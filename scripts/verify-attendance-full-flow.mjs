@@ -23,6 +23,7 @@ const assertAdminRuleSave = process.env.ASSERT_ADMIN_RULE_SAVE !== 'false'
 const assertImportJobRecovery = process.env.ASSERT_IMPORT_JOB_RECOVERY === 'true'
 const assertImportJobTelemetry = process.env.ASSERT_IMPORT_JOB_TELEMETRY !== 'false'
 const assertImportScalabilityHint = process.env.ASSERT_IMPORT_SCALABILITY_HINT === 'true'
+const uiLocaleRaw = process.env.UI_LOCALE || ''
 const importRecoveryTimeoutMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_TIMEOUT_MS || 80))
 const importRecoveryIntervalMs = Math.max(10, Number(process.env.IMPORT_RECOVERY_INTERVAL_MS || 25))
 const adminReadyTimeoutMs = Number(process.env.ADMIN_READY_TIMEOUT || Math.max(timeoutMs, 90000))
@@ -46,6 +47,80 @@ function normalizeProductMode(value) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function normalizeUiLocale(raw) {
+  const value = String(raw || '').trim().toLowerCase()
+  if (!value) return ''
+  if (value === 'zh' || value === 'zh-cn' || value === 'zh-hans') return 'zh-CN'
+  if (value === 'en' || value === 'en-us' || value === 'en-gb') return 'en-US'
+  return ''
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function bilingualName(en, zh, options = {}) {
+  const exact = options.exact !== false
+  const pattern = exact
+    ? `^(?:${escapeRegex(en)}|${escapeRegex(zh)})$`
+    : `${escapeRegex(en)}|${escapeRegex(zh)}`
+  return new RegExp(pattern, 'i')
+}
+
+function bilingualPattern(enPattern, zhPattern) {
+  return new RegExp(`(?:${enPattern})|(?:${zhPattern})`, 'i')
+}
+
+const labels = {
+  attendance: bilingualName('Attendance', '考勤'),
+  grid: bilingualName('Grid', '表格'),
+  refresh: bilingualName('Refresh', '刷新'),
+  records: bilingualName('Records', '记录'),
+  reload: bilingualName('Reload', '刷新'),
+  noRecords: bilingualName('No records.', '暂无记录。', { exact: false }),
+  anomalies: bilingualName('Anomalies', '异常', { exact: false }),
+  adminCenter: bilingualName('Admin Center', '管理中心'),
+  workflowDesigner: bilingualName('Workflow Designer', '流程设计'),
+  desktopRecommended: bilingualName('Desktop recommended', '建议使用桌面端'),
+  backToOverview: bilingualName('Back to Overview', '返回总览'),
+  settings: bilingualName('Settings', '设置'),
+  saveSettings: bilingualName('Save settings', '保存设置'),
+  settingsUpdated: bilingualName('Settings updated.', '设置已更新。'),
+  defaultRule: bilingualName('Default Rule', '默认规则'),
+  saveRule: bilingualName('Save rule', '保存规则'),
+  ruleUpdated: bilingualName('Rule updated.', '规则已更新。'),
+  importHeading: bilingualName('Import (DingTalk / Manual)', '导入（钉钉 / 手工）'),
+  payrollCycles: bilingualName('Payroll Cycles', '计薪周期'),
+  preview: bilingualName('Preview', '预览'),
+  retryPreview: bilingualName('Retry preview', '重试预览'),
+  loadCsv: bilingualName('Load CSV', '加载 CSV'),
+  import: bilingualName('Import', '导入'),
+  reloadJob: bilingualName('Reload job', '重载任务'),
+  reloadImportJob: bilingualName('Reload import job', '重载导入任务'),
+  resumePolling: bilingualName('Resume polling', '恢复轮询'),
+  resumeImportJob: bilingualName('Resume import job', '恢复导入任务'),
+  invalidImportJson: bilingualName('Invalid JSON payload for import.', '导入载荷 JSON 无效。'),
+  asyncStillRunning: bilingualName('Async import job is still running in background.', '异步导入任务仍在后台运行。'),
+  asyncJobCard: bilingualPattern('Async\\s*(preview|import)\\s*job', '异步(?:预览|导入)任务'),
+  batchGenerateCycles: bilingualName('Batch generate cycles', '批量生成周期', { exact: false }),
+  statusCompleted: bilingualPattern('Status\\s*[:：]\\s*completed', '状态\\s*[:：]\\s*completed'),
+  statusFailed: bilingualPattern('Status\\s*[:：]\\s*failed', '状态\\s*[:：]\\s*failed'),
+  statusCanceled: bilingualPattern('Status\\s*[:：]\\s*canceled', '状态\\s*[:：]\\s*canceled'),
+  previewCompleted: bilingualPattern('Preview job completed\\s*[\\(（]', '预览任务完成\\s*[\\(（]'),
+  importCompleted: bilingualPattern('Imported\\s*\\d+(?:\\/\\d+)?\\s*rows\\s*\\(async job\\)', '已导入\\s*\\d+(?:\\/\\d+)?\\s*行\\s*（异步任务）'),
+  processedFailed: bilingualPattern('Processed\\s*[:：]\\s*\\d+\\s*[·•]\\s*Failed\\s*[:：]\\s*\\d+', '已处理\\s*[:：]\\s*\\d+\\s*[·•]\\s*失败\\s*[:：]\\s*\\d+'),
+  elapsed: bilingualPattern('Elapsed\\s*[:：]\\s*\\d+\\s*ms', '耗时\\s*[:：]\\s*\\d+\\s*ms'),
+  engine: bilingualPattern('Engine\\s*[:：]\\s*[a-z0-9_-]+', '引擎\\s*[:：]\\s*[a-z0-9_-]+'),
+}
+
+const textSets = {
+  saving: ['Saving...', '保存中...'],
+  saveSettings: ['Save settings', '保存设置'],
+  saveRule: ['Save rule', '保存规则'],
+  settingsHeading: ['Settings', '设置'],
+  defaultRuleHeading: ['Default Rule', '默认规则'],
 }
 
 function deriveApiBaseFromWebUrl(url) {
@@ -138,6 +213,14 @@ async function setImportDebugOverrides(page) {
   }, { pollTimeoutMs: importRecoveryTimeoutMs, pollIntervalMs: importRecoveryIntervalMs })
 }
 
+async function setLocaleOverride(page, localeValue) {
+  if (!localeValue) return
+  const localeStorageValue = localeValue.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en'
+  await page.addInitScript((value) => {
+    if (value) localStorage.setItem('metasheet_locale', value)
+  }, localeStorageValue)
+}
+
 function parseFeatures(raw) {
   if (!raw) return null
   try {
@@ -228,17 +311,17 @@ async function endpointExists(apiBase, pathname) {
 async function ensureAttendanceLoaded(page) {
   await page.waitForURL(/\/attendance(\?|$)/, { timeout: timeoutMs })
   // Use exact match to avoid strict-mode collisions with headings like "Attendance groups".
-  await page.getByRole('heading', { name: 'Attendance', exact: true }).waitFor({ timeout: timeoutMs })
+  await page.getByRole('heading', { name: labels.attendance }).first().waitFor({ timeout: timeoutMs })
 }
 
 async function assertNavForAttendanceMode(page) {
   const nav = page.locator('nav.app-nav')
   await nav.waitFor({ timeout: timeoutMs })
-  const gridLink = page.getByRole('link', { name: 'Grid' })
+  const gridLink = page.getByRole('link', { name: labels.grid })
   if (await gridLink.count()) {
     throw new Error('Expected attendance-focused nav (no Grid link), but Grid link is visible')
   }
-  const attendanceLink = page.getByRole('link', { name: 'Attendance' })
+  const attendanceLink = page.getByRole('link', { name: labels.attendance })
   if (!(await attendanceLink.count())) {
     throw new Error('Expected Attendance link in nav, but not found')
   }
@@ -254,16 +337,16 @@ async function setDateRange(page, from, to) {
 }
 
 async function refreshRecords(page) {
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+  await page.getByRole('button', { name: labels.refresh }).first().click()
   const recordsSection = page.locator('section.attendance__card').filter({
-    has: page.getByRole('heading', { name: 'Records' }),
+    has: page.getByRole('heading', { name: labels.records }),
   })
-  await recordsSection.getByRole('button', { name: 'Reload' }).click()
+  await recordsSection.getByRole('button', { name: labels.reload }).first().click()
 }
 
 async function assertHasRecords(page) {
   await page.waitForTimeout(800)
-  const empty = page.locator('text=No records.')
+  const empty = page.getByText(labels.noRecords)
   if (allowEmptyRecords) return
   if (await empty.count()) {
     throw new Error('No records found in Records table')
@@ -272,11 +355,11 @@ async function assertHasRecords(page) {
 
 async function assertRecordsTableContainer(page) {
   const recordsSection = page.locator('section.attendance__card').filter({
-    has: page.getByRole('heading', { name: 'Records' }),
+    has: page.getByRole('heading', { name: labels.records }),
   })
   const recordsTable = recordsSection.locator('table.attendance__table.attendance__table--records')
   if (!(await recordsTable.count())) {
-    const empty = recordsSection.locator('text=No records.')
+    const empty = recordsSection.getByText(labels.noRecords)
     if (allowEmptyRecords && (await empty.count())) {
       logInfo('Records table assertion skipped (ALLOW_EMPTY_RECORDS=true and no records)')
       return
@@ -291,10 +374,10 @@ async function assertRecordsTableContainer(page) {
 
 async function assertAdminSettingsSaveCycle(page) {
   const settingsSection = page.locator('div.attendance__admin-section').filter({
-    has: page.getByRole('heading', { name: 'Settings', exact: true }),
+    has: page.getByRole('heading', { name: labels.settings }),
   }).first()
   await settingsSection.waitFor({ timeout: adminReadyTimeoutMs })
-  const saveButton = settingsSection.getByRole('button', { name: 'Save settings', exact: true })
+  const saveButton = settingsSection.getByRole('button', { name: labels.saveSettings })
   await saveButton.waitFor({ timeout: adminReadyTimeoutMs })
   if (!(await saveButton.isEnabled())) {
     throw new Error('Save settings button is not enabled before save-cycle assertion')
@@ -304,14 +387,14 @@ async function assertAdminSettingsSaveCycle(page) {
   let sawStatusMessage = false
   let sawBusyTransition = false
 
-  const statusMessage = page.getByText('Settings updated.', { exact: true }).first()
+  const statusMessage = page.getByText(labels.settingsUpdated).first()
   const transientDeadline = Date.now() + Math.max(8_000, Math.min(adminReadyTimeoutMs, 30_000))
   while (Date.now() < transientDeadline) {
     sawStatusMessage ||= await statusMessage.isVisible().catch(() => false)
-    const transientState = await settingsSection.evaluate((section) => {
+    const transientState = await settingsSection.evaluate((section, args) => {
       const button = Array.from(section.querySelectorAll('button')).find((node) => {
         const label = (node.textContent || '').trim()
-        return label === 'Save settings' || label === 'Saving...'
+        return args.saveLabels.includes(label) || args.savingLabels.includes(label)
       })
       if (!button) return { present: false, label: '', disabled: false }
       return {
@@ -319,9 +402,12 @@ async function assertAdminSettingsSaveCycle(page) {
         label: (button.textContent || '').trim(),
         disabled: button.hasAttribute('disabled'),
       }
+    }, {
+      saveLabels: textSets.saveSettings,
+      savingLabels: textSets.saving,
     }).catch(() => ({ present: false, label: '', disabled: false }))
 
-    if (transientState.present && (transientState.label === 'Saving...' || transientState.disabled)) {
+    if (transientState.present && (textSets.saving.includes(transientState.label) || transientState.disabled)) {
       sawBusyTransition = true
       break
     }
@@ -340,17 +426,21 @@ async function assertAdminSettingsSaveCycle(page) {
     }
   }
 
-  await page.waitForFunction(() => {
+  await page.waitForFunction((args) => {
     const sections = Array.from(document.querySelectorAll('.attendance__admin-section'))
-    const section = sections.find((node) => node.querySelector('h4')?.textContent?.trim() === 'Settings')
+    const section = sections.find((node) => args.headingLabels.includes(node.querySelector('h4')?.textContent?.trim() || ''))
     if (!section) return false
     const button = Array.from(section.querySelectorAll('button')).find((node) => {
       const label = (node.textContent || '').trim()
-      return label === 'Save settings' || label === 'Saving...'
+      return args.saveLabels.includes(label) || args.savingLabels.includes(label)
     })
     if (!button) return false
     const label = (button.textContent || '').trim()
-    return label === 'Save settings' && !button.hasAttribute('disabled')
+    return args.saveLabels.includes(label) && !button.hasAttribute('disabled')
+  }, {
+    headingLabels: textSets.settingsHeading,
+    saveLabels: textSets.saveSettings,
+    savingLabels: textSets.saving,
   }, { timeout: Math.max(adminReadyTimeoutMs, 90_000) })
 
   const saveCycleDetails = [
@@ -363,10 +453,10 @@ async function assertAdminSettingsSaveCycle(page) {
 
 async function assertAdminRuleSaveCycle(page) {
   const ruleSection = page.locator('div.attendance__admin-section').filter({
-    has: page.getByRole('heading', { name: 'Default Rule', exact: true }),
+    has: page.getByRole('heading', { name: labels.defaultRule }),
   }).first()
   await ruleSection.waitFor({ timeout: adminReadyTimeoutMs })
-  const saveButton = ruleSection.getByRole('button', { name: 'Save rule', exact: true })
+  const saveButton = ruleSection.getByRole('button', { name: labels.saveRule })
   await saveButton.waitFor({ timeout: adminReadyTimeoutMs })
   if (!(await saveButton.isEnabled())) {
     throw new Error('Save rule button is not enabled before save-cycle assertion')
@@ -376,14 +466,14 @@ async function assertAdminRuleSaveCycle(page) {
   let sawStatusMessage = false
   let sawBusyTransition = false
 
-  const statusMessage = page.getByText('Rule updated.', { exact: true }).first()
+  const statusMessage = page.getByText(labels.ruleUpdated).first()
   const transientDeadline = Date.now() + Math.max(8_000, Math.min(adminReadyTimeoutMs, 30_000))
   while (Date.now() < transientDeadline) {
     sawStatusMessage ||= await statusMessage.isVisible().catch(() => false)
-    const transientState = await ruleSection.evaluate((section) => {
+    const transientState = await ruleSection.evaluate((section, args) => {
       const button = Array.from(section.querySelectorAll('button')).find((node) => {
         const label = (node.textContent || '').trim()
-        return label === 'Save rule' || label === 'Saving...'
+        return args.saveLabels.includes(label) || args.savingLabels.includes(label)
       })
       if (!button) return { present: false, label: '', disabled: false }
       return {
@@ -391,9 +481,12 @@ async function assertAdminRuleSaveCycle(page) {
         label: (button.textContent || '').trim(),
         disabled: button.hasAttribute('disabled'),
       }
+    }, {
+      saveLabels: textSets.saveRule,
+      savingLabels: textSets.saving,
     }).catch(() => ({ present: false, label: '', disabled: false }))
 
-    if (transientState.present && (transientState.label === 'Saving...' || transientState.disabled)) {
+    if (transientState.present && (textSets.saving.includes(transientState.label) || transientState.disabled)) {
       sawBusyTransition = true
       break
     }
@@ -410,17 +503,21 @@ async function assertAdminRuleSaveCycle(page) {
     }
   }
 
-  await page.waitForFunction(() => {
+  await page.waitForFunction((args) => {
     const sections = Array.from(document.querySelectorAll('.attendance__admin-section'))
-    const section = sections.find((node) => node.querySelector('h4')?.textContent?.trim() === 'Default Rule')
+    const section = sections.find((node) => args.headingLabels.includes(node.querySelector('h4')?.textContent?.trim() || ''))
     if (!section) return false
     const button = Array.from(section.querySelectorAll('button')).find((node) => {
       const label = (node.textContent || '').trim()
-      return label === 'Save rule' || label === 'Saving...'
+      return args.saveLabels.includes(label) || args.savingLabels.includes(label)
     })
     if (!button) return false
     const label = (button.textContent || '').trim()
-    return label === 'Save rule' && !button.hasAttribute('disabled')
+    return args.saveLabels.includes(label) && !button.hasAttribute('disabled')
+  }, {
+    headingLabels: textSets.defaultRuleHeading,
+    saveLabels: textSets.saveRule,
+    savingLabels: textSets.saving,
   }, { timeout: Math.max(adminReadyTimeoutMs, 90_000) })
 
   const saveCycleDetails = [
@@ -548,7 +645,7 @@ async function resolveRecoveryUserId(apiBase) {
 async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
   logInfo('Admin import recovery assertion started')
   const payloadInput = importSection.locator('#attendance-import-payload').first()
-  const importButton = importSection.getByRole('button', { name: 'Import', exact: true }).first()
+  const importButton = importSection.getByRole('button', { name: labels.import }).first()
   await payloadInput.waitFor({ timeout: adminReadyTimeoutMs })
   await importButton.waitFor({ timeout: adminReadyTimeoutMs })
 
@@ -587,7 +684,7 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
 
     if (!preparedByApiUpload) {
       const csvInput = importSection.locator('#attendance-import-csv').first()
-      const loadCsvButton = importSection.getByRole('button', { name: 'Load CSV', exact: true }).first()
+      const loadCsvButton = importSection.getByRole('button', { name: labels.loadCsv }).first()
       const csvPath = path.join(tmpDir, 'attendance-recovery.csv')
       await csvInput.waitFor({ timeout: adminReadyTimeoutMs })
       await loadCsvButton.waitFor({ timeout: adminReadyTimeoutMs })
@@ -617,16 +714,16 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
     }
 
     await importButton.click()
-    const asyncCard = importSection.locator('div.attendance__status').filter({ hasText: /Async (preview|import) job/ }).first()
-    const timeoutMessage = page.getByText('Async import job is still running in background.', { exact: true }).first()
+    const asyncCard = importSection.locator('div.attendance__status').filter({ hasText: labels.asyncJobCard }).first()
+    const timeoutMessage = page.getByText(labels.asyncStillRunning).first()
     await Promise.any([
       timeoutMessage.waitFor({ timeout: timeoutMs }),
       asyncCard.waitFor({ timeout: timeoutMs }),
     ])
 
     const statusBlock = page.locator('.attendance__status-block').first()
-    const resumeStatusAction = statusBlock.getByRole('button', { name: 'Resume import job', exact: true }).first()
-    const reloadStatusAction = statusBlock.getByRole('button', { name: 'Reload import job', exact: true }).first()
+    const resumeStatusAction = statusBlock.getByRole('button', { name: labels.resumeImportJob }).first()
+    const reloadStatusAction = statusBlock.getByRole('button', { name: labels.reloadImportJob }).first()
     const statusAction = await (async () => {
       if (await resumeStatusAction.count()) return resumeStatusAction
       if (await reloadStatusAction.count()) return reloadStatusAction
@@ -643,7 +740,7 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
     if (hasStatusAction && statusAction) {
       await statusAction.click()
     } else {
-      const reloadInCard = asyncCard.getByRole('button', { name: 'Reload job', exact: true })
+      const reloadInCard = asyncCard.getByRole('button', { name: labels.reloadJob })
       if (await reloadInCard.count()) {
         const reloadButton = reloadInCard.first()
         const reloadEnabled = await reloadButton.isEnabled().catch(() => false)
@@ -656,11 +753,11 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
     }
 
     await asyncCard.waitFor({ timeout: timeoutMs })
-    const completionStatus = asyncCard.getByText(/Status:\s*completed/i).first()
-    const completionPreview = page.getByText(/Preview job completed \(/).first()
-    const completionImport = page.getByText(/Imported \d+(\/\d+)? rows \(async job\)\./).first()
-    const failedStatus = asyncCard.getByText(/Status:\s*failed/i).first()
-    const canceledStatus = asyncCard.getByText(/Status:\s*canceled/i).first()
+    const completionStatus = asyncCard.getByText(labels.statusCompleted).first()
+    const completionPreview = page.getByText(labels.previewCompleted).first()
+    const completionImport = page.getByText(labels.importCompleted).first()
+    const failedStatus = asyncCard.getByText(labels.statusFailed).first()
+    const canceledStatus = asyncCard.getByText(labels.statusCanceled).first()
     const pollDelayMs = Math.max(1200, Math.min(4000, importRecoveryIntervalMs * 20))
     const recoveryDeadlineMs = Math.max(
       timeoutMs + 30000,
@@ -698,16 +795,16 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
 
     async function triggerRecoveryPollAction() {
       const resumeCandidates = [
-        asyncCard.getByRole('button', { name: 'Resume polling', exact: true }).first(),
-        statusBlock.getByRole('button', { name: 'Resume import job', exact: true }).first(),
+        asyncCard.getByRole('button', { name: labels.resumePolling }).first(),
+        statusBlock.getByRole('button', { name: labels.resumeImportJob }).first(),
       ]
       for (const candidate of resumeCandidates) {
         if (await clickWhenReady(candidate)) return 'resume'
       }
 
       const reloadCandidates = [
-        asyncCard.getByRole('button', { name: 'Reload job', exact: true }).first(),
-        statusBlock.getByRole('button', { name: 'Reload import job', exact: true }).first(),
+        asyncCard.getByRole('button', { name: labels.reloadJob }).first(),
+        statusBlock.getByRole('button', { name: labels.reloadImportJob }).first(),
       ]
       for (const candidate of reloadCandidates) {
         if (await clickWhenReady(candidate)) return 'reload'
@@ -752,9 +849,9 @@ async function assertImportJobRecoveryFlow(page, importSection, apiBase) {
     }
 
     if (assertImportJobTelemetry) {
-      const processedLine = asyncCard.getByText(/Processed:\s*\d+\s*·\s*Failed:\s*\d+/i).first()
-      const elapsedLine = asyncCard.getByText(/Elapsed:\s*\d+\s*ms/i).first()
-      const engineLine = asyncCard.getByText(/Engine:\s*[a-z0-9_-]+/i).first()
+      const processedLine = asyncCard.getByText(labels.processedFailed).first()
+      const elapsedLine = asyncCard.getByText(labels.elapsed).first()
+      const engineLine = asyncCard.getByText(labels.engine).first()
       const hasProcessed = await processedLine.isVisible().catch(() => false)
       const hasElapsed = await elapsedLine.isVisible().catch(() => false)
 
@@ -819,19 +916,22 @@ async function run() {
       throw new Error(`Expected product mode '${expectProductMode}', got '${actualMode}'`)
     }
   }
+  const uiLocale = normalizeUiLocale(uiLocaleRaw)
 
   const browser = await chromium.launch({ headless })
   const context = await browser.newContext({
     viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 720 },
     deviceScaleFactor: mobile ? 2 : 1,
     isMobile: mobile,
+    locale: uiLocale || undefined,
   })
   const page = await context.newPage()
   await setAuth(page)
   await setProductFeatures(page)
   await setImportDebugOverrides(page)
+  await setLocaleOverride(page, uiLocale)
 
-  logInfo(`Navigating to ${webUrl}`)
+  logInfo(`Navigating to ${webUrl} (ui_locale=${uiLocale || 'auto'})`)
   await page.goto(webUrl, { waitUntil: 'networkidle', timeout: timeoutMs })
 
   await ensureAttendanceLoaded(page)
@@ -854,7 +954,7 @@ async function run() {
   const today = new Date().toISOString().slice(0, 10)
   const anomaliesSupported = await endpointExists(apiBase, `/attendance/anomalies?from=${today}&to=${today}`)
   if (anomaliesSupported) {
-    await page.getByRole('heading', { name: 'Anomalies', exact: true }).waitFor({ timeout: timeoutMs })
+    await page.getByRole('heading', { name: labels.anomalies }).first().waitFor({ timeout: timeoutMs })
     logInfo('Anomalies card verified')
   } else {
     logInfo('WARN: /attendance/anomalies not available (skipping anomalies UI assertion)')
@@ -866,15 +966,15 @@ async function run() {
 
   // Admin Center (if enabled)
   if (features.attendanceAdmin) {
-    await page.getByRole('button', { name: 'Admin Center' }).click()
+    await page.getByRole('button', { name: labels.adminCenter }).click()
     if (mobile) {
-      await page.getByRole('heading', { name: 'Desktop recommended' }).waitFor({ timeout: timeoutMs })
+      await page.getByRole('heading', { name: labels.desktopRecommended }).waitFor({ timeout: timeoutMs })
     } else {
       const importSection = page.locator('div.attendance__admin-section').filter({
-        has: page.getByRole('heading', { name: 'Import (DingTalk / Manual)', exact: true }),
+        has: page.getByRole('heading', { name: labels.importHeading }),
       })
-      const payrollHeading = page.getByRole('heading', { name: 'Payroll Cycles', exact: true })
-      const payrollBatchSummary = page.locator('summary.attendance__details-summary', { hasText: 'Batch generate cycles' })
+      const payrollHeading = page.getByRole('heading', { name: labels.payrollCycles })
+      const payrollBatchSummary = page.locator('summary.attendance__details-summary', { hasText: labels.batchGenerateCycles })
 
       try {
         await importSection.first().waitFor({ timeout: adminReadyTimeoutMs })
@@ -897,13 +997,13 @@ async function run() {
       const shouldAssertRetry = assertAdminRetry && importSectionCount > 0
       if (shouldAssertRetry) {
         const payloadInput = importSection.locator('#attendance-import-payload').first()
-        const previewButton = importSection.getByRole('button', { name: 'Preview', exact: true }).first()
+        const previewButton = importSection.getByRole('button', { name: labels.preview }).first()
         await payloadInput.waitFor({ timeout: adminReadyTimeoutMs })
         await previewButton.waitFor({ timeout: adminReadyTimeoutMs })
         await payloadInput.fill('{')
         await previewButton.click()
-        await page.getByText('Invalid JSON payload for import.', { exact: true }).waitFor({ timeout: timeoutMs })
-        await page.getByRole('button', { name: 'Retry preview', exact: true }).first().waitFor({ timeout: timeoutMs })
+        await page.getByText(labels.invalidImportJson).first().waitFor({ timeout: timeoutMs })
+        await page.getByRole('button', { name: labels.retryPreview }).first().waitFor({ timeout: timeoutMs })
         logInfo('Admin status + retry action verified')
       } else {
         logInfo('Admin retry assertions skipped (ASSERT_ADMIN_RETRY=false or section unavailable)')
@@ -929,17 +1029,17 @@ async function run() {
     await page.screenshot({ path: path.join(outputDir, '02-admin.png'), fullPage: true })
     logInfo('Saved admin screenshot')
     if (mobile) {
-      await page.getByRole('button', { name: 'Back to Overview' }).click()
+      await page.getByRole('button', { name: labels.backToOverview }).click()
     }
   }
 
   // Workflow Designer (if enabled)
   if (features.workflow) {
-    await page.getByRole('button', { name: 'Workflow Designer' }).click()
+    await page.getByRole('button', { name: labels.workflowDesigner }).click()
     if (mobile) {
-      await page.getByRole('heading', { name: 'Desktop recommended' }).waitFor({ timeout: timeoutMs })
-      await page.getByRole('button', { name: 'Back to Overview', exact: true }).click()
-      await page.getByRole('heading', { name: 'Attendance', exact: true }).waitFor({ timeout: timeoutMs })
+      await page.getByRole('heading', { name: labels.desktopRecommended }).waitFor({ timeout: timeoutMs })
+      await page.getByRole('button', { name: labels.backToOverview }).click()
+      await page.getByRole('heading', { name: labels.attendance }).first().waitFor({ timeout: timeoutMs })
     } else {
       await page.locator('.workflow-designer').waitFor({ timeout: timeoutMs })
     }

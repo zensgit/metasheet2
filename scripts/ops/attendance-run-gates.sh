@@ -8,6 +8,7 @@ WEB_URL="${WEB_URL:-}"
 AUTH_TOKEN="${AUTH_TOKEN:-}"
 EXPECT_PRODUCT_MODE="${EXPECT_PRODUCT_MODE:-attendance}"
 HEADLESS="${HEADLESS:-true}"
+UI_LOCALE="${UI_LOCALE:-}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-}"
 RUN_PREFLIGHT="${RUN_PREFLIGHT:-auto}" # auto|true|false
 PROVISION_USER_ID="${PROVISION_USER_ID:-}" # optional
@@ -16,7 +17,9 @@ REQUIRE_IDEMPOTENCY="${REQUIRE_IDEMPOTENCY:-false}"
 REQUIRE_IMPORT_EXPORT="${REQUIRE_IMPORT_EXPORT:-false}"
 REQUIRE_IMPORT_UPLOAD="${REQUIRE_IMPORT_UPLOAD:-false}"
 REQUIRE_IMPORT_ASYNC="${REQUIRE_IMPORT_ASYNC:-false}"
+REQUIRE_IMPORT_UPLOAD_ASYNC="${REQUIRE_IMPORT_UPLOAD_ASYNC:-$REQUIRE_IMPORT_UPLOAD}"
 REQUIRE_IMPORT_TELEMETRY="${REQUIRE_IMPORT_TELEMETRY:-false}"
+REQUIRE_IMPORT_UPSERT_STRATEGY="${REQUIRE_IMPORT_UPSERT_STRATEGY:-false}"
 REQUIRE_PREVIEW_ASYNC="${REQUIRE_PREVIEW_ASYNC:-false}"
 REQUIRE_BATCH_RESOLVE="${REQUIRE_BATCH_RESOLVE:-false}"
 REQUIRE_IMPORT_JOB_RECOVERY="${REQUIRE_IMPORT_JOB_RECOVERY:-false}"
@@ -88,8 +91,11 @@ gate_pw_mobile="FAIL"
 info "API_BASE=${API_BASE}"
 info "WEB_URL=${WEB_URL}"
 info "OUTPUT_ROOT=${OUTPUT_ROOT}"
+info "UI_LOCALE=${UI_LOCALE:-auto}"
 info "REQUIRE_IMPORT_JOB_RECOVERY=${REQUIRE_IMPORT_JOB_RECOVERY}"
 info "REQUIRE_IMPORT_TELEMETRY=${REQUIRE_IMPORT_TELEMETRY}"
+info "REQUIRE_IMPORT_UPSERT_STRATEGY=${REQUIRE_IMPORT_UPSERT_STRATEGY}"
+info "REQUIRE_IMPORT_UPLOAD_ASYNC=${REQUIRE_IMPORT_UPLOAD_ASYNC}"
 info "REQUIRE_ADMIN_SETTINGS_SAVE=${REQUIRE_ADMIN_SETTINGS_SAVE}"
 
 function maybe_run_preflight() {
@@ -124,7 +130,9 @@ function run_api_smoke() {
     REQUIRE_IMPORT_EXPORT="$REQUIRE_IMPORT_EXPORT" \
     REQUIRE_IMPORT_UPLOAD="$REQUIRE_IMPORT_UPLOAD" \
     REQUIRE_IMPORT_ASYNC="$REQUIRE_IMPORT_ASYNC" \
+    REQUIRE_IMPORT_UPLOAD_ASYNC="$REQUIRE_IMPORT_UPLOAD_ASYNC" \
     REQUIRE_IMPORT_TELEMETRY="$REQUIRE_IMPORT_TELEMETRY" \
+    REQUIRE_IMPORT_UPSERT_STRATEGY="$REQUIRE_IMPORT_UPSERT_STRATEGY" \
     REQUIRE_PREVIEW_ASYNC="$REQUIRE_PREVIEW_ASYNC" \
     REQUIRE_BATCH_RESOLVE="$REQUIRE_BATCH_RESOLVE" \
     "${ROOT_DIR}/scripts/ops/attendance-smoke-api.sh" \
@@ -180,6 +188,7 @@ function run_playwright_full_flow_desktop() {
     EXPECT_PRODUCT_MODE="$EXPECT_PRODUCT_MODE" \
     ASSERT_IMPORT_JOB_RECOVERY="$REQUIRE_IMPORT_JOB_RECOVERY" \
     ASSERT_ADMIN_SETTINGS_SAVE="$REQUIRE_ADMIN_SETTINGS_SAVE" \
+    UI_LOCALE="$UI_LOCALE" \
     OUTPUT_DIR="${OUTPUT_ROOT}/playwright-full-flow-desktop" \
     HEADLESS="$HEADLESS" \
     node "${ROOT_DIR}/scripts/verify-attendance-full-flow.mjs" \
@@ -197,6 +206,7 @@ function run_playwright_full_flow_mobile() {
     WEB_URL="$WEB_URL" \
     API_BASE="$API_BASE" \
     EXPECT_PRODUCT_MODE="$EXPECT_PRODUCT_MODE" \
+    UI_LOCALE="$UI_LOCALE" \
     OUTPUT_DIR="${OUTPUT_ROOT}/playwright-full-flow-mobile" \
     HEADLESS="$HEADLESS" \
     UI_MOBILE="true" \
@@ -290,6 +300,10 @@ function detect_playwright_reason() {
     echo "FEATURE_DISABLED"
     return 0
   fi
+  if grep -qiE 'strict mode violation|locator\\.click' "$log"; then
+    echo "SELECTOR_STRICT_VIOLATION"
+    return 0
+  fi
   if grep -qE 'HTTP 429 |RATE_LIMITED' "$log"; then
     echo "RATE_LIMITED"
     return 0
@@ -352,6 +366,7 @@ cat >"$summary_json" <<EOF
   "generatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "apiBase": "${API_BASE}",
   "webUrl": "${WEB_URL}",
+  "uiLocale": $(json_string_or_null "$UI_LOCALE"),
   "expectProductMode": "${EXPECT_PRODUCT_MODE}",
   "requireImportJobRecovery": ${REQUIRE_IMPORT_JOB_RECOVERY},
   "exitCode": ${exit_code},
@@ -382,6 +397,7 @@ cat <<EOF
   - Gate 4: Playwright Prod ...... ${gate_pw_prod}
   - Gate 5: Playwright Desktop ... ${gate_pw_desktop}
   - Gate 6: Playwright Mobile .... ${gate_pw_mobile}
+  - UI Locale .................... ${UI_LOCALE:-auto}
 
 Artifacts:
   ${OUTPUT_ROOT}

@@ -4215,7 +4215,11 @@ function computeAttendanceRecordUpsertValues(options) {
   const finalMeta = meta && typeof meta === 'object'
     ? { ...existingMeta, ...meta }
     : existingMeta
-  const finalSourceBatchId = sourceBatchId ?? existingSourceBatchId
+  // Safety-first rollback semantics:
+  // - New records inserted by this import batch keep source_batch_id for rollback deletion.
+  // - Existing records updated by this batch are detached from batch rollback scope
+  //   to prevent deleting historical rows during rollback.
+  const finalSourceBatchId = existingRow ? null : (sourceBatchId ?? existingSourceBatchId)
 
   if (mode === 'override') {
     if (updateFirstInAt) firstInAt = updateFirstInAt
@@ -6179,10 +6183,23 @@ module.exports = {
 	        })
 	      }
 
+	      const asyncPreviewEngine = resolveImportEngineFromMeta(payload, rows.length)
+	      const asyncPreviewFailedRows = Math.max(
+	        0,
+	        Number(previewStats.invalid ?? 0) + Number(previewStats.duplicates ?? 0)
+	      )
 	      return {
 	        items: preview,
 	        total: preview.length,
 	        rowCount: rows.length,
+	        engine: asyncPreviewEngine,
+	        processedRows: rows.length,
+	        failedRows: asyncPreviewFailedRows,
+	        elapsedMs: 0,
+	        recordUpsertStrategy: resolveImportRecordUpsertStrategy({
+	          rowCount: rows.length,
+	          engine: asyncPreviewEngine,
+	        }),
 	        truncated: rows.length > previewLimit,
 	        previewLimit,
 	        stats: previewStats,
@@ -6192,11 +6209,19 @@ module.exports = {
 	      }
 		    }
 
-		    const processAsyncImportPreviewJob = async ({ rowId, orgId, requesterId, payload }) => {
-		      const result = await buildAsyncPreviewResult({ payload, requesterId, orgId })
-		      await db.query(
-		        `UPDATE attendance_import_jobs
-		         SET status = 'completed',
+	    const processAsyncImportPreviewJob = async ({ rowId, orgId, requesterId, payload }) => {
+	      const previewStartedAtMs = Date.now()
+	      const result = await buildAsyncPreviewResult({ payload, requesterId, orgId })
+	      const previewElapsedMs = Math.max(0, Date.now() - previewStartedAtMs)
+	      const previewSummary = {
+	        processedRows: Number(result.processedRows ?? result.rowCount ?? 0),
+	        failedRows: Number(result.failedRows ?? 0),
+	        elapsedMs: previewElapsedMs,
+	        recordUpsertStrategy: result.recordUpsertStrategy ?? null,
+	      }
+	      await db.query(
+	        `UPDATE attendance_import_jobs
+	         SET status = 'completed',
 	             progress = $3,
 	             total = $4,
 	             error = NULL,
@@ -6212,8 +6237,12 @@ module.exports = {
 		          JSON.stringify({
 		            __jobType: 'preview',
 		            idempotencyKey: payload.idempotencyKey ?? null,
-		            __importEngine: resolveImportEngineFromMeta(payload, result.rowCount),
-		            previewResult: result,
+		            __importEngine: result.engine ?? resolveImportEngineFromMeta(payload, result.rowCount),
+		            summary: previewSummary,
+		            previewResult: {
+		              ...result,
+		              elapsedMs: previewElapsedMs,
+		            },
 		          }),
 	        ]
 	      )
@@ -6705,28 +6734,42 @@ module.exports = {
             totalRows: rows.length,
 	          })
 
-	          for (const item of chunk) {
-	            const record = upserted.get(`${item.userId}:${item.workDate}`)
-	            if (!record?.id) {
-	              throw new Error(`Attendance record upsert failed for ${item.userId}:${item.workDate}`)
-	            }
+		          for (const item of chunk) {
+		            const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
+		            let record = upserted.get(`${item.userId}:${workDateKey}`)
+		            if (!record?.id) {
+		              const fallbackRows = await queryImportHeavy(
+		                trx,
+		                `SELECT id, user_id, work_date
+		                   FROM attendance_records
+		                  WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date
+		                  LIMIT 1`,
+		                [orgId, item.userId, workDateKey]
+		              )
+		              if (Array.isArray(fallbackRows) && fallbackRows.length > 0) {
+		                record = fallbackRows[0]
+		              }
+		            }
+		            if (!record?.id) {
+		              throw new Error(`Attendance record upsert failed for ${item.userId}:${workDateKey}`)
+		            }
 
-	            await enqueueImportItem({
-	              userId: item.userId,
-	              workDate: item.workDate,
-	              recordId: record.id,
-	              previewSnapshot: item.previewSnapshot,
-	            })
+		            await enqueueImportItem({
+		              userId: item.userId,
+		              workDate: workDateKey,
+		              recordId: record.id,
+		              previewSnapshot: item.previewSnapshot,
+		            })
 
 	            importedCount += 1
 	            if (returnItems && (!itemsLimit || results.length < itemsLimit)) {
 	              results.push({
 	                id: record.id,
 	                userId: item.userId,
-	                workDate: item.workDate,
-	                engine: item.engine,
-	              })
-	            }
+		                workDate: workDateKey,
+		                engine: item.engine,
+		              })
+		            }
 	          }
 
 	          if (typeof onProgress === 'function') {
@@ -7187,9 +7230,11 @@ module.exports = {
 	      importQueue.process(ATTENDANCE_IMPORT_ASYNC_QUEUE, ATTENDANCE_IMPORT_ASYNC_JOB, async (job) => {
 	        await processAsyncImportCommitJob(job.data ?? {})
 	      })
+	    }
 
-	      // Re-enqueue queued/running jobs on startup (e.g. after a restart). This is best-effort with
-	      // the in-memory queue; for Bull-based backends, the queue will persist separately.
+	    if (ATTENDANCE_IMPORT_ASYNC_ENABLED) {
+	      // Re-enqueue queued/running jobs on startup (e.g. after a restart). This is best-effort and
+	      // should run for both queue-backed and fallback in-process modes.
 	      setImmediate(async () => {
 	        try {
 	          const rows = await db.query(
@@ -7644,12 +7689,8 @@ module.exports = {
 	            }
 	          })
 
-	          if (csvFileId) {
-	            await deleteImportUpload({ orgId, fileId: csvFileId })
-	          }
-
-	          res.json({
-	            ok: true,
+		          res.json({
+		            ok: true,
 	            data: {
 	              items,
 	              total,
@@ -7660,6 +7701,10 @@ module.exports = {
 	            },
 	          })
 	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
 	          if (isDatabaseSchemaError(error)) {
 	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
 	            return
@@ -10396,6 +10441,7 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
           return
         }
+        const previewStartedAtMs = Date.now()
         if (requireImportCommitToken) {
           if (!requesterId) {
             res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
@@ -10822,12 +10868,24 @@ module.exports = {
           }
 
           const combinedWarnings = [...csvWarnings, ...groupWarnings]
+          const previewFailedRows = Math.max(0, Number(previewStats.invalid ?? 0) + Number(previewStats.duplicates ?? 0))
+          const previewEngine = resolveImportEngineFromMeta(parsed.data, rows.length)
+          const previewElapsedMs = Math.max(0, Date.now() - previewStartedAtMs)
+          const previewRecordUpsertStrategy = resolveImportRecordUpsertStrategy({
+            rowCount: rows.length,
+            engine: previewEngine,
+          })
           res.json({
             ok: true,
             data: {
               items: preview,
               total: preview.length,
               rowCount: rows.length,
+              engine: previewEngine,
+              processedRows: rows.length,
+              failedRows: previewFailedRows,
+              elapsedMs: previewElapsedMs,
+              recordUpsertStrategy: previewRecordUpsertStrategy,
               truncated,
               previewLimit,
               stats: previewStats,
@@ -11248,12 +11306,25 @@ module.exports = {
                     totalRows: rows.length,
 				              })
 
-				              for (const item of chunk) {
-				                const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
-				                const record = upserted.get(`${item.userId}:${workDateKey}`)
-				                if (!record?.id) {
-				                  throw new Error(`Attendance record upsert failed for ${item.userId}:${workDateKey}`)
-				                }
+					              for (const item of chunk) {
+					                const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
+					                let record = upserted.get(`${item.userId}:${workDateKey}`)
+					                if (!record?.id) {
+					                  const fallbackRows = await queryImportHeavy(
+					                    trx,
+					                    `SELECT id, user_id, work_date
+					                       FROM attendance_records
+					                      WHERE org_id = $1 AND user_id = $2 AND work_date = $3::date
+					                      LIMIT 1`,
+					                    [orgId, item.userId, workDateKey]
+					                  )
+					                  if (Array.isArray(fallbackRows) && fallbackRows.length > 0) {
+					                    record = fallbackRows[0]
+					                  }
+					                }
+					                if (!record?.id) {
+					                  throw new Error(`Attendance record upsert failed for ${item.userId}:${workDateKey}`)
+					                }
 
 				                await enqueueImportItem({
 				                  userId: item.userId,
@@ -11868,6 +11939,9 @@ module.exports = {
 	          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
 	          else if (typeof parsed.data.csvFileId === 'string' && parsed.data.csvFileId.trim()) {
 	            const meta = await loadImportUploadMeta({ orgId, fileId: parsed.data.csvFileId.trim() })
+	            if (!meta) {
+	              throw new HttpError(404, 'NOT_FOUND', 'Import upload not found')
+	            }
 	            if (meta && isImportUploadExpired(meta)) {
 	              throw new HttpError(410, 'EXPIRED', 'Import upload expired')
 	            }
@@ -12018,6 +12092,9 @@ module.exports = {
 	          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
 	          else if (typeof parsed.data.csvFileId === 'string' && parsed.data.csvFileId.trim()) {
 	            const meta = await loadImportUploadMeta({ orgId, fileId: parsed.data.csvFileId.trim() })
+	            if (!meta) {
+	              throw new HttpError(404, 'NOT_FOUND', 'Import upload not found')
+	            }
 	            if (meta && isImportUploadExpired(meta)) {
 	              throw new HttpError(410, 'EXPIRED', 'Import upload expired')
 	            }
@@ -12069,21 +12146,25 @@ module.exports = {
           const isIdempotencyUnique = Boolean(cleanIdempotencyKey)
             && String(error?.code ?? '') === '23505'
             && maybeConstraint.includes('uq_attendance_import_jobs_idempotency')
-          if (isIdempotencyUnique) {
-            try {
-              const existingJob = await loadImportJobByIdempotencyKey(orgId, cleanIdempotencyKey)
-              if (existingJob) {
-                res.json({ ok: true, data: { job: mapImportJobRow(existingJob), idempotent: true } })
-                return
-              }
-            } catch (_error) {
-              // Fall through to generic error response.
-            }
-          }
+	          if (isIdempotencyUnique) {
+	            try {
+	              const existingJob = await loadImportJobByIdempotencyKey(orgId, cleanIdempotencyKey)
+	              if (existingJob) {
+	                res.json({ ok: true, data: { job: mapImportJobRow(existingJob), idempotent: true } })
+	                return
+	              }
+	            } catch (_error) {
+	              // Fall through to generic error response.
+	            }
+	          }
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
 
-          logger.error('Attendance import async commit failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to enqueue import job' } })
-        }
+	          logger.error('Attendance import async commit failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to enqueue import job' } })
+	        }
       })
     )
 
@@ -13539,6 +13620,10 @@ module.exports = {
 	          res.setHeader('Content-Disposition', `attachment; filename=\"${filename}\"`)
 	          res.send(lines.join('\n'))
 	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
 	          if (isDatabaseSchemaError(error)) {
 	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
 	            return

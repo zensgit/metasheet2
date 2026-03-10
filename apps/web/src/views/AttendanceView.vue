@@ -3690,6 +3690,7 @@ interface AttendanceImportJob {
   progress: number
   total: number
   engine?: 'standard' | 'bulk' | string | null
+  recordUpsertStrategy?: string | null
   processedRows?: number
   failedRows?: number
   elapsedMs?: number
@@ -5717,10 +5718,23 @@ async function resumeImportAsyncJobPolling() {
     }
     const imported = Number(finalJob.progress ?? 0)
     const total = Number(finalJob.total ?? 0)
+    const perfSuffix = buildImportPerfSuffix({
+      engine: finalJob.engine,
+      recordUpsertStrategy: finalJob.recordUpsertStrategy,
+      processedRows: finalJob.processedRows ?? imported,
+      failedRows: finalJob.failedRows,
+      elapsedMs: finalJob.elapsedMs,
+    })
     if (total && imported !== total) {
-      setStatus(tr(`Imported ${imported}/${total} rows (async job).`, `已导入 ${imported}/${total} 行（异步任务）。`))
+      setStatus(tr(
+        `Imported ${imported}/${total} rows (async job).${perfSuffix.en}`,
+        `已导入 ${imported}/${total} 行（异步任务）。${perfSuffix.zh}`,
+      ))
     } else {
-      setStatus(tr(`Imported ${imported} rows (async job).`, `已导入 ${imported} 行（异步任务）。`))
+      setStatus(tr(
+        `Imported ${imported} rows (async job).${perfSuffix.en}`,
+        `已导入 ${imported} 行（异步任务）。${perfSuffix.zh}`,
+      ))
     }
     await loadRecords()
     await loadImportBatches()
@@ -5734,6 +5748,42 @@ function clearImportAsyncJob() {
   importJobPollSeq += 1
   importAsyncPolling.value = false
   importAsyncJob.value = null
+}
+
+function buildImportPerfSuffix(input: {
+  engine?: unknown
+  recordUpsertStrategy?: unknown
+  processedRows?: unknown
+  failedRows?: unknown
+  elapsedMs?: unknown
+}): { en: string; zh: string } {
+  const processedRows = toNonNegativeNumber(input.processedRows) ?? 0
+  const failedRows = toNonNegativeNumber(input.failedRows) ?? 0
+  const elapsedMs = toNonNegativeNumber(input.elapsedMs) ?? 0
+  const importEngine = String(input.engine ?? '').trim().toLowerCase()
+  const importStrategy = String(input.recordUpsertStrategy ?? '').trim().toLowerCase()
+
+  const perfBitsEn: string[] = []
+  const perfBitsZh: string[] = []
+  if (importEngine) {
+    perfBitsEn.push(`engine=${importEngine}`)
+    perfBitsZh.push(`引擎=${importEngine}`)
+  }
+  if (importStrategy) {
+    perfBitsEn.push(`strategy=${importStrategy}`)
+    perfBitsZh.push(`策略=${importStrategy}`)
+  }
+  perfBitsEn.push(`processed=${processedRows}`)
+  perfBitsZh.push(`处理=${processedRows}`)
+  perfBitsEn.push(`failed=${failedRows}`)
+  perfBitsZh.push(`失败=${failedRows}`)
+  perfBitsEn.push(`elapsedMs=${elapsedMs}`)
+  perfBitsZh.push(`耗时毫秒=${elapsedMs}`)
+
+  return {
+    en: perfBitsEn.length ? ` (${perfBitsEn.join(', ')})` : '',
+    zh: perfBitsZh.length ? `（${perfBitsZh.join('，')}）` : '',
+  }
 }
 
 async function runImport() {
@@ -5795,9 +5845,22 @@ async function runImport() {
         const finalJob = await pollImportJob(job.id)
         const imported = Number(finalJob.progress ?? 0)
         const total = Number(finalJob.total ?? 0)
-        setStatus(tr(`Imported ${imported} rows (async job).`, `已导入 ${imported} 行（异步任务）。`))
+        const perfSuffix = buildImportPerfSuffix({
+          engine: finalJob.engine,
+          recordUpsertStrategy: finalJob.recordUpsertStrategy,
+          processedRows: finalJob.processedRows ?? imported,
+          failedRows: finalJob.failedRows,
+          elapsedMs: finalJob.elapsedMs,
+        })
+        setStatus(tr(
+          `Imported ${imported} rows (async job).${perfSuffix.en}`,
+          `已导入 ${imported} 行（异步任务）。${perfSuffix.zh}`,
+        ))
         if (total && imported !== total) {
-          setStatus(tr(`Imported ${imported}/${total} rows (async job).`, `已导入 ${imported}/${total} 行（异步任务）。`))
+          setStatus(tr(
+            `Imported ${imported}/${total} rows (async job).${perfSuffix.en}`,
+            `已导入 ${imported}/${total} 行（异步任务）。${perfSuffix.zh}`,
+          ))
         }
 
         await loadRecords()
@@ -5853,37 +5916,22 @@ async function runImport() {
     importCsvWarnings.value = Array.from(new Set(importWarnings))
     const count = Number(data.data?.imported ?? 0)
     const processedRows = toNonNegativeNumber(data.data?.processedRows) ?? count
-    const failedRows = toNonNegativeNumber(data.data?.failedRows) ?? 0
-    const elapsedMs = toNonNegativeNumber(data.data?.elapsedMs) ?? 0
-    const importEngine = String(data.data?.engine ?? '').trim().toLowerCase()
-    const importStrategy = String(data.data?.recordUpsertStrategy ?? '').trim().toLowerCase()
+    const perfSuffix = buildImportPerfSuffix({
+      engine: data.data?.engine,
+      recordUpsertStrategy: data.data?.recordUpsertStrategy,
+      processedRows,
+      failedRows: data.data?.failedRows,
+      elapsedMs: data.data?.elapsedMs,
+    })
     const groupCreated = data.data?.meta?.groupCreated ?? 0
     const groupMembersAdded = data.data?.meta?.groupMembersAdded ?? 0
-    const perfBitsEn: string[] = []
-    const perfBitsZh: string[] = []
-    if (importEngine) {
-      perfBitsEn.push(`engine=${importEngine}`)
-      perfBitsZh.push(`引擎=${importEngine}`)
-    }
-    if (importStrategy) {
-      perfBitsEn.push(`strategy=${importStrategy}`)
-      perfBitsZh.push(`策略=${importStrategy}`)
-    }
-    perfBitsEn.push(`processed=${processedRows}`)
-    perfBitsZh.push(`处理=${processedRows}`)
-    perfBitsEn.push(`failed=${failedRows}`)
-    perfBitsZh.push(`失败=${failedRows}`)
-    perfBitsEn.push(`elapsedMs=${elapsedMs}`)
-    perfBitsZh.push(`耗时毫秒=${elapsedMs}`)
-    const perfSuffixEn = perfBitsEn.length ? ` (${perfBitsEn.join(', ')})` : ''
-    const perfSuffixZh = perfBitsZh.length ? `（${perfBitsZh.join('，')}）` : ''
     if (groupCreated || groupMembersAdded) {
       setStatus(tr(
-        `Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.${perfSuffixEn}`,
-        `已导入 ${count} 行。新建分组：${groupCreated}。新增成员：${groupMembersAdded}。${perfSuffixZh}`,
+        `Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.${perfSuffix.en}`,
+        `已导入 ${count} 行。新建分组：${groupCreated}。新增成员：${groupMembersAdded}。${perfSuffix.zh}`,
       ))
     } else {
-      setStatus(tr(`Imported ${count} rows.${perfSuffixEn}`, `已导入 ${count} 行。${perfSuffixZh}`))
+      setStatus(tr(`Imported ${count} rows.${perfSuffix.en}`, `已导入 ${count} 行。${perfSuffix.zh}`))
     }
     await loadRecords()
     await loadImportBatches()

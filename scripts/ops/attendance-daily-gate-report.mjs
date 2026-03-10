@@ -21,6 +21,7 @@ const token = String(process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '').tri
 const repo = String(process.env.GITHUB_REPOSITORY || 'zensgit/metasheet2').trim()
 const apiBase = String(process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '')
 const branch = String(process.env.BRANCH || 'main').trim()
+const remoteSignalBranch = String(process.env.REMOTE_SIGNAL_BRANCH || 'main').trim()
 const includeDrillRuns = String(process.env.INCLUDE_DRILL_RUNS || '').trim() === 'true'
 const preflightWorkflow = String(process.env.PREFLIGHT_WORKFLOW || 'attendance-remote-preflight-prod.yml').trim()
 const metricsWorkflow = String(process.env.METRICS_WORKFLOW || 'attendance-remote-metrics-prod.yml').trim()
@@ -269,6 +270,50 @@ function parseStorageStepSummary(text) {
     uploadGb,
     oldestFileDays,
     fileCount,
+  }
+}
+
+export function parseLocaleZhSummaryJson(text) {
+  if (!text) return null
+
+  let value = null
+  try {
+    value = JSON.parse(text)
+  } catch {
+    return null
+  }
+
+  const schemaVersionRaw = value && Object.prototype.hasOwnProperty.call(value, 'schemaVersion') ? value.schemaVersion : null
+  const schemaVersion = typeof schemaVersionRaw === 'number' && Number.isInteger(schemaVersionRaw) && schemaVersionRaw >= 1
+    ? schemaVersionRaw
+    : null
+  const status = typeof value?.status === 'string' ? value.status.trim().toLowerCase() : ''
+  const locale = typeof value?.locale === 'string' ? value.locale.trim() : ''
+  const holidayCheck = typeof value?.holidayCheck === 'string' ? value.holidayCheck.trim().toLowerCase() : ''
+  const lunarCountValue = typeof value?.lunarCount === 'number' ? value.lunarCount : null
+  const holidayBadgeCountValue = typeof value?.holidayBadgeCount === 'number' ? value.holidayBadgeCount : null
+  const holidayCalendarLabel = typeof value?.holidayCalendarLabel === 'string' ? value.holidayCalendarLabel.trim() : ''
+  const error = typeof value?.error === 'string' ? value.error.trim() : ''
+
+  let reason = null
+  if (status === 'fail') reason = 'LOCALE_SMOKE_FAILED'
+  else if (schemaVersion === null) reason = 'SUMMARY_INVALID'
+  else if (locale !== 'zh-CN') reason = 'LOCALE_NOT_ZH_CN'
+  else if (typeof lunarCountValue !== 'number' || lunarCountValue <= 0) reason = 'LUNAR_LABELS_MISSING'
+  else if (holidayCheck === 'enabled' && (typeof holidayBadgeCountValue !== 'number' || holidayBadgeCountValue <= 0)) {
+    reason = 'HOLIDAY_BADGE_MISSING'
+  }
+
+  return {
+    reason,
+    schemaVersion,
+    status: status || null,
+    locale: locale || null,
+    lunarCount: lunarCountValue === null ? null : String(lunarCountValue),
+    holidayCheck: holidayCheck || null,
+    holidayBadgeCount: holidayBadgeCountValue === null ? null : String(holidayBadgeCountValue),
+    holidayCalendarLabel: holidayCalendarLabel || null,
+    error: error || null,
   }
 }
 
@@ -579,7 +624,30 @@ export function pickLatestCompletedRun(runList, options = {}) {
   return completedRuns[0] ?? null
 }
 
-function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbackHoursValue, fetchError }) {
+const remoteSignalGates = new Set([
+  'Remote Preflight',
+  'Branch Protection',
+  'Host Metrics',
+  'Storage Health',
+  'Upload Cleanup',
+])
+
+export function resolveGateSignalBranch({ gateName, reportBranch, remoteSignalBranchValue }) {
+  const report = String(reportBranch || '').trim() || 'main'
+  const remote = String(remoteSignalBranchValue || '').trim() || 'main'
+  if (report === 'main') return report
+  if (remoteSignalGates.has(String(gateName || ''))) return remote
+  return report
+}
+
+export function resolveQueryBranchDisplayValue({ gate, reportBranchValue }) {
+  const gateBranch = typeof gate?.queryBranch === 'string' ? gate.queryBranch.trim() : ''
+  if (gateBranch) return gateBranch
+  const reportBranch = typeof reportBranchValue === 'string' ? reportBranchValue.trim() : ''
+  return reportBranch || '-'
+}
+
+function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbackHoursValue, fetchError, queryBranch }) {
   const findings = []
   let ok = true
   const completed = formatRun(latestCompleted)
@@ -598,6 +666,7 @@ function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbac
       name,
       severity,
       ok,
+      queryBranch,
       latest,
       completed,
       findings,
@@ -610,7 +679,7 @@ function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbac
       severity,
       code: 'NO_COMPLETED_RUN',
       gate: name,
-      message: `${name}: no completed run found on branch '${branch}'`,
+      message: `${name}: no completed run found on branch '${queryBranch}'`,
       runUrl: latest.url,
     })
   } else {
@@ -641,6 +710,7 @@ function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbac
     name,
     severity,
     ok,
+    queryBranch,
     latest,
     completed,
     findings,
@@ -651,6 +721,7 @@ function renderMarkdown({
   generatedAt,
   repoValue,
   branchValue,
+  remoteSignalBranchValue,
   lookbackHoursValue,
   cleanupLookbackHoursValue,
   preflightGate,
@@ -688,14 +759,15 @@ function renderMarkdown({
   lines.push(`Generated at (UTC): \`${generatedAt}\``)
   lines.push(`Repository: \`${repoValue}\``)
   lines.push(`Branch: \`${branchValue}\``)
+  lines.push(`Remote signal branch: \`${remoteSignalBranchValue}\``)
   lines.push(`Lookback: \`${lookbackHoursValue}h\` (Upload Cleanup uses \`${cleanupLookbackHoursValue}h\`)`)
   lines.push(`P0 Status: **${p0Status.toUpperCase()}**`)
   lines.push(`Overall: **${overallStatus.toUpperCase()}**`)
   lines.push('')
   lines.push('## Gate Status')
   lines.push('')
-  lines.push('| Gate | Severity | Latest Completed | Conclusion | Reason | Updated (UTC) | Status | Link |')
-  lines.push('|---|---|---|---|---|---|---|---|')
+  lines.push('| Gate | Query Branch | Severity | Latest Completed | Conclusion | Reason | Updated (UTC) | Status | Link |')
+  lines.push('|---|---|---|---|---|---|---|---|---|')
 
   function gateReasonCell(gate) {
     if (!gate || gate.ok) return '-'
@@ -736,6 +808,12 @@ function renderMarkdown({
       if (gate.name === 'Upload Cleanup') {
         if (meta.staleCount) extra.push(`stale_count=${meta.staleCount}`)
       }
+      if (gate.name === 'Locale zh Smoke') {
+        if (meta.locale) extra.push(`locale=${meta.locale}`)
+        if (meta.lunarCount) extra.push(`lunar=${meta.lunarCount}`)
+        if (meta.holidayCheck) extra.push(`holiday_check=${meta.holidayCheck}`)
+        if (meta.holidayBadgeCount) extra.push(`holiday_badges=${meta.holidayBadgeCount}`)
+      }
       if (gate.name === 'Strict Gates') {
         if (meta.summaryValid === false) extra.push('summary=invalid')
         if (meta.summaryInvalidReasons && Array.isArray(meta.summaryInvalidReasons) && meta.summaryInvalidReasons.length > 0) {
@@ -771,11 +849,12 @@ function renderMarkdown({
     const completed = gate.completed
     const runId = completed.id ? `#${completed.id}` : '-'
     const conclusion = completed.conclusion || '-'
+    const queryBranch = `\`${resolveQueryBranchDisplayValue({ gate, reportBranchValue: branchValue })}\``
     const reason = gateReasonCell(gate)
     const updatedAt = completed.updatedAt || '-'
     const status = gate.ok ? 'PASS' : 'FAIL'
     const link = completed.url ? `[run](${completed.url})` : '-'
-    lines.push(`| ${gate.name} | ${gate.severity} | ${runId} | ${conclusion} | ${reason} | ${updatedAt} | ${status} | ${link} |`)
+    lines.push(`| ${gate.name} | ${queryBranch} | ${gate.severity} | ${runId} | ${conclusion} | ${reason} | ${updatedAt} | ${status} | ${link} |`)
   }
 
   lines.push('')
@@ -818,6 +897,8 @@ function renderMarkdown({
       const gate = gateByName[finding.gate] || null
       const meta = gate?.meta || null
       const metaBits = []
+      const queryBranch = resolveQueryBranchDisplayValue({ gate, reportBranchValue: branchValue })
+      if (queryBranch !== '-') metaBits.push(`query_branch=${queryBranch}`)
       if (meta?.reason) metaBits.push(`reason=${meta.reason}`)
       if (finding.gate === 'Remote Preflight') {
         if (meta?.rc) metaBits.push(`rc=${meta.rc}`)
@@ -842,6 +923,14 @@ function renderMarkdown({
       }
       if (finding.gate === 'Upload Cleanup') {
         if (meta?.staleCount) metaBits.push(`stale_count=${meta.staleCount}`)
+      }
+      if (finding.gate === 'Locale zh Smoke') {
+        if (meta?.locale) metaBits.push(`locale=${meta.locale}`)
+        if (meta?.lunarCount) metaBits.push(`lunar_count=${meta.lunarCount}`)
+        if (meta?.holidayCheck) metaBits.push(`holiday_check=${meta.holidayCheck}`)
+        if (meta?.holidayBadgeCount) metaBits.push(`holiday_badges=${meta.holidayBadgeCount}`)
+        if (meta?.holidayCalendarLabel) metaBits.push(`holiday_month=${meta.holidayCalendarLabel}`)
+        if (meta?.error) metaBits.push(`error=${meta.error}`)
       }
       if (finding.gate === 'Perf Baseline' || finding.gate === 'Perf Long Run') {
         if (meta?.schemaVersion) metaBits.push(`schema=${meta.schemaVersion}`)
@@ -932,6 +1021,12 @@ function renderMarkdown({
     if (findings.some((f) => f && f.gate === 'Locale zh Smoke' && f.code === 'RUN_FAILED')) {
       lines.push('- Locale zh Smoke: auth or UI smoke failed. Rotate `ATTENDANCE_ADMIN_JWT` (or login secrets) and rerun locale smoke.')
       lines.push('- Locale zh Smoke: inspect screenshot/log artifacts (`attendance-zh-locale-calendar*.png`, `auth-error.txt`) for localization/lunar/holiday regressions.')
+    }
+    if (findings.some((f) => f && f.gate === 'Locale zh Smoke' && f.code === 'LOCALE_SUMMARY_INVALID')) {
+      lines.push('- Locale zh Smoke: summary contract invalid (locale/lunar/holiday fields). Inspect `attendance-zh-locale-summary.json`, fix verifier output, then rerun locale smoke.')
+    }
+    if (findings.some((f) => f && f.gate === 'Locale zh Smoke' && f.code === 'LOCALE_SUMMARY_MISSING')) {
+      lines.push('- Locale zh Smoke: run succeeded but locale summary artifact is missing. Check upload paths and ensure verifier writes `attendance-zh-locale-summary.json`.')
     }
 
     if (findings.some((f) => f && f.gate === 'Remote Preflight' && f.code === 'RUN_FAILED')) {
@@ -1254,16 +1349,67 @@ async function run() {
 
   info(`repository=${repo} branch=${branch}`)
 
-  const preflightRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: preflightWorkflow, branchValue: branch })
-  const protectionRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: protectionWorkflow, branchValue: branch })
-  const metricsRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: metricsWorkflow, branchValue: branch })
-  const storageRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: storageWorkflow, branchValue: branch })
-  const cleanupRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: cleanupWorkflow, branchValue: branch })
-  const localeZhRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: localeZhWorkflow, branchValue: branch })
-  const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: branch })
-  const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: branch })
-  const longrunRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: longrunWorkflow, branchValue: branch })
-  const contractRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: contractWorkflow, branchValue: branch })
+  const preflightQueryBranch = resolveGateSignalBranch({
+    gateName: 'Remote Preflight',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const protectionQueryBranch = resolveGateSignalBranch({
+    gateName: 'Branch Protection',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const metricsQueryBranch = resolveGateSignalBranch({
+    gateName: 'Host Metrics',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const storageQueryBranch = resolveGateSignalBranch({
+    gateName: 'Storage Health',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const cleanupQueryBranch = resolveGateSignalBranch({
+    gateName: 'Upload Cleanup',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const localeZhQueryBranch = resolveGateSignalBranch({
+    gateName: 'Locale zh Smoke',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const strictQueryBranch = resolveGateSignalBranch({
+    gateName: 'Strict Gates',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const perfQueryBranch = resolveGateSignalBranch({
+    gateName: 'Perf Baseline',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const longrunQueryBranch = resolveGateSignalBranch({
+    gateName: 'Perf Long Run',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+  const contractQueryBranch = resolveGateSignalBranch({
+    gateName: 'Gate Contract Matrix',
+    reportBranch: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
+  })
+
+  const preflightRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: preflightWorkflow, branchValue: preflightQueryBranch })
+  const protectionRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: protectionWorkflow, branchValue: protectionQueryBranch })
+  const metricsRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: metricsWorkflow, branchValue: metricsQueryBranch })
+  const storageRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: storageWorkflow, branchValue: storageQueryBranch })
+  const cleanupRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: cleanupWorkflow, branchValue: cleanupQueryBranch })
+  const localeZhRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: localeZhWorkflow, branchValue: localeZhQueryBranch })
+  const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: strictQueryBranch })
+  const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: perfQueryBranch })
+  const longrunRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: longrunWorkflow, branchValue: longrunQueryBranch })
+  const contractRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: contractWorkflow, branchValue: contractQueryBranch })
 
   const preflightListRaw = Array.isArray(preflightRuns?.list) ? preflightRuns.list : []
   const preflightList = includeDrillRuns ? preflightListRaw : preflightListRaw.filter((run) => !isDrillRun(run))
@@ -1360,6 +1506,7 @@ async function run() {
   const preflightGate = evaluateGate({
     name: 'Remote Preflight',
     severity: 'P0',
+    queryBranch: preflightQueryBranch,
     latestAny: preflightLatestAny,
     latestCompleted: preflightLatestCompleted,
     now,
@@ -1369,6 +1516,7 @@ async function run() {
   const protectionGate = evaluateGate({
     name: 'Branch Protection',
     severity: 'P1',
+    queryBranch: protectionQueryBranch,
     latestAny: protectionLatestAny,
     latestCompleted: protectionLatestCompleted,
     now,
@@ -1378,6 +1526,7 @@ async function run() {
   const metricsGate = evaluateGate({
     name: 'Host Metrics',
     severity: 'P1',
+    queryBranch: metricsQueryBranch,
     latestAny: metricsLatestAny,
     latestCompleted: metricsLatestCompleted,
     now,
@@ -1387,6 +1536,7 @@ async function run() {
   const storageGate = evaluateGate({
     name: 'Storage Health',
     severity: 'P1',
+    queryBranch: storageQueryBranch,
     latestAny: storageLatestAny,
     latestCompleted: storageLatestCompleted,
     now,
@@ -1397,6 +1547,7 @@ async function run() {
   const cleanupGate = evaluateGate({
     name: 'Upload Cleanup',
     severity: 'P2',
+    queryBranch: cleanupQueryBranch,
     latestAny: cleanupLatestAny,
     latestCompleted: cleanupLatestCompleted,
     now,
@@ -1406,6 +1557,7 @@ async function run() {
   const localeZhGate = evaluateGate({
     name: 'Locale zh Smoke',
     severity: 'P1',
+    queryBranch: localeZhQueryBranch,
     latestAny: localeZhLatestAny,
     latestCompleted: localeZhLatestCompleted,
     now,
@@ -1415,6 +1567,7 @@ async function run() {
   const strictGate = evaluateGate({
     name: 'Strict Gates',
     severity: 'P0',
+    queryBranch: strictQueryBranch,
     latestAny: strictLatestAny,
     latestCompleted: strictLatestCompleted,
     now,
@@ -1424,6 +1577,7 @@ async function run() {
   const perfGate = evaluateGate({
     name: 'Perf Baseline',
     severity: 'P1',
+    queryBranch: perfQueryBranch,
     latestAny: perfLatestAny,
     latestCompleted: perfLatestCompleted,
     now,
@@ -1434,6 +1588,7 @@ async function run() {
   const longrunGate = evaluateGate({
     name: 'Perf Long Run',
     severity: 'P1',
+    queryBranch: longrunQueryBranch,
     latestAny: longrunLatestAny,
     latestCompleted: longrunLatestCompleted,
     now,
@@ -1444,6 +1599,7 @@ async function run() {
   const contractGate = evaluateGate({
     name: 'Gate Contract Matrix',
     severity: 'P1',
+    queryBranch: contractQueryBranch,
     latestAny: contractLatestAny,
     latestCompleted: contractLatestCompleted,
     now,
@@ -1517,6 +1673,40 @@ async function run() {
         parse: parseCleanupStepSummary,
       })
       if (meta) cleanupGate.meta = meta
+    }
+    if (localeZhGate.completed?.id) {
+      const runId = localeZhGate.completed.id
+      const meta = await tryEnrichGateFromStepSummary({
+        ownerValue: owner,
+        repoValue: repoName,
+        runId,
+        artifactNamePrefix: `attendance-locale-zh-smoke-prod-${runId}-`,
+        metaOutDir: path.join(metaRoot, 'locale-zh'),
+        innerSuffix: 'attendance-zh-locale-summary.json',
+        parse: parseLocaleZhSummaryJson,
+      })
+      if (meta) {
+        localeZhGate.meta = meta
+        if (meta.reason) {
+          localeZhGate.ok = false
+          localeZhGate.findings.push({
+            severity: 'P1',
+            code: 'LOCALE_SUMMARY_INVALID',
+            gate: 'Locale zh Smoke',
+            message: `Locale zh Smoke: summary contract invalid (${meta.reason})`,
+            runUrl: localeZhGate.completed.url,
+          })
+        }
+      } else if (localeZhGate.completed?.conclusion === 'success') {
+        localeZhGate.ok = false
+        localeZhGate.findings.push({
+          severity: 'P1',
+          code: 'LOCALE_SUMMARY_MISSING',
+          gate: 'Locale zh Smoke',
+          message: 'Locale zh Smoke: latest completed run succeeded but attendance-zh-locale-summary.json is missing from artifacts',
+          runUrl: localeZhGate.completed.url,
+        })
+      }
     }
     if (strictGate.completed?.id) {
       const runId = strictGate.completed.id
@@ -1689,6 +1879,12 @@ async function run() {
         if (meta.oldestFileDays) summaryBits.push(`oldest_days=${meta.oldestFileDays}`)
       } else if (gate.name === 'Upload Cleanup') {
         if (meta.staleCount) summaryBits.push(`stale_count=${meta.staleCount}`)
+      } else if (gate.name === 'Locale zh Smoke') {
+        if (meta.schemaVersion) summaryBits.push(`schema=${meta.schemaVersion}`)
+        if (meta.locale) summaryBits.push(`locale=${meta.locale}`)
+        if (meta.lunarCount) summaryBits.push(`lunar=${meta.lunarCount}`)
+        if (meta.holidayCheck) summaryBits.push(`holiday_check=${meta.holidayCheck}`)
+        if (meta.holidayBadgeCount) summaryBits.push(`holiday_badges=${meta.holidayBadgeCount}`)
       } else if (gate.name === 'Strict Gates') {
         if (meta.failedGates) summaryBits.push(`failed=${meta.failedGates}`)
         const pairs = meta.failedGateReasons && typeof meta.failedGateReasons === 'object' ? Object.entries(meta.failedGateReasons) : []
@@ -1719,6 +1915,7 @@ async function run() {
     const flat = {
       gate: gate?.name || null,
       severity: gate?.severity || null,
+      queryBranch: gate?.queryBranch || null,
       status: gate?.ok ? 'PASS' : 'FAIL',
       reasonCode,
       reasonSummary,
@@ -1756,6 +1953,15 @@ async function run() {
         flat.fileCount = meta.fileCount ?? null
       } else if (gate.name === 'Upload Cleanup') {
         flat.staleCount = meta.staleCount ?? null
+      } else if (gate.name === 'Locale zh Smoke') {
+        flat.summarySchemaVersion = meta.schemaVersion ?? null
+        flat.locale = meta.locale ?? null
+        flat.lunarCount = meta.lunarCount ?? null
+        flat.holidayCheck = meta.holidayCheck ?? null
+        flat.holidayBadgeCount = meta.holidayBadgeCount ?? null
+        flat.holidayCalendarLabel = meta.holidayCalendarLabel ?? null
+        flat.localeSummaryStatus = meta.status ?? null
+        flat.localeSummaryError = meta.error ?? null
       } else if (gate.name === 'Strict Gates') {
         flat.failedGates = meta.failedGates ?? null
         flat.failedGateReasons = meta.failedGateReasons ?? null
@@ -1804,6 +2010,7 @@ async function run() {
     generatedAt,
     repository: repo,
     branch,
+    remoteSignalBranch,
     lookbackHours,
     p0Status,
     overallStatus,
@@ -1828,6 +2035,7 @@ async function run() {
     generatedAt,
     repoValue: repo,
     branchValue: branch,
+    remoteSignalBranchValue: remoteSignalBranch,
     lookbackHoursValue: lookbackHours,
     cleanupLookbackHoursValue: cleanupLookbackHours,
     preflightGate,

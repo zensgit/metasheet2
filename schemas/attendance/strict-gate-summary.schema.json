@@ -29,6 +29,16 @@
     "webUrl": {
       "type": "string"
     },
+    "uiLocale": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
     "expectProductMode": {
       "type": "string",
       "minLength": 1

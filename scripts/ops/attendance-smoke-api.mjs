@@ -1,3 +1,5 @@
+import { assertImportTelemetry } from './attendance-import-telemetry-utils.mjs'
+
 const apiBase = (process.env.API_BASE || '').replace(/\/+$/, '')
 let token = process.env.AUTH_TOKEN || ''
 const orgId = process.env.ORG_ID || 'default'
@@ -9,6 +11,10 @@ const requireImportExport = process.env.REQUIRE_IMPORT_EXPORT === 'true'
 const requireImportUpload = process.env.REQUIRE_IMPORT_UPLOAD === 'true'
 const requireImportAsync = process.env.REQUIRE_IMPORT_ASYNC === 'true'
 const requireImportTelemetry = process.env.REQUIRE_IMPORT_TELEMETRY === 'true'
+const requireImportUpsertStrategy = process.env.REQUIRE_IMPORT_UPSERT_STRATEGY === 'true'
+const requireImportUploadAsync = process.env.REQUIRE_IMPORT_UPLOAD_ASYNC == null
+  ? requireImportUpload
+  : process.env.REQUIRE_IMPORT_UPLOAD_ASYNC === 'true'
 const requireBatchResolve = process.env.REQUIRE_BATCH_RESOLVE === 'true'
 const requirePreviewAsync = process.env.REQUIRE_PREVIEW_ASYNC === 'true'
 const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
@@ -18,7 +24,6 @@ const groupRetryAttempts = Math.max(1, Number(process.env.GROUP_RETRY_ATTEMPTS |
 const groupRetryDelayMs = Math.max(100, Number(process.env.GROUP_RETRY_DELAY_MS || 1000))
 const groupPageSize = Math.max(1, Number(process.env.GROUP_PAGE_SIZE || 200))
 const groupPageMax = Math.max(1, Number(process.env.GROUP_PAGE_MAX || 20))
-const importEngines = new Set(['standard', 'bulk'])
 
 function normalizeProductMode(value) {
   if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
@@ -184,39 +189,6 @@ function isoMinutesAgo(minutes) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function coerceNonNegativeNumber(value) {
-  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value)
-    if (Number.isFinite(parsed) && parsed >= 0) return parsed
-  }
-  return null
-}
-
-function assertImportTelemetry(payload, label, options = {}) {
-  const minProcessedRows = Number.isFinite(options.minProcessedRows) ? Number(options.minProcessedRows) : null
-  const engine = typeof payload?.engine === 'string' ? payload.engine.trim().toLowerCase() : ''
-  if (!importEngines.has(engine)) {
-    throw new Error(`${label}: telemetry.engine missing or invalid`)
-  }
-  const processedRows = coerceNonNegativeNumber(payload?.processedRows ?? payload?.rowCount ?? payload?.imported)
-  if (processedRows === null) {
-    throw new Error(`${label}: telemetry.processedRows missing or invalid`)
-  }
-  if (minProcessedRows !== null && processedRows < minProcessedRows) {
-    throw new Error(`${label}: telemetry.processedRows below minimum (${processedRows} < ${minProcessedRows})`)
-  }
-  const failedRows = coerceNonNegativeNumber(payload?.failedRows ?? payload?.skippedCount ?? 0)
-  if (failedRows === null) {
-    throw new Error(`${label}: telemetry.failedRows missing or invalid`)
-  }
-  const elapsedMs = coerceNonNegativeNumber(payload?.elapsedMs ?? payload?.jobElapsedMs)
-  if (elapsedMs === null) {
-    throw new Error(`${label}: telemetry.elapsedMs missing or invalid`)
-  }
-  return { engine, processedRows, failedRows, elapsedMs }
 }
 
 function isRetriableStatus(status) {
@@ -561,7 +533,7 @@ async function run() {
     }
     if (requireImportTelemetry) {
       const telemetry = assertImportTelemetry(previewAsyncDone, 'GET /attendance/import/jobs/:id (preview-async)', { minProcessedRows: 1 })
-      log(`preview async telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs}`)
+      log(`preview async telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs} recordUpsertStrategy=${telemetry.recordUpsertStrategy || 'n/a'}`)
     }
 
     const previewAsyncRetryPayload = { ...previewAsyncPayload }
@@ -637,8 +609,11 @@ async function run() {
   if (!batchId) die('commit did not return batchId')
   log(`commit ok: batchId=${batchId}`)
   if (requireImportTelemetry) {
-    const telemetry = assertImportTelemetry(commit.body?.data, 'POST /attendance/import/commit', { minProcessedRows: 1 })
-    log(`import commit telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs}`)
+    const telemetry = assertImportTelemetry(commit.body?.data, 'POST /attendance/import/commit', {
+      minProcessedRows: 1,
+      requireUpsertStrategy: requireImportUpsertStrategy,
+    })
+    log(`import commit telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs} recordUpsertStrategy=${telemetry.recordUpsertStrategy || 'n/a'}`)
   }
 
   // 6.1) idempotency retry should return the same batch without requiring a fresh commit token.
@@ -658,8 +633,11 @@ async function run() {
     if (retryBatchId !== batchId) die(`idempotency retry returned different batchId: ${retryBatchId}`)
     if (commitRetry.body?.data?.idempotent !== true) die('idempotency retry missing idempotent=true')
     if (requireImportTelemetry) {
-      const telemetry = assertImportTelemetry(commitRetry.body?.data, 'POST /attendance/import/commit (idempotency retry)', { minProcessedRows: 1 })
-      log(`import idempotency telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs}`)
+      const telemetry = assertImportTelemetry(commitRetry.body?.data, 'POST /attendance/import/commit (idempotency retry)', {
+        minProcessedRows: 1,
+        requireUpsertStrategy: requireImportUpsertStrategy,
+      })
+      log(`import idempotency telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs} recordUpsertStrategy=${telemetry.recordUpsertStrategy || 'n/a'}`)
     }
     log('idempotency ok')
   }
@@ -692,6 +670,27 @@ async function run() {
     const workDateAsync = toDateOnly(new Date(Date.now() - 2 * 24 * 60 * 60 * 1000))
     const idempotencyKeyAsync = `${idempotencyKey}-async`
     const csvTextAsync = makeCsv(workDateAsync, userId, groupName)
+    let csvFileIdAsync = ''
+
+    if (requireImportUploadAsync) {
+      const query = new URLSearchParams()
+      if (orgId) query.set('orgId', orgId)
+      query.set('filename', `attendance-smoke-async-${workDateAsync}.csv`)
+      const uploadAsyncRes = await apiFetchRaw(`/attendance/import/upload?${query.toString()}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/csv',
+        },
+        body: csvTextAsync,
+      })
+      assertOk(uploadAsyncRes, 'POST /attendance/import/upload (async)')
+      if (uploadAsyncRes.res.status !== 201) {
+        log(`WARN: import async upload returned HTTP ${uploadAsyncRes.res.status} (expected 201)`)
+      }
+      csvFileIdAsync = String(uploadAsyncRes.body?.data?.fileId || uploadAsyncRes.body?.data?.id || '')
+      if (!csvFileIdAsync) die('import async upload did not return fileId')
+      log(`import async upload ok: fileId=${csvFileIdAsync}`)
+    }
 
     const asyncPayload = {
       ...payloadExample,
@@ -699,7 +698,7 @@ async function run() {
       userId,
       timezone: payloadExample.timezone || defaultTimezone,
       mappingProfileId: 'dingtalk_csv_daily_summary',
-      csvText: csvTextAsync,
+      ...(requireImportUploadAsync ? { csvFileId: csvFileIdAsync } : { csvText: csvTextAsync }),
       idempotencyKey: idempotencyKeyAsync,
       groupSync: {
         autoCreate: true,
@@ -729,8 +728,11 @@ async function run() {
       die(`async job batchId mismatch: expected=${asyncBatchId} got=${String(jobDone.batchId || '')}`)
     }
     if (requireImportTelemetry) {
-      const telemetry = assertImportTelemetry(jobDone, 'GET /attendance/import/jobs/:id (commit-async)', { minProcessedRows: 1 })
-      log(`import async telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs}`)
+      const telemetry = assertImportTelemetry(jobDone, 'GET /attendance/import/jobs/:id (commit-async)', {
+        minProcessedRows: 1,
+        requireUpsertStrategy: requireImportUpsertStrategy,
+      })
+      log(`import async telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs} recordUpsertStrategy=${telemetry.recordUpsertStrategy || 'n/a'}`)
     }
 
     const asyncItemsRes = await apiFetch(`/attendance/import/batches/${asyncBatchId}/items?pageSize=50`, { method: 'GET' })

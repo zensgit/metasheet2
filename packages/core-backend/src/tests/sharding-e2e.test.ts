@@ -474,22 +474,27 @@ describe('Multi-Tenant Sharding E2E (Sprint 6 Day 5)', () => {
 
     it('should handle rate limiter reset per tenant', async () => {
       const tenantId = 'reset-test-tenant'
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1700000000000)
 
-      // Exhaust rate limit
-      for (let i = 0; i < 200; i++) {
-        rateLimiter.getRateLimiter().consume(`tenant:${tenantId}`)
+      try {
+        // Exhaust rate limit without allowing time-based refills
+        for (let i = 0; i < 200; i++) {
+          rateLimiter.getRateLimiter().consume(`tenant:${tenantId}`)
+        }
+
+        // Should be rate limited
+        const limitedResult = rateLimiter.getRateLimiter().consume(`tenant:${tenantId}`)
+        expect(limitedResult.allowed).toBe(false)
+
+        // Reset tenant
+        rateLimiter.resetTenant(tenantId)
+
+        // Should be allowed again
+        const resetResult = rateLimiter.getRateLimiter().consume(`tenant:${tenantId}`)
+        expect(resetResult.allowed).toBe(true)
+      } finally {
+        nowSpy.mockRestore()
       }
-
-      // Should be rate limited
-      const limitedResult = rateLimiter.getRateLimiter().consume(`tenant:${tenantId}`)
-      expect(limitedResult.allowed).toBe(false)
-
-      // Reset tenant
-      rateLimiter.resetTenant(tenantId)
-
-      // Should be allowed again
-      const resetResult = rateLimiter.getRateLimiter().consume(`tenant:${tenantId}`)
-      expect(resetResult.allowed).toBe(true)
     })
   })
 

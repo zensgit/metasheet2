@@ -9,6 +9,7 @@
 
 import fs from 'fs/promises'
 import path from 'path'
+import { assertImportTelemetry, coerceNonNegativeNumber } from './attendance-import-telemetry-utils.mjs'
 
 const apiBase = String(process.env.API_BASE || '').replace(/\/+$/, '')
 let token = String(process.env.AUTH_TOKEN || '')
@@ -19,9 +20,13 @@ const mappingProfileIdOverride = String(process.env.MAPPING_PROFILE_ID || '')
 
 const rows = Math.max(1, Number(process.env.ROWS || 10_000))
 const mode = String(process.env.MODE || 'commit') // preview|commit
+const previewModeRaw = String(process.env.PREVIEW_MODE || 'sync').trim().toLowerCase()
 const scenario = String(process.env.SCENARIO || `${rows}-${mode}`)
+const perfProfile = String(process.env.PERF_PROFILE || process.env.PROFILE || 'standard').trim().toLowerCase()
 const doRollback = process.env.ROLLBACK !== 'false' // default true
 const commitAsync = process.env.COMMIT_ASYNC === 'true' || process.env.ASYNC === 'true'
+const requireImportTelemetry = process.env.REQUIRE_IMPORT_TELEMETRY !== 'false'
+const requireImportUpsertStrategy = process.env.REQUIRE_IMPORT_UPSERT_STRATEGY === 'true'
 
 const outputRoot = String(process.env.OUTPUT_DIR || 'output/playwright/attendance-import-perf')
 const exportCsv = process.env.EXPORT_CSV === 'true'
@@ -60,6 +65,7 @@ const importJobPollRecoveryGraceMs = Math.max(
   60_000,
   Number(process.env.IMPORT_JOB_POLL_RECOVERY_GRACE_MS || 10 * 60 * 1000),
 )
+const previewAsyncRowThreshold = Math.max(1, Number(process.env.PREVIEW_ASYNC_ROW_THRESHOLD || 50_000))
 const importJobRecoveryAttemptsRaw = Number(process.env.IMPORT_JOB_RECOVERY_ATTEMPTS || 3)
 const importJobRecoveryAttempts = Number.isFinite(importJobRecoveryAttemptsRaw)
   ? Math.min(8, Math.max(1, Math.floor(importJobRecoveryAttemptsRaw)))
@@ -380,12 +386,6 @@ function resolveEngineByRows(rowCount) {
   return Number(rowCount) >= bulkEngineThreshold ? 'bulk' : 'standard'
 }
 
-function coerceNonNegativeNumber(value) {
-  const numeric = Number(value)
-  if (!Number.isFinite(numeric) || numeric < 0) return null
-  return Math.floor(numeric)
-}
-
 function coerceNonNegativeFloat(value, digits = 2) {
   const numeric = Number(value)
   if (!Number.isFinite(numeric) || numeric < 0) return null
@@ -489,6 +489,14 @@ function resolvePayloadSource() {
     }
   }
   return { payloadSource: 'csv', effectiveUploadCsv: uploadCsv, reason: 'auto_csv' }
+}
+
+function resolvePreviewMode() {
+  if (previewModeRaw === 'sync' || previewModeRaw === 'async') return previewModeRaw
+  if (previewModeRaw !== 'auto') {
+    die('PREVIEW_MODE must be one of: sync|async|auto')
+  }
+  return rows >= previewAsyncRowThreshold ? 'async' : 'sync'
 }
 
 async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2000 } = {}) {
@@ -619,10 +627,16 @@ async function run() {
 
   log(`API_BASE=${apiBase}`)
   log(`scenario=${scenario}`)
+  log(`profile=${perfProfile}`)
   await refreshAuthToken()
   const payloadPlan = resolvePayloadSource()
+  const previewMode = resolvePreviewMode()
+  const previewEndpoint = previewMode === 'async'
+    ? '/attendance/import/preview-async'
+    : '/attendance/import/preview'
   const requestedImportEngine = resolveEngineByRows(rows)
   log(`rows=${rows} bulk_engine_threshold=${bulkEngineThreshold} requested_engine=${requestedImportEngine}`)
+  log(`preview_mode_requested=${previewModeRaw} preview_mode_effective=${previewMode} preview_async_row_threshold=${previewAsyncRowThreshold}`)
   log(`payload_source=${payloadPlan.payloadSource} reason=${payloadPlan.reason} upload_csv_requested=${uploadCsv} upload_csv_effective=${payloadPlan.effectiveUploadCsv} csv_rows_limit_hint=${csvRowsLimitHint}`)
   log(`retry_profile preview=${previewRetryAttempts} commit=${commitRetryAttempts} commit_large=${commitRetryAttemptsLarge}`)
   log(
@@ -743,8 +757,11 @@ async function run() {
 
   // Preview (token can expire/be consumed when upstream returns transient failures).
   let preview = null
+  let previewAsyncJob = null
+  let previewItems = null
   let tPreview0 = nowMs()
   let tPreview1 = tPreview0
+  const previewAsyncIdempotencyKey = `${runId}-preview`
   for (let attempt = 1; attempt <= previewRetryAttempts; attempt += 1) {
     const prepPreview = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
     assertOk(prepPreview, `POST /attendance/import/prepare (preview attempt ${attempt})`)
@@ -753,10 +770,29 @@ async function run() {
 
     try {
       tPreview0 = nowMs()
-      preview = await apiFetch('/attendance/import/preview', {
+      preview = await apiFetch(previewEndpoint, {
         method: 'POST',
-        body: JSON.stringify({ ...basePayload, commitToken: commitTokenPreview }),
+        body: JSON.stringify({
+          ...basePayload,
+          idempotencyKey: previewMode === 'async' ? previewAsyncIdempotencyKey : basePayload.idempotencyKey,
+          commitToken: commitTokenPreview,
+        }),
       })
+      if (previewMode === 'async') {
+        assertOk(preview, `POST ${previewEndpoint}`)
+        const previewJobId = preview.body?.data?.job?.id
+        if (!previewJobId) die('preview-async did not return job.id')
+        const previewPollTimeoutMs = rows >= 500_000
+          ? importJobPollTimeoutLargeMs
+          : importJobPollTimeoutMs
+        previewAsyncJob = await pollImportJob(previewJobId, {
+          timeoutMs: previewPollTimeoutMs,
+          intervalMs: importJobPollIntervalMs,
+        })
+        previewItems = previewAsyncJob?.preview?.items
+      } else {
+        previewItems = preview.body?.data?.items
+      }
       tPreview1 = nowMs()
     } catch (error) {
       if (attempt >= previewRetryAttempts) throw error
@@ -786,25 +822,71 @@ async function run() {
     break
   }
   if (!preview) die('preview response missing after retries')
-  assertOk(preview, 'POST /attendance/import/preview')
-  const previewItems = preview.body?.data?.items
+  if (previewMode === 'sync') {
+    assertOk(preview, 'POST /attendance/import/preview')
+  }
   if (!Array.isArray(previewItems) || previewItems.length === 0) die('preview returned 0 items')
+
+  let previewTelemetry = null
+  if (previewMode === 'async') {
+    if (!previewAsyncJob || typeof previewAsyncJob !== 'object') {
+      die('preview-async job result missing')
+    }
+    const previewPayload = previewAsyncJob?.preview
+    const derivedFailedRows = (coerceNonNegativeNumber(previewPayload?.stats?.invalid) ?? 0)
+      + (coerceNonNegativeNumber(previewPayload?.stats?.duplicates) ?? 0)
+    const derived = {
+      engine: previewAsyncJob?.engine || requestedImportEngine,
+      processedRows: previewAsyncJob?.processedRows ?? previewPayload?.rowCount ?? previewPayload?.total ?? previewItems.length,
+      failedRows: previewAsyncJob?.failedRows ?? derivedFailedRows,
+      elapsedMs: previewAsyncJob?.elapsedMs ?? Math.max(0, tPreview1 - tPreview0),
+    }
+    if (requireImportTelemetry) {
+      previewTelemetry = assertImportTelemetry(previewAsyncJob, 'GET /attendance/import/jobs/:id (preview-async)', {
+        minProcessedRows: 1,
+        requireExplicit: true,
+      })
+    } else {
+      previewTelemetry = assertImportTelemetry(derived, 'preview-async telemetry (derived)', {
+        minProcessedRows: 1,
+        requireExplicit: true,
+      })
+    }
+  } else {
+    const previewData = preview.body?.data ?? {}
+    const previewStats = previewData?.stats ?? {}
+    const derivedFailedRows = (coerceNonNegativeNumber(previewStats?.invalid) ?? 0)
+      + (coerceNonNegativeNumber(previewStats?.duplicates) ?? 0)
+    const derived = {
+      engine: requestedImportEngine,
+      processedRows: previewData?.rowCount ?? previewData?.total ?? previewItems.length,
+      failedRows: derivedFailedRows,
+      elapsedMs: Math.max(0, tPreview1 - tPreview0),
+    }
+    previewTelemetry = assertImportTelemetry(derived, 'POST /attendance/import/preview (derived telemetry)', {
+      minProcessedRows: 1,
+      requireExplicit: true,
+    })
+  }
 
   if (mode === 'preview') {
     const summary = {
       schemaVersion: 2,
       startedAt,
       scenario,
+      profile: perfProfile,
       mode,
+      previewMode,
+      previewEndpoint,
       apiBase,
       orgId,
       rows,
-      engine: requestedImportEngine,
+      engine: previewTelemetry.engine,
       requestedImportEngine,
-      resolvedImportEngine: requestedImportEngine,
-      processedRows: null,
-      failedRows: null,
-      elapsedMs: null,
+      resolvedImportEngine: previewTelemetry.engine,
+      processedRows: previewTelemetry.processedRows,
+      failedRows: previewTelemetry.failedRows,
+      elapsedMs: previewTelemetry.elapsedMs,
       progressPercent: null,
       throughputRowsPerSec: null,
       perfMetrics: {
@@ -812,9 +894,9 @@ async function run() {
         commitMs: null,
         exportMs: null,
         rollbackMs: null,
-        processedRows: null,
-        failedRows: null,
-        elapsedMs: null,
+        processedRows: previewTelemetry.processedRows,
+        failedRows: previewTelemetry.failedRows,
+        elapsedMs: previewTelemetry.elapsedMs,
         progressPercent: null,
         throughputRowsPerSec: null,
       },
@@ -834,7 +916,7 @@ async function run() {
       outputDir: outDir,
     }
     await writeJson(path.join(outDir, 'perf-summary.json'), summary)
-    log(`preview ok: rows=${rows} ms=${summary.previewMs}`)
+    log(`preview ok: rows=${rows} ms=${summary.previewMs} engine=${summary.engine} processed=${summary.processedRows} failed=${summary.failedRows}`)
     log(`Wrote: ${path.join(outDir, 'perf-summary.json')}`)
     return
   }
@@ -968,6 +1050,7 @@ async function run() {
   let chunkItemsSize = null
   let chunkRecordsSize = null
   let recordUpsertStrategy = null
+  const commitTelemetryPayload = commitAsync ? finalAsyncJob : commit.body?.data
   if (commitAsync) {
     const job = commit.body?.data?.job
     jobId = finalAsyncJobId || job?.id
@@ -976,9 +1059,21 @@ async function run() {
     if (!finalJob) die('commit-async job result missing')
     batchId = finalJob?.batchId
     if (typeof finalJob?.engine === 'string' && finalJob.engine) engine = finalJob.engine
-    processedRows = coerceNonNegativeNumber(finalJob?.processedRows)
-    failedRows = coerceNonNegativeNumber(finalJob?.failedRows)
-    jobElapsedMs = coerceNonNegativeNumber(finalJob?.elapsedMs)
+    processedRows = coerceNonNegativeNumber(
+      requireImportTelemetry
+        ? finalJob?.processedRows
+        : (finalJob?.processedRows ?? finalJob?.rowCount ?? finalJob?.imported),
+    )
+    failedRows = coerceNonNegativeNumber(
+      requireImportTelemetry
+        ? finalJob?.failedRows
+        : (finalJob?.failedRows ?? finalJob?.skippedCount),
+    )
+    jobElapsedMs = coerceNonNegativeNumber(
+      requireImportTelemetry
+        ? finalJob?.elapsedMs
+        : (finalJob?.elapsedMs ?? finalJob?.jobElapsedMs),
+    )
     progressPercent = coerceNonNegativeFloat(finalJob?.progressPercent)
     throughputRowsPerSec = coerceNonNegativeFloat(finalJob?.throughputRowsPerSec)
     chunkItemsSize = coerceNonNegativeNumber(finalJob?.summary?.chunkConfig?.itemsChunkSize)
@@ -997,9 +1092,21 @@ async function run() {
   } else {
     batchId = commit.body?.data?.batchId
     if (typeof commit.body?.data?.engine === 'string' && commit.body.data.engine) engine = commit.body.data.engine
-    processedRows = coerceNonNegativeNumber(commit.body?.data?.processedRows ?? commit.body?.data?.rowCount ?? commit.body?.data?.imported)
-    failedRows = coerceNonNegativeNumber(commit.body?.data?.failedRows ?? commit.body?.data?.skippedCount)
-    jobElapsedMs = coerceNonNegativeNumber(commit.body?.data?.elapsedMs ?? commit.body?.data?.jobElapsedMs)
+    processedRows = coerceNonNegativeNumber(
+      requireImportTelemetry
+        ? commit.body?.data?.processedRows
+        : (commit.body?.data?.processedRows ?? commit.body?.data?.rowCount ?? commit.body?.data?.imported),
+    )
+    failedRows = coerceNonNegativeNumber(
+      requireImportTelemetry
+        ? commit.body?.data?.failedRows
+        : (commit.body?.data?.failedRows ?? commit.body?.data?.skippedCount),
+    )
+    jobElapsedMs = coerceNonNegativeNumber(
+      requireImportTelemetry
+        ? commit.body?.data?.elapsedMs
+        : (commit.body?.data?.elapsedMs ?? commit.body?.data?.jobElapsedMs),
+    )
     progressPercent = coerceNonNegativeFloat(commit.body?.data?.progressPercent)
     throughputRowsPerSec = coerceNonNegativeFloat(commit.body?.data?.throughputRowsPerSec)
     chunkItemsSize = coerceNonNegativeNumber(commit.body?.data?.meta?.chunkConfig?.itemsChunkSize)
@@ -1032,12 +1139,34 @@ async function run() {
     log(`WARN: batch metadata fetch failed: ${(error && error.message) || String(error)}`)
   }
   const tCommit1 = nowMs()
-  const elapsedMs = jobElapsedMs ?? Math.max(0, tCommit1 - tCommit0)
-  if (processedRows === null) {
-    processedRows = coerceNonNegativeNumber(rows)
+  if (requireImportTelemetry) {
+    const telemetryLabel = commitAsync
+      ? 'GET /attendance/import/jobs/:id (commit-async)'
+      : 'POST /attendance/import/commit'
+    const telemetry = assertImportTelemetry(commitTelemetryPayload, telemetryLabel, {
+      minProcessedRows: 1,
+      requireExplicit: true,
+      requireUpsertStrategy: requireImportUpsertStrategy,
+    })
+    engine = telemetry.engine
+    processedRows = telemetry.processedRows
+    failedRows = telemetry.failedRows
+    jobElapsedMs = telemetry.elapsedMs
+    if (!recordUpsertStrategy && telemetry.recordUpsertStrategy) {
+      recordUpsertStrategy = telemetry.recordUpsertStrategy
+    }
   }
-  if (failedRows === null) {
-    failedRows = 0
+  const elapsedMs = jobElapsedMs ?? Math.max(0, tCommit1 - tCommit0)
+  if (!requireImportTelemetry) {
+    if (processedRows === null) {
+      processedRows = coerceNonNegativeNumber(rows)
+    }
+    if (failedRows === null) {
+      failedRows = 0
+    }
+  } else {
+    if (processedRows === null) die('commit telemetry missing processedRows')
+    if (failedRows === null) die('commit telemetry missing failedRows')
   }
   const normalizedRecordUpsertStrategy = normalizeRecordUpsertStrategy(recordUpsertStrategy)
   recordUpsertStrategy = normalizedRecordUpsertStrategy || null
@@ -1073,7 +1202,10 @@ async function run() {
     schemaVersion: 2,
     startedAt,
     scenario,
+    profile: perfProfile,
     mode,
+    previewMode,
+    previewEndpoint,
     apiBase,
     orgId,
     rows,

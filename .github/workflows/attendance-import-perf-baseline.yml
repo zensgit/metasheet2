@@ -22,14 +22,22 @@ on:
         description: 'API base (must end with /api)'
         required: false
         default: 'http://142.171.239.56:8081/api'
+      profile:
+        description: 'Perf profile (standard|high-scale). high-scale defaults to 100k rows + async.'
+        required: false
+        default: 'standard'
       rows:
-        description: 'CSV rows to generate (default 10000)'
+        description: 'CSV rows to generate (overrides profile default when set)'
         required: false
         default: '10000'
       mode:
         description: 'preview or commit'
         required: false
         default: 'commit'
+      preview_mode:
+        description: 'Preview execution mode (sync|async|auto)'
+        required: false
+        default: 'sync'
       commit_async:
         description: 'Use /commit-async path (true/false, default false for stable manual reruns)'
         required: false
@@ -145,22 +153,28 @@ jobs:
     timeout-minutes: 45
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
-      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
+      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
+      LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL || vars.ATTENDANCE_ADMIN_EMAIL || '' }}
+      LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD || vars.ATTENDANCE_ADMIN_PASSWORD || '' }}
+      AUTH_RESOLVE_ALLOW_INSECURE_HTTP: ${{ vars.ATTENDANCE_ALLOW_INSECURE_HTTP || 'true' }}
+      PERF_PROFILE: ${{ github.event_name == 'schedule' && 'standard' || inputs.profile || vars.ATTENDANCE_PERF_BASELINE_PROFILE || 'standard' }}
       # Schedule runs must stay stable and short. Keep manual dispatch flexible.
-      ROWS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_BASELINE_ROWS_SCHEDULE || '10000') || inputs.rows || vars.ATTENDANCE_PERF_BASELINE_ROWS || '20000' }}
+      ROWS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_BASELINE_ROWS_SCHEDULE || '10000') || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_BASELINE_ROWS_HIGH || '100000')) || inputs.rows || vars.ATTENDANCE_PERF_BASELINE_ROWS || '20000' }}
       MODE: ${{ inputs.mode || 'commit' }}
+      PREVIEW_MODE: ${{ inputs.preview_mode || (inputs.profile == 'high-scale' && 'auto') || vars.ATTENDANCE_PERF_PREVIEW_MODE || 'sync' }}
+      PREVIEW_ASYNC_ROW_THRESHOLD: ${{ vars.ATTENDANCE_PERF_PREVIEW_ASYNC_ROW_THRESHOLD || '50000' }}
       ROLLBACK: 'true'
-      COMMIT_ASYNC: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_COMMIT_ASYNC_SCHEDULE || 'false') || inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'true' }}
+      COMMIT_ASYNC: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_COMMIT_ASYNC_SCHEDULE || 'false') || (inputs.profile == 'high-scale' && 'true') || inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'true' }}
       EXPORT_CSV: ${{ inputs.export_csv || vars.ATTENDANCE_PERF_EXPORT_CSV || 'true' }}
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
-      PAYLOAD_SOURCE: ${{ inputs.payload_source || vars.ATTENDANCE_PERF_PAYLOAD_SOURCE || 'auto' }}
-      CSV_ROWS_LIMIT_HINT: ${{ inputs.csv_rows_limit_hint || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '20000' }}
-      MAX_PREVIEW_MS: ${{ inputs.max_preview_ms || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '' }}
-      MAX_COMMIT_MS: ${{ inputs.max_commit_ms || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '' }}
-      MAX_EXPORT_MS: ${{ inputs.max_export_ms || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '' }}
+      PAYLOAD_SOURCE: ${{ inputs.payload_source || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_PAYLOAD_SOURCE_HIGH || 'auto')) || vars.ATTENDANCE_PERF_PAYLOAD_SOURCE || 'auto' }}
+      CSV_ROWS_LIMIT_HINT: ${{ inputs.csv_rows_limit_hint || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_CSV_ROWS_LIMIT_HINT_HIGH || '100000')) || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '20000' }}
+      MAX_PREVIEW_MS: ${{ inputs.max_preview_ms || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_MAX_PREVIEW_MS_HIGH || '240000')) || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '' }}
+      MAX_COMMIT_MS: ${{ inputs.max_commit_ms || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_MAX_COMMIT_MS_HIGH || '420000')) || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '' }}
+      MAX_EXPORT_MS: ${{ inputs.max_export_ms || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_MAX_EXPORT_MS_HIGH || '90000')) || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '' }}
       MAX_ROLLBACK_MS: ${{ inputs.max_rollback_ms || vars.ATTENDANCE_PERF_BASELINE_MAX_ROLLBACK_MS || '30000' }}
-      IMPORT_JOB_POLL_TIMEOUT_MS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_SCHEDULE_MS || '600000') || vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_MS || '2700000' }}
-      IMPORT_JOB_POLL_TIMEOUT_LARGE_MS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_SCHEDULE_MS || '900000') || vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_MS || '3600000' }}
+      IMPORT_JOB_POLL_TIMEOUT_MS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_SCHEDULE_MS || '600000') || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_HIGH_MS || '3600000')) || vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_MS || '2700000' }}
+      IMPORT_JOB_POLL_TIMEOUT_LARGE_MS: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_SCHEDULE_MS || '900000') || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_HIGH_MS || '5400000')) || vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_MS || '3600000' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -170,13 +184,50 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Resolve valid auth token
+        id: resolve-auth-token
+        run: |
+          set -euo pipefail
+          mkdir -p output/playwright/attendance-import-perf
+          meta_file="output/playwright/attendance-import-perf/auth-resolve-meta.txt"
+
+          if ! resolved_token="$(
+            API_BASE="${API_BASE}" \
+            AUTH_TOKEN="${AUTH_TOKEN}" \
+            LOGIN_EMAIL="${LOGIN_EMAIL}" \
+            LOGIN_PASSWORD="${LOGIN_PASSWORD}" \
+            AUTH_RESOLVE_ALLOW_INSECURE_HTTP="${AUTH_RESOLVE_ALLOW_INSECURE_HTTP}" \
+            AUTH_RESOLVE_META_FILE="${meta_file}" \
+            ./scripts/ops/attendance-resolve-auth.sh
+          )"; then
+            API_BASE="${API_BASE}" \
+            ./scripts/ops/attendance-write-auth-error.sh \
+              "${meta_file}" \
+              "output/playwright/attendance-import-perf/auth-error.txt"
+            echo "::error::No valid attendance admin token; see auth-error.txt artifact."
+            exit 1
+          fi
+
+          echo "::add-mask::${resolved_token}"
+          echo "AUTH_TOKEN_EFFECTIVE=${resolved_token}" >> "$GITHUB_ENV"
+
+          auth_source="unknown"
+          if [[ -f "${meta_file}" ]]; then
+            auth_source="$(awk -F= '/^AUTH_SOURCE=/{print $2}' "${meta_file}" | tail -n1)"
+          fi
+          echo "auth_source=${auth_source}" >> "$GITHUB_OUTPUT"
+
       - name: Log resolved perf config
         run: |
           set -euo pipefail
           echo "event=${{ github.event_name }}"
           echo "api_base=${API_BASE}"
+          echo "profile=${PERF_PROFILE}"
+          echo "auth_source=${{ steps.resolve-auth-token.outputs.auth_source || 'unknown' }}"
           echo "rows=${ROWS}"
           echo "mode=${MODE}"
+          echo "preview_mode=${PREVIEW_MODE}"
+          echo "preview_async_row_threshold=${PREVIEW_ASYNC_ROW_THRESHOLD}"
           echo "commit_async=${COMMIT_ASYNC}"
           echo "upload_csv=${UPLOAD_CSV}"
           echo "payload_source=${PAYLOAD_SOURCE}"
@@ -186,6 +237,8 @@ jobs:
           echo "poll_timeout_large_ms=${IMPORT_JOB_POLL_TIMEOUT_LARGE_MS}"
 
       - name: Run perf baseline (rollback enabled)
+        env:
+          AUTH_TOKEN: ${{ env.AUTH_TOKEN_EFFECTIVE }}
         run: |
           set -euo pipefail
           # Always capture logs so failures are diagnosable from artifacts.

@@ -4961,3 +4961,806 @@ Decision:
 
 - **GO maintained**.
 - No open Attendance P0/P1 alert issues after this round (`[Attendance P1] Locale zh smoke alert` closed).
+
+## Post-Go Verification (2026-03-08): Strict/Perf Auth Resolver Hardening (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- harden strict/perf workflow auth with a shared resolver so stale JWT formatting/expiry no longer causes random gate regressions.
+- keep token resolution diagnostics artifacted without writing any real secrets into docs.
+
+Code changes:
+
+- `scripts/ops/attendance-resolve-auth.sh` (new shared resolver).
+- workflow integration:
+  - `.github/workflows/attendance-strict-gates-prod.yml`
+  - `.github/workflows/attendance-import-perf-baseline.yml`
+  - `.github/workflows/attendance-import-perf-longrun.yml`
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Strict Gates (Prod) | #22821420163 | PASS | `output/playwright/ga/22821420163/attendance-strict-gates-prod-22821420163-1/20260308-125003-1/gate-api-smoke.log`, `output/playwright/ga/22821420163/attendance-strict-gates-prod-22821420163-1/20260308-125003-2/gate-summary.json` |
+| Attendance Import Perf Baseline | #22821420154 | PASS | `output/playwright/ga/22821420154/attendance-import-perf-22821420154-1/perf.log`, `output/playwright/ga/22821420154/attendance-import-perf-22821420154-1/attendance-perf-mmhr1rvj-7glun8/perf-summary.json` |
+| Attendance Import Perf Long Run | #22821486847 | PASS | `output/playwright/ga/22821486847/attendance-import-perf-longrun-rows10k-commit-22821486847-1/current/rows10k-commit/attendance-perf-mmhr7cyt-pwgumu/perf-summary.json`, `output/playwright/ga/22821486847/attendance-import-perf-longrun-trend-22821486847-1/20260308-125816/attendance-import-perf-longrun-trend.md` |
+
+Decision:
+
+- branch validation is green; ready to merge.
+- **GO maintained** on current production baseline (this section records branch hardening evidence).
+
+## Post-Go Verification (2026-03-08): OpenAPI Import Contract Sync (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- close the contract gap where runtime supports async/upload import paths but OpenAPI did not fully describe them.
+
+Changes:
+
+- updated source contracts:
+  - `packages/openapi/src/paths/attendance.yml`
+  - `packages/openapi/src/base.yml`
+- regenerated outputs:
+  - `packages/openapi/dist/openapi.json`
+  - `packages/openapi/dist/openapi.yaml`
+  - `packages/openapi/dist/combined.openapi.yml`
+
+Validation:
+
+| Check | Status | Evidence |
+|---|---|---|
+| OpenAPI build | PASS | command `pnpm exec tsx packages/openapi/tools/build.ts` |
+| Path coverage (`upload/prepare/preview-async/commit-async/jobs`) | PASS | `packages/openapi/dist/openapi.json` includes all paths |
+| Schema coverage (`AttendanceImportAsyncJobData` / upload / prepare) | PASS | `packages/openapi/dist/openapi.json` components updated |
+
+Decision:
+
+- contract sync is complete and backward compatible.
+- **GO maintained**.
+
+CI contract gate evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Gate Contract Matrix (`strict + dashboard + openapi`) | #22821820538 | PASS | `output/playwright/ga/22821820538/attendance-gate-contract-matrix-openapi-22821820538-1/openapi/validate.log`, `output/playwright/ga/22821820538/attendance-gate-contract-matrix-openapi-22821820538-1/openapi/build.log` |
+
+## Post-Go Verification (2026-03-08): Locale zh Shared Auth Resolver Sync (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- migrate locale zh smoke workflow to shared auth resolver script to avoid auth logic drift.
+
+Changes:
+
+- `.github/workflows/attendance-locale-zh-smoke-prod.yml` now calls `scripts/ops/attendance-resolve-auth.sh`.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Locale zh Smoke (Prod) | #22821890815 | PASS | `output/playwright/ga/22821890815/attendance-locale-zh-smoke-prod-22821890815-1/attendance-zh-locale-calendar.png` |
+
+Decision:
+
+- shared auth resolver adoption is validated for locale zh gate.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-08): UI Import Status Polish + Job 404 Regression Test (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- unify async/sync import completion status message with the same perf suffix (`engine/strategy/processed/failed/elapsedMs`).
+- add integration regression coverage for `GET /api/attendance/import/jobs/:id` not-found branch.
+
+Changes:
+
+- frontend:
+  - `apps/web/src/views/AttendanceView.vue`
+- backend integration test:
+  - `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+
+Validation:
+
+| Check | Status | Evidence |
+|---|---|---|
+| Targeted integration test (`unknown async import job id`) | PASS | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t \"unknown async import job id\"` |
+| Web type check | PASS | `pnpm --filter @metasheet/web exec vue-tsc -b --pretty false` |
+| PR CI sweep | PASS | Checks from runs `#22822063911`, `#22822063913`, `#22822063919`, `#22822063921`, `#22822063922`, `#22822063902` all green |
+
+Decision:
+
+- polish + regression coverage complete.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-08): Auth Heredoc Regression Fix Revalidated (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- remediate workflow parser failures caused by fragile heredoc writes in auth error paths.
+- re-run strict/perf/locale gates to confirm restored stability.
+
+Changes:
+
+- `.github/workflows/attendance-strict-gates-prod.yml`
+- `.github/workflows/attendance-import-perf-baseline.yml`
+- `.github/workflows/attendance-import-perf-longrun.yml`
+- `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Strict Gates (Prod) | #22822270117 | PASS | `output/playwright/ga/22822270117/attendance-strict-gates-prod-22822270117-1/20260308-134223-1/gate-api-smoke.log`, `output/playwright/ga/22822270117/attendance-strict-gates-prod-22822270117-1/20260308-134223-2/gate-summary.json` |
+| Attendance Import Perf Baseline | #22822270124 | PASS | `output/playwright/ga/22822270124/attendance-import-perf-22822270124-1/perf.log`, `output/playwright/ga/22822270124/attendance-import-perf-22822270124-1/attendance-perf-mmhsx1mz-gzdja7/perf-summary.json` |
+| Attendance Import Perf Long Run | #22822270161 | PASS | `output/playwright/ga/22822270161/attendance-import-perf-longrun-rows10k-commit-22822270161-1/current/rows10k-commit/attendance-perf-mmhsx40h-a5csya/perf-summary.json`, `output/playwright/ga/22822270161/attendance-import-perf-longrun-trend-22822270161-1/20260308-134347/attendance-import-perf-longrun-trend.md` |
+| Attendance Locale zh Smoke (Prod) | #22822313880 | PASS | `output/playwright/ga/22822313880/attendance-locale-zh-smoke-prod-22822313880-1/attendance-zh-locale-calendar.png` |
+
+Decision:
+
+- parser regression is closed; auth fallback chain executes normally.
+- strict/perf/locale gates returned to stable PASS.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-08): Policy + Dashboard Stability Recheck (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- confirm branch policy and daily dashboard gates stayed green after auth heredoc hardening rollout.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (Prod) | #22822410248 | PASS | `output/playwright/ga/22822410248/attendance-branch-policy-drift-prod-22822410248-1/policy.json` |
+| Attendance Daily Gate Dashboard | #22822410238 | PASS | `output/playwright/ga/22822410238/attendance-daily-gate-dashboard-22822410238-1/attendance-daily-gate-dashboard.json` |
+
+Decision:
+
+- policy and dashboard lines are stable after this fix round.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-08): Perf Baseline High-Scale Profile Refresh (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- add and validate a reusable manual baseline profile for 100k imports while keeping daily schedule defaults unchanged.
+
+Changes:
+
+- `.github/workflows/attendance-import-perf-baseline.yml`
+  - new `workflow_dispatch` input `profile=standard|high-scale`
+  - high-scale default resolution for `rows/commit_async/upload_csv` and large-run threshold/poll timeout fallbacks
+- `scripts/ops/attendance-run-perf-high-scale.sh`
+  - local/ops wrapper for the same 100k high-scale defaults (requires `AUTH_TOKEN`)
+- `scripts/ops/attendance-import-perf.mjs` + `scripts/ops/attendance-import-perf-trend-report.mjs`
+  - write/read `profile` in perf summary and render `Profile` column in longrun trend markdown.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (`profile=high-scale`) | #22822520613 | PASS | `output/playwright/ga/22822520613/attendance-import-perf-22822520613-1/perf.log`, `output/playwright/ga/22822520613/attendance-import-perf-22822520613-1/attendance-perf-mmhtgbci-rwye73/perf-summary.json` |
+| Attendance Import Perf Baseline (`profile=high-scale`, profile-field recheck) | #22822710850 | PASS | `output/playwright/ga/22822710850/attendance-import-perf-22822710850-1/perf.log`, `output/playwright/ga/22822710850/attendance-import-perf-22822710850-1/attendance-perf-mmhtvqw5-ksyvdb/perf-summary.json` |
+
+Decision:
+
+- high-scale (100k) refresh path is available and validated.
+- daily default load profile remains unchanged.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-08): Rollback Safety + zh Mobile Downgrade Regression (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- close a data-safety gap where rollback could delete updated existing records.
+- enforce async import parity: `preview-async` / `commit-async` now fail fast on missing `csvFileId`.
+- add deterministic web regression coverage for `zh-CN` + mobile desktop-only downgrade behavior.
+
+Changes:
+
+- `plugins/plugin-attendance/index.cjs`
+  - import upsert now detaches `source_batch_id` for existing rows (safety-first rollback scope).
+  - async endpoints return `404 NOT_FOUND` immediately when `csvFileId` metadata is missing.
+  - startup requeue of `queued/running` import jobs now executes for both queue-backed and fallback in-process modes.
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - added `keeps existing records after rolling back a later update batch`.
+  - added `deduplicates concurrent csvFileId commits with the same idempotencyKey`.
+  - added `returns NOT_FOUND for preview-async when csvFileId does not exist`.
+  - added `returns NOT_FOUND for commit-async when csvFileId does not exist`.
+  - added `returns EXPIRED for preview-async when csvFileId meta is older than TTL`.
+  - added `returns EXPIRED for commit-async when csvFileId meta is older than TTL`.
+- `apps/web/tests/attendance-experience-mobile-zh.spec.ts`
+  - new regression spec for `AttendanceExperienceView` with `zh-CN` locale + mobile gate.
+- `scripts/verify-attendance-full-flow.mjs`
+  - key role/text locators switched to bilingual matchers (en/zh) for `Attendance`, `Records`, `Anomalies`, `Admin Center`, `Workflow Designer`, and mobile downgrade copy.
+  - supports `UI_LOCALE` override (`zh-CN` / `en-US`) and writes locale to `metasheet_locale` before page load.
+  - admin flow locators are now bilingual as well (`Settings`, `Default Rule`, `Import`, `Retry preview`, async job status/actions/telemetry, payroll headings).
+- `scripts/ops/attendance-run-gates.sh` + `scripts/ops/attendance-regression-local.sh`
+  - `UI_LOCALE` is now forwarded to desktop/mobile full-flow playwright runs for deterministic locale-mode verification.
+  - gate summary artifact includes `uiLocale` for traceability.
+
+Verification:
+
+| Check | Command | Status |
+|---|---|---|
+| Backend integration (targeted) | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "keeps existing records after rolling back a later update batch|deduplicates concurrent csvFileId commits with the same idempotencyKey|returns NOT_FOUND for preview-async when csvFileId does not exist|returns NOT_FOUND for commit-async when csvFileId does not exist|returns EXPIRED for preview-async when csvFileId meta is older than TTL|returns EXPIRED for commit-async when csvFileId meta is older than TTL"` | PASS |
+| Web regression (attendance import + zh/mobile) | `pnpm --filter @metasheet/web exec vitest run tests/attendance-experience-mobile-zh.spec.ts tests/attendance-import-preview-regression.spec.ts` | PASS |
+| Full-flow verifier script syntax | `node --check scripts/verify-attendance-full-flow.mjs` | PASS |
+| Attendance plugin syntax | `node --check plugins/plugin-attendance/index.cjs` | PASS |
+| Gate runner shell syntax | `bash -n scripts/ops/attendance-run-gates.sh` | PASS |
+| Local regression shell syntax | `bash -n scripts/ops/attendance-regression-local.sh` | PASS |
+
+Decision:
+
+- rollback deletion scope is hardened for existing-record update scenarios.
+- zh mobile downgrade path now has direct test coverage.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Auth Resolver Hardening + Unified Workflow Auth Failure Artifacts (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- resolve review findings in auth resolver fallback path and diagnostics.
+- keep GA workflows maintainable by replacing repeated auth-error text blocks with a single helper script.
+
+Changes:
+
+- `scripts/ops/attendance-resolve-auth.sh`
+  - fixed `LAST_REFRESH_CODE` / `LAST_LOGIN_CODE` propagation by removing command-substitution subshell dependency.
+  - added token safety filter before bearer header usage.
+  - added API base security guard (`https` required for non-local by default, explicit override via `AUTH_RESOLVE_ALLOW_INSECURE_HTTP`).
+- `scripts/ops/attendance-write-auth-error.sh` (new)
+  - centralized generator for `auth-error.txt`, reading `AUTH_*` diagnostics from resolver meta file.
+- workflow wiring updates:
+  - `.github/workflows/attendance-strict-gates-prod.yml`
+  - `.github/workflows/attendance-import-perf-baseline.yml`
+  - `.github/workflows/attendance-import-perf-longrun.yml`
+  - `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+  - all now set/pass `AUTH_RESOLVE_ALLOW_INSECURE_HTTP` and call `attendance-write-auth-error.sh`.
+- contract matrix integration:
+  - `scripts/ops/attendance-run-gate-contract-case.sh` strict case now includes `node --test scripts/ops/attendance-auth-scripts.test.mjs`.
+
+Verification:
+
+| Check | Command | Status |
+|---|---|---|
+| Resolver syntax | `bash -n scripts/ops/attendance-resolve-auth.sh` | PASS |
+| Shared auth-error helper syntax | `bash -n scripts/ops/attendance-write-auth-error.sh` | PASS |
+| Auth resolver/helper regression tests | `node --test scripts/ops/attendance-auth-scripts.test.mjs` | PASS |
+| Workflow YAML parse | `ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }; puts "yaml-parse-ok"' .github/workflows/attendance-strict-gates-prod.yml .github/workflows/attendance-import-perf-baseline.yml .github/workflows/attendance-import-perf-longrun.yml .github/workflows/attendance-locale-zh-smoke-prod.yml` | PASS |
+| API base hardening guard | `API_BASE='http://example.com/api' AUTH_TOKEN='abc.def' scripts/ops/attendance-resolve-auth.sh` | PASS (expected `rc=2`) |
+| HTTP override compatibility | `API_BASE='http://example.com/api' AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_TOKEN='abc.def' scripts/ops/attendance-resolve-auth.sh` | PASS (guard allowed; resolver continues fallback) |
+| Resolver meta diagnostics | `AUTH_RESOLVE_META_FILE=/tmp/auth-meta.txt API_BASE='http://127.0.0.1:1/api' AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_TOKEN='abc.def' LOGIN_EMAIL='admin@example.com' LOGIN_PASSWORD='x' scripts/ops/attendance-resolve-auth.sh` | PASS (`AUTH_REFRESH_LAST_HTTP=000`, `AUTH_LOGIN_LAST_HTTP=000`) |
+| Contract strict case regression guard | `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check` | PASS |
+
+Decision:
+
+- auth fallback diagnostics are now reliable for triage.
+- auth error artifacts across strict/perf/locale workflows are unified and easier to maintain.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Locale Summary Contract + Dashboard Locale Metadata (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- make locale smoke evidence machine-readable and contract-enforced.
+- ensure Daily Dashboard can reason about locale/lunar/holiday health instead of only workflow conclusion.
+
+Changes:
+
+- locale smoke now writes `attendance-zh-locale-summary.json`.
+- locale smoke workflow summary includes this artifact and compact fields.
+- daily dashboard enrichment parses locale summary and populates `gateFlat.localeZh` metadata.
+- dashboard contract guard now validates locale PASS fields.
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Locale summary parser unit tests | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | `scripts/ops/attendance-daily-gate-report.test.mjs` output |
+| Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard /tmp/attendance-gate-contract-check-round17` | PASS | `/tmp/attendance-gate-contract-check-round17/dashboard/*` |
+| Strict contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check-round17` | PASS | `/tmp/attendance-gate-contract-check-round17/strict/*` |
+| Locale workflow YAML parse | `ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }; puts "yaml-parse-ok"' .github/workflows/attendance-locale-zh-smoke-prod.yml .github/workflows/attendance-daily-gate-dashboard.yml` | PASS | stdout: `yaml-parse-ok` |
+| GA locale smoke (feature branch) | `gh workflow run attendance-locale-zh-smoke-prod.yml --ref codex/attendance-parallel-round17` | PASS (#22832016585) | `output/playwright/ga/22832016585/attendance-zh-locale-summary.json` |
+| GA dashboard parse check (feature branch) | `gh workflow run attendance-daily-gate-dashboard.yml --ref codex/attendance-parallel-round17 -f branch=codex/attendance-parallel-round17 -f lookback_hours=48` | FAIL expected (#22832043211) | `output/playwright/ga/22832043211/attendance-daily-gate-dashboard.json` (locale metadata present; branch missing preflight/metrics/storage histories) |
+
+Decision:
+
+- locale gate now has structured pass/fail contract data (`schemaVersion/locale/lunar/holiday`) and is no longer a blind “workflow green” signal.
+- dashboard contract catches locale artifact regressions before they appear in production runbooks.
+- temporary branch-run escalation issue `#397` was closed after validation to avoid production signal pollution.
+- **GO maintained** (P0 unaffected, P1 visibility strengthened).
+
+## Post-Go Verification (2026-03-09): Non-main Dashboard Escalation Suppression + OpenAPI Import Job Telemetry Contract (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- prevent feature-branch dashboard verification from opening production escalation issues.
+- enforce import job telemetry fields at OpenAPI contract level.
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Dashboard contract regression | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard /tmp/attendance-gate-contract-check-round17c` | PASS | `/tmp/attendance-gate-contract-check-round17c/dashboard/*` |
+| OpenAPI contract (positive) | `node ./scripts/ops/attendance-validate-openapi-import-contract.mjs packages/openapi/dist/openapi.json packages/openapi/src/paths/attendance.yml` | PASS | stdout |
+| OpenAPI contract (negative telemetry) | `jq 'del(.components.schemas.AttendanceImportJob.properties.processedRows)' ... | node ./scripts/ops/attendance-validate-openapi-import-contract.mjs ...` | PASS (expected failure) | stderr includes `AttendanceImportJob missing telemetry field: processedRows` |
+| OpenAPI contract matrix case | `./scripts/ops/attendance-run-gate-contract-case.sh openapi /tmp/attendance-gate-contract-check-round17c` | PASS | `/tmp/attendance-gate-contract-check-round17c/openapi/*` |
+| GA dashboard feature-branch verification | `gh workflow run attendance-daily-gate-dashboard.yml --ref codex/attendance-parallel-round17 -f branch=codex/attendance-parallel-round17 -f lookback_hours=48` | FAIL expected | `output/playwright/ga/22834176090/attendance-daily-gate-dashboard.json` with `escalationIssue.mode=suppressed_non_main` and no opened issue |
+
+Decision:
+
+- feature-branch dashboard verification no longer opens production paging issues by default.
+- dashboard contract matrix now includes a valid `suppressed_non_main` fixture to prevent regression.
+- import job telemetry compatibility (`engine/processedRows/failedRows/elapsedMs/recordUpsertStrategy`) is now contract-protected in OpenAPI checks.
+- temporary branch-run issue `#398` was closed after verification.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Strict Upsert Telemetry Requirement + Feature-branch Dashboard Failure Policy (Branch `codex/attendance-parallel-round17`)
+
+Scope:
+
+- enforce optional strict telemetry field requirement (`recordUpsertStrategy`) in API smoke path.
+- control dashboard workflow conclusion on non-main branch without polluting production escalation flows.
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| API smoke syntax | `node --check scripts/ops/attendance-smoke-api.mjs` | PASS | local check |
+| Gate runner syntax | `bash -n scripts/ops/attendance-run-gates.sh` | PASS | local check |
+| Strict-twice syntax | `bash -n scripts/ops/attendance-run-strict-gates-twice.sh` | PASS | local check |
+| Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard /tmp/attendance-gate-contract-check-round17e` | PASS | `/tmp/attendance-gate-contract-check-round17e/dashboard/*` |
+| OpenAPI telemetry contract (positive/negative) | `node ./scripts/ops/attendance-validate-openapi-import-contract.mjs ...` + delete-field negative check | PASS | negative case rejects missing `AttendanceImportJob.processedRows` |
+
+Decision:
+
+- strict gates now support hard enforcement of `recordUpsertStrategy` telemetry through workflow input (`require_import_upsert_strategy=true` by default).
+- feature-branch dashboard verification can preserve artifact evidence without forced red workflow when `fail_on_p0_non_main=false`.
+- **GO maintained** (main-branch production gates unchanged).
+
+## Post-Go Verification (2026-03-09): Strict Async Upload Path in API Smoke
+
+Scope:
+
+- API smoke supports async upload path checks via `REQUIRE_IMPORT_UPLOAD_ASYNC`.
+- If `REQUIRE_IMPORT_UPLOAD_ASYNC` is not set, it defaults to `REQUIRE_IMPORT_UPLOAD`.
+- strict-twice includes this path so upload async + telemetry are exercised together.
+- telemetry validation continues to enforce `recordUpsertStrategy`.
+
+Example command:
+
+```bash
+REQUIRE_IMPORT_UPLOAD="true" \
+REQUIRE_IMPORT_UPLOAD_ASYNC="true" \
+REQUIRE_IMPORT_TELEMETRY="true" \
+REQUIRE_IMPORT_UPSERT_STRATEGY="true" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<ADMIN_JWT>" \
+scripts/ops/attendance-run-strict-gates-twice.sh
+```
+
+Expected logs (`gate-api-smoke.log`):
+
+- `import async upload ok`
+- `import async telemetry ok`
+- `SMOKE PASS`
+
+Evidence (2026-03-09):
+
+- `Attendance Strict Gates (Prod) [DRILL]` run `#22835442102`:
+  - `output/playwright/ga/22835442102/drill/gate-summary.json`
+- `Attendance Locale zh Smoke (Prod)` run `#22835516014`:
+  - `output/playwright/ga/22835516014/attendance-zh-locale-summary.json`
+- `Attendance Daily Gate Dashboard` run `#22835574844` (input `branch=codex/attendance-parallel-round17`):
+  - `output/playwright/ga/22835574844/attendance-daily-gate-dashboard.json`
+  - `gateFlat.localeZh` now points to locale run `#22835516014` with `status=PASS`.
+
+## Post-Go Verification (2026-03-09): commit-async csvFileId error codes + dashboard branch default
+
+Changes:
+
+- `commit-async` now returns expected API codes for upload channel failures:
+  - missing upload id -> `404/NOT_FOUND`
+  - expired upload id -> `410/EXPIRED`
+- Daily dashboard dispatch now defaults `branch` to workflow ref when not provided.
+
+Verification:
+
+```bash
+pnpm --filter @metasheet/core-backend exec vitest \
+  --config vitest.integration.config.ts \
+  run tests/integration/attendance-plugin.test.ts \
+  -t "returns NOT_FOUND for commit-async when csvFileId does not exist|returns EXPIRED for commit-async when csvFileId meta is older than TTL"
+```
+
+Evidence:
+
+- Daily dashboard run `#22835813042`:
+  - `output/playwright/ga/22835813042/attendance-daily-gate-dashboard.json`
+  - confirmed `branch=codex/attendance-parallel-round17` without explicit `branch` input.
+
+## Post-Go Verification (2026-03-09): Strict Selector Collision Recovery + Schema/Contract Alignment
+
+Scope:
+
+- clear strict gate false negatives triggered by `Import` vs `Retry import` button ambiguity after rate-limit retries.
+- align strict reason classification and strict gate summary schema with emitted runtime fields.
+- keep dashboard contract checks portable across CI runners that may not provide `rg`.
+
+Changes:
+
+- `scripts/verify-attendance-production-flow.mjs`: `Import` locator now uses exact match to avoid strict-mode selector collisions.
+- `scripts/ops/attendance-run-gates.sh`: `detect_playwright_reason()` classifies selector strict violations before `RATE_LIMITED`.
+- `schemas/attendance/strict-gate-summary.schema.json`: added optional `uiLocale` to remove summary/schema drift.
+- `scripts/ops/attendance-run-gate-contract-case.sh`: added `rg`/`grep` fallback helper so dashboard contract checks remain runner-compatible.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Dashboard contract matrix (runner compatibility) | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/*` |
+| Strict contract matrix (schema alignment) | `./scripts/ops/attendance-run-gate-contract-case.sh strict output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.json` |
+| Attendance Strict Gates (Prod, feature branch) | #22836147992 | PASS | `output/playwright/ga/22836147992/attendance-strict-gates-prod-22836147992-1/20260309-024303-1/gate-summary.json`, `output/playwright/ga/22836147992/attendance-strict-gates-prod-22836147992-1/20260309-024303-2/gate-summary.json`, `output/playwright/ga/22836147992/attendance-strict-gates-prod-22836147992-1/20260309-024303-2/gate-api-smoke.log` |
+| Attendance Daily Gate Dashboard (feature branch rebind) | #22836231315 | SUCCESS (workflow) / FAIL (report expected on non-main missing histories) | `output/playwright/ga/22836231315/attendance-daily-gate-dashboard-22836231315-1/attendance-daily-gate-dashboard.json` (`strict=PASS`, `protection=PASS`, `preflight=NO_COMPLETED_RUN`, `storage=NO_COMPLETED_RUN`) |
+
+Decision:
+
+- strict replay signal recovered and stable on branch validation rerun.
+- contract matrix now protects against the CI-tooling mismatch (`rg` absent) that previously caused false failures.
+- **GO maintained** for production mainline path; non-main dashboard fail remains expected when remote P0/P1 histories are absent.
+
+## Post-Go Verification (2026-03-09): Feature-branch Dashboard Remote-Signal Branching
+
+Scope:
+
+- eliminate feature-branch dashboard false negatives caused by missing remote ops histories.
+- keep strict/perf/longrun/contract bound to feature branch while remote ops gates bind to `main` by default.
+
+Changes:
+
+- dashboard workflow input added: `remote_signal_branch` (default `main`).
+- daily report now resolves per-gate query branch via `resolveGateSignalBranch()`.
+- remote gates query `main` on non-main report branches; gate metadata now records `queryBranch`.
+- dashboard contract matrix enforces the new workflow input/env mapping.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Daily report unit tests (branch resolver) | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | stdout |
+| Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/*` |
+| Local replay (feature branch + main remote signals) | `GH_TOKEN=\"$(gh auth token)\" BRANCH=\"codex/attendance-parallel-round17\" REMOTE_SIGNAL_BRANCH=\"main\" LOOKBACK_HOURS=\"48\" node scripts/ops/attendance-daily-gate-report.mjs` | PASS | `output/playwright/attendance-daily-gate-dashboard/20260309-030248/attendance-daily-gate-dashboard.json` |
+| Attendance Daily Gate Dashboard (feature branch, remote_signal_branch=main) | #22836616321 | PASS | `output/playwright/ga/22836616321/attendance-daily-gate-dashboard-22836616321-1/attendance-daily-gate-dashboard.json` (`overallStatus=pass`, `p0Status=pass`, `gateFlat.preflight.queryBranch=main`, `gateFlat.strict.queryBranch=codex/attendance-parallel-round17`) |
+
+Follow-up hardening:
+
+- dashboard validator now checks `queryBranch` routing and catches non-main strict/perf/longrun misbinding.
+- contract matrix includes explicit negative case (`dashboard.invalid.query-branch.json`) to keep this guard in CI.
+- local `attendance-daily-gate-report.mjs` output (without workflow-added `escalationIssue`) is now validator-compatible, preventing local false negatives.
+
+Decision:
+
+- feature-branch dashboard validation can now pass with production-like remote signals without forcing `main` branch verification only.
+- production `main` behavior remains unchanged.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Dashboard Query Branch Visibility
+
+Scope:
+
+- expose gate query-branch routing directly in dashboard markdown (`Gate Status`) for faster triage and operator auditability.
+
+Changes:
+
+- `scripts/ops/attendance-daily-gate-report.mjs`
+  - Gate Status table now includes `Query Branch`.
+  - added `resolveQueryBranchDisplayValue()` to keep output stable when `gate.queryBranch` is absent.
+  - Findings metadata now includes `query_branch=...` to make branch routing explicit during incident triage.
+- `scripts/ops/attendance-daily-gate-report.test.mjs`
+  - added unit tests for helper behavior.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Daily report unit tests | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | stdout |
+| Dashboard contract matrix | `./scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/*` |
+| Feature-branch dashboard replay (remote signals on main) | `GH_TOKEN=\"$(gh auth token)\" BRANCH=\"codex/attendance-parallel-round17\" REMOTE_SIGNAL_BRANCH=\"main\" LOOKBACK_HOURS=\"48\" node scripts/ops/attendance-daily-gate-report.mjs` | PASS | `output/playwright/attendance-daily-gate-dashboard/20260309-033331/attendance-daily-gate-dashboard.md` (Query Branch column present), `output/playwright/attendance-daily-gate-dashboard/20260309-033331/attendance-daily-gate-dashboard.json` |
+| Dashboard JSON validator | `./scripts/ops/attendance-validate-daily-dashboard-json.sh output/playwright/attendance-daily-gate-dashboard/20260309-033331/attendance-daily-gate-dashboard.json` | PASS | stdout |
+
+Decision:
+
+- daily dashboard now exposes branch routing decisions directly in markdown and remains contract-valid.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Perf Telemetry Enforcement + Preview Mode Controls
+
+Scope:
+
+- enforce explicit import telemetry in perf runs to avoid false-positive baselines.
+- add preview routing controls (`sync|async|auto`) for high-row scenarios.
+- deduplicate telemetry assertions by sharing helper utilities with strict smoke.
+
+Changes:
+
+- `scripts/ops/attendance-import-telemetry-utils.mjs` (new shared helper).
+- `scripts/ops/attendance-smoke-api.mjs` imports shared telemetry assertions.
+- `scripts/ops/attendance-import-perf.mjs`
+  - adds `PREVIEW_MODE`, `PREVIEW_ASYNC_ROW_THRESHOLD`, `REQUIRE_IMPORT_TELEMETRY`, `REQUIRE_IMPORT_UPSERT_STRATEGY`.
+  - supports preview async job polling path.
+  - removes synthetic fallback defaults for commit telemetry when strict mode is enabled.
+  - emits `previewMode` and `previewEndpoint` in `perf-summary.json`.
+- `scripts/ops/attendance-import-telemetry-utils.test.mjs` (new unit tests).
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Perf script syntax | `node --check scripts/ops/attendance-import-perf.mjs` | PASS | stdout |
+| Strict smoke script syntax | `node --check scripts/ops/attendance-smoke-api.mjs` | PASS | stdout |
+| Telemetry helper unit tests | `node --test scripts/ops/attendance-import-telemetry-utils.test.mjs` | PASS | stdout |
+| Dashboard unit regression | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | stdout |
+
+Decision:
+
+- telemetry contract enforcement is now script-level default for perf runs, reducing hidden regression risk.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Preview Telemetry Contract Consistency
+
+Scope:
+
+- ensure sync preview and async preview job payloads expose telemetry fields required by strict perf scripts.
+
+Changes:
+
+- `plugins/plugin-attendance/index.cjs`
+  - sync preview API now returns `engine/processedRows/failedRows/elapsedMs/recordUpsertStrategy`.
+  - async preview worker persists telemetry summary under payload `summary`.
+  - removed erroneous anomalies-route `csvFileId` cleanup reference that caused a 500 in integration tests.
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - expanded assertions for preview telemetry fields.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Backend integration subset | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t \"registers attendance routes and lists plugin|supports async import preview jobs \\(preview-async \\+ job polling\\)\"` | PASS | vitest stdout |
+
+Decision:
+
+- preview telemetry contract is now aligned across sync/async paths and supports strict perf telemetry enforcement.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Import Telemetry Metrics Export
+
+Scope:
+
+- emit import telemetry fields from middleware into Prometheus with low-cardinality labels.
+
+Changes:
+
+- `packages/core-backend/src/metrics/attendance-metrics.ts`
+  - new metrics:
+    - `attendance_import_processed_rows_total{operation,engine}`
+    - `attendance_import_failed_rows_total{operation,engine}`
+    - `attendance_import_elapsed_seconds{operation,engine}`
+- `packages/core-backend/src/middleware/attendance-production.ts`
+  - telemetry capture from response payload (`data` / `data.job`) for import preview/commit/job poll operations.
+  - writes metrics only for successful requests.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Core backend type check | `pnpm --filter @metasheet/core-backend exec tsc -p tsconfig.json --noEmit` | PASS | stdout |
+| Backend integration subset | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t \"registers attendance routes and lists plugin|supports async import preview jobs \\(preview-async \\+ job polling\\)\"` | PASS | vitest stdout |
+
+Decision:
+
+- production middleware now exports row/failure/elapsed telemetry for import operations, enabling trend alerting without parsing logs.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Perf Workflow Preview Routing Inputs
+
+Scope:
+
+- expose `PREVIEW_MODE` controls in GA perf workflows so high-row preview scenarios can route to async path deterministically.
+
+Changes:
+
+- `.github/workflows/attendance-import-perf-baseline.yml`
+  - added `preview_mode` dispatch input and passes `PREVIEW_MODE` / `PREVIEW_ASYNC_ROW_THRESHOLD`.
+- `.github/workflows/attendance-import-perf-longrun.yml`
+  - added `preview_mode` + `preview_async_row_threshold` dispatch inputs.
+  - passes values to each scenario execution step.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Baseline workflow YAML parse | `ruby -e 'require \"yaml\"; YAML.load_file(\".github/workflows/attendance-import-perf-baseline.yml\"); puts \"baseline ok\"'` | PASS | stdout |
+| Longrun workflow YAML parse | `ruby -e 'require \"yaml\"; YAML.load_file(\".github/workflows/attendance-import-perf-longrun.yml\"); puts \"longrun ok\"'` | PASS | stdout |
+
+Decision:
+
+- perf workflows now expose preview routing knobs required by the new strict telemetry/perf script behavior.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Perf Baseline High-Scale Profile (100k) Validation
+
+Scope:
+
+- validate new manual `high-scale` profile for baseline perf refresh (100k rows) without changing daily scheduled profile.
+
+Changes:
+
+- `.github/workflows/attendance-import-perf-baseline.yml`
+  - adds `profile=standard|high-scale` dispatch option.
+  - high-scale defaults to `rows=100000`, `commit_async=true`, and large-window thresholds/timeouts.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Import Perf Baseline (`profile=high-scale`) | #22822520613 | PASS | `output/playwright/ga/22822520613/attendance-import-perf-22822520613-1/perf.log`, `output/playwright/ga/22822520613/attendance-import-perf-22822520613-1/attendance-perf-mmhtgbci-rwye73/perf-summary.json` |
+
+Decision:
+
+- 100k baseline refresh path is validated and reproducible via workflow_dispatch.
+- daily schedule remains unchanged (standard profile), so production daily load posture is preserved.
+- **GO maintained**.
+
+Operator note:
+
+- `scripts/ops/attendance-post-merge-verify.sh` now accepts `PERF_BASELINE_PROFILE=standard|high-scale` and forwards it to `attendance-import-perf-baseline.yml`.
+
+## Post-Go Verification (2026-03-09): Nightly Post-Merge Chain Recheck + Async Large-Payload Commit Guard
+
+Scope:
+
+- run one full nightly post-merge chain to confirm gate stability after high-scale/profile additions.
+- close async import regression gap for large in-memory entries payload retried without `commitToken`.
+
+Changes:
+
+- `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - async commit integration polling ceiling raised (`160` -> `2000`) to reduce slow-run false negatives.
+  - new test case validates idempotent retry path:
+    - `keeps large entries payload for commit-async jobs when csv payload is absent`.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Attendance Post-Merge Verify (Nightly) | #22842467070 | PASS | `output/playwright/ga/22842467070/attendance-post-merge-verify-22842467070-1/summary.md`, `output/playwright/ga/22842467070/attendance-post-merge-verify-22842467070-1/summary.json` |
+| Strict gate retry in nightly chain | #22842479790 -> #22842628652 | PASS after retry | `output/playwright/ga/22842467070/attendance-post-merge-verify-22842467070-1/summary.md` |
+| Perf baseline contract check in nightly chain | local assert (run #22842759903) | PASS | `output/playwright/ga/22842467070/attendance-post-merge-verify-22842467070-1/gate-perf-baseline-contract.log` |
+| Locale zh contract check in nightly chain | local assert (run #22842730292) | PASS | `output/playwright/ga/22842467070/attendance-post-merge-verify-22842467070-1/gate-locale-zh-contract.log` |
+| Async import commit polling regression | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "supports async import commit jobs \\(commit-async \\+ job polling\\)"` | PASS | vitest stdout |
+| Async large-payload idempotency regression | `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "keeps large entries payload for commit-async jobs when csv payload is absent"` | PASS | vitest stdout |
+
+Decision:
+
+- nightly post-merge chain remains production-usable with reproducible artifacts.
+- async large-payload retry path is now under regression protection.
+- **GO maintained** (no new open Attendance P0/P1 blocker introduced).
+
+## Post-Go Verification (2026-03-09): Post-Merge Perf Dispatch Backward Compatibility
+
+Scope:
+
+- fix and verify post-merge verifier behavior when dispatching to a branch where perf workflow inputs lag behind script capabilities.
+
+Changes:
+
+- `scripts/ops/attendance-post-merge-verify.sh`
+  - detects `Unexpected inputs provided` from `gh workflow run`.
+  - strips unsupported dispatch keys and retries automatically once.
+  - avoids false post-merge failures caused only by workflow input skew.
+  - clears per-gate run metadata before trigger to avoid stale run identifiers when dispatch fails before run discovery.
+
+Verification:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Script syntax guard | `bash -n scripts/ops/attendance-post-merge-verify.sh` | PASS | stdout |
+| Compatibility replay (perf-only chain, `PERF_BASELINE_PROFILE=high-scale`) | `SKIP_BRANCH_POLICY=true SKIP_STRICT=true SKIP_LOCALE_ZH=true SKIP_DASHBOARD=true PERF_BASELINE_PROFILE=high-scale bash scripts/ops/attendance-post-merge-verify.sh` | PASS | `output/playwright/attendance-post-merge-verify/20260309-153802/summary.md`, `output/playwright/attendance-post-merge-verify/20260309-153802/summary.json` |
+| Compatibility replay (perf-only chain + stale-run-id guard) | `SKIP_BRANCH_POLICY=true SKIP_STRICT=true SKIP_LOCALE_ZH=true SKIP_DASHBOARD=true PERF_BASELINE_PROFILE=high-scale bash scripts/ops/attendance-post-merge-verify.sh` | PASS | `output/playwright/attendance-post-merge-verify/20260309-155917/summary.md`, `output/playwright/attendance-post-merge-verify/20260309-155917/summary.json` |
+| Perf baseline downstream run | #22843172792 | PASS | `output/playwright/attendance-post-merge-verify/20260309-153802/ga/22843172792/attendance-import-perf-22843172792-1/attendance-perf-mmivdf41-hrc4ue/perf-summary.json` |
+
+Decision:
+
+- post-merge verifier now tolerates temporary workflow input skew across branches.
+- gate chain remains actionable and no longer fails early on dispatch contract drift.
+- **GO maintained**.
+
+Follow-up full-chain replay:
+
+| Gate | Run / Command | Status | Evidence |
+|---|---|---|---|
+| Attendance Post-Merge Verify (full chain, `PERF_BASELINE_PROFILE=high-scale`) | local run `output/playwright/attendance-post-merge-verify/20260309-154253` | PASS | `output/playwright/attendance-post-merge-verify/20260309-154253/summary.md`, `output/playwright/attendance-post-merge-verify/20260309-154253/summary.json` |
+| Strict gate retry path | #22843329945 -> #22843491398 | PASS after retry | `output/playwright/attendance-post-merge-verify/20260309-154253/summary.md` |
+| Perf baseline fallback dispatch run | #22843641249 | PASS | `output/playwright/attendance-post-merge-verify/20260309-154253/ga/22843641249/attendance-import-perf-22843641249-1/attendance-perf-mmivxy9u-pyo5ab/perf-summary.json` |
+| Daily dashboard run | #22843663627 | PASS | `output/playwright/attendance-post-merge-verify/20260309-154253/ga/22843663627` |
+
+Conclusion:
+
+- fallback logic is validated on both perf-only replay and full-chain replay.
+- production-oriented post-merge verification is stable under mixed workflow schema versions.
+
+## Post-Go Verification (2026-03-09): Shared Dispatcher Fallback Compatibility
+
+Scope:
+
+- make the shared workflow dispatch utility resilient to workflow input-schema drift (same failure mode fixed in post-merge verifier).
+
+Changes:
+
+- `scripts/ops/attendance-run-workflow-dispatch.sh`
+  - adds unsupported-input fallback retry logic for `gh workflow run`.
+- `scripts/ops/attendance-run-workflow-dispatch.test.mjs`
+  - adds deterministic mocked-`gh` coverage for:
+    - fallback path (unsupported input removed on retry),
+    - regular success path (single dispatch).
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Shared dispatcher tests | `node --test scripts/ops/attendance-run-workflow-dispatch.test.mjs` | PASS | node test stdout |
+| Shared dispatcher syntax | `bash -n scripts/ops/attendance-run-workflow-dispatch.sh` | PASS | stdout |
+| Post-merge verifier syntax | `bash -n scripts/ops/attendance-post-merge-verify.sh` | PASS | stdout |
+| Strict contract matrix (includes dispatcher tests) | `./scripts/ops/attendance-run-gate-contract-case.sh strict /tmp/attendance-gate-contract-check-round17-dispatch` | PASS | `/tmp/attendance-gate-contract-check-round17-dispatch/strict/*` |
+
+Decision:
+
+- dispatcher-level compatibility is now regression-tested, not only script-local patched.
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-09): Fast Parallel Local Regression Harness
+
+Scope:
+
+- reduce local regression feedback cycle for ops scripts and contract checks while keeping evidence artifacts normalized.
+
+Changes:
+
+- added `scripts/ops/attendance-fast-parallel-regression.sh`:
+  - runs core ops test blocks + strict/dashboard contract cases in parallel.
+  - supports `PROFILE=full|ops|contracts` and `MAX_PARALLEL=<n>` for lane-specific execution.
+  - writes `results.tsv`, `summary.md`, and `summary.json` to a timestamped evidence directory (`timestamp + pid` suffix to avoid collisions).
+- added `scripts/ops/attendance-fast-parallel-regression.test.mjs`:
+  - locks profile input guards and default lane composition behavior.
+- added `scripts/ops/attendance-fast-parallel-summary-report.mjs` + tests:
+  - aggregates latest `full/ops/contracts` lane health into markdown/json reports.
+  - infers profile metadata for older summaries to keep report continuity.
+- updated `scripts/ops/attendance-regression-local.sh` to execute checks from repository root explicitly (`cd "$ROOT_DIR"`), preventing login-shell cwd drift.
+- added pnpm shortcuts:
+  - `pnpm verify:attendance-regression-fast`
+  - `pnpm verify:attendance-regression-fast:test`
+  - `pnpm verify:attendance-regression-fast:ops`
+  - `pnpm verify:attendance-regression-fast:contracts`
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Syntax guard | `bash -n scripts/ops/attendance-fast-parallel-regression.sh scripts/ops/attendance-regression-local.sh scripts/ops/attendance-run-workflow-dispatch.sh` | PASS | stdout |
+| Dispatcher fallback tests | `node --test scripts/ops/attendance-run-workflow-dispatch.test.mjs` | PASS | node test stdout |
+| Fast parallel regression run | `scripts/ops/attendance-fast-parallel-regression.sh` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-170846/summary.json` |
+| Fast parallel regression run (pnpm shortcut) | `pnpm verify:attendance-regression-fast` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-171117/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-171117/summary.json` |
+| Fast regression profile tests | `pnpm verify:attendance-regression-fast:test` | PASS | node test stdout |
+| Fast parallel regression run (ops lane) | `pnpm verify:attendance-regression-fast:ops` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172147-94804/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-172147-94804/summary.json` |
+| Fast parallel regression run (contracts lane) | `pnpm verify:attendance-regression-fast:contracts` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172147-94807/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-172147-94807/summary.json` |
+| Fast parallel regression run (full lane, collision-safe output path) | `pnpm verify:attendance-regression-fast` | PASS | `output/playwright/attendance-fast-parallel-regression/20260309-172332-1671/summary.md`, `output/playwright/attendance-fast-parallel-regression/20260309-172332-1671/summary.json` |
+| Fast parallel regression run (structured summary metadata) | `pnpm verify:attendance-regression-fast` + `jq '.profile,.maxParallel,.runContractCases,.totals.total' <summary.json>` | PASS | `output/playwright/attendance-fast-parallel-regression/20260310-075225-24644/summary.json` |
+| Fast lane summary report tests | `pnpm verify:attendance-regression-fast:report:test` | PASS | node test stdout |
+| Fast lane summary report generation | `pnpm verify:attendance-regression-fast:report` | PASS | `output/playwright/attendance-fast-parallel-report/20260309-235920/attendance-fast-parallel-report.md`, `output/playwright/attendance-fast-parallel-report/20260309-235920/attendance-fast-parallel-report.json` |
+
+Decision:
+
+- local pre-PR gate verification now has a deterministic high-speed entrypoint.
+- **GO maintained** (P0/P1 production gate posture unchanged).

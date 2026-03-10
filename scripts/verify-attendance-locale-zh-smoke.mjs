@@ -8,6 +8,7 @@ const token = process.env.AUTH_TOKEN || ''
 const headless = process.env.HEADLESS !== 'false'
 const timeoutMs = Number(process.env.UI_TIMEOUT || 45000)
 const outputDir = process.env.OUTPUT_DIR || 'output/playwright/attendance-locale-zh-smoke'
+const summaryPath = process.env.OUTPUT_SUMMARY_JSON || path.join(outputDir, 'attendance-zh-locale-summary.json')
 const orgId = String(process.env.ORG_ID || 'default').trim()
 const verifyHoliday = process.env.VERIFY_HOLIDAY !== 'false'
 
@@ -32,6 +33,10 @@ function log(message) {
 
 async function ensureDir(dir) {
   await fs.mkdir(dir, { recursive: true })
+}
+
+async function writeSummary(filePath, value) {
+  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
 }
 
 function toDateKey(date) {
@@ -249,6 +254,37 @@ async function run() {
   let createdHolidayId = null
   let createdHolidayName = null
   let createdHolidayDate = null
+  let createdHolidayDeleted = false
+  let createdHolidayDeleteError = null
+  let holidayBadgeProbe = null
+  let runError = null
+
+  const summary = {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    webUrl: normalizeUrl(webUrl),
+    apiBase,
+    orgId,
+    verifyHoliday,
+    status: 'running',
+    locale: null,
+    lunarCount: 0,
+    lunarSamples: [],
+    holidayCheck: verifyHoliday ? 'enabled' : 'disabled',
+    holidayBadgeCount: null,
+    holidayCalendarLabel: null,
+    holidayBadgeSamples: [],
+    createdHolidayId: null,
+    createdHolidayDate: null,
+    createdHolidayName: null,
+    screenshot: null,
+    failScreenshot: null,
+    cleanup: {
+      holidayDeleted: false,
+      error: null,
+    },
+    error: null,
+  }
 
   const browser = await chromium.launch({ headless })
   const context = await browser.newContext({
@@ -269,6 +305,7 @@ async function run() {
     const localeSelect = page.locator('nav.app-nav .nav-locale__select')
     await localeSelect.waitFor({ timeout: timeoutMs })
     const localeValue = await localeSelect.inputValue()
+    summary.locale = localeValue || null
     if (localeValue !== 'zh-CN') {
       throw new Error(`Expected locale select value zh-CN, got ${localeValue || '<empty>'}`)
     }
@@ -278,6 +315,8 @@ async function run() {
 
     const lunarSamples = await verifyLunarLabelsMeaningful(page)
     const lunarCount = lunarSamples.length
+    summary.lunarCount = lunarCount
+    summary.lunarSamples = lunarSamples.slice(0, 20)
 
     if (verifyHoliday) {
       const calendarLabelNode = page.locator('.attendance__calendar-label').first()
@@ -324,6 +363,9 @@ async function run() {
       })
       createdHolidayId = String(createPayload?.data?.id || '')
       createdHolidayDate = candidateDate
+      summary.createdHolidayId = createdHolidayId || null
+      summary.createdHolidayDate = createdHolidayDate || null
+      summary.createdHolidayName = createdHolidayName || null
       if (!createdHolidayId) {
         throw new Error('Create holiday returned empty id')
       }
@@ -340,25 +382,33 @@ async function run() {
       await page.waitForTimeout(300)
 
       await findHolidayBadgeAcrossMonths(page, createdHolidayName)
-      const badgeProbe = await findAnyHolidayBadgeAcrossMonths(page)
+      holidayBadgeProbe = await findAnyHolidayBadgeAcrossMonths(page)
+      summary.holidayBadgeCount = holidayBadgeProbe.count
+      summary.holidayCalendarLabel = holidayBadgeProbe.calendarLabel
+      summary.holidayBadgeSamples = holidayBadgeProbe.badgeTexts
       log(
-        `holiday badges visible: target="${createdHolidayName}", count=${badgeProbe.count}, month=${badgeProbe.calendarLabel}, samples=${JSON.stringify(badgeProbe.badgeTexts)}`,
+        `holiday badges visible: target="${createdHolidayName}", count=${holidayBadgeProbe.count}, month=${holidayBadgeProbe.calendarLabel}, samples=${JSON.stringify(holidayBadgeProbe.badgeTexts)}`,
       )
     }
 
     const screenshotPath = path.join(outputDir, 'attendance-zh-locale-calendar.png')
     await page.screenshot({ path: screenshotPath, fullPage: true })
+    summary.screenshot = screenshotPath
+    summary.status = 'pass'
 
     log(`PASS: locale=zh-CN, lunarLabels=${lunarCount}, holidayCheck=${verifyHoliday ? 'on' : 'off'}, screenshot=${screenshotPath}`)
   } catch (error) {
+    runError = error
+    summary.status = 'fail'
+    summary.error = (error && error.message) || String(error)
     const failShot = path.join(outputDir, 'attendance-zh-locale-calendar-fail.png')
     try {
       await page.screenshot({ path: failShot, fullPage: true })
+      summary.failScreenshot = failShot
       log(`captured failure screenshot: ${failShot}`)
     } catch {
       // ignore screenshot failure
     }
-    throw error
   } finally {
     await browser.close()
     if (createdHolidayId) {
@@ -366,11 +416,20 @@ async function run() {
         await apiRequestJson(`/attendance/holidays/${createdHolidayId}`, {
           method: 'DELETE',
         })
+        createdHolidayDeleted = true
         log(`deleted holiday: ${createdHolidayId}`)
       } catch (error) {
+        createdHolidayDeleteError = error?.message || String(error)
         log(`WARN cleanup failed for holiday ${createdHolidayId}: ${error?.message || error}`)
       }
     }
+    summary.cleanup.holidayDeleted = createdHolidayDeleted
+    summary.cleanup.error = createdHolidayDeleteError
+    await writeSummary(summaryPath, summary)
+  }
+
+  if (runError) {
+    throw runError
   }
 }
 

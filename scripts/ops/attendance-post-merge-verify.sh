@@ -50,6 +50,7 @@ LOCALE_ZH_ORG_ID="${LOCALE_ZH_ORG_ID:-default}"
 LOCALE_ZH_VERIFY_HOLIDAY="${LOCALE_ZH_VERIFY_HOLIDAY:-true}"
 
 PERF_BASELINE_API_BASE="${PERF_BASELINE_API_BASE:-${API_BASE}}"
+PERF_BASELINE_PROFILE="${PERF_BASELINE_PROFILE:-standard}"
 PERF_BASELINE_ROWS="${PERF_BASELINE_ROWS:-10000}"
 PERF_BASELINE_MODE="${PERF_BASELINE_MODE:-commit}"
 PERF_BASELINE_COMMIT_ASYNC="${PERF_BASELINE_COMMIT_ASYNC:-false}"
@@ -184,11 +185,37 @@ function to_bool() {
   esac
 }
 
+function extract_unexpected_workflow_inputs() {
+  local raw="${1:-}"
+  if [[ -z "$raw" ]]; then
+    return 0
+  fi
+  python3 - "$raw" <<'PY'
+import json
+import re
+import sys
+
+text = sys.argv[1]
+match = re.search(r'Unexpected inputs provided:\s*(\[[^\]]*\])', text)
+if not match:
+    raise SystemExit(0)
+try:
+    values = json.loads(match.group(1))
+except Exception:
+    raise SystemExit(0)
+for value in values:
+    if isinstance(value, str) and value:
+        print(value)
+PY
+}
+
 function run_perf_baseline_contract_gate() {
   local run_id="$1"
   local run_url="$2"
   local artifacts_dir="$3"
   local log_file="${OUTPUT_ROOT}/gate-perf-baseline-contract.log"
+  local profile_lower
+  profile_lower="$(printf '%s' "${PERF_BASELINE_PROFILE:-standard}" | tr '[:upper:]' '[:lower:]')"
 
   local expected_upload
   expected_upload="$(to_bool "$PERF_EXPECT_UPLOAD_CSV")"
@@ -209,6 +236,7 @@ function run_perf_baseline_contract_gate() {
     echo "[attendance-post-merge-verify] validating perf artifact contract"
     echo "run_id=${run_id}"
     echo "artifacts_dir=${artifacts_dir}"
+    echo "profile=${profile_lower}"
     echo "expected_upload_csv=${expected_upload:-<skip>}"
     echo "expected_upload_csv_requested=${expected_upload_requested:-<skip>}"
     echo "expected_payload_source=${expected_payload_source:-<skip>}"
@@ -252,6 +280,10 @@ function run_perf_baseline_contract_gate() {
   } >>"$log_file"
 
   local errors=()
+  if [[ "$profile_lower" != "standard" && "$profile_lower" != "high-scale" ]]; then
+    errors+=("PERF_BASELINE_PROFILE must be standard|high-scale (actual=${PERF_BASELINE_PROFILE})")
+  fi
+
   if [[ -n "$expected_upload" ]]; then
     local actual_upload_bool
     actual_upload_bool="$(to_bool "$actual_upload")"
@@ -385,14 +417,57 @@ function trigger_and_wait() {
   local run_json=''
   local attempt
 
+  # Reset global run metadata at the beginning of each gate trigger to avoid stale IDs
+  # when dispatch/discovery fails before a new run is created.
+  RUN_ID=''
+  RUN_URL=''
+  RUN_CONCLUSION=''
+  RUN_ARTIFACTS=''
+
   before_id="$(gh_capture gh run list --workflow "$workflow" --branch "$BRANCH" --limit 1 --json databaseId --jq '.[0].databaseId // 0' || echo '0')"
   if [[ -z "$before_id" ]]; then
     before_id='0'
   fi
 
   info "dispatch workflow: ${workflow} (branch=${BRANCH})"
-  if ! gh_capture gh workflow run "$workflow" --ref "$BRANCH" "${args[@]}" >/dev/null; then
-    return 3
+  local dispatch_output=''
+  local dispatch_rc=0
+  dispatch_output="$(gh_capture gh workflow run "$workflow" --ref "$BRANCH" "${args[@]}" 2>&1)"
+  dispatch_rc=$?
+  if [[ "$dispatch_rc" -ne 0 ]]; then
+    local unsupported_inputs=''
+    unsupported_inputs="$(extract_unexpected_workflow_inputs "$dispatch_output" || true)"
+    if [[ -n "$unsupported_inputs" ]]; then
+      info "WARN: workflow ${workflow} rejected unsupported inputs, retrying without: $(printf '%s' "$unsupported_inputs" | paste -sd ',' -)"
+      local -a filtered_args=()
+      local dropped=0
+      local index=0
+      while (( index < ${#args[@]} )); do
+        local token="${args[$index]}"
+        if [[ "$token" == "-f" ]] && (( index + 1 < ${#args[@]} )); then
+          local kv="${args[$((index + 1))]}"
+          local key="${kv%%=*}"
+          if printf '%s\n' "$unsupported_inputs" | grep -Fxq "$key"; then
+            dropped=1
+          else
+            filtered_args+=("-f" "$kv")
+          fi
+          index=$((index + 2))
+          continue
+        fi
+        filtered_args+=("$token")
+        index=$((index + 1))
+      done
+      if (( dropped == 1 )); then
+        args=("${filtered_args[@]}")
+        dispatch_output="$(gh_capture gh workflow run "$workflow" --ref "$BRANCH" "${args[@]}" 2>&1)"
+        dispatch_rc=$?
+      fi
+    fi
+    if [[ "$dispatch_rc" -ne 0 ]]; then
+      printf '%s\n' "$dispatch_output" >&2
+      return 3
+    fi
   fi
 
   for attempt in $(seq 1 "$RUN_DISCOVERY_ATTEMPTS"); do
@@ -579,6 +654,7 @@ run_gate \
   "$SKIP_PERF_BASELINE" \
   -f "drill=false" \
   -f "api_base=${PERF_BASELINE_API_BASE}" \
+  -f "profile=${PERF_BASELINE_PROFILE}" \
   -f "rows=${PERF_BASELINE_ROWS}" \
   -f "mode=${PERF_BASELINE_MODE}" \
   -f "commit_async=${PERF_BASELINE_COMMIT_ASYNC}" \

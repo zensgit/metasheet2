@@ -13,7 +13,7 @@ function info() {
   echo "[attendance-run-gate-contract-case] $*" >&2
 }
 
-[[ -n "$CASE_ID" ]] || die "usage: $0 <strict|dashboard> [output_root]"
+[[ -n "$CASE_ID" ]] || die "usage: $0 <strict|dashboard|openapi> [output_root]"
 
 info "running zh copy contract guard"
 node ./scripts/ops/attendance-verify-zh-copy-contract.mjs
@@ -88,7 +88,22 @@ function expect_fail() {
   info "expected failure confirmed: ${label}"
 }
 
+function line_matches() {
+  local pattern="$1"
+  local file="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -n "$pattern" "$file" >/dev/null
+    return $?
+  fi
+  grep -Eq "$pattern" "$file"
+}
+
 if [[ "$CASE_ID" == "strict" ]]; then
+  info "running auth resolver script regressions"
+  node --test ./scripts/ops/attendance-auth-scripts.test.mjs
+  info "running shared dispatcher regressions"
+  node --test ./scripts/ops/attendance-run-workflow-dispatch.test.mjs
+
   cp "$valid_summary" "${strict_dir}/gate-summary.json"
   ./scripts/ops/attendance-validate-gate-summary.sh "$strict_dir" 1
   node ./scripts/ops/attendance-validate-gate-summary-schema.mjs \
@@ -109,12 +124,59 @@ if [[ "$CASE_ID" == "strict" ]]; then
   exit 0
 fi
 
+if [[ "$CASE_ID" == "openapi" ]]; then
+  openapi_dir="${case_dir}/openapi"
+  mkdir -p "$openapi_dir"
+
+  info "running openapi build"
+  if ! pnpm exec tsx packages/openapi/tools/build.ts >"${openapi_dir}/build.log" 2>&1; then
+    cat "${openapi_dir}/build.log" >&2
+    die "openapi build failed"
+  fi
+
+  if ! git diff --quiet -- \
+    packages/openapi/dist/openapi.json \
+    packages/openapi/dist/openapi.yaml \
+    packages/openapi/dist/combined.openapi.yml; then
+    git diff -- \
+      packages/openapi/dist/openapi.json \
+      packages/openapi/dist/openapi.yaml \
+      packages/openapi/dist/combined.openapi.yml >"${openapi_dir}/dist-drift.patch"
+    die "openapi dist drift detected; rebuild artifacts and commit generated outputs"
+  fi
+
+  node ./scripts/ops/attendance-validate-openapi-import-contract.mjs \
+    packages/openapi/dist/openapi.json \
+    packages/openapi/src/paths/attendance.yml >"${openapi_dir}/validate.log"
+
+  invalid_openapi="${openapi_dir}/openapi.invalid.json"
+  jq 'del(.paths["/api/attendance/import/commit-async"])' \
+    packages/openapi/dist/openapi.json >"${invalid_openapi}"
+  expect_fail "openapi import path contract" \
+    node ./scripts/ops/attendance-validate-openapi-import-contract.mjs \
+      "${invalid_openapi}" \
+      packages/openapi/src/paths/attendance.yml
+
+  invalid_openapi_job="${openapi_dir}/openapi.invalid.job-telemetry.json"
+  jq 'del(.components.schemas.AttendanceImportJob.properties.processedRows)' \
+    packages/openapi/dist/openapi.json >"${invalid_openapi_job}"
+  expect_fail "openapi AttendanceImportJob telemetry contract" \
+    node ./scripts/ops/attendance-validate-openapi-import-contract.mjs \
+      "${invalid_openapi_job}" \
+      packages/openapi/src/paths/attendance.yml
+
+  info "OK: openapi contract case passed"
+  exit 0
+fi
+
 if [[ "$CASE_ID" == "dashboard" ]]; then
   dashboard_valid="${case_dir}/dashboard.valid.json"
+  dashboard_valid_non_main="${case_dir}/dashboard.valid.non-main.json"
   dashboard_invalid_strict="${case_dir}/dashboard.invalid.strict.json"
   dashboard_invalid_perf="${case_dir}/dashboard.invalid.perf.json"
   dashboard_invalid_longrun="${case_dir}/dashboard.invalid.longrun.json"
   dashboard_invalid_upsert="${case_dir}/dashboard.invalid.upsert.json"
+  dashboard_invalid_query_branch="${case_dir}/dashboard.invalid.query-branch.json"
 
   cat >"$dashboard_valid" <<'EOF'
 {
@@ -183,12 +245,101 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
-      "runId": 200004
+      "runId": 200004,
+      "summarySchemaVersion": 1,
+      "locale": "zh-CN",
+      "lunarCount": "26",
+      "holidayCheck": "enabled",
+      "holidayBadgeCount": "1",
+      "holidayCalendarLabel": "二月 2026"
     }
   },
   "escalationIssue": {
     "mode": "none_or_closed",
     "p0Status": "pass"
+  }
+}
+EOF
+
+  cat >"$dashboard_valid_non_main" <<'EOF'
+{
+  "p0Status": "fail",
+  "overallStatus": "fail",
+  "gates": {
+    "strict": {
+      "completed": {
+        "id": 210001,
+        "conclusion": "success"
+      }
+    },
+    "perf": {
+      "completed": {
+        "id": 210002,
+        "conclusion": "success"
+      }
+    },
+    "longrun": {
+      "completed": {
+        "id": 210003,
+        "conclusion": "success"
+      }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 210004,
+        "conclusion": "success"
+      }
+    }
+  },
+  "gateFlat": {
+    "schemaVersion": 2,
+    "strict": {
+      "summaryPresent": true,
+      "summaryValid": true
+    },
+    "perf": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 210002,
+      "summarySchemaVersion": 2,
+      "scenario": "100000-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "staging",
+      "expectedRecordUpsertStrategy": "staging",
+      "previewMs": "1200",
+      "regressionsCount": "0"
+    },
+    "longrun": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 210003,
+      "summarySchemaVersion": 2,
+      "scenario": "rows500k-preview",
+      "rows": 500000,
+      "mode": "preview",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "values",
+      "expectedRecordUpsertStrategy": "values",
+      "previewMs": "33000",
+      "regressionsCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 210004,
+      "summarySchemaVersion": 1,
+      "locale": "zh-CN",
+      "lunarCount": "26",
+      "holidayCheck": "enabled",
+      "holidayBadgeCount": "1",
+      "holidayCalendarLabel": "二月 2026"
+    }
+  },
+  "escalationIssue": {
+    "mode": "suppressed_non_main",
+    "p0Status": "fail"
   }
 }
 EOF
@@ -260,7 +411,13 @@ EOF
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
-      "runId": 600004
+      "runId": 600004,
+      "summarySchemaVersion": 1,
+      "locale": "zh-CN",
+      "lunarCount": "26",
+      "holidayCheck": "enabled",
+      "holidayBadgeCount": "1",
+      "holidayCalendarLabel": "二月 2026"
     }
   },
   "escalationIssue": {
@@ -331,7 +488,13 @@ EOF
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
-      "runId": 300004
+      "runId": 300004,
+      "summarySchemaVersion": 1,
+      "locale": "zh-CN",
+      "lunarCount": "26",
+      "holidayCheck": "enabled",
+      "holidayBadgeCount": "1",
+      "holidayCalendarLabel": "二月 2026"
     }
   },
   "escalationIssue": {
@@ -404,7 +567,13 @@ EOF
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
-      "runId": 400004
+      "runId": 400004,
+      "summarySchemaVersion": 1,
+      "locale": "zh-CN",
+      "lunarCount": "26",
+      "holidayCheck": "enabled",
+      "holidayBadgeCount": "1",
+      "holidayCalendarLabel": "二月 2026"
     }
   },
   "escalationIssue": {
@@ -477,7 +646,13 @@ EOF
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
-      "runId": 500004
+      "runId": 500004,
+      "summarySchemaVersion": 1,
+      "locale": "zh-CN",
+      "lunarCount": "26",
+      "holidayCheck": "enabled",
+      "holidayBadgeCount": "1",
+      "holidayCalendarLabel": "二月 2026"
     }
   },
   "escalationIssue": {
@@ -487,7 +662,43 @@ EOF
 }
 EOF
 
+  function annotate_dashboard_fixture() {
+    local fixture="$1"
+    local report_branch="$2"
+    local remote_branch="$3"
+    local tmp_fixture="${fixture}.tmp"
+    jq \
+      --arg report_branch "$report_branch" \
+      --arg remote_branch "$remote_branch" \
+      '
+      .branch = $report_branch
+      | .remoteSignalBranch = $remote_branch
+      | (if (.gateFlat.preflight | type == "object") then .gateFlat.preflight.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
+      | (if (.gateFlat.protection | type == "object") then .gateFlat.protection.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
+      | (if (.gateFlat.metrics | type == "object") then .gateFlat.metrics.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
+      | (if (.gateFlat.storage | type == "object") then .gateFlat.storage.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
+      | (if (.gateFlat.cleanup | type == "object") then .gateFlat.cleanup.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
+      | (if (.gateFlat.strict | type == "object") then .gateFlat.strict.queryBranch = $report_branch else . end)
+      | (if (.gateFlat.perf | type == "object") then .gateFlat.perf.queryBranch = $report_branch else . end)
+      | (if (.gateFlat.longrun | type == "object") then .gateFlat.longrun.queryBranch = $report_branch else . end)
+      | (if (.gateFlat.contract | type == "object") then .gateFlat.contract.queryBranch = $report_branch else . end)
+      | (if (.gateFlat.localeZh | type == "object") then .gateFlat.localeZh.queryBranch = $report_branch else . end)
+      ' \
+      "$fixture" >"$tmp_fixture"
+    mv "$tmp_fixture" "$fixture"
+  }
+
+  annotate_dashboard_fixture "$dashboard_valid" "main" "main"
+  annotate_dashboard_fixture "$dashboard_valid_non_main" "codex/feature-branch" "main"
+  annotate_dashboard_fixture "$dashboard_invalid_strict" "main" "main"
+  annotate_dashboard_fixture "$dashboard_invalid_perf" "main" "main"
+  annotate_dashboard_fixture "$dashboard_invalid_longrun" "main" "main"
+  annotate_dashboard_fixture "$dashboard_invalid_upsert" "main" "main"
+
+  jq '.gateFlat.strict.queryBranch = "main"' "$dashboard_valid_non_main" >"$dashboard_invalid_query_branch"
+
   ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_valid"
+  ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_valid_non_main"
   expect_fail "dashboard strict-summary-validity contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_strict"
   expect_fail "dashboard perf gateFlat contract" \
@@ -496,6 +707,28 @@ EOF
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_longrun"
   expect_fail "dashboard upsert contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_upsert"
+  expect_fail "dashboard query-branch routing contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_query_branch"
+
+  workflow_file=".github/workflows/attendance-daily-gate-dashboard.yml"
+  if ! line_matches "^[[:space:]]*branch:[[:space:]]*$" "$workflow_file"; then
+    die "dashboard workflow contract failed: missing workflow_dispatch.inputs.branch"
+  fi
+  if ! line_matches "^[[:space:]]*remote_signal_branch:[[:space:]]*$" "$workflow_file"; then
+    die "dashboard workflow contract failed: missing workflow_dispatch.inputs.remote_signal_branch"
+  fi
+  if ! line_matches "^[[:space:]]*default:[[:space:]]*''[[:space:]]*$" "$workflow_file"; then
+    die "dashboard workflow contract failed: inputs.branch default must be empty string for ref fallback"
+  fi
+  if ! line_matches "^[[:space:]]*default:[[:space:]]*'main'[[:space:]]*$" "$workflow_file"; then
+    die "dashboard workflow contract failed: inputs.remote_signal_branch default must be 'main'"
+  fi
+  if ! line_matches "BRANCH:[[:space:]]*\\$\\{\\{[[:space:]]*inputs\\.branch[[:space:]]*\\|\\|[[:space:]]*github\\.ref_name[[:space:]]*\\|\\|[[:space:]]*'main'[[:space:]]*\\}\\}" "$workflow_file"; then
+    die "dashboard workflow contract failed: BRANCH env must fallback to github.ref_name"
+  fi
+  if ! line_matches "REMOTE_SIGNAL_BRANCH:[[:space:]]*\\$\\{\\{[[:space:]]*inputs\\.remote_signal_branch[[:space:]]*\\|\\|[[:space:]]*'main'[[:space:]]*\\}\\}" "$workflow_file"; then
+    die "dashboard workflow contract failed: REMOTE_SIGNAL_BRANCH env must fallback to 'main'"
+  fi
 
   info "OK: dashboard contract case passed"
   exit 0

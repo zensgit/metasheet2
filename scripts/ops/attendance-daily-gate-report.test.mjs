@@ -1,6 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { pickLatestCompletedRun } from './attendance-daily-gate-report.mjs'
+import {
+  parseLocaleZhSummaryJson,
+  pickLatestCompletedRun,
+  resolveGateSignalBranch,
+  resolveQueryBranchDisplayValue,
+} from './attendance-daily-gate-report.mjs'
 
 test('pickLatestCompletedRun skips excluded conclusions and falls back to previous valid run', () => {
   const list = [
@@ -44,4 +49,82 @@ test('pickLatestCompletedRun returns null when no completed run exists', () => {
   })
 
   assert.equal(picked, null)
+})
+
+test('parseLocaleZhSummaryJson returns normalized pass metadata', () => {
+  const payload = {
+    schemaVersion: 1,
+    status: 'pass',
+    locale: 'zh-CN',
+    lunarCount: 28,
+    holidayCheck: 'enabled',
+    holidayBadgeCount: 1,
+    holidayCalendarLabel: '二月 2026',
+  }
+
+  const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
+  assert.equal(parsed?.reason, null)
+  assert.equal(parsed?.schemaVersion, 1)
+  assert.equal(parsed?.locale, 'zh-CN')
+  assert.equal(parsed?.lunarCount, '28')
+  assert.equal(parsed?.holidayCheck, 'enabled')
+  assert.equal(parsed?.holidayBadgeCount, '1')
+  assert.equal(parsed?.holidayCalendarLabel, '二月 2026')
+})
+
+test('parseLocaleZhSummaryJson flags missing lunar labels as invalid', () => {
+  const payload = {
+    schemaVersion: 1,
+    status: 'pass',
+    locale: 'zh-CN',
+    lunarCount: 0,
+    holidayCheck: 'enabled',
+    holidayBadgeCount: 1,
+  }
+
+  const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
+  assert.equal(parsed?.reason, 'LUNAR_LABELS_MISSING')
+})
+
+test('resolveGateSignalBranch routes remote gates to main branch by default on non-main report branch', () => {
+  const resolved = resolveGateSignalBranch({
+    gateName: 'Remote Preflight',
+    reportBranch: 'codex/feature-branch',
+    remoteSignalBranchValue: 'main',
+  })
+  assert.equal(resolved, 'main')
+})
+
+test('resolveGateSignalBranch keeps strict gates on report branch', () => {
+  const resolved = resolveGateSignalBranch({
+    gateName: 'Strict Gates',
+    reportBranch: 'codex/feature-branch',
+    remoteSignalBranchValue: 'main',
+  })
+  assert.equal(resolved, 'codex/feature-branch')
+})
+
+test('resolveGateSignalBranch can override remote signal branch explicitly', () => {
+  const resolved = resolveGateSignalBranch({
+    gateName: 'Host Metrics',
+    reportBranch: 'codex/feature-branch',
+    remoteSignalBranchValue: 'release/ops-signal',
+  })
+  assert.equal(resolved, 'release/ops-signal')
+})
+
+test('resolveQueryBranchDisplayValue prefers gate query branch', () => {
+  const resolved = resolveQueryBranchDisplayValue({
+    gate: { queryBranch: 'main' },
+    reportBranchValue: 'codex/feature-branch',
+  })
+  assert.equal(resolved, 'main')
+})
+
+test('resolveQueryBranchDisplayValue falls back to report branch', () => {
+  const resolved = resolveQueryBranchDisplayValue({
+    gate: { queryBranch: '' },
+    reportBranchValue: 'codex/feature-branch',
+  })
+  assert.equal(resolved, 'codex/feature-branch')
 })
