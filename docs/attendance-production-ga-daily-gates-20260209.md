@@ -3337,9 +3337,10 @@ Observed:
 
 Execution summary:
 
-1. Enhanced `scripts/verify-attendance-locale-zh-smoke.mjs` to verify **both**:
+1. Enhanced `scripts/verify-attendance-locale-zh-smoke.mjs` to verify:
    - lunar day labels rendered in calendar cells (`zh-CN-u-ca-chinese`);
    - holiday badge rendered by creating a temporary holiday via `/api/attendance/holidays`, checking UI, then auto-cleaning it.
+   - calendar display toggle regression (`Lunar` / `Holiday` off -> markers hidden; on -> markers visible again).
 2. Added npm entrypoint:
    - `pnpm verify:attendance-locale-zh`
 
@@ -3349,7 +3350,9 @@ Local validation:
 |---|---|---|
 | Script syntax (`node --check scripts/verify-attendance-locale-zh-smoke.mjs`) | PASS | local shell output |
 
-Run command (production/staging):
+Run command (production/staging, local smoke auth fallback supported):
+
+Path A: direct token
 
 ```bash
 WEB_URL="http://142.171.239.56:8081" \
@@ -3359,10 +3362,27 @@ ORG_ID="default" \
 pnpm verify:attendance-locale-zh
 ```
 
+Path B: login fallback (no pre-generated `AUTH_TOKEN` required)
+
+```bash
+WEB_URL="http://142.171.239.56:8081" \
+API_BASE="http://142.171.239.56:8081/api" \
+LOGIN_EMAIL="<ATTENDANCE_ADMIN_EMAIL_PLACEHOLDER>" \
+LOGIN_PASSWORD="<ATTENDANCE_ADMIN_PASSWORD_PLACEHOLDER>" \
+ORG_ID="default" \
+pnpm verify:attendance-locale-zh
+```
+
 Expected log markers:
 - `created holiday: ...`
-- `PASS: locale=zh-CN, lunarLabels=... holidayCheck=on`
+- `PASS: locale=zh-CN, lunarLabels=... holidayCheck=on, toggleCheck=pass, authSource=...`
 - `deleted holiday: ...`
+
+Calendar toggle regression coverage:
+- `toggleCheck=pass` means the smoke run verified both toggles:
+  - `Lunar`: on -> off -> on
+  - `Holiday`: on -> off -> on
+- Any visibility mismatch on toggle transitions fails the run and is captured in screenshot evidence.
 
 GitHub workflow (uses `ATTENDANCE_ADMIN_JWT` secret):
 
@@ -3380,9 +3400,11 @@ Artifact:
   - `attendance-locale-zh-smoke-prod-<runId>-<attempt>/auth-error.txt`
 
 Auth note:
-- Workflow first validates `ATTENDANCE_ADMIN_JWT`.
-- If JWT is invalid and `ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD` are configured, it auto-logins and continues.
+- Local and workflow runs resolve auth in the same order:
+  1. valid token path (`AUTH_TOKEN` locally / `ATTENDANCE_ADMIN_JWT` in workflow);
+  2. login fallback (`LOGIN_EMAIL` + `LOGIN_PASSWORD` locally / `ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD` in workflow).
 - If neither path yields a valid token, run fails with explicit rotation guidance.
+- Never write real JWT/passwords into repo/docs; use placeholders only.
 
 ### Update (2026-03-01): Auth Failure Path Evidence Verified
 
