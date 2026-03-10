@@ -3690,6 +3690,7 @@ Local verification:
 | Attendance Gate Contract Case (strict) | local (2026-03-10) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.json` |
 | Attendance Gate Contract Case (dashboard, schema v3 + locale) | local (2026-03-10) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.locale.json` |
 | Attendance Gate Contract Matrix (branch GA) | #22896171398 | PASS | `output/playwright/ga/22896171398/attendance-gate-contract-matrix-dashboard-22896171398-1/dashboard.valid.json`, `output/playwright/ga/22896171398/attendance-gate-contract-matrix-dashboard-22896171398-1/dashboard.invalid.locale.json`, `output/playwright/ga/22896171398/attendance-gate-contract-matrix-strict-22896171398-1/strict/gate-summary.json` |
+| Attendance Locale zh Smoke (branch GA) | #22896361190 | PASS | `output/playwright/ga/22896361190/attendance-locale-zh-smoke-prod-22896361190-1/attendance-zh-locale-summary.json`, `output/playwright/ga/22896361190/attendance-locale-zh-smoke-prod-22896361190-1/attendance-zh-locale-calendar.png` |
 
 ### Update (2026-03-07): Daily Gates Refresh (Strict + Preflight + Storage + Policy + Dashboard)
 

@@ -224,3 +224,23 @@ gh run download 22896171398 -D output/playwright/ga/22896171398
 - `output/playwright/ga/22896171398/attendance-gate-contract-matrix-dashboard-22896171398-1/dashboard.valid.json`
 - `output/playwright/ga/22896171398/attendance-gate-contract-matrix-dashboard-22896171398-1/dashboard.invalid.locale.json`
 - `output/playwright/ga/22896171398/attendance-gate-contract-matrix-strict-22896171398-1/strict/gate-summary.json`
+
+### 7.4 GA zh smoke 回归（分支）
+执行：
+
+```bash
+gh workflow run attendance-locale-zh-smoke-prod.yml --ref codex/attendance-pr396-pr399-delivery-md-20260310
+gh run view 22896361190 --json status,conclusion
+gh run download 22896361190 -D output/playwright/ga/22896361190
+```
+
+结果：PASS（runId: `22896361190`）
+
+关键结论：
+- `status=pass`
+- `authSource=refresh`
+- `toggleCheck.skipped=true`（当前生产环境未部署日历开关 UI，deploy-aware 行为生效）
+
+证据路径：
+- `output/playwright/ga/22896361190/attendance-locale-zh-smoke-prod-22896361190-1/attendance-zh-locale-summary.json`
+- `output/playwright/ga/22896361190/attendance-locale-zh-smoke-prod-22896361190-1/attendance-zh-locale-calendar.png`

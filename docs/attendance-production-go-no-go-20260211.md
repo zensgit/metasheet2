@@ -2676,6 +2676,7 @@ Verification:
 | Gate | Run | Status | Evidence |
 |---|---|---|---|
 | Attendance Locale zh Smoke (Prod) | #22884926952 | PASS | `output/playwright/ga/22884926952/attendance-locale-zh-smoke-prod-22884926952-1/attendance-zh-locale-summary.json`, `output/playwright/ga/22884926952/attendance-locale-zh-smoke-prod-22884926952-1/attendance-zh-locale-calendar.png`, `output/playwright/ga/22884926952/attendance-locale-zh-smoke-prod-22884926952-1/auth-resolve-meta.txt` |
+| Attendance Locale zh Smoke (PR #404 branch) | #22896361190 | PASS | `output/playwright/ga/22896361190/attendance-locale-zh-smoke-prod-22896361190-1/attendance-zh-locale-summary.json`, `output/playwright/ga/22896361190/attendance-locale-zh-smoke-prod-22896361190-1/attendance-zh-locale-calendar.png` |
 
 Observed highlights:
 
