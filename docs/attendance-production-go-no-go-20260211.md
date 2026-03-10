@@ -5764,3 +5764,44 @@ Decision:
 
 - local pre-PR gate verification now has a deterministic high-speed entrypoint.
 - **GO maintained** (P0/P1 production gate posture unchanged).
+
+## Post-Go Verification (2026-03-10): zh Schema v3 + Shell Tab Contract
+
+Scope:
+
+- upgrade locale zh smoke contract from schema v2 to v3, adding shell tab zh assertions (`总览/管理中心/流程设计`).
+- keep PR checks and remote smoke evidence green after contract hardening.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Gate Contract Matrix (PR batch) | #22894853137 | PASS | GitHub Actions run logs |
+| Observability E2E (PR batch) | #22894853106 | PASS | GitHub Actions run logs |
+| Phase 5 PR Validation (PR batch) | #22894853065 | PASS | GitHub Actions run logs |
+| Plugin System Tests + coverage (PR batch) | #22894853112 | PASS | GitHub Actions run logs |
+| Locale zh Smoke (schema v3, branch verification) | #22894858521 | PASS | `output/playwright/ga/22894858521/attendance-zh-locale-summary.json`, `output/playwright/ga/22894858521/attendance-zh-locale-calendar.png` |
+
+Key contract evidence from run `#22894858521`:
+
+- `status=pass`
+- `schemaVersion=3`
+- `authSource=refresh`
+- `zhLabels.overviewTab=true`
+- `zhLabels.adminTab=true`
+- `zhLabels.workflowTab=true`
+
+Operations enhancement:
+
+- added one-click production acceptance script:
+  - `scripts/ops/attendance-production-oneclick-verify.sh`
+- covers:
+  - preflight
+  - strict gates twice
+  - desktop/mobile Playwright full flow
+  - locale zh smoke
+
+Decision:
+
+- locale contract hardening shipped with green CI and reproducible remote evidence.
+- **GO maintained**.

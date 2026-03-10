@@ -852,7 +852,23 @@ function renderMarkdown({
   lines.push('|---|---|---|---|---|---|---|---|---|')
 
   function gateReasonCell(gate) {
-    if (!gate || gate.ok) return '-'
+    if (!gate) return '-'
+    const meta = gate?.meta || null
+    if (gate.ok) {
+      if (gate.name === 'Locale zh Smoke' && meta && typeof meta === 'object') {
+        const passBits = []
+        if (meta.schemaVersion) passBits.push(`schema=${meta.schemaVersion}`)
+        if (meta.authSource) passBits.push(`auth=${meta.authSource}`)
+        if (meta.zhLabelsStatus) passBits.push(`zh_labels=${meta.zhLabelsStatus}`)
+        if (meta.schemaVersion >= 3) {
+          const shellOk = meta.zhOverviewTab === 'true' && meta.zhAdminTab === 'true' && meta.zhWorkflowTab === 'true'
+          passBits.push(`zh_shell_tabs=${shellOk ? 'pass' : 'fail'}`)
+        }
+        if (meta.toggleCheckStatus) passBits.push(`toggle=${meta.toggleCheckStatus}`)
+        if (passBits.length > 0) return `\`${passBits.join(' ')}\``
+      }
+      return '-'
+    }
     const codes = Array.isArray(gate.findings) ? gate.findings.map((f) => f?.code).filter(Boolean) : []
     const has = (code) => codes.includes(code)
     let reason = 'FAIL'
@@ -865,7 +881,6 @@ function renderMarkdown({
     else if (codes.length > 0) reason = String(codes[0])
 
     const extra = []
-    const meta = gate?.meta || null
     if (meta && typeof meta === 'object') {
       if (gate.name === 'Remote Preflight') {
         if (meta.rc) extra.push(`rc=${meta.rc}`)
@@ -891,8 +906,13 @@ function renderMarkdown({
         if (meta.staleCount) extra.push(`stale_count=${meta.staleCount}`)
       }
       if (gate.name === 'Locale zh Smoke') {
+        if (meta.schemaVersion) extra.push(`schema=${meta.schemaVersion}`)
         if (meta.authSource) extra.push(`auth=${meta.authSource}`)
         if (meta.zhLabelsStatus) extra.push(`zh_labels=${meta.zhLabelsStatus}`)
+        if (meta.schemaVersion >= 3) {
+          const shellOk = meta.zhOverviewTab === 'true' && meta.zhAdminTab === 'true' && meta.zhWorkflowTab === 'true'
+          extra.push(`zh_shell_tabs=${shellOk ? 'pass' : 'fail'}`)
+        }
         if (meta.toggleCheckStatus) extra.push(`toggle=${meta.toggleCheckStatus}`)
         if (meta.locale) extra.push(`locale=${meta.locale}`)
         if (meta.lunarCount) extra.push(`lunar=${meta.lunarCount}`)
@@ -941,6 +961,26 @@ function renderMarkdown({
     const status = gate.ok ? 'PASS' : 'FAIL'
     const link = completed.url ? `[run](${completed.url})` : '-'
     lines.push(`| ${gate.name} | ${queryBranch} | ${gate.severity} | ${runId} | ${conclusion} | ${reason} | ${updatedAt} | ${status} | ${link} |`)
+  }
+
+  lines.push('')
+  lines.push('## Locale zh Contract Snapshot')
+  lines.push('')
+  if (localeZhGate?.meta && typeof localeZhGate.meta === 'object') {
+    const meta = localeZhGate.meta
+    const schemaVersion = meta.schemaVersion || 'unknown'
+    const contractLevel = Number(schemaVersion) >= 3 ? 'v3 (shell tabs required)' : 'v2 (core labels required)'
+    const shellTabState = Number(schemaVersion) >= 3
+      ? (meta.zhOverviewTab === 'true' && meta.zhAdminTab === 'true' && meta.zhWorkflowTab === 'true' ? 'PASS' : 'FAIL')
+      : 'n/a'
+    lines.push(`- Schema: \`${schemaVersion}\` (${contractLevel})`)
+    lines.push(`- Locale: \`${meta.locale || '-'}\``)
+    lines.push(`- Auth source: \`${meta.authSource || '-'}\``)
+    lines.push(`- zh labels: \`${meta.zhLabelsStatus || '-'}\``)
+    lines.push(`- zh shell tabs: \`${shellTabState}\``)
+    lines.push(`- Toggle check: \`${meta.toggleCheckStatus || '-'}\``)
+  } else {
+    lines.push('- No locale summary metadata found for latest run.')
   }
 
   lines.push('')
@@ -2045,11 +2085,16 @@ async function run() {
         flat.staleCount = meta.staleCount ?? null
       } else if (gate.name === 'Locale zh Smoke') {
         flat.summarySchemaVersion = meta.schemaVersion ?? null
+        flat.localeContractLevel = Number(meta.schemaVersion) >= 3 ? 'v3-shell-tabs' : 'v2-core-labels'
         flat.authSource = meta.authSource ?? null
         flat.zhLabelsStatus = meta.zhLabelsStatus ?? null
         flat.zhLabelsSkipped = meta.zhLabelsSkipped ?? null
         flat.zhLabelsOk = meta.zhLabelsOk ?? null
         flat.zhNoEnglishLeak = meta.zhNoEnglishLeak ?? null
+        flat.zhOverviewTab = meta.zhOverviewTab ?? null
+        flat.zhAdminTab = meta.zhAdminTab ?? null
+        flat.zhWorkflowTab = meta.zhWorkflowTab ?? null
+        flat.zhShellTabsChecked = meta.zhShellTabsChecked ?? null
         flat.zhMissingFields = meta.zhMissingFields ?? null
         flat.zhReason = meta.zhReason ?? null
         flat.toggleCheckStatus = meta.toggleCheckStatus ?? null

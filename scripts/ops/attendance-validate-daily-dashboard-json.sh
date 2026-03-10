@@ -270,6 +270,10 @@ function validate_locale_gate() {
   local gate_created_holiday_id
   local gate_created_holiday_date
   local gate_created_holiday_name
+  local gate_zh_overview_tab
+  local gate_zh_admin_tab
+  local gate_zh_workflow_tab
+  local gate_zh_shell_tabs_checked
 
   validate_basic_gate "$gate_key" "$gate_label"
 
@@ -301,6 +305,10 @@ function validate_locale_gate() {
   gate_created_holiday_id="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].createdHolidayId // empty' "$report_json")"
   gate_created_holiday_date="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].createdHolidayDate // empty' "$report_json")"
   gate_created_holiday_name="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].createdHolidayName // empty' "$report_json")"
+  gate_zh_overview_tab="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].zhOverviewTab // empty' "$report_json")"
+  gate_zh_admin_tab="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].zhAdminTab // empty' "$report_json")"
+  gate_zh_workflow_tab="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].zhWorkflowTab // empty' "$report_json")"
+  gate_zh_shell_tabs_checked="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].zhShellTabsChecked // empty' "$report_json")"
 
   if [[ -z "$gate_schema_version" ]] || ! [[ "$gate_schema_version" =~ ^[0-9]+$ ]] || (( gate_schema_version < 2 )); then
     die "${gate_label} contract failed: gateFlat.${gate_key}.summarySchemaVersion=${gate_schema_version:-<empty>} (expected integer >= 2 when status=PASS)"
@@ -325,6 +333,17 @@ function validate_locale_gate() {
       die "${gate_label} contract failed: gateFlat.${gate_key}.zhLabelsStatus=${gate_zh_labels_status:-<empty>} (expected pass or skipped:* when status=PASS)"
       ;;
   esac
+
+  if (( gate_schema_version >= 3 )); then
+    for shell_value in "$gate_zh_overview_tab" "$gate_zh_admin_tab" "$gate_zh_workflow_tab"; do
+      if [[ "$shell_value" != "true" ]]; then
+        die "${gate_label} contract failed: schemaVersion>=3 requires zhOverviewTab/zhAdminTab/zhWorkflowTab=true"
+      fi
+    done
+    if [[ "$gate_zh_shell_tabs_checked" != "true" ]]; then
+      die "${gate_label} contract failed: schemaVersion>=3 requires zhShellTabsChecked=true"
+    fi
+  fi
 
   if [[ -z "$gate_lunar_count" ]] || ! [[ "$gate_lunar_count" =~ ^[0-9]+$ ]] || (( gate_lunar_count <= 0 )); then
     die "${gate_label} contract failed: gateFlat.${gate_key}.lunarCount=${gate_lunar_count:-<empty>} (expected positive integer when status=PASS)"
