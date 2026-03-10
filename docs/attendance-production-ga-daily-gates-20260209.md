@@ -4033,3 +4033,11 @@ Evidence (PR #401 branch):
   - no hard-coded English template leaks in those zh-guarded wrappers.
 - Local verification command:
   - `pnpm verify:attendance-zh-copy-contract` (PASS)
+
+### Update (2026-03-10): Locale zh Smoke Workflow Executes Copy Contract First
+- Workflow: `.github/workflows/attendance-locale-zh-smoke-prod.yml`
+- New step order (`DRILL_FAIL != true`):
+  1. `pnpm install --frozen-lockfile`
+  2. `pnpm verify:attendance-zh-copy-contract`
+  3. Playwright browser install + zh smoke UI flow
+- Benefit: catches static zh copy regressions before browser stage, reducing false-negative UI failures.

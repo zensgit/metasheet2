@@ -102,6 +102,10 @@ jobs:
         if: ${{ env.DRILL_FAIL != 'true' }}
         run: pnpm install --frozen-lockfile
 
+      - name: Run zh copy contract
+        if: ${{ env.DRILL_FAIL != 'true' }}
+        run: pnpm verify:attendance-zh-copy-contract
+
       - name: Install Playwright browsers
         if: ${{ env.DRILL_FAIL != 'true' }}
         run: pnpm exec playwright install chromium --with-deps

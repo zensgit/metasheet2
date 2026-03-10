@@ -244,3 +244,10 @@ gh run download 22889357568 -D output/playwright/ga/22889357568
 pnpm verify:attendance-zh-copy-contract
 ```
 - 结果：PASS
+
+## 11. 门禁串联优化（2026-03-10）
+- 文件：`.github/workflows/attendance-locale-zh-smoke-prod.yml`
+- 新增步骤：`Run zh copy contract`
+  - 命令：`pnpm verify:attendance-zh-copy-contract`
+  - 位置：`Install dependencies` 之后、Playwright 浏览器安装之前。
+- 目的：在进入浏览器回归前先拦截静态文案回归，减少定位成本。
