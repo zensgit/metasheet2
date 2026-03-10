@@ -71,7 +71,7 @@ node scripts/verify-attendance-locale-zh-smoke.mjs
 ```
 - 结果：FAIL（本地 token 失效）
 - 失败信息：`API /attendance/holidays?... failed: Invalid token`
-- 恢复尝试：执行 `scripts/ops/attendance-resolve-auth.sh`（token/refresh/login fallback）后仍返回 `no valid auth token`
+- 恢复尝试：执行 `scripts/ops/attendance-resolve-auth.sh`（token/refresh-token/login fallback）后仍返回 `no valid auth token`
 - 证据路径：
   - `output/playwright/attendance-locale-zh-smoke/20260310-lint-fix/attendance-zh-locale-calendar-fail.png`
 
@@ -123,9 +123,11 @@ gh run download 22888000382 -D output/playwright/ga/22888000382
 
 ### 6.1 `authSource`
 - 含义：本次 smoke 使用的鉴权来源。
+- Runbook 约定取值：`token|refresh|login`。
 - 典型取值：
   - `token`：直接使用 `AUTH_TOKEN`（或 CI 中的 `ATTENDANCE_ADMIN_JWT`）通过鉴权。
-  - `loginFallback`：未使用有效 token，改走 `LOGIN_EMAIL` + `LOGIN_PASSWORD`（或 CI 对应管理员账号密码）登录成功。
+  - `refresh`：`AUTH_TOKEN` 不可用时，通过 `/auth/refresh-token` 刷新并通过鉴权。
+  - `login`：token/refresh-token 均不可用时，改走 `LOGIN_EMAIL` + `LOGIN_PASSWORD`（或 CI 对应管理员账号密码）登录成功。
 - 作用：用于快速判断失败属于“凭据不可用”还是“业务回归”。
 
 ### 6.2 `toggleCheck`
@@ -142,7 +144,7 @@ gh run download 22888000382 -D output/playwright/ga/22888000382
 {
   "status": "pass",
   "locale": "zh-CN",
-  "authSource": "loginFallback",
+  "authSource": "refresh",
   "toggleCheck": "pass",
   "lunarCount": 42,
   "holidayBadgeCount": 1,

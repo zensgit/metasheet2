@@ -3362,7 +3362,17 @@ ORG_ID="default" \
 pnpm verify:attendance-locale-zh
 ```
 
-Path B: login fallback (no pre-generated `AUTH_TOKEN` required)
+Path B: refresh-token fallback (uses `AUTH_TOKEN` as refresh input)
+
+```bash
+WEB_URL="http://142.171.239.56:8081" \
+API_BASE="http://142.171.239.56:8081/api" \
+AUTH_TOKEN="<EXPIRED_OR_ROTATABLE_ADMIN_JWT_PLACEHOLDER>" \
+ORG_ID="default" \
+pnpm verify:attendance-locale-zh
+```
+
+Path C: login fallback (no pre-generated `AUTH_TOKEN` required)
 
 ```bash
 WEB_URL="http://142.171.239.56:8081" \
@@ -3402,8 +3412,10 @@ Artifact:
 Auth note:
 - Local and workflow runs resolve auth in the same order:
   1. valid token path (`AUTH_TOKEN` locally / `ATTENDANCE_ADMIN_JWT` in workflow);
-  2. login fallback (`LOGIN_EMAIL` + `LOGIN_PASSWORD` locally / `ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD` in workflow).
-- If neither path yields a valid token, run fails with explicit rotation guidance.
+  2. refresh-token fallback (`POST /auth/refresh-token` with the provided token);
+  3. login fallback (`LOGIN_EMAIL` + `LOGIN_PASSWORD` locally / `ATTENDANCE_ADMIN_EMAIL` + `ATTENDANCE_ADMIN_PASSWORD` in workflow).
+- Runbook field `authSource` possible values: `token` | `refresh` | `login`.
+- If none of the above paths yields a valid token, run fails with explicit rotation guidance.
 - Never write real JWT/passwords into repo/docs; use placeholders only.
 
 ### Update (2026-03-01): Auth Failure Path Evidence Verified
