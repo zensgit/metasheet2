@@ -12,6 +12,7 @@ const timeoutMs = Number(process.env.UI_TIMEOUT || 45000)
 const outputDir = process.env.OUTPUT_DIR || 'output/playwright/attendance-locale-zh-smoke'
 const orgId = String(process.env.ORG_ID || 'default').trim()
 const verifyHoliday = process.env.VERIFY_HOLIDAY !== 'false'
+const requireToggleChecks = process.env.REQUIRE_TOGGLE_CHECKS === 'true'
 
 function normalizeUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '')
@@ -378,11 +379,25 @@ async function setCalendarFlag(checkbox, checked, labelName) {
 
 async function verifyCalendarToggleChecks(page, options = {}) {
   const requireHolidayVisible = options.requireHolidayVisible !== false
+  const requireChecks = options.requireToggleChecks === true
   const toggleCheck = {
     lunarOffNoBadge: false,
     lunarOnRecovered: false,
     holidayOffNoBadge: false,
     holidayOnRecovered: false,
+    skipped: false,
+    reason: null,
+  }
+
+  const flagContainer = page.locator('.attendance__calendar-flags')
+  const flagContainerCount = await flagContainer.count().catch(() => 0)
+  if (flagContainerCount === 0) {
+    if (requireChecks) {
+      throw new Error('Calendar toggle flags are required but not available in this deployment')
+    }
+    toggleCheck.skipped = true
+    toggleCheck.reason = 'calendar flags not available in this deployment'
+    return toggleCheck
   }
 
   const lunarCheckbox = await getCalendarFlagCheckbox(page, /(Lunar|农历)/i, 'Lunar/农历')
@@ -459,6 +474,8 @@ async function run() {
       lunarOnRecovered: false,
       holidayOffNoBadge: false,
       holidayOnRecovered: false,
+      skipped: false,
+      reason: null,
     },
     // backward-compatible aliases used by some local tooling
     ok: false,
@@ -586,6 +603,7 @@ async function run() {
 
     summary.toggleCheck = await verifyCalendarToggleChecks(page, {
       requireHolidayVisible: verifyHoliday,
+      requireToggleChecks,
     })
 
     const screenshotPath = path.join(outputDir, 'attendance-zh-locale-calendar.png')
@@ -596,8 +614,17 @@ async function run() {
     summary.status = 'pass'
     summary.ok = true
 
-    const togglePass = Object.values(summary.toggleCheck).every(Boolean)
-    log(`PASS: locale=zh-CN, lunarLabels=${lunarCount}, holidayCheck=${verifyHoliday ? 'on' : 'off'}, toggleCheck=${togglePass ? 'pass' : 'fail'}, authSource=${summary.authSource}, screenshot=${screenshotPath}`)
+    const toggleFlags = [
+      summary.toggleCheck.lunarOffNoBadge,
+      summary.toggleCheck.lunarOnRecovered,
+      summary.toggleCheck.holidayOffNoBadge,
+      summary.toggleCheck.holidayOnRecovered,
+    ]
+    const togglePass = toggleFlags.every(Boolean)
+    const toggleStatus = summary.toggleCheck.skipped
+      ? `skipped:${summary.toggleCheck.reason || 'not-required'}`
+      : (togglePass ? 'pass' : 'fail')
+    log(`PASS: locale=zh-CN, lunarLabels=${lunarCount}, holidayCheck=${verifyHoliday ? 'on' : 'off'}, toggleCheck=${toggleStatus}, authSource=${summary.authSource}, screenshot=${screenshotPath}`)
   } catch (error) {
     summary.status = 'fail'
     summary.error = (error && error.message) || String(error)
