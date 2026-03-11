@@ -4,13 +4,16 @@ import path from 'path'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
 const apiBase = resolveApiBase(process.env.API_BASE || '')
-const token = process.env.AUTH_TOKEN || ''
+let authToken = String(process.env.AUTH_TOKEN || '').trim()
+const loginEmail = String(process.env.LOGIN_EMAIL || '').trim()
+const loginPassword = String(process.env.LOGIN_PASSWORD || '')
 const headless = process.env.HEADLESS !== 'false'
 const timeoutMs = Number(process.env.UI_TIMEOUT || 45000)
 const outputDir = process.env.OUTPUT_DIR || 'output/playwright/attendance-locale-zh-smoke'
-const summaryPath = process.env.OUTPUT_SUMMARY_JSON || path.join(outputDir, 'attendance-zh-locale-summary.json')
 const orgId = String(process.env.ORG_ID || 'default').trim()
 const verifyHoliday = process.env.VERIFY_HOLIDAY !== 'false'
+const requireToggleChecks = process.env.REQUIRE_TOGGLE_CHECKS === 'true'
+const requireShellTabChecks = process.env.REQUIRE_SHELL_TAB_CHECKS === 'true'
 
 function normalizeUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '')
@@ -35,8 +38,8 @@ async function ensureDir(dir) {
   await fs.mkdir(dir, { recursive: true })
 }
 
-async function writeSummary(filePath, value) {
-  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function toDateKey(date) {
@@ -57,12 +60,12 @@ function buildApiPath(pathname, query = {}) {
   return suffix.length > 0 ? `${pathname}?${suffix}` : pathname
 }
 
-async function apiRequest(pathname, init = {}) {
+async function apiRequest(pathname, init = {}, tokenValue = authToken) {
   if (!apiBase) throw new Error('API_BASE is required')
   const url = `${apiBase}${pathname.startsWith('/') ? pathname : `/${pathname}`}`
-  const headers = {
-    Authorization: `Bearer ${token}`,
-    ...(init.headers || {}),
+  const headers = { ...(init.headers || {}) }
+  if (tokenValue) {
+    headers.Authorization = `Bearer ${tokenValue}`
   }
   const response = await fetch(url, {
     ...init,
@@ -80,19 +83,117 @@ async function apiRequest(pathname, init = {}) {
   return { response, payload }
 }
 
-async function apiRequestJson(pathname, init = {}) {
+async function apiRequestJson(pathname, init = {}, tokenValue = authToken) {
   const { response, payload } = await apiRequest(pathname, {
     ...init,
     headers: {
       'content-type': 'application/json',
       ...(init.headers || {}),
     },
-  })
+  }, tokenValue)
   if (!response.ok) {
     const message = payload?.error?.message || payload?.message || `HTTP ${response.status}`
     throw new Error(`API ${pathname} failed: ${message}`)
   }
   return payload
+}
+
+function extractTokenFromPayload(payload) {
+  const value = payload?.data?.token ?? payload?.token ?? ''
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+async function validateTokenWithAuthMe(tokenValue) {
+  if (!tokenValue) return { usable: false, reason: 'missing' }
+  try {
+    const { response, payload } = await apiRequest('/auth/me', { method: 'GET' }, tokenValue)
+    if (response.ok && payload?.ok !== false && payload?.success !== false) {
+      return { usable: true, reason: 'ok' }
+    }
+    if (response.status === 401 || response.status === 403) {
+      return { usable: false, reason: `http_${response.status}` }
+    }
+    if (response.ok && (payload?.ok === false || payload?.success === false)) {
+      return { usable: false, reason: 'payload_rejected' }
+    }
+    return { usable: null, reason: `http_${response.status}` }
+  } catch (error) {
+    return { usable: null, reason: `network:${error?.message || error}` }
+  }
+}
+
+async function loginForToken() {
+  const payload = await apiRequestJson('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({
+      email: loginEmail,
+      password: loginPassword,
+    }),
+  }, '')
+  const nextToken = extractTokenFromPayload(payload)
+  if (!nextToken) {
+    throw new Error('POST /auth/login returned empty token')
+  }
+  return nextToken
+}
+
+async function refreshTokenFromApi(tokenValue) {
+  const payload = await apiRequestJson('/auth/refresh-token', {
+    method: 'POST',
+    body: JSON.stringify({ token: tokenValue }),
+  }, '')
+  const nextToken = extractTokenFromPayload(payload)
+  if (!nextToken) {
+    throw new Error('POST /auth/refresh-token returned empty token')
+  }
+  return nextToken
+}
+
+async function resolveAuthToken() {
+  if (authToken) {
+    const status = await validateTokenWithAuthMe(authToken)
+    if (status.usable === true) {
+      return 'token'
+    }
+    if (status.usable === null) {
+      log(`AUTH_TOKEN validation inconclusive (${status.reason}), keep using AUTH_TOKEN`)
+      return 'token'
+    }
+    log(`AUTH_TOKEN is not usable (${status.reason}), trying refresh/login fallback`)
+
+    try {
+      const refreshedToken = await refreshTokenFromApi(authToken)
+      const refreshStatus = await validateTokenWithAuthMe(refreshedToken)
+      if (refreshStatus.usable !== false) {
+        authToken = refreshedToken
+        if (refreshStatus.usable === null) {
+          log(`Refresh token validation inconclusive (${refreshStatus.reason}), continue with refreshed token`)
+        }
+        return 'refresh'
+      }
+      log(`refresh token is not usable (${refreshStatus.reason}), continue to login fallback`)
+    } catch (error) {
+      log(`refresh fallback failed: ${error?.message || error}`)
+    }
+  }
+
+  if (!loginEmail || !loginPassword) {
+    if (authToken) {
+      throw new Error('AUTH_TOKEN is invalid and LOGIN_EMAIL/LOGIN_PASSWORD are missing')
+    }
+    throw new Error('AUTH_TOKEN is required (or provide LOGIN_EMAIL/LOGIN_PASSWORD)')
+  }
+
+  const loginToken = await loginForToken()
+  const loginStatus = await validateTokenWithAuthMe(loginToken)
+  if (loginStatus.usable === false) {
+    throw new Error('Login succeeded but returned token is unusable')
+  }
+  if (loginStatus.usable === null) {
+    log(`Login token validation inconclusive (${loginStatus.reason}), continue with login token`)
+  }
+  authToken = loginToken
+  return 'login'
 }
 
 function pickHolidayDate(existingDates, year, monthIndex) {
@@ -244,35 +345,162 @@ async function verifyLunarLabelsMeaningful(page) {
   return normalized
 }
 
-async function run() {
-  if (!token) {
-    throw new Error('AUTH_TOKEN is required')
+async function waitForLocatorCount(locator, predicate, label, timeout = 5000, interval = 120) {
+  const startedAt = Date.now()
+  let lastCount = -1
+  while (Date.now() - startedAt <= timeout) {
+    lastCount = await locator.count().catch(() => 0)
+    if (predicate(lastCount)) return lastCount
+    await sleep(interval)
+  }
+  throw new Error(`${label} (timeout=${timeout}ms, lastCount=${lastCount})`)
+}
+
+async function getCalendarFlagCheckbox(page, textPattern, labelName) {
+  const flags = page.locator('.attendance__calendar-flags').first()
+  await flags.waitFor({ timeout: timeoutMs })
+  const row = flags.locator('.attendance__calendar-flag', { hasText: textPattern }).first()
+  await row.waitFor({ timeout: timeoutMs })
+  const checkbox = row.locator('input[type="checkbox"]').first()
+  await checkbox.waitFor({ timeout: timeoutMs })
+  const count = await checkbox.count()
+  if (count === 0) {
+    throw new Error(`Calendar toggle checkbox not found: ${labelName}`)
+  }
+  return checkbox
+}
+
+async function setCalendarFlag(checkbox, checked, labelName) {
+  await checkbox.setChecked(checked, { timeout: timeoutMs })
+  const actual = await checkbox.isChecked()
+  if (actual !== checked) {
+    throw new Error(`Failed to set ${labelName} to ${checked ? 'on' : 'off'}`)
+  }
+}
+
+async function verifyCalendarToggleChecks(page, options = {}) {
+  const requireHolidayVisible = options.requireHolidayVisible !== false
+  const requireChecks = options.requireToggleChecks === true
+  const toggleCheck = {
+    lunarOffNoBadge: false,
+    lunarOnRecovered: false,
+    holidayOffNoBadge: false,
+    holidayOnRecovered: false,
+    skipped: false,
+    reason: null,
   }
 
+  const flagContainer = page.locator('.attendance__calendar-flags')
+  const flagContainerCount = await flagContainer.count().catch(() => 0)
+  if (flagContainerCount === 0) {
+    if (requireChecks) {
+      throw new Error('Calendar toggle flags are required but not available in this deployment')
+    }
+    toggleCheck.skipped = true
+    toggleCheck.reason = 'calendar flags not available in this deployment'
+    return toggleCheck
+  }
+
+  const lunarCheckbox = await getCalendarFlagCheckbox(page, /(Lunar|农历)/i, 'Lunar/农历')
+  const holidayCheckbox = await getCalendarFlagCheckbox(page, /(Holiday|节假日)/i, 'Holiday/节假日')
+
+  await setCalendarFlag(lunarCheckbox, true, 'Lunar/农历')
+  await setCalendarFlag(holidayCheckbox, true, 'Holiday/节假日')
+
+  const lunarBadgeLocator = page.locator('.attendance__calendar-lunar')
+  const holidayBadgeLocator = page.locator('.attendance__calendar-holiday')
+
+  await waitForLocatorCount(lunarBadgeLocator, count => count > 0, 'Expected lunar labels before toggling')
+  const holidayBaseline = requireHolidayVisible
+    ? await waitForLocatorCount(holidayBadgeLocator, count => count > 0, 'Expected holiday badges before toggling')
+    : await holidayBadgeLocator.count().catch(() => 0)
+
+  await setCalendarFlag(holidayCheckbox, false, 'Holiday/节假日')
+  await waitForLocatorCount(holidayBadgeLocator, count => count === 0, 'Expected no holiday badges when Holiday is off')
+  toggleCheck.holidayOffNoBadge = true
+
+  await setCalendarFlag(holidayCheckbox, true, 'Holiday/节假日')
+  const holidayRecoveredPredicate = requireHolidayVisible
+    ? (count) => count > 0
+    : (count) => count >= holidayBaseline
+  await waitForLocatorCount(holidayBadgeLocator, holidayRecoveredPredicate, 'Expected holiday badges to recover when Holiday is on')
+  toggleCheck.holidayOnRecovered = true
+
+  await setCalendarFlag(lunarCheckbox, false, 'Lunar/农历')
+  await waitForLocatorCount(lunarBadgeLocator, count => count === 0, 'Expected no lunar labels when Lunar is off')
+  toggleCheck.lunarOffNoBadge = true
+
+  await setCalendarFlag(lunarCheckbox, true, 'Lunar/农历')
+  await waitForLocatorCount(lunarBadgeLocator, count => count > 0, 'Expected lunar labels to recover when Lunar is on')
+  toggleCheck.lunarOnRecovered = true
+
+  return toggleCheck
+}
+
+async function verifyZhShellTabs(page, options = {}) {
+  const requireChecks = options.requireShellTabChecks === true
+  const result = {
+    checked: false,
+    overviewTab: false,
+    adminTab: false,
+    workflowTab: false,
+    reason: null,
+    tabTexts: [],
+  }
+
+  const tabs = page.locator('.attendance-shell__tabs')
+  const tabsCount = await tabs.count().catch(() => 0)
+  if (tabsCount === 0) {
+    if (requireChecks) {
+      throw new Error('Attendance shell tabs are required but not available in this deployment')
+    }
+    result.reason = 'attendance shell tabs not available in this deployment'
+    return result
+  }
+
+  const tabButtons = tabs.locator('.attendance-shell__tab')
+  await tabButtons.first().waitFor({ timeout: timeoutMs })
+  const rawTexts = await tabButtons.allTextContents().catch(() => [])
+  const tabTexts = rawTexts.map((text) => String(text || '').trim()).filter(Boolean)
+  result.tabTexts = tabTexts.slice(0, 12)
+  result.checked = true
+  result.overviewTab = tabTexts.some((text) => text.includes('总览'))
+  result.adminTab = tabTexts.some((text) => text.includes('管理中心'))
+  result.workflowTab = tabTexts.some((text) => text.includes('流程设计'))
+
+  if (!result.overviewTab) {
+    throw new Error(`Expected zh overview tab label "总览"; observed tabs=${JSON.stringify(result.tabTexts)}`)
+  }
+  const hasEnglishTabs = tabTexts.some((text) => /^(Overview|Admin Center|Workflow Designer)$/i.test(text))
+  if (hasEnglishTabs) {
+    throw new Error(`Expected zh shell tab labels, found English label in tabs=${JSON.stringify(result.tabTexts)}`)
+  }
+
+  return result
+}
+
+async function writeSummaryJson(filePath, summary) {
+  await fs.writeFile(filePath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
+}
+
+async function run() {
   await ensureDir(outputDir)
-
-  let createdHolidayId = null
-  let createdHolidayName = null
-  let createdHolidayDate = null
-  let createdHolidayDeleted = false
-  let createdHolidayDeleteError = null
-  let holidayBadgeProbe = null
-  let runError = null
-
+  const summaryPath = path.join(outputDir, 'attendance-zh-locale-summary.json')
   const summary = {
-    schemaVersion: 1,
+    schemaVersion: 3,
     generatedAt: new Date().toISOString(),
     webUrl: normalizeUrl(webUrl),
     apiBase,
     orgId,
     verifyHoliday,
-    status: 'running',
-    locale: null,
+    requireShellTabChecks,
+    status: 'fail',
+    locale: 'zh-CN',
     lunarCount: 0,
     lunarSamples: [],
     holidayCheck: verifyHoliday ? 'enabled' : 'disabled',
-    holidayBadgeCount: null,
-    holidayCalendarLabel: null,
+    holidayBadgeCount: 0,
+    holidayCalendarLabel: '',
     holidayBadgeSamples: [],
     createdHolidayId: null,
     createdHolidayDate: null,
@@ -284,20 +512,54 @@ async function run() {
       error: null,
     },
     error: null,
+    authSource: 'unknown',
+    zhShellTabsChecked: false,
+    zhShellTabReason: null,
+    zhShellTabSamples: [],
+    zhLabels: {
+      overviewTab: false,
+      adminTab: false,
+      workflowTab: false,
+    },
+    toggleCheck: {
+      lunarOffNoBadge: false,
+      lunarOnRecovered: false,
+      holidayOffNoBadge: false,
+      holidayOnRecovered: false,
+      skipped: false,
+      reason: null,
+    },
+    // backward-compatible aliases used by some local tooling
+    ok: false,
+    holidayCheckEnabled: verifyHoliday,
+    lunarLabelCount: 0,
   }
 
-  const browser = await chromium.launch({ headless })
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
-  })
-  const page = await context.newPage()
+  let createdHolidayId = null
+  let createdHolidayName = null
+  let createdHolidayDate = null
 
-  await page.addInitScript((payload) => {
-    localStorage.setItem('auth_token', payload.token)
-    localStorage.setItem('metasheet_locale', 'zh-CN')
-  }, { token })
+  let browser = null
+  let page = null
 
   try {
+    const authSource = await resolveAuthToken()
+    summary.authSource = authSource
+    log(`auth resolved via ${authSource}`)
+
+    browser = await chromium.launch({ headless })
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+    })
+    page = await context.newPage()
+
+    await page.addInitScript((payload) => {
+      if (payload?.token) {
+        localStorage.setItem('auth_token', payload.token)
+      }
+      localStorage.setItem('metasheet_locale', 'zh-CN')
+    }, { token: authToken })
+
     const target = `${normalizeUrl(webUrl)}/attendance`
     await page.goto(target, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
     await page.waitForLoadState('networkidle', { timeout: timeoutMs })
@@ -305,7 +567,6 @@ async function run() {
     const localeSelect = page.locator('nav.app-nav .nav-locale__select')
     await localeSelect.waitFor({ timeout: timeoutMs })
     const localeValue = await localeSelect.inputValue()
-    summary.locale = localeValue || null
     if (localeValue !== 'zh-CN') {
       throw new Error(`Expected locale select value zh-CN, got ${localeValue || '<empty>'}`)
     }
@@ -313,9 +574,20 @@ async function run() {
     await page.locator('#attendance-from-date').waitFor({ timeout: timeoutMs })
     await page.getByRole('heading', { name: '考勤', exact: true }).waitFor({ timeout: timeoutMs })
 
+    const zhShellTabs = await verifyZhShellTabs(page, { requireShellTabChecks })
+    summary.zhShellTabsChecked = zhShellTabs.checked
+    summary.zhShellTabReason = zhShellTabs.reason
+    summary.zhShellTabSamples = Array.isArray(zhShellTabs.tabTexts) ? zhShellTabs.tabTexts.slice(0, 12) : []
+    summary.zhLabels = {
+      overviewTab: zhShellTabs.overviewTab,
+      adminTab: zhShellTabs.adminTab,
+      workflowTab: zhShellTabs.workflowTab,
+    }
+
     const lunarSamples = await verifyLunarLabelsMeaningful(page)
     const lunarCount = lunarSamples.length
     summary.lunarCount = lunarCount
+    summary.lunarLabelCount = lunarCount
     summary.lunarSamples = lunarSamples.slice(0, 20)
 
     if (verifyHoliday) {
@@ -363,9 +635,9 @@ async function run() {
       })
       createdHolidayId = String(createPayload?.data?.id || '')
       createdHolidayDate = candidateDate
-      summary.createdHolidayId = createdHolidayId || null
-      summary.createdHolidayDate = createdHolidayDate || null
-      summary.createdHolidayName = createdHolidayName || null
+      summary.createdHolidayId = createdHolidayId
+      summary.createdHolidayDate = createdHolidayDate
+      summary.createdHolidayName = createdHolidayName
       if (!createdHolidayId) {
         throw new Error('Create holiday returned empty id')
       }
@@ -382,54 +654,82 @@ async function run() {
       await page.waitForTimeout(300)
 
       await findHolidayBadgeAcrossMonths(page, createdHolidayName)
-      holidayBadgeProbe = await findAnyHolidayBadgeAcrossMonths(page)
-      summary.holidayBadgeCount = holidayBadgeProbe.count
-      summary.holidayCalendarLabel = holidayBadgeProbe.calendarLabel
-      summary.holidayBadgeSamples = holidayBadgeProbe.badgeTexts
+      const badgeProbe = await findAnyHolidayBadgeAcrossMonths(page)
+      summary.holidayBadgeCount = Number(badgeProbe.count || 0)
+      summary.holidayCalendarLabel = String(badgeProbe.calendarLabel || '')
+      summary.holidayBadgeSamples = Array.isArray(badgeProbe.badgeTexts) ? badgeProbe.badgeTexts.slice(0, 12) : []
       log(
-        `holiday badges visible: target="${createdHolidayName}", count=${holidayBadgeProbe.count}, month=${holidayBadgeProbe.calendarLabel}, samples=${JSON.stringify(holidayBadgeProbe.badgeTexts)}`,
+        `holiday badges visible: target="${createdHolidayName}", count=${badgeProbe.count}, month=${badgeProbe.calendarLabel}, samples=${JSON.stringify(badgeProbe.badgeTexts)}`,
       )
     }
+
+    summary.toggleCheck = await verifyCalendarToggleChecks(page, {
+      requireHolidayVisible: verifyHoliday,
+      requireToggleChecks,
+    })
 
     const screenshotPath = path.join(outputDir, 'attendance-zh-locale-calendar.png')
     await page.screenshot({ path: screenshotPath, fullPage: true })
     summary.screenshot = screenshotPath
+    summary.failScreenshot = null
+    summary.error = null
     summary.status = 'pass'
+    summary.ok = true
 
-    log(`PASS: locale=zh-CN, lunarLabels=${lunarCount}, holidayCheck=${verifyHoliday ? 'on' : 'off'}, screenshot=${screenshotPath}`)
+    const toggleFlags = [
+      summary.toggleCheck.lunarOffNoBadge,
+      summary.toggleCheck.lunarOnRecovered,
+      summary.toggleCheck.holidayOffNoBadge,
+      summary.toggleCheck.holidayOnRecovered,
+    ]
+    const togglePass = toggleFlags.every(Boolean)
+    const toggleStatus = summary.toggleCheck.skipped
+      ? `skipped:${summary.toggleCheck.reason || 'not-required'}`
+      : (togglePass ? 'pass' : 'fail')
+    log(
+      `PASS: locale=zh-CN, lunarLabels=${lunarCount}, holidayCheck=${verifyHoliday ? 'on' : 'off'}, toggleCheck=${toggleStatus}, authSource=${summary.authSource}, zhTabsChecked=${summary.zhShellTabsChecked}, zhTabs=${JSON.stringify(summary.zhLabels)}, screenshot=${screenshotPath}`,
+    )
   } catch (error) {
-    runError = error
     summary.status = 'fail'
     summary.error = (error && error.message) || String(error)
     const failShot = path.join(outputDir, 'attendance-zh-locale-calendar-fail.png')
     try {
-      await page.screenshot({ path: failShot, fullPage: true })
+      if (page) {
+        await page.screenshot({ path: failShot, fullPage: true })
+      }
       summary.failScreenshot = failShot
+      if (!summary.screenshot) {
+        summary.screenshot = failShot
+      }
       log(`captured failure screenshot: ${failShot}`)
     } catch {
       // ignore screenshot failure
     }
+    throw error
   } finally {
-    await browser.close()
+    if (browser) {
+      await browser.close().catch(() => {})
+    }
     if (createdHolidayId) {
       try {
         await apiRequestJson(`/attendance/holidays/${createdHolidayId}`, {
           method: 'DELETE',
         })
-        createdHolidayDeleted = true
+        summary.cleanup.holidayDeleted = true
+        summary.cleanup.error = null
         log(`deleted holiday: ${createdHolidayId}`)
       } catch (error) {
-        createdHolidayDeleteError = error?.message || String(error)
+        summary.cleanup.holidayDeleted = false
+        summary.cleanup.error = (error && error.message) || String(error)
         log(`WARN cleanup failed for holiday ${createdHolidayId}: ${error?.message || error}`)
       }
     }
-    summary.cleanup.holidayDeleted = createdHolidayDeleted
-    summary.cleanup.error = createdHolidayDeleteError
-    await writeSummary(summaryPath, summary)
-  }
-
-  if (runError) {
-    throw runError
+    try {
+      await writeSummaryJson(summaryPath, summary)
+      log(`summary json: ${summaryPath}`)
+    } catch (error) {
+      log(`WARN write summary failed: ${error?.message || error}`)
+    }
   }
 }
 
