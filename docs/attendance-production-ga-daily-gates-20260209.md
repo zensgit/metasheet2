@@ -4289,13 +4289,13 @@ Verification (local, 2026-03-11):
 |---|---|---|
 | Gate Contract Matrix (`strict`) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Gate Contract Matrix (`dashboard`) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.locale-legacy.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.cleanup.json` |
-| Daily dashboard report generation (`main`, lookback 48h) | PASS | `output/playwright/attendance-daily-gate-dashboard/20260311-010651/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-daily-gate-dashboard/20260311-010651/attendance-daily-gate-dashboard.md` |
-| Dashboard JSON validator (new contract) | PASS | command: `scripts/ops/attendance-validate-daily-dashboard-json.sh output/playwright/attendance-daily-gate-dashboard/20260311-010651/attendance-daily-gate-dashboard.json` |
+| Daily dashboard report generation (`main`, lookback 48h) | PASS | `output/playwright/attendance-daily-gate-dashboard/20260311-011632/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-daily-gate-dashboard/20260311-011632/attendance-daily-gate-dashboard.md` |
+| Dashboard JSON validator (new contract) | PASS | command: `scripts/ops/attendance-validate-daily-dashboard-json.sh output/playwright/attendance-daily-gate-dashboard/20260311-011632/attendance-daily-gate-dashboard.json` |
 
 Observed:
 
 - contract runner now explicitly blocks legacy locale summary fixture (`dashboard.invalid.locale-legacy.json`) as expected.
-- current `main` latest locale artifact is still legacy (`runId=22886643423`, `summarySchemaVersion=1`), therefore dashboard computed `overallStatus=fail` with `reasonCode=LOCALE_ZH_SUMMARY_INVALID` while `p0Status=pass`.
+- current `main` latest locale artifact is still legacy (`runId=22931818514`, `summarySchemaVersion=1`), therefore dashboard computed `overallStatus=fail` with `reasonCode=LOCALE_ZH_SUMMARY_INVALID` while `p0Status=pass`.
 
 Remediation:
 

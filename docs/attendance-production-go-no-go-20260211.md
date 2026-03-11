@@ -2658,12 +2658,12 @@ Verification:
 |---|---|---|---|
 | Attendance Gate Contract Matrix (`strict`, local) | local (2026-03-11) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Attendance Gate Contract Matrix (`dashboard`, local) | local (2026-03-11) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.locale-legacy.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.cleanup.json` |
-| Attendance Daily Gate Dashboard report generation (`main`, lookback 48h, local) | local (2026-03-11) | PASS | `output/playwright/attendance-daily-gate-dashboard/20260311-010651/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-daily-gate-dashboard/20260311-010651/attendance-daily-gate-dashboard.md` |
-| Dashboard validator on latest generated JSON | local (2026-03-11) | PASS | command: `scripts/ops/attendance-validate-daily-dashboard-json.sh output/playwright/attendance-daily-gate-dashboard/20260311-010651/attendance-daily-gate-dashboard.json` |
+| Attendance Daily Gate Dashboard report generation (`main`, lookback 48h, local) | local (2026-03-11) | PASS | `output/playwright/attendance-daily-gate-dashboard/20260311-011632/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-daily-gate-dashboard/20260311-011632/attendance-daily-gate-dashboard.md` |
+| Dashboard validator on latest generated JSON | local (2026-03-11) | PASS | command: `scripts/ops/attendance-validate-daily-dashboard-json.sh output/playwright/attendance-daily-gate-dashboard/20260311-011632/attendance-daily-gate-dashboard.json` |
 
 Observed:
 
-- `main` latest locale run currently referenced by dashboard is `runId=22886643423` with legacy schema (`summarySchemaVersion=1`), so dashboard sets:
+- `main` latest locale run currently referenced by dashboard is `runId=22931818514` with legacy schema (`summarySchemaVersion=1`), so dashboard sets:
   - `gateFlat.localeZh.status=FAIL`
   - `reasonCode=LOCALE_ZH_SUMMARY_INVALID`
   - `overallStatus=fail`
