@@ -5876,3 +5876,54 @@ Decision:
 
 - longrun gate returned to green with clearer triage signals and lower transient-failure sensitivity.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-11): Parallel Acceleration Round (PR #440/#441/#443)
+
+Scope:
+
+- parallelize A/B/C follow-up hardening after longrun recovery:
+  - A-line dashboard parser/testability hardening (`#440`),
+  - C-line holiday sync production UX recovery action (`#441`),
+  - B-line import metadata assertion completeness (`#443`, supersedes closed `#442`).
+
+Changes:
+
+- PR #440 (MERGED, `b5627e2e592f8b86492e296afa32fb2bde6b7dff`)
+  - `scripts/ops/attendance-daily-gate-report.mjs`
+  - `scripts/ops/attendance-daily-gate-report.test.mjs`
+  - added completed-run selection helper (`cancelled/neutral/skipped` exclusion), module entry guard, parser exports, and updated locale/perf parser tests.
+- PR #441 (MERGED, `fc890467e935bd8588f7d025b5a59da6d73ce484`)
+  - `apps/web/src/views/AttendanceView.vue`
+  - holiday sync now uses `apiFetchWithTimeout + createApiError + setStatusFromError('sync-holidays')` with `retry-sync-holidays` action.
+- PR #443 (MERGED, `a6f41c3db821eb2d7df3391cc4b4bea5a5bb258b`)
+  - `packages/core-backend/tests/integration/attendance-plugin.test.ts`
+  - expanded assertions for `engine/processedRows/failedRows/elapsedMs` across idempotent/concurrent sync and `csvFileId` flows, plus async retry job payload.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Gate Dashboard (post-#440 parser hardening) | #22943901841 | PASS | `output/playwright/ga/22943901841/attendance-daily-gate-dashboard-22943901841-1/attendance-daily-gate-dashboard.json` |
+| Daily Gate Dashboard (post-#441/#443 merge sweep) | #22944797333 | PASS | `output/playwright/ga/22944797333/attendance-daily-gate-dashboard-22944797333-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22944797333/attendance-daily-gate-dashboard-22944797333-1/attendance-daily-gate-dashboard.md` |
+| PR #441 required checks | #22944257988 / #22944258042 | PASS | `https://github.com/zensgit/metasheet2/actions/runs/22944257988`, `https://github.com/zensgit/metasheet2/actions/runs/22944258042` |
+| PR #443 required checks | #22944693788 / #22944693806 | PASS | `https://github.com/zensgit/metasheet2/actions/runs/22944693788`, `https://github.com/zensgit/metasheet2/actions/runs/22944693806` |
+
+Local validation (branch/dev):
+
+- `node --test scripts/ops/attendance-daily-gate-report.test.mjs` -> PASS
+- `pnpm --filter @metasheet/web exec vue-tsc --noEmit` -> PASS
+- `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "idempotencyKey retries|deduplicates concurrent import commits|supports async import commit jobs|supports CSV upload channel|supports idempotency retry for csvFileId|deduplicates concurrent csvFileId commits"` -> PASS
+- note: full `attendance-plugin.test.ts` run still has known baseline instability unrelated to this patch set (merge/rollback/bulk strategy/query-timeout paths).
+
+Branch protection restore check:
+
+- executed `scripts/ops/attendance-ensure-branch-protection.sh` with `MIN_APPROVING_REVIEW_COUNT=1` after merges.
+- current policy snapshot:
+  - `pr_reviews_required=true`
+  - `approving_review_count=1`
+  - required checks include `contracts (strict)` + `contracts (dashboard)`.
+
+Decision:
+
+- parallel round merged with gates green and policy restored.
+- **GO maintained**.
