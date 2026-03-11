@@ -8096,7 +8096,7 @@ async function loadLeaveTypes() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load leave types')
+      throw createApiError(response, data, tr('Failed to load leave types', '加载请假类型失败'))
     }
     adminForbidden.value = false
     leaveTypes.value = data.data.items || []
@@ -8104,7 +8104,7 @@ async function loadLeaveTypes() {
       requestForm.leaveTypeId = leaveTypes.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load leave types', '加载请假类型失败'), 'error')
+    setStatusFromError(error, tr('Failed to load leave types', '加载请假类型失败'), 'admin')
   } finally {
     leaveTypeLoading.value = false
   }
@@ -8115,7 +8115,7 @@ async function saveLeaveType() {
   const isEditing = Boolean(leaveTypeEditingId.value)
   try {
     if (!leaveTypeForm.code.trim() || !leaveTypeForm.name.trim()) {
-      throw new Error('Code and name are required')
+      throw new Error(tr('Code and name are required', '编码和名称为必填项'))
     }
     const payload = {
       code: leaveTypeForm.code.trim(),
@@ -8135,18 +8135,18 @@ async function saveLeaveType() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw createForbiddenError()
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save leave type')
+      throw createApiError(response, data, tr('Failed to save leave type', '保存请假类型失败'))
     }
     adminForbidden.value = false
     await loadLeaveTypes()
     resetLeaveTypeForm()
     setStatus(isEditing ? tr('Leave type updated.', '请假类型已更新。') : tr('Leave type created.', '请假类型已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save leave type', '保存请假类型失败'), 'error')
+    setStatusFromError(error, tr('Failed to save leave type', '保存请假类型失败'), 'admin')
   } finally {
     leaveTypeSaving.value = false
   }
@@ -8158,17 +8158,17 @@ async function deleteLeaveType(id: string) {
     const response = await apiFetch(`/api/attendance/leave-types/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw createForbiddenError()
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to delete leave type')
+      throw createApiError(response, data, tr('Failed to delete leave type', '删除请假类型失败'))
     }
     adminForbidden.value = false
     await loadLeaveTypes()
     setStatus(tr('Leave type deleted.', '请假类型已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete leave type', '删除请假类型失败'), 'error')
+    setStatusFromError(error, tr('Failed to delete leave type', '删除请假类型失败'), 'admin')
   }
 }
 
@@ -8203,7 +8203,7 @@ async function loadOvertimeRules() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to load overtime rules')
+      throw createApiError(response, data, tr('Failed to load overtime rules', '加载加班规则失败'))
     }
     adminForbidden.value = false
     overtimeRules.value = data.data.items || []
@@ -8211,7 +8211,7 @@ async function loadOvertimeRules() {
       requestForm.overtimeRuleId = overtimeRules.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load overtime rules', '加载加班规则失败'), 'error')
+    setStatusFromError(error, tr('Failed to load overtime rules', '加载加班规则失败'), 'admin')
   } finally {
     overtimeRuleLoading.value = false
   }
@@ -8222,7 +8222,7 @@ async function saveOvertimeRule() {
   const isEditing = Boolean(overtimeRuleEditingId.value)
   try {
     if (!overtimeRuleForm.name.trim()) {
-      throw new Error('Name is required')
+      throw new Error(tr('Name is required', '名称为必填项'))
     }
     const payload = {
       name: overtimeRuleForm.name.trim(),
@@ -8242,11 +8242,11 @@ async function saveOvertimeRule() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw createForbiddenError()
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to save overtime rule')
+      throw createApiError(response, data, tr('Failed to save overtime rule', '保存加班规则失败'))
     }
     adminForbidden.value = false
     await loadOvertimeRules()
@@ -8257,7 +8257,7 @@ async function saveOvertimeRule() {
         : tr('Overtime rule created.', '加班规则已创建。')
     )
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save overtime rule', '保存加班规则失败'), 'error')
+    setStatusFromError(error, tr('Failed to save overtime rule', '保存加班规则失败'), 'admin')
   } finally {
     overtimeRuleSaving.value = false
   }
@@ -8269,17 +8269,17 @@ async function deleteOvertimeRule(id: string) {
     const response = await apiFetch(`/api/attendance/overtime-rules/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw createForbiddenError()
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || 'Failed to delete overtime rule')
+      throw createApiError(response, data, tr('Failed to delete overtime rule', '删除加班规则失败'))
     }
     adminForbidden.value = false
     await loadOvertimeRules()
     setStatus(tr('Overtime rule deleted.', '加班规则已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete overtime rule', '删除加班规则失败'), 'error')
+    setStatusFromError(error, tr('Failed to delete overtime rule', '删除加班规则失败'), 'admin')
   }
 }
 
