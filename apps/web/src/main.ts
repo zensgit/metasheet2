@@ -8,6 +8,7 @@ import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
 import App from './App.vue'
 import { AppRouteNames, ROUTE_PATHS, RouteGuards } from './router/types'
+import { useFeatureFlags } from './stores/featureFlags'
 
 // Import views
 import GridView from './views/GridView.vue'
@@ -110,7 +111,7 @@ const router = createRouter({
 })
 
 // Navigation guard for page title
-router.beforeEach(async (to, from, next) => {
+router.beforeEach(async (to, _from, next) => {
   const title = to.meta?.title
   if (title) {
     document.title = `${title} - MetaSheet`
@@ -120,8 +121,6 @@ router.beforeEach(async (to, from, next) => {
 
   // Product capability guard + attendance focused mode restriction.
   try {
-    const mod = await import('./stores/featureFlags')
-    const { useFeatureFlags } = mod
     const flags = useFeatureFlags()
     await flags.loadProductFeatures()
 
@@ -146,6 +145,15 @@ router.beforeEach(async (to, from, next) => {
       const path = String(to.path || '')
       if (!allowed.has(path)) {
         return next('/attendance')
+      }
+    }
+
+    if (typeof flags.isPlmWorkbenchFocused === 'function' && flags.isPlmWorkbenchFocused()) {
+      const path = String(to.path || '')
+      const allowedPrefixes = ['/plm']
+      const allowed = allowedPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
+      if (!allowed) {
+        return next('/plm')
       }
     }
   } catch {
