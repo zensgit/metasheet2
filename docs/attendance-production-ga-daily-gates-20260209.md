@@ -4289,12 +4289,19 @@ Verification (local, 2026-03-11):
 |---|---|---|
 | Gate Contract Matrix (`strict`) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
 | Gate Contract Matrix (`dashboard`) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.locale-legacy.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.cleanup.json` |
+| Attendance Gate Contract Matrix (branch CI) | PASS | run `#22932001065`, `output/playwright/ga/22932001065/strict/strict/gate-summary.valid.json`, `output/playwright/ga/22932001065/dashboard/dashboard.invalid.cleanup.json` |
+| Attendance Daily Gate Dashboard (branch CI) | PASS | run `#22931997979`, `output/playwright/ga/22931997979/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22931997979/attendance-daily-gate-dashboard.md` |
+| Attendance Locale zh Smoke (branch CI) | PASS | run `#22932046549`, `output/playwright/ga/22932046549/attendance-zh-locale-summary.json`, `output/playwright/ga/22932046549/attendance-zh-locale-calendar.png` |
 | Daily dashboard report generation (`main`, lookback 48h) | PASS | `output/playwright/attendance-daily-gate-dashboard/20260311-011632/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-daily-gate-dashboard/20260311-011632/attendance-daily-gate-dashboard.md` |
 | Dashboard JSON validator (new contract) | PASS | command: `scripts/ops/attendance-validate-daily-dashboard-json.sh output/playwright/attendance-daily-gate-dashboard/20260311-011632/attendance-daily-gate-dashboard.json` |
 
 Observed:
 
 - contract runner now explicitly blocks legacy locale summary fixture (`dashboard.invalid.locale-legacy.json`) as expected.
+- branch CI locale smoke run `#22932046549` confirms new artifact shape:
+  - `schemaVersion=3`
+  - `toggleCheck.skipped=true`
+  - `zhShellTabsChecked=true`
 - current `main` latest locale artifact is still legacy (`runId=22931818514`, `summarySchemaVersion=1`), therefore dashboard computed `overallStatus=fail` with `reasonCode=LOCALE_ZH_SUMMARY_INVALID` while `p0Status=pass`.
 
 Remediation:
