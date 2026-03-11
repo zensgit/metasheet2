@@ -1,7 +1,7 @@
 import { computed, reactive, readonly } from 'vue'
 import { apiFetch } from '../utils/api'
 
-export type ProductMode = 'platform' | 'attendance'
+export type ProductMode = 'platform' | 'attendance' | 'plm-workbench'
 
 export interface ProductFeatures {
   attendance: boolean
@@ -66,11 +66,17 @@ function parseJwtPayload(token: string | null): Record<string, unknown> {
   }
 }
 
+function isFeatureOverrideAllowed(): boolean {
+  if (import.meta.env.DEV) return true
+  return String(import.meta.env.VITE_ALLOW_FEATURE_OVERRIDE || '').trim().toLowerCase() === 'true'
+}
+
 function parseOverrideFeatures(): Partial<ProductFeatures> {
+  if (!isFeatureOverrideAllowed()) return {}
   if (typeof localStorage === 'undefined') return {}
 
   const modeRaw = localStorage.getItem('metasheet_product_mode')
-  const mode: ProductMode | undefined = modeRaw === 'attendance' || modeRaw === 'platform'
+  const mode: ProductMode | undefined = modeRaw === 'attendance' || modeRaw === 'platform' || modeRaw === 'plm-workbench'
     ? modeRaw
     : undefined
 
@@ -90,7 +96,9 @@ function parseOverrideFeatures(): Partial<ProductFeatures> {
 
 function normalizeMode(value: unknown): ProductMode | undefined {
   if (value === 'attendance' || value === 'platform') return value
+  if (value === 'plm-workbench' || value === 'plmWorkbench') return 'plm-workbench'
   if (value === 'attendance-focused') return 'attendance'
+  if (value === 'plm-focused') return 'plm-workbench'
   return undefined
 }
 
@@ -154,7 +162,9 @@ function isAdminRole(payload: any): boolean {
   }
 
   const tokenPayload = parseJwtPayload(
-    typeof localStorage !== 'undefined' ? localStorage.getItem('auth_token') : null,
+    typeof localStorage !== 'undefined'
+      ? localStorage.getItem('auth_token') || localStorage.getItem('jwt') || localStorage.getItem('devToken')
+      : null,
   )
   if (tokenPayload.role === 'admin') return true
   if (Array.isArray(tokenPayload.roles) && tokenPayload.roles.includes('admin')) return true
@@ -274,8 +284,13 @@ function isAttendanceFocused(): boolean {
   return state.features.mode === 'attendance' && state.features.attendance
 }
 
+function isPlmWorkbenchFocused(): boolean {
+  return state.features.mode === 'plm-workbench'
+}
+
 function resolveHomePath(): string {
   if (isAttendanceFocused()) return '/attendance'
+  if (isPlmWorkbenchFocused()) return '/plm'
   return '/grid'
 }
 
@@ -287,6 +302,7 @@ export function useFeatureFlags() {
     loadProductFeatures,
     hasFeature,
     isAttendanceFocused,
+    isPlmWorkbenchFocused,
     resolveHomePath,
   }
 }
