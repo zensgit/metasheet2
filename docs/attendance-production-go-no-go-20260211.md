@@ -2636,6 +2636,31 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Validation (2026-03-11): Attendance zh Error-Copy Cleanup
+
+Scope:
+
+- localized remaining admin-permission error throws in attendance view to prevent English leaks in zh mode.
+
+Code:
+
+- `apps/web/src/views/AttendanceView.vue`
+- commit: `a42a77da`
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| zh copy contract | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
+
+Note:
+
+- full web build in the current dirty tree is blocked by unrelated PLM type errors; this does not affect the attendance zh copy gate result above.
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Validation (2026-03-11): Frontend Auth Guard Closure + Production Feature-Override Hardening
 
 Scope:

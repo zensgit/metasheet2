@@ -4240,3 +4240,24 @@ Verification:
 Operational note:
 
 - production should keep `VITE_ALLOW_FEATURE_OVERRIDE` unset (or `false`) to avoid client-side feature tampering.
+
+### Update (2026-03-11): Attendance zh Error-Copy Cleanup (Admin Permission Paths)
+
+Scope:
+
+- replaced remaining hard-coded admin permission English throws in attendance view with localized `tr(...)` copy.
+
+Code:
+
+- `apps/web/src/views/AttendanceView.vue`
+- commit: `a42a77da`
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| zh copy contract | PASS | command: `pnpm verify:attendance-zh-copy-contract` |
+
+Note:
+
+- full `pnpm --filter @metasheet/web build` is currently blocked by unrelated PLM type errors in the working tree; attendance zh copy gate remains green.
