@@ -1219,6 +1219,13 @@ async function run() {
     }
   }
   const elapsedMs = jobElapsedMs ?? Math.max(0, tCommit1 - tCommit0)
+  const commitWallClockMs = Math.max(0, tCommit1 - tCommit0)
+  const commitGateSource = commitAsync && Number.isFinite(elapsedMs)
+    ? 'jobElapsedMs'
+    : 'wallClockMs'
+  const commitGateMs = commitGateSource === 'jobElapsedMs'
+    ? elapsedMs
+    : commitWallClockMs
   if (!requireImportTelemetry) {
     if (processedRows === null) {
       processedRows = coerceNonNegativeNumber(rows)
@@ -1288,7 +1295,9 @@ async function run() {
     jobElapsedMs,
     perfMetrics: {
       previewMs: tPreview1 - tPreview0,
-      commitMs: tCommit1 - tCommit0,
+      commitMs: commitWallClockMs,
+      commitGateMs,
+      commitGateSource,
       exportMs,
       rollbackMs,
       processedRows,
@@ -1311,7 +1320,9 @@ async function run() {
     commitIdempotencyKey,
     jobId,
     previewMs: tPreview1 - tPreview0,
-    commitMs: tCommit1 - tCommit0,
+    commitMs: commitWallClockMs,
+    commitGateMs,
+    commitGateSource,
     exportMs,
     rollbackMs,
     batchId,
@@ -1336,8 +1347,10 @@ async function run() {
   if (maxPreviewMs !== null && summary.previewMs > maxPreviewMs) {
     summary.regressions.push(`previewMs=${summary.previewMs} exceeds maxPreviewMs=${maxPreviewMs}`)
   }
-  if (maxCommitMs !== null && summary.commitMs > maxCommitMs) {
-    summary.regressions.push(`commitMs=${summary.commitMs} exceeds maxCommitMs=${maxCommitMs}`)
+  if (maxCommitMs !== null && summary.commitGateMs > maxCommitMs) {
+    summary.regressions.push(
+      `commitGateMs=${summary.commitGateMs} (source=${summary.commitGateSource}, wallClockMs=${summary.commitMs}) exceeds maxCommitMs=${maxCommitMs}`
+    )
   }
   if (maxExportMs !== null && summary.exportMs !== null && summary.exportMs > maxExportMs) {
     summary.regressions.push(`exportMs=${summary.exportMs} exceeds maxExportMs=${maxExportMs}`)
@@ -1360,7 +1373,7 @@ async function run() {
 
   await writeJson(path.join(outDir, 'perf-summary.json'), summary)
   log(`preview ok: rows=${rows} ms=${summary.previewMs}`)
-  log(`commit ok: batchId=${batchId} ms=${summary.commitMs}`)
+  log(`commit ok: batchId=${batchId} ms=${summary.commitMs} gateMs=${summary.commitGateMs} source=${summary.commitGateSource}`)
   if (exportMs !== null) log(`export ok: type=${exportType} ms=${exportMs}`)
   if (rolledBack) log(`rollback ok: ms=${rollbackMs}`)
   if (progressPercent !== null || throughputRowsPerSec !== null) {
