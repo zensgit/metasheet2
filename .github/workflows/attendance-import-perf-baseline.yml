@@ -39,9 +39,9 @@ on:
         required: false
         default: 'sync'
       commit_async:
-        description: 'Use /commit-async path (true/false, default false for stable manual reruns)'
+        description: 'Use /commit-async path (true/false, default true for gateway-safe baseline runs)'
         required: false
-        default: 'false'
+        default: 'true'
       export_csv:
         description: 'Verify export csv latency (true/false)'
         required: false
@@ -164,7 +164,7 @@ jobs:
       PREVIEW_MODE: ${{ inputs.preview_mode || (inputs.profile == 'high-scale' && 'auto') || vars.ATTENDANCE_PERF_PREVIEW_MODE || 'sync' }}
       PREVIEW_ASYNC_ROW_THRESHOLD: ${{ vars.ATTENDANCE_PERF_PREVIEW_ASYNC_ROW_THRESHOLD || '50000' }}
       ROLLBACK: 'true'
-      COMMIT_ASYNC: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_COMMIT_ASYNC_SCHEDULE || 'false') || (inputs.profile == 'high-scale' && 'true') || inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'true' }}
+      COMMIT_ASYNC: ${{ github.event_name == 'schedule' && (vars.ATTENDANCE_PERF_COMMIT_ASYNC_SCHEDULE || 'true') || (inputs.profile == 'high-scale' && 'true') || inputs.commit_async || vars.ATTENDANCE_PERF_COMMIT_ASYNC || 'true' }}
       EXPORT_CSV: ${{ inputs.export_csv || vars.ATTENDANCE_PERF_EXPORT_CSV || 'true' }}
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
       PAYLOAD_SOURCE: ${{ inputs.payload_source || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_PAYLOAD_SOURCE_HIGH || 'auto')) || vars.ATTENDANCE_PERF_PAYLOAD_SOURCE || 'auto' }}
