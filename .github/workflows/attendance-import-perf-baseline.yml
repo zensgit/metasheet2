@@ -169,6 +169,8 @@ jobs:
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
       PAYLOAD_SOURCE: ${{ inputs.payload_source || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_PAYLOAD_SOURCE_HIGH || 'auto')) || vars.ATTENDANCE_PERF_PAYLOAD_SOURCE || 'auto' }}
       CSV_ROWS_LIMIT_HINT: ${{ inputs.csv_rows_limit_hint || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_CSV_ROWS_LIMIT_HINT_HIGH || '100000')) || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '20000' }}
+      PERF_USER_POOL_SIZE: ${{ inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_USER_POOL_SIZE_HIGH || '120') || vars.ATTENDANCE_PERF_USER_POOL_SIZE || '16' }}
+      PERF_WORK_DATE_SPAN_DAYS: ${{ inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_WORK_DATE_SPAN_DAYS_HIGH || '180') || vars.ATTENDANCE_PERF_WORK_DATE_SPAN_DAYS || '60' }}
       MAX_PREVIEW_MS: ${{ inputs.max_preview_ms || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_MAX_PREVIEW_MS_HIGH || '240000')) || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '' }}
       MAX_COMMIT_MS: ${{ inputs.max_commit_ms || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_MAX_COMMIT_MS_HIGH || '420000')) || vars.ATTENDANCE_PERF_MAX_COMMIT_MS || '' }}
       MAX_EXPORT_MS: ${{ inputs.max_export_ms || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_MAX_EXPORT_MS_HIGH || '90000')) || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '' }}
