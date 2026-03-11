@@ -15,6 +15,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import { fileURLToPath } from 'url'
 
 const token = String(process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '').trim()
 const repo = String(process.env.GITHUB_REPOSITORY || 'zensgit/metasheet2').trim()
@@ -650,6 +651,38 @@ function toRunList(value) {
   return Array.isArray(value) ? value : []
 }
 
+function pickLatestCompletedRun(list, { excludeConclusions = [] } = {}) {
+  const completed = toRunList(list).filter((run) => run?.status === 'completed')
+  if (completed.length === 0) return null
+  const excluded = new Set(
+    (Array.isArray(excludeConclusions) ? excludeConclusions : [])
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean),
+  )
+  if (excluded.size === 0) return completed[0]
+  const preferred = completed.find((run) => !excluded.has(String(run?.conclusion || '').trim().toLowerCase()))
+  return preferred || completed[0]
+}
+
+function resolveGateSignalBranch({ gateName, reportBranch, remoteSignalBranchValue }) {
+  const name = String(gateName || '').trim()
+  const branchValue = String(reportBranch || '').trim()
+  const remoteBranch = String(remoteSignalBranchValue || '').trim()
+  const remoteGate = name === 'Remote Preflight'
+    || name === 'Host Metrics'
+    || name === 'Storage Health'
+    || name === 'Upload Cleanup'
+  if (!remoteGate) return branchValue
+  if (!remoteBranch || remoteBranch === branchValue) return branchValue
+  return remoteBranch
+}
+
+function resolveQueryBranchDisplayValue({ gate, reportBranchValue }) {
+  const query = String(gate?.queryBranch || '').trim()
+  if (query) return query
+  return String(reportBranchValue || '').trim()
+}
+
 function filterDrillRuns(list) {
   const normalized = toRunList(list)
   return includeDrillRuns ? normalized : normalized.filter((run) => !isDrillRun(run))
@@ -675,14 +708,14 @@ async function resolveRemoteSignalRuns({
     fallbackError: null,
   }
 
-  const remoteGate = gateName === 'Remote Preflight'
-    || gateName === 'Host Metrics'
-    || gateName === 'Storage Health'
-    || gateName === 'Upload Cleanup'
+  const targetSignalBranch = resolveGateSignalBranch({
+    gateName,
+    reportBranch: branchValue,
+    remoteSignalBranchValue: remoteSignalFallbackBranch,
+  })
   const canFallback = enableRemoteSignalFallback
-    && remoteGate
-    && remoteSignalFallbackBranch
-    && remoteSignalFallbackBranch !== branchValue
+    && targetSignalBranch
+    && targetSignalBranch !== branchValue
   if (!canFallback) {
     return result
   }
@@ -696,7 +729,7 @@ async function resolveRemoteSignalRuns({
     ownerValue,
     repoValue,
     workflowFile,
-    branchValue: remoteSignalFallbackBranch,
+    branchValue: targetSignalBranch,
   })
   result.fallbackError = fallbackRuns.error || null
   if (fallbackRuns.error) {
@@ -706,10 +739,10 @@ async function resolveRemoteSignalRuns({
   const fallbackList = toRunList(fallbackRuns.list)
   const fallbackHasCompleted = hasCompletedRun(fallbackList)
   if (fallbackHasCompleted || !primaryHasCompleted || result.error) {
-    info(`${gateName}: using fallback branch '${remoteSignalFallbackBranch}'`)
+    info(`${gateName}: using fallback branch '${targetSignalBranch}'`)
     result.list = fallbackList
     result.error = fallbackRuns.error || null
-    result.sourceBranch = remoteSignalFallbackBranch
+    result.sourceBranch = targetSignalBranch
     result.fallbackUsed = true
   }
 
@@ -1546,25 +1579,46 @@ async function run() {
   }
 
   const preflightLatestAny = preflightList[0] ?? null
-  const preflightLatestCompleted = preflightList.find((run) => run?.status === 'completed') ?? null
+  const completedRunExcludeConclusions = ['cancelled', 'neutral', 'skipped']
+  const preflightLatestCompleted = pickLatestCompletedRun(preflightList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const protectionLatestAny = protectionList[0] ?? null
-  const protectionLatestCompleted = protectionList.find((run) => run?.status === 'completed') ?? null
+  const protectionLatestCompleted = pickLatestCompletedRun(protectionList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const metricsLatestAny = metricsList[0] ?? null
-  const metricsLatestCompleted = metricsList.find((run) => run?.status === 'completed') ?? null
+  const metricsLatestCompleted = pickLatestCompletedRun(metricsList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const storageLatestAny = storageList[0] ?? null
-  const storageLatestCompleted = storageList.find((run) => run?.status === 'completed') ?? null
+  const storageLatestCompleted = pickLatestCompletedRun(storageList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const cleanupLatestAny = cleanupList[0] ?? null
-  const cleanupLatestCompleted = cleanupList.find((run) => run?.status === 'completed') ?? null
+  const cleanupLatestCompleted = pickLatestCompletedRun(cleanupList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const strictLatestAny = strictList[0] ?? null
-  const strictLatestCompleted = strictList.find((run) => run?.status === 'completed') ?? null
+  const strictLatestCompleted = pickLatestCompletedRun(strictList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const perfLatestAny = perfList[0] ?? null
-  const perfLatestCompleted = perfList.find((run) => run?.status === 'completed') ?? null
+  const perfLatestCompleted = pickLatestCompletedRun(perfList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const longrunLatestAny = longrunList[0] ?? null
-  const longrunLatestCompleted = longrunList.find((run) => run?.status === 'completed') ?? null
+  const longrunLatestCompleted = pickLatestCompletedRun(longrunList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const localeZhLatestAny = localeZhList[0] ?? null
-  const localeZhLatestCompleted = localeZhList.find((run) => run?.status === 'completed') ?? null
+  const localeZhLatestCompleted = pickLatestCompletedRun(localeZhList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const contractLatestAny = contractList[0] ?? null
-  const contractLatestCompleted = contractList.find((run) => run?.status === 'completed') ?? null
+  const contractLatestCompleted = pickLatestCompletedRun(contractList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
 
   const preflightGate = evaluateGate({
     name: 'Remote Preflight',
@@ -2159,7 +2213,19 @@ async function run() {
   console.log(`REPORT_JSON=${jsonPath}`)
 }
 
-run().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error)
-  die(message)
-})
+const moduleFilePath = fileURLToPath(import.meta.url)
+const entryFilePath = process.argv[1] ? path.resolve(process.argv[1]) : ''
+if (entryFilePath === moduleFilePath) {
+  run().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error)
+    die(message)
+  })
+}
+
+export {
+  parsePerfSummaryJson,
+  parseLocaleZhSummaryJson,
+  pickLatestCompletedRun,
+  resolveGateSignalBranch,
+  resolveQueryBranchDisplayValue,
+}

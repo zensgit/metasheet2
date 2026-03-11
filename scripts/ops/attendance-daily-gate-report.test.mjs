@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  parsePerfSummaryJson,
   parseLocaleZhSummaryJson,
   pickLatestCompletedRun,
   resolveGateSignalBranch,
@@ -53,37 +54,78 @@ test('pickLatestCompletedRun returns null when no completed run exists', () => {
 
 test('parseLocaleZhSummaryJson returns normalized pass metadata', () => {
   const payload = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'pass',
     locale: 'zh-CN',
-    lunarCount: 28,
-    holidayCheck: 'enabled',
+    authSource: 'token',
+    lunarLabelCount: 28,
+    holidayCheckEnabled: true,
     holidayBadgeCount: 1,
-    holidayCalendarLabel: '二月 2026',
   }
 
   const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
   assert.equal(parsed?.reason, null)
-  assert.equal(parsed?.schemaVersion, 1)
+  assert.equal(parsed?.schemaVersion, 2)
   assert.equal(parsed?.locale, 'zh-CN')
-  assert.equal(parsed?.lunarCount, '28')
-  assert.equal(parsed?.holidayCheck, 'enabled')
+  assert.equal(parsed?.authSource, 'token')
+  assert.equal(parsed?.lunarLabelCount, '28')
+  assert.equal(parsed?.holidayCheckEnabled, 'true')
   assert.equal(parsed?.holidayBadgeCount, '1')
-  assert.equal(parsed?.holidayCalendarLabel, '二月 2026')
+  assert.equal(parsed?.summaryValid, true)
+  assert.equal(parsed?.summaryInvalidReasons, null)
 })
 
-test('parseLocaleZhSummaryJson flags missing lunar labels as invalid', () => {
+test('parseLocaleZhSummaryJson flags missing zh shell labels as invalid for schema v3', () => {
   const payload = {
-    schemaVersion: 1,
+    schemaVersion: 3,
     status: 'pass',
     locale: 'zh-CN',
-    lunarCount: 0,
-    holidayCheck: 'enabled',
+    authSource: 'token',
+    lunarLabelCount: 28,
+    holidayCheckEnabled: true,
     holidayBadgeCount: 1,
+    zhShellTabsChecked: true,
+    zhLabels: {},
   }
 
   const parsed = parseLocaleZhSummaryJson(JSON.stringify(payload))
-  assert.equal(parsed?.reason, 'LUNAR_LABELS_MISSING')
+  assert.equal(parsed?.reason, 'SUMMARY_INVALID')
+  assert.equal(parsed?.summaryValid, false)
+  assert.ok(Array.isArray(parsed?.summaryInvalidReasons))
+  assert.ok(parsed?.summaryInvalidReasons.includes('zh_overview_tab'))
+  assert.ok(parsed?.summaryInvalidReasons.includes('zh_admin_tab'))
+  assert.ok(parsed?.summaryInvalidReasons.includes('zh_workflow_tab'))
+})
+
+test('parsePerfSummaryJson normalizes async commit gate telemetry fields', () => {
+  const payload = {
+    schemaVersion: 3,
+    scenario: 'rows10k-commit',
+    rows: 10000,
+    mode: 'commit',
+    uploadCsv: true,
+    engine: 'bulk',
+    requestedImportEngine: 'bulk',
+    processedRows: 10000,
+    failedRows: 0,
+    jobElapsedMs: 163448,
+    commitMs: 20000,
+    commitGateMs: 20000,
+    commitGateSource: 'jobElapsedMs',
+    regressions: [],
+  }
+
+  const parsed = parsePerfSummaryJson(JSON.stringify(payload))
+  assert.equal(parsed?.reason, null)
+  assert.equal(parsed?.scenario, 'rows10k-commit')
+  assert.equal(parsed?.rows, 10000)
+  assert.equal(parsed?.mode, 'commit')
+  assert.equal(parsed?.uploadCsv, 'true')
+  assert.equal(parsed?.commitMs, '20000')
+  assert.equal(parsed?.commitGateMs, '20000')
+  assert.equal(parsed?.commitGateSource, 'jobElapsedMs')
+  assert.equal(parsed?.processedRows, '10000')
+  assert.equal(parsed?.failedRows, '0')
 })
 
 test('resolveGateSignalBranch routes remote gates to main branch by default on non-main report branch', () => {
