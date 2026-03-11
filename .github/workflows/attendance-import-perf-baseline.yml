@@ -262,8 +262,11 @@ jobs:
             return "$rc"
           }
 
-          run_once "$attempt1_log" node ./scripts/ops/attendance-import-perf.mjs
-          rc_first="$?"
+          if run_once "$attempt1_log" node ./scripts/ops/attendance-import-perf.mjs; then
+            rc_first=0
+          else
+            rc_first="$?"
+          fi
           if [[ "$rc_first" -eq 0 ]]; then
             cp "$attempt1_log" "$final_log"
             exit 0
@@ -280,11 +283,14 @@ jobs:
 
           echo "Transient perf failure detected; retrying once with expanded commit retries."
           sleep 10
-          run_once "$attempt2_log" env \
+          if run_once "$attempt2_log" env \
             COMMIT_RETRIES="${COMMIT_RETRIES_RETRY}" \
             COMMIT_RETRIES_LARGE="${COMMIT_RETRIES_LARGE_RETRY}" \
-            node ./scripts/ops/attendance-import-perf.mjs
-          rc_second="$?"
+            node ./scripts/ops/attendance-import-perf.mjs; then
+            rc_second=0
+          else
+            rc_second="$?"
+          fi
           if [[ "$rc_second" -eq 0 ]]; then
             cat "$attempt1_log" "$attempt2_log" > "$final_log"
             exit 0
