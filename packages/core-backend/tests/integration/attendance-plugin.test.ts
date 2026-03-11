@@ -926,6 +926,7 @@ describe('Attendance Plugin Integration', () => {
     expect(['standard', 'bulk']).toContain(String(retryData?.engine))
     expect(Number(retryData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
     expect(Number(retryData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+    expect(Number(retryData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
   })
 
   it('supports import commit merge mode (keeps earliest firstInAt and latest lastOutAt)', async () => {
@@ -1213,6 +1214,8 @@ describe('Attendance Plugin Integration', () => {
     expect(commitData?.batchId).toBeTruthy()
     expect(commitData?.engine).toBe('bulk')
     expect(Number(commitData?.processedRows ?? 0)).toBeGreaterThanOrEqual(120)
+    expect(Number(commitData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+    expect(Number(commitData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
     expect(commitData?.recordUpsertStrategy).toBe('staging')
     expect(commitData?.meta?.recordUpsertStrategy).toBe('staging')
 
@@ -1306,12 +1309,20 @@ describe('Attendance Plugin Integration', () => {
     expect(commitARes.status).toBe(200)
     expect(commitBRes.status).toBe(200)
 
-    const commitAData = (commitARes.body as { data?: { batchId?: string; idempotent?: boolean } } | undefined)?.data
-    const commitBData = (commitBRes.body as { data?: { batchId?: string; idempotent?: boolean } } | undefined)?.data
+    const commitAData = (commitARes.body as { data?: any } | undefined)?.data
+    const commitBData = (commitBRes.body as { data?: any } | undefined)?.data
     expect(commitAData?.batchId).toBeTruthy()
     expect(commitBData?.batchId).toBeTruthy()
     expect(commitAData?.batchId).toBe(commitBData?.batchId)
     expect([commitAData?.idempotent, commitBData?.idempotent].some(Boolean)).toBe(true)
+    expect(['standard', 'bulk']).toContain(String(commitAData?.engine || ''))
+    expect(['standard', 'bulk']).toContain(String(commitBData?.engine || ''))
+    expect(Number(commitAData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(commitBData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(commitAData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+    expect(Number(commitBData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+    expect(Number(commitAData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
+    expect(Number(commitBData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
 
     // Follow-up retry without commitToken should remain idempotent and return the same batch.
     const retryRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
@@ -1323,9 +1334,13 @@ describe('Attendance Plugin Integration', () => {
       body: JSON.stringify(basePayload),
     })
     expect(retryRes.status).toBe(200)
-    const retryData = (retryRes.body as { data?: { batchId?: string; idempotent?: boolean } } | undefined)?.data
+    const retryData = (retryRes.body as { data?: any } | undefined)?.data
     expect(retryData?.batchId).toBe(commitAData?.batchId)
     expect(retryData?.idempotent).toBe(true)
+    expect(['standard', 'bulk']).toContain(String(retryData?.engine || ''))
+    expect(Number(retryData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(retryData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+    expect(Number(retryData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
   })
 
   it('supports async import commit jobs (commit-async + job polling)', async () => {
@@ -1405,6 +1420,10 @@ describe('Attendance Plugin Integration', () => {
     const retryJob = (retryRes.body as { data?: { job?: any; idempotent?: boolean } } | undefined)?.data
     expect(retryJob?.job?.id).toBe(jobId)
     expect(retryJob?.idempotent).toBe(true)
+    expect(['standard', 'bulk']).toContain(String(retryJob?.job?.engine || ''))
+    expect(typeof retryJob?.job?.processedRows).toBe('number')
+    expect(typeof retryJob?.job?.failedRows).toBe('number')
+    expect(typeof retryJob?.job?.elapsedMs).toBe('number')
 
     // Poll job status until completion (fallback path runs in-process in tests).
     let batchId = ''
@@ -2329,8 +2348,13 @@ describe('Attendance Plugin Integration', () => {
       }),
     })
     expect(commitRes.status).toBe(200)
-    const batchId = (commitRes.body as { data?: { batchId?: string } } | undefined)?.data?.batchId
+    const commitData = (commitRes.body as { data?: any } | undefined)?.data
+    const batchId = commitData?.batchId
     expect(typeof batchId).toBe('string')
+    expect(['standard', 'bulk']).toContain(String(commitData?.engine || ''))
+    expect(Number(commitData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(commitData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+    expect(Number(commitData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
 
     const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
     const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
@@ -2451,8 +2475,13 @@ describe('Attendance Plugin Integration', () => {
       }),
     })
     expect(commitRes.status).toBe(200)
-    const batchId = (commitRes.body as { data?: { batchId?: string } } | undefined)?.data?.batchId
+    const commitData = (commitRes.body as { data?: any } | undefined)?.data
+    const batchId = commitData?.batchId
     expect(typeof batchId).toBe('string')
+    expect(['standard', 'bulk']).toContain(String(commitData?.engine || ''))
+    expect(Number(commitData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(commitData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+    expect(Number(commitData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
 
     const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
     const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
@@ -2472,9 +2501,13 @@ describe('Attendance Plugin Integration', () => {
       }),
     })
     expect(retryRes.status).toBe(200)
-    const retryBody = retryRes.body as { data?: { batchId?: string; idempotent?: boolean } } | undefined
-    expect(retryBody?.data?.batchId).toBe(batchId)
-    expect(retryBody?.data?.idempotent).toBe(true)
+    const retryData = (retryRes.body as { data?: any } | undefined)?.data
+    expect(retryData?.batchId).toBe(batchId)
+    expect(retryData?.idempotent).toBe(true)
+    expect(['standard', 'bulk']).toContain(String(retryData?.engine || ''))
+    expect(Number(retryData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(retryData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+    expect(Number(retryData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
 
     if (batchId) {
       const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
@@ -2595,12 +2628,20 @@ describe('Attendance Plugin Integration', () => {
     expect(commitARes.status).toBe(200)
     expect(commitBRes.status).toBe(200)
 
-    const commitAData = (commitARes.body as { data?: { batchId?: string; idempotent?: boolean } } | undefined)?.data
-    const commitBData = (commitBRes.body as { data?: { batchId?: string; idempotent?: boolean } } | undefined)?.data
+    const commitAData = (commitARes.body as { data?: any } | undefined)?.data
+    const commitBData = (commitBRes.body as { data?: any } | undefined)?.data
     expect(commitAData?.batchId).toBeTruthy()
     expect(commitBData?.batchId).toBeTruthy()
     expect(commitAData?.batchId).toBe(commitBData?.batchId)
     expect([commitAData?.idempotent, commitBData?.idempotent].some(Boolean)).toBe(true)
+    expect(['standard', 'bulk']).toContain(String(commitAData?.engine || ''))
+    expect(['standard', 'bulk']).toContain(String(commitBData?.engine || ''))
+    expect(Number(commitAData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(commitBData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(commitAData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+    expect(Number(commitBData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+    expect(Number(commitAData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
+    expect(Number(commitBData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
 
     const retryRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
       method: 'POST',
@@ -2614,9 +2655,13 @@ describe('Attendance Plugin Integration', () => {
       }),
     })
     expect(retryRes.status).toBe(200)
-    const retryBody = retryRes.body as { data?: { batchId?: string; idempotent?: boolean } } | undefined
-    expect(retryBody?.data?.batchId).toBe(commitAData?.batchId)
-    expect(retryBody?.data?.idempotent).toBe(true)
+    const retryData = (retryRes.body as { data?: any } | undefined)?.data
+    expect(retryData?.batchId).toBe(commitAData?.batchId)
+    expect(retryData?.idempotent).toBe(true)
+    expect(['standard', 'bulk']).toContain(String(retryData?.engine || ''))
+    expect(Number(retryData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(retryData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+    expect(Number(retryData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
 
     const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
     const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
