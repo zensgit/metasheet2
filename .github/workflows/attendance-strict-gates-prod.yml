@@ -205,6 +205,8 @@ jobs:
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
       AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
+      LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL }}
+      LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD }}
       PROVISION_USER_ID: ${{ vars.ATTENDANCE_PROVISION_USER_ID }}
       EXPECT_PRODUCT_MODE: ${{ inputs.expect_product_mode || 'attendance' }}
       RUN_PREFLIGHT: 'false'
@@ -222,6 +224,36 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve attendance auth token
+        run: |
+          set -euo pipefail
+          output_root="output/playwright/attendance-prod-acceptance"
+          mkdir -p "$output_root"
+          auth_meta_file="${output_root}/auth-resolve-meta.txt"
+          auth_token_file="${RUNNER_TEMP}/attendance-auth-token.txt"
+
+          if AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_RESOLVE_META_FILE="$auth_meta_file" ./scripts/ops/attendance-resolve-auth.sh > "$auth_token_file"; then
+            resolved_token="$(tr -d '\r\n' < "$auth_token_file")"
+            if [[ -z "$resolved_token" ]]; then
+              AUTH_RESOLVE_META_FILE="$auth_meta_file" \
+                AUTH_ERROR_FILE="${output_root}/auth-error.txt" \
+                API_BASE="$API_BASE" \
+                ./scripts/ops/attendance-write-auth-error.sh
+              echo "::error::Resolved attendance auth token is empty."
+              exit 1
+            fi
+            echo "::add-mask::${resolved_token}"
+            echo "AUTH_TOKEN_EFFECTIVE=${resolved_token}" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          AUTH_RESOLVE_META_FILE="$auth_meta_file" \
+            AUTH_ERROR_FILE="${output_root}/auth-error.txt" \
+            API_BASE="$API_BASE" \
+            ./scripts/ops/attendance-write-auth-error.sh
+          echo "::error::No valid attendance admin token. Rotate ATTENDANCE_ADMIN_JWT or configure ATTENDANCE_ADMIN_EMAIL/ATTENDANCE_ADMIN_PASSWORD."
+          exit 1
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -242,6 +274,8 @@ jobs:
 
       - name: Run strict gates twice (remote)
         id: run_strict
+        env:
+          AUTH_TOKEN: ${{ env.AUTH_TOKEN_EFFECTIVE }}
         run: |
           set -euo pipefail
           ./scripts/ops/attendance-run-strict-gates-twice.sh
