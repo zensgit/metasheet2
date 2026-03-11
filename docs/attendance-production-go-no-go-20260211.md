@@ -2636,6 +2636,34 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Validation (2026-03-11): Strict Auth Token Fallback + Preflight Attendance-Only Guard
+
+Scope:
+
+- hardened strict gate CI auth handling and attendance-only preflight policy enforcement.
+- verified via branch run on `codex/attendance-pr396-pr399-delivery-md-20260310`.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Strict Gates (Prod, branch non-drill) | #22930543555 | PASS | `output/playwright/ga/22930543555/attendance-strict-gates-prod-22930543555-1/*-1/gate-summary.json`, `output/playwright/ga/22930543555/attendance-strict-gates-prod-22930543555-1/*-2/gate-summary.json`, `output/playwright/ga/22930543555/attendance-strict-gates-prod-22930543555-1/auth-resolve-meta.txt` |
+| Attendance Strict Gates (Prod, rerun baseline) | #22930455550 | FAIL (transient) | `output/playwright/ga/22930455550/attendance-strict-gates-prod-22930455550-1/*-1/gate-summary.json` (`playwrightProd=FAIL`, `gateReasons.playwrightProd=TIMEOUT`) |
+| Local preflight positive check (`ATTENDANCE_PREFLIGHT_REQUIRE_PRODUCT_MODE_ATTENDANCE=1`, `PRODUCT_MODE=attendance`) | local (2026-03-11) | PASS | command: `scripts/ops/attendance-preflight.sh` with temp compose/env/nginx fixtures |
+| Local preflight negative check (`PRODUCT_MODE=platform`) | local (2026-03-11) | FAIL (expected) | error: `PRODUCT_MODE='platform' is not allowed for attendance-only deployment` |
+
+Observed highlights:
+
+- strict run `#22930543555` passed all gates end-to-end after enabling auth token resolution fallback.
+- auth resolve metadata:
+  - `AUTH_SOURCE=refresh`
+  - `AUTH_ME_LAST_HTTP=200`
+  - `AUTH_REFRESH_LAST_HTTP=200`
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Validation (2026-03-11): Branch Policy Drift Drill Lifecycle Fix (Custom Title)
 
 Scope:

@@ -4143,3 +4143,34 @@ Observed highlights:
   - `gateFlat.protection.runId=22930314595`
   - `gateFlat.protection.requirePrReviews=true`
   - `gateFlat.protection.minApprovingReviews=1`
+
+### Update (2026-03-11): Strict Auth Fallback + Preflight Attendance-Mode Guard
+
+Scope:
+
+- strict gates now resolves effective auth token before remote gate execution (`token -> refresh -> login` fallback order).
+- preflight now supports strict attendance-only enforcement when explicitly enabled:
+  - `ATTENDANCE_PREFLIGHT_REQUIRE_PRODUCT_MODE_ATTENDANCE=1`
+
+Code:
+
+- `.github/workflows/attendance-strict-gates-prod.yml`
+- `scripts/ops/attendance-preflight.sh`
+- commit: `1f03aa14`
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Strict Gates (Prod, branch non-drill) | #22930543555 | PASS | `output/playwright/ga/22930543555/attendance-strict-gates-prod-22930543555-1/*-1/gate-summary.json`, `output/playwright/ga/22930543555/attendance-strict-gates-prod-22930543555-1/*-2/gate-summary.json`, `output/playwright/ga/22930543555/attendance-strict-gates-prod-22930543555-1/auth-resolve-meta.txt` |
+| Attendance Strict Gates (Prod, branch transient failure before rerun) | #22930455550 | FAIL (transient TIMEOUT) | `output/playwright/ga/22930455550/attendance-strict-gates-prod-22930455550-1/*-1/gate-summary.json` |
+| Local preflight guard check (`PRODUCT_MODE=attendance`) | local (2026-03-11) | PASS | command: `COMPOSE_FILE=<tmp> ENV_FILE=<tmp> NGINX_CONF=<tmp> ATTENDANCE_PREFLIGHT_REQUIRE_PRODUCT_MODE_ATTENDANCE=1 scripts/ops/attendance-preflight.sh` |
+| Local preflight negative check (`PRODUCT_MODE=platform`) | local (2026-03-11) | FAIL (expected) | error: `PRODUCT_MODE='platform' is not allowed for attendance-only deployment` |
+
+Observed highlights:
+
+- strict run `#22930543555` shows full gate success (`apiSmoke/provisioning/playwrightProd/desktop/mobile=PASS`).
+- auth resolve metadata confirms fallback path worked in CI:
+  - `AUTH_SOURCE=refresh`
+  - `AUTH_ME_LAST_HTTP=200`
+  - `AUTH_REFRESH_LAST_HTTP=200`
