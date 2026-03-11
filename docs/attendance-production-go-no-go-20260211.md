@@ -5833,3 +5833,46 @@ Decision:
 
 - dashboard now distinguishes wall-clock latency from gated async job telemetry.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-11): Longrun Stability + Gate-Metric Trend Alignment
+
+Scope:
+
+- align longrun trend drift analysis with async gate metric semantics.
+- reduce false `ASYNC_JOB_TIMEOUT` in longrun commit scenarios under transient 502 bursts.
+
+Changes:
+
+- PR #437 (`feat(perf): report async commit gate metrics in longrun trend`)
+  - file: `scripts/ops/attendance-import-perf-trend-report.mjs`
+  - adds `Latest Commit(gate)`, `Latest Commit(wall)`, `Commit Src` in trend markdown.
+  - drift analysis now prefers `commitMetricMs` (`commitGateMs` when available).
+- PR #438 (`fix(ci): harden longrun async poll recovery windows`)
+  - file: `.github/workflows/attendance-import-perf-longrun.yml`
+  - increases longrun commit scenarios `IMPORT_JOB_POLL_RECOVERY_GRACE_MS`.
+  - increases `rows10k-commit` recovery attempts to `4`.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf longrun (pre-fix reference) | #22942492361 | FAIL (expected pre-fix behavior) | `output/playwright/ga/22942492361/attendance-import-perf-longrun-rows10k-commit-22942492361-1/current/rows10k-commit/perf.log` |
+| Perf longrun (post-fix) | #22942967119 | PASS | `output/playwright/ga/22942967119/attendance-import-perf-longrun-trend-22942967119-1/20260311-081531/attendance-import-perf-longrun-trend.md` |
+| Daily Gate Dashboard (post longrun refresh) | #22943147061 | PASS | `output/playwright/ga/22943147061/attendance-daily-gate-dashboard-22943147061-1/attendance-daily-gate-dashboard.json` |
+
+Observed:
+
+- `#22942967119` trend row (`rows10k-commit`):
+  - `Latest Commit(gate)=20000`
+  - `Latest Commit(wall)=163448`
+  - `Commit Src=jobElapsedMs`
+- `#22943147061` includes:
+  - `gateFlat.longrun.commitGateMs=20000`
+  - `gateFlat.longrun.commitGateSource=jobElapsedMs`
+- P1 tracking issue auto-recovered:
+  - `#157 [Attendance P1] Perf longrun alert` -> `CLOSED`.
+
+Decision:
+
+- longrun gate returned to green with clearer triage signals and lower transient-failure sensitivity.
+- **GO maintained**.

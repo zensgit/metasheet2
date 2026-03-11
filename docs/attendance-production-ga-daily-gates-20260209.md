@@ -5578,3 +5578,25 @@ Dashboard gateFlat verification (post PR #435):
 - `gateFlat.perf.commitGateSource=jobElapsedMs`
 - evidence:
   - `output/playwright/ga/22942361131/attendance-daily-gate-dashboard-22942361131-1/attendance-daily-gate-dashboard.json`
+
+Longrun trend gate-metric verification (post PR #437 + #438):
+
+- run: `#22942967119` (PASS)
+- trend markdown now shows:
+  - `Latest Commit(gate)` / `Latest Commit(wall)` / `Commit Src`
+- `rows10k-commit` sample:
+  - `Latest Commit(gate)=20000`
+  - `Latest Commit(wall)=163448`
+  - `Commit Src=jobElapsedMs`
+- evidence:
+  - `output/playwright/ga/22942967119/attendance-import-perf-longrun-trend-22942967119-1/20260311-081531/attendance-import-perf-longrun-trend.md`
+
+Dashboard integration check (post longrun refresh):
+
+- run: `#22943147061` (PASS)
+- `gateFlat.longrun` includes:
+  - `commitMs=163448`
+  - `commitGateMs=20000`
+  - `commitGateSource=jobElapsedMs`
+- evidence:
+  - `output/playwright/ga/22943147061/attendance-daily-gate-dashboard-22943147061-1/attendance-daily-gate-dashboard.json`
