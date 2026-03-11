@@ -396,7 +396,7 @@ function parseLocaleZhSummaryJson(text) {
   if (statusRaw !== 'pass' && statusRaw !== 'fail') invalidReasonsRaw.push('status')
 
   const schemaVersionRaw = value && Object.prototype.hasOwnProperty.call(value, 'schemaVersion') ? value.schemaVersion : null
-  const schemaVersion = typeof schemaVersionRaw === 'number' && Number.isInteger(schemaVersionRaw) && schemaVersionRaw >= 1
+  const schemaVersion = typeof schemaVersionRaw === 'number' && Number.isInteger(schemaVersionRaw) && schemaVersionRaw >= 2
     ? schemaVersionRaw
     : null
   if (schemaVersionRaw !== null && schemaVersion === null) invalidReasonsRaw.push('schema_version')

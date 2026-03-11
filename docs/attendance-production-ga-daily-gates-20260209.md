@@ -4261,3 +4261,45 @@ Verification:
 Note:
 
 - full `pnpm --filter @metasheet/web build` is currently blocked by unrelated PLM type errors in the working tree; attendance zh copy gate remains green.
+
+### Update (2026-03-11): Dashboard Contract Hardening (`localeZh>=v2` + Cleanup Gate Assertions)
+
+Scope:
+
+- tightened locale dashboard contract to reject legacy locale summaries (`summarySchemaVersion=1`) on `status=PASS`.
+- added explicit calendar-toggle contract assertions:
+  - `toggleCheckSkipped` is required (`true|false`) when `summarySchemaVersion>=2`.
+  - `toggleCheckReason` is required when `toggleCheckSkipped=true`.
+- added machine contract assertions for `gateFlat.cleanup`:
+  - `status` must be `PASS|FAIL`;
+  - `FAIL` requires non-empty `reasonCode`;
+  - `PASS` forbids `reasonCode`;
+  - optional `staleCount` must be integer when present.
+- aligned dashboard parser with validator by requiring locale summary `schemaVersion>=2`.
+
+Code:
+
+- `scripts/ops/attendance-daily-gate-report.mjs`
+- `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+
+Verification (local, 2026-03-11):
+
+| Check | Status | Evidence |
+|---|---|---|
+| Gate Contract Matrix (`strict`) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
+| Gate Contract Matrix (`dashboard`) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.locale-legacy.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.cleanup.json` |
+| Daily dashboard report generation (`main`, lookback 48h) | PASS | `output/playwright/attendance-daily-gate-dashboard/20260311-010651/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-daily-gate-dashboard/20260311-010651/attendance-daily-gate-dashboard.md` |
+| Dashboard JSON validator (new contract) | PASS | command: `scripts/ops/attendance-validate-daily-dashboard-json.sh output/playwright/attendance-daily-gate-dashboard/20260311-010651/attendance-daily-gate-dashboard.json` |
+
+Observed:
+
+- contract runner now explicitly blocks legacy locale summary fixture (`dashboard.invalid.locale-legacy.json`) as expected.
+- current `main` latest locale artifact is still legacy (`runId=22886643423`, `summarySchemaVersion=1`), therefore dashboard computed `overallStatus=fail` with `reasonCode=LOCALE_ZH_SUMMARY_INVALID` while `p0Status=pass`.
+
+Remediation:
+
+1. Run `Attendance Locale zh Smoke (Prod)` on `main` with latest script to produce `schemaVersion>=3`.
+2. Re-run `Attendance Daily Gate Dashboard` and verify:
+   - `gateFlat.localeZh.status=PASS`
+   - `overallStatus=pass`

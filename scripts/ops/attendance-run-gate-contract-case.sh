@@ -111,12 +111,13 @@ fi
 
 if [[ "$CASE_ID" == "dashboard" ]]; then
   dashboard_valid="${case_dir}/dashboard.valid.json"
-  dashboard_valid_locale_legacy="${case_dir}/dashboard.valid.locale-legacy.json"
+  dashboard_invalid_locale_legacy="${case_dir}/dashboard.invalid.locale-legacy.json"
   dashboard_invalid_strict="${case_dir}/dashboard.invalid.strict.json"
   dashboard_invalid_perf="${case_dir}/dashboard.invalid.perf.json"
   dashboard_invalid_longrun="${case_dir}/dashboard.invalid.longrun.json"
   dashboard_invalid_upsert="${case_dir}/dashboard.invalid.upsert.json"
   dashboard_invalid_locale="${case_dir}/dashboard.invalid.locale.json"
+  dashboard_invalid_cleanup="${case_dir}/dashboard.invalid.cleanup.json"
 
   cat >"$dashboard_valid" <<'EOF'
 {
@@ -138,6 +139,12 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
     "longrun": {
       "completed": {
         "id": 200003,
+        "conclusion": "success"
+      }
+    },
+    "cleanup": {
+      "completed": {
+        "id": 200005,
         "conclusion": "success"
       }
     },
@@ -182,6 +189,12 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
       "previewMs": "33000",
       "regressionsCount": "0"
     },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 200005,
+      "staleCount": "0"
+    },
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
@@ -206,7 +219,7 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
 }
 EOF
 
-  cat >"$dashboard_valid_locale_legacy" <<'EOF'
+  cat >"$dashboard_invalid_locale_legacy" <<'EOF'
 {
   "p0Status": "pass",
   "overallStatus": "pass",
@@ -226,6 +239,12 @@ EOF
     "longrun": {
       "completed": {
         "id": 210003,
+        "conclusion": "success"
+      }
+    },
+    "cleanup": {
+      "completed": {
+        "id": 210005,
         "conclusion": "success"
       }
     },
@@ -270,6 +289,12 @@ EOF
       "previewMs": "33000",
       "regressionsCount": "0"
     },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 210005,
+      "staleCount": "0"
+    },
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
@@ -307,6 +332,12 @@ EOF
     "longrun": {
       "completed": {
         "id": 600003,
+        "conclusion": "success"
+      }
+    },
+    "cleanup": {
+      "completed": {
+        "id": 600005,
         "conclusion": "success"
       }
     },
@@ -350,6 +381,12 @@ EOF
       "expectedRecordUpsertStrategy": "staging",
       "previewMs": "33000",
       "regressionsCount": "0"
+    },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 600005,
+      "staleCount": "0"
     },
     "localeZh": {
       "status": "PASS",
@@ -398,6 +435,12 @@ EOF
         "conclusion": "success"
       }
     },
+    "cleanup": {
+      "completed": {
+        "id": 300005,
+        "conclusion": "success"
+      }
+    },
     "localeZh": {
       "completed": {
         "id": 300004,
@@ -432,6 +475,12 @@ EOF
       "uploadCsv": "true",
       "previewMs": "33000",
       "regressionsCount": "0"
+    },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 300005,
+      "staleCount": "0"
     },
     "localeZh": {
       "status": "PASS",
@@ -480,6 +529,12 @@ EOF
         "conclusion": "success"
       }
     },
+    "cleanup": {
+      "completed": {
+        "id": 400005,
+        "conclusion": "success"
+      }
+    },
     "localeZh": {
       "completed": {
         "id": 400004,
@@ -516,6 +571,12 @@ EOF
       "uploadCsv": "true",
       "previewMs": "33000",
       "regressionsCount": "0"
+    },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 400005,
+      "staleCount": "0"
     },
     "localeZh": {
       "status": "PASS",
@@ -564,6 +625,12 @@ EOF
         "conclusion": "success"
       }
     },
+    "cleanup": {
+      "completed": {
+        "id": 500005,
+        "conclusion": "success"
+      }
+    },
     "localeZh": {
       "completed": {
         "id": 500004,
@@ -600,6 +667,12 @@ EOF
       "uploadCsv": "maybe",
       "previewMs": "33000",
       "regressionsCount": "0"
+    },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 500005,
+      "staleCount": "0"
     },
     "localeZh": {
       "status": "PASS",
@@ -648,6 +721,12 @@ EOF
         "conclusion": "success"
       }
     },
+    "cleanup": {
+      "completed": {
+        "id": 700005,
+        "conclusion": "success"
+      }
+    },
     "localeZh": {
       "completed": {
         "id": 700004,
@@ -689,6 +768,12 @@ EOF
       "previewMs": "33000",
       "regressionsCount": "0"
     },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 700005,
+      "staleCount": "0"
+    },
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
@@ -713,8 +798,109 @@ EOF
 }
 EOF
 
+  cat >"$dashboard_invalid_cleanup" <<'EOF'
+{
+  "p0Status": "pass",
+  "overallStatus": "pass",
+  "gates": {
+    "strict": {
+      "completed": {
+        "id": 800001,
+        "conclusion": "success"
+      }
+    },
+    "perf": {
+      "completed": {
+        "id": 800002,
+        "conclusion": "success"
+      }
+    },
+    "longrun": {
+      "completed": {
+        "id": 800003,
+        "conclusion": "success"
+      }
+    },
+    "cleanup": {
+      "completed": {
+        "id": 800005,
+        "conclusion": "success"
+      }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 800004,
+        "conclusion": "success"
+      }
+    }
+  },
+  "gateFlat": {
+    "schemaVersion": 3,
+    "strict": {
+      "summaryPresent": true,
+      "summaryValid": true
+    },
+    "perf": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 800002,
+      "summarySchemaVersion": 2,
+      "scenario": "100000-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "staging",
+      "expectedRecordUpsertStrategy": "staging",
+      "previewMs": "1200",
+      "regressionsCount": "0"
+    },
+    "longrun": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 800003,
+      "summarySchemaVersion": 2,
+      "scenario": "rows500k-preview",
+      "rows": 500000,
+      "mode": "preview",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "values",
+      "expectedRecordUpsertStrategy": "values",
+      "previewMs": "33000",
+      "regressionsCount": "0"
+    },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": "RUN_FAILED",
+      "runId": 800005,
+      "staleCount": "3"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 800004,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
+      "locale": "zh-CN",
+      "lunarLabelCount": "42",
+      "holidayBadgeCount": "1",
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "true",
+      "zhShellTabsChecked": "true"
+    }
+  },
+  "escalationIssue": {
+    "mode": "none_or_closed",
+    "p0Status": "pass"
+  }
+}
+EOF
+
   ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_valid"
-  ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_valid_locale_legacy"
+  expect_fail "dashboard locale zh legacy schema contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_locale_legacy"
   expect_fail "dashboard strict-summary-validity contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_strict"
   expect_fail "dashboard perf gateFlat contract" \
@@ -725,6 +911,8 @@ EOF
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_upsert"
   expect_fail "dashboard locale zh schema v3 contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_locale"
+  expect_fail "dashboard cleanup gateFlat contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_cleanup"
 
   info "OK: dashboard contract case passed"
   exit 0

@@ -2636,6 +2636,46 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Validation (2026-03-11): Daily Dashboard Contract Hardening + Cleanup/Toggle Assertions
+
+Scope:
+
+- hardened daily dashboard machine contract in three areas:
+  - locale summary must be `summarySchemaVersion>=2` for `PASS`;
+  - locale toggle contract requires `toggleCheckSkipped` (and `toggleCheckReason` when skipped);
+  - cleanup gate contract validates `status/reasonCode/runId/staleCount`.
+- aligned parser and validator so locale legacy summaries are marked invalid consistently.
+
+Code:
+
+- `scripts/ops/attendance-daily-gate-report.mjs`
+- `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+
+Verification:
+
+| Check | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Gate Contract Matrix (`strict`, local) | local (2026-03-11) | PASS | `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.valid.json`, `output/playwright/attendance-gate-contract-matrix/strict/strict/gate-summary.invalid.json` |
+| Attendance Gate Contract Matrix (`dashboard`, local) | local (2026-03-11) | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.valid.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.locale-legacy.json`, `output/playwright/attendance-gate-contract-matrix/dashboard/dashboard.invalid.cleanup.json` |
+| Attendance Daily Gate Dashboard report generation (`main`, lookback 48h, local) | local (2026-03-11) | PASS | `output/playwright/attendance-daily-gate-dashboard/20260311-010651/attendance-daily-gate-dashboard.json`, `output/playwright/attendance-daily-gate-dashboard/20260311-010651/attendance-daily-gate-dashboard.md` |
+| Dashboard validator on latest generated JSON | local (2026-03-11) | PASS | command: `scripts/ops/attendance-validate-daily-dashboard-json.sh output/playwright/attendance-daily-gate-dashboard/20260311-010651/attendance-daily-gate-dashboard.json` |
+
+Observed:
+
+- `main` latest locale run currently referenced by dashboard is `runId=22886643423` with legacy schema (`summarySchemaVersion=1`), so dashboard sets:
+  - `gateFlat.localeZh.status=FAIL`
+  - `reasonCode=LOCALE_ZH_SUMMARY_INVALID`
+  - `overallStatus=fail`
+  - `p0Status=pass`
+
+Decision:
+
+- **GO maintained for P0 production gates**.
+- **P1 remediation required** to restore full green dashboard:
+  1. rerun `Attendance Locale zh Smoke (Prod)` on `main` (new schema);
+  2. rerun `Attendance Daily Gate Dashboard` and confirm `overallStatus=pass`.
+
 ## Post-Go Validation (2026-03-11): Attendance zh Error-Copy Cleanup
 
 Scope:
