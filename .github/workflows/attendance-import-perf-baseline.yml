@@ -272,9 +272,9 @@ jobs:
             exit 0
           fi
 
-          last_failure_line="$(grep -E '^\\[attendance-import-perf\\] Failed:' "$attempt1_log" | tail -n 1 || true)"
+          last_failure_line="$(grep -E '^\[attendance-import-perf\] Failed:' "$attempt1_log" | tail -n 1 || true)"
           if [[ -z "$last_failure_line" ]]; then
-            last_failure_line="$(tail -n 3 "$attempt1_log" | tr '\n' ' ')"
+            last_failure_line="$(tail -n 40 "$attempt1_log" | tr '\n' ' ')"
           fi
           if ! printf '%s' "$last_failure_line" | grep -Eiq "$transient_pattern"; then
             cp "$attempt1_log" "$final_log"
