@@ -53,6 +53,10 @@ const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5)
 const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
 const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 180000))
 const importJobPollIntervalMs = Math.max(500, Number(process.env.IMPORT_JOB_POLL_INTERVAL_MS || 2000))
+const importJobPollApiRetryAttempts = Math.max(
+  1,
+  Number(process.env.IMPORT_JOB_POLL_API_RETRIES || 2),
+)
 const importJobPollTimeoutMs = Math.max(
   60_000,
   Number(process.env.IMPORT_JOB_POLL_TIMEOUT_MS || 30 * 60 * 1000),
@@ -64,6 +68,10 @@ const importJobPollTimeoutLargeMs = Math.max(
 const importJobPollRecoveryGraceMs = Math.max(
   60_000,
   Number(process.env.IMPORT_JOB_POLL_RECOVERY_GRACE_MS || 3 * 60 * 1000),
+)
+const importJobPollStallTimeoutMs = Math.max(
+  importJobPollIntervalMs * 5,
+  Number(process.env.IMPORT_JOB_POLL_STALL_TIMEOUT_MS || importJobPollRecoveryGraceMs),
 )
 const previewAsyncRowThreshold = Math.max(1, Number(process.env.PREVIEW_ASYNC_ROW_THRESHOLD || 50_000))
 const importJobRecoveryAttemptsRaw = Number(process.env.IMPORT_JOB_RECOVERY_ATTEMPTS || 3)
@@ -153,6 +161,12 @@ function isTokenizedImportEndpoint(pathname, method) {
   const upper = String(method || 'GET').toUpperCase()
   if (upper !== 'POST') return false
   return /^\/attendance\/import\/(preview|preview-async|commit|commit-async)(?:\/|$)/.test(String(pathname || ''))
+}
+
+function isImportJobPollEndpoint(pathname, method) {
+  const upper = String(method || 'GET').toUpperCase()
+  if (upper !== 'GET') return false
+  return /^\/attendance\/import\/jobs\/[^/]+(?:\/|$)/.test(String(pathname || ''))
 }
 
 function isResponseOk(resp) {
@@ -289,7 +303,11 @@ async function refreshAuthToken() {
 async function apiFetch(pathname, init = {}) {
   const url = `${apiBase}${pathname}`
   const method = String(init.method || 'GET').toUpperCase()
-  const attempts = isTokenizedImportEndpoint(pathname, method) ? 1 : apiRetryAttempts
+  const attempts = isTokenizedImportEndpoint(pathname, method)
+    ? 1
+    : isImportJobPollEndpoint(pathname, method)
+      ? Math.max(1, Math.min(importJobPollApiRetryAttempts, apiRetryAttempts))
+      : apiRetryAttempts
   const res = await fetchWithRetry(url, {
     ...init,
     headers: {
@@ -503,6 +521,8 @@ async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2
   const started = Date.now()
   let transientErrors = 0
   const transientRecoveryErrorThreshold = 3
+  let lastProgressSignal = ''
+  let lastProgressAt = started
   while (true) {
     let job = null
     try {
@@ -545,6 +565,24 @@ async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2
     }
     const data = job.body?.data ?? job.body
     const status = String(data?.status || '')
+    const progressSignal = [
+      status || 'unknown',
+      String(data?.progressPercent ?? data?.progress ?? ''),
+      String(data?.processedRows ?? ''),
+      String(data?.failedRows ?? ''),
+      String(data?.elapsedMs ?? ''),
+      String(data?.updatedAt ?? ''),
+      String(data?.step ?? data?.phase ?? ''),
+    ].join('|')
+    const now = Date.now()
+    if (!lastProgressSignal || progressSignal !== lastProgressSignal) {
+      lastProgressSignal = progressSignal
+      lastProgressAt = now
+    } else if ((now - lastProgressAt) > importJobPollStallTimeoutMs && (now - started) > importJobPollRecoveryGraceMs) {
+      throw new Error(
+        `async commit job poll timed out after no progress (stallMs=${now - lastProgressAt} status=${status || 'unknown'})`,
+      )
+    }
     if (status === 'completed') return data
     if (status === 'failed') {
       const msg = data?.error ? String(data.error) : 'job failed'
@@ -649,7 +687,7 @@ async function run() {
   log(`payload_source=${payloadPlan.payloadSource} reason=${payloadPlan.reason} upload_csv_requested=${uploadCsv} upload_csv_effective=${payloadPlan.effectiveUploadCsv} csv_rows_limit_hint=${csvRowsLimitHint}`)
   log(`retry_profile preview=${previewRetryAttempts} commit=${commitRetryAttempts} commit_large=${commitRetryAttemptsLarge}`)
   log(
-    `job_poll interval_ms=${importJobPollIntervalMs} timeout_ms=${importJobPollTimeoutMs} timeout_large_ms=${importJobPollTimeoutLargeMs} recovery_grace_ms=${importJobPollRecoveryGraceMs} recovery_attempts=${importJobRecoveryAttempts}`,
+    `job_poll interval_ms=${importJobPollIntervalMs} api_retries=${importJobPollApiRetryAttempts} timeout_ms=${importJobPollTimeoutMs} timeout_large_ms=${importJobPollTimeoutLargeMs} recovery_grace_ms=${importJobPollRecoveryGraceMs} stall_timeout_ms=${importJobPollStallTimeoutMs} recovery_attempts=${importJobRecoveryAttempts}`,
   )
   if (expectRecordUpsertStrategy) {
     log(`expect_record_upsert_strategy=${expectRecordUpsertStrategy}`)
