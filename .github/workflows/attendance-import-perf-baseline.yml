@@ -262,27 +262,33 @@ jobs:
             return "$rc"
           }
 
-          if run_once "$attempt1_log" node ./scripts/ops/attendance-import-perf.mjs; then
+          run_once "$attempt1_log" node ./scripts/ops/attendance-import-perf.mjs
+          rc_first="$?"
+          if [[ "$rc_first" -eq 0 ]]; then
             cp "$attempt1_log" "$final_log"
             exit 0
           fi
-          rc_first="$?"
 
-          if ! grep -Eiq "$transient_pattern" "$attempt1_log"; then
+          last_failure_line="$(grep -E '^\\[attendance-import-perf\\] Failed:' "$attempt1_log" | tail -n 1 || true)"
+          if [[ -z "$last_failure_line" ]]; then
+            last_failure_line="$(tail -n 3 "$attempt1_log" | tr '\n' ' ')"
+          fi
+          if ! printf '%s' "$last_failure_line" | grep -Eiq "$transient_pattern"; then
             cp "$attempt1_log" "$final_log"
             exit "$rc_first"
           fi
 
           echo "Transient perf failure detected; retrying once with expanded commit retries."
           sleep 10
-          if run_once "$attempt2_log" env \
+          run_once "$attempt2_log" env \
             COMMIT_RETRIES="${COMMIT_RETRIES_RETRY}" \
             COMMIT_RETRIES_LARGE="${COMMIT_RETRIES_LARGE_RETRY}" \
-            node ./scripts/ops/attendance-import-perf.mjs; then
+            node ./scripts/ops/attendance-import-perf.mjs
+          rc_second="$?"
+          if [[ "$rc_second" -eq 0 ]]; then
             cat "$attempt1_log" "$attempt2_log" > "$final_log"
             exit 0
           fi
-          rc_second="$?"
           cat "$attempt1_log" "$attempt2_log" > "$final_log"
           exit "$rc_second"
 
