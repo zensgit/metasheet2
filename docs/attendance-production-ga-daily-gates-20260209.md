@@ -4213,3 +4213,30 @@ Observed highlights:
   - `p0Status=pass`
   - `overallStatus=pass`
   - `openTrackingIssues=[]`
+
+### Update (2026-03-11): Frontend Auth Guard Closure + Production Feature-Override Hardening
+
+Scope:
+
+- added explicit `/login` route and auth-first navigation guard to prevent unauthenticated access loops.
+- disabled localStorage feature overrides in production by default (kept opt-in escape hatch for diagnostics).
+
+Code:
+
+- `apps/web/src/main.ts`
+  - route: `/login` (`requiresAuth=false`, `hideNavbar=true`)
+  - guard: redirect unauthenticated requests to `/login?redirect=<path>`
+  - guard: authenticated visits to `/login` are redirected to `flags.resolveHomePath()`
+- `apps/web/src/stores/featureFlags.ts`
+  - `parseOverrideFeatures()` now returns overrides only in DEV or when `VITE_ALLOW_FEATURE_OVERRIDE=true`.
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| Web unit tests (`useAuth` / `api` / `featureFlags`) | PASS | command: `pnpm --filter @metasheet/web exec vitest run --watch=false tests/useAuth.spec.ts tests/utils/api.test.ts tests/featureFlags.spec.ts` |
+| Web production build | PASS | command: `pnpm --filter @metasheet/web build` |
+
+Operational note:
+
+- production should keep `VITE_ALLOW_FEATURE_OVERRIDE` unset (or `false`) to avoid client-side feature tampering.

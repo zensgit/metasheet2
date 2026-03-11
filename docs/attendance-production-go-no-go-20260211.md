@@ -2636,6 +2636,29 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Validation (2026-03-11): Frontend Auth Guard Closure + Production Feature-Override Hardening
+
+Scope:
+
+- completed login-route/auth-guard closure for web shell navigation.
+- prevented production localStorage feature overrides unless explicitly enabled by env.
+
+Code:
+
+- `apps/web/src/main.ts`
+- `apps/web/src/stores/featureFlags.ts`
+
+Verification:
+
+| Check | Status | Evidence |
+|---|---|---|
+| Web unit tests (`useAuth`, `utils/api`, `featureFlags`) | PASS | command: `pnpm --filter @metasheet/web exec vitest run --watch=false tests/useAuth.spec.ts tests/utils/api.test.ts tests/featureFlags.spec.ts` |
+| Web build | PASS | command: `pnpm --filter @metasheet/web build` |
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Validation (2026-03-11): Drill Override Issue-Matching Normalization (P1 Workflows)
 
 Scope:
