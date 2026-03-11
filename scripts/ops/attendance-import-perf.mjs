@@ -63,7 +63,7 @@ const importJobPollTimeoutLargeMs = Math.max(
 )
 const importJobPollRecoveryGraceMs = Math.max(
   60_000,
-  Number(process.env.IMPORT_JOB_POLL_RECOVERY_GRACE_MS || 10 * 60 * 1000),
+  Number(process.env.IMPORT_JOB_POLL_RECOVERY_GRACE_MS || 3 * 60 * 1000),
 )
 const previewAsyncRowThreshold = Math.max(1, Number(process.env.PREVIEW_ASYNC_ROW_THRESHOLD || 50_000))
 const importJobRecoveryAttemptsRaw = Number(process.env.IMPORT_JOB_RECOVERY_ATTEMPTS || 3)
@@ -502,6 +502,7 @@ function resolvePreviewMode() {
 async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2000 } = {}) {
   const started = Date.now()
   let transientErrors = 0
+  const transientRecoveryErrorThreshold = 3
   while (true) {
     let job = null
     try {
@@ -510,8 +511,12 @@ async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2
       transientErrors += 1
       const message = (error && error.message) || String(error)
       log(`WARN: transient job poll network error (attempt=${transientErrors}); retrying (${message})`)
-      if (Date.now() - started > timeoutMs) {
+      const elapsed = Date.now() - started
+      if (elapsed > timeoutMs) {
         throw new Error(`async commit job poll timed out after network errors: ${message}`)
+      }
+      if (transientErrors >= transientRecoveryErrorThreshold && elapsed > importJobPollRecoveryGraceMs) {
+        throw new Error(`async commit job poll timed out after transient errors (network): ${message}`)
       }
       await sleep(intervalMs)
       continue
@@ -522,7 +527,11 @@ async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2
       if (transient) {
         transientErrors += 1
         log(`WARN: transient job poll error (attempt=${transientErrors} status=${status}); retrying`)
-        if (Date.now() - started > timeoutMs) {
+        const elapsed = Date.now() - started
+        if (elapsed > timeoutMs) {
+          throw new Error(`async commit job poll timed out after transient errors (last status=${status})`)
+        }
+        if (transientErrors >= transientRecoveryErrorThreshold && elapsed > importJobPollRecoveryGraceMs) {
           throw new Error(`async commit job poll timed out after transient errors (last status=${status})`)
         }
         await sleep(intervalMs)
