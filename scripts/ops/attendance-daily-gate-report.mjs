@@ -325,6 +325,12 @@ function parsePerfSummaryJson(text) {
 
   const previewMs = typeof value?.previewMs === 'number' ? value.previewMs : null
   const commitMs = typeof value?.commitMs === 'number' ? value.commitMs : null
+  const commitGateMs = typeof value?.commitGateMs === 'number'
+    ? value.commitGateMs
+    : (typeof value?.perfMetrics?.commitGateMs === 'number' ? value.perfMetrics.commitGateMs : null)
+  const commitGateSource = typeof value?.commitGateSource === 'string'
+    ? value.commitGateSource.trim()
+    : (typeof value?.perfMetrics?.commitGateSource === 'string' ? value.perfMetrics.commitGateSource.trim() : null)
   const exportMs = typeof value?.exportMs === 'number' ? value.exportMs : null
   const rollbackMs = typeof value?.rollbackMs === 'number' ? value.rollbackMs : null
   const rows = typeof value?.rows === 'number' ? value.rows : null
@@ -375,6 +381,8 @@ function parsePerfSummaryJson(text) {
     uploadCsv: uploadCsv === null ? null : uploadCsv ? 'true' : 'false',
     previewMs: previewMs === null ? null : String(previewMs),
     commitMs: commitMs === null ? null : String(commitMs),
+    commitGateMs: commitGateMs === null ? null : String(commitGateMs),
+    commitGateSource: commitGateSource || null,
     exportMs: exportMs === null ? null : String(exportMs),
     rollbackMs: rollbackMs === null ? null : String(rollbackMs),
     regressionsCount: String(regressionsRaw.length),
@@ -917,6 +925,8 @@ function renderMarkdown({
         if (meta.rows) extra.push(`rows=${meta.rows}`)
         if (meta.mode) extra.push(`mode=${meta.mode}`)
         if (meta.uploadCsv) extra.push(`upload=${meta.uploadCsv}`)
+        if (meta.commitGateMs) extra.push(`commit_gate_ms=${meta.commitGateMs}`)
+        if (meta.commitGateSource) extra.push(`commit_gate_source=${meta.commitGateSource}`)
         if (meta.regressionsCount) extra.push(`regressions=${meta.regressionsCount}`)
       }
       if (gate.name === 'Locale zh Smoke') {
@@ -1023,6 +1033,8 @@ function renderMarkdown({
         if (meta?.uploadCsv) metaBits.push(`upload_csv=${meta.uploadCsv}`)
         if (meta?.previewMs) metaBits.push(`preview_ms=${meta.previewMs}`)
         if (meta?.commitMs) metaBits.push(`commit_ms=${meta.commitMs}`)
+        if (meta?.commitGateMs) metaBits.push(`commit_gate_ms=${meta.commitGateMs}`)
+        if (meta?.commitGateSource) metaBits.push(`commit_gate_source=${meta.commitGateSource}`)
         if (meta?.exportMs) metaBits.push(`export_ms=${meta.exportMs}`)
         if (meta?.rollbackMs) metaBits.push(`rollback_ms=${meta.rollbackMs}`)
         if (meta?.regressionsCount) metaBits.push(`regressions=${meta.regressionsCount}`)
@@ -1947,6 +1959,8 @@ async function run() {
           if (meta.rows) summaryBits.push(`rows=${meta.rows}`)
           if (meta.mode) summaryBits.push(`mode=${meta.mode}`)
           if (meta.uploadCsv) summaryBits.push(`upload_csv=${meta.uploadCsv}`)
+          if (meta.commitGateMs) summaryBits.push(`commit_gate_ms=${meta.commitGateMs}`)
+          if (meta.commitGateSource) summaryBits.push(`commit_gate_source=${meta.commitGateSource}`)
           if (meta.regressionsCount) summaryBits.push(`regressions=${meta.regressionsCount}`)
         }
       } else if (gate.name === 'Locale zh Smoke') {
@@ -2046,6 +2060,8 @@ async function run() {
           flat.uploadCsv = meta.uploadCsv ?? null
           flat.previewMs = meta.previewMs ?? null
           flat.commitMs = meta.commitMs ?? null
+          flat.commitGateMs = meta.commitGateMs ?? null
+          flat.commitGateSource = meta.commitGateSource ?? null
           flat.exportMs = meta.exportMs ?? null
           flat.rollbackMs = meta.rollbackMs ?? null
           flat.regressionsCount = meta.regressionsCount ?? null
