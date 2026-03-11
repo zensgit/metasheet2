@@ -3302,6 +3302,7 @@ type AttendanceStatusAction =
   | 'resume-import-job'
   | 'reload-import-csv'
   | 'retry-save-settings'
+  | 'retry-sync-holidays'
   | 'retry-save-rule'
   | 'retry-preview-import'
   | 'retry-run-import'
@@ -3311,6 +3312,7 @@ type AttendanceStatusContext =
   | 'refresh'
   | 'admin'
   | 'save-settings'
+  | 'sync-holidays'
   | 'save-rule'
   | 'import-preview'
   | 'import-run'
@@ -4182,6 +4184,7 @@ const statusActionLabel = computed(() => {
   if (action === 'resume-import-job') return tr('Resume import job', '恢复导入任务')
   if (action === 'reload-import-csv') return tr('Re-apply CSV', '重新应用 CSV')
   if (action === 'retry-save-settings') return tr('Retry save settings', '重试保存设置')
+  if (action === 'retry-sync-holidays') return tr('Retry holiday sync', '重试节假日同步')
   if (action === 'retry-save-rule') return tr('Retry save rule', '重试保存规则')
   if (action === 'retry-preview-import') return tr('Retry preview', '重试预览')
   if (action === 'retry-run-import' && canResumeImportJobFromStatus.value) return tr('Resume import job', '恢复导入任务')
@@ -4200,6 +4203,7 @@ const statusActionBusy = computed(() => {
   if (action === 'resume-import-job') return importAsyncPolling.value
   if (action === 'reload-import-csv') return importLoading.value
   if (action === 'retry-save-settings') return settingsLoading.value
+  if (action === 'retry-sync-holidays') return holidaySyncLoading.value
   if (action === 'retry-save-rule') return ruleLoading.value
   if (action === 'retry-preview-import') return importLoading.value
   if (action === 'retry-run-import') {
@@ -6249,6 +6253,7 @@ function defaultStatusActionForContext(context: AttendanceStatusContext): Attend
   if (context === 'refresh') return 'refresh-overview'
   if (context === 'admin') return 'reload-admin'
   if (context === 'save-settings') return 'retry-save-settings'
+  if (context === 'sync-holidays') return 'retry-sync-holidays'
   if (context === 'save-rule') return 'retry-save-rule'
   if (context === 'import-preview') return 'retry-preview-import'
   if (context === 'import-run') return 'retry-run-import'
@@ -6553,6 +6558,10 @@ async function runStatusAction() {
   }
   if (action === 'retry-save-settings') {
     await saveSettings()
+    return
+  }
+  if (action === 'retry-sync-holidays') {
+    await syncHolidays()
     return
   }
   if (action === 'retry-save-rule') {
@@ -7914,33 +7923,7 @@ async function saveSettings() {
 }
 
 async function syncHolidays() {
-  holidaySyncLoading.value = true
-  try {
-    const payload = {
-      source: 'holiday-cn',
-      ...buildHolidaySyncPayload(),
-    }
-    const response = await apiFetch('/api/attendance/holidays/sync', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error(tr('Admin permissions required', '需要管理员权限'))
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Holiday sync failed', '节假日同步失败'))
-    }
-    if (data?.data?.lastRun) {
-      holidaySyncLastRun.value = data.data.lastRun
-    }
-    setStatus(tr(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`, `节假日同步完成（已应用 ${data.data?.totalApplied ?? 0} 条）。`))
-  } catch (error: any) {
-    setStatus(error?.message || tr('Holiday sync failed', '节假日同步失败'), 'error')
-  } finally {
-    holidaySyncLoading.value = false
-  }
+  await syncHolidaysWithPayload()
 }
 
 function buildHolidaySyncPayload(overrides?: { years?: number[] }) {
@@ -7969,29 +7952,34 @@ function buildHolidaySyncPayload(overrides?: { years?: number[] }) {
 
 async function syncHolidaysForYears(years: number[]) {
   settingsForm.holidaySyncYears = years.join(',')
+  await syncHolidaysWithPayload({ years })
+}
+
+async function syncHolidaysWithPayload(overrides?: { years?: number[] }) {
   holidaySyncLoading.value = true
   try {
-    const response = await apiFetch('/api/attendance/holidays/sync', {
+    const response = await apiFetchWithTimeout('/api/attendance/holidays/sync', {
       method: 'POST',
       body: JSON.stringify({
         source: 'holiday-cn',
-        ...buildHolidaySyncPayload({ years }),
+        ...buildHolidaySyncPayload(overrides),
       }),
-    })
+    }, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error(tr('Admin permissions required', '需要管理员权限'))
+      throw createForbiddenError()
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Holiday sync failed', '节假日同步失败'))
+      throw createApiError(response, data, tr('Holiday sync failed', '节假日同步失败'))
     }
+    adminForbidden.value = false
     if (data?.data?.lastRun) {
       holidaySyncLastRun.value = data.data.lastRun
     }
     setStatus(tr(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`, `节假日同步完成（已应用 ${data.data?.totalApplied ?? 0} 条）。`))
   } catch (error: any) {
-    setStatus(error?.message || tr('Holiday sync failed', '节假日同步失败'), 'error')
+    setStatusFromError(error, tr('Holiday sync failed', '节假日同步失败'), 'sync-holidays')
   } finally {
     holidaySyncLoading.value = false
   }
