@@ -2655,6 +2655,7 @@ Verification:
 | Remote Storage drill recovery | #22930898557 | PASS | `output/playwright/ga/22930898557/attendance-remote-storage-prod-22930898557-1/storage.log`, `output/playwright/ga/22930898557/attendance-remote-storage-prod-22930898557-1/step-summary.md`, Issue: #411 closed |
 | Branch Protection drill (override title) | #22930977139 | FAIL (expected) | `output/playwright/ga/22930977139/attendance-branch-protection-prod-22930977139-1/protection.log`, `output/playwright/ga/22930977139/attendance-branch-protection-prod-22930977139-1/step-summary.md`, Issue: #413 opened |
 | Branch Protection drill recovery | #22930989790 | PASS | `output/playwright/ga/22930989790/attendance-branch-protection-prod-22930989790-1/protection.log`, `output/playwright/ga/22930989790/attendance-branch-protection-prod-22930989790-1/step-summary.md`, Issue: #413 closed |
+| Daily Gate Dashboard re-verify (branch) | #22931065485 | PASS | `output/playwright/ga/22931065485/attendance-daily-gate-dashboard-22931065485-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22931065485/attendance-daily-gate-dashboard-22931065485-1/attendance-daily-gate-dashboard.md` |
 
 Decision:
 
