@@ -198,6 +198,20 @@ function isAsyncCommitPollTimeoutFailure(error) {
     || message.includes('async commit job poll timed out')
 }
 
+function isRetriableAsyncCommitRecoveryFailure(error) {
+  const message = String(error?.message || error || '').toLowerCase()
+  if (!message) return false
+  return message.includes('http 429')
+    || message.includes('http 500')
+    || message.includes('http 502')
+    || message.includes('http 503')
+    || message.includes('http 504')
+    || message.includes('network error')
+    || message.includes('fetch failed')
+    || message.includes('econnreset')
+    || message.includes('etimedout')
+}
+
 function buildCommitAttemptIdempotencyKey(baseKey, attempt) {
   if (attempt <= 1) return baseKey
   return `${baseKey}-retry-${attempt}`
@@ -649,10 +663,11 @@ async function recoverAsyncCommitJobWithRetry({
       lastError = error
       const message = (error && error.message) || String(error)
       const timedOut = isAsyncCommitPollTimeoutFailure(error)
+      const transientRecoveryError = isRetriableAsyncCommitRecoveryFailure(error)
       log(
         `WARN: commit-async idempotency recovery attempt ${recoveryAttempt}/${importJobRecoveryAttempts} failed (${message})`,
       )
-      if (!timedOut || recoveryAttempt >= importJobRecoveryAttempts) {
+      if ((!timedOut && !transientRecoveryError) || recoveryAttempt >= importJobRecoveryAttempts) {
         throw error
       }
       const delayMs = computeRetryDelayMs({
