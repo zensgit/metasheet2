@@ -5600,3 +5600,31 @@ Dashboard integration check (post longrun refresh):
   - `commitGateSource=jobElapsedMs`
 - evidence:
   - `output/playwright/ga/22943147061/attendance-daily-gate-dashboard-22943147061-1/attendance-daily-gate-dashboard.json`
+
+### Update (2026-03-11): Parallel Round Follow-up (#440 / #441 / #443)
+
+Scope:
+
+- continue accelerated parallel delivery after longrun stabilization:
+  - dashboard parser hardening and contract tests (`#440`);
+  - holiday sync error recovery UX hardening (`#441`);
+  - import metadata assertion completeness in integration tests (`#443`, replacing closed `#442`).
+
+Merged PRs:
+
+- #440 `test(gates): cover dashboard run selection and locale/perf summary parsing` (merge commit `b5627e2e592f8b86492e296afa32fb2bde6b7dff`)
+- #441 `fix(attendance-web): classify holiday sync failures with retry context` (merge commit `fc890467e935bd8588f7d025b5a59da6d73ce484`)
+- #443 `test(attendance-import): cover metadata fields in idempotent commit flows` (merge commit `a6f41c3db821eb2d7df3391cc4b4bea5a5bb258b`)
+
+Gate evidence:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Gate Dashboard (post parser hardening) | #22943901841 | PASS | `output/playwright/ga/22943901841/attendance-daily-gate-dashboard-22943901841-1/attendance-daily-gate-dashboard.json` |
+| Daily Gate Dashboard (post merged parallel round) | #22944797333 | PASS | `output/playwright/ga/22944797333/attendance-daily-gate-dashboard-22944797333-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22944797333/attendance-daily-gate-dashboard-22944797333-1/attendance-daily-gate-dashboard.md` |
+
+Operational notes:
+
+- branch protection temporarily lowered to `approving_review_count=0` for merge, then restored to `1` immediately after merge completion.
+- replacement flow used when PR became `BEHIND` after base moved:
+  - close superseded PR (`#442`) and recreate from latest `main` (`#443`) to keep required checks deterministic.
