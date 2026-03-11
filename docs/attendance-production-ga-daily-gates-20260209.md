@@ -5569,3 +5569,12 @@ gh workflow run attendance-import-perf-baseline.yml -f profile=standard -f uploa
 gh workflow run attendance-import-perf-longrun.yml -f upload_csv=true -f fail_on_regression=false
 gh workflow run attendance-daily-gate-dashboard.yml -f lookback_hours=48
 ```
+
+Dashboard gateFlat verification (post PR #435):
+
+- run: `#22942361131` (PASS)
+- `gateFlat.perf.commitMs=574071`
+- `gateFlat.perf.commitGateMs=18000`
+- `gateFlat.perf.commitGateSource=jobElapsedMs`
+- evidence:
+  - `output/playwright/ga/22942361131/attendance-daily-gate-dashboard-22942361131-1/attendance-daily-gate-dashboard.json`
