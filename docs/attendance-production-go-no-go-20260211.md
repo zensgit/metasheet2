@@ -5804,3 +5804,32 @@ Decision:
 - perf gates recovered to green under real-world proxy jitter, without lowering thresholds.
 - dashboard overall status returned to `PASS`.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-11): Dashboard Perf Gate Visibility
+
+Scope:
+
+- expose async commit gate metric (`commitGateMs`) in daily dashboard output to improve triage speed under proxy jitter.
+
+Changes:
+
+- PR #435 (`feat(gates): surface async commit gate metrics in dashboard`)
+  - file: `scripts/ops/attendance-daily-gate-report.mjs`
+  - parse and emit `commitGateMs` + `commitGateSource` for perf gates.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily Gate Dashboard (post-fix) | #22942361131 | PASS | `output/playwright/ga/22942361131/attendance-daily-gate-dashboard-22942361131-1/attendance-daily-gate-dashboard.json` |
+
+Observed (`#22942361131`):
+
+- `gateFlat.perf.commitMs=574071`
+- `gateFlat.perf.commitGateMs=18000`
+- `gateFlat.perf.commitGateSource=jobElapsedMs`
+
+Decision:
+
+- dashboard now distinguishes wall-clock latency from gated async job telemetry.
+- **GO maintained**.
