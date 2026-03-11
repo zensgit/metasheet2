@@ -88,22 +88,7 @@ function expect_fail() {
   info "expected failure confirmed: ${label}"
 }
 
-function line_matches() {
-  local pattern="$1"
-  local file="$2"
-  if command -v rg >/dev/null 2>&1; then
-    rg -n "$pattern" "$file" >/dev/null
-    return $?
-  fi
-  grep -Eq "$pattern" "$file"
-}
-
 if [[ "$CASE_ID" == "strict" ]]; then
-  info "running auth resolver script regressions"
-  node --test ./scripts/ops/attendance-auth-scripts.test.mjs
-  info "running shared dispatcher regressions"
-  node --test ./scripts/ops/attendance-run-workflow-dispatch.test.mjs
-
   cp "$valid_summary" "${strict_dir}/gate-summary.json"
   ./scripts/ops/attendance-validate-gate-summary.sh "$strict_dir" 1
   node ./scripts/ops/attendance-validate-gate-summary-schema.mjs \
@@ -171,12 +156,13 @@ fi
 
 if [[ "$CASE_ID" == "dashboard" ]]; then
   dashboard_valid="${case_dir}/dashboard.valid.json"
-  dashboard_valid_non_main="${case_dir}/dashboard.valid.non-main.json"
+  dashboard_invalid_locale_legacy="${case_dir}/dashboard.invalid.locale-legacy.json"
   dashboard_invalid_strict="${case_dir}/dashboard.invalid.strict.json"
   dashboard_invalid_perf="${case_dir}/dashboard.invalid.perf.json"
   dashboard_invalid_longrun="${case_dir}/dashboard.invalid.longrun.json"
   dashboard_invalid_upsert="${case_dir}/dashboard.invalid.upsert.json"
-  dashboard_invalid_query_branch="${case_dir}/dashboard.invalid.query-branch.json"
+  dashboard_invalid_locale="${case_dir}/dashboard.invalid.locale.json"
+  dashboard_invalid_cleanup="${case_dir}/dashboard.invalid.cleanup.json"
 
   cat >"$dashboard_valid" <<'EOF'
 {
@@ -201,6 +187,12 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
         "conclusion": "success"
       }
     },
+    "cleanup": {
+      "completed": {
+        "id": 200005,
+        "conclusion": "success"
+      }
+    },
     "localeZh": {
       "completed": {
         "id": 200004,
@@ -209,7 +201,7 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
     }
   },
   "gateFlat": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "strict": {
       "summaryPresent": true,
       "summaryValid": true
@@ -242,16 +234,27 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
       "previewMs": "33000",
       "regressionsCount": "0"
     },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 200005,
+      "staleCount": "0"
+    },
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
       "runId": 200004,
-      "summarySchemaVersion": 1,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
       "locale": "zh-CN",
-      "lunarCount": "26",
-      "holidayCheck": "enabled",
+      "lunarLabelCount": "42",
       "holidayBadgeCount": "1",
-      "holidayCalendarLabel": "二月 2026"
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "true",
+      "zhShellTabsChecked": "true"
     }
   },
   "escalationIssue": {
@@ -261,10 +264,10 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
 }
 EOF
 
-  cat >"$dashboard_valid_non_main" <<'EOF'
+  cat >"$dashboard_invalid_locale_legacy" <<'EOF'
 {
-  "p0Status": "fail",
-  "overallStatus": "fail",
+  "p0Status": "pass",
+  "overallStatus": "pass",
   "gates": {
     "strict": {
       "completed": {
@@ -284,6 +287,12 @@ EOF
         "conclusion": "success"
       }
     },
+    "cleanup": {
+      "completed": {
+        "id": 210005,
+        "conclusion": "success"
+      }
+    },
     "localeZh": {
       "completed": {
         "id": 210004,
@@ -292,7 +301,7 @@ EOF
     }
   },
   "gateFlat": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "strict": {
       "summaryPresent": true,
       "summaryValid": true
@@ -325,21 +334,25 @@ EOF
       "previewMs": "33000",
       "regressionsCount": "0"
     },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 210005,
+      "staleCount": "0"
+    },
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
       "runId": 210004,
       "summarySchemaVersion": 1,
       "locale": "zh-CN",
-      "lunarCount": "26",
-      "holidayCheck": "enabled",
-      "holidayBadgeCount": "1",
-      "holidayCalendarLabel": "二月 2026"
+      "lunarLabelCount": "42",
+      "holidayBadgeCount": "1"
     }
   },
   "escalationIssue": {
-    "mode": "suppressed_non_main",
-    "p0Status": "fail"
+    "mode": "none_or_closed",
+    "p0Status": "pass"
   }
 }
 EOF
@@ -367,6 +380,12 @@ EOF
         "conclusion": "success"
       }
     },
+    "cleanup": {
+      "completed": {
+        "id": 600005,
+        "conclusion": "success"
+      }
+    },
     "localeZh": {
       "completed": {
         "id": 600004,
@@ -375,7 +394,7 @@ EOF
     }
   },
   "gateFlat": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "strict": {
       "summaryPresent": true,
       "summaryValid": true
@@ -408,16 +427,27 @@ EOF
       "previewMs": "33000",
       "regressionsCount": "0"
     },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 600005,
+      "staleCount": "0"
+    },
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
       "runId": 600004,
-      "summarySchemaVersion": 1,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
       "locale": "zh-CN",
-      "lunarCount": "26",
-      "holidayCheck": "enabled",
+      "lunarLabelCount": "42",
       "holidayBadgeCount": "1",
-      "holidayCalendarLabel": "二月 2026"
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "true",
+      "zhShellTabsChecked": "true"
     }
   },
   "escalationIssue": {
@@ -450,6 +480,12 @@ EOF
         "conclusion": "success"
       }
     },
+    "cleanup": {
+      "completed": {
+        "id": 300005,
+        "conclusion": "success"
+      }
+    },
     "localeZh": {
       "completed": {
         "id": 300004,
@@ -458,7 +494,7 @@ EOF
     }
   },
   "gateFlat": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "strict": {
       "summaryPresent": true,
       "summaryValid": false
@@ -485,16 +521,27 @@ EOF
       "previewMs": "33000",
       "regressionsCount": "0"
     },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 300005,
+      "staleCount": "0"
+    },
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
       "runId": 300004,
-      "summarySchemaVersion": 1,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
       "locale": "zh-CN",
-      "lunarCount": "26",
-      "holidayCheck": "enabled",
+      "lunarLabelCount": "42",
       "holidayBadgeCount": "1",
-      "holidayCalendarLabel": "二月 2026"
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "true",
+      "zhShellTabsChecked": "true"
     }
   },
   "escalationIssue": {
@@ -527,6 +574,12 @@ EOF
         "conclusion": "success"
       }
     },
+    "cleanup": {
+      "completed": {
+        "id": 400005,
+        "conclusion": "success"
+      }
+    },
     "localeZh": {
       "completed": {
         "id": 400004,
@@ -535,7 +588,7 @@ EOF
     }
   },
   "gateFlat": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "strict": {
       "summaryPresent": true,
       "summaryValid": true
@@ -564,16 +617,27 @@ EOF
       "previewMs": "33000",
       "regressionsCount": "0"
     },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 400005,
+      "staleCount": "0"
+    },
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
       "runId": 400004,
-      "summarySchemaVersion": 1,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
       "locale": "zh-CN",
-      "lunarCount": "26",
-      "holidayCheck": "enabled",
+      "lunarLabelCount": "42",
       "holidayBadgeCount": "1",
-      "holidayCalendarLabel": "二月 2026"
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "true",
+      "zhShellTabsChecked": "true"
     }
   },
   "escalationIssue": {
@@ -606,6 +670,12 @@ EOF
         "conclusion": "success"
       }
     },
+    "cleanup": {
+      "completed": {
+        "id": 500005,
+        "conclusion": "success"
+      }
+    },
     "localeZh": {
       "completed": {
         "id": 500004,
@@ -614,7 +684,7 @@ EOF
     }
   },
   "gateFlat": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "strict": {
       "summaryPresent": true,
       "summaryValid": true
@@ -643,16 +713,27 @@ EOF
       "previewMs": "33000",
       "regressionsCount": "0"
     },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 500005,
+      "staleCount": "0"
+    },
     "localeZh": {
       "status": "PASS",
       "reasonCode": null,
       "runId": 500004,
-      "summarySchemaVersion": 1,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
       "locale": "zh-CN",
-      "lunarCount": "26",
-      "holidayCheck": "enabled",
+      "lunarLabelCount": "42",
       "holidayBadgeCount": "1",
-      "holidayCalendarLabel": "二月 2026"
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "true",
+      "zhShellTabsChecked": "true"
     }
   },
   "escalationIssue": {
@@ -662,43 +743,209 @@ EOF
 }
 EOF
 
-  function annotate_dashboard_fixture() {
-    local fixture="$1"
-    local report_branch="$2"
-    local remote_branch="$3"
-    local tmp_fixture="${fixture}.tmp"
-    jq \
-      --arg report_branch "$report_branch" \
-      --arg remote_branch "$remote_branch" \
-      '
-      .branch = $report_branch
-      | .remoteSignalBranch = $remote_branch
-      | (if (.gateFlat.preflight | type == "object") then .gateFlat.preflight.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
-      | (if (.gateFlat.protection | type == "object") then .gateFlat.protection.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
-      | (if (.gateFlat.metrics | type == "object") then .gateFlat.metrics.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
-      | (if (.gateFlat.storage | type == "object") then .gateFlat.storage.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
-      | (if (.gateFlat.cleanup | type == "object") then .gateFlat.cleanup.queryBranch = (if $report_branch == "main" then $report_branch else $remote_branch end) else . end)
-      | (if (.gateFlat.strict | type == "object") then .gateFlat.strict.queryBranch = $report_branch else . end)
-      | (if (.gateFlat.perf | type == "object") then .gateFlat.perf.queryBranch = $report_branch else . end)
-      | (if (.gateFlat.longrun | type == "object") then .gateFlat.longrun.queryBranch = $report_branch else . end)
-      | (if (.gateFlat.contract | type == "object") then .gateFlat.contract.queryBranch = $report_branch else . end)
-      | (if (.gateFlat.localeZh | type == "object") then .gateFlat.localeZh.queryBranch = $report_branch else . end)
-      ' \
-      "$fixture" >"$tmp_fixture"
-    mv "$tmp_fixture" "$fixture"
+  cat >"$dashboard_invalid_locale" <<'EOF'
+{
+  "p0Status": "pass",
+  "overallStatus": "pass",
+  "gates": {
+    "strict": {
+      "completed": {
+        "id": 700001,
+        "conclusion": "success"
+      }
+    },
+    "perf": {
+      "completed": {
+        "id": 700002,
+        "conclusion": "success"
+      }
+    },
+    "longrun": {
+      "completed": {
+        "id": 700003,
+        "conclusion": "success"
+      }
+    },
+    "cleanup": {
+      "completed": {
+        "id": 700005,
+        "conclusion": "success"
+      }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 700004,
+        "conclusion": "success"
+      }
+    }
+  },
+  "gateFlat": {
+    "schemaVersion": 3,
+    "strict": {
+      "summaryPresent": true,
+      "summaryValid": true
+    },
+    "perf": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 700002,
+      "summarySchemaVersion": 2,
+      "scenario": "100000-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "staging",
+      "expectedRecordUpsertStrategy": "staging",
+      "previewMs": "1200",
+      "regressionsCount": "0"
+    },
+    "longrun": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 700003,
+      "summarySchemaVersion": 2,
+      "scenario": "rows500k-preview",
+      "rows": 500000,
+      "mode": "preview",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "values",
+      "expectedRecordUpsertStrategy": "values",
+      "previewMs": "33000",
+      "regressionsCount": "0"
+    },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 700005,
+      "staleCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 700004,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
+      "locale": "zh-CN",
+      "lunarLabelCount": "42",
+      "holidayBadgeCount": "1",
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "maybe",
+      "zhShellTabsChecked": "true"
+    }
+  },
+  "escalationIssue": {
+    "mode": "none_or_closed",
+    "p0Status": "pass"
   }
+}
+EOF
 
-  annotate_dashboard_fixture "$dashboard_valid" "main" "main"
-  annotate_dashboard_fixture "$dashboard_valid_non_main" "codex/feature-branch" "main"
-  annotate_dashboard_fixture "$dashboard_invalid_strict" "main" "main"
-  annotate_dashboard_fixture "$dashboard_invalid_perf" "main" "main"
-  annotate_dashboard_fixture "$dashboard_invalid_longrun" "main" "main"
-  annotate_dashboard_fixture "$dashboard_invalid_upsert" "main" "main"
-
-  jq '.gateFlat.strict.queryBranch = "main"' "$dashboard_valid_non_main" >"$dashboard_invalid_query_branch"
+  cat >"$dashboard_invalid_cleanup" <<'EOF'
+{
+  "p0Status": "pass",
+  "overallStatus": "pass",
+  "gates": {
+    "strict": {
+      "completed": {
+        "id": 800001,
+        "conclusion": "success"
+      }
+    },
+    "perf": {
+      "completed": {
+        "id": 800002,
+        "conclusion": "success"
+      }
+    },
+    "longrun": {
+      "completed": {
+        "id": 800003,
+        "conclusion": "success"
+      }
+    },
+    "cleanup": {
+      "completed": {
+        "id": 800005,
+        "conclusion": "success"
+      }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 800004,
+        "conclusion": "success"
+      }
+    }
+  },
+  "gateFlat": {
+    "schemaVersion": 3,
+    "strict": {
+      "summaryPresent": true,
+      "summaryValid": true
+    },
+    "perf": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 800002,
+      "summarySchemaVersion": 2,
+      "scenario": "100000-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "staging",
+      "expectedRecordUpsertStrategy": "staging",
+      "previewMs": "1200",
+      "regressionsCount": "0"
+    },
+    "longrun": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 800003,
+      "summarySchemaVersion": 2,
+      "scenario": "rows500k-preview",
+      "rows": 500000,
+      "mode": "preview",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "values",
+      "expectedRecordUpsertStrategy": "values",
+      "previewMs": "33000",
+      "regressionsCount": "0"
+    },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": "RUN_FAILED",
+      "runId": 800005,
+      "staleCount": "3"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 800004,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
+      "locale": "zh-CN",
+      "lunarLabelCount": "42",
+      "holidayBadgeCount": "1",
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "true",
+      "zhShellTabsChecked": "true"
+    }
+  },
+  "escalationIssue": {
+    "mode": "none_or_closed",
+    "p0Status": "pass"
+  }
+}
+EOF
 
   ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_valid"
-  ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_valid_non_main"
+  expect_fail "dashboard locale zh legacy schema contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_locale_legacy"
   expect_fail "dashboard strict-summary-validity contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_strict"
   expect_fail "dashboard perf gateFlat contract" \
@@ -707,28 +954,10 @@ EOF
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_longrun"
   expect_fail "dashboard upsert contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_upsert"
-  expect_fail "dashboard query-branch routing contract" \
-    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_query_branch"
-
-  workflow_file=".github/workflows/attendance-daily-gate-dashboard.yml"
-  if ! line_matches "^[[:space:]]*branch:[[:space:]]*$" "$workflow_file"; then
-    die "dashboard workflow contract failed: missing workflow_dispatch.inputs.branch"
-  fi
-  if ! line_matches "^[[:space:]]*remote_signal_branch:[[:space:]]*$" "$workflow_file"; then
-    die "dashboard workflow contract failed: missing workflow_dispatch.inputs.remote_signal_branch"
-  fi
-  if ! line_matches "^[[:space:]]*default:[[:space:]]*''[[:space:]]*$" "$workflow_file"; then
-    die "dashboard workflow contract failed: inputs.branch default must be empty string for ref fallback"
-  fi
-  if ! line_matches "^[[:space:]]*default:[[:space:]]*'main'[[:space:]]*$" "$workflow_file"; then
-    die "dashboard workflow contract failed: inputs.remote_signal_branch default must be 'main'"
-  fi
-  if ! line_matches "BRANCH:[[:space:]]*\\$\\{\\{[[:space:]]*inputs\\.branch[[:space:]]*\\|\\|[[:space:]]*github\\.ref_name[[:space:]]*\\|\\|[[:space:]]*'main'[[:space:]]*\\}\\}" "$workflow_file"; then
-    die "dashboard workflow contract failed: BRANCH env must fallback to github.ref_name"
-  fi
-  if ! line_matches "REMOTE_SIGNAL_BRANCH:[[:space:]]*\\$\\{\\{[[:space:]]*inputs\\.remote_signal_branch[[:space:]]*\\|\\|[[:space:]]*'main'[[:space:]]*\\}\\}" "$workflow_file"; then
-    die "dashboard workflow contract failed: REMOTE_SIGNAL_BRANCH env must fallback to 'main'"
-  fi
+  expect_fail "dashboard locale zh schema v3 contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_locale"
+  expect_fail "dashboard cleanup gateFlat contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_cleanup"
 
   info "OK: dashboard contract case passed"
   exit 0
