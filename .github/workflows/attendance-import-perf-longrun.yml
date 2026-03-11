@@ -168,6 +168,8 @@ jobs:
             import_job_poll_interval_ms: '2000'
             import_job_poll_timeout_ms: '1800000'
             import_job_poll_timeout_large_ms: '2700000'
+            import_job_poll_recovery_grace_ms: '600000'
+            import_job_recovery_attempts: '4'
           - id: rows100k-commit
             rows: '100000'
             mode: 'commit'
@@ -182,6 +184,7 @@ jobs:
             import_job_poll_interval_ms: '5000'
             import_job_poll_timeout_ms: '2700000'
             import_job_poll_timeout_large_ms: '3600000'
+            import_job_poll_recovery_grace_ms: '900000'
             import_job_recovery_attempts: '4'
           - id: rows50k-preview
             rows: '50000'
@@ -230,6 +233,7 @@ jobs:
             import_job_poll_interval_ms: '10000'
             import_job_poll_timeout_ms: '3600000'
             import_job_poll_timeout_large_ms: '5400000'
+            import_job_poll_recovery_grace_ms: '1200000'
             import_job_recovery_attempts: '3'
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
@@ -353,6 +357,7 @@ jobs:
           IMPORT_JOB_POLL_INTERVAL_MS: ${{ matrix.import_job_poll_interval_ms }}
           IMPORT_JOB_POLL_TIMEOUT_MS: ${{ matrix.import_job_poll_timeout_ms }}
           IMPORT_JOB_POLL_TIMEOUT_LARGE_MS: ${{ matrix.import_job_poll_timeout_large_ms }}
+          IMPORT_JOB_POLL_RECOVERY_GRACE_MS: ${{ matrix.import_job_poll_recovery_grace_ms }}
           IMPORT_JOB_RECOVERY_ATTEMPTS: ${{ matrix.import_job_recovery_attempts }}
           PAYLOAD_SOURCE: ${{ env.PAYLOAD_SOURCE }}
           PREVIEW_MODE: ${{ env.PREVIEW_MODE }}
