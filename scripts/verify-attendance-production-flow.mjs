@@ -154,7 +154,13 @@ async function setAuth(page) {
 }
 
 async function ensureAttendanceLoaded(page) {
-  await page.waitForURL(/\/attendance(\?|$)/, { timeout: timeoutMs })
+  await page.waitForFunction(
+    () => {
+      const pathname = String(window.location?.pathname || '')
+      return pathname === '/attendance' || pathname.startsWith('/attendance/')
+    },
+    { timeout: timeoutMs },
+  )
   await page.getByRole('heading', { name: 'Attendance', exact: true }).waitFor({ timeout: timeoutMs })
 }
 
