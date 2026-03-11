@@ -466,14 +466,25 @@ jobs:
               '```',
             ].join('\\n')
 
-            const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
-            const search = await github.rest.search.issuesAndPullRequests({
-              q,
-              sort: 'updated',
-              order: 'desc',
-              per_page: 20,
-            })
-            const items = Array.isArray(search.data.items) ? search.data.items : []
+            let items = []
+            if (titleOverride) {
+              const listed = await github.paginate(github.rest.issues.listForRepo, {
+                owner,
+                repo,
+                state: 'all',
+                per_page: 100,
+              })
+              items = Array.isArray(listed) ? listed : []
+            } else {
+              const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
+              const search = await github.rest.search.issuesAndPullRequests({
+                q,
+                sort: 'updated',
+                order: 'desc',
+                per_page: 20,
+              })
+              items = Array.isArray(search.data.items) ? search.data.items : []
+            }
             const match = items.find((item) => item && !item.pull_request && item.title === title) || null
 
             if (failed) {

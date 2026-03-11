@@ -2636,6 +2636,30 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Validation (2026-03-11): Drill Override Issue-Matching Normalization (P1 Workflows)
+
+Scope:
+
+- normalized drill override issue lookup across branch protection/perf/storage/upload/strict workflows.
+- verified open/close lifecycle under custom `issue_title` (non-default, non-paging).
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf Baseline drill (override title) | #22930898553 | FAIL (expected) | `output/playwright/ga/22930898553/attendance-import-perf-22930898553-1/drill/drill.txt`, Issue: #412 opened |
+| Perf Baseline drill recovery | #22930943661 | PASS | `output/playwright/ga/22930943661/attendance-import-perf-22930943661-1/drill/drill.txt`, Issue: #412 closed |
+| Perf Longrun drill (override title) | #22930876316 | FAIL (expected) | `output/playwright/ga/22930876316/attendance-import-perf-longrun-drill-22930876316-1/drill.txt`, Issue: #410 opened |
+| Perf Longrun drill recovery | #22930923648 | PASS | `output/playwright/ga/22930923648/attendance-import-perf-longrun-drill-22930923648-1/drill.txt`, Issue: #410 closed |
+| Remote Storage drill (override title) | #22930876289 | FAIL (expected) | `output/playwright/ga/22930876289/attendance-remote-storage-prod-22930876289-1/storage.log`, `output/playwright/ga/22930876289/attendance-remote-storage-prod-22930876289-1/step-summary.md`, Issue: #411 opened |
+| Remote Storage drill recovery | #22930898557 | PASS | `output/playwright/ga/22930898557/attendance-remote-storage-prod-22930898557-1/storage.log`, `output/playwright/ga/22930898557/attendance-remote-storage-prod-22930898557-1/step-summary.md`, Issue: #411 closed |
+| Branch Protection drill (override title) | #22930977139 | FAIL (expected) | `output/playwright/ga/22930977139/attendance-branch-protection-prod-22930977139-1/protection.log`, `output/playwright/ga/22930977139/attendance-branch-protection-prod-22930977139-1/step-summary.md`, Issue: #413 opened |
+| Branch Protection drill recovery | #22930989790 | PASS | `output/playwright/ga/22930989790/attendance-branch-protection-prod-22930989790-1/protection.log`, `output/playwright/ga/22930989790/attendance-branch-protection-prod-22930989790-1/step-summary.md`, Issue: #413 closed |
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Validation (2026-03-11): Strict Auth Token Fallback + Preflight Attendance-Only Guard
 
 Scope:
