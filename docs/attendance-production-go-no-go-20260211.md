@@ -2636,6 +2636,33 @@ Decision:
 
 - **GO maintained**.
 
+## Post-Go Validation (2026-03-11): Branch Policy Drift Drill Lifecycle Fix (Custom Title)
+
+Scope:
+
+- fixed branch policy drift drill recovery not auto-closing override-title issue.
+- validated on branch `codex/attendance-pr396-pr399-delivery-md-20260310` before merge.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (Prod) [DRILL] | #22930291461 | FAIL (expected) | `output/playwright/ga/22930291461/attendance-branch-policy-drift-prod-22930291461-1/policy.log`, `output/playwright/ga/22930291461/attendance-branch-policy-drift-prod-22930291461-1/step-summary.md`, Issue: #409 opened |
+| Attendance Branch Policy Drift (Prod) recovery | #22930314595 | PASS | `output/playwright/ga/22930314595/attendance-branch-policy-drift-prod-22930314595-1/policy.log`, `output/playwright/ga/22930314595/attendance-branch-policy-drift-prod-22930314595-1/step-summary.md`, Issue: #409 closed |
+| Attendance Daily Gate Dashboard (branch) | #22930336943 | PASS | `output/playwright/ga/22930336943/attendance-daily-gate-dashboard-22930336943-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22930336943/attendance-daily-gate-dashboard-22930336943-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- dashboard `gateFlat.protection` binds latest non-drill run and keeps review-policy fields complete:
+  - `runId=22930314595`
+  - `requirePrReviews=true`
+  - `minApprovingReviews=1`
+  - `requireCodeOwnerReviews=false`
+
+Decision:
+
+- **GO maintained**.
+
 ## Post-Go Validation (2026-03-10): Daily Dashboard Feature-Branch Remote Signal Fallback
 
 Scope:

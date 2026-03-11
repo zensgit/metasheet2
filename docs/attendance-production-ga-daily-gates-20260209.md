@@ -4112,3 +4112,34 @@ Observed highlights:
   - `gateFlat.preflight.signalBranch=main`
   - `gateFlat.perf.status=PASS`
   - `gateFlat.longrun.status=PASS`
+
+### Update (2026-03-11): Branch Policy Drift Drill Issue Auto-Close Fix (Custom Title)
+
+Scope:
+
+- fixed `Attendance Branch Policy Drift (Prod)` drill issue lifecycle when `issue_title` override is provided.
+- root cause: issue lookup used hard-coded search prefix (`[Attendance P1] Branch`) and could not find custom drill titles for recovery close.
+- fix: when `issue_title` is set, issue lookup now scans repository issues and matches exact title; default/non-drill path keeps existing prefix search for backward compatibility.
+
+Code:
+
+- workflow:
+  - `.github/workflows/attendance-branch-policy-drift-prod.yml`
+- commit:
+  - `e4cdc15d`
+
+Verification (branch: `codex/attendance-pr396-pr399-delivery-md-20260310`):
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Attendance Branch Policy Drift (Prod) [DRILL] | #22930291461 | FAIL (expected) | `output/playwright/ga/22930291461/attendance-branch-policy-drift-prod-22930291461-1/policy.log`, `output/playwright/ga/22930291461/attendance-branch-policy-drift-prod-22930291461-1/step-summary.md`, Issue: #409 opened |
+| Attendance Branch Policy Drift (Prod) recovery | #22930314595 | PASS | `output/playwright/ga/22930314595/attendance-branch-policy-drift-prod-22930314595-1/policy.log`, `output/playwright/ga/22930314595/attendance-branch-policy-drift-prod-22930314595-1/step-summary.md`, Issue: #409 closed |
+| Attendance Daily Gate Dashboard | #22930336943 | PASS | `output/playwright/ga/22930336943/attendance-daily-gate-dashboard-22930336943-1/attendance-daily-gate-dashboard.json`, `output/playwright/ga/22930336943/attendance-daily-gate-dashboard-22930336943-1/attendance-daily-gate-dashboard.md` |
+
+Observed highlights:
+
+- issue `#409` state transition verified: `OPEN -> CLOSED` after recovery run.
+- dashboard selected latest non-drill branch policy run:
+  - `gateFlat.protection.runId=22930314595`
+  - `gateFlat.protection.requirePrReviews=true`
+  - `gateFlat.protection.minApprovingReviews=1`
