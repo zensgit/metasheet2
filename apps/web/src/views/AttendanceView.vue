@@ -8301,7 +8301,7 @@ async function saveApprovalFlow() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -8324,7 +8324,7 @@ async function deleteApprovalFlow(id: string) {
     const response = await apiFetch(`/api/attendance/approval-flows/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -8406,7 +8406,7 @@ async function saveRotationRule() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -8429,7 +8429,7 @@ async function deleteRotationRule(id: string) {
     const response = await apiFetch(`/api/attendance/rotation-rules/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -8512,7 +8512,7 @@ async function saveRotationAssignment() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -8539,7 +8539,7 @@ async function deleteRotationAssignment(id: string) {
     const response = await apiFetch(`/api/attendance/rotation-assignments/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -8626,7 +8626,7 @@ async function saveShift() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -8649,7 +8649,7 @@ async function deleteShift(id: string) {
     const response = await apiFetch(`/api/attendance/shifts/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -8732,7 +8732,7 @@ async function saveAssignment() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -8755,7 +8755,7 @@ async function deleteAssignment(id: string) {
     const response = await apiFetch(`/api/attendance/assignments/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -8826,7 +8826,7 @@ async function saveHoliday() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -8849,7 +8849,7 @@ async function deleteHoliday(id: string) {
     const response = await apiFetch(`/api/attendance/holidays/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -8932,7 +8932,7 @@ async function saveRuleSet() {
     )
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -8955,7 +8955,7 @@ async function deleteRuleSet(id: string) {
     const response = await apiFetch(`/api/attendance/rule-sets/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -9042,7 +9042,7 @@ async function saveAttendanceGroup() {
     )
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -9153,7 +9153,7 @@ async function deleteAttendanceGroup(id: string) {
     const response = await apiFetch(`/api/attendance/groups/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -9172,7 +9172,7 @@ async function loadRuleSetTemplate() {
     const response = await apiFetch('/api/attendance/rule-sets/template')
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -9229,7 +9229,7 @@ async function saveRuleTemplates() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -9256,7 +9256,7 @@ async function restoreRuleTemplates(versionId: string) {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -9355,7 +9355,7 @@ async function savePayrollTemplate() {
     )
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -9378,7 +9378,7 @@ async function deletePayrollTemplate(id: string) {
     const response = await apiFetch(`/api/attendance/payroll-templates/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -9475,7 +9475,7 @@ async function generatePayrollCycles() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -9519,7 +9519,7 @@ async function savePayrollCycle() {
     )
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -9542,7 +9542,7 @@ async function deletePayrollCycle(id: string) {
     const response = await apiFetch(`/api/attendance/payroll-cycles/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
@@ -9568,7 +9568,7 @@ async function loadPayrollCycleSummary() {
     const response = await apiFetch(`/api/attendance/payroll-cycles/${cycleId}/summary?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
