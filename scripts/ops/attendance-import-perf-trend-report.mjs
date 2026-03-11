@@ -275,6 +275,11 @@ function recordFromSummary(summary, sourcePath, sourceType) {
     startedAt,
     previewMs: toNumber(summary?.previewMs),
     commitMs: toNumber(summary?.commitMs),
+    commitGateMs: toNumber(summary?.commitGateMs),
+    commitGateSource: typeof summary?.commitGateSource === 'string'
+      ? summary.commitGateSource.trim()
+      : '',
+    commitMetricMs: toNumber(summary?.commitGateMs) ?? toNumber(summary?.commitMs),
     exportMs: toNumber(summary?.exportMs),
     rollbackMs: toNumber(summary?.rollbackMs),
     processedRows: toNumber(summary?.processedRows),
@@ -310,7 +315,7 @@ function dedupeRecords(records) {
   const seen = new Set()
   const out = []
   for (const row of records) {
-    const key = `${row.scenario}|${row.startedAt || 'na'}|${row.previewMs || 'na'}|${row.commitMs || 'na'}|${row.sourcePath}`
+    const key = `${row.scenario}|${row.startedAt || 'na'}|${row.previewMs || 'na'}|${row.commitMetricMs || 'na'}|${row.commitMs || 'na'}|${row.sourcePath}`
     if (seen.has(key)) continue
     seen.add(key)
     out.push(row)
@@ -347,8 +352,8 @@ function renderMarkdown(payload) {
 
   lines.push('## Scenario Summary')
   lines.push('')
-  lines.push('| Scenario | Rows | Profile | Mode | Upload(eff) | Upload(req) | Payload | Upsert | Chunk | Samples | Latest Preview | Latest Commit | Latest Export | Latest Rollback | Latest Progress % | Latest Throughput | P95 Preview | P95 Commit | Status |')
-  lines.push('|---|---:|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|')
+  lines.push('| Scenario | Rows | Profile | Mode | Upload(eff) | Upload(req) | Payload | Upsert | Chunk | Samples | Latest Preview | Latest Commit(gate) | Latest Commit(wall) | Commit Src | Latest Export | Latest Rollback | Latest Progress % | Latest Throughput | P95 Preview | P95 Commit(gate) | Status |')
+  lines.push('|---|---:|---|---|---|---|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---|')
   for (const row of payload.scenarios) {
     const profile = row?.latest?.profile ? String(row.latest.profile).toLowerCase() : '--'
     const upload = row?.latest?.uploadCsv ? 'YES' : 'NO'
@@ -359,7 +364,10 @@ function renderMarkdown(payload) {
     const payloadSource = row?.latest?.payloadSource ? String(row.latest.payloadSource).toLowerCase() : '--'
     const upsert = row?.latest?.recordUpsertStrategy ? String(row.latest.recordUpsertStrategy).toUpperCase() : '--'
     const chunk = formatChunk(row?.latest?.chunkItemsSize, row?.latest?.chunkRecordsSize)
-    lines.push(`| ${row.scenario} | ${row.rows ?? '--'} | ${profile} | ${row.mode || '--'} | ${upload} | ${uploadRequested} | ${payloadSource} | ${upsert} | ${chunk} | ${row.sampleCount} | ${formatMs(row.latest.previewMs)} | ${formatMs(row.latest.commitMs)} | ${formatMs(row.latest.exportMs)} | ${formatMs(row.latest.rollbackMs)} | ${formatFloat(row.latest.progressPercent)} | ${formatFloat(row.latest.throughputRowsPerSec)} rows/s | ${formatMs(row.p95.previewMs)} | ${formatMs(row.p95.commitMs)} | ${row.status.toUpperCase()} |`)
+    const commitSource = row?.latest?.commitMetricMs === null
+      ? '--'
+      : (row?.latest?.commitGateSource || (row?.latest?.commitGateMs !== null ? 'commitGateMs' : 'commitMs'))
+    lines.push(`| ${row.scenario} | ${row.rows ?? '--'} | ${profile} | ${row.mode || '--'} | ${upload} | ${uploadRequested} | ${payloadSource} | ${upsert} | ${chunk} | ${row.sampleCount} | ${formatMs(row.latest.previewMs)} | ${formatMs(row.latest.commitMetricMs)} | ${formatMs(row.latest.commitMs)} | ${commitSource || '--'} | ${formatMs(row.latest.exportMs)} | ${formatMs(row.latest.rollbackMs)} | ${formatFloat(row.latest.progressPercent)} | ${formatFloat(row.latest.throughputRowsPerSec)} rows/s | ${formatMs(row.p95.previewMs)} | ${formatMs(row.p95.commitMetricMs)} | ${row.status.toUpperCase()} |`)
   }
 
   lines.push('')
@@ -467,7 +475,7 @@ async function run() {
     const samples = (byScenario.get(scenario) || []).slice(0, trendDepth)
 
     const previewSeries = samples.map((s) => s.previewMs).filter((v) => v !== null)
-    const commitSeries = samples.map((s) => s.commitMs).filter((v) => v !== null)
+    const commitSeries = samples.map((s) => s.commitMetricMs).filter((v) => v !== null)
 
     const p95Preview = percentile(previewSeries, 95)
     const p95Commit = percentile(commitSeries, 95)
@@ -483,9 +491,13 @@ async function run() {
       itemWarnings.push(`preview drift: latest=${Math.round(latest.previewMs)}ms vs p95=${Math.round(p95Preview)}ms (${fmtPct(ratio)})`)
     }
 
-    if (latest.commitMs !== null && p95Commit !== null && p95Commit > 0 && latest.commitMs > p95Commit * regressionFactor) {
-      const ratio = latest.commitMs / p95Commit
-      itemWarnings.push(`commit drift: latest=${Math.round(latest.commitMs)}ms vs p95=${Math.round(p95Commit)}ms (${fmtPct(ratio)})`)
+    if (latest.commitMetricMs !== null && p95Commit !== null && p95Commit > 0 && latest.commitMetricMs > p95Commit * regressionFactor) {
+      const ratio = latest.commitMetricMs / p95Commit
+      const source = latest.commitGateSource || (latest.commitGateMs !== null ? 'commitGateMs' : 'commitMs')
+      const wall = latest.commitMs !== null ? ` wall=${Math.round(latest.commitMs)}ms` : ''
+      itemWarnings.push(
+        `commit drift: latest=${Math.round(latest.commitMetricMs)}ms source=${source}${wall} vs p95=${Math.round(p95Commit)}ms (${fmtPct(ratio)})`
+      )
     }
 
     const status = itemWarnings.length > 0 ? 'warn' : 'pass'
@@ -510,6 +522,7 @@ async function run() {
       p95: {
         previewMs: p95Preview,
         commitMs: p95Commit,
+        commitMetricMs: p95Commit,
       },
       status,
     })
