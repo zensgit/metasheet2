@@ -5533,3 +5533,39 @@ Verification:
 Operational note:
 
 - this script is local CI-prep tooling; GA gate workflows and escalation behavior remain unchanged.
+
+### Update (2026-03-11): Perf Baseline Async Gate Metric
+
+Context:
+
+- production proxy jitter can inflate async wall-clock `commitMs` even when backend import job telemetry remains healthy.
+
+Change:
+
+- PR #433 updated `scripts/ops/attendance-import-perf.mjs`:
+  - keep `commitMs` for observation;
+  - add `commitGateMs` + `commitGateSource`;
+  - apply `MAX_COMMIT_MS` threshold against `commitGateMs` (for `commit_async=true`, this maps to telemetry `elapsedMs`).
+
+Latest verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf baseline (post-fix) | #22941480396 | PASS | `output/playwright/ga/22941480396/attendance-import-perf-22941480396-1/attendance-perf-mmlpulc8-lh6mcu/perf-summary.json` |
+| Perf longrun | #22941104798 | PASS | `output/playwright/ga/22941104798/attendance-import-perf-longrun-rows10k-commit-22941104798-1/current-flat/rows10000-commit.json` |
+| Daily dashboard | #22941932185 | PASS | `output/playwright/ga/22941932185/attendance-daily-gate-dashboard-22941932185-1/attendance-daily-gate-dashboard.md` |
+
+Example (from `#22941480396`):
+
+- `commitMs=574071`
+- `commitGateMs=18000`
+- `commitGateSource=jobElapsedMs`
+- `regressions=[]`
+
+Manual re-run commands:
+
+```bash
+gh workflow run attendance-import-perf-baseline.yml -f profile=standard -f upload_csv=true -f export_csv=true
+gh workflow run attendance-import-perf-longrun.yml -f upload_csv=true -f fail_on_regression=false
+gh workflow run attendance-daily-gate-dashboard.yml -f lookback_hours=48
+```

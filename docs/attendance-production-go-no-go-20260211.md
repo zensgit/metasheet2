@@ -5764,3 +5764,43 @@ Decision:
 
 - local pre-PR gate verification now has a deterministic high-speed entrypoint.
 - **GO maintained** (P0/P1 production gate posture unchanged).
+
+## Post-Go Verification (2026-03-11): Async Commit Gate Metric Hardening
+
+Scope:
+
+- eliminate false perf gate failures where async commit job succeeds quickly but proxy/job-poll jitter inflates wall-clock `commitMs`.
+
+Changes:
+
+- PR #433 (`fix(perf): gate async commit threshold by job elapsed telemetry`)
+  - file: `scripts/ops/attendance-import-perf.mjs`
+  - preserves `commitMs` (wall clock) for observability.
+  - adds `commitGateMs` + `commitGateSource`.
+  - applies `MAX_COMMIT_MS` threshold against `commitGateMs` when `commit_async=true` (uses server-reported `elapsedMs`).
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Perf longrun (upload path) | #22941104798 | PASS | `output/playwright/ga/22941104798/attendance-import-perf-longrun-rows10k-commit-22941104798-1/current-flat/rows10000-commit.json` |
+| Perf baseline (pre-fix reference) | #22941102543 | FAIL (expected pre-fix behavior) | `output/playwright/ga/22941102543/attendance-import-perf-22941102543-1/perf.log` |
+| Perf baseline (post-fix) | #22941480396 | PASS | `output/playwright/ga/22941480396/attendance-import-perf-22941480396-1/attendance-perf-mmlpulc8-lh6mcu/perf-summary.json` |
+| Daily Gate Dashboard | #22941932185 | PASS | `output/playwright/ga/22941932185/attendance-daily-gate-dashboard-22941932185-1/attendance-daily-gate-dashboard.md` |
+
+Observed:
+
+- `#22941480396` summary shows:
+  - `commitMs=574071` (wall clock)
+  - `commitGateMs=18000`
+  - `commitGateSource=jobElapsedMs`
+  - `regressions=[]`
+- P1 tracking issues auto-recovered to closed:
+  - `#213 [Attendance P1] Perf baseline alert`
+  - `#157 [Attendance P1] Perf longrun alert`
+
+Decision:
+
+- perf gates recovered to green under real-world proxy jitter, without lowering thresholds.
+- dashboard overall status returned to `PASS`.
+- **GO maintained**.
