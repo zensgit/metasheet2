@@ -91,7 +91,7 @@ jobs:
             "git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo \"[deploy][error] DEPLOY_PATH is not a git repo: ${DEPLOY_PATH}\" >&2; exit 1; }"
             "git fetch origin main"
             "git checkout main"
-            "git pull --ff-only origin main"
+            "git merge --ff-only origin/main"
             "# Preflight: validate production env/compose/nginx before (re)deploying containers."
             "echo \"=== ATTENDANCE PREFLIGHT START ===\""
             "preflight_rc=0"
