@@ -65,6 +65,7 @@ jobs:
       STRICT_WORKFLOW: attendance-strict-gates-prod.yml
       PERF_WORKFLOW: attendance-import-perf-baseline.yml
       LONGRUN_WORKFLOW: attendance-import-perf-longrun.yml
+      HIGHSCALE_WORKFLOW: attendance-import-perf-highscale.yml
       CONTRACT_WORKFLOW: attendance-gate-contract-matrix.yml
       PROTECTION_WORKFLOW: attendance-branch-policy-drift-prod.yml
       ESCALATE_ISSUES_FOR_NON_MAIN: ${{ inputs.escalate_issues_for_non_main || 'false' }}

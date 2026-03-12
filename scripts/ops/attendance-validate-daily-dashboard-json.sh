@@ -190,6 +190,9 @@ function validate_perf_like_gate() {
 
 validate_perf_like_gate "perf" "Perf Baseline"
 validate_perf_like_gate "longrun" "Perf Long Run"
+if [[ "$(jq -r 'if (.gateFlat.highscale | type == "object") then "true" else "false" end' "$report_json")" == "true" ]]; then
+  validate_perf_like_gate "highscale" "Perf High Scale"
+fi
 
 function validate_locale_zh_gate() {
   local gate_key="localeZh"

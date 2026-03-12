@@ -52,7 +52,12 @@ test('attendance-fast-parallel-regression ops profile defaults to ops checks onl
 });
 
 test('attendance-fast-parallel-regression contracts profile defaults to contract checks only', () => {
-  const result = runFastRegression({ PROFILE: 'contracts', MAX_PARALLEL: '1' });
+  const result = runFastRegression({
+    PROFILE: 'contracts',
+    MAX_PARALLEL: '1',
+    CONTRACT_STRICT_CMD: 'echo strict-ok',
+    CONTRACT_DASHBOARD_CMD: 'echo dashboard-ok',
+  });
   assert.equal(result.status, 0);
   const summary = JSON.parse(
     readFileSync(path.join(result.outputRoot, 'summary.json'), 'utf8'),
