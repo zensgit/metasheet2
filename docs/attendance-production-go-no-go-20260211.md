@@ -6061,6 +6061,7 @@ Verification:
 | Post-merge verify shell contract | local | PASS | `bash -n scripts/ops/attendance-post-merge-verify.sh` |
 | Dashboard contract matrix (with highscale invalid case) | local | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/` |
 | Fast regression tests (ops profile includes highscale runner tests) | local | PASS | `pnpm verify:attendance-regression-fast:test` |
+| Fast regression ops lane (5 checks, includes highscale runner tests) | local | PASS | `output/playwright/attendance-fast-parallel-regression/20260312-091347-45263/summary.json` |
 | Daily report parser tests | local | PASS | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` |
 
 Decision:

@@ -66,12 +66,14 @@ Changes:
 | Contract-case syntax | `bash -n scripts/ops/attendance-run-gate-contract-case.sh` | PASS | stdout |
 | Dashboard contract matrix (incl. highscale negative case) | `scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/` |
 | Fast regression tests | `pnpm verify:attendance-regression-fast:test` | PASS | stdout (4/4) |
+| Fast regression ops lane (includes highscale runner test) | `pnpm verify:attendance-regression-fast:ops` | PASS | `output/playwright/attendance-fast-parallel-regression/20260312-091347-45263/summary.json` |
 | Highscale runner tests | `pnpm verify:attendance-perf-highscale:test` | PASS | stdout (2/2) |
 | Daily report parser tests | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | stdout (14/14) |
 
 ## Evidence Paths
 
 - `output/playwright/attendance-gate-contract-matrix/dashboard/`
+- `output/playwright/attendance-fast-parallel-regression/20260312-091347-45263/summary.json`
 - `output/playwright/attendance-daily-gate-dashboard/20260312-005458/`
 
 ## Next (main branch after merge)
@@ -87,4 +89,3 @@ SKIP_PERF_HIGHSCALE=false bash scripts/ops/attendance-post-merge-verify.sh
    - `perf-highscale-contract`
 
 3. append runId/evidence into Go/No-Go MD.
-

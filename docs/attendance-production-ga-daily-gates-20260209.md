@@ -5772,6 +5772,7 @@ Verification:
 | Post-merge verify syntax | `bash -n scripts/ops/attendance-post-merge-verify.sh` | PASS | stdout |
 | Dashboard contract case (highscale added) | `scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/` |
 | Fast regression ops profile (includes highscale runner test) | `pnpm verify:attendance-regression-fast:test` | PASS | stdout |
+| Fast regression ops lane (5 checks) | `pnpm verify:attendance-regression-fast:ops` | PASS | `output/playwright/attendance-fast-parallel-regression/20260312-091347-45263/summary.json` |
 
 Recommended main-branch command:
 
