@@ -160,6 +160,7 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
   dashboard_invalid_strict="${case_dir}/dashboard.invalid.strict.json"
   dashboard_invalid_perf="${case_dir}/dashboard.invalid.perf.json"
   dashboard_invalid_longrun="${case_dir}/dashboard.invalid.longrun.json"
+  dashboard_invalid_highscale="${case_dir}/dashboard.invalid.highscale.json"
   dashboard_invalid_upsert="${case_dir}/dashboard.invalid.upsert.json"
   dashboard_invalid_locale="${case_dir}/dashboard.invalid.locale.json"
   dashboard_invalid_cleanup="${case_dir}/dashboard.invalid.cleanup.json"
@@ -187,6 +188,12 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
         "conclusion": "success"
       }
     },
+    "highscale": {
+      "completed": {
+        "id": 200006,
+        "conclusion": "success"
+      }
+    },
     "cleanup": {
       "completed": {
         "id": 200005,
@@ -201,7 +208,7 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
     }
   },
   "gateFlat": {
-    "schemaVersion": 3,
+    "schemaVersion": 4,
     "strict": {
       "summaryPresent": true,
       "summaryValid": true
@@ -232,6 +239,20 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
       "recordUpsertStrategy": "values",
       "expectedRecordUpsertStrategy": "values",
       "previewMs": "33000",
+      "regressionsCount": "0"
+    },
+    "highscale": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 200006,
+      "summarySchemaVersion": 2,
+      "scenario": "rows100k-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "staging",
+      "expectedRecordUpsertStrategy": "staging",
+      "previewMs": "9000",
       "regressionsCount": "0"
     },
     "cleanup": {
@@ -743,6 +764,120 @@ EOF
 }
 EOF
 
+  cat >"$dashboard_invalid_highscale" <<'EOF'
+{
+  "p0Status": "pass",
+  "overallStatus": "pass",
+  "gates": {
+    "strict": {
+      "completed": {
+        "id": 550001,
+        "conclusion": "success"
+      }
+    },
+    "perf": {
+      "completed": {
+        "id": 550002,
+        "conclusion": "success"
+      }
+    },
+    "longrun": {
+      "completed": {
+        "id": 550003,
+        "conclusion": "success"
+      }
+    },
+    "highscale": {
+      "completed": {
+        "id": 550006,
+        "conclusion": "success"
+      }
+    },
+    "cleanup": {
+      "completed": {
+        "id": 550005,
+        "conclusion": "success"
+      }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 550004,
+        "conclusion": "success"
+      }
+    }
+  },
+  "gateFlat": {
+    "schemaVersion": 4,
+    "strict": {
+      "summaryPresent": true,
+      "summaryValid": true
+    },
+    "perf": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 550002,
+      "summarySchemaVersion": 2,
+      "scenario": "100000-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "previewMs": "1200",
+      "regressionsCount": "0"
+    },
+    "longrun": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 550003,
+      "summarySchemaVersion": 2,
+      "scenario": "rows500k-preview",
+      "rows": 500000,
+      "mode": "preview",
+      "uploadCsv": "true",
+      "previewMs": "33000",
+      "regressionsCount": "0"
+    },
+    "highscale": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 550006,
+      "summarySchemaVersion": 2,
+      "scenario": "rows100k-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "maybe",
+      "previewMs": "9100",
+      "regressionsCount": "0"
+    },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 550005,
+      "staleCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 550004,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
+      "locale": "zh-CN",
+      "lunarLabelCount": "42",
+      "holidayBadgeCount": "1",
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "true",
+      "zhShellTabsChecked": "true"
+    }
+  },
+  "escalationIssue": {
+    "mode": "none_or_closed",
+    "p0Status": "pass"
+  }
+}
+EOF
+
   cat >"$dashboard_invalid_locale" <<'EOF'
 {
   "p0Status": "pass",
@@ -952,6 +1087,8 @@ EOF
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_perf"
   expect_fail "dashboard longrun gateFlat contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_longrun"
+  expect_fail "dashboard highscale gateFlat contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_highscale"
   expect_fail "dashboard upsert contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_upsert"
   expect_fail "dashboard locale zh schema v3 contract" \

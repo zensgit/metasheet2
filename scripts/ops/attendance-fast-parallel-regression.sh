@@ -93,6 +93,10 @@ if [[ "$PROFILE" == "full" || "$PROFILE" == "ops" ]]; then
   add_check \
     "ops-daily-gate-report-tests" \
     "node --test scripts/ops/attendance-daily-gate-report.test.mjs"
+
+  add_check \
+    "ops-perf-highscale-runner-tests" \
+    "node --test scripts/ops/attendance-run-perf-highscale.test.mjs"
 fi
 
 if [[ "$PROFILE" == "contracts" || "$RUN_CONTRACT_CASES" == "true" ]]; then

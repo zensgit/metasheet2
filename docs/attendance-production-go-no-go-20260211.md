@@ -6035,3 +6035,35 @@ Decision:
 
 - dashboard highscale integration is code-complete and locally validated.
 - final production closure requires one GA run on `main` after merge to record real runId/evidence for `attendance-import-perf-highscale.yml`.
+
+## Post-Go Verification (2026-03-12): Post-Merge Highscale Coverage + Contract Matrix Expansion
+
+Scope:
+
+- ensure post-merge verification script covers the highscale lane.
+- ensure dashboard JSON contract matrix includes explicit highscale negative case.
+
+Changes:
+
+- `scripts/ops/attendance-post-merge-verify.sh`
+  - adds `perf-highscale` gate dispatch
+  - adds `perf-highscale-contract` local assertion
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - valid fixture includes `gateFlat.highscale`
+  - invalid fixture adds `dashboard.invalid.highscale.json`
+- `scripts/ops/attendance-fast-parallel-regression.sh`
+  - ops/full profile now includes `ops-perf-highscale-runner-tests`
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Post-merge verify shell contract | local | PASS | `bash -n scripts/ops/attendance-post-merge-verify.sh` |
+| Dashboard contract matrix (with highscale invalid case) | local | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/` |
+| Fast regression tests (ops profile includes highscale runner tests) | local | PASS | `pnpm verify:attendance-regression-fast:test` |
+| Daily report parser tests | local | PASS | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` |
+
+Decision:
+
+- merge-ready for next main run.
+- after merge, run one full post-merge verify and append GA evidence paths.

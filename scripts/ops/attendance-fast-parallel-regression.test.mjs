@@ -46,9 +46,10 @@ test('attendance-fast-parallel-regression ops profile defaults to ops checks onl
   assert.equal(summary.profile, 'ops');
   assert.equal(summary.maxParallel, 2);
   assert.equal(summary.runContractCases, false);
-  assert.equal(summary.totals.total, 4);
+  assert.equal(summary.totals.total, 5);
   const checks = summary.checks.map((item) => item.check);
   assert.ok(checks.every((name) => name.startsWith('ops-')));
+  assert.ok(checks.includes('ops-perf-highscale-runner-tests'));
 });
 
 test('attendance-fast-parallel-regression contracts profile defaults to contract checks only', () => {

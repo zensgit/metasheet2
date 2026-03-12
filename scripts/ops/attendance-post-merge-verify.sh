@@ -11,6 +11,7 @@ DOWNLOAD_ARTIFACTS="${DOWNLOAD_ARTIFACTS:-true}"
 SKIP_BRANCH_POLICY="${SKIP_BRANCH_POLICY:-false}"
 SKIP_STRICT="${SKIP_STRICT:-false}"
 SKIP_PERF_BASELINE="${SKIP_PERF_BASELINE:-false}"
+SKIP_PERF_HIGHSCALE="${SKIP_PERF_HIGHSCALE:-false}"
 SKIP_LOCALE_ZH="${SKIP_LOCALE_ZH:-false}"
 SKIP_DASHBOARD="${SKIP_DASHBOARD:-false}"
 
@@ -63,6 +64,21 @@ PERF_BASELINE_MAX_COMMIT_MS="${PERF_BASELINE_MAX_COMMIT_MS:-}"
 PERF_BASELINE_MAX_EXPORT_MS="${PERF_BASELINE_MAX_EXPORT_MS:-}"
 PERF_BASELINE_MAX_ROLLBACK_MS="${PERF_BASELINE_MAX_ROLLBACK_MS:-}"
 
+PERF_HIGHSCALE_API_BASE="${PERF_HIGHSCALE_API_BASE:-${API_BASE}}"
+PERF_HIGHSCALE_ROWS="${PERF_HIGHSCALE_ROWS:-100000}"
+PERF_HIGHSCALE_MODE="${PERF_HIGHSCALE_MODE:-commit}"
+PERF_HIGHSCALE_PREVIEW_MODE="${PERF_HIGHSCALE_PREVIEW_MODE:-auto}"
+PERF_HIGHSCALE_COMMIT_ASYNC="${PERF_HIGHSCALE_COMMIT_ASYNC:-true}"
+PERF_HIGHSCALE_EXPORT_CSV="${PERF_HIGHSCALE_EXPORT_CSV:-true}"
+PERF_HIGHSCALE_UPLOAD_CSV="${PERF_HIGHSCALE_UPLOAD_CSV:-true}"
+PERF_HIGHSCALE_PAYLOAD_SOURCE="${PERF_HIGHSCALE_PAYLOAD_SOURCE:-auto}"
+PERF_HIGHSCALE_CSV_ROWS_LIMIT_HINT="${PERF_HIGHSCALE_CSV_ROWS_LIMIT_HINT:-100000}"
+PERF_HIGHSCALE_MAX_PREVIEW_MS="${PERF_HIGHSCALE_MAX_PREVIEW_MS:-}"
+PERF_HIGHSCALE_MAX_COMMIT_MS="${PERF_HIGHSCALE_MAX_COMMIT_MS:-}"
+PERF_HIGHSCALE_MAX_EXPORT_MS="${PERF_HIGHSCALE_MAX_EXPORT_MS:-}"
+PERF_HIGHSCALE_IMPORT_JOB_POLL_TIMEOUT_MS="${PERF_HIGHSCALE_IMPORT_JOB_POLL_TIMEOUT_MS:-3600000}"
+PERF_HIGHSCALE_IMPORT_JOB_POLL_TIMEOUT_LARGE_MS="${PERF_HIGHSCALE_IMPORT_JOB_POLL_TIMEOUT_LARGE_MS:-5400000}"
+
 # Local contract assertions for perf artifacts downloaded from GA run.
 PERF_EXPECT_UPLOAD_CSV="${PERF_EXPECT_UPLOAD_CSV:-${PERF_BASELINE_UPLOAD_CSV}}"
 PERF_EXPECT_COMMIT_ASYNC="${PERF_EXPECT_COMMIT_ASYNC:-${PERF_BASELINE_COMMIT_ASYNC}}"
@@ -86,6 +102,33 @@ if [[ -z "$PERF_EXPECT_PAYLOAD_SOURCE" ]]; then
         PERF_EXPECT_PAYLOAD_SOURCE="rows"
       else
         PERF_EXPECT_PAYLOAD_SOURCE="csv"
+      fi
+      ;;
+  esac
+fi
+
+PERF_HIGHSCALE_EXPECT_UPLOAD_CSV="${PERF_HIGHSCALE_EXPECT_UPLOAD_CSV:-${PERF_HIGHSCALE_UPLOAD_CSV}}"
+PERF_HIGHSCALE_EXPECT_COMMIT_ASYNC="${PERF_HIGHSCALE_EXPECT_COMMIT_ASYNC:-${PERF_HIGHSCALE_COMMIT_ASYNC}}"
+PERF_HIGHSCALE_EXPECT_ROWS_MIN="${PERF_HIGHSCALE_EXPECT_ROWS_MIN:-${PERF_HIGHSCALE_ROWS}}"
+PERF_HIGHSCALE_EXPECT_MODE="${PERF_HIGHSCALE_EXPECT_MODE:-${PERF_HIGHSCALE_MODE}}"
+PERF_HIGHSCALE_EXPECT_UPLOAD_CSV_REQUESTED="${PERF_HIGHSCALE_EXPECT_UPLOAD_CSV_REQUESTED:-${PERF_HIGHSCALE_UPLOAD_CSV}}"
+PERF_HIGHSCALE_EXPECT_PAYLOAD_SOURCE="${PERF_HIGHSCALE_EXPECT_PAYLOAD_SOURCE:-}"
+
+if [[ -z "$PERF_HIGHSCALE_EXPECT_PAYLOAD_SOURCE" ]]; then
+  perf_high_rows_num="$(printf '%s' "${PERF_HIGHSCALE_ROWS:-}" | tr -cd '0-9')"
+  perf_high_hint_num="$(printf '%s' "${PERF_HIGHSCALE_CSV_ROWS_LIMIT_HINT:-}" | tr -cd '0-9')"
+  [[ -n "$perf_high_rows_num" ]] || perf_high_rows_num="0"
+  [[ -n "$perf_high_hint_num" ]] || perf_high_hint_num="100000"
+  perf_high_payload_mode="$(printf '%s' "${PERF_HIGHSCALE_PAYLOAD_SOURCE:-auto}" | tr '[:upper:]' '[:lower:]')"
+  case "$perf_high_payload_mode" in
+    rows|csv)
+      PERF_HIGHSCALE_EXPECT_PAYLOAD_SOURCE="$perf_high_payload_mode"
+      ;;
+    *)
+      if (( perf_high_rows_num > perf_high_hint_num )); then
+        PERF_HIGHSCALE_EXPECT_PAYLOAD_SOURCE="rows"
+      else
+        PERF_HIGHSCALE_EXPECT_PAYLOAD_SOURCE="csv"
       fi
       ;;
   esac
@@ -343,6 +386,138 @@ function run_perf_baseline_contract_gate() {
   echo "OK: perf contract validation passed" >>"$log_file"
   append_result "perf-baseline-contract" "local-assert" "$run_id" "PASS" "success" "$run_url" "$summary_path"
   info "perf-baseline-contract ok: uploadCsv=${actual_upload} uploadCsvRequested=${actual_upload_requested} payloadSource=${actual_payload_source} commitAsync=${actual_commit_async} rows=${actual_rows} mode=${actual_mode}"
+  return 0
+}
+
+function run_perf_highscale_contract_gate() {
+  local run_id="$1"
+  local run_url="$2"
+  local artifacts_dir="$3"
+  local log_file="${OUTPUT_ROOT}/gate-perf-highscale-contract.log"
+  local profile_lower='high-scale'
+
+  local expected_upload
+  expected_upload="$(to_bool "$PERF_HIGHSCALE_EXPECT_UPLOAD_CSV")"
+  local expected_commit_async
+  expected_commit_async="$(to_bool "$PERF_HIGHSCALE_EXPECT_COMMIT_ASYNC")"
+  local expected_upload_requested
+  expected_upload_requested="$(to_bool "$PERF_HIGHSCALE_EXPECT_UPLOAD_CSV_REQUESTED")"
+  local expected_mode="${PERF_HIGHSCALE_EXPECT_MODE}"
+  local expected_payload_source
+  expected_payload_source="$(printf '%s' "${PERF_HIGHSCALE_EXPECT_PAYLOAD_SOURCE:-}" | tr '[:upper:]' '[:lower:]')"
+  local expected_rows_min
+  expected_rows_min="$(printf '%s' "${PERF_HIGHSCALE_EXPECT_ROWS_MIN:-0}" | tr -cd '0-9')"
+  if [[ -z "$expected_rows_min" ]]; then
+    expected_rows_min="0"
+  fi
+
+  {
+    echo "[attendance-post-merge-verify] validating highscale perf artifact contract"
+    echo "run_id=${run_id}"
+    echo "artifacts_dir=${artifacts_dir}"
+    echo "profile=${profile_lower}"
+    echo "expected_upload_csv=${expected_upload:-<skip>}"
+    echo "expected_upload_csv_requested=${expected_upload_requested:-<skip>}"
+    echo "expected_payload_source=${expected_payload_source:-<skip>}"
+    echo "expected_commit_async=${expected_commit_async:-<skip>}"
+    echo "expected_rows_min=${expected_rows_min}"
+    echo "expected_mode=${expected_mode:-<skip>}"
+  } >"$log_file"
+
+  if [[ -z "$artifacts_dir" || ! -d "$artifacts_dir" ]]; then
+    failures=$((failures + 1))
+    echo "ERROR: artifacts dir missing" >>"$log_file"
+    append_result "perf-highscale-contract" "local-assert" "$run_id" "FAIL" "artifacts_missing" "$run_url" "$artifacts_dir"
+    return 1
+  fi
+
+  local summary_path=''
+  summary_path="$(find "$artifacts_dir" -type f -name 'perf-summary.json' | head -n 1 || true)"
+  if [[ -z "$summary_path" || ! -f "$summary_path" ]]; then
+    failures=$((failures + 1))
+    echo "ERROR: perf-summary.json not found" >>"$log_file"
+    append_result "perf-highscale-contract" "local-assert" "$run_id" "FAIL" "summary_missing" "$run_url" "$artifacts_dir"
+    return 1
+  fi
+
+  local actual_upload actual_upload_requested actual_payload_source actual_commit_async actual_rows actual_mode
+  actual_upload="$(jq -r '.uploadCsv' "$summary_path" 2>/dev/null || echo '')"
+  actual_upload_requested="$(jq -r '.uploadCsvRequested // empty' "$summary_path" 2>/dev/null || echo '')"
+  actual_payload_source="$(jq -r '.payloadSource // empty' "$summary_path" 2>/dev/null || echo '')"
+  actual_commit_async="$(jq -r '.commitAsync' "$summary_path" 2>/dev/null || echo '')"
+  actual_rows="$(jq -r '.rows' "$summary_path" 2>/dev/null || echo '')"
+  actual_mode="$(jq -r '.mode // empty' "$summary_path" 2>/dev/null || echo '')"
+
+  {
+    echo "summary_path=${summary_path}"
+    echo "actual_upload_csv=${actual_upload}"
+    echo "actual_upload_csv_requested=${actual_upload_requested}"
+    echo "actual_payload_source=${actual_payload_source}"
+    echo "actual_commit_async=${actual_commit_async}"
+    echo "actual_rows=${actual_rows}"
+    echo "actual_mode=${actual_mode}"
+  } >>"$log_file"
+
+  local errors=()
+  if [[ -n "$expected_upload" ]]; then
+    local actual_upload_bool
+    actual_upload_bool="$(to_bool "$actual_upload")"
+    if [[ "$actual_upload_bool" != "$expected_upload" ]]; then
+      errors+=("uploadCsv mismatch (expected=${expected_upload} actual=${actual_upload})")
+    fi
+  fi
+
+  if [[ -n "$expected_commit_async" ]]; then
+    local actual_commit_async_bool
+    actual_commit_async_bool="$(to_bool "$actual_commit_async")"
+    if [[ "$actual_commit_async_bool" != "$expected_commit_async" ]]; then
+      errors+=("commitAsync mismatch (expected=${expected_commit_async} actual=${actual_commit_async})")
+    fi
+  fi
+
+  if [[ -n "$expected_upload_requested" ]]; then
+    local actual_upload_requested_bool
+    actual_upload_requested_bool="$(to_bool "$actual_upload_requested")"
+    if [[ "$actual_upload_requested_bool" != "$expected_upload_requested" ]]; then
+      errors+=("uploadCsvRequested mismatch (expected=${expected_upload_requested} actual=${actual_upload_requested})")
+    fi
+  fi
+
+  if [[ -n "$expected_payload_source" ]]; then
+    local actual_payload_source_normalized
+    actual_payload_source_normalized="$(printf '%s' "${actual_payload_source:-}" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$actual_payload_source_normalized" != "$expected_payload_source" ]]; then
+      errors+=("payloadSource mismatch (expected=${expected_payload_source} actual=${actual_payload_source})")
+    fi
+  fi
+
+  if [[ "$actual_rows" =~ ^[0-9]+$ ]]; then
+    if (( actual_rows < expected_rows_min )); then
+      errors+=("rows below minimum (expected>=${expected_rows_min} actual=${actual_rows})")
+    fi
+  else
+    errors+=("rows missing/invalid (actual=${actual_rows})")
+  fi
+
+  if [[ -n "$expected_mode" && "$actual_mode" != "$expected_mode" ]]; then
+    errors+=("mode mismatch (expected=${expected_mode} actual=${actual_mode})")
+  fi
+
+  if (( ${#errors[@]} > 0 )); then
+    failures=$((failures + 1))
+    {
+      echo "ERROR: highscale perf contract validation failed"
+      for item in "${errors[@]}"; do
+        echo "- ${item}"
+      done
+    } >>"$log_file"
+    append_result "perf-highscale-contract" "local-assert" "$run_id" "FAIL" "contract_mismatch" "$run_url" "$summary_path"
+    return 1
+  fi
+
+  echo "OK: highscale perf contract validation passed" >>"$log_file"
+  append_result "perf-highscale-contract" "local-assert" "$run_id" "PASS" "success" "$run_url" "$summary_path"
+  info "perf-highscale-contract ok: uploadCsv=${actual_upload} uploadCsvRequested=${actual_upload_requested} payloadSource=${actual_payload_source} commitAsync=${actual_commit_async} rows=${actual_rows} mode=${actual_mode}"
   return 0
 }
 
@@ -673,6 +848,34 @@ elif [[ "$GATE_LAST_STATUS" == "PASS" ]]; then
   run_perf_baseline_contract_gate "$GATE_LAST_RUN_ID" "$GATE_LAST_RUN_URL" "$GATE_LAST_ARTIFACTS" || true
 else
   append_result "perf-baseline-contract" "local-assert" "$GATE_LAST_RUN_ID" "SKIP" "upstream_gate_failed" "$GATE_LAST_RUN_URL" "$GATE_LAST_ARTIFACTS"
+fi
+
+run_gate \
+  "perf-highscale" \
+  "attendance-import-perf-highscale.yml" \
+  "$SKIP_PERF_HIGHSCALE" \
+  -f "drill=false" \
+  -f "api_base=${PERF_HIGHSCALE_API_BASE}" \
+  -f "rows=${PERF_HIGHSCALE_ROWS}" \
+  -f "mode=${PERF_HIGHSCALE_MODE}" \
+  -f "preview_mode=${PERF_HIGHSCALE_PREVIEW_MODE}" \
+  -f "commit_async=${PERF_HIGHSCALE_COMMIT_ASYNC}" \
+  -f "export_csv=${PERF_HIGHSCALE_EXPORT_CSV}" \
+  -f "upload_csv=${PERF_HIGHSCALE_UPLOAD_CSV}" \
+  -f "payload_source=${PERF_HIGHSCALE_PAYLOAD_SOURCE}" \
+  -f "csv_rows_limit_hint=${PERF_HIGHSCALE_CSV_ROWS_LIMIT_HINT}" \
+  -f "max_preview_ms=${PERF_HIGHSCALE_MAX_PREVIEW_MS}" \
+  -f "max_commit_ms=${PERF_HIGHSCALE_MAX_COMMIT_MS}" \
+  -f "max_export_ms=${PERF_HIGHSCALE_MAX_EXPORT_MS}" \
+  -f "import_job_poll_timeout_ms=${PERF_HIGHSCALE_IMPORT_JOB_POLL_TIMEOUT_MS}" \
+  -f "import_job_poll_timeout_large_ms=${PERF_HIGHSCALE_IMPORT_JOB_POLL_TIMEOUT_LARGE_MS}"
+
+if [[ "$SKIP_PERF_HIGHSCALE" == "true" ]]; then
+  append_result "perf-highscale-contract" "local-assert" "" "SKIP" "" "" ""
+elif [[ "$GATE_LAST_STATUS" == "PASS" ]]; then
+  run_perf_highscale_contract_gate "$GATE_LAST_RUN_ID" "$GATE_LAST_RUN_URL" "$GATE_LAST_ARTIFACTS" || true
+else
+  append_result "perf-highscale-contract" "local-assert" "$GATE_LAST_RUN_ID" "SKIP" "upstream_gate_failed" "$GATE_LAST_RUN_URL" "$GATE_LAST_ARTIFACTS"
 fi
 
 run_gate \

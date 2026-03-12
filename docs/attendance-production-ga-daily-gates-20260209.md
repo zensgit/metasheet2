@@ -5746,3 +5746,41 @@ Post-merge note:
 - after merge to `main`, run:
   - `gh workflow run attendance-daily-gate-dashboard.yml -f branch=main -f lookback_hours=48`
   - ensure `Perf High Scale` row resolves against `attendance-import-perf-highscale.yml`.
+
+### Update (2026-03-12): Post-Merge Verify Chain Includes Perf High Scale
+
+Updated:
+
+- `scripts/ops/attendance-post-merge-verify.sh`
+
+Changes:
+
+- adds `SKIP_PERF_HIGHSCALE` (default `false`)
+- dispatches `attendance-import-perf-highscale.yml` in the post-merge chain
+- validates highscale artifact contract via `perf-highscale-contract`
+
+Also updated:
+
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - dashboard contract fixtures now include `gateFlat.highscale`
+  - adds expected-fail case `dashboard.invalid.highscale.json`
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Post-merge verify syntax | `bash -n scripts/ops/attendance-post-merge-verify.sh` | PASS | stdout |
+| Dashboard contract case (highscale added) | `scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/` |
+| Fast regression ops profile (includes highscale runner test) | `pnpm verify:attendance-regression-fast:test` | PASS | stdout |
+
+Recommended main-branch command:
+
+```bash
+SKIP_PERF_HIGHSCALE=false \
+bash scripts/ops/attendance-post-merge-verify.sh
+```
+
+Expected summary rows:
+
+- `perf-highscale`
+- `perf-highscale-contract`
