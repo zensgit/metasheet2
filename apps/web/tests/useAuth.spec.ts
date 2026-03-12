@@ -35,5 +35,42 @@ describe('useAuth', () => {
     expect(h.Authorization).toBeUndefined()
     expect(h['x-user-id']).toBe('dev-user')
   })
-})
 
+  it('persists auth_token and jwt when setToken is called', () => {
+    const { setToken, getToken } = useAuth()
+    setToken('persisted-token')
+
+    expect(store.auth_token).toBe('persisted-token')
+    expect(store.jwt).toBe('persisted-token')
+    expect(getToken()).toBe('persisted-token')
+  })
+
+  it('clears all supported token aliases', () => {
+    store.auth_token = 'auth-token'
+    store.jwt = 'jwt-token'
+    store.devToken = 'dev-token'
+
+    const { clearToken, getToken } = useAuth()
+    clearToken()
+
+    expect(store.auth_token).toBeUndefined()
+    expect(store.jwt).toBeUndefined()
+    expect(store.devToken).toBeUndefined()
+    expect(getToken()).toBeNull()
+  })
+
+  it('refreshes dev token and stores aliases', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ token: 'dev-jwt-token' }),
+    }))
+
+    const { refreshDevToken, getToken } = useAuth()
+    await expect(refreshDevToken()).resolves.toBe('dev-jwt-token')
+
+    expect(store.auth_token).toBe('dev-jwt-token')
+    expect(store.jwt).toBe('dev-jwt-token')
+    expect(store.devToken).toBe('dev-jwt-token')
+    expect(getToken()).toBe('dev-jwt-token')
+  })
+})

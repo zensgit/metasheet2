@@ -95,6 +95,10 @@ describe('API Utils', () => {
   })
 
   describe('authHeaders()', () => {
+    beforeEach(() => {
+      localStorage.clear()
+    })
+
     it('应返回包含 Content-Type 的基础 headers', () => {
       const headers = authHeaders()
 
@@ -130,6 +134,22 @@ describe('API Utils', () => {
 
       expect(headers).not.toHaveProperty('Authorization')
       expect(Object.keys(headers)).toHaveLength(1)
+    })
+
+    it('应从 auth_token 读取本地 token', () => {
+      localStorage.setItem('auth_token', 'stored-auth-token')
+
+      const headers = authHeaders()
+      expect(headers.Authorization).toBe('Bearer stored-auth-token')
+    })
+
+    it('应在没有 auth_token 时回退到 jwt / devToken', () => {
+      localStorage.setItem('jwt', 'stored-jwt-token')
+      expect(authHeaders().Authorization).toBe('Bearer stored-jwt-token')
+
+      localStorage.removeItem('jwt')
+      localStorage.setItem('devToken', 'stored-dev-token')
+      expect(authHeaders().Authorization).toBe('Bearer stored-dev-token')
     })
 
     it('应正确格式化不同长度的 token', () => {
@@ -169,7 +189,6 @@ describe('API Utils', () => {
     })
 
     it('应支持 POST 请求场景', () => {
-      const apiBase = getApiBase()
       const token = 'admin-token-xyz'
       const headers = authHeaders(token)
 
@@ -185,7 +204,6 @@ describe('API Utils', () => {
     })
 
     it('应支持无认证的公开 API 调用', () => {
-      const apiBase = getApiBase()
       const headers = authHeaders()
 
       const requestConfig = {

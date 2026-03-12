@@ -44,11 +44,25 @@ export function getApiBase(): string {
 /**
  * Build authorization headers for authenticated requests
  */
+function getStoredToken(): string | null {
+  if (typeof localStorage === 'undefined') return null
+
+  const keys = ['auth_token', 'jwt', 'devToken'] as const
+  for (const key of keys) {
+    const token = localStorage.getItem(key)
+    if (typeof token === 'string' && token.trim().length > 0) {
+      return token
+    }
+  }
+
+  return null
+}
+
 export function authHeaders(token?: string): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json'
   }
-  const storedToken = typeof localStorage !== 'undefined' ? localStorage.getItem('auth_token') : null
+  const storedToken = getStoredToken()
   const resolvedToken = typeof token === 'string' ? token : storedToken ?? ''
   if (resolvedToken.trim().length > 0) {
     headers.Authorization = `Bearer ${resolvedToken}`

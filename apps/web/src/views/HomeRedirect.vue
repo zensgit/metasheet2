@@ -13,10 +13,9 @@ import { useRouter } from 'vue-router'
 import { useFeatureFlags } from '../stores/featureFlags'
 
 const router = useRouter()
-const { loadProductFeatures, resolveHomePath } = useFeatureFlags()
+const { resolveHomePath } = useFeatureFlags()
 
 onMounted(async () => {
-  await loadProductFeatures()
   await router.replace(resolveHomePath())
 })
 </script>
@@ -48,4 +47,3 @@ onMounted(async () => {
   font-size: 14px;
 }
 </style>
-

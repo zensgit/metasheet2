@@ -13,7 +13,33 @@
     <div v-if="error" class="plugin-admin__error">{{ error }}</div>
     <div v-else-if="loading" class="plugin-admin__loading">Loading plugins...</div>
 
-    <div v-else class="plugin-admin__grid">
+    <section v-if="integrationItems.length" class="plugin-admin__integrations">
+      <article v-for="item in integrationItems" :key="item.id" class="integration-card">
+        <div class="integration-card__header">
+          <div>
+            <h2>{{ item.id.toUpperCase() }}</h2>
+            <p class="integration-card__sub">{{ item.baseUrl || 'No upstream configured' }}</p>
+          </div>
+          <span class="status-chip" :class="integrationStatusClass(item.implementation)">
+            {{ item.implementation }}
+          </span>
+        </div>
+        <div class="integration-card__meta">
+          <span>Configured: {{ item.configured ? 'yes' : 'no' }}</span>
+          <span>Connected: {{ item.connected ? 'yes' : 'no' }}</span>
+          <span>Health check: {{ item.healthSupported ? 'supported' : 'n/a' }}</span>
+        </div>
+        <p class="integration-card__ops">
+          {{ item.supportedOperations.join(', ') || 'No declared operations' }}
+        </p>
+      </article>
+    </section>
+
+    <div v-if="integrationError" class="plugin-admin__error">
+      Integration status: {{ integrationError }}
+    </div>
+
+    <div v-if="!loading" class="plugin-admin__grid">
       <article v-for="plugin in plugins" :key="plugin.name" class="plugin-card">
         <div class="plugin-card__header">
           <div>
@@ -128,9 +154,21 @@ interface PluginConfigEntry {
   modified_by?: string | null
 }
 
+interface IntegrationItem {
+  id: string
+  implementation: 'real' | 'stub' | 'missing'
+  configured: boolean
+  connected: boolean
+  healthSupported: boolean
+  baseUrl?: string
+  supportedOperations: string[]
+}
+
 const plugins = ref<PluginEntry[]>([])
+const integrationItems = ref<IntegrationItem[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
+const integrationError = ref<string | null>(null)
 const actionLoading = reactive<Record<string, boolean>>({})
 const actionErrors = reactive<Record<string, string | null>>({})
 
@@ -149,16 +187,37 @@ const statusClass = (status: PluginStatus) => {
   return 'status-chip--inactive'
 }
 
+const integrationStatusClass = (status: IntegrationItem['implementation']) => {
+  if (status === 'real') return 'status-chip--active'
+  if (status === 'stub') return 'status-chip--inactive'
+  return 'status-chip--failed'
+}
+
 const refresh = async () => {
   loading.value = true
   error.value = null
+  integrationError.value = null
   try {
-    const response = await apiFetch('/api/admin/plugins')
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
-    const payload = await response.json()
-    plugins.value = Array.isArray(payload?.list) ? payload.list : []
+    const [pluginResponse, integrationResponse] = await Promise.all([
+      apiFetch('/api/admin/plugins'),
+      apiFetch('/api/federation/integration-status'),
+    ])
+
+    if (!pluginResponse.ok) throw new Error(`${pluginResponse.status} ${pluginResponse.statusText}`)
+    const pluginPayload = await pluginResponse.json()
+    plugins.value = Array.isArray(pluginPayload?.list) ? pluginPayload.list : []
+
+    if (integrationResponse.ok) {
+      const integrationPayload = await integrationResponse.json()
+      integrationItems.value = Array.isArray(integrationPayload?.data?.items) ? integrationPayload.data.items : []
+    } else {
+      integrationItems.value = []
+      integrationError.value = `${integrationResponse.status} ${integrationResponse.statusText}`
+    }
   } catch (err: any) {
     error.value = err?.message || 'Failed to load plugins'
+    plugins.value = []
+    integrationItems.value = []
   } finally {
     loading.value = false
   }
@@ -292,6 +351,50 @@ onMounted(() => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: 16px;
+}
+
+.plugin-admin__integrations {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.integration-card {
+  background: #fff;
+  border: 1px solid #e5e5e5;
+  border-radius: 12px;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.integration-card__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.integration-card__header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.integration-card__sub,
+.integration-card__ops {
+  margin: 0;
+  color: #666;
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.integration-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: #666;
+  font-size: 12px;
 }
 
 .plugin-card {

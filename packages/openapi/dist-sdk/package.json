@@ -5,11 +5,21 @@
   "type": "module",
   "main": "index.js",
   "types": "index.d.ts",
-  "files": ["index.js", "index.d.ts"],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./client": {
+      "types": "./client.d.ts",
+      "default": "./client.js"
+    }
+  },
+  "files": ["index.js", "index.d.ts", "client.js", "client.d.ts", "README.md"],
   "scripts": {
-    "build": "node ./scripts/build.mjs"
+    "build": "node ./scripts/build.mjs",
+    "test": "vitest run tests/client.test.ts --watch=false"
   },
   "keywords": ["metasheet","sdk","openapi"],
   "license": "UNLICENSED"
 }
-

@@ -100,6 +100,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'PLM' }
   },
   {
+    path: '/plm/audit',
+    name: 'plm-audit',
+    component: () => import('./views/PlmAuditView.vue'),
+    meta: { title: 'PLM Audit' }
+  },
+  {
     path: '/admin/plugins',
     name: 'plugin-manager',
     component: () => import('./views/PluginManagerView.vue'),

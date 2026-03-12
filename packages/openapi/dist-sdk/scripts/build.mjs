@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -15,5 +16,26 @@ const dtsOut = path.join(outDir, 'index.d.ts')
 const src = fs.readFileSync(sdkSrc, 'utf8')
 fs.writeFileSync(dtsOut, src)
 fs.writeFileSync(jsOut, `// ESM stub exports types only\nexport {};\n`)
-console.log('SDK packaged to dist-sdk')
 
+execFileSync(
+  'pnpm',
+  [
+    'exec',
+    'tsc',
+    'client.ts',
+    '--declaration',
+    '--module',
+    'NodeNext',
+    '--moduleResolution',
+    'NodeNext',
+    '--target',
+    'ES2020',
+    '--skipLibCheck',
+  ],
+  {
+    cwd: process.cwd(),
+    stdio: 'inherit',
+  },
+)
+
+console.log('SDK packaged to dist-sdk')

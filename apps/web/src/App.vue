@@ -8,22 +8,33 @@
         <router-link v-if="attendanceFocused" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
 
         <template v-else>
-          <router-link to="/grid" class="nav-link">{{ navLabels.grid }}</router-link>
-          <router-link to="/spreadsheets" class="nav-link">{{ navLabels.spreadsheets }}</router-link>
-          <router-link to="/kanban" class="nav-link">{{ navLabels.kanban }}</router-link>
-          <router-link to="/calendar" class="nav-link">{{ navLabels.calendar }}</router-link>
-          <router-link to="/gallery" class="nav-link">{{ navLabels.gallery }}</router-link>
-          <router-link to="/form" class="nav-link">{{ navLabels.form }}</router-link>
-          <router-link
-            v-for="item in pluginNavItems"
-            :key="item.id"
-            :to="item.path"
-            class="nav-link"
-          >
-            {{ item.label }}
-          </router-link>
-          <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
-          <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
+          <template v-if="plmWorkbenchFocused">
+            <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
+            <router-link to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
+            <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
+            <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+          </template>
+          <template v-else>
+            <router-link to="/grid" class="nav-link">{{ navLabels.grid }}</router-link>
+            <router-link to="/spreadsheets" class="nav-link">{{ navLabels.spreadsheets }}</router-link>
+            <router-link to="/kanban" class="nav-link">{{ navLabels.kanban }}</router-link>
+            <router-link to="/calendar" class="nav-link">{{ navLabels.calendar }}</router-link>
+            <router-link to="/gallery" class="nav-link">{{ navLabels.gallery }}</router-link>
+            <router-link to="/form" class="nav-link">{{ navLabels.form }}</router-link>
+            <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
+            <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+            <router-link
+              v-for="item in pluginNavItems"
+              :key="item.id"
+              :to="item.path"
+              class="nav-link"
+            >
+              {{ item.label }}
+            </router-link>
+            <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
+            <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
+            <router-link to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
+          </template>
         </template>
       </div>
 
@@ -51,13 +62,15 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
+import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
 import { useFeatureFlags } from './stores/featureFlags'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
-const { loadProductFeatures, isAttendanceFocused, hasFeature } = useFeatureFlags()
+const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures } = useFeatureFlags()
+const { clearToken, getToken } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 
 const showNav = computed(() => {
@@ -65,6 +78,7 @@ const showNav = computed(() => {
 })
 
 const attendanceFocused = computed(() => isAttendanceFocused())
+const plmWorkbenchFocused = computed(() => isPlmWorkbenchFocused())
 const isAdmin = computed(() => hasFeature('attendanceAdmin'))
 const navLabels = computed(() => {
   if (isZh.value) {
@@ -76,8 +90,12 @@ const navLabels = computed(() => {
       calendar: '日历',
       gallery: '画廊',
       form: '表单',
+      workflows: '流程',
+      approvals: '审批中心',
       plugins: '插件',
       plm: 'PLM',
+      audit: '审计',
+      plmWorkbench: 'PLM 工作台',
       signOut: '退出登录',
       language: '语言',
     }
@@ -90,8 +108,12 @@ const navLabels = computed(() => {
     calendar: 'Calendar',
     gallery: 'Gallery',
     form: 'Form',
+    workflows: 'Workflows',
+    approvals: 'Approvals',
     plugins: 'Plugins',
     plm: 'PLM',
+    audit: 'Audit',
+    plmWorkbench: 'PLM Workbench',
     signOut: 'Sign out',
     language: 'Language',
   }
@@ -99,12 +121,13 @@ const navLabels = computed(() => {
 
 const brandText = computed(() => {
   if (attendanceFocused.value) return navLabels.value.attendance
+  if (plmWorkbenchFocused.value) return navLabels.value.plmWorkbench
   return 'MetaSheet'
 })
 
 const accountEmail = computed(() => {
   if (typeof localStorage === 'undefined') return ''
-  const token = localStorage.getItem('auth_token')
+  const token = getToken()
   if (!token) return ''
   const chunks = token.split('.')
   if (chunks.length < 2) return ''
@@ -122,8 +145,8 @@ const accountEmail = computed(() => {
 })
 
 function logout(): void {
+  clearToken()
   if (typeof localStorage !== 'undefined') {
-    localStorage.removeItem('auth_token')
     localStorage.removeItem('metasheet_features')
     localStorage.removeItem('metasheet_product_mode')
     localStorage.removeItem('user_permissions')
@@ -139,7 +162,10 @@ function onLocaleChange(event: Event): void {
 }
 
 onMounted(async () => {
-  await loadProductFeatures()
+  await loadProductFeatures().catch(() => null)
+  if (attendanceFocused.value || plmWorkbenchFocused.value) {
+    return
+  }
   await fetchPlugins()
 })
 </script>
