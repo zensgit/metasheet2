@@ -41,6 +41,42 @@ pnpm --filter @metasheet/web build
 - 单测通过（包含 401 重定向与 token 清理逻辑）。
 - 前端构建成功（可产出 `apps/web/dist`）。
 
+## 交付证据（GitHub）
+
+- PR：`#448`
+  - URL：<https://github.com/zensgit/metasheet2/pull/448>
+  - 状态：`MERGED`
+  - Merge commit：`02d2a2115fd1e1d70eb05e3119c05bb9707114d1`
+- On-Prem Package Build：
+  - Workflow run：`#22983975956`
+  - Artifact：`attendance-onprem-package-22983975956-1`
+  - 本地下载证据目录：`output/playwright/ga/22983975956/`
+- Release：
+  - Tag：`attendance-onprem-run10-20260312-authfix`
+  - URL：<https://github.com/zensgit/metasheet2/releases/tag/attendance-onprem-run10-20260312-authfix>
+  - 包名：
+    - `metasheet-attendance-onprem-v2.5.0-run10-20260312-authfix.zip`
+    - `metasheet-attendance-onprem-v2.5.0-run10-20260312-authfix.tgz`
+
+## 安装包校验记录
+
+在仓库根目录执行：
+
+```bash
+scripts/ops/attendance-onprem-package-verify.sh output/playwright/ga/22983975956/metasheet-attendance-onprem-v2.5.0-run10-20260312-authfix.tgz
+scripts/ops/attendance-onprem-package-verify.sh output/playwright/ga/22983975956/metasheet-attendance-onprem-v2.5.0-run10-20260312-authfix.zip
+(
+  cd output/playwright/ga/22983975956
+  sha256sum -c SHA256SUMS
+)
+```
+
+结果：
+
+- `.tgz`：`OK`
+- `.zip`：`OK`
+- `SHA256SUMS`：两项均 `OK`
+
 ## 上线后现场验收清单
 
 1. 首次访问 `http://<host>/login` 显示登录页。
