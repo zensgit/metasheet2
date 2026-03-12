@@ -99,6 +99,9 @@ function handleUnauthorized(path: string): void {
     return
   }
   authRedirecting = true
+  window.setTimeout(() => {
+    authRedirecting = false
+  }, 3000)
   clearStoredAuthState()
   const loginUrl = buildLoginRedirectUrl()
   if (typeof window.location?.replace === 'function') {
