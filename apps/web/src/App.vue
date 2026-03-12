@@ -35,7 +35,7 @@
             <option value="zh-CN">中文</option>
           </select>
         </label>
-        <template v-if="attendanceFocused">
+        <template v-if="isLoggedIn">
           <span v-if="accountEmail" class="nav-user">{{ accountEmail }}</span>
           <button class="nav-link nav-link--button" type="button" @click="logout">{{ navLabels.signOut }}</button>
         </template>
@@ -54,6 +54,7 @@ import { useRoute } from 'vue-router'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
 import { useFeatureFlags } from './stores/featureFlags'
+import { clearStoredAuthState, getStoredAuthToken } from './utils/api'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
@@ -66,6 +67,7 @@ const showNav = computed(() => {
 
 const attendanceFocused = computed(() => isAttendanceFocused())
 const isAdmin = computed(() => hasFeature('attendanceAdmin'))
+const isLoggedIn = computed(() => getStoredAuthToken().length > 0)
 const navLabels = computed(() => {
   if (isZh.value) {
     return {
@@ -103,8 +105,7 @@ const brandText = computed(() => {
 })
 
 const accountEmail = computed(() => {
-  if (typeof localStorage === 'undefined') return ''
-  const token = localStorage.getItem('auth_token')
+  const token = getStoredAuthToken()
   if (!token) return ''
   const chunks = token.split('.')
   if (chunks.length < 2) return ''
@@ -122,14 +123,8 @@ const accountEmail = computed(() => {
 })
 
 function logout(): void {
-  if (typeof localStorage !== 'undefined') {
-    localStorage.removeItem('auth_token')
-    localStorage.removeItem('metasheet_features')
-    localStorage.removeItem('metasheet_product_mode')
-    localStorage.removeItem('user_permissions')
-    localStorage.removeItem('user_roles')
-  }
-  window.location.assign('/')
+  clearStoredAuthState()
+  window.location.assign('/login')
 }
 
 function onLocaleChange(event: Event): void {

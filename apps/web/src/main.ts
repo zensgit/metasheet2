@@ -7,8 +7,9 @@ import type { RouteRecordRaw } from 'vue-router'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
 import App from './App.vue'
-import { AppRouteNames, ROUTE_PATHS, RouteGuards } from './router/types'
+import { ROUTE_PATHS } from './router/types'
 import { useFeatureFlags } from './stores/featureFlags'
+import { apiFetch, clearStoredAuthState, getStoredAuthToken } from './utils/api'
 
 // Import views
 import GridView from './views/GridView.vue'
@@ -23,79 +24,86 @@ import PluginManagerView from './views/PluginManagerView.vue'
 import PluginViewHost from './views/PluginViewHost.vue'
 import AttendanceExperienceView from './views/attendance/AttendanceExperienceView.vue'
 import HomeRedirect from './views/HomeRedirect.vue'
+import LoginView from './views/LoginView.vue'
 
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
     name: 'home',
     component: HomeRedirect,
-    meta: { title: 'Home', hideNavbar: true }
+    meta: { title: 'Home', hideNavbar: true, requiresAuth: true }
+  },
+  {
+    path: ROUTE_PATHS.LOGIN,
+    name: 'login',
+    component: LoginView,
+    meta: { title: 'Sign In', hideNavbar: true, requiresGuest: true }
   },
   {
     path: '/grid',
     name: 'grid',
     component: GridView,
-    meta: { title: 'Grid View' }
+    meta: { title: 'Grid View', requiresAuth: true }
   },
   {
     path: '/kanban',
     name: 'kanban',
     component: KanbanView,
-    meta: { title: 'Kanban View' }
+    meta: { title: 'Kanban View', requiresAuth: true }
   },
   {
     path: '/calendar',
     name: 'calendar',
     component: CalendarView,
-    meta: { title: 'Calendar View' }
+    meta: { title: 'Calendar View', requiresAuth: true }
   },
   {
     path: '/gallery',
     name: 'gallery',
     component: GalleryView,
-    meta: { title: 'Gallery View' }
+    meta: { title: 'Gallery View', requiresAuth: true }
   },
   {
     path: '/form',
     name: 'form',
     component: FormView,
-    meta: { title: 'Form View' }
+    meta: { title: 'Form View', requiresAuth: true }
   },
   {
     path: '/attendance',
     name: 'attendance',
     component: AttendanceExperienceView,
-    meta: { title: 'Attendance', requiredFeature: 'attendance' }
+    meta: { title: 'Attendance', requiresAuth: true, requiredFeature: 'attendance' }
   },
   {
     path: '/p/:plugin/:viewId',
     name: 'plugin-view',
     component: PluginViewHost,
-    meta: { title: 'Plugin' }
+    meta: { title: 'Plugin', requiresAuth: true }
   },
   {
     path: '/spreadsheets',
     name: 'spreadsheet-list',
     component: SpreadsheetsView,
-    meta: { title: 'Spreadsheets' }
+    meta: { title: 'Spreadsheets', requiresAuth: true }
   },
   {
     path: '/spreadsheets/:id',
     name: 'spreadsheet-detail',
     component: SpreadsheetDetailView,
-    meta: { title: 'Spreadsheet' }
+    meta: { title: 'Spreadsheet', requiresAuth: true }
   },
   {
     path: '/plm',
     name: 'plm',
     component: PlmProductView,
-    meta: { title: 'PLM' }
+    meta: { title: 'PLM', requiresAuth: true }
   },
   {
     path: '/admin/plugins',
     name: 'plugin-manager',
     component: PluginManagerView,
-    meta: { title: 'Plugins', requiredFeature: 'attendanceAdmin' }
+    meta: { title: 'Plugins', requiresAuth: true, requiredFeature: 'attendanceAdmin' }
   },
   {
     path: '/:pathMatch(.*)*',
@@ -112,6 +120,36 @@ const router = createRouter({
 
 // Navigation guard for page title
 router.beforeEach(async (to, _from, next) => {
+  const token = getStoredAuthToken()
+  const isLoginRoute = to.path === ROUTE_PATHS.LOGIN
+
+  if (!token && !isLoginRoute) {
+    return next({
+      path: ROUTE_PATHS.LOGIN,
+      query: { redirect: to.fullPath || '/attendance' },
+    })
+  }
+
+  if (token && isLoginRoute) {
+    const verify = await apiFetch('/api/auth/me')
+    if (!verify.ok) {
+      clearStoredAuthState()
+      return next()
+    }
+
+    const redirectRaw = to.query?.redirect
+    const redirect = typeof redirectRaw === 'string' && redirectRaw.startsWith('/') && !redirectRaw.startsWith('//')
+      ? redirectRaw
+      : null
+    const flags = useFeatureFlags()
+    try {
+      await flags.loadProductFeatures()
+    } catch {
+      // noop
+    }
+    return next(redirect || flags.resolveHomePath())
+  }
+
   const title = to.meta?.title
   if (title) {
     document.title = `${title} - MetaSheet`
@@ -122,7 +160,9 @@ router.beforeEach(async (to, _from, next) => {
   // Product capability guard + attendance focused mode restriction.
   try {
     const flags = useFeatureFlags()
-    await flags.loadProductFeatures()
+    if (token) {
+      await flags.loadProductFeatures()
+    }
 
     const required = to.meta?.requiredFeature
     const requiredFeature =

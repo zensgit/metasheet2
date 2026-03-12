@@ -10,6 +10,12 @@
 - Release tag：`attendance-onprem-pr396-20260310`
 - Release URL：<https://github.com/zensgit/metasheet2/releases/tag/attendance-onprem-pr396-20260310>
 
+## Update（2026-03-12）
+
+部署团队在 `v2.5.0-run9` 实施时反馈的登录与前端鉴权问题，已在后续修复中处理。详见：
+
+- [attendance-onprem-run9-defect-fixes-20260312.md](/Users/huazhou/Downloads/Github/metasheet2/docs/deployment/attendance-onprem-run9-defect-fixes-20260312.md)
+
 ## 0. 前置要求
 
 - 目标环境：Windows Server + WSL2 Ubuntu（或 Linux 服务器）
