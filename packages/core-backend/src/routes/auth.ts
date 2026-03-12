@@ -9,6 +9,7 @@ import jwt, { type SignOptions } from 'jsonwebtoken'
 import { authService, type User } from '../auth/AuthService'
 import { FEATURE_FLAGS } from '../config/flags'
 import { Logger } from '../core/logger'
+import { secretManager } from '../security/SecretManager'
 
 const logger = new Logger('AuthRouter')
 
@@ -37,7 +38,10 @@ authRouter.get('/dev-token', (req: Request, res: Response) => {
   const roles = rolesParam.split(',').map((v) => v.trim()).filter(Boolean)
   const perms = permsParam.split(',').map((v) => v.trim()).filter(Boolean)
 
-  const secret = process.env.JWT_SECRET || DEV_FALLBACK_JWT_SECRET
+  const secret = secretManager.get('JWT_SECRET', {
+    required: process.env.NODE_ENV === 'production',
+    fallback: DEV_FALLBACK_JWT_SECRET,
+  }) || DEV_FALLBACK_JWT_SECRET
 
   const payload = {
     id: userId,
@@ -428,9 +432,10 @@ authRouter.get('/me', async (req: Request, res: Response) => {
     }
 
     const authUser = user as User
-    type ProductMode = 'platform' | 'attendance'
+    type ProductMode = 'platform' | 'attendance' | 'plm-workbench'
     const normalizeProductMode = (value: unknown): ProductMode => {
       if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
+      if (value === 'plm-workbench' || value === 'plmWorkbench' || value === 'plm-focused') return 'plm-workbench'
       return 'platform'
     }
 

@@ -1,4 +1,41 @@
 paths:
+  /api/workflow-designer/hub-views/team:
+    get:
+      summary: List workflow hub team views
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200': { description: OK }
+    post:
+      summary: Save workflow hub team view
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                state: { type: object }
+              required: [name, state]
+      responses:
+        '201': { description: Created }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/workflow-designer/hub-views/team/{id}:
+    delete:
+      summary: Delete workflow hub team view
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/workflow-designer/node-types:
     get:
       summary: List workflow designer node types
@@ -16,8 +53,60 @@ paths:
         - in: query
           name: featured
           schema: { type: boolean }
+        - in: query
+          name: search
+          schema: { type: string }
+        - in: query
+          name: source
+          schema: { type: string, enum: [all, builtin, database], default: all }
+        - in: query
+          name: sortBy
+          schema: { type: string, enum: [usage_count, name, updated_at], default: usage_count }
+        - in: query
+          name: sortOrder
+          schema: { type: string, enum: [asc, desc], default: desc }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
       responses:
         '200': { description: OK }
+  /api/workflow-designer/templates/{id}:
+    get:
+      summary: Get workflow template detail
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/workflow-designer/templates/{id}/instantiate:
+    post:
+      summary: Instantiate workflow from template
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string }
+                category: { type: string }
+      responses:
+        '201': { description: Created }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/workflow-designer/workflows:
     post:
       summary: Create workflow
@@ -26,7 +115,20 @@ paths:
         required: true
         content:
           application/json:
-            schema: { type: object }
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string }
+                category: { type: string }
+                bpmnXml: { type: string }
+                nodes:
+                  type: array
+                  items: { type: object }
+                edges:
+                  type: array
+                  items: { type: object }
+              required: [name]
       responses:
         '201': { description: Created }
         '400': { $ref: '#/components/responses/ValidationError' }
@@ -43,6 +145,18 @@ paths:
         - in: query
           name: search
           schema: { type: string }
+        - in: query
+          name: sortBy
+          schema: { type: string, enum: [updated_at, created_at, name], default: updated_at }
+        - in: query
+          name: sortOrder
+          schema: { type: string, enum: [asc, desc], default: desc }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
       responses:
         '200': { description: OK }
   /api/workflow-designer/workflows/{id}:
@@ -70,10 +184,69 @@ paths:
         required: true
         content:
           application/json:
-            schema: { type: object }
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string }
+                category: { type: string }
+                bpmnXml: { type: string }
+                nodes:
+                  type: array
+                  items: { type: object }
+                edges:
+                  type: array
+                  items: { type: object }
       responses:
         '200': { description: OK }
         '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/workflow-designer/workflows/{id}/duplicate:
+    post:
+      summary: Duplicate workflow draft
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+      responses:
+        '201': { description: Created }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/workflow-designer/workflows/{id}/archive:
+    post:
+      summary: Archive workflow draft
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/workflow-designer/workflows/{id}/restore:
+    post:
+      summary: Restore archived workflow draft
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
   /api/workflow-designer/workflows/{id}/validate:

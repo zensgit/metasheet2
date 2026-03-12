@@ -117,6 +117,19 @@ describe('AuthService.verifyToken', () => {
     expect(user?.id).toBe('u3')
     expect(user?.permissions).toContain('attendance:read')
   })
+
+  it('falls back to a synthetic non-production user when the token subject is not in the database', async () => {
+    jwtMocks.verify.mockReturnValue({ id: 'dev-user', email: 'dev@x', role: 'admin', iat: 0, exp: 0 })
+    poolMocks.query.mockResolvedValue({ rows: [] })
+
+    const auth = new AuthService()
+    const user = await auth.verifyToken('dev-token')
+
+    expect(user).toBeTruthy()
+    expect(user?.id).toBe('dev-user')
+    expect(user?.role).toBe('admin')
+    expect(user?.permissions).toEqual(['*:*'])
+  })
 })
 
 describe('AuthService.refreshToken', () => {

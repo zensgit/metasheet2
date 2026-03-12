@@ -18,7 +18,6 @@ import type { BOMItem as AdapterBOMItem, PLMProduct as AdapterPLMProduct } from 
 import type { AthenaDocument as AdapterAthenaDocument, DocumentVersion as AdapterDocumentVersion } from '../data-adapters/AthenaAdapter'
 import {
   getAdapterMetrics,
-  recordCrossSystemOperation,
   startCrossSystemTimer,
 } from '../metrics/adapter-metrics'
 
@@ -46,6 +45,18 @@ interface CrossSystemOperation {
   startedAt: Date
   completedAt?: Date
   error?: string
+}
+
+interface AdapterRuntimeStatus {
+  id: string
+  implementation: 'real' | 'stub' | 'missing'
+  configured: boolean
+  connected: boolean
+  healthSupported: boolean
+  supportedOperations: string[]
+  systemStatus: FederatedSystem['status'] | 'missing'
+  baseUrl?: string
+  authType?: FederatedSystem['authType']
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -358,6 +369,63 @@ export function federationRouter(injector?: Injector): Router {
     return undefined
   }
 
+  const buildAdapterRuntimeStatus = async (
+    id: 'plm' | 'athena',
+    adapter: unknown,
+  ): Promise<AdapterRuntimeStatus> => {
+    const system = federatedSystems.get(id)
+    const systemCapabilities = system?.capabilities ?? getDefaultCapabilities(id)
+    if (!adapter) {
+      return {
+        id,
+        implementation: 'missing',
+        configured: false,
+        connected: false,
+        healthSupported: false,
+        supportedOperations: systemCapabilities,
+        systemStatus: system?.status ?? 'missing',
+        baseUrl: system?.baseUrl,
+        authType: system?.authType,
+      }
+    }
+
+    const runtime = typeof (adapter as { getRuntimeStatus?: () => unknown }).getRuntimeStatus === 'function'
+      ? (adapter as { getRuntimeStatus: () => unknown }).getRuntimeStatus()
+      : null
+
+    const implementation = runtime && typeof runtime === 'object' && (runtime as { implementation?: unknown }).implementation === 'stub'
+      ? 'stub'
+      : 'real'
+
+    const configured = runtime && typeof runtime === 'object' && typeof (runtime as { configured?: unknown }).configured === 'boolean'
+      ? Boolean((runtime as { configured: boolean }).configured)
+      : Boolean(system?.baseUrl)
+
+    const connected = typeof (adapter as { isConnected?: () => boolean }).isConnected === 'function'
+      ? Boolean((adapter as { isConnected: () => boolean }).isConnected())
+      : false
+
+    const healthSupported = runtime && typeof runtime === 'object' && typeof (runtime as { healthSupported?: unknown }).healthSupported === 'boolean'
+      ? Boolean((runtime as { healthSupported: boolean }).healthSupported)
+      : typeof (adapter as { healthCheck?: unknown }).healthCheck === 'function'
+
+    const supportedOperations = runtime && typeof runtime === 'object' && Array.isArray((runtime as { supportedOperations?: unknown[] }).supportedOperations)
+      ? (runtime as { supportedOperations: unknown[] }).supportedOperations.map((entry) => String(entry))
+      : systemCapabilities
+
+    return {
+      id,
+      implementation,
+      configured,
+      connected,
+      healthSupported,
+      supportedOperations,
+      systemStatus: system?.status ?? 'missing',
+      baseUrl: system?.baseUrl,
+      authType: system?.authType,
+    }
+  }
+
   const resolveAdapterError = (error: unknown, fallbackMessage: string) => {
     const status = (error as { response?: { status?: number } })?.response?.status
     const statusCode = typeof status === 'number' ? status : 502
@@ -649,6 +717,39 @@ export function federationRouter(injector?: Injector): Router {
           error: {
             code: 'INTERNAL_ERROR',
             message: error instanceof Error ? error.message : 'Failed to list systems',
+          },
+        })
+      }
+    }
+  )
+
+  /**
+   * GET /api/federation/integration-status
+   * List adapter runtime implementation status separately from plugin/runtime state.
+   */
+  router.get(
+    '/api/federation/integration-status',
+    rbacGuard('federation', 'read'),
+    async (_req: Request, res: Response) => {
+      try {
+        const items = await Promise.all([
+          buildAdapterRuntimeStatus('plm', plmAdapter),
+          buildAdapterRuntimeStatus('athena', athenaAdapter),
+        ])
+
+        return res.json({
+          ok: true,
+          data: {
+            items,
+            total: items.length,
+          },
+        })
+      } catch (error) {
+        return res.status(500).json({
+          ok: false,
+          error: {
+            code: 'INTERNAL_ERROR',
+            message: error instanceof Error ? error.message : 'Failed to load integration status',
           },
         })
       }
@@ -2600,6 +2701,7 @@ type AthenaDocumentWire = AdapterAthenaDocument & {
   contentType?: string
   currentVersionLabel?: string
   createdAt?: string
+  modified_at?: string
   modifiedAt?: string
   updatedAt?: string
   locked?: boolean
@@ -2609,7 +2711,7 @@ function mapAthenaDocument(document: AthenaDocumentWire) {
   const mimeType = document.mimeType || document.mime_type || document.contentType || document.type || 'application/octet-stream'
   const size = typeof document.size === 'number' ? document.size : (document.file_size ?? 0)
   const createdAt = document.createdAt || document.created_at
-  const modifiedAt = document.modifiedAt || document.updatedAt || document.updated_at
+  const modifiedAt = document.modifiedAt || document.modified_at || document.updatedAt || document.updated_at
   const locked = typeof document.locked === 'boolean'
     ? document.locked
     : Boolean(document.checked_out_by || document.checked_out_at)

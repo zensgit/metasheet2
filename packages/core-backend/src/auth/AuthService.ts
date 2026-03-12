@@ -268,8 +268,8 @@ export class AuthService {
         this.logger.warn('Database query failed', dbError instanceof Error ? dbError : undefined)
       }
 
-      // 降级：返回mock用户（仅开发环境）
-      if (process.env.NODE_ENV === 'development') {
+      // 降级：返回mock用户（非生产环境）
+      if (process.env.NODE_ENV !== 'production') {
         return {
           id: userId,
           email: 'dev@metasheet.com',

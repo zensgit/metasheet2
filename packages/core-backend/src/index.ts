@@ -66,6 +66,7 @@ import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import workflowRouter from './routes/workflow'
 import workflowDesignerRouter from './routes/workflow-designer'
+import plmWorkbenchRouter from './routes/plm-workbench'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
 import { SnapshotService } from './services/SnapshotService'
@@ -526,6 +527,8 @@ export class MetaSheetServer {
     this.app.use('/api/workflow', workflowRouter)
     // 路由：工作流设计器 (V2 Visual Designer)
     this.app.use('/api/workflow-designer', workflowDesignerRouter)
+    // 路由：PLM 工作台（共享预设、工作台状态）
+    this.app.use(plmWorkbenchRouter)
 
     // 路由：工作流 Echo/Mock API（用于前端并行开发）
     // 当后端引擎未完全就绪时，返回 echo 响应

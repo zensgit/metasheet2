@@ -1,4 +1,4 @@
-import { Server as SocketServer, Socket } from 'socket.io'
+import { Server as SocketServer, type Socket } from 'socket.io'
 import type { Server as HttpServer } from 'http'
 import type { ILogger } from '../di/identifiers'
 import type { EventBus } from '../integration/events/event-bus'
@@ -131,8 +131,7 @@ export class CollabService {
     this.logger.debug(`Left ${target} from room ${room}`)
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  onConnection(handler: (socket: any) => void): void {
+  onConnection(handler: (socket: Socket) => void): void {
     if (!this.io) return
     this.io.on('connection', handler)
   }
