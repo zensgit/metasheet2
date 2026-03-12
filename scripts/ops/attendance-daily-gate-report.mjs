@@ -29,6 +29,7 @@ const cleanupWorkflow = String(process.env.CLEANUP_WORKFLOW || 'attendance-remot
 const strictWorkflow = String(process.env.STRICT_WORKFLOW || 'attendance-strict-gates-prod.yml').trim()
 const perfWorkflow = String(process.env.PERF_WORKFLOW || 'attendance-import-perf-baseline.yml').trim()
 const longrunWorkflow = String(process.env.LONGRUN_WORKFLOW || 'attendance-import-perf-longrun.yml').trim()
+const highscaleWorkflow = String(process.env.HIGHSCALE_WORKFLOW || 'attendance-import-perf-highscale.yml').trim()
 const localeZhWorkflow = String(process.env.LOCALE_ZH_WORKFLOW || 'attendance-locale-zh-smoke-prod.yml').trim()
 const contractWorkflow = String(process.env.CONTRACT_WORKFLOW || 'attendance-gate-contract-matrix.yml').trim()
 const protectionWorkflow = String(process.env.PROTECTION_WORKFLOW || 'attendance-branch-policy-drift-prod.yml').trim()
@@ -779,6 +780,10 @@ function formatRun(run) {
   }
 }
 
+function isPerfGateName(name) {
+  return name === 'Perf Baseline' || name === 'Perf Long Run' || name === 'Perf High Scale'
+}
+
 function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbackHoursValue, fetchError, sourceBranch = branch }) {
   const findings = []
   let ok = true
@@ -854,6 +859,7 @@ function renderMarkdown({
   branchValue,
   lookbackHoursValue,
   cleanupLookbackHoursValue,
+  highscaleLookbackHoursValue,
   preflightGate,
   protectionGate,
   metricsGate,
@@ -862,6 +868,7 @@ function renderMarkdown({
   strictGate,
   perfGate,
   longrunGate,
+  highscaleGate,
   localeZhGate,
   contractGate,
   openTrackingIssues,
@@ -879,6 +886,7 @@ function renderMarkdown({
     'Strict Gates': strictWorkflow,
     'Perf Baseline': perfWorkflow,
     'Perf Long Run': longrunWorkflow,
+    'Perf High Scale': highscaleWorkflow,
     'Locale zh Smoke': localeZhWorkflow,
     'Gate Contract Matrix': contractWorkflow,
   }
@@ -889,7 +897,7 @@ function renderMarkdown({
   lines.push(`Generated at (UTC): \`${generatedAt}\``)
   lines.push(`Repository: \`${repoValue}\``)
   lines.push(`Branch: \`${branchValue}\``)
-  lines.push(`Lookback: \`${lookbackHoursValue}h\` (Upload Cleanup uses \`${cleanupLookbackHoursValue}h\`)`)
+  lines.push(`Lookback: \`${lookbackHoursValue}h\` (Upload Cleanup uses \`${cleanupLookbackHoursValue}h\`; Perf High Scale uses \`${highscaleLookbackHoursValue}h\`)`)
   lines.push(`P0 Status: **${p0Status.toUpperCase()}**`)
   lines.push(`Overall: **${overallStatus.toUpperCase()}**`)
   lines.push('')
@@ -949,7 +957,7 @@ function renderMarkdown({
           extra.push(`reasons=${head.join(' ')}`)
         }
       }
-      if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
+      if (isPerfGateName(gate.name)) {
         if (meta.schemaVersion) extra.push(`schema=${meta.schemaVersion}`)
         if (meta.engine) extra.push(`engine=${meta.engine}`)
         if (meta.processedRows) extra.push(`processed=${meta.processedRows}`)
@@ -979,7 +987,7 @@ function renderMarkdown({
     return `\`${value}\``
   }
 
-  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, localeZhGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, highscaleGate, localeZhGate, contractGate]) {
     const completed = gate.completed
     const runId = completed.id ? `#${completed.id}` : '-'
     const conclusion = completed.conclusion || '-'
@@ -993,7 +1001,7 @@ function renderMarkdown({
   lines.push('')
   lines.push('## Artifact Download Commands')
   lines.push('')
-  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, localeZhGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, highscaleGate, localeZhGate, contractGate]) {
     const runIdValue = gate?.completed?.id
     if (!runIdValue) continue
     lines.push(`- ${gate.name} (#${runIdValue}): \`gh run download ${runIdValue} -D "output/playwright/ga/${runIdValue}"\``)
@@ -1021,6 +1029,7 @@ function renderMarkdown({
       [strictGate.name]: strictGate,
       [perfGate.name]: perfGate,
       [longrunGate.name]: longrunGate,
+      [highscaleGate.name]: highscaleGate,
       [localeZhGate.name]: localeZhGate,
       [contractGate.name]: contractGate,
     }
@@ -1055,7 +1064,7 @@ function renderMarkdown({
       if (finding.gate === 'Upload Cleanup') {
         if (meta?.staleCount) metaBits.push(`stale_count=${meta.staleCount}`)
       }
-      if (finding.gate === 'Perf Baseline' || finding.gate === 'Perf Long Run') {
+      if (isPerfGateName(finding.gate)) {
         if (meta?.schemaVersion) metaBits.push(`schema=${meta.schemaVersion}`)
         if (meta?.engine) metaBits.push(`engine=${meta.engine}`)
         if (meta?.processedRows) metaBits.push(`processed_rows=${meta.processedRows}`)
@@ -1242,6 +1251,20 @@ function renderMarkdown({
       lines.push('- Perf Long Run: run succeeded but `perf-summary.json` is missing from artifacts. Check scenario artifact upload paths and rerun longrun.')
     }
 
+    if (findings.some((f) => f && f.gate === 'Perf High Scale' && f.code === 'RUN_FAILED')) {
+      if (highscaleGate?.meta?.regressionsCount && highscaleGate.meta.regressionsCount !== '0') {
+        lines.push(`- Perf High Scale: regressions detected (count=${highscaleGate.meta.regressionsCount}). See perf artifacts for details.`)
+        if (highscaleGate.meta.regressionsSample) {
+          lines.push(`- Perf High Scale: sample regressions: ${highscaleGate.meta.regressionsSample}`)
+        }
+      } else {
+        lines.push('- Perf High Scale: inspect perf artifacts (`perf.log`, `perf-summary.json`) for the first error and threshold evaluation.')
+      }
+    }
+    if (findings.some((f) => f && f.gate === 'Perf High Scale' && f.code === 'PERF_SUMMARY_MISSING')) {
+      lines.push('- Perf High Scale: run succeeded but `perf-summary.json` is missing from artifacts. Check artifact upload paths and rerun highscale benchmark.')
+    }
+
     if (findings.some((f) => f && f.gate === 'Gate Contract Matrix' && f.code === 'RUN_FAILED')) {
       lines.push('- Gate Contract Matrix: contract regression detected. Open matrix artifacts and fix strict/dashboard contract scripts or schema drift before merging.')
     }
@@ -1425,19 +1448,19 @@ function renderMarkdown({
   lines.push('## Suggested Actions')
   lines.push('')
   lines.push('1. Re-run remote preflight or strict gate manually when any `P0` finding exists.')
-  lines.push('2. Re-run branch protection / host metrics / storage health / perf baseline / perf long run / locale zh smoke / contract matrix manually when any `P1` finding exists.')
+  lines.push('2. Re-run branch protection / host metrics / storage health / perf baseline / perf long run / perf high scale / locale zh smoke / contract matrix manually when any `P1/P2` finding exists.')
   lines.push('3. Record evidence paths in production acceptance docs after gate recovery.')
   lines.push('')
   lines.push('Quick re-run commands:')
   lines.push('')
-  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, localeZhGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, highscaleGate, localeZhGate, contractGate]) {
     const wf = workflowByGate[gate.name]
     if (!wf) continue
     lines.push(`- \`${gate.name}\`: \`gh workflow run ${wf}\``)
   }
 
   lines.push('')
-  lines.push('## Open Tracking Issues (P1)')
+  lines.push('## Open Tracking Issues (P1/P2)')
   lines.push('')
   if (openTrackingIssuesError) {
     lines.push(`- Unable to list open issues: \`${openTrackingIssuesError}\``)
@@ -1491,6 +1514,7 @@ async function run() {
   const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: branch })
   const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: branch })
   const longrunRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: longrunWorkflow, branchValue: branch })
+  const highscaleRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: highscaleWorkflow, branchValue: branch })
   const localeZhRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: localeZhWorkflow, branchValue: branch })
   const contractRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: contractWorkflow, branchValue: branch })
 
@@ -1567,6 +1591,11 @@ async function run() {
   if (!includeDrillRuns && longrunListRaw.length !== longrunList.length) {
     info(`longrun: filtered drill/debug runs (${longrunListRaw.length - longrunList.length})`)
   }
+  const highscaleListRaw = Array.isArray(highscaleRuns?.list) ? highscaleRuns.list : []
+  const highscaleList = includeDrillRuns ? highscaleListRaw : highscaleListRaw.filter((run) => !isDrillRun(run))
+  if (!includeDrillRuns && highscaleListRaw.length !== highscaleList.length) {
+    info(`highscale: filtered drill/debug runs (${highscaleListRaw.length - highscaleList.length})`)
+  }
   const localeZhListRaw = Array.isArray(localeZhRuns?.list) ? localeZhRuns.list : []
   const localeZhList = includeDrillRuns ? localeZhListRaw : localeZhListRaw.filter((run) => !isDrillRun(run))
   if (!includeDrillRuns && localeZhListRaw.length !== localeZhList.length) {
@@ -1609,6 +1638,10 @@ async function run() {
   })
   const longrunLatestAny = longrunList[0] ?? null
   const longrunLatestCompleted = pickLatestCompletedRun(longrunList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
+  const highscaleLatestAny = highscaleList[0] ?? null
+  const highscaleLatestCompleted = pickLatestCompletedRun(highscaleList, {
     excludeConclusions: completedRunExcludeConclusions,
   })
   const localeZhLatestAny = localeZhList[0] ?? null
@@ -1697,6 +1730,16 @@ async function run() {
     now,
     lookbackHoursValue: lookbackHours,
     fetchError: longrunRuns.error,
+  })
+  const highscaleLookbackHours = Math.max(lookbackHours, 240)
+  const highscaleGate = evaluateGate({
+    name: 'Perf High Scale',
+    severity: 'P2',
+    latestAny: highscaleLatestAny,
+    latestCompleted: highscaleLatestCompleted,
+    now,
+    lookbackHoursValue: highscaleLookbackHours,
+    fetchError: highscaleRuns.error,
   })
 
   const localeZhGate = evaluateGate({
@@ -1885,6 +1928,33 @@ async function run() {
         })
       }
     }
+    if (highscaleGate.completed?.id) {
+      const runId = highscaleGate.completed.id
+      const meta = await tryEnrichGateFromStepSummary({
+        ownerValue: owner,
+        repoValue: repoName,
+        runId,
+        artifactNamePrefixes: [
+          `attendance-import-perf-highscale-${runId}-`,
+        ],
+        metaOutDir: path.join(metaRoot, 'highscale'),
+        innerSuffix: 'perf-summary.json',
+        parse: parsePerfSummaryJson,
+        allowAnyArtifactFallback: true,
+      })
+      if (meta) {
+        highscaleGate.meta = meta
+      } else if (highscaleGate.completed?.conclusion === 'success') {
+        highscaleGate.ok = false
+        highscaleGate.findings.push({
+          severity: 'P2',
+          code: 'PERF_SUMMARY_MISSING',
+          gate: 'Perf High Scale',
+          message: 'Perf High Scale: latest completed run succeeded but perf-summary.json is missing from artifacts',
+          runUrl: highscaleGate.completed.url,
+        })
+      }
+    }
     if (localeZhGate.completed?.id) {
       const runId = localeZhGate.completed.id
       const meta = await tryEnrichGateFromStepSummary({
@@ -1934,6 +2004,7 @@ async function run() {
     ...strictGate.findings,
     ...perfGate.findings,
     ...longrunGate.findings,
+    ...highscaleGate.findings,
     ...localeZhGate.findings,
     ...contractGate.findings,
   ]
@@ -1943,7 +2014,10 @@ async function run() {
   const openIssues = await tryListOpenIssues({ ownerValue: owner, repoValue: repoName })
   const openIssuesListRaw = Array.isArray(openIssues?.list) ? openIssues.list : []
   const openTrackingIssues = openIssuesListRaw
-    .filter((issue) => issue && !issue.pull_request && String(issue.title || '').startsWith('[Attendance P1]'))
+    .filter((issue) => issue && !issue.pull_request && (
+      String(issue.title || '').startsWith('[Attendance P1]')
+      || String(issue.title || '').startsWith('[Attendance P2]')
+    ))
     .slice(0, 10)
   const openTrackingIssuesError = openIssues.error
 
@@ -1971,7 +2045,7 @@ async function run() {
     }
 
     const summaryBits = []
-    const isPerfGate = gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run'
+    const isPerfGate = isPerfGateName(gate.name)
     const regressionsCountValue = String(meta?.regressionsCount ?? '').trim()
     const hasPerfRegressions = regressionsCountValue !== '' && regressionsCountValue !== '0'
     const includePerfMeta = !isPerfGate || Boolean(gate?.ok) || Boolean(meta?.reason) || hasPerfRegressions
@@ -2001,7 +2075,7 @@ async function run() {
         if (pairs.length > 0) {
           summaryBits.push(`reasons=${pairs.slice(0, 3).map(([k, v]) => `${k}=${v}`).join(' ')}`)
         }
-      } else if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
+      } else if (isPerfGateName(gate.name)) {
         if (includePerfMeta) {
           if (meta.schemaVersion) summaryBits.push(`schema=${meta.schemaVersion}`)
           if (meta.engine) summaryBits.push(`engine=${meta.engine}`)
@@ -2098,7 +2172,7 @@ async function run() {
         flat.zhShellTabsChecked = meta.zhShellTabsChecked ?? null
         flat.summaryValid = meta.summaryValid ?? null
         flat.summaryInvalidReasons = meta.summaryInvalidReasons ?? null
-      } else if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
+      } else if (isPerfGateName(gate.name)) {
         if (includePerfMeta) {
           flat.summarySchemaVersion = meta.schemaVersion ?? null
           flat.engine = meta.engine ?? null
@@ -2132,7 +2206,7 @@ async function run() {
   }
 
   const gateFlat = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     preflight: toGateFlat(preflightGate),
     protection: toGateFlat(protectionGate),
     metrics: toGateFlat(metricsGate),
@@ -2141,6 +2215,7 @@ async function run() {
     strict: toGateFlat(strictGate),
     perf: toGateFlat(perfGate),
     longrun: toGateFlat(longrunGate),
+    highscale: toGateFlat(highscaleGate),
     localeZh: toGateFlat(localeZhGate),
     contract: toGateFlat(contractGate),
   }
@@ -2163,6 +2238,7 @@ async function run() {
       strict: strictGate,
       perf: perfGate,
       longrun: longrunGate,
+      highscale: highscaleGate,
       localeZh: localeZhGate,
       contract: contractGate,
     },
@@ -2175,6 +2251,7 @@ async function run() {
     branchValue: branch,
     lookbackHoursValue: lookbackHours,
     cleanupLookbackHoursValue: cleanupLookbackHours,
+    highscaleLookbackHoursValue: highscaleLookbackHours,
     preflightGate,
     protectionGate,
     metricsGate,
@@ -2183,6 +2260,7 @@ async function run() {
     strictGate,
     perfGate,
     longrunGate,
+    highscaleGate,
     localeZhGate,
     contractGate,
     openTrackingIssues,
@@ -2225,6 +2303,9 @@ if (entryFilePath === moduleFilePath) {
 export {
   parsePerfSummaryJson,
   parseLocaleZhSummaryJson,
+  parsePreflightStepSummary,
+  parseStorageStepSummary,
+  parseBranchProtectionStepSummary,
   pickLatestCompletedRun,
   resolveGateSignalBranch,
   resolveQueryBranchDisplayValue,

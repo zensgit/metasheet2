@@ -5927,3 +5927,144 @@ Decision:
 
 - parallel round merged with gates green and policy restored.
 - **GO maintained**.
+
+## Post-Go Verification (2026-03-12): Parser Coverage + Portable Parallel Regression
+
+Scope:
+
+- harden daily dashboard parser reason-code coverage with direct unit tests.
+- remove local environment coupling in fast parallel regression contracts-profile tests.
+
+Changes:
+
+- `scripts/ops/attendance-daily-gate-report.mjs` exported:
+  - `parsePreflightStepSummary`
+  - `parseStorageStepSummary`
+  - `parseBranchProtectionStepSummary`
+- `scripts/ops/attendance-daily-gate-report.test.mjs` added parser coverage for preflight/storage/branch-policy summary parsing.
+- `scripts/ops/attendance-fast-parallel-regression.sh` added injectable contract commands:
+  - `CONTRACT_STRICT_CMD`
+  - `CONTRACT_DASHBOARD_CMD`
+- `scripts/ops/attendance-fast-parallel-regression.test.mjs` contracts profile test now uses deterministic injected commands, avoiding incidental dependency on full local `node_modules`.
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Daily gate parser unit tests | local | PASS | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` (14/14) |
+| Fast regression script tests | local | PASS | `pnpm verify:attendance-regression-fast:test` |
+| Fast regression ops lane | local | PASS | `output/playwright/attendance-fast-parallel-regression/20260312-081734-11399/summary.json` |
+| Fast regression contracts lane (portable override) | local | PASS | `output/playwright/attendance-fast-parallel-regression/20260312-081747-11998/summary.json` |
+| Daily Gate Dashboard snapshot | local generated from GH API | PASS | `output/playwright/attendance-daily-gate-dashboard/20260312-001528/attendance-daily-gate-dashboard.md`, `output/playwright/attendance-daily-gate-dashboard/20260312-001528/attendance-daily-gate-dashboard.json` |
+
+Decision:
+
+- parser reliability and local parallel verification portability are improved without changing production API semantics.
+- latest dashboard snapshot remains green (`P0 PASS`, `Overall PASS`).
+- **GO maintained**.
+
+## Post-Go Verification (2026-03-12): High-Scale Benchmark Lane (100k+)
+
+Scope:
+
+- add an independent GA lane for high-scale attendance import benchmark.
+- provide one-command ops execution + local artifact contract checks.
+
+Changes:
+
+- workflow: `.github/workflows/attendance-import-perf-highscale.yml`
+- runner: `scripts/ops/attendance-run-perf-highscale.sh`
+- tests: `scripts/ops/attendance-run-perf-highscale.test.mjs`
+- package scripts:
+  - `verify:attendance-perf-highscale`
+  - `verify:attendance-perf-highscale:test`
+
+Local verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| High-scale runner tests | local | PASS | `pnpm verify:attendance-perf-highscale:test` (2/2) |
+| Existing parser/fast regression tests | local | PASS | `node --test scripts/ops/attendance-daily-gate-report.test.mjs scripts/ops/attendance-fast-parallel-regression.test.mjs` (18/18) |
+| Delivery report | local | PASS | `docs/attendance-parallel-development-20260312-round23.md` |
+
+Post-merge mandatory runs (main):
+
+1. Drill fail / recovery pass:
+   - `attendance-import-perf-highscale.yml` with `drill=true`, then `drill_fail=true/false`
+2. Real high-scale benchmark:
+   - `pnpm verify:attendance-perf-highscale`
+3. Evidence paths:
+   - `output/playwright/attendance-perf-highscale/<timestamp>/summary.md`
+   - `output/playwright/attendance-perf-highscale/<timestamp>/summary.json`
+   - `output/playwright/attendance-perf-highscale/<timestamp>/ga/<runId>/...`
+
+Decision:
+
+- high-scale benchmark lane is implemented and locally verified.
+- production Go state remains unchanged pending post-merge GA evidence capture.
+
+## Post-Go Verification (2026-03-12): Daily Dashboard Highscale Gate Integration
+
+Scope:
+
+- promote `Perf High Scale` into daily dashboard signal set with weekly-safe lookback.
+- align dashboard JSON contract validator with `gateFlat.highscale`.
+
+Changes:
+
+- `scripts/ops/attendance-daily-gate-report.mjs`
+  - adds `Perf High Scale` gate (`P2`)
+  - adds highscale lookback (`240h` minimum)
+  - includes highscale in markdown + `gateFlat`/`gates`
+- `.github/workflows/attendance-daily-gate-dashboard.yml`
+  - adds env `HIGHSCALE_WORKFLOW=attendance-import-perf-highscale.yml`
+- `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+  - conditionally validates `gateFlat.highscale` when present
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Dashboard/fast/highscale local tests | local | PASS | `node --test scripts/ops/attendance-daily-gate-report.test.mjs scripts/ops/attendance-fast-parallel-regression.test.mjs scripts/ops/attendance-run-perf-highscale.test.mjs` (20/20) |
+| Dashboard contract matrix fixtures | local | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/` |
+| Daily dashboard replay (default highscale workflow before merge) | local | FAIL expected | `output/playwright/attendance-daily-gate-dashboard/20260312-005245/attendance-daily-gate-dashboard.json` (`gateFlat.highscale.reasonCode=WORKFLOW_QUERY_FAILED`) |
+| Daily dashboard replay (compat override) | local | PASS | `output/playwright/attendance-daily-gate-dashboard/20260312-005458/attendance-daily-gate-dashboard.json`, `.md` |
+| Dashboard JSON validator (schema v4) | local | PASS | `./scripts/ops/attendance-validate-daily-dashboard-json.sh output/playwright/attendance-daily-gate-dashboard/20260312-005458/attendance-daily-gate-dashboard.json` |
+
+Decision:
+
+- dashboard highscale integration is code-complete and locally validated.
+- final production closure requires one GA run on `main` after merge to record real runId/evidence for `attendance-import-perf-highscale.yml`.
+
+## Post-Go Verification (2026-03-12): Post-Merge Highscale Coverage + Contract Matrix Expansion
+
+Scope:
+
+- ensure post-merge verification script covers the highscale lane.
+- ensure dashboard JSON contract matrix includes explicit highscale negative case.
+
+Changes:
+
+- `scripts/ops/attendance-post-merge-verify.sh`
+  - adds `perf-highscale` gate dispatch
+  - adds `perf-highscale-contract` local assertion
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - valid fixture includes `gateFlat.highscale`
+  - invalid fixture adds `dashboard.invalid.highscale.json`
+- `scripts/ops/attendance-fast-parallel-regression.sh`
+  - ops/full profile now includes `ops-perf-highscale-runner-tests`
+
+Verification:
+
+| Gate | Run | Status | Evidence |
+|---|---|---|---|
+| Post-merge verify shell contract | local | PASS | `bash -n scripts/ops/attendance-post-merge-verify.sh` |
+| Dashboard contract matrix (with highscale invalid case) | local | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/` |
+| Fast regression tests (ops profile includes highscale runner tests) | local | PASS | `pnpm verify:attendance-regression-fast:test` |
+| Fast regression ops lane (5 checks, includes highscale runner tests) | local | PASS | `output/playwright/attendance-fast-parallel-regression/20260312-091347-45263/summary.json` |
+| Daily report parser tests | local | PASS | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` |
+
+Decision:
+
+- merge-ready for next main run.
+- after merge, run one full post-merge verify and append GA evidence paths.

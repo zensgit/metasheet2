@@ -5628,3 +5628,160 @@ Operational notes:
 - branch protection temporarily lowered to `approving_review_count=0` for merge, then restored to `1` immediately after merge completion.
 - replacement flow used when PR became `BEHIND` after base moved:
   - close superseded PR (`#442`) and recreate from latest `main` (`#443`) to keep required checks deterministic.
+
+### Update (2026-03-12): Dashboard Parser Coverage + Local Portable Contracts Lane
+
+Scope:
+
+- increase parser-level confidence for daily dashboard reason mapping.
+- make fast parallel regression contracts profile tests deterministic in clean local worktrees.
+
+Changes:
+
+- `scripts/ops/attendance-daily-gate-report.mjs` now exports:
+  - `parsePreflightStepSummary`
+  - `parseStorageStepSummary`
+  - `parseBranchProtectionStepSummary`
+- `scripts/ops/attendance-daily-gate-report.test.mjs` adds parser tests for:
+  - preflight reason mapping,
+  - storage metric extraction,
+  - branch protection review policy extraction.
+- `scripts/ops/attendance-fast-parallel-regression.sh` supports:
+  - `CONTRACT_STRICT_CMD`
+  - `CONTRACT_DASHBOARD_CMD`
+  so contracts-profile script tests can inject deterministic commands.
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Daily gate parser tests | `node --test scripts/ops/attendance-daily-gate-report.test.mjs` | PASS | stdout (14/14) |
+| Fast regression tests | `pnpm verify:attendance-regression-fast:test` | PASS | stdout |
+| Fast ops lane | `pnpm verify:attendance-regression-fast:ops` | PASS | `output/playwright/attendance-fast-parallel-regression/20260312-081734-11399/summary.json` |
+| Fast contracts lane (injected commands) | `PROFILE=contracts MAX_PARALLEL=1 CONTRACT_STRICT_CMD='echo strict-ok' CONTRACT_DASHBOARD_CMD='echo dashboard-ok' bash scripts/ops/attendance-fast-parallel-regression.sh` | PASS | `output/playwright/attendance-fast-parallel-regression/20260312-081747-11998/summary.json` |
+| Daily dashboard snapshot from GH API | `GH_TOKEN="$(gh auth token)" BRANCH=main LOOKBACK_HOURS=48 node scripts/ops/attendance-daily-gate-report.mjs` | PASS | `output/playwright/attendance-daily-gate-dashboard/20260312-001528/attendance-daily-gate-dashboard.md` |
+
+Latest snapshot (`20260312-001528`):
+
+- `P0 Status: PASS`
+- `Overall: PASS`
+- includes expected gate rows: preflight/protection/metrics/storage/cleanup/strict/perf/longrun/locale-zh/contract-matrix.
+
+### Update (2026-03-12): High-Scale Benchmark Lane (100k+)
+
+Added workflow:
+
+- `.github/workflows/attendance-import-perf-highscale.yml`
+
+Purpose:
+
+- separate high-scale benchmark lane from daily baseline/longrun,
+- keep high-load verification auditable without increasing daily P0 pressure.
+
+Defaults:
+
+- `rows=100000`
+- `mode=commit`
+- `commit_async=true`
+- `upload_csv=true`
+- `payload_source=auto`
+
+Ops entrypoint:
+
+- `pnpm verify:attendance-perf-highscale`
+- script path: `scripts/ops/attendance-run-perf-highscale.sh`
+
+Drill commands:
+
+```bash
+gh workflow run attendance-import-perf-highscale.yml \
+  -f drill=true \
+  -f drill_fail=true \
+  -f issue_title='[Attendance Highscale Drill] Perf highscale issue test'
+
+gh workflow run attendance-import-perf-highscale.yml \
+  -f drill=true \
+  -f drill_fail=false \
+  -f issue_title='[Attendance Highscale Drill] Perf highscale issue test'
+```
+
+Issue policy:
+
+- default: `[Attendance P2] Perf highscale alert` (non-paging).
+- drill runs do not create issues unless `issue_title` is explicitly provided.
+
+### Update (2026-03-12): Daily Dashboard Adds Perf High Scale Gate
+
+Scope:
+
+- include weekly `attendance-import-perf-highscale.yml` signal in daily dashboard output.
+- avoid false stale alarms by using a dedicated high-scale lookback window.
+
+Changes:
+
+- workflow env:
+  - `.github/workflows/attendance-daily-gate-dashboard.yml`
+  - adds `HIGHSCALE_WORKFLOW: attendance-import-perf-highscale.yml`
+- report script:
+  - `scripts/ops/attendance-daily-gate-report.mjs`
+  - adds `Perf High Scale` (`P2`) gate row
+  - adds high-scale lookback policy: `max(lookbackHours, 240)`
+  - includes high-scale in markdown table, artifact commands, findings/remediation, and `gateFlat.highscale`
+- validator:
+  - `scripts/ops/attendance-validate-daily-dashboard-json.sh`
+  - validates `gateFlat.highscale` when present
+
+Verification (local):
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Daily dashboard + parser/runner tests | `node --test scripts/ops/attendance-daily-gate-report.test.mjs scripts/ops/attendance-fast-parallel-regression.test.mjs scripts/ops/attendance-run-perf-highscale.test.mjs` | PASS | stdout (20/20) |
+| Dashboard contract fixtures | `scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/` |
+| Dashboard replay (compat workflow override) | `GH_TOKEN="$(gh auth token)" BRANCH=main LOOKBACK_HOURS=48 HIGHSCALE_WORKFLOW=attendance-import-perf-longrun.yml node scripts/ops/attendance-daily-gate-report.mjs` | PASS | `output/playwright/attendance-daily-gate-dashboard/20260312-005458/` |
+| JSON contract validation on replay output | `./scripts/ops/attendance-validate-daily-dashboard-json.sh output/playwright/attendance-daily-gate-dashboard/20260312-005458/attendance-daily-gate-dashboard.json` | PASS | stdout (`schemaVersion=4`) |
+
+Post-merge note:
+
+- before merge, querying `attendance-import-perf-highscale.yml` on remote default branch may return 404 and produce expected `WORKFLOW_QUERY_FAILED` in local replay.
+- after merge to `main`, run:
+  - `gh workflow run attendance-daily-gate-dashboard.yml -f branch=main -f lookback_hours=48`
+  - ensure `Perf High Scale` row resolves against `attendance-import-perf-highscale.yml`.
+
+### Update (2026-03-12): Post-Merge Verify Chain Includes Perf High Scale
+
+Updated:
+
+- `scripts/ops/attendance-post-merge-verify.sh`
+
+Changes:
+
+- adds `SKIP_PERF_HIGHSCALE` (default `false`)
+- dispatches `attendance-import-perf-highscale.yml` in the post-merge chain
+- validates highscale artifact contract via `perf-highscale-contract`
+
+Also updated:
+
+- `scripts/ops/attendance-run-gate-contract-case.sh`
+  - dashboard contract fixtures now include `gateFlat.highscale`
+  - adds expected-fail case `dashboard.invalid.highscale.json`
+
+Verification:
+
+| Check | Command | Status | Evidence |
+|---|---|---|---|
+| Post-merge verify syntax | `bash -n scripts/ops/attendance-post-merge-verify.sh` | PASS | stdout |
+| Dashboard contract case (highscale added) | `scripts/ops/attendance-run-gate-contract-case.sh dashboard output/playwright/attendance-gate-contract-matrix` | PASS | `output/playwright/attendance-gate-contract-matrix/dashboard/` |
+| Fast regression ops profile (includes highscale runner test) | `pnpm verify:attendance-regression-fast:test` | PASS | stdout |
+| Fast regression ops lane (5 checks) | `pnpm verify:attendance-regression-fast:ops` | PASS | `output/playwright/attendance-fast-parallel-regression/20260312-091347-45263/summary.json` |
+
+Recommended main-branch command:
+
+```bash
+SKIP_PERF_HIGHSCALE=false \
+bash scripts/ops/attendance-post-merge-verify.sh
+```
+
+Expected summary rows:
+
+- `perf-highscale`
+- `perf-highscale-contract`

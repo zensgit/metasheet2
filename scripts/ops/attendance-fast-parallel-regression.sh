@@ -8,6 +8,8 @@ timestamp="$(date +%Y%m%d-%H%M%S)-$$"
 OUTPUT_ROOT="${OUTPUT_ROOT:-output/playwright/attendance-fast-parallel-regression/${timestamp}}"
 PROFILE="${PROFILE:-full}"
 MAX_PARALLEL="${MAX_PARALLEL:-0}"
+CONTRACT_STRICT_CMD="${CONTRACT_STRICT_CMD:-bash scripts/ops/attendance-run-gate-contract-case.sh strict \"$OUTPUT_ROOT/contracts\"}"
+CONTRACT_DASHBOARD_CMD="${CONTRACT_DASHBOARD_CMD:-bash scripts/ops/attendance-run-gate-contract-case.sh dashboard \"$OUTPUT_ROOT/contracts\"}"
 
 if [[ -z "${RUN_CONTRACT_CASES+x}" ]]; then
   if [[ "$PROFILE" == "ops" ]]; then
@@ -91,16 +93,20 @@ if [[ "$PROFILE" == "full" || "$PROFILE" == "ops" ]]; then
   add_check \
     "ops-daily-gate-report-tests" \
     "node --test scripts/ops/attendance-daily-gate-report.test.mjs"
+
+  add_check \
+    "ops-perf-highscale-runner-tests" \
+    "node --test scripts/ops/attendance-run-perf-highscale.test.mjs"
 fi
 
 if [[ "$PROFILE" == "contracts" || "$RUN_CONTRACT_CASES" == "true" ]]; then
   add_check \
     "contract-strict" \
-    "bash scripts/ops/attendance-run-gate-contract-case.sh strict \"$OUTPUT_ROOT/contracts\""
+    "$CONTRACT_STRICT_CMD"
 
   add_check \
     "contract-dashboard" \
-    "bash scripts/ops/attendance-run-gate-contract-case.sh dashboard \"$OUTPUT_ROOT/contracts\""
+    "$CONTRACT_DASHBOARD_CMD"
 fi
 
 total_checks="${#CHECK_NAMES[@]}"

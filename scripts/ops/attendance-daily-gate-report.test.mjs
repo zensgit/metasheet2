@@ -3,6 +3,9 @@ import assert from 'node:assert/strict'
 import {
   parsePerfSummaryJson,
   parseLocaleZhSummaryJson,
+  parsePreflightStepSummary,
+  parseStorageStepSummary,
+  parseBranchProtectionStepSummary,
   pickLatestCompletedRun,
   resolveGateSignalBranch,
   resolveQueryBranchDisplayValue,
@@ -169,4 +172,54 @@ test('resolveQueryBranchDisplayValue falls back to report branch', () => {
     reportBranchValue: 'codex/feature-branch',
   })
   assert.equal(resolved, 'codex/feature-branch')
+})
+
+test('parsePreflightStepSummary maps drill and known preflight reasons', () => {
+  const drill = parsePreflightStepSummary('- Remote exit code: `97`')
+  assert.equal(drill?.rc, '97')
+  assert.equal(drill?.reason, 'DRILL_FAIL')
+
+  const tokenMissing = parsePreflightStepSummary([
+    '- Remote exit code: `1`',
+    '[attendance-preflight] ERROR: ATTENDANCE_IMPORT_REQUIRE_TOKEN must be set to 1',
+  ].join('\n'))
+  assert.equal(tokenMissing?.rc, '1')
+  assert.equal(tokenMissing?.reason, 'IMPORT_REQUIRE_TOKEN_MISSING')
+})
+
+test('parseStorageStepSummary extracts reason and storage metrics', () => {
+  const summary = [
+    '- Failure reason: `UPLOAD_DIR_TOO_LARGE`',
+    '- Computed: df_used_pct=`82` (max=`90`), upload_gb=`13` (max=`10`), oldest_file_days=`2` (max=`14`), file_count=`1024`',
+  ].join('\n')
+
+  const parsed = parseStorageStepSummary(summary)
+  assert.equal(parsed?.reason, 'UPLOAD_DIR_TOO_LARGE')
+  assert.equal(parsed?.dfUsedPct, '82')
+  assert.equal(parsed?.uploadGb, '13')
+  assert.equal(parsed?.oldestFileDays, '2')
+  assert.equal(parsed?.fileCount, '1024')
+})
+
+test('parseBranchProtectionStepSummary extracts review policy fields', () => {
+  const summary = [
+    '- Failure reason: `PR_REVIEWS_NOT_ENABLED`',
+    '- Branch: `main`',
+    '- Required checks: `contracts (strict),contracts (dashboard)`',
+    '- Require strict: `true`',
+    '- Require enforce admins: `true`',
+    '- Require PR reviews: `false`',
+    '- Min approving reviews: `0`',
+    '- Require code owner reviews: `false`',
+  ].join('\n')
+
+  const parsed = parseBranchProtectionStepSummary(summary)
+  assert.equal(parsed?.reason, 'PR_REVIEWS_NOT_ENABLED')
+  assert.equal(parsed?.branch, 'main')
+  assert.equal(parsed?.checks, 'contracts (strict),contracts (dashboard)')
+  assert.equal(parsed?.strict, 'true')
+  assert.equal(parsed?.enforceAdmins, 'true')
+  assert.equal(parsed?.requirePrReviews, 'false')
+  assert.equal(parsed?.minApprovingReviews, '0')
+  assert.equal(parsed?.requireCodeOwnerReviews, 'false')
 })
