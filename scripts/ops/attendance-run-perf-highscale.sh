@@ -82,6 +82,73 @@ run_id="$(printf '%s\n' "$dispatch_output" | awk -F= '/^RUN_ID=/{print $2}' | ta
 artifact_root="${DOWNLOAD_ROOT}/ga/${run_id}"
 [[ -d "$artifact_root" ]] || die "artifact root missing: ${artifact_root}"
 
+summary_md="${DOWNLOAD_ROOT}/summary.md"
+summary_json="${DOWNLOAD_ROOT}/summary.json"
+
+capacity_mismatch_path="$(find "$artifact_root" -type f -name 'perf-capacity-mismatch.json' | sort | tail -n1 || true)"
+if [[ -n "$capacity_mismatch_path" ]]; then
+  requested_rows="$(jq -r '.requestedRows // empty' "$capacity_mismatch_path")"
+  remote_csv_rows_limit="$(jq -r '.remoteCsvRowsLimit // empty' "$capacity_mismatch_path")"
+  requested_payload_source="$(jq -r '.payloadSourceRequested // empty' "$capacity_mismatch_path")"
+  failure_line="$(jq -r '.failureLine // empty' "$capacity_mismatch_path")"
+
+  cat >"$summary_md" <<EOF
+# Attendance Perf High Scale Run
+
+- Workflow: \`${WORKFLOW}\`
+- Branch: \`${BRANCH}\`
+- Run ID: \`${run_id}\`
+- Artifact root: \`${artifact_root}\`
+- Capacity mismatch file: \`${capacity_mismatch_path}\`
+
+## Classification
+
+- status: \`known_capacity_mismatch\`
+- requested rows: \`${requested_rows:-<missing>}\`
+- remote csv rows limit: \`${remote_csv_rows_limit:-<missing>}\`
+- payloadSource requested: \`${requested_payload_source:-<missing>}\`
+- failure: \`${failure_line:-<missing>}\`
+EOF
+
+  jq -n \
+    --arg workflow "$WORKFLOW" \
+    --arg branch "$BRANCH" \
+    --arg runId "$run_id" \
+    --arg artifactRoot "$artifact_root" \
+    --arg capacityMismatchPath "$capacity_mismatch_path" \
+    --argjson rowsExpected "$ROWS" \
+    --argjson rowsActual "${requested_rows:-0}" \
+    --arg requestedPayloadSource "${requested_payload_source}" \
+    --argjson remoteCsvRowsLimit "${remote_csv_rows_limit:-0}" \
+    --arg failureLine "${failure_line}" \
+    '{
+      status: "known_capacity_mismatch",
+      classification: "capacity_mismatch",
+      workflow: $workflow,
+      branch: $branch,
+      runId: $runId,
+      artifactRoot: $artifactRoot,
+      capacityMismatch: {
+        requestedRows: $rowsExpected,
+        observedRows: $rowsActual,
+        payloadSourceRequested: ($requestedPayloadSource | select(. != "") // null),
+        remoteCsvRowsLimit: $remoteCsvRowsLimit,
+        failureLine: ($failureLine | select(. != "") // null),
+        summaryPath: $capacityMismatchPath
+      }
+    }' >"$summary_json"
+
+  info "KNOWN: high-scale run classified as capacity mismatch"
+  info "summary_md=${summary_md}"
+  info "summary_json=${summary_json}"
+
+  echo "RUN_ID=${run_id}"
+  echo "ARTIFACT_ROOT=${artifact_root}"
+  echo "SUMMARY_MD=${summary_md}"
+  echo "SUMMARY_JSON=${summary_json}"
+  exit 0
+fi
+
 summary_path="$(find "$artifact_root" -type f -name 'perf-summary.json' | sort | tail -n1 || true)"
 [[ -n "$summary_path" ]] || die "perf-summary.json not found under ${artifact_root}"
 
@@ -111,9 +178,6 @@ if [[ -n "$actual_payload_source" ]]; then
       ;;
   esac
 fi
-
-summary_md="${DOWNLOAD_ROOT}/summary.md"
-summary_json="${DOWNLOAD_ROOT}/summary.json"
 
 cat >"$summary_md" <<EOF
 # Attendance Perf High Scale Run
