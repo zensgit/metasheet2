@@ -3010,10 +3010,19 @@ describe('Attendance Plugin Integration', () => {
     if (!token) return
 
     const orgId = 'default'
+    const runSuffix = Date.now().toString(36)
     const workDate = new Date().toISOString().slice(0, 10)
-    const mappedUserId = `attendance-async-${Date.now().toString(36)}`
+    const mappedUserIdA = `attendance-async-${runSuffix}-a`
+    const mappedUserIdB = `attendance-async-${runSuffix}-b`
+    const asyncGroupName = `CSV Async Group ${runSuffix}`
     const csvHeader = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
-    const csvText = `${csvHeader}\n${workDate},${mappedUserId},CSV Async Success,09:00,18:00,正常\n`
+    const csvRows = [
+      `${workDate},${mappedUserIdA},${asyncGroupName},09:00,18:00,正常`,
+      `${workDate},${mappedUserIdB},${asyncGroupName},09:10,18:10,正常`,
+      `${workDate},${mappedUserIdA},${asyncGroupName},09:20,18:20,正常`,
+      `,attendance-async-${runSuffix}-invalid,${asyncGroupName},09:30,18:30,正常`,
+    ]
+    const csvText = `${csvHeader}\n${csvRows.join('\n')}\n`
 
     const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=async-success.csv`, {
       method: 'POST',
@@ -3047,6 +3056,10 @@ describe('Attendance Plugin Integration', () => {
       csvFileId: String(fileId || ''),
       idempotencyKey,
       mappingProfileId: 'dingtalk_csv_daily_summary',
+      groupSync: {
+        autoCreate: true,
+        autoAssignMembers: true,
+      },
       mode: 'override',
       commitToken,
     }
@@ -3093,13 +3106,54 @@ describe('Attendance Plugin Integration', () => {
     expect(String(completedJob?.batchId || '')).toBe(batchId)
     expect(['standard', 'bulk']).toContain(String(completedJob?.engine || ''))
     expect(typeof completedJob?.processedRows).toBe('number')
-    expect(completedJob?.processedRows).toBeGreaterThanOrEqual(1)
+    expect(completedJob?.processedRows).toBeGreaterThanOrEqual(2)
     expect(typeof completedJob?.failedRows).toBe('number')
+    expect(completedJob?.failedRows).toBe(2)
     expect(typeof completedJob?.elapsedMs).toBe('number')
     expect(typeof completedJob?.progressPercent).toBe('number')
     expect(typeof completedJob?.throughputRowsPerSec).toBe('number')
     expectChunkConfigMatchesEngine(completedJob?.engine, completedJob?.chunkConfig)
     expect(['values', 'unnest', 'staging']).toContain(String(completedJob?.recordUpsertStrategy || ''))
+
+    const batchDetailRes = await requestJson(
+      `${baseUrl}/api/attendance/import/batches/${encodeURIComponent(batchId)}`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    )
+    expect(batchDetailRes.status).toBe(200)
+    const batchMeta = (batchDetailRes.body as { data?: { meta?: any } } | undefined)?.data?.meta
+    expect(batchMeta?.groupCreated).toBe(1)
+    expect(batchMeta?.groupMembersAdded).toBe(2)
+    expect(batchMeta?.skippedCount).toBe(2)
+    expect(Array.isArray(batchMeta?.skippedRows)).toBe(true)
+    expect(batchMeta?.groupSync?.autoCreate).toBe(true)
+    expect(batchMeta?.groupSync?.autoAssignMembers).toBe(true)
+
+    const listGroupsRes = await requestJson(`${baseUrl}/api/attendance/groups?pageSize=200`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(listGroupsRes.status).toBe(200)
+    const groups = (listGroupsRes.body as { data?: { items?: { id?: string; name?: string }[] } } | undefined)?.data?.items ?? []
+    const asyncGroup = groups.find(item => item.name === asyncGroupName)
+    expect(asyncGroup?.id).toBeTruthy()
+
+    if (asyncGroup?.id) {
+      const asyncGroupMembersRes = await requestJson(`${baseUrl}/api/attendance/groups/${asyncGroup.id}/members?pageSize=200`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      expect(asyncGroupMembersRes.status).toBe(200)
+      const asyncGroupMembers = (asyncGroupMembersRes.body as { data?: { items?: { userId?: string }[] } } | undefined)?.data?.items ?? []
+      expect(asyncGroupMembers.some(item => item.userId === mappedUserIdA)).toBe(true)
+      expect(asyncGroupMembers.some(item => item.userId === mappedUserIdB)).toBe(true)
+    }
 
     const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
     const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
