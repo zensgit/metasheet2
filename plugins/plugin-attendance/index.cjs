@@ -1696,6 +1696,8 @@ function collectAttendanceGroupNames(rows) {
     const name = resolveAttendanceGroupName(row)
     const key = normalizeAttendanceGroupValue(name)
     if (!key || !name) continue
+    // Avoid auto-creating placeholder-like numeric groups such as "1" from raw imports.
+    if (/^\d+$/.test(name)) continue
     if (!names.has(key)) names.set(key, name)
   }
   return names
@@ -2017,6 +2019,7 @@ function mapLeaveTypeRow(row) {
     orgId: row.org_id ?? DEFAULT_ORG_ID,
     code: row.code,
     name: row.name,
+    paid: row.paid ?? true,
     requiresApproval: row.requires_approval ?? true,
     requiresAttachment: row.requires_attachment ?? false,
     defaultMinutesPerDay: Number(row.default_minutes_per_day ?? 480),
@@ -5262,7 +5265,7 @@ module.exports = {
           totalFetched: z.number().optional(),
           totalApplied: z.number().optional(),
           error: z.string().optional(),
-        }).optional(),
+        }).nullable().optional(),
       }).optional(),
       ipAllowlist: z.array(z.string()).optional(),
       geoFence: z.object({
@@ -5327,6 +5330,7 @@ module.exports = {
     const leaveTypeCreateSchema = z.object({
       code: z.string().min(1),
       name: z.string().min(1),
+      paid: z.boolean().optional(),
       requiresApproval: z.boolean().optional(),
       requiresAttachment: z.boolean().optional(),
       defaultMinutesPerDay: z.number().int().min(0).optional(),
@@ -7957,6 +7961,7 @@ module.exports = {
             id: leaveType.id,
             code: leaveType.code,
             name: leaveType.name,
+            paid: leaveType.paid,
             requiresApproval: leaveType.requiresApproval,
             requiresAttachment: leaveType.requiresAttachment,
             defaultMinutesPerDay: leaveType.defaultMinutesPerDay,
@@ -8578,6 +8583,7 @@ module.exports = {
         const payload = {
           code: parsed.data.code,
           name: parsed.data.name,
+          paid: parsed.data.paid ?? true,
           requiresApproval: parsed.data.requiresApproval ?? true,
           requiresAttachment: parsed.data.requiresAttachment ?? false,
           defaultMinutesPerDay: parsed.data.defaultMinutesPerDay ?? 480,
@@ -8587,14 +8593,15 @@ module.exports = {
         try {
           const rows = await db.query(
             `INSERT INTO attendance_leave_types
-             (id, org_id, code, name, requires_approval, requires_attachment, default_minutes_per_day, is_active)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             (id, org_id, code, name, paid, requires_approval, requires_attachment, default_minutes_per_day, is_active)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              RETURNING *`,
             [
               randomUUID(),
               orgId,
               payload.code,
               payload.name,
+              payload.paid,
               payload.requiresApproval,
               payload.requiresAttachment,
               payload.defaultMinutesPerDay,
@@ -8647,6 +8654,7 @@ module.exports = {
           const payload = {
             code: parsed.data.code ?? existing.code,
             name: parsed.data.name ?? existing.name,
+            paid: parsed.data.paid ?? existing.paid ?? true,
             requiresApproval: parsed.data.requiresApproval ?? existing.requires_approval,
             requiresAttachment: parsed.data.requiresAttachment ?? existing.requires_attachment,
             defaultMinutesPerDay: parsed.data.defaultMinutesPerDay ?? existing.default_minutes_per_day,
@@ -8657,10 +8665,11 @@ module.exports = {
             `UPDATE attendance_leave_types
              SET code = $3,
                  name = $4,
-                 requires_approval = $5,
-                 requires_attachment = $6,
-                 default_minutes_per_day = $7,
-                 is_active = $8,
+                 paid = $5,
+                 requires_approval = $6,
+                 requires_attachment = $7,
+                 default_minutes_per_day = $8,
+                 is_active = $9,
                  updated_at = now()
              WHERE id = $1 AND org_id = $2
              RETURNING *`,
@@ -8669,6 +8678,7 @@ module.exports = {
               orgId,
               payload.code,
               payload.name,
+              payload.paid,
               payload.requiresApproval,
               payload.requiresAttachment,
               payload.defaultMinutesPerDay,

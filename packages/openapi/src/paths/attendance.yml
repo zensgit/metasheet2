@@ -987,6 +987,7 @@ paths:
               properties:
                 code: { type: string }
                 name: { type: string }
+                paid: { type: boolean }
                 requiresApproval: { type: boolean }
                 requiresAttachment: { type: boolean }
                 defaultMinutesPerDay: { type: integer }
@@ -1025,6 +1026,7 @@ paths:
               properties:
                 code: { type: string }
                 name: { type: string }
+                paid: { type: boolean }
                 requiresApproval: { type: boolean }
                 requiresAttachment: { type: boolean }
                 defaultMinutesPerDay: { type: integer }

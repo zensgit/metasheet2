@@ -65,6 +65,7 @@ const showNav = computed(() => {
   return route.meta?.hideNavbar !== true
 })
 
+const isPublicRoute = computed(() => route.meta?.requiresAuth === false)
 const attendanceFocused = computed(() => isAttendanceFocused())
 const isAdmin = computed(() => hasFeature('attendanceAdmin'))
 const isLoggedIn = computed(() => getStoredAuthToken().length > 0)
@@ -134,7 +135,12 @@ function onLocaleChange(event: Event): void {
 }
 
 onMounted(async () => {
-  await loadProductFeatures()
+  await loadProductFeatures(false, {
+    skipSessionProbe: isPublicRoute.value,
+  })
+  if (isPublicRoute.value) {
+    return
+  }
   await fetchPlugins()
 })
 </script>
