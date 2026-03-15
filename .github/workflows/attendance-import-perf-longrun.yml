@@ -35,9 +35,9 @@ on:
         required: false
         default: '50000'
       max_csv_rows:
-        description: 'CSV row limit hint for payload auto-selection (legacy name for compatibility)'
+        description: 'Declared remote CSV row cap for long-run payload auto-selection (legacy name for compatibility)'
         required: false
-        default: '20000'
+        default: '100000'
       include_rows500k_preview:
         description: 'Run rows500k-preview scenario (true/false)'
         required: false
@@ -246,7 +246,7 @@ jobs:
       PAYLOAD_SOURCE: ${{ inputs.payload_source || vars.ATTENDANCE_PERF_PAYLOAD_SOURCE || 'auto' }}
       PREVIEW_MODE: ${{ inputs.preview_mode || vars.ATTENDANCE_PERF_LONGRUN_PREVIEW_MODE || 'auto' }}
       PREVIEW_ASYNC_ROW_THRESHOLD: ${{ inputs.preview_async_row_threshold || vars.ATTENDANCE_PERF_PREVIEW_ASYNC_ROW_THRESHOLD || '50000' }}
-      CSV_ROWS_LIMIT_HINT: ${{ inputs.max_csv_rows || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '20000' }}
+      CSV_ROWS_LIMIT_HINT: ${{ inputs.max_csv_rows || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '100000' }}
       PERF_WORK_DATE_SPAN_DAYS_STANDARD: ${{ vars.ATTENDANCE_PERF_LONGRUN_WORK_DATE_SPAN_DAYS || vars.ATTENDANCE_PERF_WORK_DATE_SPAN_DAYS || '366' }}
       PERF_WORK_DATE_SPAN_DAYS_HIGH: ${{ vars.ATTENDANCE_PERF_LONGRUN_WORK_DATE_SPAN_DAYS_HIGH || vars.ATTENDANCE_PERF_WORK_DATE_SPAN_DAYS_HIGH || '180' }}
       INCLUDE_ROWS500K_PREVIEW: ${{ inputs.include_rows500k_preview || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_PREVIEW || 'false' }}
