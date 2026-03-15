@@ -15,13 +15,42 @@ export interface ContainerOptions {
   pluginDirs?: string[]
 }
 
+type StubImplementation = 'stub'
+
 class AdapterStub {
-  async getProducts() { return [] }
-  async getProductBOM() { return [] }
+  readonly implementation: StubImplementation = 'stub'
+  private connected = false
+
+  constructor(
+    readonly adapterId: string,
+    readonly supportedOperations: string[],
+  ) {}
+
+  isConnected() { return this.connected }
+  isConfigured() { return false }
+  async connect() { this.connected = false }
+  async disconnect() { this.connected = false }
+  async healthCheck() { return false }
+
+  getRuntimeStatus() {
+    return {
+      id: this.adapterId,
+      implementation: this.implementation,
+      configured: this.isConfigured(),
+      connected: this.isConnected(),
+      healthSupported: true,
+      supportedOperations: [...this.supportedOperations],
+    }
+  }
+
+  async getProducts() { return { data: [], metadata: { totalCount: 0 } } }
+  async getProductBOM() { return { data: [], metadata: { totalCount: 0 } } }
+  async getProductById() { return null }
   async listFolders() { return [] }
-  async searchDocuments() { return [] }
+  async searchDocuments() { return { data: [], metadata: { totalCount: 0 } } }
   async getDocument() { return null }
   async uploadDocument() { return null }
+  async getVersionHistory() { return { data: [], metadata: { totalCount: 0 } } }
   async search() { return [] }
   async compare() { return null }
   async analyze() { return null }
@@ -65,7 +94,10 @@ export function createContainer(options: ContainerOptions = {}): Injector {
     },
   ])
 
-  const adapterStub = new AdapterStub()
+  const athenaStub = new AdapterStub('athena', ['documents', 'search', 'preview', 'versions', 'workflow', 'collaboration'])
+  const dedupStub = new AdapterStub('dedup-cad', ['compare', 'generateDiff'])
+  const cadMlStub = new AdapterStub('cad-ml', ['analyze', 'predictCost'])
+  const visionStub = new AdapterStub('vision', ['extractText'])
   injector.add([
     IPLMAdapter,
     {
@@ -73,10 +105,10 @@ export function createContainer(options: ContainerOptions = {}): Injector {
       deps: [IConfigService, ILogger],
     },
   ])
-  injector.add([IAthenaAdapter, { useValue: adapterStub }])
-  injector.add([IDedupCADAdapter, { useValue: adapterStub }])
-  injector.add([ICADMLAdapter, { useValue: adapterStub }])
-  injector.add([IVisionAdapter, { useValue: adapterStub }])
+  injector.add([IAthenaAdapter, { useValue: athenaStub }])
+  injector.add([IDedupCADAdapter, { useValue: dedupStub }])
+  injector.add([ICADMLAdapter, { useValue: cadMlStub }])
+  injector.add([IVisionAdapter, { useValue: visionStub }])
 
   return injector
 }
