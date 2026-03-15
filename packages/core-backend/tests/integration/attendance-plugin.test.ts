@@ -2451,12 +2451,15 @@ describe('Attendance Plugin Integration', () => {
 
     const orgId = 'default'
     const workDate = new Date().toISOString().slice(0, 10)
-    const totalRows = 1000
+    const baseRows = 1000
+    const totalRows = baseRows + 2
     const csvHeader = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
-    const csvRows = Array.from({ length: totalRows }, (_, index) => {
+    const csvRows = Array.from({ length: baseRows }, (_, index) => {
       const rowUserId = `attendance-highscale-${String(index + 1).padStart(4, '0')}`
       return `${workDate},${rowUserId},CSV High Scale,09:00,18:00,正常`
     })
+    csvRows.push(`${workDate},attendance-highscale-0001,CSV High Scale,09:05,18:05,正常`)
+    csvRows.push(`,attendance-highscale-invalid,CSV High Scale,09:10,18:10,正常`)
     const csvText = `${csvHeader}\n${csvRows.join('\n')}\n`
 
     const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=highscale-async.csv`, {
@@ -2567,6 +2570,10 @@ describe('Attendance Plugin Integration', () => {
     expect(completedPreviewJob).toBeTruthy()
     expect(completedPreviewJob?.kind).toBe('preview')
     expect(completedPreviewJob?.preview?.rowCount).toBe(totalRows)
+    expect(completedPreviewJob?.preview?.stats?.rowCount).toBe(totalRows)
+    expect(completedPreviewJob?.preview?.stats?.duplicates).toBe(1)
+    expect(completedPreviewJob?.preview?.stats?.invalid).toBe(1)
+    expect(completedPreviewJob?.preview?.failedRows).toBe(2)
     expect(completedPreviewJob?.preview?.previewLimit).toBe(5)
     expect(completedPreviewJob?.preview?.truncated).toBe(true)
     expect(completedPreviewJob?.preview?.asyncSimplified).toBe(true)

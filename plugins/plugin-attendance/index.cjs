@@ -1022,6 +1022,79 @@ function iterateCsvRows(csvText, delimiter = ',', onRow) {
   return { rowCount, stoppedEarly }
 }
 
+async function iterateCsvRowsAsync(csvText, delimiter = ',', onRow) {
+  if (typeof csvText !== 'string' || !csvText.trim()) return { rowCount: 0, stoppedEarly: false }
+  const sep = typeof delimiter === 'string' && delimiter.length > 0 ? delimiter[0] : ','
+  let row = []
+  let field = ''
+  let inQuotes = false
+  let rowCount = 0
+  let stoppedEarly = false
+
+  const emitRow = async () => {
+    row.push(field)
+    field = ''
+    const keepRow = row.length > 1 || row[0]?.trim()
+    if (!keepRow) {
+      row = []
+      return true
+    }
+    const shouldContinue = typeof onRow === 'function'
+      ? await onRow(row, rowCount) !== false
+      : true
+    rowCount += 1
+    row = []
+    if (!shouldContinue) {
+      stoppedEarly = true
+      return false
+    }
+    return true
+  }
+
+  for (let i = 0; i < csvText.length; i += 1) {
+    const ch = csvText[i]
+    if (inQuotes) {
+      if (ch === '"') {
+        const next = csvText[i + 1]
+        if (next === '"') {
+          field += '"'
+          i += 1
+        } else {
+          inQuotes = false
+        }
+      } else if (ch === '\r') {
+        if (csvText[i + 1] === '\n') i += 1
+        field += '\n'
+      } else {
+        field += ch
+      }
+      continue
+    }
+
+    if (ch === '"') {
+      inQuotes = true
+      continue
+    }
+    if (ch === sep) {
+      row.push(field)
+      field = ''
+      continue
+    }
+    if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && csvText[i + 1] === '\n') i += 1
+      if (!await emitRow()) break
+      continue
+    }
+    field += ch
+  }
+
+  if (!stoppedEarly) {
+    await emitRow()
+  }
+
+  return { rowCount, stoppedEarly }
+}
+
 function normalizeCsvHeaderValue(value) {
   if (value === undefined || value === null) return ''
   const text = String(value).replace(/\ufeff/g, '').trim()
@@ -1167,24 +1240,66 @@ function shouldEnforcePunchRequired(row) {
   return true
 }
 
-function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
+function resolveImportCsvIterationOptions({ csvText, csvOptions, maxRows }) {
   const delimiter = csvOptions?.delimiter || ','
   const resolvedMaxRowsRaw = Number(maxRows ?? ATTENDANCE_IMPORT_CSV_MAX_ROWS)
   const resolvedMaxRows = Number.isFinite(resolvedMaxRowsRaw) && resolvedMaxRowsRaw > 0
     ? Math.floor(resolvedMaxRowsRaw)
     : ATTENDANCE_IMPORT_CSV_MAX_ROWS
+  return {
+    csvText,
+    delimiter,
+    resolvedMaxRows,
+    headerRowIndex: Number.isFinite(csvOptions?.headerRowIndex)
+      ? Math.max(0, Number(csvOptions.headerRowIndex))
+      : detectCsvHeaderIndex(csvText, delimiter),
+  }
+}
 
-  if (typeof csvText !== 'string' || !csvText.trim()) {
-    return { rows: [], warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
+function buildImportRowFromCsvRawRow(header, rawRow) {
+  const fields = {}
+  let hasValue = false
+  header.forEach((key, index) => {
+    if (!key) return
+    const value = rawRow[index] ?? ''
+    if (value !== '') hasValue = true
+    fields[key] = value
+  })
+  if (!hasValue) return null
+
+  const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.date)
+  const userId = fields.UserId ?? fields.userId ?? fields['用户ID']
+  return {
+    workDate: workDate ?? '',
+    fields,
+    userId: userId ? String(userId).trim() : undefined,
+  }
+}
+
+function finalizeImportCsvIteration({ seenRows, header, rowCount, limitExceeded, maxRows }) {
+  if (seenRows === 0) {
+    return { rowCount: 0, warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows }
+  }
+  if (!header.length || header.every((value) => !value)) {
+    return { rowCount: 0, warnings: ['CSV header row not found'], limitExceeded: false, maxRows }
   }
 
-  const headerRowIndex = Number.isFinite(csvOptions?.headerRowIndex)
-    ? Math.max(0, Number(csvOptions.headerRowIndex))
-    : detectCsvHeaderIndex(csvText, delimiter)
+  const warnings = []
+  if (limitExceeded) {
+    warnings.push(`CSV exceeds max rows (${maxRows}); only the first ${maxRows} rows were parsed.`)
+  }
+  return { rowCount, warnings, limitExceeded, maxRows }
+}
+
+function iterateImportRowsFromCsv({ csvText, csvOptions, maxRows, onRow }) {
+  const { delimiter, resolvedMaxRows, headerRowIndex } = resolveImportCsvIterationOptions({ csvText, csvOptions, maxRows })
+  if (typeof csvText !== 'string' || !csvText.trim()) {
+    return { rowCount: 0, warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
+  }
 
   let seenRows = 0
   let header = []
-  const rows = []
+  let rowCount = 0
   let limitExceeded = false
 
   iterateCsvRows(csvText, delimiter, (rawRow, rowIndex) => {
@@ -1195,41 +1310,79 @@ function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
       return true
     }
     if (!header.length) return true
-    if (rows.length >= resolvedMaxRows) {
+    if (rowCount >= resolvedMaxRows) {
       limitExceeded = true
       return false
     }
-    const fields = {}
-    let hasValue = false
-    header.forEach((key, index) => {
-      if (!key) return
-      const value = rawRow[index] ?? ''
-      if (value !== '') hasValue = true
-      fields[key] = value
-    })
-    if (!hasValue) return true
-    const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.date)
-    const userId = fields.UserId ?? fields.userId ?? fields['用户ID']
-    rows.push({
-      workDate: workDate ?? '',
-      fields,
-      userId: userId ? String(userId).trim() : undefined,
-    })
+    const row = buildImportRowFromCsvRawRow(header, rawRow)
+    if (!row) return true
+    const nextIndex = rowCount
+    rowCount += 1
+    if (typeof onRow === 'function') return onRow(row, nextIndex) !== false
     return true
   })
 
-  if (seenRows === 0) {
-    return { rows: [], warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
-  }
-  if (!header.length || header.every((value) => !value)) {
-    return { rows: [], warnings: ['CSV header row not found'], limitExceeded: false, maxRows: resolvedMaxRows }
+  return finalizeImportCsvIteration({
+    seenRows,
+    header,
+    rowCount,
+    limitExceeded,
+    maxRows: resolvedMaxRows,
+  })
+}
+
+async function iterateImportRowsFromCsvAsync({ csvText, csvOptions, maxRows, onRow }) {
+  const { delimiter, resolvedMaxRows, headerRowIndex } = resolveImportCsvIterationOptions({ csvText, csvOptions, maxRows })
+  if (typeof csvText !== 'string' || !csvText.trim()) {
+    return { rowCount: 0, warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
   }
 
-  const warnings = []
-  if (limitExceeded) {
-    warnings.push(`CSV exceeds max rows (${resolvedMaxRows}); only the first ${resolvedMaxRows} rows were parsed.`)
-  }
-  return { rows, warnings, limitExceeded, maxRows: resolvedMaxRows }
+  let seenRows = 0
+  let header = []
+  let rowCount = 0
+  let limitExceeded = false
+
+  await iterateCsvRowsAsync(csvText, delimiter, async (rawRow, rowIndex) => {
+    seenRows += 1
+    if (rowIndex < headerRowIndex) return true
+    if (rowIndex === headerRowIndex) {
+      header = rawRow.map(normalizeCsvHeaderValue)
+      return true
+    }
+    if (!header.length) return true
+    if (rowCount >= resolvedMaxRows) {
+      limitExceeded = true
+      return false
+    }
+    const row = buildImportRowFromCsvRawRow(header, rawRow)
+    if (!row) return true
+    const nextIndex = rowCount
+    rowCount += 1
+    if (typeof onRow === 'function') return await onRow(row, nextIndex) !== false
+    return true
+  })
+
+  return finalizeImportCsvIteration({
+    seenRows,
+    header,
+    rowCount,
+    limitExceeded,
+    maxRows: resolvedMaxRows,
+  })
+}
+
+function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
+  const rows = []
+  const result = iterateImportRowsFromCsv({
+    csvText,
+    csvOptions,
+    maxRows,
+    onRow: (row) => {
+      rows.push(row)
+      return true
+    },
+  })
+  return { rows, warnings: result.warnings, limitExceeded: result.limitExceeded, maxRows: result.maxRows }
 }
 
 function ensureCsvRowsWithinLimit(result) {
@@ -1724,13 +1877,19 @@ function collectAttendanceGroupNames(rows) {
   const names = new Map()
   if (!Array.isArray(rows)) return names
   for (const row of rows) {
-    const name = resolveAttendanceGroupName(row)
-    const key = normalizeAttendanceGroupValue(name)
-    if (!key || !name) continue
-    // Avoid auto-creating placeholder-like numeric groups such as "1" from raw imports.
-    if (/^\d+$/.test(name)) continue
-    if (!names.has(key)) names.set(key, name)
+    appendAttendanceGroupName(names, row)
   }
+  return names
+}
+
+function appendAttendanceGroupName(names, row) {
+  if (!(names instanceof Map)) return names
+  const name = resolveAttendanceGroupName(row)
+  const key = normalizeAttendanceGroupValue(name)
+  if (!key || !name) return names
+  // Avoid auto-creating placeholder-like numeric groups such as "1" from raw imports.
+  if (/^\d+$/.test(name)) return names
+  if (!names.has(key)) names.set(key, name)
   return names
 }
 
@@ -5782,9 +5941,9 @@ module.exports = {
 		      importUploadCleanupInterval = null
 		    }
 
-		    const resolveImportRows = async ({ payload, orgId, fallbackUserId }) => {
-		      let csvWarnings = []
-		      let csvFileId = null
+	    const resolveImportRows = async ({ payload, orgId, fallbackUserId }) => {
+	      let csvWarnings = []
+	      let csvFileId = null
 		      if (Array.isArray(payload.rows)) return { rows: payload.rows, csvWarnings, csvFileId }
 		      if (typeof payload.csvFileId === 'string' && payload.csvFileId.trim()) {
 		        csvFileId = payload.csvFileId.trim()
@@ -5801,19 +5960,65 @@ module.exports = {
 		        return { rows: result.rows, csvWarnings, csvFileId }
 		      }
 		      if (Array.isArray(payload.entries)) return { rows: buildRowsFromEntries({ entries: payload.entries }), csvWarnings, csvFileId }
-		      return {
-		        rows: buildRowsFromDingTalk({
-		          columns: payload.columns,
+	      return {
+	        rows: buildRowsFromDingTalk({
+	          columns: payload.columns,
 		          data: payload.data,
 		          userId: payload.userId ?? fallbackUserId,
 		        }),
 		        csvWarnings,
-		        csvFileId,
-		      }
-		    }
+	        csvFileId,
+	      }
+	    }
 
-		    // ============================================================
-		    // Async Import Commit (large payloads)
+	    const createMaterializedImportRowSource = ({ rows, csvWarnings, csvFileId }) => ({
+	      csvFileId: csvFileId ?? null,
+	      iterateRows: async (onRow) => {
+	        let rowCount = 0
+	        for (const row of Array.isArray(rows) ? rows : []) {
+	          const nextIndex = rowCount
+	          rowCount += 1
+	          if (typeof onRow === 'function') {
+	            const shouldContinue = await onRow(row, nextIndex)
+	            if (shouldContinue === false) break
+	          }
+	        }
+	        return {
+	          rowCount,
+	          warnings: Array.isArray(csvWarnings) ? csvWarnings : [],
+	          limitExceeded: false,
+	          maxRows: rowCount,
+	        }
+	      },
+	    })
+
+	    const resolveAsyncImportRowSource = async ({ payload, orgId, fallbackUserId }) => {
+	      if (typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()) {
+	        const csvFileId = payload.csvFileId.trim()
+	        const { csvText } = await readImportUploadCsvText({ orgId, fileId: csvFileId })
+	        return {
+	          csvFileId,
+	          iterateRows: async (onRow) => {
+	            const result = await iterateImportRowsFromCsvAsync({
+	              csvText,
+	              csvOptions: payload.csvOptions,
+	              onRow,
+	            })
+	            ensureCsvRowsWithinLimit(result)
+	            return result
+	          },
+	        }
+	      }
+	      const { rows, csvWarnings, csvFileId } = await resolveImportRows({
+	        payload,
+	        orgId,
+	        fallbackUserId,
+	      })
+	      return createMaterializedImportRowSource({ rows, csvWarnings, csvFileId })
+	    }
+
+	    // ============================================================
+	    // Async Import Commit (large payloads)
 		    // ============================================================
 
 		    const ATTENDANCE_IMPORT_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED !== 'false'
@@ -6137,29 +6342,26 @@ module.exports = {
 	      return 'queued'
 	    }
 
-		    const buildAsyncPreviewResult = async ({ payload, requesterId, orgId }) => {
-		      const profile = findImportProfile(payload.mappingProfileId)
-		      const requiredFields = profile?.requiredFields ?? []
-		      const punchRequiredFields = profile?.punchRequiredFields ?? []
-		      const { rows, csvWarnings } = await resolveImportRows({
-		        payload,
-		        orgId,
-		        fallbackUserId: payload.userId ?? requesterId,
-		      })
-		      if (!rows.length) {
-		        throw new Error('No rows to preview')
-		      }
+	    const buildAsyncPreviewResult = async ({ payload, requesterId, orgId }) => {
+	      const profile = findImportProfile(payload.mappingProfileId)
+	      const requiredFields = profile?.requiredFields ?? []
+	      const punchRequiredFields = profile?.punchRequiredFields ?? []
+	      const rowSource = await resolveAsyncImportRowSource({
+	        payload,
+	        orgId,
+	        fallbackUserId: payload.userId ?? requesterId,
+	      })
 
 	      const previewLimit = normalizePreviewAsyncLimit(payload.previewLimit)
 	      const preview = []
 	      const previewStats = {
-	        rowCount: rows.length,
+	        rowCount: 0,
 	        invalid: 0,
 	        duplicates: 0,
 	      }
 	      const seenKeys = new Set()
-
-	      for (const row of rows) {
+	      const rowScan = await rowSource.iterateRows((row) => {
+	        previewStats.rowCount += 1
 	        const shouldRender = preview.length < previewLimit
 	        const workDate = row.workDate
 	        const rowUserId = resolveRowUserId({
@@ -6186,9 +6388,9 @@ module.exports = {
 	          })
 	          if (missingPunch.length) warnings.push(`Missing required: ${missingPunch.join(', ')}`)
 	        }
-	        if (warnings.length) {
-	          previewStats.invalid += 1
-	          if (shouldRender) {
+	          if (warnings.length) {
+	            previewStats.invalid += 1
+	            if (shouldRender) {
 	            preview.push({
 	              userId: rowUserId ?? 'unknown',
 	              workDate: workDate ?? '',
@@ -6206,7 +6408,7 @@ module.exports = {
 	              userGroups: [],
 	            })
 	          }
-	          continue
+	          return true
 	        }
 
 	        const dedupKey = `${rowUserId}:${workDate}`
@@ -6230,11 +6432,11 @@ module.exports = {
 	              userGroups: [],
 	            })
 	          }
-	          continue
+	          return true
 	        }
 	        seenKeys.add(dedupKey)
 
-	        if (!shouldRender) continue
+	        if (!shouldRender) return true
 
 	        preview.push({
 	          userId: rowUserId,
@@ -6252,9 +6454,14 @@ module.exports = {
 	          appliedPolicies: [],
 	          userGroups: [],
 	        })
+	        return true
+	      })
+	      if (!rowScan.rowCount) {
+	        throw new Error('No rows to preview')
 	      }
+	      const csvWarnings = rowScan.warnings
 
-	      const asyncPreviewEngine = resolveImportEngineFromMeta(payload, rows.length)
+	      const asyncPreviewEngine = resolveImportEngineFromMeta(payload, rowScan.rowCount)
 	      const asyncPreviewFailedRows = Math.max(
 	        0,
 	        Number(previewStats.invalid ?? 0) + Number(previewStats.duplicates ?? 0)
@@ -6262,16 +6469,16 @@ module.exports = {
 	      return {
 	        items: preview,
 	        total: preview.length,
-	        rowCount: rows.length,
+	        rowCount: rowScan.rowCount,
 	        engine: asyncPreviewEngine,
-	        processedRows: rows.length,
+	        processedRows: rowScan.rowCount,
 	        failedRows: asyncPreviewFailedRows,
 	        elapsedMs: 0,
 	        recordUpsertStrategy: resolveImportRecordUpsertStrategy({
-	          rowCount: rows.length,
+	          rowCount: rowScan.rowCount,
 	          engine: asyncPreviewEngine,
 	        }),
-	        truncated: rows.length > previewLimit,
+	        truncated: rowScan.rowCount > previewLimit,
 	        previewLimit,
 	        stats: previewStats,
 	        csvWarnings,
@@ -6513,28 +6720,46 @@ module.exports = {
 	        ?? []
 	      const requiredFields = profile?.requiredFields ?? []
 	      const punchRequiredFields = profile?.punchRequiredFields ?? []
+	      const rowSource = await resolveAsyncImportRowSource({
+	        payload,
+	        orgId,
+	        fallbackUserId: payload.userId ?? requesterId,
+	      })
+	      const groupSync = normalizeGroupSyncOptions(payload.groupSync, payload.ruleSetId, payload.timezone)
+	      const groupNames = new Map()
+	      const scopeWorkDates = new Set()
+	      const scopeUserIds = new Set()
+	      const rowScan = await rowSource.iterateRows((row) => {
+	        const workDate = row?.workDate
+	        if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
+	        const rowUserId = resolveRowUserId({
+	          row,
+	          fallbackUserId: requesterId,
+	          userMap: payload.userMap,
+	          userMapKeyField: payload.userMapKeyField,
+	          userMapSourceFields: payload.userMapSourceFields,
+	        })
+	        if (rowUserId) scopeUserIds.add(rowUserId)
+	        if (groupSync) appendAttendanceGroupName(groupNames, row)
+	        return true
+	      })
+	      const rowCount = rowScan.rowCount
+	      const csvWarnings = rowScan.warnings
+	      const csvFileId = rowSource.csvFileId ?? null
 
-		      const { rows, csvWarnings, csvFileId } = await resolveImportRows({
-		        payload,
-		        orgId,
-		        fallbackUserId: payload.userId ?? requesterId,
-		      })
-
-	      if (rows.length === 0) {
+	      if (rowCount === 0) {
 	        throw new Error('No rows to import')
 	      }
-	      const importEngine = resolveImportEngineByRowCount(rows.length)
+	      const importEngine = resolveImportEngineByRowCount(rowCount)
 	      const importChunkConfig = resolveImportChunkConfig(importEngine)
 	      const importRecordUpsertStrategy = resolveImportRecordUpsertStrategy({
-	        rowCount: rows.length,
+	        rowCount,
 	        engine: importEngine,
 	      })
 
 	      const baseRule = await loadDefaultRule(db, orgId)
 	      const settings = await getSettings(db)
 	      const groupRuleSetMap = payload.ruleSetId ? new Map() : await loadAttendanceGroupRuleSetMap(db, orgId)
-	      const groupSync = normalizeGroupSyncOptions(payload.groupSync, payload.ruleSetId, payload.timezone)
-	      const groupNames = groupSync ? collectAttendanceGroupNames(rows) : new Map()
 	      const groupWarnings = []
 	      if (groupNames.size && !groupSync?.autoCreate) {
 	        const groupIdMap = await loadAttendanceGroupIdMap(db, orgId)
@@ -6635,7 +6860,7 @@ module.exports = {
 	                payload.source ?? null,
 	                payload.ruleSetId ?? null,
 	                JSON.stringify(mapping),
-	                rows.length,
+	                rowCount,
 	                'committed',
 	                JSON.stringify(batchMeta),
 	              ],
@@ -6651,7 +6876,7 @@ module.exports = {
 	                payload.source ?? null,
 	                payload.ruleSetId ?? null,
 	                JSON.stringify(mapping),
-	                rows.length,
+	                rowCount,
 	                'committed',
 	                JSON.stringify(batchMeta),
 	              ],
@@ -6682,20 +6907,6 @@ module.exports = {
 	        }
 
 	        // Prefetch holidays + scheduling assignments for the import scope to reduce per-row DB roundtrips.
-	        const scopeWorkDates = new Set()
-	        const scopeUserIds = new Set()
-	        for (const row of rows) {
-	          const workDate = row?.workDate
-	          if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
-	          const rowUserId = resolveRowUserId({
-	            row,
-	            fallbackUserId: requesterId,
-	            userMap: payload.userMap,
-	            userMapKeyField: payload.userMapKeyField,
-	            userMapSourceFields: payload.userMapSourceFields,
-	          })
-	          if (rowUserId) scopeUserIds.add(rowUserId)
-	        }
 	        const scopeWorkDateList = Array.from(scopeWorkDates)
 	        const scopeUserIdList = Array.from(scopeUserIds)
 	        let scopeFromDate = null
@@ -6808,7 +7019,7 @@ module.exports = {
 
 	          const upserted = await batchUpsertAttendanceRecords(trx, upsertRows, {
 	            strategy: importRecordUpsertStrategy,
-            totalRows: rows.length,
+            totalRows: rowCount,
 	          })
 
 		          for (const item of chunk) {
@@ -6850,7 +7061,7 @@ module.exports = {
 	          }
 
 	          if (typeof onProgress === 'function') {
-	            await onProgress({ imported: importedCount, total: rows.length })
+	            await onProgress({ imported: importedCount, total: rowCount })
 	          }
 	        }
 	        const enqueueRecordUpsert = async (item) => {
@@ -6861,7 +7072,7 @@ module.exports = {
 	        }
 
 	        const seenRowKeys = new Set()
-	        for (const row of rows) {
+	        await rowSource.iterateRows(async (row) => {
 	          const workDate = row.workDate
 	          const groupKey = resolveAttendanceGroupKey(row)
 	          const rowUserId = resolveRowUserId({
@@ -6913,7 +7124,7 @@ module.exports = {
 		              warnings: importWarnings,
 		            })
 		            releaseImportRowMemory(row)
-		            continue
+		            return true
 		          }
 
 	          const dedupKey = `${rowUserId}:${workDate}`
@@ -6928,7 +7139,7 @@ module.exports = {
 		            })
 		            appendSkipped({ userId: rowUserId, workDate, warnings })
 		            releaseImportRowMemory(row)
-		            continue
+		            return true
 		          }
 	          seenRowKeys.add(dedupKey)
 	          if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
@@ -7220,7 +7431,8 @@ module.exports = {
 	              : null,
 	          })
 	          releaseImportRowMemory(row)
-	        }
+	          return true
+	        })
 
 	        await flushRecordUpserts()
 	        await flushImportItems()
@@ -7285,7 +7497,7 @@ module.exports = {
 		      return {
 		        batchId: resolvedBatchId,
 		        imported: importedCount,
-		        rowCount: rows.length,
+		        rowCount,
 		        processedRows: importedCount,
 		        failedRows: skippedCount,
 		        elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
