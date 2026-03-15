@@ -8,7 +8,55 @@ import { userHasPermission, isAdmin, listUserPermissions } from './service'
 import { Logger } from '../core/logger'
 
 const logger = new Logger('RBACGuard')
-const trustTokenClaims = process.env.RBAC_TOKEN_TRUST === 'true' || process.env.RBAC_TOKEN_TRUST === '1'
+
+function getClaimRoles(user: Request['user']): string[] {
+  const roles = new Set<string>()
+  if (typeof user?.role === 'string' && user.role.trim().length > 0) {
+    roles.add(user.role.trim())
+  }
+  if (Array.isArray(user?.roles)) {
+    for (const role of user.roles) {
+      if (typeof role === 'string' && role.trim().length > 0) {
+        roles.add(role.trim())
+      }
+    }
+  }
+  return [...roles]
+}
+
+function getClaimPermissions(user: Request['user']): string[] {
+  const permissions = new Set<string>()
+  if (Array.isArray(user?.perms)) {
+    for (const permission of user.perms) {
+      if (typeof permission === 'string' && permission.trim().length > 0) {
+        permissions.add(permission.trim())
+      }
+    }
+  }
+  if (Array.isArray(user?.permissions)) {
+    for (const permission of user.permissions) {
+      if (typeof permission === 'string' && permission.trim().length > 0) {
+        permissions.add(permission.trim())
+      }
+    }
+  }
+  return [...permissions]
+}
+
+function hasClaimPermission(user: Request['user'], permissionCode: string): boolean {
+  const roles = getClaimRoles(user)
+  if (roles.includes('admin')) {
+    return true
+  }
+
+  const permissions = getClaimPermissions(user)
+  if (permissions.includes('*:*') || permissions.includes('admin:all') || permissions.includes(permissionCode)) {
+    return true
+  }
+
+  const [resource] = permissionCode.split(':')
+  return Boolean(resource) && permissions.includes(`${resource}:*`)
+}
 
 /**
  * RBAC guard middleware factory
@@ -25,20 +73,15 @@ export function rbacGuard(resourceOrPermission: string, action?: string): Reques
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const userId = req.user?.id?.toString()
-      const tokenRoles = Array.isArray(req.user?.roles) ? req.user?.roles : []
-      const tokenPerms = Array.isArray(req.user?.perms) ? req.user?.perms : []
 
       if (!userId) {
         res.status(401).json({ error: 'Authentication required' })
         return
       }
 
-      if (trustTokenClaims) {
-        // Fast-path for trusted JWT roles/permissions (useful for dev tokens)
-        if (tokenRoles.includes('admin') || tokenPerms.includes(permissionCode)) {
-          next()
-          return
-        }
+      if (hasClaimPermission(req.user, permissionCode)) {
+        next()
+        return
       }
 
       // Check if user is admin (admins bypass permission checks)
@@ -71,27 +114,15 @@ export function rbacGuardAny(permissionCodes: string[]): RequestHandler {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const userId = req.user?.id?.toString()
-      const tokenRoles = Array.isArray(req.user?.roles) ? req.user?.roles : []
-      const tokenPerms = Array.isArray(req.user?.perms) ? req.user?.perms : []
 
       if (!userId) {
         res.status(401).json({ error: 'Authentication required' })
         return
       }
 
-      if (trustTokenClaims) {
-        if (tokenRoles.includes('admin')) {
-          next()
-          return
-        }
-
-        if (tokenPerms.length > 0) {
-          const hasAny = permissionCodes.some((code) => tokenPerms.includes(code))
-          if (hasAny) {
-            next()
-            return
-          }
-        }
+      if (permissionCodes.some((code) => hasClaimPermission(req.user, code))) {
+        next()
+        return
       }
 
       // Check if user is admin
@@ -126,27 +157,15 @@ export function rbacGuardAll(permissionCodes: string[]): RequestHandler {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const userId = req.user?.id?.toString()
-      const tokenRoles = Array.isArray(req.user?.roles) ? req.user?.roles : []
-      const tokenPerms = Array.isArray(req.user?.perms) ? req.user?.perms : []
 
       if (!userId) {
         res.status(401).json({ error: 'Authentication required' })
         return
       }
 
-      if (trustTokenClaims) {
-        if (tokenRoles.includes('admin')) {
-          next()
-          return
-        }
-
-        if (tokenPerms.length > 0) {
-          const hasAll = permissionCodes.every((code) => tokenPerms.includes(code))
-          if (hasAll) {
-            next()
-            return
-          }
-        }
+      if (permissionCodes.every((code) => hasClaimPermission(req.user, code))) {
+        next()
+        return
       }
 
       // Check if user is admin
