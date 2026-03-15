@@ -107,102 +107,34 @@
 
       <!-- Properties Panel -->
       <transition name="slide-right">
-        <div v-if="showProperties" class="properties-panel">
-          <div class="panel-header">
-            <span>{{ selectedElement ? '元素属性' : '工作流属性' }}</span>
-            <el-button :icon="Close" text @click="showProperties = false" />
-          </div>
-          <div class="panel-content">
-            <!-- Workflow Properties -->
-            <template v-if="!selectedElement">
-              <el-form label-position="top" size="small">
-                <el-form-item label="工作流名称">
-                  <el-input v-model="workflowName" placeholder="输入工作流名称" />
-                </el-form-item>
-                <el-form-item label="工作流描述">
-                  <el-input
-                    v-model="workflowDescription"
-                    type="textarea"
-                    :rows="3"
-                    placeholder="输入工作流描述"
-                  />
-                </el-form-item>
-                <el-form-item label="版本">
-                  <el-input v-model="workflowVersion" disabled />
-                </el-form-item>
-              </el-form>
-            </template>
-            <!-- Element Properties -->
-            <template v-else>
-              <el-form label-position="top" size="small">
-                <el-form-item label="元素ID">
-                  <el-input :model-value="selectedElement.id" disabled />
-                </el-form-item>
-                <el-form-item label="元素名称">
-                  <el-input
-                    v-model="elementName"
-                    placeholder="输入元素名称"
-                    @change="updateElementName"
-                  />
-                </el-form-item>
-                <el-form-item label="元素类型">
-                  <el-tag>{{ getElementTypeLabel(selectedElement.type) }}</el-tag>
-                </el-form-item>
-                <!-- Task-specific properties -->
-                <template v-if="isTaskElement">
-                  <el-form-item label="执行人">
-                    <el-input
-                      id="workflow-task-assignee"
-                      v-model="taskAssignee"
-                      name="taskAssignee"
-                      placeholder="输入执行人"
-                    />
-                  </el-form-item>
-                  <el-form-item label="候选人">
-                    <el-input
-                      id="workflow-task-candidates"
-                      v-model="taskCandidates"
-                      name="taskCandidates"
-                      placeholder="多人用逗号分隔"
-                    />
-                  </el-form-item>
-                  <el-form-item label="到期时间">
-                    <el-input
-                      id="workflow-task-due-date"
-                      v-model="taskDueDate"
-                      name="taskDueDate"
-                      placeholder="如: PT1H (1小时)"
-                    />
-                  </el-form-item>
-                </template>
-                <!-- Gateway-specific properties -->
-                <template v-if="isGatewayElement">
-                  <el-form-item label="默认流">
-                    <el-select v-model="gatewayDefault" placeholder="选择默认出口">
-                      <el-option
-                        v-for="flow in outgoingFlows"
-                        :key="flow.id"
-                        :label="flow.name || flow.id"
-                        :value="flow.id"
-                      />
-                    </el-select>
-                  </el-form-item>
-                </template>
-                <!-- Sequence Flow properties -->
-                <template v-if="isSequenceFlow">
-                  <el-form-item label="条件表达式">
-                    <el-input
-                      v-model="flowCondition"
-                      type="textarea"
-                      :rows="2"
-                      placeholder="${amount > 1000}"
-                    />
-                  </el-form-item>
-                </template>
-              </el-form>
-            </template>
-          </div>
-        </div>
+        <WorkflowPropertyPanel
+          v-if="showProperties"
+          :workflow-name="workflowName"
+          :workflow-description="workflowDescription"
+          :workflow-version="workflowVersion"
+          :selected-element="selectedElement"
+          :element-name="elementName"
+          :element-type-label="selectedElement ? getElementTypeLabel(selectedElement.type) : ''"
+          :task-assignee="taskAssignee"
+          :task-candidates="taskCandidates"
+          :task-due-date="taskDueDate"
+          :gateway-default="gatewayDefault"
+          :flow-condition="flowCondition"
+          :is-task-element="!!isTaskElement"
+          :is-gateway-element="!!isGatewayElement"
+          :is-sequence-flow="!!isSequenceFlow"
+          :outgoing-flows="outgoingFlows"
+          @close="showProperties = false"
+          @update:workflow-name="workflowName = $event"
+          @update:workflow-description="workflowDescription = $event"
+          @update:element-name="elementName = $event"
+          @commit-element-name="updateElementName"
+          @update:task-assignee="taskAssignee = $event"
+          @update:task-candidates="taskCandidates = $event"
+          @update:task-due-date="taskDueDate = $event"
+          @update:gateway-default="gatewayDefault = $event"
+          @update:flow-condition="flowCondition = $event"
+        />
       </transition>
     </div>
 
@@ -270,15 +202,9 @@ import {
   ElButtonGroup,
   ElDialog,
   ElDivider,
-  ElForm,
-  ElFormItem,
   ElIcon,
-  ElInput,
   ElMessage,
   ElMessageBox,
-  ElOption,
-  ElSelect,
-  ElTag,
 } from 'element-plus'
 import {
   ArrowLeft,
@@ -286,7 +212,6 @@ import {
   ZoomOut,
   FullScreen,
   Setting,
-  Close,
   Upload,
   Promotion,
   CircleCheck,
@@ -342,6 +267,7 @@ import {
 } from './workflowDesignerRecentTemplates'
 import { validateWorkflowElements } from './workflowDesignerValidation'
 import WorkflowTemplateDialog from '../components/workflow/WorkflowTemplateDialog.vue'
+import WorkflowPropertyPanel from '../components/workflow/WorkflowPropertyPanel.vue'
 
 // Types
 interface PaletteItem {
