@@ -117,16 +117,19 @@ describe('Attendance Plugin Integration', () => {
     process.env.RBAC_BYPASS = 'true'
     process.env.SKIP_PLUGINS = 'false'
     // Keep CSV guardrail deterministic and testable across environments.
-    process.env.ATTENDANCE_IMPORT_CSV_MAX_ROWS = '1000'
-    // Keep bulk/staging auto-switch testable in integration scope.
+    process.env.ATTENDANCE_IMPORT_CSV_MAX_ROWS = '2000'
+    process.env.ATTENDANCE_IMPORT_SYNC_ASYNC_ROW_THRESHOLD = '500'
+    // Keep bulk/staging auto-switch testable in integration scope. The runtime
+    // clamps these thresholds to >= 1000, so the test fixture must also allow
+    // more than 1000 rows.
     if (!process.env.ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD) {
-      process.env.ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD = '100'
+      process.env.ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD = '1000'
     }
     if (!process.env.ATTENDANCE_IMPORT_COPY_ENABLED) {
       process.env.ATTENDANCE_IMPORT_COPY_ENABLED = 'true'
     }
     if (!process.env.ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS) {
-      process.env.ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS = '100'
+      process.env.ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS = '1000'
     }
     // Isolate import upload channel state (csvFileId) under a temp directory for integration tests.
     const repoRoot = path.join(__dirname, '../../../../')
@@ -2435,6 +2438,175 @@ describe('Attendance Plugin Integration', () => {
       expect(rollbackRes.status).toBe(200)
     }
   })
+
+  it('routes high-scale csvFileId imports to async endpoints and preserves upload for async lanes', async () => {
+    if (!baseUrl) return
+    if (!importUploadDir) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const orgId = 'default'
+    const workDate = new Date().toISOString().slice(0, 10)
+    const totalRows = 1000
+    const csvHeader = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
+    const csvRows = Array.from({ length: totalRows }, (_, index) => {
+      const rowUserId = `attendance-highscale-${String(index + 1).padStart(4, '0')}`
+      return `${workDate},${rowUserId},CSV High Scale,09:00,18:00,正常`
+    })
+    const csvText = `${csvHeader}\n${csvRows.join('\n')}\n`
+
+    const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=highscale-async.csv`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/csv',
+      },
+      body: csvText,
+    })
+    expect(uploadRes.status).toBe(201)
+    const fileId = (uploadRes.body as { data?: { fileId?: string } } | undefined)?.data?.fileId
+    expect(typeof fileId).toBe('string')
+
+    const csvPayloadBase = {
+      orgId,
+      userId: 'attendance-test',
+      timezone: 'UTC',
+      csvFileId: String(fileId || ''),
+      mappingProfileId: 'dingtalk_csv_daily_summary',
+      mode: 'override',
+      previewLimit: 5,
+    }
+
+    const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
+    const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
+    await expect(fs.stat(csvPath)).resolves.toBeTruthy()
+    await expect(fs.stat(metaPath)).resolves.toBeTruthy()
+
+    const prepareSyncPreviewRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareSyncPreviewRes.status).toBe(200)
+    const syncPreviewCommitToken = (prepareSyncPreviewRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(syncPreviewCommitToken).toBeTruthy()
+
+    const syncPreviewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...csvPayloadBase,
+        commitToken: syncPreviewCommitToken,
+      }),
+    })
+    expect(syncPreviewRes.status).toBe(400)
+    const syncPreviewError = (syncPreviewRes.body as { error?: { code?: string; message?: string } } | undefined)?.error
+    expect(syncPreviewError?.code).toBe('IMPORT_TOO_LARGE_FOR_SYNC')
+    expect(String(syncPreviewError?.message || '')).toContain('/api/attendance/import/preview-async')
+
+    const prepareAsyncPreviewRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareAsyncPreviewRes.status).toBe(200)
+    const asyncPreviewCommitToken = (prepareAsyncPreviewRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(asyncPreviewCommitToken).toBeTruthy()
+
+    const previewAsyncRes = await requestJson(`${baseUrl}/api/attendance/import/preview-async`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...csvPayloadBase,
+        idempotencyKey: `integration-csvfile-preview-async-${Date.now().toString(36)}`,
+        commitToken: asyncPreviewCommitToken,
+      }),
+    })
+    expect(previewAsyncRes.status).toBe(200)
+    const previewJobId = String(((previewAsyncRes.body as { data?: { job?: any } } | undefined)?.data?.job?.id) || '')
+    expect(previewJobId).toBeTruthy()
+
+    let completedPreviewJob: any = null
+    for (let i = 0; i < 200; i += 1) {
+      const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${previewJobId}`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      })
+      expect(jobRes.status).toBe(200)
+      const jobData = (jobRes.body as { data?: any } | undefined)?.data
+      const status = String(jobData?.status || '')
+      if (status === 'completed') {
+        completedPreviewJob = jobData
+        break
+      }
+      if (status === 'failed') {
+        throw new Error(String(jobData?.error || 'async preview job failed'))
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    expect(completedPreviewJob).toBeTruthy()
+    expect(completedPreviewJob?.kind).toBe('preview')
+    expect(completedPreviewJob?.preview?.rowCount).toBe(totalRows)
+    expect(completedPreviewJob?.preview?.previewLimit).toBe(5)
+    expect(completedPreviewJob?.preview?.truncated).toBe(true)
+    expect(completedPreviewJob?.preview?.asyncSimplified).toBe(true)
+    expect(Array.isArray(completedPreviewJob?.preview?.items)).toBe(true)
+    expect(completedPreviewJob?.preview?.items.length).toBe(5)
+
+    await expect(fs.stat(csvPath)).resolves.toBeTruthy()
+    await expect(fs.stat(metaPath)).resolves.toBeTruthy()
+
+    const prepareSyncCommitRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareSyncCommitRes.status).toBe(200)
+    const syncCommitToken = (prepareSyncCommitRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(syncCommitToken).toBeTruthy()
+
+    const syncCommitRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...csvPayloadBase,
+        commitToken: syncCommitToken,
+      }),
+    })
+    expect(syncCommitRes.status).toBe(400)
+    const syncCommitError = (syncCommitRes.body as { error?: { code?: string; message?: string } } | undefined)?.error
+    expect(syncCommitError?.code).toBe('IMPORT_TOO_LARGE_FOR_SYNC')
+    expect(String(syncCommitError?.message || '')).toContain('/api/attendance/import/commit-async')
+
+    await expect(fs.stat(csvPath)).resolves.toBeTruthy()
+    await expect(fs.stat(metaPath)).resolves.toBeTruthy()
+  }, 120000)
 
   it('supports idempotency retry for csvFileId even after upload cleanup', async () => {
     if (!baseUrl) return

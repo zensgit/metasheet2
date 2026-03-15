@@ -848,6 +848,15 @@ const ATTENDANCE_IMPORT_CSV_MAX_ROWS = resolvePositiveIntEnv('ATTENDANCE_IMPORT_
   min: 1000,
 })
 
+const ATTENDANCE_IMPORT_SYNC_ASYNC_ROW_THRESHOLD = resolvePositiveIntEnv(
+  'ATTENDANCE_IMPORT_SYNC_ASYNC_ROW_THRESHOLD',
+  50000,
+  {
+    min: 10,
+    max: ATTENDANCE_IMPORT_CSV_MAX_ROWS,
+  }
+)
+
 const ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD = resolvePositiveIntEnv('ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD', 50000, {
   min: 1000,
   max: ATTENDANCE_IMPORT_CSV_MAX_ROWS,
@@ -1226,6 +1235,28 @@ function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
 function ensureCsvRowsWithinLimit(result) {
   if (!result?.limitExceeded) return
   throw new HttpError(400, 'CSV_TOO_LARGE', `CSV exceeds max rows (${result.maxRows})`)
+}
+
+function createSyncImportTooLargeError({ rowCount, operation }) {
+  const route = operation === 'preview' ? '/api/attendance/import/preview-async' : '/api/attendance/import/commit-async'
+  const normalizedRowCount = Number.isFinite(Number(rowCount)) ? Math.max(0, Math.floor(Number(rowCount))) : 0
+  return new HttpError(
+    400,
+    'IMPORT_TOO_LARGE_FOR_SYNC',
+    `Large imports (${normalizedRowCount} rows) must use ${route}`
+  )
+}
+
+function assertSyncImportWithinScale({ rowCount, operation }) {
+  const numeric = Number(rowCount ?? 0)
+  if (!Number.isFinite(numeric) || numeric <= 0) return
+  const normalizedRowCount = Math.max(0, Math.floor(numeric))
+  if (normalizedRowCount > ATTENDANCE_IMPORT_CSV_MAX_ROWS) {
+    throw new HttpError(400, 'CSV_TOO_LARGE', `CSV exceeds max rows (${ATTENDANCE_IMPORT_CSV_MAX_ROWS})`)
+  }
+  if (normalizedRowCount > ATTENDANCE_IMPORT_SYNC_ASYNC_ROW_THRESHOLD) {
+    throw createSyncImportTooLargeError({ rowCount: normalizedRowCount, operation })
+  }
 }
 
 function releaseImportRowMemory(row) {
@@ -5671,7 +5702,7 @@ module.exports = {
 		      return Date.now() - createdAt > ATTENDANCE_IMPORT_UPLOAD_TTL_MS
 		    }
 
-		    const readImportUploadCsvText = async ({ orgId, fileId }) => {
+		    const loadImportUploadMetaOrThrow = async ({ orgId, fileId }) => {
 		      if (!isUuidLike(fileId)) {
 		        throw new HttpError(400, 'VALIDATION_ERROR', 'csvFileId must be a UUID')
 		      }
@@ -5682,6 +5713,11 @@ module.exports = {
 		      if (isImportUploadExpired(meta)) {
 		        throw new HttpError(410, 'EXPIRED', 'Import upload expired')
 		      }
+		      return meta
+		    }
+
+		    const readImportUploadCsvText = async ({ orgId, fileId }) => {
+		      const meta = await loadImportUploadMetaOrThrow({ orgId, fileId })
 		      const paths = getImportUploadPaths({ orgId, fileId })
 		      const csvText = await fsp.readFile(paths.csvPath, 'utf8')
 		      return { csvText, meta }
@@ -5780,22 +5816,37 @@ module.exports = {
 		    // Async Import Commit (large payloads)
 		    // ============================================================
 
-	    const ATTENDANCE_IMPORT_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED !== 'false'
-	    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED !== 'false'
-	    const ATTENDANCE_IMPORT_ASYNC_QUEUE = 'attendance-import'
-	    const ATTENDANCE_IMPORT_ASYNC_JOB = 'attendance-import-commit-async'
-	    const ATTENDANCE_IMPORT_ASYNC_PROGRESS_MIN_INTERVAL_MS = 1000
-	    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT = (() => {
-	      const raw = Number(process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT ?? 300)
-	      if (!Number.isFinite(raw)) return 300
-	      return Math.max(1, Math.min(1000, Math.floor(raw)))
-	    })()
+		    const ATTENDANCE_IMPORT_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED !== 'false'
+		    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED !== 'false'
+		    const ATTENDANCE_IMPORT_ASYNC_QUEUE = 'attendance-import'
+		    const ATTENDANCE_IMPORT_ASYNC_JOB = 'attendance-import-commit-async'
+		    const ATTENDANCE_IMPORT_ASYNC_PROGRESS_MIN_INTERVAL_MS = 1000
+		    const ATTENDANCE_IMPORT_ASYNC_SKIPPED_SAMPLE_LIMIT = resolvePositiveIntEnv(
+		      'ATTENDANCE_IMPORT_ASYNC_SKIPPED_SAMPLE_LIMIT',
+		      50,
+		      {
+		        min: 1,
+		        max: 500,
+		      }
+		    )
+		    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT = (() => {
+		      const raw = Number(process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT ?? 300)
+		      if (!Number.isFinite(raw)) return 300
+		      return Math.max(1, Math.min(1000, Math.floor(raw)))
+		    })()
 
-	    const normalizePreviewAsyncLimit = (value) => {
-	      const numeric = Number(value)
-	      if (!Number.isFinite(numeric)) return ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT
-	      return Math.max(1, Math.min(1000, Math.floor(numeric)))
-	    }
+		    const normalizePreviewAsyncLimit = (value) => {
+		      const numeric = Number(value)
+		      if (!Number.isFinite(numeric)) return ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT
+		      return Math.max(1, Math.min(1000, Math.floor(numeric)))
+		    }
+
+		    const normalizeImportSkippedSampleLimit = (value) => {
+		      if (value === undefined || value === null || value === '') return null
+		      const numeric = Number(value)
+		      if (!Number.isFinite(numeric)) return null
+		      return Math.max(0, Math.min(500, Math.floor(numeric)))
+		    }
 
 	    const toPreviewJobIdempotencyKey = (idempotencyKey) => {
 	      const clean = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
@@ -5822,6 +5873,10 @@ module.exports = {
 		        if (Array.isArray(next.entries) && next.entries.length > 30000 && typeof next.csvText === 'string') delete next.entries
 		        return next
 		      }
+	      next.returnItems = false
+	      next.skippedSampleLimit = normalizeImportSkippedSampleLimit(next.skippedSampleLimit)
+	        ?? ATTENDANCE_IMPORT_ASYNC_SKIPPED_SAMPLE_LIMIT
+	      delete next.itemsLimit
 	      // Prefer csvText over expanded rows/entries for large jobs to avoid DB bloat.
 	      // Keep rows/entries when they are the only payload source (no csvText/csvFileId),
 	      // otherwise commit-async workers can fail with "No rows to import".
@@ -5972,16 +6027,28 @@ module.exports = {
 	      }
 	    }
 
-	    const estimateCsvRowCount = (csvText) => {
-	      if (typeof csvText !== 'string' || csvText.length === 0) return 0
-	      // Count '\n' without splitting to reduce memory.
-	      let lines = 1
+		    const estimateCsvRowCount = (csvText) => {
+		      if (typeof csvText !== 'string' || csvText.length === 0) return 0
+		      // Count '\n' without splitting to reduce memory.
+		      let lines = 1
 	      for (let i = 0; i < csvText.length; i++) {
 	        if (csvText.charCodeAt(i) === 10) lines += 1
 	      }
-	      // Assume first line is header for CSV imports.
-	      return Math.max(0, lines - 1)
-	    }
+		      // Assume first line is header for CSV imports.
+		      return Math.max(0, lines - 1)
+		    }
+
+		    const estimateImportPayloadRowCount = async ({ payload, orgId }) => {
+		      if (Array.isArray(payload?.rows)) return payload.rows.length
+		      if (Array.isArray(payload?.entries)) return payload.entries.length
+		      if (typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()) {
+		        const meta = await loadImportUploadMetaOrThrow({ orgId, fileId: payload.csvFileId.trim() })
+		        const hint = Number(meta?.rowCount ?? 0)
+		        return Number.isFinite(hint) && hint > 0 ? hint : 0
+		      }
+		      if (typeof payload?.csvText === 'string') return estimateCsvRowCount(payload.csvText)
+		      return 0
+		    }
 
 	    const getQueueService = () => context?.services?.queue
 
@@ -6399,7 +6466,7 @@ module.exports = {
 	    // Shared background commit implementation. Intentionally mirrors the sync commit logic but:
 	    // - uses a stable batchId (job.batch_id)
 	    // - does NOT consume commit tokens (token is consumed when the job is enqueued)
-	    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress }) => {
+		    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress }) => {
 	      const cleanIdempotency = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
 	      const commitStartedAtMs = Date.now()
 	      if (cleanIdempotency) {
@@ -6494,13 +6561,19 @@ module.exports = {
 	        }
 	      }
 
-	      const statusMap = payload.statusMap ?? {}
-	      const returnItems = payload.returnItems !== false
-	      const itemsLimit = returnItems && typeof payload.itemsLimit === 'number' ? payload.itemsLimit : null
-	      const results = []
-	      let importedCount = 0
-	      const skipped = []
-	      const idempotencyEnabled = Boolean(cleanIdempotency) && await hasImportBatchIdempotencyColumn(db)
+		      const statusMap = payload.statusMap ?? {}
+		      const returnItems = payload.returnItems !== false
+		      const itemsLimit = returnItems && typeof payload.itemsLimit === 'number' ? payload.itemsLimit : null
+	      const skippedSampleLimit = normalizeImportSkippedSampleLimit(payload.skippedSampleLimit)
+		      const results = []
+		      let importedCount = 0
+		      const skipped = []
+	      let skippedCount = 0
+	      const appendSkipped = (entry) => {
+	        skippedCount += 1
+	        if (skippedSampleLimit === null || skipped.length < skippedSampleLimit) skipped.push(entry)
+	      }
+		      const idempotencyEnabled = Boolean(cleanIdempotency) && await hasImportBatchIdempotencyColumn(db)
 	      const resolvedBatchId = batchId || randomUUID()
 	      let batchMeta = null
 	      let idempotentInTransaction = null
@@ -6826,37 +6899,37 @@ module.exports = {
 	              importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
 	            }
 	          }
-	          if (importWarnings.length) {
-	            const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
-	            await enqueueImportItem({
+		          if (importWarnings.length) {
+		            const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
+		            await enqueueImportItem({
 	              userId: rowUserId ?? null,
 	              workDate: workDate ?? null,
-	              recordId: null,
-	              previewSnapshot: snapshot,
-	            })
-	            skipped.push({
-	              userId: rowUserId ?? null,
-	              workDate: workDate ?? null,
-	              warnings: importWarnings,
-	            })
-	            releaseImportRowMemory(row)
-	            continue
-	          }
+		              recordId: null,
+		              previewSnapshot: snapshot,
+		            })
+		            appendSkipped({
+		              userId: rowUserId ?? null,
+		              workDate: workDate ?? null,
+		              warnings: importWarnings,
+		            })
+		            releaseImportRowMemory(row)
+		            continue
+		          }
 
 	          const dedupKey = `${rowUserId}:${workDate}`
 	          if (seenRowKeys.has(dedupKey)) {
 	            const warnings = ['Duplicate row in payload (same userId + workDate)']
 	            const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
-	            await enqueueImportItem({
-	              userId: rowUserId,
-	              workDate,
-	              recordId: null,
-	              previewSnapshot: snapshot,
-	            })
-	            skipped.push({ userId: rowUserId, workDate, warnings })
-	            releaseImportRowMemory(row)
-	            continue
-	          }
+		            await enqueueImportItem({
+		              userId: rowUserId,
+		              workDate,
+		              recordId: null,
+		              previewSnapshot: snapshot,
+		            })
+		            appendSkipped({ userId: rowUserId, workDate, warnings })
+		            releaseImportRowMemory(row)
+		            continue
+		          }
 	          seenRowKeys.add(dedupKey)
 	          if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
 	            const groupEntry = groupIdMap.get(groupKey)
@@ -7162,14 +7235,14 @@ module.exports = {
 	            )
 	          }
 	        }
-	        if (skipped.length) {
-	          const updatedMeta = {
-	            ...(batchMeta ?? {}),
-	            skippedCount: skipped.length,
-	            skippedRows: skipped.slice(0, 50),
-	          }
-	          await trx.query(
-	            'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
+		        if (skippedCount) {
+		          const updatedMeta = {
+		            ...(batchMeta ?? {}),
+		            skippedCount,
+		            skippedRows: skipped.slice(0, 50),
+		          }
+		          await trx.query(
+		            'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
 	            [resolvedBatchId, orgId, JSON.stringify(updatedMeta)]
 	          )
 			          batchMeta = updatedMeta
@@ -7209,18 +7282,18 @@ module.exports = {
 	        }
 	      }
 
-	      return {
-	        batchId: resolvedBatchId,
-	        imported: importedCount,
-	        rowCount: rows.length,
-	        processedRows: importedCount,
-	        failedRows: skipped.length,
-	        elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
-	        skippedCount: skipped.length,
-	        engine: importEngine,
-	        recordUpsertStrategy: importRecordUpsertStrategy,
-	        items: returnItems ? results : [],
-		        itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
+		      return {
+		        batchId: resolvedBatchId,
+		        imported: importedCount,
+		        rowCount: rows.length,
+		        processedRows: importedCount,
+		        failedRows: skippedCount,
+		        elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
+		        skippedCount,
+		        engine: importEngine,
+		        recordUpsertStrategy: importRecordUpsertStrategy,
+		        items: returnItems ? results : [],
+			        itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
 		        skipped,
 	        csvWarnings: [...csvWarnings, ...groupWarnings],
 	        groupWarnings,
@@ -10446,13 +10519,25 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const requesterId = getUserId(req)
-        const userId = parsed.data.userId ?? requesterId
-        if (!userId) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
-          return
-        }
-        const previewStartedAtMs = Date.now()
-        if (requireImportCommitToken) {
+	        const userId = parsed.data.userId ?? requesterId
+	        if (!userId) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
+	          return
+	        }
+	        try {
+	          const rowCountHint = await estimateImportPayloadRowCount({ payload: parsed.data, orgId })
+	          assertSyncImportWithinScale({ rowCount: rowCountHint, operation: 'preview' })
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          logger.error('Attendance import preview preflight failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate preview size' } })
+	          return
+	        }
+	        const previewStartedAtMs = Date.now()
+	        if (requireImportCommitToken) {
           if (!requesterId) {
             res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
             return
@@ -10936,9 +11021,9 @@ module.exports = {
 	          return
 	        }
 
-	        const idempotencyKey = typeof parsed.data.idempotencyKey === 'string'
-	          ? parsed.data.idempotencyKey.trim()
-	          : ''
+		        const idempotencyKey = typeof parsed.data.idempotencyKey === 'string'
+		          ? parsed.data.idempotencyKey.trim()
+		          : ''
 	        if (idempotencyKey) {
 	          const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
 	          if (existing) {
@@ -10966,12 +11051,25 @@ module.exports = {
 	                idempotent: true,
 	              },
 	            })
-	            return
-	          }
-	        }
+		            return
+		          }
+		        }
 
-	        const commitToken = parsed.data.commitToken
-	        if (!commitToken && requireImportCommitToken) {
+		        try {
+		          const rowCountHint = await estimateImportPayloadRowCount({ payload: parsed.data, orgId })
+		          assertSyncImportWithinScale({ rowCount: rowCountHint, operation: 'commit' })
+		        } catch (error) {
+		          if (error instanceof HttpError) {
+		            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+		            return
+		          }
+		          logger.error('Attendance import commit preflight failed', error)
+		          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate import size' } })
+		          return
+		        }
+
+		        const commitToken = parsed.data.commitToken
+		        if (!commitToken && requireImportCommitToken) {
 	          res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
 	          return
         }
@@ -12218,12 +12316,24 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const requesterId = getUserId(req)
-        const userId = parsed.data.userId ?? requesterId
-        if (!userId) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
-          return
-        }
-        if (requireImportCommitToken) {
+		        const userId = parsed.data.userId ?? requesterId
+		        if (!userId) {
+		          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
+		          return
+		        }
+	        try {
+	          const rowCountHint = await estimateImportPayloadRowCount({ payload: parsed.data, orgId })
+	          assertSyncImportWithinScale({ rowCount: rowCountHint, operation: 'commit' })
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          logger.error('Attendance legacy import preflight failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate import size' } })
+	          return
+	        }
+	        if (requireImportCommitToken) {
           if (!requesterId) {
             res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
             return
