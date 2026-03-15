@@ -189,93 +189,33 @@
     </section>
 
     <section class="panel">
-      <div class="panel-header">
-        <h2>BOM 结构</h2>
-        <div class="panel-actions">
-          <button class="btn ghost" :disabled="bomView !== 'tree' || !bomHasTree" @click="expandAllBom">
-            展开全部
-          </button>
-          <button class="btn ghost" :disabled="bomView !== 'tree' || !bomHasTree" @click="collapseAllBom">
-            折叠全部
-          </button>
-          <button
-            class="btn ghost"
-            :disabled="bomView !== 'tree' || !bomHasTree"
-            @click="expandBomToDepth(bomDepth)"
-          >
-            展开到深度
-          </button>
-          <button
-            class="btn ghost"
-            :disabled="bomView !== 'table' || !bomTablePathIdsCount"
-            @click="copyBomTablePathIdsBulk"
-          >
-            复制所有路径 ID
-          </button>
-          <button
-            class="btn ghost"
-            :disabled="bomView !== 'tree' || !bomTreePathIdsCount"
-            @click="copyBomTreePathIdsBulk"
-          >
-            复制树形路径 ID
-          </button>
-          <button class="btn ghost" :disabled="!bomSelectedCount" @click="copyBomSelectedChildIds">
-            复制选中子件
-          </button>
-          <button class="btn ghost" :disabled="!bomSelectedCount" @click="clearBomSelection">
-            清空选择
-          </button>
-          <span v-if="bomSelectedCount" class="muted">已选 {{ bomSelectedCount }}</span>
-          <button class="btn ghost" :disabled="!bomExportCount" @click="exportBomCsv">
-            导出 CSV
-          </button>
-          <button class="btn" :disabled="!productId || bomLoading" @click="loadBom">
-            {{ bomLoading ? '加载中...' : '刷新 BOM' }}
-          </button>
-        </div>
-      </div>
+      <PlmBomHeader
+        :bom-view="bomView"
+        :bom-has-tree="bomHasTree"
+        :bom-table-path-ids-count="bomTablePathIdsCount"
+        :bom-tree-path-ids-count="bomTreePathIdsCount"
+        :bom-selected-count="bomSelectedCount"
+        :bom-export-count="bomExportCount"
+        :product-id="productId"
+        :bom-loading="bomLoading"
+        :bom-depth="bomDepth"
+        :bom-effective-at="bomEffectiveAt"
+        :quick-depth-options="BOM_DEPTH_QUICK_OPTIONS"
+        @expand-all="expandAllBom"
+        @collapse-all="collapseAllBom"
+        @expand-to-depth="expandBomToDepth"
+        @copy-table-path-ids="copyBomTablePathIdsBulk"
+        @copy-tree-path-ids="copyBomTreePathIdsBulk"
+        @copy-selected-child-ids="copyBomSelectedChildIds"
+        @clear-selection="clearBomSelection"
+        @export-csv="exportBomCsv"
+        @refresh-bom="loadBom"
+        @update:bom-depth="bomDepth = $event"
+        @set-depth-quick="setBomDepthQuick"
+        @update:bom-effective-at="bomEffectiveAt = $event"
+        @update:bom-view="bomView = $event"
+      />
       <div class="form-grid compact">
-        <label for="plm-bom-depth">
-          深度
-          <div class="field-inline">
-            <input
-              id="plm-bom-depth"
-              v-model.number="bomDepth"
-              name="plmBomDepth"
-              type="number"
-              min="1"
-              max="10"
-            />
-            <div class="field-actions">
-              <button
-                v-for="depth in BOM_DEPTH_QUICK_OPTIONS"
-                :key="`bom-depth-${depth}`"
-                class="btn ghost mini"
-                type="button"
-                :disabled="bomDepth === depth"
-                @click="setBomDepthQuick(depth)"
-              >
-                {{ depth }}
-              </button>
-            </div>
-          </div>
-        </label>
-        <label for="plm-bom-effective-at">
-          生效时间
-          <input
-            id="plm-bom-effective-at"
-            v-model="bomEffectiveAt"
-            name="plmBomEffectiveAt"
-            type="datetime-local"
-          />
-        </label>
-        <label for="plm-bom-view">
-          视图
-          <select id="plm-bom-view" v-model="bomView" name="plmBomView">
-            <option value="table">表格</option>
-            <option value="tree">树形</option>
-          </select>
-        </label>
         <label for="plm-bom-filter">
           过滤
           <div class="field-inline">
@@ -2390,6 +2330,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { type LocationQueryValue, useRoute, useRouter } from 'vue-router'
 import { apiGet, apiPost } from '../utils/api'
+import PlmBomHeader from '../components/plm/PlmBomHeader.vue'
 import PlmSearchShell from '../components/plm/PlmSearchShell.vue'
 import PlmWorkbenchShell from '../components/plm/PlmWorkbenchShell.vue'
 
