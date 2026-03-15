@@ -7,6 +7,12 @@ import { EventEmitter } from 'events'
 import { Logger } from '../core/logger'
 import { db } from '../db/db'
 import { v4 as uuidv4 } from 'uuid'
+import {
+  buildStoredWorkflowDefinition,
+  parseStoredWorkflowDefinition,
+  toWorkflowDraftRecord,
+  type WorkflowDraftRecord,
+} from './workflowDesignerDrafts'
 
 // Type definitions for node properties
 interface PropertyDefinition {
@@ -105,13 +111,19 @@ interface WorkflowListItem {
   category: string
 }
 
-// Stored workflow definition structure
-interface StoredWorkflowDefinition {
-  visual: WorkflowDefinition
-  bpmn: string
+export interface BpmnWorkflowDraftInput {
+  id?: string
+  name: string
   description?: string
+  version?: number
   category?: string
-  tags: string[]
+  tags?: string[]
+  bpmnXml: string
+  createdBy?: string
+  status?: string
+  shares?: WorkflowDraftRecord['shares']
+  executions?: WorkflowDraftRecord['executions']
+  visual?: WorkflowDefinition | null
 }
 
 export class WorkflowDesigner extends EventEmitter {
@@ -405,36 +417,42 @@ export class WorkflowDesigner extends EventEmitter {
     const workflowId = definition.id || uuidv4()
 
     try {
+      const existing = definition.id ? await this.loadWorkflowDraft(definition.id) : null
+
       // Convert visual definition to BPMN XML
       const bpmnXml = this.convertToBPMN(definition)
 
-      const storedDefinition: StoredWorkflowDefinition = {
+      const storedDefinition = buildStoredWorkflowDefinition({
         visual: definition,
-        bpmn: bpmnXml,
+        bpmnXml,
         description: definition.description,
         category: definition.category,
-        tags: definition.tags || []
-      }
+        tags: definition.tags || existing?.tags || [],
+        shares: existing?.shares || [],
+        executions: existing?.executions || [],
+      })
 
       // Save to database using workflow_definitions table
       // Note: version should be number, definition is JSONColumnType expecting string for insert
       await db
         .insertInto('workflow_definitions')
         .values({
+          id: workflowId,
           name: definition.name,
           description: definition.description || null,
           version: definition.version || 1,
           definition: JSON.stringify(storedDefinition),
-          status: 'ACTIVE',
+          status: existing?.status || 'draft',
           is_active: true,
-          created_by: 'system'  // Required field, use system as default
+          created_by: existing?.createdBy || 'system'  // Required field, use system as default
         })
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .onConflict((oc: any) => oc.column('id').doUpdateSet({
           name: definition.name,
           description: definition.description || null,
           version: definition.version || 1,
-          definition: JSON.stringify(storedDefinition)
+          definition: JSON.stringify(storedDefinition),
+          status: existing?.status || 'draft',
         }))
         .execute()
 
@@ -464,13 +482,80 @@ export class WorkflowDesigner extends EventEmitter {
       }
 
       // workflow.definition may be returned as object or string depending on driver
-      const definitionData = typeof workflow.definition === 'string'
-        ? workflow.definition
-        : JSON.stringify(workflow.definition)
-      const definition = JSON.parse(definitionData) as StoredWorkflowDefinition
-      return definition.visual
+      const definition = parseStoredWorkflowDefinition(workflow.definition)
+      return definition.visual ?? null
     } catch (error) {
       this.logger.error(`Failed to load workflow: ${error}`)
+      throw error
+    }
+  }
+
+  async loadWorkflowDraft(workflowId: string): Promise<WorkflowDraftRecord | null> {
+    try {
+      const workflow = await db
+        .selectFrom('workflow_definitions')
+        .selectAll()
+        .where('id', '=', workflowId)
+        .executeTakeFirst()
+
+      if (!workflow) {
+        return null
+      }
+
+      const record = toWorkflowDraftRecord(workflow)
+      if (!record.bpmnXml && record.visual) {
+        record.bpmnXml = this.convertToBPMN(record.visual)
+      }
+      return record
+    } catch (error) {
+      this.logger.error(`Failed to load workflow draft: ${error}`)
+      throw error
+    }
+  }
+
+  async saveBpmnDraft(input: BpmnWorkflowDraftInput): Promise<string> {
+    const workflowId = input.id || uuidv4()
+
+    try {
+      const existing = input.id ? await this.loadWorkflowDraft(input.id) : null
+      const storedDefinition = buildStoredWorkflowDefinition({
+        visual: input.visual ?? existing?.visual ?? null,
+        bpmnXml: input.bpmnXml,
+        description: input.description,
+        category: input.category,
+        tags: input.tags || existing?.tags || [],
+        shares: input.shares || existing?.shares || [],
+        executions: input.executions || existing?.executions || [],
+      })
+
+      await db
+        .insertInto('workflow_definitions')
+        .values({
+          id: workflowId,
+          name: input.name,
+          description: input.description || null,
+          version: input.version || 1,
+          definition: JSON.stringify(storedDefinition),
+          status: input.status || 'draft',
+          is_active: true,
+          created_by: input.createdBy || existing?.createdBy || 'system',
+        })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .onConflict((oc: any) => oc.column('id').doUpdateSet({
+          name: input.name,
+          description: input.description || null,
+          version: input.version || 1,
+          definition: JSON.stringify(storedDefinition),
+          status: input.status || existing?.status || 'draft',
+        }))
+        .execute()
+
+      this.emit('workflow:saved', { workflowId, name: input.name })
+      this.logger.info(`Saved BPMN workflow draft: ${input.name} (${workflowId})`)
+
+      return workflowId
+    } catch (error) {
+      this.logger.error(`Failed to save BPMN workflow draft: ${error}`)
       throw error
     }
   }
