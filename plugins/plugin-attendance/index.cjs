@@ -2060,7 +2060,7 @@ function mapImportBatchRow(row) {
 	  }
 	  if (row && typeof row === 'object') {
 	    snapshot.row = {
-	      workDate: row.workDate ?? null,
+      workDate: normalizeImportWorkDateForStorage(row.workDate),
 	      userId: row.userId ?? row.user_id ?? null,
 	      fields: row.fields ?? {},
 	    }
@@ -2533,6 +2533,10 @@ function augmentFieldValuesWithDates(fieldValues, workDate) {
   }
 
   return fieldValues
+}
+
+function normalizeImportWorkDateForStorage(value) {
+  return normalizeDateOnly(value) ?? null
 }
 
 function parseHolidayDayIndex(name) {
@@ -4934,7 +4938,15 @@ async function batchInsertAttendanceImportItems(client, { batchId, orgId, items 
       .join(', ')
     const params = []
     for (const item of items) {
-      params.push(item.id, batchId, orgId, item.userId, item.workDate, item.recordId, item.previewSnapshot)
+      params.push(
+        item.id,
+        batchId,
+        orgId,
+        item.userId,
+        normalizeImportWorkDateForStorage(item.workDate),
+        item.recordId,
+        item.previewSnapshot
+      )
     }
     await queryImportHeavy(
       client,
@@ -4955,7 +4967,7 @@ async function batchInsertAttendanceImportItems(client, { batchId, orgId, items 
   for (const item of items) {
     ids.push(item.id ?? null)
     userIds.push(item.userId ?? null)
-    workDates.push(item.workDate ?? null)
+    workDates.push(normalizeImportWorkDateForStorage(item.workDate))
     recordIds.push(item.recordId ?? null)
     snapshots.push(item.previewSnapshot ?? '{}')
   }
