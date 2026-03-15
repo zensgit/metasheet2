@@ -51,7 +51,7 @@ on:
         required: false
         default: 'auto'
       csv_rows_limit_hint:
-        description: 'CSV row limit hint used by auto payload selection'
+        description: 'Declared remote CSV row cap for high-scale runs'
         required: false
         default: '100000'
       max_preview_ms:
@@ -156,7 +156,7 @@ jobs:
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_HIGHSCALE_UPLOAD_CSV || 'true' }}
       PAYLOAD_SOURCE: ${{ inputs.payload_source || vars.ATTENDANCE_PERF_HIGHSCALE_PAYLOAD_SOURCE || 'auto' }}
       CSV_ROWS_LIMIT_HINT: ${{ inputs.csv_rows_limit_hint || vars.ATTENDANCE_PERF_HIGHSCALE_CSV_ROWS_LIMIT_HINT || '100000' }}
-      REMOTE_CSV_ROWS_LIMIT: ${{ vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '20000' }}
+      REMOTE_CSV_ROWS_LIMIT: ${{ vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '100000' }}
       PERF_WORK_DATE_SPAN_DAYS: ${{ vars.ATTENDANCE_PERF_WORK_DATE_SPAN_DAYS_HIGH || '180' }}
       MAX_PREVIEW_MS: ${{ inputs.max_preview_ms || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS_HIGH || '300000' }}
       MAX_COMMIT_MS: ${{ inputs.max_commit_ms || vars.ATTENDANCE_PERF_MAX_COMMIT_MS_HIGH || '480000' }}

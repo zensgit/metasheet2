@@ -59,7 +59,7 @@ PERF_BASELINE_COMMIT_ASYNC="${PERF_BASELINE_COMMIT_ASYNC:-true}"
 PERF_BASELINE_EXPORT_CSV="${PERF_BASELINE_EXPORT_CSV:-true}"
 PERF_BASELINE_UPLOAD_CSV="${PERF_BASELINE_UPLOAD_CSV:-true}"
 PERF_BASELINE_PAYLOAD_SOURCE="${PERF_BASELINE_PAYLOAD_SOURCE:-auto}"
-PERF_BASELINE_CSV_ROWS_LIMIT_HINT="${PERF_BASELINE_CSV_ROWS_LIMIT_HINT:-20000}"
+PERF_BASELINE_CSV_ROWS_LIMIT_HINT="${PERF_BASELINE_CSV_ROWS_LIMIT_HINT:-100000}"
 PERF_BASELINE_MAX_PREVIEW_MS="${PERF_BASELINE_MAX_PREVIEW_MS:-}"
 PERF_BASELINE_MAX_COMMIT_MS="${PERF_BASELINE_MAX_COMMIT_MS:-}"
 PERF_BASELINE_MAX_EXPORT_MS="${PERF_BASELINE_MAX_EXPORT_MS:-}"
@@ -92,7 +92,7 @@ if [[ -z "$PERF_EXPECT_PAYLOAD_SOURCE" ]]; then
   perf_rows_num="$(printf '%s' "${PERF_BASELINE_ROWS:-}" | tr -cd '0-9')"
   perf_hint_num="$(printf '%s' "${PERF_BASELINE_CSV_ROWS_LIMIT_HINT:-}" | tr -cd '0-9')"
   [[ -n "$perf_rows_num" ]] || perf_rows_num="0"
-  [[ -n "$perf_hint_num" ]] || perf_hint_num="20000"
+  [[ -n "$perf_hint_num" ]] || perf_hint_num="100000"
   perf_payload_mode="$(printf '%s' "${PERF_BASELINE_PAYLOAD_SOURCE:-auto}" | tr '[:upper:]' '[:lower:]')"
   case "$perf_payload_mode" in
     rows|csv)
