@@ -27,19 +27,7 @@
         @drag-start="onDragStart"
       />
 
-      <!-- BPMN Canvas -->
-      <div class="canvas-container" ref="canvasContainer">
-        <div ref="bpmnCanvas" class="bpmn-canvas"></div>
-        <!-- Drop Zone Overlay -->
-        <div
-          v-if="isDragging"
-          class="drop-zone"
-          @dragover.prevent
-          @drop="onDrop"
-        >
-          拖放元素到此处
-        </div>
-      </div>
+      <WorkflowCanvasShell ref="canvasShellRef" :is-dragging="isDragging" @drop="onDrop" />
 
       <!-- Properties Panel -->
       <transition name="slide-right">
@@ -196,6 +184,7 @@ import WorkflowTemplateDialog from '../components/workflow/WorkflowTemplateDialo
 import WorkflowPropertyPanel from '../components/workflow/WorkflowPropertyPanel.vue'
 import WorkflowDesignerToolbar from '../components/workflow/WorkflowDesignerToolbar.vue'
 import WorkflowPalette from '../components/workflow/WorkflowPalette.vue'
+import WorkflowCanvasShell from '../components/workflow/WorkflowCanvasShell.vue'
 
 // Types
 interface PaletteItem {
@@ -224,9 +213,15 @@ interface BpmnElement {
 const router = useRouter()
 const route = useRoute()
 
+type WorkflowCanvasShellExposed = {
+  containerEl: HTMLElement | null
+  canvasEl: HTMLElement | null
+}
+
 // State
-const bpmnCanvas = ref<HTMLElement | null>(null)
-const canvasContainer = ref<HTMLElement | null>(null)
+const canvasShellRef = ref<WorkflowCanvasShellExposed | null>(null)
+const bpmnCanvas = computed(() => canvasShellRef.value?.canvasEl ?? null)
+const canvasContainer = computed(() => canvasShellRef.value?.containerEl ?? null)
 const minimapContainer = ref<HTMLElement | null>(null)
 let modeler: WorkflowModelerInstance | null = null
 
