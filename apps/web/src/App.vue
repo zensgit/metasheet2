@@ -30,7 +30,13 @@
       <div class="nav-actions">
         <label class="nav-locale">
           <span class="nav-locale__label">{{ navLabels.language }}</span>
-          <select class="nav-locale__select" :value="locale" @change="onLocaleChange">
+          <select
+            id="nav-locale-select"
+            name="locale"
+            class="nav-locale__select"
+            :value="locale"
+            @change="onLocaleChange"
+          >
             <option value="en">English</option>
             <option value="zh-CN">中文</option>
           </select>
@@ -65,7 +71,7 @@ const showNav = computed(() => {
   return route.meta?.hideNavbar !== true
 })
 
-const isPublicRoute = computed(() => route.meta?.requiresAuth === false)
+const isPublicRoute = computed(() => route.meta?.requiresAuth === false || route.meta?.requiresGuest === true)
 const attendanceFocused = computed(() => isAttendanceFocused())
 const isAdmin = computed(() => hasFeature('attendanceAdmin'))
 const isLoggedIn = computed(() => getStoredAuthToken().length > 0)
@@ -137,8 +143,8 @@ function onLocaleChange(event: Event): void {
 onMounted(async () => {
   await loadProductFeatures(false, {
     skipSessionProbe: isPublicRoute.value,
-  })
-  if (isPublicRoute.value) {
+  }).catch(() => null)
+  if (isPublicRoute.value || attendanceFocused.value) {
     return
   }
   await fetchPlugins()

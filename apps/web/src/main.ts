@@ -7,9 +7,9 @@ import type { RouteRecordRaw } from 'vue-router'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
 import App from './App.vue'
+import { useAuth } from './composables/useAuth'
 import { ROUTE_PATHS } from './router/types'
 import { useFeatureFlags } from './stores/featureFlags'
-import { apiFetch, clearStoredAuthState, getStoredAuthToken } from './utils/api'
 
 // Import views
 import GridView from './views/GridView.vue'
@@ -120,35 +120,10 @@ const router = createRouter({
 
 // Navigation guard for page title
 router.beforeEach(async (to, _from, next) => {
-  const token = getStoredAuthToken()
+  const auth = useAuth()
+  const token = auth.getToken()
   const isLoginRoute = to.path === ROUTE_PATHS.LOGIN
-
-  if (!token && !isLoginRoute) {
-    return next({
-      path: ROUTE_PATHS.LOGIN,
-      query: { redirect: to.fullPath || '/attendance' },
-    })
-  }
-
-  if (token && isLoginRoute) {
-    const verify = await apiFetch('/api/auth/me')
-    if (!verify.ok) {
-      clearStoredAuthState()
-      return next()
-    }
-
-    const redirectRaw = to.query?.redirect
-    const redirect = typeof redirectRaw === 'string' && redirectRaw.startsWith('/') && !redirectRaw.startsWith('//')
-      ? redirectRaw
-      : null
-    const flags = useFeatureFlags()
-    try {
-      await flags.loadProductFeatures()
-    } catch {
-      // noop
-    }
-    return next(redirect || flags.resolveHomePath())
-  }
+  const requiresAuth = to.meta?.requiresAuth !== false
 
   const title = to.meta?.title
   if (title) {
@@ -157,12 +132,44 @@ router.beforeEach(async (to, _from, next) => {
     document.title = 'MetaSheet'
   }
 
+  const flags = useFeatureFlags()
+
+  if (isLoginRoute) {
+    if (token) {
+      const session = await auth.bootstrapSession()
+      if (session.ok) {
+        try {
+          await flags.loadProductFeatures()
+        } catch {
+          // Fall back to shell redirect when feature probing is temporarily unavailable.
+        }
+        return next(flags.resolveHomePath())
+      }
+    }
+    return next()
+  }
+
+  if (requiresAuth) {
+    const ensuredToken = token || await auth.ensureToken()
+    if (!ensuredToken) {
+      return next({
+        path: ROUTE_PATHS.LOGIN,
+        query: { redirect: to.fullPath || '/attendance' },
+      })
+    }
+
+    const session = await auth.bootstrapSession()
+    if (!session.ok) {
+      return next({
+        path: ROUTE_PATHS.LOGIN,
+        query: { redirect: to.fullPath || '/attendance' },
+      })
+    }
+  }
+
   // Product capability guard + attendance focused mode restriction.
   try {
-    const flags = useFeatureFlags()
-    if (token) {
-      await flags.loadProductFeatures()
-    }
+    await flags.loadProductFeatures()
 
     const required = to.meta?.requiredFeature
     const requiredFeature =

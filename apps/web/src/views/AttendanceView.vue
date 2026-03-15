@@ -237,8 +237,8 @@
         <div class="attendance__card attendance__card--admin">
           <div class="attendance__admin-header">
             <h3>{{ tr('Admin Console', '管理控制台') }}</h3>
-            <button class="attendance__btn" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
-              {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
+            <button class="attendance__btn" :disabled="adminDataLoading || adminReloadCoolingDown" @click="handleAdminReload">
+              {{ adminDataLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
             </button>
           </div>
           <div v-if="statusMessage" class="attendance__status-block attendance__status-block--admin">
@@ -504,6 +504,13 @@ interface AttendanceApiError extends Error {
   status?: number
 }
 
+type AttendanceAdminReloadScope = 'full' | 'manual'
+
+interface AttendanceReloadOptions {
+  scope?: AttendanceAdminReloadScope
+  queueWhileLoading?: boolean
+}
+
 const loading = ref(false)
 const punching = ref(false)
 const requestSubmitting = ref(false)
@@ -520,9 +527,16 @@ const calendarMonth = ref(new Date())
 const pluginsLoaded = ref(false)
 const exporting = ref(false)
 const reportLoading = ref(false)
+const adminDataLoading = ref(false)
 const adminForbidden = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 const ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS = 45 * 1000
+const ADMIN_MANUAL_RELOAD_COOLDOWN_MS = 1200
+let adminDataPromise: Promise<void> | null = null
+let adminDataQueued = false
+let adminDataQueuedScope: AttendanceAdminReloadScope | null = null
+const adminReloadCoolingDown = ref(false)
+let adminReloadCooldownTimer: ReturnType<typeof setTimeout> | null = null
 const {
   addHolidayOverride,
   holidaySyncLastRun,
@@ -792,7 +806,7 @@ const statusActionBusy = computed(() => {
   const action = statusMeta.value?.action
   if (!action) return false
   if (action === 'refresh-overview') return loading.value
-  if (action === 'reload-admin') return settingsLoading.value || ruleLoading.value
+  if (action === 'reload-admin') return adminDataLoading.value
   if (action === 'reload-import-job') return importAsyncPolling.value
   if (action === 'resume-import-job') return importAsyncPolling.value
   if (action === 'reload-import-csv') return importLoading.value
@@ -1927,6 +1941,28 @@ function setStatusFromError(error: unknown, fallbackMessage: string, context: At
   })
 }
 
+function armAdminReloadCooldown() {
+  if (adminReloadCoolingDown.value) {
+    return false
+  }
+  adminReloadCoolingDown.value = true
+  if (adminReloadCooldownTimer) {
+    clearTimeout(adminReloadCooldownTimer)
+  }
+  adminReloadCooldownTimer = setTimeout(() => {
+    adminReloadCoolingDown.value = false
+    adminReloadCooldownTimer = null
+  }, ADMIN_MANUAL_RELOAD_COOLDOWN_MS)
+  return true
+}
+
+async function handleAdminReload() {
+  if (adminDataLoading.value || adminDataPromise || !armAdminReloadCooldown()) {
+    return
+  }
+  await loadAdminData({ scope: 'manual' })
+}
+
 async function runStatusAction() {
   const action = statusMeta.value?.action
   if (!action) return
@@ -1935,7 +1971,7 @@ async function runStatusAction() {
     return
   }
   if (action === 'reload-admin') {
-    await loadAdminData()
+    await handleAdminReload()
     return
   }
   if (action === 'reload-import-job') {
@@ -2341,31 +2377,71 @@ async function exportCsv() {
   }
 }
 
-async function loadAdminData() {
+function buildAdminDataLoaders(scope: AttendanceAdminReloadScope) {
+  const loaders: Array<() => Promise<unknown>> = [
+    () => loadSettings(),
+    () => loadAuditLogs(1),
+    () => loadAuditSummary(),
+    () => loadRule(),
+    () => loadAttendanceGroups(),
+    () => loadImportBatches({ orgId: normalizedOrgId() }),
+    () => loadPayrollCycles(),
+    () => loadLeaveTypes(),
+    () => loadOvertimeRules(),
+    () => loadApprovalFlows(),
+    () => loadRotationRules(),
+    () => loadShifts(),
+    () => loadAssignments(),
+    () => loadRotationAssignments(),
+    () => loadHolidays(),
+  ]
+
+  if (scope === 'full') {
+    loaders.splice(1, 0, () => loadProvisionRoleTemplates())
+    loaders.splice(5, 0, () => loadRuleSets(), () => loadRuleTemplates())
+    loaders.splice(8, 0, () => loadPayrollTemplates())
+  }
+
+  return loaders
+}
+
+async function loadAdminData(options: AttendanceReloadOptions = {}) {
+  const scope = options.scope ?? 'full'
+  if (adminDataPromise) {
+    if (options.queueWhileLoading) {
+      adminDataQueued = true
+      adminDataQueuedScope = scope === 'full' ? 'full' : (adminDataQueuedScope ?? 'manual')
+    }
+    return adminDataPromise
+  }
+
+  const currentPromise = (async () => {
+    adminDataLoading.value = true
+    try {
+      await Promise.all(buildAdminDataLoaders(scope).map((loader) => loader()))
+    } catch (error) {
+      setStatusFromError(error, tr('Failed to load admin data', '加载管理数据失败'), 'admin')
+    } finally {
+      adminDataLoading.value = false
+    }
+  })()
+
+  adminDataPromise = currentPromise
   try {
-    await Promise.all([
-      loadSettings(),
-      loadProvisionRoleTemplates(),
-      loadAuditLogs(1),
-      loadAuditSummary(),
-      loadRule(),
-      loadRuleSets(),
-      loadRuleTemplates(),
-      loadAttendanceGroups(),
-      loadImportBatches({ orgId: normalizedOrgId() }),
-      loadPayrollTemplates(),
-      loadPayrollCycles(),
-      loadLeaveTypes(),
-      loadOvertimeRules(),
-      loadApprovalFlows(),
-      loadRotationRules(),
-      loadShifts(),
-      loadAssignments(),
-      loadRotationAssignments(),
-      loadHolidays(),
-    ])
-  } catch (error) {
-    setStatusFromError(error, tr('Failed to load admin data', '加载管理数据失败'), 'admin')
+    await currentPromise
+  } finally {
+    if (adminDataPromise === currentPromise) {
+      adminDataPromise = null
+    }
+  }
+
+  if (adminDataQueued) {
+    adminDataQueued = false
+    const queuedScope = adminDataQueuedScope ?? 'full'
+    adminDataQueuedScope = null
+    queueMicrotask(() => {
+      void loadAdminData({ scope: queuedScope })
+    })
   }
 }
 
