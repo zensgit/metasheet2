@@ -23,8 +23,13 @@ export interface MobileCapabilityPolicy {
 interface ProductFeatureState {
   loaded: boolean
   loading: boolean
+  sessionAwareLoaded: boolean
   error: string | null
   features: ProductFeatures
+}
+
+interface LoadProductFeatureOptions {
+  skipSessionProbe?: boolean
 }
 
 const DEFAULT_FEATURES: ProductFeatures = {
@@ -38,6 +43,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
 const state = reactive<ProductFeatureState>({
   loaded: false,
   loading: false,
+  sessionAwareLoaded: false,
   error: null,
   features: { ...DEFAULT_FEATURES },
 })
@@ -229,8 +235,12 @@ function resolveFeatures(
   }
 }
 
-async function loadProductFeatures(force = false): Promise<ProductFeatures> {
-  if (state.loaded && !force) return state.features
+async function loadProductFeatures(
+  force = false,
+  options: LoadProductFeatureOptions = {},
+): Promise<ProductFeatures> {
+  const requiresSessionProbe = !options.skipSessionProbe
+  if (state.loaded && !force && (!requiresSessionProbe || state.sessionAwareLoaded)) return state.features
   if (state.loading && loadPromise) return loadPromise
 
   state.loading = true
@@ -241,16 +251,23 @@ async function loadProductFeatures(force = false): Promise<ProductFeatures> {
     let pluginPayload: any = null
 
     try {
-      const [meRes, pluginRes] = await Promise.all([
-        apiFetch('/api/auth/me'),
-        apiFetch('/api/plugins'),
-      ])
+      const requests: Array<Promise<Response | null>> = [
+        apiFetch('/api/plugins').catch(() => null),
+      ]
 
-      if (meRes.ok) {
+      if (requiresSessionProbe) {
+        requests.unshift(apiFetch('/api/auth/me').catch(() => null))
+      }
+
+      const responses = await Promise.all(requests)
+      const pluginRes = responses.at(-1) ?? null
+      const meRes = requiresSessionProbe ? (responses[0] ?? null) : null
+
+      if (meRes?.ok) {
         mePayload = await meRes.json()
       }
 
-      if (pluginRes.ok) {
+      if (pluginRes?.ok) {
         pluginPayload = await pluginRes.json()
       }
     } catch (error) {
@@ -264,6 +281,7 @@ async function loadProductFeatures(force = false): Promise<ProductFeatures> {
 
     state.features = resolveFeatures(backendFeatures, overrideFeatures, pluginInference, adminRole)
     state.loaded = true
+    state.sessionAwareLoaded = state.sessionAwareLoaded || requiresSessionProbe
     state.loading = false
 
     return state.features

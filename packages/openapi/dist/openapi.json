@@ -534,6 +534,9 @@
           "name": {
             "type": "string"
           },
+          "paid": {
+            "type": "boolean"
+          },
           "requiresApproval": {
             "type": "boolean"
           },
@@ -4962,6 +4965,9 @@
                   "name": {
                     "type": "string"
                   },
+                  "paid": {
+                    "type": "boolean"
+                  },
                   "requiresApproval": {
                     "type": "boolean"
                   },
@@ -5048,6 +5054,9 @@
                   },
                   "name": {
                     "type": "string"
+                  },
+                  "paid": {
+                    "type": "boolean"
                   },
                   "requiresApproval": {
                     "type": "boolean"

@@ -592,15 +592,34 @@ describe('Attendance Plugin Integration', () => {
     expect(importData?.idempotent).toBe(false)
     expect(importData?.batchId ?? null).toBe(null)
 
-    const anomalyDate = (() => {
+    const anomalyDate = await (async () => {
       const dt = new Date()
-      // Ensure we don't override the "normal" record we just imported for `workDate`.
-      dt.setUTCDate(dt.getUTCDate() + 1)
-      // Pick a weekday so `is_workday` stays true and the anomalies endpoint can surface the record.
-      while (dt.getUTCDay() === 0 || dt.getUTCDay() === 6) {
+      // Push the anomaly test into a far-future window so synced holiday calendars in a developer DB
+      // are unlikely to collide with it. We still create a working-day override below to make the
+      // anomalies query deterministic even if the default org rule or local holiday data differs.
+      dt.setUTCDate(dt.getUTCDate() + 395)
+      for (let attempt = 0; attempt < 45; attempt += 1) {
+        while (dt.getUTCDay() === 0 || dt.getUTCDay() === 6) {
+          dt.setUTCDate(dt.getUTCDate() + 1)
+        }
+        const candidate = dt.toISOString().slice(0, 10)
+        const holidayRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            date: candidate,
+            name: `Integration Working Day ${runSuffix}-${attempt}`,
+            isWorkingDay: true,
+          }),
+        })
+        expect([201, 409]).toContain(holidayRes.status)
+        if (holidayRes.status === 201) return candidate
         dt.setUTCDate(dt.getUTCDate() + 1)
       }
-      return dt.toISOString().slice(0, 10)
+      throw new Error('Unable to reserve a deterministic anomaly workday for attendance integration test')
     })()
 
     const anomalyPayload = {
@@ -752,6 +771,49 @@ describe('Attendance Plugin Integration', () => {
       const csvGroupMembers = (csvGroupMembersRes.body as { data?: { items?: { userId?: string }[] } } | undefined)?.data?.items ?? []
       expect(csvGroupMembers.some(item => item.userId === 'attendance-test')).toBe(true)
     }
+
+    const numericGroupName = '1'
+    expect(groups.some(item => item.name === numericGroupName)).toBe(false)
+
+    const numericGroupImportRes = await requestJson(`${baseUrl}/api/attendance/import`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: 'attendance-test',
+        csvText: `日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果\n${workDate},A001,${numericGroupName},09:05,18:05,正常`,
+        mapping: {
+          columns: [
+            { sourceField: '日期', targetField: 'workDate', dataType: 'date' },
+            { sourceField: '工号', targetField: 'empNo', dataType: 'string' },
+            { sourceField: '考勤组', targetField: 'attendance_group', dataType: 'string' },
+            { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+            { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+            { sourceField: '考勤结果', targetField: 'status', dataType: 'string' },
+          ],
+        },
+        userMap: {
+          A001: 'attendance-test',
+        },
+        groupSync: {
+          autoCreate: true,
+          autoAssignMembers: true,
+        },
+        mode: 'override',
+      }),
+    })
+    expect(numericGroupImportRes.status).toBe(200)
+
+    const listGroupsAfterNumericRes = await requestJson(`${baseUrl}/api/attendance/groups?pageSize=200`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(listGroupsAfterNumericRes.status).toBe(200)
+    const groupsAfterNumeric = (listGroupsAfterNumericRes.body as { data?: { items?: { id?: string; name?: string }[] } } | undefined)?.data?.items ?? []
+    expect(groupsAfterNumeric.some(item => item.name === numericGroupName)).toBe(false)
 
     const templateGetRes = await requestJson(`${baseUrl}/api/attendance/rule-templates`, {
       headers: {

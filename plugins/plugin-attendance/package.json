@@ -1,0 +1,9 @@
+{
+  "name": "plugin-attendance",
+  "version": "0.1.0",
+  "description": "Attendance plugin for MetaSheet",
+  "main": "index.cjs",
+  "dependencies": {
+    "zod": "^3.22.4"
+  }
+}

@@ -372,6 +372,8 @@ components:
           type: string
         name:
           type: string
+        paid:
+          type: boolean
         requiresApproval:
           type: boolean
         requiresAttachment:
@@ -3171,6 +3173,8 @@ paths:
                   type: string
                 name:
                   type: string
+                paid:
+                  type: boolean
                 requiresApproval:
                   type: boolean
                 requiresAttachment:
@@ -3225,6 +3229,8 @@ paths:
                   type: string
                 name:
                   type: string
+                paid:
+                  type: boolean
                 requiresApproval:
                   type: boolean
                 requiresAttachment:
