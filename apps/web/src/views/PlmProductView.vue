@@ -1,92 +1,21 @@
 <template>
   <div class="plm-page">
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <h2>产品搜索</h2>
-          <p class="subtext">基于联邦接口快速定位可用的 PLM 产品 ID</p>
-        </div>
-        <button class="btn primary" :disabled="searchLoading" @click="searchProducts">
-          {{ searchLoading ? '搜索中...' : '搜索' }}
-        </button>
-      </div>
-
-      <div class="form-grid">
-        <label for="plm-search-query">
-          关键词
-          <input
-            id="plm-search-query"
-            v-model.trim="searchQuery"
-            name="plmSearchQuery"
-            placeholder="可留空，返回最新记录"
-          />
-        </label>
-        <label for="plm-search-item-type">
-          Item Type
-          <input
-            id="plm-search-item-type"
-            v-model.trim="searchItemType"
-            name="plmSearchItemType"
-            placeholder="Part"
-          />
-        </label>
-        <label for="plm-search-limit">
-          Limit
-          <input
-            id="plm-search-limit"
-            v-model.number="searchLimit"
-            name="plmSearchLimit"
-            type="number"
-            min="1"
-            max="50"
-          />
-        </label>
-      </div>
-
-      <p v-if="searchError" class="status error">{{ searchError }}</p>
-      <p v-else-if="searchResults.length" class="status">
-        共 {{ searchTotal }} 条，当前展示 {{ searchResults.length }} 条
-      </p>
-      <div v-if="!searchResults.length" class="empty">暂无搜索结果</div>
-      <table v-else class="data-table">
-        <thead>
-          <tr>
-            <th>名称</th>
-            <th>料号</th>
-            <th>状态</th>
-            <th>类型</th>
-            <th>更新时间</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="item in searchResults" :key="item.id">
-            <td>{{ item.name || '-' }}</td>
-            <td>{{ item.partNumber || item.item_number || item.itemNumber || item.code || '-' }}</td>
-            <td>{{ item.status || '-' }}</td>
-            <td>{{ item.itemType || '-' }}</td>
-            <td>{{ item.updatedAt || item.updated_at || '-' }}</td>
-            <td>
-              <div class="inline-actions">
-                <button class="btn" @click="applySearchItem(item)">使用</button>
-                <button class="btn ghost mini" @click="applyCompareFromSearch(item, 'left')">
-                  左对比
-                </button>
-                <button class="btn ghost mini" @click="applyCompareFromSearch(item, 'right')">
-                  右对比
-                </button>
-                <button class="btn ghost mini" @click="copySearchValue(item, 'id')">
-                  复制 ID
-                </button>
-                <button class="btn ghost mini" @click="copySearchValue(item, 'number')">
-                  复制料号
-                </button>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </section>
+    <PlmSearchShell
+      :search-query="searchQuery"
+      :search-item-type="searchItemType"
+      :search-limit="searchLimit"
+      :search-results="searchResults"
+      :search-total="searchTotal"
+      :search-loading="searchLoading"
+      :search-error="searchError"
+      @update:search-query="searchQuery = $event"
+      @update:search-item-type="searchItemType = $event"
+      @update:search-limit="searchLimit = $event"
+      @search="searchProducts"
+      @apply-item="applySearchItem"
+      @compare-item="applyCompareFromSearch"
+      @copy-item="copySearchValue"
+    />
 
     <section class="panel">
       <PlmWorkbenchShell
@@ -2461,6 +2390,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { type LocationQueryValue, useRoute, useRouter } from 'vue-router'
 import { apiGet, apiPost } from '../utils/api'
+import PlmSearchShell from '../components/plm/PlmSearchShell.vue'
 import PlmWorkbenchShell from '../components/plm/PlmWorkbenchShell.vue'
 
 const route = useRoute()
