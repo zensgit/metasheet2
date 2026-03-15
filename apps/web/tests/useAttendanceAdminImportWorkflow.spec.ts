@@ -180,6 +180,40 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(setStatusFromError.mock.calls[0]?.[2]).toBe('import-preview')
   })
 
+  it.each([
+    {
+      name: 'preview invalid JSON',
+      invoke: async (workflow: ReturnType<typeof useAttendanceAdminImportWorkflow>) => workflow.previewImport(),
+      expectedMeta: {
+        context: 'import-preview',
+        hint: 'Fix JSON syntax in payload and retry preview.',
+        action: 'retry-preview-import',
+      },
+    },
+    {
+      name: 'run invalid JSON',
+      invoke: async (workflow: ReturnType<typeof useAttendanceAdminImportWorkflow>) => workflow.runImport(),
+      expectedMeta: {
+        context: 'import-run',
+        hint: 'Fix JSON syntax in payload and retry import.',
+        action: 'retry-run-import',
+      },
+    },
+  ])('reports retry metadata for $name', async ({ invoke, expectedMeta }) => {
+    const { workflow, apiFetch, setStatus } = createWorkflow()
+
+    workflow.importForm.payload = '{'
+
+    await invoke(workflow)
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(setStatus).toHaveBeenCalledWith(
+      'Invalid JSON payload for import.',
+      'error',
+      expectedMeta,
+    )
+  })
+
   it('refreshes records and batches after a successful import commit', async () => {
     const loadRecords = vi.fn(async () => undefined)
     const loadImportBatches = vi.fn(async () => undefined)
