@@ -8,8 +8,23 @@ import test from 'node:test';
 const ROOT_DIR = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
 const SCRIPT_PATH = path.join(ROOT_DIR, 'scripts', 'ops', 'attendance-run-perf-highscale.sh');
 
-function writeDispatcher({ root, runId = '123456', rows = 100000, mode = 'commit', uploadCsv = true, commitAsync = true, payloadSource = 'auto' }) {
+function writeDispatcher({
+  root,
+  runId = '123456',
+  rows = 100000,
+  mode = 'commit',
+  uploadCsv = true,
+  commitAsync = true,
+  payloadSource = 'auto',
+  capacityMismatch = null,
+}) {
   const dispatcherPath = path.join(root, 'fake-dispatcher.sh');
+  const capacityMismatchScript = capacityMismatch
+    ? `cat > "\${DOWNLOAD_DIR}/\${run_id}/artifact/perf-capacity-mismatch.json" <<'EOF'
+${JSON.stringify(capacityMismatch, null, 2)}
+EOF
+`
+    : '';
   const script = `#!/usr/bin/env bash
 set -euo pipefail
 run_id="${runId}"
@@ -26,6 +41,7 @@ cat > "\${DOWNLOAD_DIR}/\${run_id}/artifact/perf-summary.json" <<'EOF'
   "regressions": []
 }
 EOF
+${capacityMismatchScript}
 echo "RUN_ID=\${run_id}"
 `;
   writeFileSync(dispatcherPath, script, 'utf8');
@@ -107,4 +123,39 @@ test('attendance-run-perf-highscale fails when summary rows is below expected', 
 
   assert.notEqual(result.status, 0);
   assert.match(`${result.stderr}${result.stdout}`, /summary rows 99999 < expected 100000/);
+});
+
+test('attendance-run-perf-highscale classifies known capacity mismatch from artifact', () => {
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'attendance-highscale-capacity-'));
+  const outputRoot = path.join(tempRoot, 'out');
+  const dispatcherPath = writeDispatcher({
+    root: tempRoot,
+    capacityMismatch: {
+      classification: 'capacity_mismatch',
+      requestedRows: 100000,
+      payloadSourceRequested: 'auto',
+      uploadCsvRequested: true,
+      csvRowsLimitHint: 100000,
+      remoteCsvRowsLimit: 20000,
+      failureLine: '[attendance-import-perf] Failed: async commit job failed: CSV exceeds max rows (20000)',
+    },
+  });
+
+  const result = spawnSync('bash', [SCRIPT_PATH], {
+    cwd: ROOT_DIR,
+    env: {
+      ...process.env,
+      DOWNLOAD_ROOT: outputRoot,
+      DISPATCHER: dispatcherPath,
+      ROWS: '100000',
+    },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+  const summary = JSON.parse(readFileSync(path.join(outputRoot, 'summary.json'), 'utf8'));
+  assert.equal(summary.status, 'known_capacity_mismatch');
+  assert.equal(summary.classification, 'capacity_mismatch');
+  assert.equal(summary.capacityMismatch.remoteCsvRowsLimit, 20000);
+  assert.equal(summary.capacityMismatch.requestedRows, 100000);
 });

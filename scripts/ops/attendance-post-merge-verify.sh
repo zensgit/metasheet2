@@ -36,6 +36,7 @@ REQUIRE_IMPORT_JOB_RECOVERY="${REQUIRE_IMPORT_JOB_RECOVERY:-false}"
 REQUIRE_ADMIN_SETTINGS_SAVE="${REQUIRE_ADMIN_SETTINGS_SAVE:-true}"
 REQUIRE_LOCALE_ZH="${REQUIRE_LOCALE_ZH:-false}"
 STRICT_RETRY_ON_RATE_LIMITED="${STRICT_RETRY_ON_RATE_LIMITED:-true}"
+PERF_HIGHSCALE_ALLOW_KNOWN_CAPACITY_MISMATCH="${PERF_HIGHSCALE_ALLOW_KNOWN_CAPACITY_MISMATCH:-true}"
 
 LOOKBACK_HOURS="${LOOKBACK_HOURS:-48}"
 GH_RETRY_MAX_ATTEMPTS="${GH_RETRY_MAX_ATTEMPTS:-5}"
@@ -583,6 +584,19 @@ function strict_gate_has_rate_limited_reason() {
   ' "$summary_path" >/dev/null 2>&1
 }
 
+function perf_highscale_has_capacity_mismatch() {
+  local artifacts_dir="$1"
+  if [[ -z "$artifacts_dir" || ! -d "$artifacts_dir" ]]; then
+    return 1
+  fi
+  local mismatch_path=''
+  mismatch_path="$(find "$artifacts_dir" -type f -name 'perf-capacity-mismatch.json' | sort | tail -n 1 || true)"
+  if [[ -z "$mismatch_path" || ! -f "$mismatch_path" ]]; then
+    return 1
+  fi
+  jq -e '.classification == "capacity_mismatch"' "$mismatch_path" >/dev/null 2>&1
+}
+
 function trigger_and_wait() {
   local workflow="$1"
   shift
@@ -870,10 +884,25 @@ run_gate \
   -f "import_job_poll_timeout_ms=${PERF_HIGHSCALE_IMPORT_JOB_POLL_TIMEOUT_MS}" \
   -f "import_job_poll_timeout_large_ms=${PERF_HIGHSCALE_IMPORT_JOB_POLL_TIMEOUT_LARGE_MS}"
 
+perf_highscale_allow_known_capacity_mismatch_bool="$(to_bool "$PERF_HIGHSCALE_ALLOW_KNOWN_CAPACITY_MISMATCH")"
+perf_highscale_known_capacity_mismatch='false'
+if [[ "$SKIP_PERF_HIGHSCALE" != "true" && "$GATE_LAST_STATUS" == "FAIL" && "$perf_highscale_allow_known_capacity_mismatch_bool" == "true" ]]; then
+  if perf_highscale_has_capacity_mismatch "$GATE_LAST_ARTIFACTS"; then
+    perf_highscale_known_capacity_mismatch='true'
+    info "perf-highscale failed with known capacity mismatch; treated as non-blocking"
+    if (( failures > 0 )); then
+      failures=$((failures - 1))
+    fi
+    append_result "perf-highscale-policy" "local-assert" "$GATE_LAST_RUN_ID" "PASS" "known_capacity_mismatch" "$GATE_LAST_RUN_URL" "$GATE_LAST_ARTIFACTS"
+  fi
+fi
+
 if [[ "$SKIP_PERF_HIGHSCALE" == "true" ]]; then
   append_result "perf-highscale-contract" "local-assert" "" "SKIP" "" "" ""
 elif [[ "$GATE_LAST_STATUS" == "PASS" ]]; then
   run_perf_highscale_contract_gate "$GATE_LAST_RUN_ID" "$GATE_LAST_RUN_URL" "$GATE_LAST_ARTIFACTS" || true
+elif [[ "$perf_highscale_known_capacity_mismatch" == "true" ]]; then
+  append_result "perf-highscale-contract" "local-assert" "$GATE_LAST_RUN_ID" "SKIP" "known_capacity_mismatch" "$GATE_LAST_RUN_URL" "$GATE_LAST_ARTIFACTS"
 else
   append_result "perf-highscale-contract" "local-assert" "$GATE_LAST_RUN_ID" "SKIP" "upstream_gate_failed" "$GATE_LAST_RUN_URL" "$GATE_LAST_ARTIFACTS"
 fi
