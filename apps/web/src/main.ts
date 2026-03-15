@@ -40,6 +40,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'Sign In', hideNavbar: true, requiresGuest: true }
   },
   {
+    path: '/accept-invite',
+    name: 'accept-invite',
+    component: () => import('./views/AcceptInviteView.vue'),
+    meta: { title: 'Accept Invite', hideNavbar: true, requiresAuth: false }
+  },
+  {
     path: '/grid',
     name: 'grid',
     component: GridView,
@@ -98,6 +104,36 @@ const routes: RouteRecordRaw[] = [
     name: 'plm',
     component: PlmProductView,
     meta: { title: 'PLM', requiresAuth: true }
+  },
+  {
+    path: '/settings',
+    name: 'user-settings',
+    component: () => import('./views/SessionCenterView.vue'),
+    meta: { title: 'My Sessions', requiresAuth: true }
+  },
+  {
+    path: '/admin/users',
+    name: 'user-management',
+    component: () => import('./views/UserManagementView.vue'),
+    meta: { title: 'User Management', requiresAuth: true }
+  },
+  {
+    path: '/admin/roles',
+    name: 'role-management',
+    component: () => import('./views/RoleManagementView.vue'),
+    meta: { title: 'Role Management', requiresAuth: true }
+  },
+  {
+    path: '/admin/permissions',
+    name: 'permission-management',
+    component: () => import('./views/PermissionManagementView.vue'),
+    meta: { title: 'Permission Management', requiresAuth: true }
+  },
+  {
+    path: '/admin/audit',
+    name: 'admin-audit',
+    component: () => import('./views/AdminAuditView.vue'),
+    meta: { title: 'Admin Audit', requiresAuth: true }
   },
   {
     path: '/admin/plugins',
@@ -188,6 +224,7 @@ router.beforeEach(async (to, _from, next) => {
       const allowed = new Set<string>([
         '/attendance',
         '/p/plugin-attendance/attendance',
+        '/settings',
       ])
       const path = String(to.path || '')
       if (!allowed.has(path)) {
