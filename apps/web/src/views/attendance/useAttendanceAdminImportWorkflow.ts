@@ -901,6 +901,7 @@ export function useAttendanceAdminImportWorkflow({
         tr('Select a CSV file first.', '请先选择 CSV 文件。'),
         'error',
         {
+          context: 'import-preview',
           hint: tr('Choose a CSV file, then retry preview/import.', '选择 CSV 文件后，再重试预览或导入。'),
           action: 'retry-preview-import',
         },
@@ -1348,6 +1349,7 @@ export function useAttendanceAdminImportWorkflow({
         tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'),
         'error',
         {
+          context: 'import-preview',
           hint: tr('Fix JSON syntax in payload and retry preview.', '请修复载荷 JSON 语法后重试预览。'),
           action: 'retry-preview-import',
         },
@@ -1456,6 +1458,7 @@ export function useAttendanceAdminImportWorkflow({
         tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'),
         'error',
         {
+          context: 'import-run',
           hint: tr('Fix JSON syntax in payload and retry import.', '请修复载荷 JSON 语法后重试导入。'),
           action: 'retry-run-import',
         },
