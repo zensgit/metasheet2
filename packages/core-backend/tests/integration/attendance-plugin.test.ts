@@ -1536,6 +1536,168 @@ describe('Attendance Plugin Integration', () => {
     expect(rollbackRes.status).toBe(200)
   })
 
+  it('retains compact skipped summary for completed commit-async jobs and idempotent retry', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const duplicateUserId = `attendance-async-duplicate-${Date.now().toString(36)}`
+    const idempotencyKey = `integration-async-duplicate-${Date.now().toString(36)}`
+
+    const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareRes.status).toBe(200)
+    const commitToken = (prepareRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+
+    const commitPayload = {
+      userId: 'attendance-test',
+      idempotencyKey,
+      timezone: 'UTC',
+      rows: [
+        {
+          userId: duplicateUserId,
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T09:00:00Z`,
+            lastOutAt: `${workDate}T18:00:00Z`,
+            status: 'normal',
+          },
+        },
+        {
+          userId: duplicateUserId,
+          workDate,
+          fields: {
+            firstInAt: `${workDate}T09:05:00Z`,
+            lastOutAt: `${workDate}T18:05:00Z`,
+            status: 'normal',
+          },
+        },
+      ],
+      mode: 'override',
+      commitToken,
+    }
+
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(commitPayload),
+    })
+    expect(commitRes.status).toBe(200)
+    const initialJob = (commitRes.body as { data?: { job?: any } } | undefined)?.data?.job
+    const jobId = String(initialJob?.id || '')
+    expect(jobId).toBeTruthy()
+
+    let batchId = ''
+    let completedJob: any = null
+    for (let i = 0; i < 100; i += 1) {
+      const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${jobId}`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      })
+      expect(jobRes.status).toBe(200)
+      const jobData = (jobRes.body as { data?: any } | undefined)?.data
+      const status = String(jobData?.status || '')
+      if (status === 'completed') {
+        batchId = String(jobData?.batchId || '')
+        completedJob = jobData
+        break
+      }
+      if (status === 'failed') {
+        throw new Error(String(jobData?.error || 'async duplicate job failed'))
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+
+    expect(batchId).toBeTruthy()
+    expect(completedJob).toBeTruthy()
+    expect(Number(completedJob?.failedRows ?? 0)).toBe(1)
+    expect(Number(completedJob?.skippedCount ?? 0)).toBe(1)
+    expect(Array.isArray(completedJob?.skippedRows)).toBe(true)
+    expect(completedJob?.skippedRows).toHaveLength(1)
+    expect(String(completedJob?.skippedRows?.[0]?.warnings?.[0] || '')).toContain('Duplicate row')
+
+    const batchDetailRes = await requestJson(
+      `${baseUrl}/api/attendance/import/batches/${encodeURIComponent(batchId)}`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    )
+    expect(batchDetailRes.status).toBe(200)
+    const batchMeta = (batchDetailRes.body as { data?: { meta?: any } } | undefined)?.data?.meta
+    expect(Number(batchMeta?.skippedCount ?? 0)).toBe(1)
+    expect(Array.isArray(batchMeta?.skippedRows)).toBe(true)
+    expect(batchMeta?.skippedRows).toHaveLength(1)
+    expect(String(batchMeta?.skippedRows?.[0]?.warnings?.[0] || '')).toContain('Duplicate row')
+
+    const batchItemsRes = await requestJson(
+      `${baseUrl}/api/attendance/import/batches/${encodeURIComponent(batchId)}/items?pageSize=20`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    )
+    expect(batchItemsRes.status).toBe(200)
+    const batchItems = (batchItemsRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+    const skippedItem = batchItems.find((item) => item?.recordId == null)
+    expect(skippedItem).toBeTruthy()
+    expect(String(skippedItem?.previewSnapshot?.skip?.reason || '')).toBe('duplicate')
+    expect(String(skippedItem?.previewSnapshot?.warnings?.[0] || '')).toContain('Duplicate row')
+
+    const { commitToken: _commitToken, ...retryPayload } = commitPayload
+    const retryRes = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(retryPayload),
+    })
+    expect(retryRes.status).toBe(200)
+    const retryData = (retryRes.body as { data?: { idempotent?: boolean; job?: any } } | undefined)?.data
+    expect(retryData?.idempotent).toBe(true)
+    expect(String(retryData?.job?.id || '')).toBe(jobId)
+    expect(String(retryData?.job?.batchId || '')).toBe(batchId)
+    expect(Number(retryData?.job?.failedRows ?? 0)).toBe(1)
+    expect(Number(retryData?.job?.skippedCount ?? 0)).toBe(1)
+    expect(Array.isArray(retryData?.job?.skippedRows)).toBe(true)
+    expect(retryData?.job?.skippedRows).toHaveLength(1)
+    expect(String(retryData?.job?.skippedRows?.[0]?.warnings?.[0] || '')).toContain('Duplicate row')
+
+    const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(rollbackRes.status).toBe(200)
+  })
+
   it('returns NOT_FOUND for unknown async import job id', async () => {
     if (!baseUrl) return
 

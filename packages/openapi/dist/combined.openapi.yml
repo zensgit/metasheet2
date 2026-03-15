@@ -793,6 +793,13 @@ components:
           type: integer
         failedRows:
           type: integer
+        skippedCount:
+          type: integer
+        skippedRows:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
         elapsedMs:
           type: integer
         throughputRowsPerSec:
