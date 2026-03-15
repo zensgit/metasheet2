@@ -1,44 +1,21 @@
 <template>
   <div class="workflow-designer">
     <!-- Header -->
-    <div class="designer-header">
-      <div class="header-left">
-        <el-button :icon="ArrowLeft" @click="goBack">返回</el-button>
-        <el-divider direction="vertical" />
-        <span class="workflow-name">{{ workflowName || '新建工作流' }}</span>
-        <el-tag v-if="isDirty" type="warning" size="small">未保存</el-tag>
-      </div>
-      <div class="header-center">
-        <el-button-group>
-          <el-button :icon="ZoomOut" @click="zoom(-0.1)" />
-          <el-button>{{ Math.round(zoomLevel * 100) }}%</el-button>
-          <el-button :icon="ZoomIn" @click="zoom(0.1)" />
-          <el-button :icon="FullScreen" @click="fitViewport" />
-        </el-button-group>
-      </div>
-      <div class="header-right">
-        <el-button @click="openTemplatePicker">
-          <el-icon><Document /></el-icon>
-          模板
-        </el-button>
-        <el-button @click="showProperties = !showProperties">
-          <el-icon><Setting /></el-icon>
-          属性面板
-        </el-button>
-        <el-button @click="validateWorkflow">
-          <el-icon><CircleCheck /></el-icon>
-          验证
-        </el-button>
-        <el-button type="primary" @click="saveWorkflow" :loading="saving">
-          <el-icon><Upload /></el-icon>
-          保存
-        </el-button>
-        <el-button type="success" @click="deployWorkflow" :loading="deploying">
-          <el-icon><Promotion /></el-icon>
-          部署
-        </el-button>
-      </div>
-    </div>
+    <WorkflowDesignerToolbar
+      :workflow-name="workflowName"
+      :is-dirty="isDirty"
+      :zoom-level="zoomLevel"
+      :saving="saving"
+      :deploying="deploying"
+      @go-back="goBack"
+      @zoom="zoom"
+      @fit-viewport="fitViewport"
+      @open-template-picker="openTemplatePicker"
+      @toggle-properties="showProperties = !showProperties"
+      @validate-workflow="validateWorkflow"
+      @save-workflow="saveWorkflow"
+      @deploy-workflow="deployWorkflow"
+    />
 
     <!-- Main Content -->
     <div class="designer-content">
@@ -198,8 +175,6 @@ import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick, markRaw } f
 import { useRouter, useRoute } from 'vue-router'
 import {
   ElAlert,
-  ElButton,
-  ElButtonGroup,
   ElDialog,
   ElDivider,
   ElIcon,
@@ -207,14 +182,6 @@ import {
   ElMessageBox,
 } from 'element-plus'
 import {
-  ArrowLeft,
-  ZoomIn,
-  ZoomOut,
-  FullScreen,
-  Setting,
-  Upload,
-  Promotion,
-  CircleCheck,
   CircleCheckFilled,
   VideoPlay,
   VideoPause,
@@ -268,6 +235,7 @@ import {
 import { validateWorkflowElements } from './workflowDesignerValidation'
 import WorkflowTemplateDialog from '../components/workflow/WorkflowTemplateDialog.vue'
 import WorkflowPropertyPanel from '../components/workflow/WorkflowPropertyPanel.vue'
+import WorkflowDesignerToolbar from '../components/workflow/WorkflowDesignerToolbar.vue'
 
 // Types
 interface PaletteItem {
