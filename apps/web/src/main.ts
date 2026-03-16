@@ -8,7 +8,7 @@ import App from './App.vue'
 import { useAuth } from './composables/useAuth'
 import { useFeatureFlags } from './stores/featureFlags'
 
-const routes: RouteRecordRaw[] = [
+const coreRoutes: RouteRecordRaw[] = [
   {
     path: '/',
     name: 'home',
@@ -21,6 +21,15 @@ const routes: RouteRecordRaw[] = [
     component: () => import('./views/LoginView.vue'),
     meta: { title: 'Login', hideNavbar: true, requiresAuth: false }
   },
+  {
+    path: '/accept-invite',
+    name: 'accept-invite',
+    component: () => import('./views/AcceptInviteView.vue'),
+    meta: { title: 'Accept Invite', hideNavbar: true, requiresAuth: false }
+  },
+]
+
+const workbenchRoutes: RouteRecordRaw[] = [
   {
     path: '/grid',
     name: 'grid',
@@ -51,18 +60,18 @@ const routes: RouteRecordRaw[] = [
     component: () => import('./views/FormView.vue'),
     meta: { title: 'Form View' }
   },
+]
+
+const attendanceRoutes: RouteRecordRaw[] = [
   {
     path: '/attendance',
     name: 'attendance',
     component: () => import('./views/attendance/AttendanceExperienceView.vue'),
     meta: { title: 'Attendance', requiredFeature: 'attendance' }
   },
-  {
-    path: '/p/:plugin/:viewId',
-    name: 'plugin-view',
-    component: () => import('./views/PluginViewHost.vue'),
-    meta: { title: 'Plugin' }
-  },
+]
+
+const dataRoutes: RouteRecordRaw[] = [
   {
     path: '/spreadsheets',
     name: 'spreadsheet-list',
@@ -93,6 +102,9 @@ const routes: RouteRecordRaw[] = [
     component: () => import('./views/ApprovalInboxView.vue'),
     meta: { title: 'Approvals' }
   },
+]
+
+const plmRoutes: RouteRecordRaw[] = [
   {
     path: '/plm',
     name: 'plm',
@@ -100,16 +112,74 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'PLM' }
   },
   {
+    path: '/plm/audit',
+    name: 'plm-audit',
+    component: () => import('./views/PlmAuditView.vue'),
+    meta: { title: 'PLM Audit' }
+  },
+]
+
+const adminRoutes: RouteRecordRaw[] = [
+  {
+    path: '/admin/users',
+    name: 'user-management',
+    component: () => import('./views/UserManagementView.vue'),
+    meta: { title: 'User Management' }
+  },
+  {
+    path: '/settings',
+    name: 'user-settings',
+    component: () => import('./views/SessionCenterView.vue'),
+    meta: { title: 'My Sessions' }
+  },
+  {
+    path: '/admin/roles',
+    name: 'role-management',
+    component: () => import('./views/RoleManagementView.vue'),
+    meta: { title: 'Role Management' }
+  },
+  {
+    path: '/admin/permissions',
+    name: 'permission-management',
+    component: () => import('./views/PermissionManagementView.vue'),
+    meta: { title: 'Permission Management' }
+  },
+  {
+    path: '/admin/audit',
+    name: 'admin-audit',
+    component: () => import('./views/AdminAuditView.vue'),
+    meta: { title: 'Admin Audit' }
+  },
+  {
     path: '/admin/plugins',
     name: 'plugin-manager',
     component: () => import('./views/PluginManagerView.vue'),
     meta: { title: 'Plugins', requiredFeature: 'attendanceAdmin' }
   },
+]
+
+const fallbackRoutes: RouteRecordRaw[] = [
+  {
+    path: '/p/:plugin/:viewId',
+    name: 'plugin-view',
+    component: () => import('./views/PluginViewHost.vue'),
+    meta: { title: 'Plugin' }
+  },
   {
     path: '/:pathMatch(.*)*',
     name: 'not-found',
-    redirect: '/'
+    redirect: '/',
   }
+]
+
+const routes: RouteRecordRaw[] = [
+  ...coreRoutes,
+  ...workbenchRoutes,
+  ...attendanceRoutes,
+  ...dataRoutes,
+  ...plmRoutes,
+  ...adminRoutes,
+  ...fallbackRoutes,
 ]
 
 // Create router
@@ -135,12 +205,15 @@ router.beforeEach(async (to, _from, next) => {
 
   if (isLoginRoute) {
     if (currentToken) {
-      try {
-        await flags.loadProductFeatures()
-      } catch {
-        // Fallback to a stable shell route when features are temporarily unavailable.
+      const session = await auth.bootstrapSession()
+      if (session.ok) {
+        try {
+          await flags.loadProductFeatures()
+        } catch {
+          // Fallback to a stable shell route when features are temporarily unavailable.
+        }
+        return next(flags.resolveHomePath())
       }
-      return next(flags.resolveHomePath())
     }
     return next()
   }
@@ -148,6 +221,17 @@ router.beforeEach(async (to, _from, next) => {
   if (requiresAuth) {
     const ensuredToken = currentToken || await auth.ensureToken()
     if (!ensuredToken) {
+      const redirect = typeof to.fullPath === 'string' && to.fullPath.length > 0 ? to.fullPath : '/attendance'
+      return next({
+        name: 'login',
+        query: {
+          redirect,
+        },
+      })
+    }
+
+    const session = await auth.bootstrapSession()
+    if (!session.ok) {
       const redirect = typeof to.fullPath === 'string' && to.fullPath.length > 0 ? to.fullPath : '/attendance'
       return next({
         name: 'login',
@@ -179,6 +263,7 @@ router.beforeEach(async (to, _from, next) => {
       const allowed = new Set<string>([
         '/attendance',
         '/p/plugin-attendance/attendance',
+        '/settings',
       ])
       const path = String(to.path || '')
       if (!allowed.has(path)) {

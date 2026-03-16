@@ -28,6 +28,10 @@ interface ProductFeatureState {
   features: ProductFeatures
 }
 
+interface LoadProductFeatureOptions {
+  skipSessionProbe?: boolean
+}
+
 const DEFAULT_FEATURES: ProductFeatures = {
   attendance: false,
   workflow: false,
@@ -234,7 +238,10 @@ function resolveFeatures(
   }
 }
 
-async function loadProductFeatures(force = false): Promise<ProductFeatures> {
+async function loadProductFeatures(
+  force = false,
+  options: LoadProductFeatureOptions = {},
+): Promise<ProductFeatures> {
   if (state.loaded && !force) return state.features
   if (state.loading && loadPromise) return loadPromise
 
@@ -245,25 +252,21 @@ async function loadProductFeatures(force = false): Promise<ProductFeatures> {
     let mePayload: any = null
     let pluginPayload: any = null
     let backendFeatures: Partial<ProductFeatures> = {}
-    const { ensureToken, getToken, refreshDevToken } = useAuth()
+    const { ensureToken, getToken, bootstrapSession } = useAuth()
 
     try {
-      if (!getToken()) {
+      const currentToken = getToken()
+
+      if (!currentToken && !options.skipSessionProbe) {
         await ensureToken()
       }
 
-      let meRes = await apiFetch('/api/auth/me').catch(() => null)
-
-      if (meRes?.status === 401) {
-        const token = await refreshDevToken()
-        if (token) {
-          meRes = await apiFetch('/api/auth/me').catch(() => null)
+      if (!options.skipSessionProbe && getToken()) {
+        const session = await bootstrapSession()
+        if (session.ok && session.payload) {
+          mePayload = session.payload
+          backendFeatures = extractFeaturesFromPayload(mePayload)
         }
-      }
-
-      if (meRes?.ok) {
-        mePayload = await meRes.json()
-        backendFeatures = extractFeaturesFromPayload(mePayload)
       }
 
       if (needsPluginInference(backendFeatures)) {

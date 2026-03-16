@@ -1,0 +1,1316 @@
+import type { Request, Response } from 'express'
+import { Router } from 'express'
+import * as bcrypt from 'bcryptjs'
+import * as crypto from 'crypto'
+import { buildOnboardingPacket, getAccessPreset, listAccessPresets } from '../auth/access-presets'
+import { recordInvite } from '../auth/invite-ledger'
+import { isInviteTokenExpired, issueInviteToken } from '../auth/invite-tokens'
+import { validatePassword } from '../auth/password-policy'
+import { getUserSession, listUserSessions, revokeUserSession } from '../auth/session-registry'
+import { revokeUserSessions } from '../auth/session-revocation'
+import { auditLog } from '../audit/audit'
+import { authenticate } from '../middleware/auth'
+import { query } from '../db/pg'
+import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import { isDatabaseSchemaError } from '../utils/database-errors'
+import { jsonError, jsonOk, parsePagination } from '../util/response'
+
+type AdminUserProfile = {
+  id: string
+  email: string
+  name: string | null
+  role: string
+  is_active: boolean
+  is_admin: boolean
+  last_login_at: string | null
+  created_at: string
+  updated_at?: string
+}
+
+type AdminRoleCatalogRow = {
+  id: string
+  name: string
+  permissions: string[] | null
+  member_count: number | string
+}
+
+type AdminAuditLogRow = {
+  id: number
+  created_at: string
+  event_type: string
+  event_category: string
+  event_severity: string
+  action: string
+  resource_type: string | null
+  resource_id: string | null
+  user_id: number | null
+  user_name: string | null
+  user_email: string | null
+  action_details: Record<string, unknown> | null
+  error_code: string | null
+}
+
+type AdminSessionRevocationRow = {
+  user_id: string
+  revoked_after: string
+  updated_at: string
+  updated_by: string | null
+  reason: string | null
+  user_email: string | null
+  user_name: string | null
+  updated_by_email: string | null
+  updated_by_name: string | null
+}
+
+type AdminInviteLedgerRow = {
+  id: string
+  user_id: string
+  email: string
+  preset_id: string | null
+  product_mode: 'platform' | 'attendance' | 'plm-workbench'
+  role_id: string | null
+  invited_by: string | null
+  invite_token: string
+  status: 'pending' | 'accepted' | 'revoked' | 'expired'
+  accepted_at: string | null
+  consumed_by: string | null
+  last_sent_at: string
+  created_at: string
+  updated_at: string
+  user_name: string | null
+  invited_by_email: string | null
+  invited_by_name: string | null
+}
+
+type AuditRangeBoundaryMode = 'start' | 'end'
+
+type CreateUserRequestBody = {
+  email?: string
+  name?: string
+  password?: string
+  role?: string
+  roleId?: string
+  presetId?: string
+  isActive?: boolean
+}
+
+const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template'] as const
+
+function getRequestUserId(req: Request): string {
+  const raw = req.user as Record<string, unknown> | undefined
+  const userId = raw?.id ?? raw?.userId ?? raw?.sub
+  return typeof userId === 'string' ? userId.trim() : ''
+}
+
+function hasLegacyAdminClaim(req: Request): boolean {
+  const raw = req.user as Record<string, unknown> | undefined
+  if (!raw) return false
+  if (raw.role === 'admin') return true
+  if (Array.isArray(raw.roles) && raw.roles.includes('admin')) return true
+  if (Array.isArray(raw.perms) && (raw.perms.includes('*:*') || raw.perms.includes('admin:all'))) return true
+  return false
+}
+
+async function ensurePlatformAdmin(req: Request, res: Response): Promise<string | null> {
+  const userId = getRequestUserId(req)
+  if (!userId) {
+    jsonError(res, 401, 'UNAUTHENTICATED', 'Authentication required')
+    return null
+  }
+
+  const allowed = hasLegacyAdminClaim(req) || await isRbacAdmin(userId)
+  if (!allowed) {
+    jsonError(res, 403, 'FORBIDDEN', 'Admin access required')
+    return null
+  }
+
+  return userId
+}
+
+async function fetchUserProfile(userId: string): Promise<AdminUserProfile | null> {
+  const result = await query<AdminUserProfile>(
+    `SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at
+     FROM users
+     WHERE id = $1`,
+    [userId],
+  )
+  return result.rows[0] ?? null
+}
+
+async function fetchUserRoleIds(userId: string): Promise<string[]> {
+  const result = await query<{ role_id: string }>(
+    `SELECT role_id
+     FROM user_roles
+     WHERE user_id = $1
+     ORDER BY role_id ASC`,
+    [userId],
+  )
+  return result.rows.map((row) => row.role_id).filter(Boolean)
+}
+
+async function fetchRoleCatalog() {
+  const result = await query<AdminRoleCatalogRow>(
+    `SELECT
+        r.id,
+        r.name,
+        COALESCE(array_remove(array_agg(DISTINCT rp.permission_code), NULL), ARRAY[]::text[]) AS permissions,
+        COUNT(DISTINCT ur.user_id)::int AS member_count
+     FROM roles r
+     LEFT JOIN role_permissions rp ON rp.role_id = r.id
+     LEFT JOIN user_roles ur ON ur.role_id = r.id
+     GROUP BY r.id, r.name
+     ORDER BY r.id ASC`,
+  )
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    permissions: Array.isArray(row.permissions) ? row.permissions.filter(Boolean) : [],
+    memberCount: Number(row.member_count || 0),
+  }))
+}
+
+async function fetchUserAccessSnapshot(userId: string) {
+  const profile = await fetchUserProfile(userId)
+  if (!profile) return null
+
+  const [roles, permissions, isAdmin] = await Promise.all([
+    fetchUserRoleIds(userId),
+    listUserPermissions(userId),
+    isRbacAdmin(userId),
+  ])
+
+  return {
+    user: profile,
+    roles,
+    permissions,
+    isAdmin,
+  }
+}
+
+function generateTemporaryPassword(): string {
+  return `Tmp-${crypto.randomBytes(8).toString('base64url')}9A`
+}
+
+function sanitizeEmail(email: string): string {
+  return email.trim().toLowerCase().slice(0, 255)
+}
+
+function sanitizeName(name: string): string {
+  return name.trim().replace(/[<>'\"&;]/g, '').slice(0, 100)
+}
+
+function parseAuditRangeBoundary(value: unknown, mode: AuditRangeBoundaryMode): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(trimmed)
+    ? `${trimmed}${mode === 'start' ? 'T00:00:00.000Z' : 'T23:59:59.999Z'}`
+    : trimmed
+
+  const timestamp = Date.parse(normalized)
+  if (Number.isNaN(timestamp)) return null
+  return new Date(timestamp).toISOString()
+}
+
+function normalizeInviteLedgerRow(row: AdminInviteLedgerRow): AdminInviteLedgerRow {
+  if (row.status === 'pending' && isInviteTokenExpired(row.invite_token)) {
+    return {
+      ...row,
+      status: 'expired',
+    }
+  }
+  return row
+}
+
+export function adminUsersRouter(): Router {
+  const r = Router()
+
+  r.get('/api/admin/users', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const q = String(req.query.q || '').trim()
+      const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
+        defaultPage: 1,
+        defaultPageSize: 20,
+        maxPageSize: 100,
+      })
+
+      const term = q ? `%${q}%` : '%'
+      const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR id ILIKE $1' : ''
+      const countSql = `SELECT COUNT(*)::int AS c FROM users ${where}`
+      const listSql = `
+        SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at
+        FROM users
+        ${where}
+        ORDER BY created_at DESC
+        LIMIT $${q ? 2 : 1} OFFSET $${q ? 3 : 2}
+      `
+
+      const count = await query<{ c: number }>(countSql, q ? [term] : undefined)
+      const total = count.rows[0]?.c ?? 0
+      const list = await query<AdminUserProfile>(listSql, q ? [term, pageSize, offset] : [pageSize, offset])
+
+      return jsonOk(res, {
+        items: list.rows,
+        page,
+        pageSize,
+        total,
+        query: q,
+        actorId: adminUserId,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'USER_LIST_FAILED', (error as Error)?.message || 'Failed to list users')
+    }
+  })
+
+  r.get('/api/admin/access-presets', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    const mode = String(req.query.mode || '').trim()
+    const items = listAccessPresets().filter((preset) => !mode || preset.productMode === mode)
+
+    return jsonOk(res, {
+      items,
+      actorId: adminUserId,
+    })
+  })
+
+  r.get('/api/admin/invites', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const q = String(req.query.q || '').trim()
+      const status = String(req.query.status || '').trim()
+      const userId = String(req.query.userId || '').trim()
+      const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
+        defaultPage: 1,
+        defaultPageSize: 20,
+        maxPageSize: 100,
+      })
+
+      const where: string[] = []
+      const values: unknown[] = []
+
+      if (userId) {
+        values.push(userId)
+        where.push(`inv.user_id = $${values.length}`)
+      }
+
+      if (status) {
+        values.push(status)
+        where.push(`inv.status = $${values.length}`)
+      }
+
+      if (q) {
+        values.push(`%${q}%`)
+        where.push(
+          `(inv.email ILIKE $${values.length}
+            OR COALESCE(u.name, '') ILIKE $${values.length}
+            OR COALESCE(inv.preset_id, '') ILIKE $${values.length}
+            OR COALESCE(inv.product_mode, '') ILIKE $${values.length})`,
+        )
+      }
+
+      const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+      const countResult = await query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c
+         FROM user_invites inv
+         LEFT JOIN users u ON u.id = inv.user_id
+         ${whereSql}`,
+        values,
+      )
+
+      values.push(pageSize, offset)
+      const rows = await query<AdminInviteLedgerRow>(
+        `SELECT
+            inv.id,
+            inv.user_id,
+            inv.email,
+            inv.preset_id,
+            inv.product_mode,
+            inv.role_id,
+            inv.invited_by,
+            inv.invite_token,
+            inv.status,
+            inv.accepted_at,
+            inv.consumed_by,
+            inv.last_sent_at,
+            inv.created_at,
+            inv.updated_at,
+            u.name AS user_name,
+            inviter.email AS invited_by_email,
+            inviter.name AS invited_by_name
+         FROM user_invites inv
+         LEFT JOIN users u ON u.id = inv.user_id
+         LEFT JOIN users inviter ON inviter.id = inv.invited_by
+         ${whereSql}
+         ORDER BY inv.created_at DESC
+         LIMIT $${values.length - 1} OFFSET $${values.length}`,
+        values,
+      )
+
+      return jsonOk(res, {
+        items: rows.rows.map(normalizeInviteLedgerRow),
+        page,
+        pageSize,
+        total: countResult.rows[0]?.c ?? 0,
+        actorId: adminUserId,
+      })
+    } catch (error) {
+      if (isDatabaseSchemaError(error)) {
+        return jsonOk(res, {
+          items: [],
+          page: 1,
+          pageSize: 20,
+          total: 0,
+          actorId: adminUserId,
+          degraded: true,
+        })
+      }
+      return jsonError(res, 500, 'INVITE_LEDGER_LIST_FAILED', (error as Error)?.message || 'Failed to load invite ledger')
+    }
+  })
+
+  r.post('/api/admin/invites/:inviteId/revoke', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const inviteId = String(req.params.inviteId || '').trim()
+      if (!inviteId) return jsonError(res, 400, 'INVITE_ID_REQUIRED', 'inviteId is required')
+
+      const result = await query<AdminInviteLedgerRow>(
+        `UPDATE user_invites
+         SET status = 'revoked',
+             updated_at = NOW()
+         WHERE id = $1
+           AND status = 'pending'
+         RETURNING id, user_id, email, preset_id, product_mode, role_id, invited_by, invite_token, status, accepted_at, consumed_by, last_sent_at, created_at, updated_at,
+                   NULL::text AS user_name,
+                   NULL::text AS invited_by_email,
+                   NULL::text AS invited_by_name`,
+        [inviteId],
+      )
+
+      const invite = result.rows[0]
+      if (!invite) {
+        return jsonError(res, 404, 'INVITE_NOT_FOUND', 'Pending invite not found')
+      }
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'revoke',
+        resourceType: 'user-invite',
+        resourceId: inviteId,
+        meta: {
+          adminUserId,
+          inviteId,
+          userId: invite.user_id,
+          email: invite.email,
+          status: invite.status,
+          productMode: invite.product_mode,
+        },
+      })
+
+      return jsonOk(res, {
+        item: invite,
+        actorId: adminUserId,
+      })
+    } catch (error) {
+      if (isDatabaseSchemaError(error)) {
+        return jsonError(res, 503, 'INVITE_LEDGER_UNAVAILABLE', 'Invite ledger is not available until migrations are applied')
+      }
+      return jsonError(res, 500, 'INVITE_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke invite')
+    }
+  })
+
+  r.post('/api/admin/invites/:inviteId/resend', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const inviteId = String(req.params.inviteId || '').trim()
+      if (!inviteId) return jsonError(res, 400, 'INVITE_ID_REQUIRED', 'inviteId is required')
+
+      const currentResult = await query<AdminInviteLedgerRow>(
+        `SELECT
+            inv.id,
+            inv.user_id,
+            inv.email,
+            inv.preset_id,
+            inv.product_mode,
+            inv.role_id,
+            inv.invited_by,
+            inv.invite_token,
+            inv.status,
+            inv.accepted_at,
+            inv.consumed_by,
+            inv.last_sent_at,
+            inv.created_at,
+            inv.updated_at,
+            u.name AS user_name,
+            inviter.email AS invited_by_email,
+            inviter.name AS invited_by_name
+         FROM user_invites inv
+         LEFT JOIN users u ON u.id = inv.user_id
+         LEFT JOIN users inviter ON inviter.id = inv.invited_by
+         WHERE inv.id = $1`,
+        [inviteId],
+      )
+
+      const current = currentResult.rows[0]
+      if (!current) {
+        return jsonError(res, 404, 'INVITE_NOT_FOUND', 'Invite not found')
+      }
+
+      const normalized = normalizeInviteLedgerRow(current)
+      if (normalized.status === 'accepted') {
+        return jsonError(res, 409, 'INVITE_ALREADY_ACCEPTED', 'Accepted invite cannot be resent')
+      }
+
+      const inviteToken = issueInviteToken({
+        userId: current.user_id,
+        email: current.email,
+        presetId: current.preset_id,
+      })
+
+      const updateResult = await query<AdminInviteLedgerRow>(
+        `UPDATE user_invites
+         SET invite_token = $2,
+             status = 'pending',
+             accepted_at = NULL,
+             consumed_by = NULL,
+             invited_by = $3,
+             last_sent_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING id, user_id, email, preset_id, product_mode, role_id, invited_by, invite_token, status, accepted_at, consumed_by, last_sent_at, created_at, updated_at,
+                   NULL::text AS user_name,
+                   NULL::text AS invited_by_email,
+                   NULL::text AS invited_by_name`,
+        [inviteId, inviteToken, adminUserId],
+      )
+
+      const invite = updateResult.rows[0]
+      if (!invite) {
+        return jsonError(res, 404, 'INVITE_NOT_FOUND', 'Invite not found')
+      }
+
+      const preset = getAccessPreset(invite.preset_id)
+      const onboarding = buildOnboardingPacket({
+        email: invite.email,
+        temporaryPassword: null,
+        preset,
+        inviteToken,
+      })
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'user-invite',
+        resourceId: inviteId,
+        meta: {
+          adminUserId,
+          inviteId,
+          userId: invite.user_id,
+          email: invite.email,
+          previousStatus: normalized.status,
+          status: 'pending',
+          productMode: invite.product_mode,
+          presetId: invite.preset_id,
+          reissued: true,
+        },
+      })
+
+      return jsonOk(res, {
+        item: invite,
+        inviteToken,
+        onboarding,
+        actorId: adminUserId,
+      })
+    } catch (error) {
+      if (isDatabaseSchemaError(error)) {
+        return jsonError(res, 503, 'INVITE_LEDGER_UNAVAILABLE', 'Invite ledger is not available until migrations are applied')
+      }
+      return jsonError(res, 500, 'INVITE_RESEND_FAILED', (error as Error)?.message || 'Failed to resend invite')
+    }
+  })
+
+  r.post('/api/admin/users', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const body = (req.body || {}) as CreateUserRequestBody
+      const cleanEmail = typeof body.email === 'string' ? sanitizeEmail(body.email) : ''
+      const cleanName = typeof body.name === 'string' ? sanitizeName(body.name) : ''
+      const preset = getAccessPreset(typeof body.presetId === 'string' ? body.presetId.trim() : '')
+      const cleanRole = typeof body.role === 'string' && body.role.trim()
+        ? body.role.trim().slice(0, 100)
+        : preset?.role || 'user'
+      const roleId = typeof body.roleId === 'string' && body.roleId.trim()
+        ? body.roleId.trim()
+        : preset?.roleId || ''
+      const isActive = typeof body.isActive === 'boolean' ? body.isActive : true
+      const requestedPassword = typeof body.password === 'string' ? body.password.trim() : ''
+      const directPermissions = Array.from(new Set(preset?.permissions || []))
+
+      if (!cleanEmail || !cleanName) {
+        return jsonError(res, 400, 'USER_FIELDS_REQUIRED', 'email and name are required')
+      }
+
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+      if (!emailRegex.test(cleanEmail)) {
+        return jsonError(res, 400, 'INVALID_EMAIL', 'Invalid email format')
+      }
+
+      if (cleanName.length < 2 || cleanName.length > 100) {
+        return jsonError(res, 400, 'INVALID_NAME', 'Name must be between 2 and 100 characters')
+      }
+
+      const password = requestedPassword || generateTemporaryPassword()
+      const passwordValidation = validatePassword(password)
+      if (!passwordValidation.valid) {
+        return jsonError(res, 400, 'PASSWORD_POLICY_FAILED', 'Password does not meet requirements', {
+          details: passwordValidation.errors,
+        })
+      }
+
+      const existing = await query<{ id: string }>('SELECT id FROM users WHERE email = $1', [cleanEmail])
+      if (existing.rows.length > 0) {
+        return jsonError(res, 409, 'USER_ALREADY_EXISTS', 'User with this email already exists')
+      }
+
+      if (roleId) {
+        const roleRow = await query<{ id: string }>('SELECT id FROM roles WHERE id = $1', [roleId])
+        if (!roleRow.rows.length) {
+          return jsonError(res, 404, 'ROLE_NOT_FOUND', 'Role not found')
+        }
+      }
+
+      const userId = crypto.randomUUID()
+      const passwordHash = await bcrypt.hash(password, Number(process.env.BCRYPT_SALT_ROUNDS || 10))
+
+      await query(
+        `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, NOW(), NOW())`,
+        [userId, cleanEmail, cleanName, passwordHash, cleanRole, JSON.stringify(directPermissions), isActive, cleanRole === 'admin'],
+      )
+
+      if (roleId) {
+        await query(
+          `INSERT INTO user_roles (user_id, role_id)
+           VALUES ($1, $2)
+           ON CONFLICT DO NOTHING`,
+          [userId, roleId],
+        )
+        invalidateUserPerms(userId)
+      }
+
+      if (directPermissions.length > 0) {
+        const values = directPermissions.map((_, index) => `($1, $${index + 2})`).join(', ')
+        await query(
+          `INSERT INTO user_permissions (user_id, permission_code)
+           VALUES ${values}
+           ON CONFLICT DO NOTHING`,
+          [userId, ...directPermissions],
+        )
+        invalidateUserPerms(userId)
+      }
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'create',
+        resourceType: 'user',
+        resourceId: userId,
+        meta: {
+          email: cleanEmail,
+          name: cleanName,
+          adminUserId,
+          role: cleanRole,
+          presetId: preset?.id || null,
+          roleId: roleId || null,
+          is_active: isActive,
+          permissions: directPermissions,
+          generatedPassword: requestedPassword.length === 0,
+        },
+      })
+
+      const snapshot = await fetchUserAccessSnapshot(userId)
+      if (!snapshot) {
+        return jsonError(res, 500, 'USER_CREATE_FAILED', 'User created but failed to load access snapshot')
+      }
+
+      const inviteToken = issueInviteToken({
+        userId,
+        email: cleanEmail,
+        presetId: preset?.id || null,
+      })
+      await recordInvite({
+        userId,
+        email: cleanEmail,
+        presetId: preset?.id || null,
+        productMode: preset?.productMode || 'platform',
+        roleId: roleId || preset?.roleId || null,
+        invitedBy: adminUserId,
+        inviteToken,
+      })
+
+      return jsonOk(res, {
+        ...snapshot,
+        actorId: adminUserId,
+        temporaryPassword: requestedPassword.length === 0 ? password : undefined,
+        inviteToken,
+        onboarding: buildOnboardingPacket({
+          email: cleanEmail,
+          temporaryPassword: requestedPassword.length === 0 ? password : null,
+          preset,
+          inviteToken,
+        }),
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'USER_CREATE_FAILED', (error as Error)?.message || 'Failed to create user')
+    }
+  })
+
+  r.get('/api/admin/users/:userId/access', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+
+      const snapshot = await fetchUserAccessSnapshot(userId)
+      if (!snapshot) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      return jsonOk(res, { ...snapshot, actorId: adminUserId })
+    } catch (error) {
+      return jsonError(res, 500, 'USER_ACCESS_FAILED', (error as Error)?.message || 'Failed to load user access')
+    }
+  })
+
+  r.post('/api/admin/users/:userId/roles/assign', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      const roleId = String(req.body?.roleId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      if (!roleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'roleId is required')
+
+      const [roleRow, profile] = await Promise.all([
+        query<{ id: string }>('SELECT id FROM roles WHERE id = $1', [roleId]),
+        fetchUserProfile(userId),
+      ])
+      if (!roleRow.rows.length) return jsonError(res, 404, 'ROLE_NOT_FOUND', 'Role not found')
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      await query(
+        `INSERT INTO user_roles (user_id, role_id)
+         VALUES ($1, $2)
+         ON CONFLICT DO NOTHING`,
+        [userId, roleId],
+      )
+      invalidateUserPerms(userId)
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'grant',
+        resourceType: 'user-role',
+        resourceId: `${userId}:${roleId}`,
+        meta: {
+          adminUserId,
+          userId,
+          roleId,
+        },
+      })
+
+      const snapshot = await fetchUserAccessSnapshot(userId)
+      return jsonOk(res, {
+        ...snapshot,
+        changedRoleId: roleId,
+        actorId: adminUserId,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to assign role')
+    }
+  })
+
+  r.post('/api/admin/users/:userId/roles/unassign', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      const roleId = String(req.body?.roleId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      if (!roleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'roleId is required')
+
+      const profile = await fetchUserProfile(userId)
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      await query(
+        `DELETE FROM user_roles
+         WHERE user_id = $1 AND role_id = $2`,
+        [userId, roleId],
+      )
+      invalidateUserPerms(userId)
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'revoke',
+        resourceType: 'user-role',
+        resourceId: `${userId}:${roleId}`,
+        meta: {
+          adminUserId,
+          userId,
+          roleId,
+        },
+      })
+
+      const snapshot = await fetchUserAccessSnapshot(userId)
+      return jsonOk(res, {
+        ...snapshot,
+        changedRoleId: roleId,
+        actorId: adminUserId,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to unassign role')
+    }
+  })
+
+  r.patch('/api/admin/users/:userId/status', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      const isActive = req.body?.isActive
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      if (typeof isActive !== 'boolean') return jsonError(res, 400, 'STATUS_REQUIRED', 'isActive boolean is required')
+      if (userId === adminUserId && isActive === false) {
+        return jsonError(res, 400, 'SELF_DISABLE_FORBIDDEN', 'Cannot disable your own account')
+      }
+
+      const profile = await fetchUserProfile(userId)
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      await query(
+        `UPDATE users
+         SET is_active = $1, updated_at = NOW()
+         WHERE id = $2`,
+        [isActive, userId],
+      )
+
+      const revocation = !isActive
+        ? await revokeUserSessions(userId, {
+            updatedBy: adminUserId,
+            reason: 'user-disabled',
+          })
+        : null
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'user',
+        resourceId: userId,
+        meta: {
+          adminUserId,
+          before: { is_active: profile.is_active },
+          after: { is_active: isActive },
+          revokedAfter: revocation?.revokedAfter || null,
+        },
+      })
+
+      const snapshot = await fetchUserAccessSnapshot(userId)
+      return jsonOk(res, {
+        ...snapshot,
+        actorId: adminUserId,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'USER_STATUS_FAILED', (error as Error)?.message || 'Failed to update user status')
+    }
+  })
+
+  r.post('/api/admin/users/:userId/reset-password', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      const requestedPassword = typeof req.body?.password === 'string' ? req.body.password.trim() : ''
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+
+      const profile = await fetchUserProfile(userId)
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      const temporaryPassword = requestedPassword || generateTemporaryPassword()
+      if (temporaryPassword.length < 8) {
+        return jsonError(res, 400, 'PASSWORD_TOO_SHORT', 'Password must be at least 8 characters long')
+      }
+
+      const passwordHash = await bcrypt.hash(temporaryPassword, Number(process.env.BCRYPT_SALT_ROUNDS || 10))
+      await query(
+        `UPDATE users
+         SET password_hash = $1, updated_at = NOW()
+         WHERE id = $2`,
+        [passwordHash, userId],
+      )
+
+      const revocation = await revokeUserSessions(userId, {
+        updatedBy: adminUserId,
+        reason: 'password-reset',
+      })
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'user-password',
+        resourceId: userId,
+        meta: {
+          adminUserId,
+          generated: requestedPassword.length === 0,
+          revokedAfter: revocation?.revokedAfter || null,
+        },
+      })
+
+      return jsonOk(res, {
+        userId,
+        temporaryPassword,
+        actorId: adminUserId,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'PASSWORD_RESET_FAILED', (error as Error)?.message || 'Failed to reset password')
+    }
+  })
+
+  r.post('/api/admin/users/:userId/revoke-sessions', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+
+      const profile = await fetchUserProfile(userId)
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      const reason = typeof req.body?.reason === 'string' && req.body.reason.trim()
+        ? req.body.reason.trim().slice(0, 255)
+        : 'admin-force-logout'
+
+      const revocation = await revokeUserSessions(userId, {
+        updatedBy: adminUserId,
+        reason,
+      })
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'revoke',
+        resourceType: 'user-session',
+        resourceId: userId,
+        meta: {
+          adminUserId,
+          reason,
+          revokedAfter: revocation?.revokedAfter || null,
+        },
+      })
+
+      return jsonOk(res, {
+        userId,
+        revokedAfter: revocation?.revokedAfter || null,
+        actorId: adminUserId,
+        reason,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'SESSION_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke user sessions')
+    }
+  })
+
+  r.get('/api/admin/roles', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const roles = await fetchRoleCatalog()
+      return jsonOk(res, {
+        items: roles,
+        total: roles.length,
+        actorId: adminUserId,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ROLE_LIST_FAILED', (error as Error)?.message || 'Failed to list roles')
+    }
+  })
+
+  r.get('/api/admin/audit-activity', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const q = String(req.query.q || '').trim()
+      const action = String(req.query.action || '').trim()
+      const resourceType = String(req.query.resourceType || '').trim()
+      const from = parseAuditRangeBoundary(req.query.from, 'start')
+      const to = parseAuditRangeBoundary(req.query.to, 'end')
+      const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
+        defaultPage: 1,
+        defaultPageSize: 20,
+        maxPageSize: 100,
+      })
+
+      const values: unknown[] = [resourceType ? [resourceType] : [...ADMIN_AUDIT_RESOURCE_TYPES]]
+      const where = ['resource_type = ANY($1::text[])']
+
+      if (action) {
+        values.push(action)
+        where.push(`action = $${values.length}`)
+      }
+
+      if (q) {
+        values.push(`%${q}%`)
+        where.push(
+          `(COALESCE(resource_id, '') ILIKE $${values.length}
+            OR COALESCE(action, '') ILIKE $${values.length}
+            OR COALESCE(action_details::text, '') ILIKE $${values.length}
+            OR COALESCE(user_email, '') ILIKE $${values.length}
+            OR COALESCE(user_name, '') ILIKE $${values.length})`,
+        )
+      }
+
+      if (from) {
+        values.push(from)
+        where.push(`created_at >= $${values.length}`)
+      }
+
+      if (to) {
+        values.push(to)
+        where.push(`created_at <= $${values.length}`)
+      }
+
+      const whereSql = `WHERE ${where.join(' AND ')}`
+      const countResult = await query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c
+         FROM audit_logs
+         ${whereSql}`,
+        values,
+      )
+
+      values.push(pageSize, offset)
+      const itemsResult = await query<AdminAuditLogRow>(
+        `SELECT
+            id,
+            created_at,
+            event_type,
+            event_category,
+            event_severity,
+            action,
+            resource_type,
+            resource_id,
+            user_id,
+            user_name,
+            user_email,
+            action_details,
+            error_code
+         FROM audit_logs
+         ${whereSql}
+         ORDER BY created_at DESC
+         LIMIT $${values.length - 1} OFFSET $${values.length}`,
+        values,
+      )
+
+      return jsonOk(res, {
+        items: itemsResult.rows,
+        page,
+        pageSize,
+        total: countResult.rows[0]?.c ?? 0,
+        query: q,
+        resourceType: resourceType || null,
+        action: action || null,
+        from,
+        to,
+        actorId: adminUserId,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'ADMIN_AUDIT_LIST_FAILED', (error as Error)?.message || 'Failed to load admin audit activity')
+    }
+  })
+
+  r.get('/api/admin/audit-activity/export.csv', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const q = String(req.query.q || '').trim()
+      const action = String(req.query.action || '').trim()
+      const resourceType = String(req.query.resourceType || '').trim()
+      const from = parseAuditRangeBoundary(req.query.from, 'start')
+      const to = parseAuditRangeBoundary(req.query.to, 'end')
+      const rawLimit = Number(req.query.limit || 1000)
+      const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 5000) : 1000
+
+      const values: unknown[] = [resourceType ? [resourceType] : [...ADMIN_AUDIT_RESOURCE_TYPES]]
+      const where = ['resource_type = ANY($1::text[])']
+
+      if (action) {
+        values.push(action)
+        where.push(`action = $${values.length}`)
+      }
+
+      if (q) {
+        values.push(`%${q}%`)
+        where.push(
+          `(COALESCE(resource_id, '') ILIKE $${values.length}
+            OR COALESCE(action, '') ILIKE $${values.length}
+            OR COALESCE(action_details::text, '') ILIKE $${values.length}
+            OR COALESCE(user_email, '') ILIKE $${values.length}
+            OR COALESCE(user_name, '') ILIKE $${values.length})`,
+        )
+      }
+
+      if (from) {
+        values.push(from)
+        where.push(`created_at >= $${values.length}`)
+      }
+
+      if (to) {
+        values.push(to)
+        where.push(`created_at <= $${values.length}`)
+      }
+
+      values.push(limit)
+      const rows = await query<AdminAuditLogRow>(
+        `SELECT
+            id,
+            created_at,
+            event_type,
+            event_category,
+            event_severity,
+            action,
+            resource_type,
+            resource_id,
+            user_id,
+            user_name,
+            user_email,
+            action_details,
+            error_code
+         FROM audit_logs
+         WHERE ${where.join(' AND ')}
+         ORDER BY created_at DESC
+         LIMIT $${values.length}`,
+        values,
+      )
+
+      const filename = `iam-admin-audit-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+      res.write('id,created_at,resource_type,resource_id,action,event_type,event_severity,user_email,user_name,error_code,action_details\n')
+
+      for (const item of rows.rows) {
+        const line = [
+          item.id,
+          item.created_at,
+          item.resource_type || '',
+          item.resource_id || '',
+          item.action,
+          item.event_type,
+          item.event_severity,
+          item.user_email || '',
+          item.user_name || '',
+          item.error_code || '',
+          JSON.stringify(item.action_details || {}),
+        ].map((value) => {
+          const text = String(value)
+          return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+        }).join(',')
+        res.write(`${line}\n`)
+      }
+
+      return res.end()
+    } catch (error) {
+      return jsonError(res, 500, 'ADMIN_AUDIT_EXPORT_FAILED', (error as Error)?.message || 'Failed to export admin audit activity')
+    }
+  })
+
+  r.get('/api/admin/users/:userId/sessions', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+
+      const profile = await fetchUserProfile(userId)
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      const sessions = await listUserSessions(userId)
+      return jsonOk(res, {
+        userId,
+        items: sessions,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'SESSION_LIST_FAILED', (error as Error)?.message || 'Failed to load user sessions')
+    }
+  })
+
+  r.post('/api/admin/users/:userId/sessions/:sessionId/revoke', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      const sessionId = String(req.params.sessionId || '').trim()
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+      if (!sessionId) return jsonError(res, 400, 'SESSION_ID_REQUIRED', 'sessionId is required')
+
+      const profile = await fetchUserProfile(userId)
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      const session = await getUserSession(sessionId)
+      if (!session || session.userId !== userId) {
+        return jsonError(res, 404, 'NOT_FOUND', 'Session not found')
+      }
+
+      const reason = typeof req.body?.reason === 'string' && req.body.reason.trim()
+        ? req.body.reason.trim().slice(0, 255)
+        : 'admin-force-single-session-logout'
+
+      const revoked = await revokeUserSession(sessionId, {
+        revokedBy: adminUserId,
+        reason,
+      })
+
+      if (!revoked) {
+        return jsonError(res, 404, 'NOT_FOUND', 'Session not found')
+      }
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'revoke',
+        resourceType: 'user-session',
+        resourceId: sessionId,
+        meta: {
+          adminUserId,
+          userId,
+          sessionId,
+          reason,
+          revokedAt: revoked.revokedAt,
+        },
+      })
+
+      return jsonOk(res, {
+        userId,
+        sessionId,
+        revokedAt: revoked.revokedAt,
+        actorId: adminUserId,
+        reason,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'SESSION_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke session')
+    }
+  })
+
+  r.get('/api/admin/session-revocations', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const q = String(req.query.q || '').trim()
+      const from = parseAuditRangeBoundary(req.query.from, 'start')
+      const to = parseAuditRangeBoundary(req.query.to, 'end')
+      const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
+        defaultPage: 1,
+        defaultPageSize: 20,
+        maxPageSize: 100,
+      })
+
+      const values: unknown[] = []
+      const where: string[] = []
+
+      if (q) {
+        values.push(`%${q}%`)
+        where.push(
+          `(usr.user_id ILIKE $${values.length}
+            OR COALESCE(target.email, '') ILIKE $${values.length}
+            OR COALESCE(target.name, '') ILIKE $${values.length}
+            OR COALESCE(actor.email, '') ILIKE $${values.length}
+            OR COALESCE(actor.name, '') ILIKE $${values.length}
+            OR COALESCE(usr.reason, '') ILIKE $${values.length})`,
+        )
+      }
+
+      if (from) {
+        values.push(from)
+        where.push(`usr.updated_at >= $${values.length}`)
+      }
+
+      if (to) {
+        values.push(to)
+        where.push(`usr.updated_at <= $${values.length}`)
+      }
+
+      const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+      const countResult = await query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c
+         FROM user_session_revocations usr
+         LEFT JOIN users target ON target.id = usr.user_id
+         LEFT JOIN users actor ON actor.id = usr.updated_by
+         ${whereSql}`,
+        values,
+      )
+
+      values.push(pageSize, offset)
+      const rows = await query<AdminSessionRevocationRow>(
+        `SELECT
+            usr.user_id,
+            usr.revoked_after,
+            usr.updated_at,
+            usr.updated_by,
+            usr.reason,
+            target.email AS user_email,
+            target.name AS user_name,
+            actor.email AS updated_by_email,
+            actor.name AS updated_by_name
+         FROM user_session_revocations usr
+         LEFT JOIN users target ON target.id = usr.user_id
+         LEFT JOIN users actor ON actor.id = usr.updated_by
+         ${whereSql}
+         ORDER BY usr.updated_at DESC
+         LIMIT $${values.length - 1} OFFSET $${values.length}`,
+        values,
+      )
+
+      return jsonOk(res, {
+        items: rows.rows,
+        page,
+        pageSize,
+        total: countResult.rows[0]?.c ?? 0,
+        query: q,
+        from,
+        to,
+        actorId: adminUserId,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'SESSION_REVOCATION_LIST_FAILED', (error as Error)?.message || 'Failed to load session revocations')
+    }
+  })
+
+  return r
+}
