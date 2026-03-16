@@ -6182,14 +6182,81 @@ module.exports = {
 	      return Math.max(0, Math.floor(endMs - startMs))
 	    }
 
+	    const normalizeImportJobSkippedRows = (value, limit = 50) => {
+	      if (!Array.isArray(value) || limit <= 0) return []
+	      return value
+	        .map((entry) => normalizeMetadata(entry))
+	        .filter((entry) => entry && typeof entry === 'object' && Object.keys(entry).length > 0)
+	        .slice(0, limit)
+	    }
+
+	    const extractImportJobSkippedSummary = (...sources) => {
+	      let skippedCount = 0
+	      let skippedRows = []
+	      for (const source of sources) {
+	        const normalized = normalizeMetadata(source)
+	        if (!skippedRows.length) {
+	          skippedRows = normalizeImportJobSkippedRows(normalized?.skippedRows)
+	        }
+	        const rawCount = Number(normalized?.skippedCount)
+	        if (Number.isFinite(rawCount) && rawCount >= 0) {
+	          skippedCount = Math.max(skippedCount, Math.floor(rawCount))
+	        }
+	      }
+	      if (!skippedCount && skippedRows.length) skippedCount = skippedRows.length
+	      return { skippedCount, skippedRows }
+	    }
+
+	    const buildAsyncCommitJobSummaryPayload = ({
+	      basePayload,
+	      rowCount,
+	      processedRows,
+	      failedRows,
+	      elapsedMs,
+	      engine,
+	      recordUpsertStrategy,
+	      chunkConfig,
+	      skippedCount,
+	      skippedRows,
+	      idempotencyKey,
+	    }) => {
+	      const compactSummary = {
+	        processedRows: Math.max(0, Math.floor(Number(processedRows ?? rowCount ?? 0) || 0)),
+	        failedRows: Math.max(0, Math.floor(Number(failedRows ?? skippedCount ?? 0) || 0)),
+	        elapsedMs: Math.max(0, Math.floor(Number(elapsedMs ?? 0) || 0)),
+	        chunkConfig: chunkConfig ?? resolveImportChunkConfig(engine),
+	      }
+	      const normalizedSkippedCount = Math.max(0, Math.floor(Number(skippedCount ?? 0) || 0))
+	      const normalizedSkippedRows = normalizeImportJobSkippedRows(skippedRows)
+	      if (normalizedSkippedCount > 0) compactSummary.skippedCount = normalizedSkippedCount
+	      if (normalizedSkippedRows.length) compactSummary.skippedRows = normalizedSkippedRows
+	      return {
+	        __jobType: 'commit',
+	        idempotencyKey: basePayload?.idempotencyKey ?? idempotencyKey ?? null,
+	        __importEngine: engine ?? resolveImportEngineFromMeta(basePayload, rowCount ?? processedRows ?? 0),
+	        recordUpsertStrategy:
+	          recordUpsertStrategy
+	          ?? resolveImportRecordUpsertStrategyFromMeta(
+	            basePayload,
+	            rowCount ?? processedRows ?? 0,
+	            engine ?? resolveImportEngineFromMeta(basePayload, rowCount ?? processedRows ?? 0)
+	          ),
+	        summary: compactSummary,
+	      }
+	    }
+
 	    const mapImportJobRow = (row) => {
 	      const payload = normalizeMetadata(row.payload)
 	      const kind = payload?.__jobType === 'preview' ? 'preview' : 'commit'
 	      const status = normalizeImportJobStatus(row.status)
 	      const progress = Number(row.progress ?? 0)
 	      const total = Number(row.total ?? 0)
-	      const processedRowsRaw = Number(payload?.summary?.processedRows)
-	      const failedRowsRaw = Number(payload?.summary?.failedRows)
+	      const summary = normalizeMetadata(payload?.summary)
+	      const processedRowsRaw = Number(summary?.processedRows)
+	      const failedRowsRaw = Number(summary?.failedRows)
+	      const { skippedCount, skippedRows } = kind === 'commit'
+	        ? extractImportJobSkippedSummary(summary, payload)
+	        : { skippedCount: 0, skippedRows: [] }
 	      const processedRows = Number.isFinite(processedRowsRaw)
 	        ? Math.max(0, Math.floor(processedRowsRaw))
 	        : (status === 'completed' ? Math.max(0, Math.floor(total)) : Math.max(0, Math.floor(progress)))
@@ -6233,6 +6300,8 @@ module.exports = {
 	        progressPercent,
 	        processedRows,
 	        failedRows,
+	        skippedCount,
+	        skippedRows,
 	        elapsedMs,
 	        throughputRowsPerSec,
 	        error: row.error ?? null,
@@ -6552,25 +6621,58 @@ module.exports = {
 	      const payload = normalizeMetadata(jobRow.payload)
 	      const isPreviewJob = payload?.__jobType === 'preview'
 	      const status = normalizeImportJobStatus(jobRow.status)
+	      const idempotencyKey = typeof jobRow.idempotency_key === 'string' ? jobRow.idempotency_key : null
 	      if (status === 'completed') return
 
 	      if (!isPreviewJob) {
 	        // If the batch already exists, treat the job as complete (idempotent re-run).
 	        try {
 	          const batchRows = await db.query(
-	            'SELECT id, status, meta FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
+	            'SELECT id, status, meta, row_count FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
 	            [batchId, orgId]
 	          )
 	          if (batchRows.length && String(batchRows[0].status ?? '').toLowerCase() === 'committed') {
+	            const batchMeta = normalizeMetadata(batchRows[0].meta)
+	            const rowCount = Math.max(0, Number(batchRows[0].row_count ?? jobRow.total ?? 0))
+	            const { skippedCount, skippedRows } = extractImportJobSkippedSummary(batchMeta)
+	            const processedRows = Math.max(0, rowCount - skippedCount)
 	            await updateImportJobProgress({
 	              jobId: rowId,
 	              orgId,
 	              status: 'completed',
-	              progress: jobRow.total ?? 0,
-	              total: jobRow.total ?? 0,
+	              progress: rowCount,
+	              total: rowCount,
 	              error: null,
 	              finishedAt: true,
 	            })
+	            await db.query(
+	              'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
+	              [
+	                rowId,
+	                orgId,
+	                JSON.stringify(
+	                  buildAsyncCommitJobSummaryPayload({
+	                    basePayload: payload,
+	                    rowCount,
+	                    processedRows,
+	                    failedRows: skippedCount,
+	                    elapsedMs: 0,
+	                    engine: resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount),
+	                    recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
+	                      batchMeta,
+	                      rowCount,
+	                      resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
+	                    ),
+	                    chunkConfig: batchMeta?.chunkConfig ?? resolveImportChunkConfig(
+	                      resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
+	                    ),
+	                    skippedCount,
+	                    skippedRows,
+	                    idempotencyKey,
+	                  })
+	                ),
+	              ]
+	            )
 	            return
 	          }
 	        } catch (_error) {
@@ -6579,7 +6681,6 @@ module.exports = {
 	      }
 
 	      await updateImportJobProgress({ jobId: rowId, orgId, status: 'running', startedAt: true })
-	      const idempotencyKey = typeof jobRow.idempotency_key === 'string' ? jobRow.idempotency_key : null
 
 	      if (isPreviewJob) {
 	        try {
@@ -6643,11 +6744,19 @@ module.exports = {
 	          finishedAt: true,
 	        })
 
+	        const { skippedCount, skippedRows } = extractImportJobSkippedSummary(
+	          commitResult,
+	          commitResult?.meta,
+	          commitResult?.summary
+	        )
 	        // Drop large payload after completion while preserving compact progress metadata.
-		        const summaryPayload = {
-		          __jobType: 'commit',
-		          idempotencyKey: payload.idempotencyKey ?? idempotencyKey ?? null,
-		          __importEngine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
+		        const summaryPayload = buildAsyncCommitJobSummaryPayload({
+		          basePayload: payload,
+		          rowCount: commitResult.rowCount ?? commitResult.imported ?? 0,
+		          processedRows: commitResult.processedRows ?? commitResult.rowCount ?? 0,
+		          failedRows: Math.max(0, Number(commitResult.failedRows ?? skippedCount ?? 0)),
+		          elapsedMs: Number(commitResult.elapsedMs ?? 0),
+		          engine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
 		          recordUpsertStrategy:
 		            commitResult.recordUpsertStrategy
 		            ?? commitResult?.meta?.recordUpsertStrategy
@@ -6656,15 +6765,13 @@ module.exports = {
 		              commitResult.rowCount ?? commitResult.imported ?? 0,
 		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
 		            ),
-		          summary: {
-		            processedRows: Number(commitResult.processedRows ?? commitResult.rowCount ?? 0),
-		            failedRows: Math.max(0, Number(commitResult.failedRows ?? commitResult.skippedCount ?? 0)),
-		            elapsedMs: Number(commitResult.elapsedMs ?? 0),
-		            chunkConfig: commitResult?.meta?.chunkConfig ?? resolveImportChunkConfig(
-		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
-		            ),
-		          },
-		        }
+		          chunkConfig: commitResult?.meta?.chunkConfig ?? resolveImportChunkConfig(
+		            commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
+		          ),
+		          skippedCount,
+		          skippedRows,
+		          idempotencyKey,
+		        })
 	        await db.query(
 	          'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
 	          [rowId, orgId, JSON.stringify(summaryPayload)]
