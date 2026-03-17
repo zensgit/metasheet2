@@ -35,9 +35,9 @@ on:
         required: false
         default: '50000'
       max_csv_rows:
-        description: 'Declared remote CSV row cap for long-run payload auto-selection (legacy name for compatibility)'
+        description: 'Optional: override remote CSV row cap for long-run payload auto-selection (leave empty to inherit deployed cap)'
         required: false
-        default: '100000'
+        default: ''
       include_rows500k_preview:
         description: 'Run rows500k-preview scenario (true/false)'
         required: false
