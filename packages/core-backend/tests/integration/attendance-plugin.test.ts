@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
@@ -3477,6 +3477,130 @@ describe('Attendance Plugin Integration', () => {
       body: '{}',
     })
     expect(rollbackRes.status).toBe(200)
+  })
+
+  it('streams csvFileId data for commit-async without fs.readFile on the csv payload', async () => {
+    if (!baseUrl) return
+    if (!importUploadDir) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const orgId = 'default'
+    const runSuffix = Date.now().toString(36)
+    const workDate = new Date().toISOString().slice(0, 10)
+    const csvText = [
+      '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果',
+      `${workDate},attendance-stream-${runSuffix}-a,CSV Stream Group ${runSuffix},09:00,18:00,正常`,
+      `${workDate},attendance-stream-${runSuffix}-b,CSV Stream Group ${runSuffix},09:10,18:10,正常`,
+      '',
+    ].join('\n')
+
+    const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=async-stream.csv`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/csv',
+      },
+      body: csvText,
+    })
+    expect(uploadRes.status).toBe(201)
+    const fileId = (uploadRes.body as { data?: { fileId?: string } } | undefined)?.data?.fileId
+    expect(typeof fileId).toBe('string')
+
+    const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareRes.status).toBe(200)
+    const commitToken = (prepareRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+
+    const originalReadFile = fs.readFile.bind(fs)
+    const readFileSpy = vi.spyOn(fs, 'readFile').mockImplementation(async (target: any, options?: any) => {
+      const targetPath = typeof target === 'string'
+        ? target
+        : target instanceof URL
+          ? target.pathname
+          : String(target)
+      if (targetPath.endsWith('.csv')) {
+        throw new Error(`csv readFile should not be used for async csvFileId import: ${targetPath}`)
+      }
+      return originalReadFile(target, options)
+    })
+
+    let batchId = ''
+    try {
+      const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          orgId,
+          userId: 'attendance-test',
+          timezone: 'UTC',
+          csvFileId: String(fileId || ''),
+          idempotencyKey: `upload-async-stream-${Date.now()}`,
+          mappingProfileId: 'dingtalk_csv_daily_summary',
+          mode: 'override',
+          commitToken,
+        }),
+      })
+      expect(commitRes.status).toBe(200)
+      const commitData = (commitRes.body as { data?: { job?: any } } | undefined)?.data
+      const jobId = String(commitData?.job?.id || '')
+      batchId = String(commitData?.job?.batchId || '')
+      expect(jobId).toBeTruthy()
+      expect(batchId).toBeTruthy()
+
+      let completedJob: any = null
+      for (let i = 0; i < 160; i += 1) {
+        const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${jobId}`, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+        })
+        expect(jobRes.status).toBe(200)
+        const jobData = (jobRes.body as { data?: any } | undefined)?.data
+        const status = String(jobData?.status || '')
+        if (status === 'completed') {
+          completedJob = jobData
+          break
+        }
+        if (status === 'failed') {
+          throw new Error(String(jobData?.error || 'async csv stream job failed'))
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      expect(completedJob).toBeTruthy()
+      expect(Number(completedJob?.processedRows ?? 0)).toBeGreaterThanOrEqual(2)
+      expect(readFileSpy).toHaveBeenCalled()
+    } finally {
+      readFileSpy.mockRestore()
+      if (batchId) {
+        const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: '{}',
+        })
+        expect(rollbackRes.status).toBe(200)
+      }
+    }
   })
 
   it('returns NOT_FOUND for preview-async when csvFileId does not exist', async () => {

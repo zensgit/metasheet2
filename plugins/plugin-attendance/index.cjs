@@ -4,6 +4,7 @@ const fsp = require('fs/promises')
 const path = require('path')
 const { Transform, Readable } = require('stream')
 const { pipeline } = require('stream/promises')
+const { StringDecoder } = require('string_decoder')
 const { z } = require('zod')
 const { createRuleEngine } = require('./engine/index.cjs')
 const { validateConfig: validateEngineConfig } = require('./engine/schema.cjs')
@@ -1095,6 +1096,100 @@ async function iterateCsvRowsAsync(csvText, delimiter = ',', onRow) {
   return { rowCount, stoppedEarly }
 }
 
+async function iterateCsvRowsStreamAsync(readable, delimiter = ',', onRow) {
+  if (!readable || typeof readable[Symbol.asyncIterator] !== 'function') {
+    return { rowCount: 0, stoppedEarly: false }
+  }
+  const sep = typeof delimiter === 'string' && delimiter.length > 0 ? delimiter[0] : ','
+  const decoder = new StringDecoder('utf8')
+  let row = []
+  let field = ''
+  let inQuotes = false
+  let rowCount = 0
+  let stoppedEarly = false
+
+  const emitRow = async () => {
+    row.push(field)
+    field = ''
+    const keepRow = row.length > 1 || row[0]?.trim()
+    if (!keepRow) {
+      row = []
+      return true
+    }
+    const shouldContinue = typeof onRow === 'function'
+      ? await onRow(row, rowCount) !== false
+      : true
+    rowCount += 1
+    row = []
+    if (!shouldContinue) {
+      stoppedEarly = true
+      return false
+    }
+    return true
+  }
+
+  const processChunk = async (text) => {
+    for (let i = 0; i < text.length; i += 1) {
+      const ch = text[i]
+      if (inQuotes) {
+        if (ch === '"') {
+          const next = text[i + 1]
+          if (next === '"') {
+            field += '"'
+            i += 1
+          } else {
+            inQuotes = false
+          }
+        } else if (ch === '\r') {
+          if (text[i + 1] === '\n') i += 1
+          field += '\n'
+        } else {
+          field += ch
+        }
+        continue
+      }
+
+      if (ch === '"') {
+        inQuotes = true
+        continue
+      }
+      if (ch === sep) {
+        row.push(field)
+        field = ''
+        continue
+      }
+      if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && text[i + 1] === '\n') i += 1
+        if (!await emitRow()) return false
+        continue
+      }
+      field += ch
+    }
+    return true
+  }
+
+  for await (const chunk of readable) {
+    const text = typeof chunk === 'string' ? chunk : decoder.write(chunk)
+    if (!text) continue
+    if (!await processChunk(text)) break
+  }
+
+  if (!stoppedEarly) {
+    const tail = decoder.end()
+    if (tail) {
+      await processChunk(tail)
+    }
+  } else {
+    decoder.end()
+  }
+
+  if (!stoppedEarly) {
+    await emitRow()
+  }
+
+  return { rowCount, stoppedEarly }
+}
+
 function normalizeCsvHeaderValue(value) {
   if (value === undefined || value === null) return ''
   const text = String(value).replace(/\ufeff/g, '').trim()
@@ -1347,6 +1442,65 @@ async function iterateImportRowsFromCsvAsync({ csvText, csvOptions, maxRows, onR
     if (rowIndex < headerRowIndex) return true
     if (rowIndex === headerRowIndex) {
       header = rawRow.map(normalizeCsvHeaderValue)
+      return true
+    }
+    if (!header.length) return true
+    if (rowCount >= resolvedMaxRows) {
+      limitExceeded = true
+      return false
+    }
+    const row = buildImportRowFromCsvRawRow(header, rawRow)
+    if (!row) return true
+    const nextIndex = rowCount
+    rowCount += 1
+    if (typeof onRow === 'function') return await onRow(row, nextIndex) !== false
+    return true
+  })
+
+  return finalizeImportCsvIteration({
+    seenRows,
+    header,
+    rowCount,
+    limitExceeded,
+    maxRows: resolvedMaxRows,
+  })
+}
+
+async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows, onRow }) {
+  const delimiter = csvOptions?.delimiter || ','
+  const resolvedMaxRowsRaw = Number(maxRows ?? ATTENDANCE_IMPORT_CSV_MAX_ROWS)
+  const resolvedMaxRows = Number.isFinite(resolvedMaxRowsRaw) && resolvedMaxRowsRaw > 0
+    ? Math.floor(resolvedMaxRowsRaw)
+    : ATTENDANCE_IMPORT_CSV_MAX_ROWS
+  const explicitHeaderRowIndex = Number.isFinite(csvOptions?.headerRowIndex)
+    ? Math.max(0, Number(csvOptions.headerRowIndex))
+    : null
+
+  let seenRows = 0
+  let header = []
+  let rowCount = 0
+  let limitExceeded = false
+  let resolvedHeaderRowIndex = explicitHeaderRowIndex
+
+  const csvStream = fs.createReadStream(csvPath, { encoding: 'utf8' })
+  await iterateCsvRowsStreamAsync(csvStream, delimiter, async (rawRow, rowIndex) => {
+    seenRows += 1
+    if (resolvedHeaderRowIndex === null) {
+      const normalized = rawRow.map(normalizeCsvHeaderValue).filter(Boolean)
+      if (normalized.length > 0) {
+        const hasName = normalized.some((cell) => cell === '姓名' || cell.toLowerCase() === 'name')
+        const hasDate = normalized.some((cell) => ['日期', 'date', 'workdate', 'work_date'].includes(cell.toLowerCase()))
+        if (rowIndex === 0 || (hasName && hasDate)) {
+          resolvedHeaderRowIndex = rowIndex
+          header = rawRow.map(normalizeCsvHeaderValue)
+          return true
+        }
+      }
+      return true
+    }
+    if (rowIndex < resolvedHeaderRowIndex) return true
+    if (rowIndex === resolvedHeaderRowIndex) {
+      if (!header.length) header = rawRow.map(normalizeCsvHeaderValue)
       return true
     }
     if (!header.length) return true
@@ -6046,12 +6200,13 @@ module.exports = {
 	    const resolveAsyncImportRowSource = async ({ payload, orgId, fallbackUserId }) => {
 	      if (typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()) {
 	        const csvFileId = payload.csvFileId.trim()
-	        const { csvText } = await readImportUploadCsvText({ orgId, fileId: csvFileId })
+	        await loadImportUploadMetaOrThrow({ orgId, fileId: csvFileId })
+	        const { csvPath } = getImportUploadPaths({ orgId, fileId: csvFileId })
 	        return {
 	          csvFileId,
 	          iterateRows: async (onRow) => {
-	            const result = await iterateImportRowsFromCsvAsync({
-	              csvText,
+	            const result = await iterateImportRowsFromCsvFileAsync({
+	              csvPath,
 	              csvOptions: payload.csvOptions,
 	              onRow,
 	            })
