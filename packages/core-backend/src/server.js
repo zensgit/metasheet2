@@ -98,7 +98,7 @@ async function handleRequest(req, res) {
   }
 
   // Health check
-  if (pathname === '/health' && method === 'GET') {
+  if ((pathname === '/health' || pathname === '/api/health') && method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({
       status: 'ok',

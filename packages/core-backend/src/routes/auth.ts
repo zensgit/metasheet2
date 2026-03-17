@@ -9,6 +9,7 @@ import jwt, { type SignOptions } from 'jsonwebtoken'
 import { authService, type User } from '../auth/AuthService'
 import { FEATURE_FLAGS } from '../config/flags'
 import { Logger } from '../core/logger'
+import { query } from '../db/pg'
 
 const logger = new Logger('AuthRouter')
 
@@ -456,6 +457,79 @@ authRouter.get('/me', async (req: Request, res: Response) => {
   } catch (error) {
     logger.error('Get user info error', error instanceof Error ? error : undefined)
     res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    })
+  }
+})
+
+/**
+ * 管理员用户列表（兼容旧客户端 /api/auth/users）
+ */
+authRouter.get('/users', async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: 'No token provided'
+      })
+    }
+
+    const payload = jwt.verify(token, process.env.JWT_SECRET || DEV_FALLBACK_JWT_SECRET)
+    if (!payload || typeof payload !== 'object') {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid token'
+      })
+    }
+
+    const tokenUser = payload as { role?: unknown; roles?: unknown }
+    const roles = Array.isArray(tokenUser.roles) ? tokenUser.roles.map((value) => String(value)) : []
+    const isAdmin = tokenUser.role === 'admin' || roles.includes('admin')
+    if (!isAdmin) {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden'
+      })
+    }
+
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+    const page = Math.max(1, Number.parseInt(String(req.query.page ?? '1'), 10) || 1)
+    const requestedPageSize = Number.parseInt(String(req.query.pageSize ?? '20'), 10) || 20
+    const pageSize = Math.min(100, Math.max(1, requestedPageSize))
+    const offset = (page - 1) * pageSize
+
+    const term = q ? `%${q}%` : '%'
+    const where = q ? 'WHERE email ILIKE $1 OR name ILIKE $1 OR id ILIKE $1' : ''
+    const countSql = `SELECT COUNT(*)::int AS total FROM users ${where}`
+    const listSql = `
+      SELECT id, email, name, role, is_active, is_admin, last_login_at, created_at, updated_at
+      FROM users
+      ${where}
+      ORDER BY created_at DESC
+      LIMIT $${q ? 2 : 1} OFFSET $${q ? 3 : 2}
+    `
+
+    const countResult = await query<{ total: number }>(countSql, q ? [term] : undefined)
+    const total = countResult.rows[0]?.total ?? 0
+    const listParams = q ? [term, pageSize, offset] : [pageSize, offset]
+    const listResult = await query(listSql, listParams)
+
+    return res.json({
+      success: true,
+      data: {
+        items: listResult.rows,
+        total,
+        page,
+        pageSize,
+      }
+    })
+  } catch (error) {
+    logger.error('Get users error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
       success: false,
       error: 'Internal server error'
     })

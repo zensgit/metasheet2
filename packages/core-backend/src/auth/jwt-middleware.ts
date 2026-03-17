@@ -8,6 +8,7 @@ const logger = new Logger('JWTMiddleware')
 
 const AUTH_WHITELIST = [
   '/health',
+  '/api/health',
   '/metrics',
   '/metrics/prom',
   '/api/auth/login',

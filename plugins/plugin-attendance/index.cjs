@@ -5007,6 +5007,45 @@ function getWeekdayFromDateKey(dateKey) {
   return date.getUTCDay()
 }
 
+function formatDateOnlyForCsv(value) {
+  if (value === null || value === undefined || value === '') return ''
+  if (typeof value === 'string') {
+    const match = value.match(/^(\d{4}-\d{2}-\d{2})/)
+    if (match?.[1]) return match[1]
+  }
+  if (value instanceof Date) {
+    const year = value.getFullYear()
+    const month = String(value.getMonth() + 1).padStart(2, '0')
+    const day = String(value.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  return date.toISOString().slice(0, 10)
+}
+
+function formatTimeZoneOffsetForCsv(offsetMinutes) {
+  const safeOffset = Number.isFinite(offsetMinutes) ? Number(offsetMinutes) : 0
+  const sign = safeOffset >= 0 ? '+' : '-'
+  const absolute = Math.abs(safeOffset)
+  const hours = String(Math.floor(absolute / 60)).padStart(2, '0')
+  const minutes = String(absolute % 60).padStart(2, '0')
+  return `${sign}${hours}:${minutes}`
+}
+
+function formatDateTimeForCsv(value, timeZone) {
+  if (value === null || value === undefined || value === '') return ''
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  const zone = resolveTimeZone(timeZone, null)
+  if (!zone) return date.toISOString()
+  const parts = getZonedParts(date, zone)
+  const offsetMinutes = getTimeZoneOffset(date, zone)
+  const datePart = `${String(parts.year).padStart(4, '0')}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`
+  const timePart = `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}:${String(parts.second).padStart(2, '0')}`
+  return `${datePart}T${timePart}${formatTimeZoneOffsetForCsv(offsetMinutes)}`
+}
+
 function formatCsvValue(value) {
   if (value === null || value === undefined) return ''
   const text = String(value)
@@ -7852,10 +7891,7 @@ module.exports = {
       })
     )
 
-	    context.api.http.addRoute(
-	      'GET',
-	      '/api/attendance/records',
-	      withPermission('attendance:read', async (req, res) => {
+      const handleAttendanceRecordsGet = withPermission('attendance:read', async (req, res) => {
         const schema = z.object({
           userId: z.string().optional(),
           orgId: z.string().optional(),
@@ -7942,8 +7978,19 @@ module.exports = {
           }
           logger.error('Attendance records query failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load records' } })
-	        }
-	      })
+        }
+      })
+
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/records',
+	      handleAttendanceRecordsGet
+	    )
+
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/calendar',
+	      handleAttendanceRecordsGet
 	    )
 
 	    context.api.http.addRoute(
@@ -16067,7 +16114,20 @@ module.exports = {
             'status',
             'is_workday',
           ]
-          const csv = buildCsv(rows, headers)
+          const csvRows = rows.map((row) => ({
+            user_id: row.user_id ?? '',
+            org_id: row.org_id ?? '',
+            work_date: formatDateOnlyForCsv(row.work_date),
+            timezone: row.timezone ?? '',
+            first_in_at: formatDateTimeForCsv(row.first_in_at, row.timezone),
+            last_out_at: formatDateTimeForCsv(row.last_out_at, row.timezone),
+            work_minutes: row.work_minutes ?? 0,
+            late_minutes: row.late_minutes ?? 0,
+            early_leave_minutes: row.early_leave_minutes ?? 0,
+            status: row.status ?? '',
+            is_workday: row.is_workday ?? '',
+          }))
+          const csv = buildCsv(csvRows, headers)
           const filename = `attendance-${orgId}-${from}-to-${to}.csv`
 
           emitEvent('attendance.exported', {

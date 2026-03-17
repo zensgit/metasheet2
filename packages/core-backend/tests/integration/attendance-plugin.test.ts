@@ -913,6 +913,134 @@ describe('Attendance Plugin Integration', () => {
     }
   })
 
+  it('keeps /api/health public for probes', async () => {
+    if (!baseUrl) return
+
+    const healthRes = await requestJson(`${baseUrl}/api/health`)
+    expect(healthRes.status).toBe(200)
+    const body = (healthRes.body as { status?: string; timestamp?: string } | undefined) ?? {}
+    expect(body.status).toBe('ok')
+    expect(typeof body.timestamp).toBe('string')
+  })
+
+  it('keeps /api/auth/users available for admin user listing', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=auth-users-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const usersRes = await requestJson(`${baseUrl}/api/auth/users?page=1&pageSize=5`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+
+    expect(usersRes.status).toBe(200)
+    const body = (usersRes.body as { success?: boolean; data?: { items?: unknown[]; total?: number } } | undefined) ?? {}
+    expect(body.success).toBe(true)
+    expect(Array.isArray(body.data?.items)).toBe(true)
+    expect(typeof body.data?.total).toBe('number')
+  })
+
+  it('keeps /api/attendance/calendar available as records compatibility alias', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-calendar-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const calendarRes = await requestJson(
+      `${baseUrl}/api/attendance/calendar?from=${encodeURIComponent(workDate)}&to=${encodeURIComponent(workDate)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    )
+
+    expect(calendarRes.status).toBe(200)
+    const body = (calendarRes.body as { ok?: boolean; data?: { items?: unknown[] } } | undefined) ?? {}
+    expect(body.ok).toBe(true)
+    expect(Array.isArray(body.data?.items)).toBe(true)
+  })
+
+  it('exports attendance CSV with ISO date values and timezone-consistent timestamps', async () => {
+    if (!baseUrl) return
+
+    const tokenUserId = `attendance-export-${Date.now().toString(36)}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(tokenUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    expect(dbUrl).toBeTruthy()
+    if (!dbUrl) return
+
+    const workDate = '2029-03-13'
+    const firstInAt = new Date(`${workDate}T00:00:00.000Z`)
+    const lastOutAt = new Date(`${workDate}T09:00:00.000Z`)
+    const recordId = randomUuidV4()
+    const sourceBatchId = randomUuidV4()
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      await pool.query(
+        `INSERT INTO attendance_records
+         (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, now(), now())`,
+        [
+          recordId,
+          tokenUserId,
+          'default',
+          workDate,
+          'Asia/Tokyo',
+          firstInAt,
+          lastOutAt,
+          540,
+          0,
+          0,
+          'normal',
+          true,
+          JSON.stringify({ source: 'integration-export-format' }),
+          sourceBatchId,
+        ]
+      )
+
+      const exportRes = await requestJson(
+        `${baseUrl}/api/attendance/export?from=${encodeURIComponent(workDate)}&to=${encodeURIComponent(workDate)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      )
+      expect(exportRes.status).toBe(200)
+
+      const lines = exportRes.raw.trim().split('\n')
+      expect(lines.length).toBeGreaterThanOrEqual(2)
+      expect(lines[0]).toContain('work_date')
+      expect(lines[0]).toContain('timezone')
+      expect(lines[0]).toContain('is_workday')
+      expect(lines[1]).toContain(`${workDate},Asia/Tokyo,${workDate}T09:00:00+09:00,${workDate}T18:00:00+09:00`)
+      expect(lines[1]).toContain(',true')
+      expect(lines[1]).not.toContain('GMT+')
+      expect(lines[1]).not.toContain('Mon ')
+    } finally {
+      await pool.query('DELETE FROM attendance_records WHERE id = $1', [recordId]).catch(() => undefined)
+      await pool.end()
+    }
+  })
+
   it('supports import commit idempotencyKey retries (without requiring a new commitToken)', async () => {
     if (!baseUrl) return
 
