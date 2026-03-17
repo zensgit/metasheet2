@@ -1815,20 +1815,26 @@ describe('Attendance Plugin Integration', () => {
     expect(batchMeta?.skippedRows).toHaveLength(1)
     expect(String(batchMeta?.skippedRows?.[0]?.warnings?.[0] || '')).toContain('Duplicate row')
 
-    const batchItemsRes = await requestJson(
-      `${baseUrl}/api/attendance/import/batches/${encodeURIComponent(batchId)}/items?pageSize=20`,
-      {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    )
-    expect(batchItemsRes.status).toBe(200)
-    const batchItemsData = (batchItemsRes.body as { data?: { items?: any[]; total?: number } } | undefined)?.data
-    const batchItems = batchItemsData?.items ?? []
-    expect(Number(batchItemsData?.total ?? 0)).toBe(commitPayload.rows.length)
-    const skippedItem = batchItems.find((item) => item?.recordId == null)
+    const pageSize = 200
+    let batchItemsTotal = 0
+    let skippedItem: any = null
+    for (let page = 1; page <= Math.ceil(commitPayload.rows.length / pageSize); page += 1) {
+      const batchItemsRes = await requestJson(
+        `${baseUrl}/api/attendance/import/batches/${encodeURIComponent(batchId)}/items?page=${page}&pageSize=${pageSize}`,
+        {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      )
+      expect(batchItemsRes.status).toBe(200)
+      const batchItemsData = (batchItemsRes.body as { data?: { items?: any[]; total?: number } } | undefined)?.data
+      if (!batchItemsTotal) batchItemsTotal = Number(batchItemsData?.total ?? 0)
+      skippedItem = (batchItemsData?.items ?? []).find((item) => item?.recordId == null) ?? skippedItem
+      if (skippedItem) break
+    }
+    expect(batchItemsTotal).toBe(commitPayload.rows.length)
     expect(skippedItem).toBeTruthy()
     expect(String(skippedItem?.previewSnapshot?.skip?.reason || '')).toBe('duplicate')
     expect(String(skippedItem?.previewSnapshot?.warnings?.[0] || '')).toContain('Duplicate row')
