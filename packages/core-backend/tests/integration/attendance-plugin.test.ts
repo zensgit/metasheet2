@@ -1373,7 +1373,7 @@ describe('Attendance Plugin Integration', () => {
     expect(commitToken).toBeTruthy()
 
     const seedDate = new Date(Date.UTC(2026, 0, 1))
-    const rows = Array.from({ length: 120 }, (_, index) => {
+    const rows = Array.from({ length: 1001 }, (_, index) => {
       const date = new Date(seedDate)
       date.setUTCDate(seedDate.getUTCDate() + index)
       const workDate = date.toISOString().slice(0, 10)
@@ -1406,11 +1406,12 @@ describe('Attendance Plugin Integration', () => {
     const commitData = (commitRes.body as { data?: any } | undefined)?.data
     expect(commitData?.batchId).toBeTruthy()
     expect(commitData?.engine).toBe('bulk')
-    expect(Number(commitData?.processedRows ?? 0)).toBeGreaterThanOrEqual(120)
+    expect(Number(commitData?.processedRows ?? 0)).toBeGreaterThanOrEqual(rows.length)
     expect(Number(commitData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
     expect(Number(commitData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
     expect(commitData?.recordUpsertStrategy).toBe('staging')
     expect(commitData?.meta?.recordUpsertStrategy).toBe('staging')
+    expect(commitData?.meta?.itemsInsertStrategy).toBe('staging')
 
     const batchDetailRes = await requestJson(
       `${baseUrl}/api/attendance/import/batches/${encodeURIComponent(String(commitData.batchId))}`,
@@ -1424,6 +1425,21 @@ describe('Attendance Plugin Integration', () => {
     expect(batchDetailRes.status).toBe(200)
     const batchMeta = (batchDetailRes.body as { data?: { meta?: any } } | undefined)?.data?.meta
     expect(batchMeta?.recordUpsertStrategy).toBe('staging')
+    expect(batchMeta?.itemsInsertStrategy).toBe('staging')
+
+    const batchItemsRes = await requestJson(
+      `${baseUrl}/api/attendance/import/batches/${encodeURIComponent(String(commitData.batchId))}/items?pageSize=1`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    )
+    expect(batchItemsRes.status).toBe(200)
+    const batchItemsData = (batchItemsRes.body as { data?: { items?: any[]; total?: number } } | undefined)?.data
+    expect(Number(batchItemsData?.total ?? 0)).toBe(rows.length)
+    expect(String(batchItemsData?.items?.[0]?.recordId || '')).toBeTruthy()
   })
 
   it('deduplicates concurrent import commits with the same idempotencyKey', async () => {
@@ -1689,11 +1705,28 @@ describe('Attendance Plugin Integration', () => {
     const commitToken = (prepareRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
     expect(commitToken).toBeTruthy()
 
+    const seedDate = new Date(Date.UTC(2026, 0, 1))
+    const bulkRows = Array.from({ length: 1000 }, (_, index) => {
+      const date = new Date(seedDate)
+      date.setUTCDate(seedDate.getUTCDate() + index)
+      const rowWorkDate = date.toISOString().slice(0, 10)
+      return {
+        userId: `attendance-async-bulk-${Date.now().toString(36)}-${index}`,
+        workDate: rowWorkDate,
+        fields: {
+          firstInAt: `${rowWorkDate}T09:00:00Z`,
+          lastOutAt: `${rowWorkDate}T18:00:00Z`,
+          status: 'normal',
+        },
+      }
+    })
+
     const commitPayload = {
       userId: 'attendance-test',
       idempotencyKey,
       timezone: 'UTC',
       rows: [
+        ...bulkRows,
         {
           userId: duplicateUserId,
           workDate,
@@ -1757,6 +1790,8 @@ describe('Attendance Plugin Integration', () => {
 
     expect(batchId).toBeTruthy()
     expect(completedJob).toBeTruthy()
+    expect(completedJob?.engine).toBe('bulk')
+    expect(completedJob?.itemsInsertStrategy).toBe('staging')
     expect(Number(completedJob?.failedRows ?? 0)).toBe(1)
     expect(Number(completedJob?.skippedCount ?? 0)).toBe(1)
     expect(Array.isArray(completedJob?.skippedRows)).toBe(true)
@@ -1774,23 +1809,32 @@ describe('Attendance Plugin Integration', () => {
     )
     expect(batchDetailRes.status).toBe(200)
     const batchMeta = (batchDetailRes.body as { data?: { meta?: any } } | undefined)?.data?.meta
+    expect(batchMeta?.itemsInsertStrategy).toBe('staging')
     expect(Number(batchMeta?.skippedCount ?? 0)).toBe(1)
     expect(Array.isArray(batchMeta?.skippedRows)).toBe(true)
     expect(batchMeta?.skippedRows).toHaveLength(1)
     expect(String(batchMeta?.skippedRows?.[0]?.warnings?.[0] || '')).toContain('Duplicate row')
 
-    const batchItemsRes = await requestJson(
-      `${baseUrl}/api/attendance/import/batches/${encodeURIComponent(batchId)}/items?pageSize=20`,
-      {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    )
-    expect(batchItemsRes.status).toBe(200)
-    const batchItems = (batchItemsRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
-    const skippedItem = batchItems.find((item) => item?.recordId == null)
+    const pageSize = 200
+    let batchItemsTotal = 0
+    let skippedItem: any = null
+    for (let page = 1; page <= Math.ceil(commitPayload.rows.length / pageSize); page += 1) {
+      const batchItemsRes = await requestJson(
+        `${baseUrl}/api/attendance/import/batches/${encodeURIComponent(batchId)}/items?page=${page}&pageSize=${pageSize}`,
+        {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      )
+      expect(batchItemsRes.status).toBe(200)
+      const batchItemsData = (batchItemsRes.body as { data?: { items?: any[]; total?: number } } | undefined)?.data
+      if (!batchItemsTotal) batchItemsTotal = Number(batchItemsData?.total ?? 0)
+      skippedItem = (batchItemsData?.items ?? []).find((item) => item?.recordId == null) ?? skippedItem
+      if (skippedItem) break
+    }
+    expect(batchItemsTotal).toBe(commitPayload.rows.length)
     expect(skippedItem).toBeTruthy()
     expect(String(skippedItem?.previewSnapshot?.skip?.reason || '')).toBe('duplicate')
     expect(String(skippedItem?.previewSnapshot?.warnings?.[0] || '')).toContain('Duplicate row')
@@ -1809,6 +1853,8 @@ describe('Attendance Plugin Integration', () => {
     expect(retryData?.idempotent).toBe(true)
     expect(String(retryData?.job?.id || '')).toBe(jobId)
     expect(String(retryData?.job?.batchId || '')).toBe(batchId)
+    expect(retryData?.job?.engine).toBe('bulk')
+    expect(retryData?.job?.itemsInsertStrategy).toBe('staging')
     expect(Number(retryData?.job?.failedRows ?? 0)).toBe(1)
     expect(Number(retryData?.job?.skippedCount ?? 0)).toBe(1)
     expect(Array.isArray(retryData?.job?.skippedRows)).toBe(true)
