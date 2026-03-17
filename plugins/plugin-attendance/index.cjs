@@ -913,7 +913,7 @@ const ATTENDANCE_IMPORT_RECORD_UPSERT_MODE = resolveEnumEnv(
 const ATTENDANCE_IMPORT_ITEMS_INSERT_MODE = resolveEnumEnv(
   'ATTENDANCE_IMPORT_ITEMS_INSERT_MODE',
   'unnest',
-  ['values', 'unnest']
+  ['values', 'unnest', 'staging']
 )
 
 const ATTENDANCE_IMPORT_COPY_ENABLED = resolveEnumEnv(
@@ -4873,6 +4873,42 @@ async function copyAttendanceImportRowsToStage(client, rows) {
   return true
 }
 
+function* iterAttendanceImportItemsStageCsvLines({ batchId, orgId, items }) {
+  for (const item of items) {
+    const snapshotValue = typeof item?.previewSnapshot === 'string'
+      ? item.previewSnapshot
+      : JSON.stringify(item?.previewSnapshot ?? {})
+    const values = [
+      item?.id ?? null,
+      batchId ?? null,
+      orgId ?? null,
+      item?.userId ?? null,
+      normalizeImportWorkDateForStorage(item?.workDate),
+      item?.recordId ?? null,
+      snapshotValue,
+    ]
+    yield `${values.map((value) => encodeAttendanceImportCsvValue(value)).join(',')}\n`
+  }
+}
+
+async function copyAttendanceImportItemsToStage(client, { batchId, orgId, items }) {
+  const rawClient = resolveAttendanceImportRawClient(client)
+  const copyFromFactory = resolveAttendanceCopyFromFactory()
+  if (!rawClient || !copyFromFactory) return false
+  const copyStream = rawClient.query(
+    copyFromFactory(
+      `COPY attendance_import_items_stage
+        (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot)
+       FROM STDIN WITH (FORMAT csv, NULL '\\N')`
+    )
+  )
+  await pipeline(
+    Readable.from(iterAttendanceImportItemsStageCsvLines({ batchId, orgId, items })),
+    copyStream
+  )
+  return true
+}
+
 async function ensureAttendanceImportRecordsStageTable(client) {
   if (client && client.__attendanceImportStageReady === true) return
   await queryImportHeavy(
@@ -4895,6 +4931,24 @@ async function ensureAttendanceImportRecordsStageTable(client) {
     []
   )
   if (client) client.__attendanceImportStageReady = true
+}
+
+async function ensureAttendanceImportItemsStageTable(client) {
+  if (client && client.__attendanceImportItemsStageReady === true) return
+  await queryImportHeavy(
+    client,
+    `CREATE TEMP TABLE IF NOT EXISTS attendance_import_items_stage (
+       id uuid NOT NULL,
+       batch_id uuid NOT NULL,
+       org_id text NOT NULL,
+       user_id text,
+       work_date date,
+       record_id uuid,
+       preview_snapshot jsonb
+     ) ON COMMIT DROP`,
+    []
+  )
+  if (client) client.__attendanceImportItemsStageReady = true
 }
 
 async function batchUpsertAttendanceRecordsStaging(client, rows, options = {}) {
@@ -5080,37 +5134,128 @@ async function batchUpsertAttendanceRecords(client, rows, options = {}) {
   return batchUpsertAttendanceRecordsUnnest(client, rows)
 }
 
-async function batchInsertAttendanceImportItems(client, { batchId, orgId, items }) {
+async function batchInsertAttendanceImportItemsValues(client, { batchId, orgId, items }) {
+  const values = items
+    .map((_, idx) => {
+      const base = idx * 7
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}::jsonb, now())`
+    })
+    .join(', ')
+  const params = []
+  for (const item of items) {
+    params.push(
+      item.id,
+      batchId,
+      orgId,
+      item.userId,
+      normalizeImportWorkDateForStorage(item.workDate),
+      item.recordId,
+      item.previewSnapshot
+    )
+  }
+  await queryImportHeavy(
+    client,
+    `INSERT INTO attendance_import_items
+     (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+     VALUES ${values}`,
+    params
+  )
+}
+
+async function batchInsertAttendanceImportItemsStaging(client, { batchId, orgId, items, totalRows }) {
   if (!Array.isArray(items) || items.length === 0) return
 
-  if (ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'values') {
-    const values = items
-      .map((_, idx) => {
-        const base = idx * 7
-        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}::jsonb, now())`
-      })
-      .join(', ')
-    const params = []
-    for (const item of items) {
-      params.push(
-        item.id,
-        batchId,
-        orgId,
-        item.userId,
-        normalizeImportWorkDateForStorage(item.workDate),
-        item.recordId,
-        item.previewSnapshot
-      )
+  await ensureAttendanceImportItemsStageTable(client)
+  const numericTotalRows = Number.isFinite(Number(totalRows))
+    ? Math.max(0, Math.floor(Number(totalRows)))
+    : items.length
+  const allowCopyStdin = shouldUseAttendanceImportCopyStdin({ client, totalRows: numericTotalRows })
+
+  const ids = []
+  const batchIds = []
+  const orgIds = []
+  const userIds = []
+  const workDates = []
+  const recordIds = []
+  const snapshots = []
+
+  for (const item of items) {
+    ids.push(item.id ?? null)
+    batchIds.push(batchId ?? null)
+    orgIds.push(orgId ?? null)
+    userIds.push(item.userId ?? null)
+    workDates.push(normalizeImportWorkDateForStorage(item.workDate))
+    recordIds.push(item.recordId ?? null)
+    snapshots.push(item.previewSnapshot ?? '{}')
+  }
+
+  await queryImportHeavy(client, 'TRUNCATE attendance_import_items_stage', [])
+  let stagedByCopy = false
+  if (allowCopyStdin) {
+    try {
+      stagedByCopy = await copyAttendanceImportItemsToStage(client, { batchId, orgId, items })
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error)
+      console.warn(`[attendance-import] COPY FROM STDIN items stage load failed, fallback to unnest: ${message}`)
+      await queryImportHeavy(client, 'TRUNCATE attendance_import_items_stage', [])
+      stagedByCopy = false
     }
+  }
+  if (!stagedByCopy) {
     await queryImportHeavy(
       client,
-      `INSERT INTO attendance_import_items
-       (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
-       VALUES ${values}`,
-      params
+      `INSERT INTO attendance_import_items_stage
+        (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot)
+       SELECT
+         t.id,
+         t.batch_id,
+         t.org_id,
+         t.user_id,
+         t.work_date,
+         t.record_id,
+         t.preview_snapshot::jsonb
+       FROM unnest(
+         $1::uuid[],
+         $2::uuid[],
+         $3::text[],
+         $4::text[],
+         $5::date[],
+         $6::uuid[],
+         $7::text[]
+       ) AS t(
+         id,
+         batch_id,
+         org_id,
+         user_id,
+         work_date,
+         record_id,
+         preview_snapshot
+       )`,
+      [ids, batchIds, orgIds, userIds, workDates, recordIds, snapshots]
     )
-    return
   }
+
+  await queryImportHeavy(
+    client,
+    `INSERT INTO attendance_import_items
+      (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+     SELECT
+       s.id,
+       s.batch_id,
+       s.org_id,
+       s.user_id,
+       s.work_date,
+       s.record_id,
+       s.preview_snapshot,
+       now()
+     FROM attendance_import_items_stage s`,
+    []
+  )
+  await queryImportHeavy(client, 'TRUNCATE attendance_import_items_stage', [])
+}
+
+async function batchInsertAttendanceImportItemsUnnest(client, { batchId, orgId, items }) {
+  if (!Array.isArray(items) || items.length === 0) return
 
   const ids = []
   const userIds = []
@@ -5154,6 +5299,29 @@ async function batchInsertAttendanceImportItems(client, { batchId, orgId, items 
      )`,
     [ids, userIds, workDates, recordIds, snapshots, batchId, orgId]
   )
+}
+
+async function batchInsertAttendanceImportItems(client, { batchId, orgId, items, totalRows, strategy }) {
+  if (!Array.isArray(items) || items.length === 0) return
+  const normalizedStrategy = typeof strategy === 'string'
+    ? strategy.trim().toLowerCase()
+    : resolveImportItemsInsertStrategy({
+        rowCount: totalRows,
+        engine: resolveImportEngineByRowCount(totalRows),
+      })
+
+  if (normalizedStrategy === 'values') {
+    return batchInsertAttendanceImportItemsValues(client, { batchId, orgId, items })
+  }
+  if (normalizedStrategy === 'staging') {
+    return batchInsertAttendanceImportItemsStaging(client, {
+      batchId,
+      orgId,
+      items,
+      totalRows,
+    })
+  }
+  return batchInsertAttendanceImportItemsUnnest(client, { batchId, orgId, items })
 }
 
 function getWeekdayFromDateKey(dateKey) {
@@ -6301,7 +6469,9 @@ module.exports = {
 	      const thresholdReached = Number.isFinite(numeric) && numeric >= ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD
 	      const supportsRecordBulkPath = ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'unnest'
 	        || ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'staging'
-	      const supportsBulkPath = supportsRecordBulkPath && ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'unnest'
+	      const supportsItemsBulkPath = ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'unnest'
+	        || ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'staging'
+	      const supportsBulkPath = supportsRecordBulkPath && supportsItemsBulkPath
 	      if (!supportsBulkPath) return 'standard'
 	      if (ATTENDANCE_IMPORT_BULK_ENGINE_MODE === 'off') return 'standard'
 	      if (ATTENDANCE_IMPORT_BULK_ENGINE_MODE === 'force') return 'bulk'
@@ -6328,6 +6498,30 @@ module.exports = {
 	        : ''
 	      if (['values', 'unnest', 'staging'].includes(explicit)) return explicit
 	      return resolveImportRecordUpsertStrategy({
+	        rowCount: rowCountHint,
+	        engine: engineHint,
+	      })
+	    }
+
+	    const resolveImportItemsInsertStrategy = ({ rowCount, engine }) => {
+	      if (ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'values') return 'values'
+	      if (ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'staging') return 'staging'
+	      const numeric = Number(rowCount ?? 0)
+	      const thresholdReached = Number.isFinite(numeric) && numeric >= ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS
+	      const isBulkEngine = String(engine ?? '').trim().toLowerCase() === 'bulk'
+	      if (ATTENDANCE_IMPORT_COPY_ENABLED && thresholdReached && isBulkEngine) {
+	        return 'staging'
+	      }
+	      return 'unnest'
+	    }
+
+	    const resolveImportItemsInsertStrategyFromMeta = (meta, rowCountHint, engineHint) => {
+	      const payload = normalizeMetadata(meta)
+	      const explicit = typeof payload?.itemsInsertStrategy === 'string'
+	        ? payload.itemsInsertStrategy.trim().toLowerCase()
+	        : ''
+	      if (['values', 'unnest', 'staging'].includes(explicit)) return explicit
+	      return resolveImportItemsInsertStrategy({
 	        rowCount: rowCountHint,
 	        engine: engineHint,
 	      })
@@ -6409,6 +6603,7 @@ module.exports = {
 	      elapsedMs,
 	      engine,
 	      recordUpsertStrategy,
+	      itemsInsertStrategy,
 	      chunkConfig,
 	      skippedCount,
 	      skippedRows,
@@ -6431,6 +6626,13 @@ module.exports = {
 	        recordUpsertStrategy:
 	          recordUpsertStrategy
 	          ?? resolveImportRecordUpsertStrategyFromMeta(
+	            basePayload,
+	            rowCount ?? processedRows ?? 0,
+	            engine ?? resolveImportEngineFromMeta(basePayload, rowCount ?? processedRows ?? 0)
+	          ),
+	        itemsInsertStrategy:
+	          itemsInsertStrategy
+	          ?? resolveImportItemsInsertStrategyFromMeta(
 	            basePayload,
 	            rowCount ?? processedRows ?? 0,
 	            engine ?? resolveImportEngineFromMeta(basePayload, rowCount ?? processedRows ?? 0)
@@ -6478,6 +6680,7 @@ module.exports = {
 	      const engine = resolveImportEngineFromMeta(payload, total)
 	      const chunkConfig = resolveImportChunkConfigFromMeta(payload, engine)
 	      const recordUpsertStrategy = resolveImportRecordUpsertStrategyFromMeta(payload, total, engine)
+	      const itemsInsertStrategy = resolveImportItemsInsertStrategyFromMeta(payload, total, engine)
 	      return {
 	        id: row.id,
 	        orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -6489,6 +6692,7 @@ module.exports = {
 	        engine,
 	        chunkConfig,
 	        recordUpsertStrategy,
+	        itemsInsertStrategy,
 	        progress,
 	        total,
 	        progressPercent,
@@ -6857,6 +7061,11 @@ module.exports = {
 	                      rowCount,
 	                      resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
 	                    ),
+	                    itemsInsertStrategy: resolveImportItemsInsertStrategyFromMeta(
+	                      batchMeta,
+	                      rowCount,
+	                      resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
+	                    ),
 	                    chunkConfig: batchMeta?.chunkConfig ?? resolveImportChunkConfig(
 	                      resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
 	                    ),
@@ -6955,6 +7164,14 @@ module.exports = {
 		            commitResult.recordUpsertStrategy
 		            ?? commitResult?.meta?.recordUpsertStrategy
 		            ?? resolveImportRecordUpsertStrategyFromMeta(
+		              payload,
+		              commitResult.rowCount ?? commitResult.imported ?? 0,
+		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
+		            ),
+		          itemsInsertStrategy:
+		            commitResult.itemsInsertStrategy
+		            ?? commitResult?.meta?.itemsInsertStrategy
+		            ?? resolveImportItemsInsertStrategyFromMeta(
 		              payload,
 		              commitResult.rowCount ?? commitResult.imported ?? 0,
 		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
@@ -7069,6 +7286,10 @@ module.exports = {
 	        rowCount,
 	        engine: importEngine,
 	      })
+	      const importItemsInsertStrategy = resolveImportItemsInsertStrategy({
+	        rowCount,
+	        engine: importEngine,
+	      })
 
 	      const baseRule = await loadDefaultRule(db, orgId)
 	      const settings = await getSettings(db)
@@ -7147,6 +7368,7 @@ module.exports = {
 		          engine: importEngine,
 		          chunkConfig: importChunkConfig,
 		          recordUpsertStrategy: importRecordUpsertStrategy,
+		          itemsInsertStrategy: importItemsInsertStrategy,
 		          mappingProfileId: payload.mappingProfileId ?? null,
 		          groupSync: groupSync
 		            ? {
@@ -7204,6 +7426,8 @@ module.exports = {
 		            batchId: resolvedBatchId,
 		            orgId,
 		            items: chunk,
+		            totalRows: rowCount,
+		            strategy: importItemsInsertStrategy,
 		          })
 		        }
 		        const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
@@ -11666,6 +11890,10 @@ module.exports = {
 	            rowCount: rows.length,
 	            engine: importEngine,
 	          })
+	          const importItemsInsertStrategy = resolveImportItemsInsertStrategy({
+	            rowCount: rows.length,
+	            engine: importEngine,
+	          })
 
           const baseRule = await loadDefaultRule(db, orgId)
           const settings = await getSettings(db)
@@ -11746,6 +11974,7 @@ module.exports = {
 	              engine: importEngine,
 	              chunkConfig: importChunkConfig,
 	              recordUpsertStrategy: importRecordUpsertStrategy,
+	              itemsInsertStrategy: importItemsInsertStrategy,
 	              mappingProfileId: parsed.data.mappingProfileId ?? null,
 	              groupSync: groupSync
 	                ? {
@@ -11801,6 +12030,8 @@ module.exports = {
 			                batchId,
 			                orgId,
 			                items: chunk,
+			                totalRows: rows.length,
+			                strategy: importItemsInsertStrategy,
 			              })
 			            }
 				            const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
