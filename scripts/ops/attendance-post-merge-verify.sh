@@ -592,7 +592,22 @@ function perf_highscale_has_capacity_mismatch() {
   local mismatch_path=''
   mismatch_path="$(find "$artifacts_dir" -type f -name 'perf-capacity-mismatch.json' | sort | tail -n 1 || true)"
   if [[ -z "$mismatch_path" || ! -f "$mismatch_path" ]]; then
-    return 1
+    local perf_log_path=''
+    perf_log_path="$(find "$artifacts_dir" -type f -name 'perf.log' | sort | tail -n 1 || true)"
+    if [[ -z "$perf_log_path" || ! -f "$perf_log_path" ]]; then
+      return 1
+    fi
+    mismatch_path="$(dirname "$perf_log_path")/perf-capacity-mismatch.json"
+    if ! PERF_LOG="$perf_log_path" \
+      OUTPUT_FILE="$mismatch_path" \
+      ROWS="$PERF_HIGHSCALE_ROWS" \
+      CSV_ROWS_LIMIT_HINT="$PERF_HIGHSCALE_CSV_ROWS_LIMIT_HINT" \
+      REMOTE_CSV_ROWS_LIMIT="${REMOTE_CSV_ROWS_LIMIT:-}" \
+      UPLOAD_CSV="$PERF_HIGHSCALE_UPLOAD_CSV" \
+      PAYLOAD_SOURCE="$PERF_HIGHSCALE_PAYLOAD_SOURCE" \
+      node ./scripts/ops/attendance-classify-perf-capacity-mismatch.mjs >/dev/null; then
+      return 1
+    fi
   fi
   jq -e '.classification == "capacity_mismatch"' "$mismatch_path" >/dev/null 2>&1
 }

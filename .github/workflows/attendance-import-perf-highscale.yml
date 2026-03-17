@@ -288,48 +288,20 @@ jobs:
           log_dir="output/playwright/attendance-import-perf-highscale"
           final_log="${log_dir}/perf.log"
           mismatch_file="${log_dir}/perf-capacity-mismatch.json"
-
-          last_failure_line="$(grep -E '^\[attendance-import-perf\] Failed:' "$final_log" | tail -n 1 || true)"
-          if [[ -z "$last_failure_line" ]]; then
-            last_failure_line="$(tail -n 40 "$final_log" | tr '\n' ' ')"
-          fi
-
-          rows_value="${ROWS}"
-          hint_value="${CSV_ROWS_LIMIT_HINT}"
-          remote_value="${REMOTE_CSV_ROWS_LIMIT}"
-          upload_csv_value="$(printf '%s' "${UPLOAD_CSV}" | tr '[:upper:]' '[:lower:]')"
-          payload_source_value="$(printf '%s' "${PAYLOAD_SOURCE}" | tr '[:upper:]' '[:lower:]')"
-          would_use_csv='false'
-
-          if [[ "${upload_csv_value}" == 'true' ]]; then
-            case "${payload_source_value}" in
-              csv)
-                would_use_csv='true'
-                ;;
-              auto)
-                if [[ "${rows_value}" =~ ^[0-9]+$ && "${hint_value}" =~ ^[0-9]+$ ]] && (( rows_value <= hint_value )); then
-                  would_use_csv='true'
-                fi
-                ;;
-            esac
-          fi
-
-          if [[ "${rows_value}" =~ ^[0-9]+$ && "${hint_value}" =~ ^[0-9]+$ && "${remote_value}" =~ ^[0-9]+$ ]] \
-            && [[ "${would_use_csv}" == 'true' ]] \
-            && (( rows_value > remote_value )) \
-            && printf '%s' "${last_failure_line}" | grep -Eq 'CSV exceeds max rows'; then
-            cat > "${mismatch_file}" <<EOF
-          {
-            "classification": "capacity_mismatch",
-            "requestedRows": ${rows_value},
-            "payloadSourceRequested": "${payload_source_value}",
-            "uploadCsvRequested": ${upload_csv_value},
-            "csvRowsLimitHint": ${hint_value},
-            "remoteCsvRowsLimit": ${remote_value},
-            "failureLine": $(printf '%s' "${last_failure_line}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))'),
-            "suggestedAction": "Align the high-scale gate with the deployed CSV row cap or raise ATTENDANCE_IMPORT_CSV_MAX_ROWS after capacity validation."
-          }
-          EOF
+          if PERF_LOG="${final_log}" \
+            OUTPUT_FILE="${mismatch_file}" \
+            ROWS="${ROWS}" \
+            CSV_ROWS_LIMIT_HINT="${CSV_ROWS_LIMIT_HINT}" \
+            REMOTE_CSV_ROWS_LIMIT="${REMOTE_CSV_ROWS_LIMIT}" \
+            UPLOAD_CSV="${UPLOAD_CSV}" \
+            PAYLOAD_SOURCE="${PAYLOAD_SOURCE}" \
+            node ./scripts/ops/attendance-classify-perf-capacity-mismatch.mjs >/dev/null; then
+            last_failure_line="$(jq -r '.failureLine // empty' "${mismatch_file}")"
+            rows_value="$(jq -r '.requestedRows // empty' "${mismatch_file}")"
+            hint_value="$(jq -r '.csvRowsLimitHint // empty' "${mismatch_file}")"
+            remote_value="$(jq -r '.remoteCsvRowsLimit // empty' "${mismatch_file}")"
+            remote_value_source="$(jq -r '.remoteCsvRowsLimitSource // empty' "${mismatch_file}")"
+            payload_source_value="$(jq -r '.payloadSourceRequested // empty' "${mismatch_file}")"
             echo "classification=capacity_mismatch" >> "$GITHUB_OUTPUT"
             {
               echo "High-scale perf benchmark classified as known capacity mismatch."
@@ -337,7 +309,7 @@ jobs:
               echo "- requested rows: \`${rows_value}\`"
               echo "- payload source requested: \`${payload_source_value}\`"
               echo "- csv rows limit hint: \`${hint_value}\`"
-              echo "- remote csv rows limit: \`${remote_value}\`"
+              echo "- remote csv rows limit: \`${remote_value}\` (${remote_value_source:-unknown})"
               echo "- failure: \`${last_failure_line}\`"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
