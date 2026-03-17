@@ -86,6 +86,22 @@ summary_md="${DOWNLOAD_ROOT}/summary.md"
 summary_json="${DOWNLOAD_ROOT}/summary.json"
 
 capacity_mismatch_path="$(find "$artifact_root" -type f -name 'perf-capacity-mismatch.json' | sort | tail -n1 || true)"
+if [[ -z "$capacity_mismatch_path" ]]; then
+  perf_log_path="$(find "$artifact_root" -type f -name 'perf.log' | sort | tail -n1 || true)"
+  if [[ -n "$perf_log_path" ]]; then
+    inferred_capacity_mismatch_path="$(dirname "$perf_log_path")/perf-capacity-mismatch.json"
+    if PERF_LOG="$perf_log_path" \
+      OUTPUT_FILE="$inferred_capacity_mismatch_path" \
+      ROWS="$ROWS" \
+      CSV_ROWS_LIMIT_HINT="$CSV_ROWS_LIMIT_HINT" \
+      REMOTE_CSV_ROWS_LIMIT="${REMOTE_CSV_ROWS_LIMIT:-}" \
+      UPLOAD_CSV="$UPLOAD_CSV" \
+      PAYLOAD_SOURCE="$PAYLOAD_SOURCE" \
+      node ./scripts/ops/attendance-classify-perf-capacity-mismatch.mjs >/dev/null; then
+      capacity_mismatch_path="$inferred_capacity_mismatch_path"
+    fi
+  fi
+fi
 if [[ -n "$capacity_mismatch_path" ]]; then
   requested_rows="$(jq -r '.requestedRows // empty' "$capacity_mismatch_path")"
   remote_csv_rows_limit="$(jq -r '.remoteCsvRowsLimit // empty' "$capacity_mismatch_path")"
