@@ -1,5 +1,6 @@
-import { reactive, ref, type Ref } from 'vue'
+import { computed, reactive, ref, watch, type Ref } from 'vue'
 import { apiFetch as baseApiFetch } from '../../utils/api'
+import { generateAttendanceCode } from './attendanceCode'
 
 type ApiFetchFn = typeof baseApiFetch
 type Translate = (en: string, zh: string) => string
@@ -24,6 +25,7 @@ export interface AttendanceRuleTemplateVersion {
   createdBy?: string | null
   sourceVersionId?: string | null
   itemCount?: number | null
+  templates?: unknown[] | null
 }
 
 export interface AttendanceGroup {
@@ -205,6 +207,7 @@ export function useAttendanceAdminRulesAndGroups({
   const ruleTemplateLoading = ref(false)
   const ruleTemplateSaving = ref(false)
   const ruleTemplateRestoring = ref(false)
+  const ruleTemplateVersionLoading = ref(false)
   const attendanceGroupLoading = ref(false)
   const attendanceGroupSaving = ref(false)
   const attendanceGroupMemberLoading = ref(false)
@@ -214,6 +217,7 @@ export function useAttendanceAdminRulesAndGroups({
   const ruleTemplateSystemText = ref('[]')
   const ruleTemplateLibraryText = ref('[]')
   const ruleTemplateVersions = ref<AttendanceRuleTemplateVersion[]>([])
+  const selectedRuleTemplateVersionId = ref('')
   const attendanceGroups = ref<AttendanceGroup[]>([])
   const attendanceGroupMembers = ref<AttendanceGroupMember[]>([])
 
@@ -238,6 +242,20 @@ export function useAttendanceAdminRulesAndGroups({
     ruleSetId: '',
     description: '',
   })
+
+  const selectedRuleTemplateVersion = computed(
+    () => ruleTemplateVersions.value.find((item) => item.id === selectedRuleTemplateVersionId.value) ?? null,
+  )
+
+  watch(
+    () => attendanceGroupForm.name,
+    (name) => {
+      const trimmedName = name.trim()
+      if (!trimmedName || attendanceGroupForm.code.trim().length > 0) return
+      attendanceGroupForm.code = generateAttendanceCode(trimmedName, 'group')
+    },
+    { immediate: true },
+  )
 
   function resetRuleSetForm() {
     ruleSetEditingId.value = null
@@ -380,6 +398,9 @@ export function useAttendanceAdminRulesAndGroups({
       ruleTemplateSystemText.value = JSON.stringify(Array.isArray(data.data?.system) ? data.data?.system : [], null, 2)
       ruleTemplateLibraryText.value = JSON.stringify(Array.isArray(data.data?.library) ? data.data?.library : [], null, 2)
       ruleTemplateVersions.value = Array.isArray(data.data?.versions) ? data.data.versions : []
+      if (!ruleTemplateVersions.value.some((item) => item.id === selectedRuleTemplateVersionId.value)) {
+        selectedRuleTemplateVersionId.value = ''
+      }
       setStatus?.(tr('Rule templates loaded.', '规则模板已加载。'))
     } catch (error: unknown) {
       setStatus?.((error as Error)?.message || tr('Failed to load rule templates', '加载规则模板失败'), 'error')
@@ -457,6 +478,41 @@ export function useAttendanceAdminRulesAndGroups({
     setStatus?.(tr('System templates copied to library.', '系统模板已复制到模板库。'))
   }
 
+  async function openRuleTemplateVersion(versionId: string) {
+    if (!versionId) return
+    const current = ruleTemplateVersions.value.find((item) => item.id === versionId) ?? null
+    if (current?.templates) {
+      selectedRuleTemplateVersionId.value = versionId
+      return
+    }
+    ruleTemplateVersionLoading.value = true
+    try {
+      const response = await apiFetch(`/api/attendance/rule-templates/versions/${encodeURIComponent(versionId)}`)
+      if (response.status === 403) {
+        adminForbiddenRef.value = true
+        throw new Error(tr('Admin permissions required', '需要管理员权限'))
+      }
+      const data = asObject(await response.json().catch(() => null)) as ApiEnvelope<AttendanceRuleTemplateVersion> | null
+      if (!response.ok || !data?.ok || !data.data) {
+        throw new Error(String(data?.error?.message || tr('Failed to load template version', '加载模板版本失败')))
+      }
+      ruleTemplateVersions.value = ruleTemplateVersions.value.map((item) => (
+        item.id === versionId
+          ? { ...item, ...data.data }
+          : item
+      ))
+      selectedRuleTemplateVersionId.value = versionId
+    } catch (error: unknown) {
+      setStatus?.((error as Error)?.message || tr('Failed to load template version', '加载模板版本失败'), 'error')
+    } finally {
+      ruleTemplateVersionLoading.value = false
+    }
+  }
+
+  function closeRuleTemplateVersionView() {
+    selectedRuleTemplateVersionId.value = ''
+  }
+
   function resetAttendanceGroupForm() {
     attendanceGroupEditingId.value = null
     attendanceGroupForm.name = ''
@@ -511,7 +567,7 @@ export function useAttendanceAdminRulesAndGroups({
     try {
       const payload = {
         name: attendanceGroupForm.name.trim(),
-        code: attendanceGroupForm.code.trim() || null,
+        code: attendanceGroupForm.code.trim() || generateAttendanceCode(attendanceGroupForm.name, 'group'),
         timezone: attendanceGroupForm.timezone.trim() || defaultTimezone,
         ruleSetId: attendanceGroupForm.ruleSetId || null,
         description: attendanceGroupForm.description.trim() || null,
@@ -691,9 +747,14 @@ export function useAttendanceAdminRulesAndGroups({
     ruleTemplateRestoring,
     ruleTemplateSaving,
     ruleTemplateSystemText,
+    ruleTemplateVersionLoading,
     ruleTemplateVersions,
     saveAttendanceGroup,
     saveRuleSet,
     saveRuleTemplates,
+    selectedRuleTemplateVersion,
+    selectedRuleTemplateVersionId,
+    closeRuleTemplateVersionView,
+    openRuleTemplateVersion,
   }
 }

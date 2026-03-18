@@ -3255,7 +3255,6 @@ paths:
                 orgId:
                   type: string
               required:
-                - code
                 - name
       responses:
         '201':
@@ -3351,6 +3350,190 @@ paths:
                     properties:
                       id:
                         type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/rule-templates:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get rule templates
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      system:
+                        type: array
+                        items:
+                          type: object
+                      library:
+                        type: array
+                        items:
+                          type: object
+                      versions:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            version:
+                              type: integer
+                            createdAt:
+                              type: string
+                              nullable: true
+                            createdBy:
+                              type: string
+                              nullable: true
+                            sourceVersionId:
+                              type: string
+                              nullable: true
+                            itemCount:
+                              type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    put:
+      summary: Save rule template library
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                templates:
+                  type: array
+                  items:
+                    type: object
+              required:
+                - templates
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      templates:
+                        type: array
+                        items:
+                          type: object
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/rule-templates/restore:
+    x-plugin: plugin-attendance
+    post:
+      summary: Restore rule template library from a version
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                versionId:
+                  type: string
+                version:
+                  type: integer
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      templates:
+                        type: array
+                        items:
+                          type: object
+                      restoredFrom:
+                        type: string
+                        nullable: true
+                      version:
+                        type: integer
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/rule-templates/versions/{versionId}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get rule template version contents
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: versionId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      version:
+                        type: integer
+                      createdAt:
+                        type: string
+                        nullable: true
+                      createdBy:
+                        type: string
+                        nullable: true
+                      sourceVersionId:
+                        type: string
+                        nullable: true
+                      itemCount:
+                        type: integer
+                      templates:
+                        type: array
+                        items:
+                          type: object
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':

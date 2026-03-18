@@ -176,6 +176,10 @@
           :format-request-type="formatRequestType"
           :format-status="formatStatus"
           :format-warnings-short="formatWarningsShort"
+          :calendar-days="calendarDays"
+          :calendar-label="calendarLabel"
+          :shift-month="shiftMonth"
+          :week-days="weekDays"
           :request-center="requestCenterSectionBindings"
           :tr="tr"
         />
@@ -706,8 +710,10 @@ const {
   removeAttendanceGroupMember,
   resetAttendanceGroupForm,
   resetRuleSetForm,
+  closeRuleTemplateVersionView,
   resolveRuleSetName,
   restoreRuleTemplates,
+  openRuleTemplateVersion,
   ruleSetEditingId,
   ruleSetForm,
   ruleSetLoading,
@@ -718,7 +724,9 @@ const {
   ruleTemplateRestoring,
   ruleTemplateSaving,
   ruleTemplateSystemText,
+  ruleTemplateVersionLoading,
   ruleTemplateVersions,
+  selectedRuleTemplateVersion,
   saveAttendanceGroup,
   saveRuleSet,
   saveRuleTemplates,
@@ -1269,8 +1277,10 @@ const rulesAndGroupsSectionBindings = {
   removeAttendanceGroupMember,
   resetAttendanceGroupForm,
   resetRuleSetForm,
+  closeRuleTemplateVersionView,
   resolveRuleSetName,
   restoreRuleTemplates,
+  openRuleTemplateVersion,
   ruleSetEditingId,
   ruleSetForm,
   ruleSetLoading,
@@ -1281,7 +1291,9 @@ const rulesAndGroupsSectionBindings = {
   ruleTemplateRestoring,
   ruleTemplateSaving,
   ruleTemplateSystemText,
+  ruleTemplateVersionLoading,
   ruleTemplateVersions,
+  selectedRuleTemplateVersion,
   saveAttendanceGroup,
   saveRuleSet,
   saveRuleTemplates,
@@ -1406,6 +1418,8 @@ const requestCenterSectionBindings = {
   requests,
   requestSubmitting,
   resolveRequest,
+  focusCalendarMonth,
+  shiftMonth,
   submitRequest,
 }
 
@@ -1428,6 +1442,13 @@ function normalizeDateKey(value: string | null | undefined): string | null {
   const date = new Date(raw)
   if (Number.isNaN(date.getTime())) return null
   return date.toISOString().slice(0, 10)
+}
+
+function parseDateValue(value: string | null | undefined): Date | null {
+  const key = normalizeDateKey(value)
+  if (!key) return null
+  const date = new Date(`${key}T00:00:00`)
+  return Number.isNaN(date.getTime()) ? null : date
 }
 
 function formatDateTime(value: string | null | undefined): string {
@@ -2167,6 +2188,22 @@ function shiftMonth(delta: number) {
   fromDate.value = toDateInput(from)
   toDate.value = toDateInput(to)
   refreshAll()
+}
+
+async function focusCalendarMonth(value: string | null | undefined) {
+  const next = parseDateValue(value) ?? new Date()
+  const nextMonth = new Date(next.getFullYear(), next.getMonth(), 1)
+  const currentMonth = calendarMonth.value
+  if (
+    currentMonth.getFullYear() === nextMonth.getFullYear()
+    && currentMonth.getMonth() === nextMonth.getMonth()
+  ) {
+    return
+  }
+  calendarMonth.value = nextMonth
+  fromDate.value = toDateInput(new Date(nextMonth.getFullYear(), nextMonth.getMonth(), 1))
+  toDate.value = toDateInput(new Date(nextMonth.getFullYear(), nextMonth.getMonth() + 1, 0))
+  await refreshAll()
 }
 
 function validateRequestForm(): string | null {

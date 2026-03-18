@@ -9,6 +9,7 @@ import 'element-plus/dist/index.css'
 import App from './App.vue'
 import { ROUTE_PATHS } from './router/types'
 import { useFeatureFlags } from './stores/featureFlags'
+import { normalizePostLoginRedirect } from './utils/authRedirect'
 import { apiFetch, clearStoredAuthState, getStoredAuthToken } from './utils/api'
 
 // Import views
@@ -146,10 +147,7 @@ router.beforeEach(async (to, _from, next) => {
       return next()
     }
 
-    const redirectRaw = to.query?.redirect
-    const redirect = typeof redirectRaw === 'string' && redirectRaw.startsWith('/') && !redirectRaw.startsWith('//')
-      ? redirectRaw
-      : null
+    const redirect = normalizePostLoginRedirect(to.query?.redirect)
     const flags = useFeatureFlags()
     try {
       await flags.loadProductFeatures()
