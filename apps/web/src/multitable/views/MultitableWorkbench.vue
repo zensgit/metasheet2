@@ -18,8 +18,9 @@
       @update-sort="onUpdateSort" @add-filter="grid.addFilterRule" @update-filter="grid.updateFilterRule"
       @remove-filter="grid.removeFilterRule" @clear-filters="onClearFilters" @set-conjunction="onSetConjunction"
       :group-field-id="grid.groupFieldId.value"
+      :search-text="searchText" :total-rows="grid.page.value.total"
       @apply-sort-filter="grid.applySortFilter" @add-record="onAddRecord" @undo="grid.undo" @redo="grid.redo"
-      @set-group-field="grid.setGroupField" @export-csv="onExportCsv"
+      @set-group-field="grid.setGroupField" @export-csv="onExportCsv" @update:search-text="searchText = $event"
     />
     <div class="mt-workbench__content">
       <div class="mt-workbench__main">
@@ -59,6 +60,7 @@
           :can-delete="caps.canDeleteRecord.value" :column-widths="grid.columnWidths.value"
           :enable-multi-select="caps.canDeleteRecord.value"
           :group-field="grid.groupField.value"
+          :search-text="searchText"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
           @bulk-delete="onBulkDelete"
@@ -77,6 +79,23 @@
         :resolving-ids="commentsState.resolvingIds.value"
         @close="showComments = false" @submit="onSubmitComment" @resolve="onResolveComment" @update:draft="commentDraft = $event"
       />
+    </div>
+    <div v-if="showShortcuts" class="mt-workbench__shortcuts-overlay" @click.self="showShortcuts = false">
+      <div class="mt-workbench__shortcuts">
+        <div class="mt-workbench__shortcuts-header">
+          <strong>Keyboard Shortcuts</strong>
+          <button class="mt-workbench__shortcuts-close" @click="showShortcuts = false">&times;</button>
+        </div>
+        <div class="mt-workbench__shortcuts-grid">
+          <div class="mt-workbench__shortcut"><kbd>&#x2191; &#x2193; &#x2190; &#x2192;</kbd><span>Navigate cells</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Enter</kbd><span>Edit cell</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Escape</kbd><span>Cancel edit / close</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Tab</kbd><span>Next cell</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Ctrl+Z</kbd><span>Undo</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Ctrl+Y</kbd><span>Redo</span></div>
+          <div class="mt-workbench__shortcut"><kbd>?</kbd><span>Toggle this help</span></div>
+        </div>
+      </div>
     </div>
     <MetaLinkPicker :visible="linkPickerVisible" :field="linkPickerField" :current-value="linkPickerCurrentValue"
       @close="linkPickerVisible = false" @confirm="onLinkPickerConfirm"
@@ -139,6 +158,8 @@ const bases = ref<MetaBase[]>([])
 const activeBaseId = ref(props.baseId ?? '')
 const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
 const commentDraft = ref('')
+const searchText = ref('')
+const showShortcuts = ref(false)
 const formSubmitting = ref(false)
 const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
@@ -405,6 +426,7 @@ function onGlobalKeydown(e: KeyboardEvent) {
   const mod = e.metaKey || e.ctrlKey
   if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); grid.undo() }
   else if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); grid.redo() }
+  else if (e.key === '?' && !(e.target as HTMLElement)?.closest('input, textarea, select')) { showShortcuts.value = !showShortcuts.value }
 }
 
 // --- Record deep-link (read recordId from URL hash) ---
@@ -432,8 +454,9 @@ watch([selectedRecordId, () => workbench.activeViewId.value], () => {
 // --- Bulk delete ---
 async function onBulkDelete(recordIds: string[]) {
   try {
-    for (const rid of recordIds) await grid.deleteRecord(rid)
+    await Promise.all(recordIds.map((rid) => grid.deleteRecord(rid)))
     if (selectedRecordId.value && recordIds.includes(selectedRecordId.value)) selectedRecordId.value = null
+    showSuccess(`${recordIds.length} record(s) deleted`)
   } catch (e: any) { showError(e.message ?? 'Bulk delete failed') }
 }
 
@@ -508,4 +531,11 @@ onMounted(async () => {
 .mt-workbench__mgr-btn { padding: 3px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #666; }
 .mt-workbench__mgr-btn:hover { background: #f5f7fa; color: #409eff; border-color: #c0d8f0; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
+.mt-workbench__shortcuts-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
+.mt-workbench__shortcuts { background: #fff; border-radius: 8px; padding: 20px 24px; min-width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,.15); }
+.mt-workbench__shortcuts-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; font-size: 15px; }
+.mt-workbench__shortcuts-close { border: none; background: none; font-size: 20px; cursor: pointer; color: #999; }
+.mt-workbench__shortcuts-grid { display: flex; flex-direction: column; gap: 8px; }
+.mt-workbench__shortcut { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+.mt-workbench__shortcut kbd { background: #f0f0f0; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-family: monospace; font-size: 12px; min-width: 80px; text-align: center; }
 </style>

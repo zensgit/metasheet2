@@ -1,8 +1,19 @@
 <template>
   <div class="meta-cell-editor">
-    <!-- string -->
+    <!-- string: date-like -->
     <input
-      v-if="field.type === 'string'"
+      v-if="field.type === 'string' && isDateLike"
+      ref="inputRef"
+      class="meta-cell-editor__input"
+      type="date"
+      :value="modelValue ?? ''"
+      @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
+      @keydown.enter="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
+    <!-- string: normal -->
+    <input
+      v-else-if="field.type === 'string'"
       ref="inputRef"
       class="meta-cell-editor__input"
       type="text"
@@ -62,10 +73,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import type { MetaField } from '../../types'
 
-defineProps<{ field: MetaField; modelValue: unknown }>()
+const props = defineProps<{ field: MetaField; modelValue: unknown }>()
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}/
+const DATE_FIELD_NAMES = /date|time|deadline|due|start|end|created|updated|birthday/i
+const isDateLike = computed(() => {
+  if (props.field.type !== 'string') return false
+  if (DATE_FIELD_NAMES.test(props.field.name)) return true
+  if (typeof props.modelValue === 'string' && DATE_RE.test(props.modelValue)) return true
+  return false
+})
 
 const emit = defineEmits<{
   (e: 'update:modelValue', val: unknown): void

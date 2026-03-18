@@ -79,7 +79,7 @@
         </tbody>
         <tbody v-else>
           <tr
-            v-for="(row, ri) in rows"
+            v-for="(row, ri) in filteredRows"
             :key="row.id"
             class="meta-grid__row"
             :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === ri }"
@@ -110,11 +110,18 @@
               <MetaCellRenderer v-else :field="field" :value="row.data[field.id]" />
             </td>
           </tr>
-          <tr v-if="!rows.length && !loading">
+          <tr v-if="!filteredRows.length && !loading">
             <td :colspan="colSpan" class="meta-grid__empty">
-              <div class="meta-grid__empty-icon">&#x1F4CB;</div>
-              <div class="meta-grid__empty-title">No records yet</div>
-              <div class="meta-grid__empty-hint">Click <strong>+ New Record</strong> to add your first row</div>
+              <template v-if="searchText">
+                <div class="meta-grid__empty-icon">&#x1F50D;</div>
+                <div class="meta-grid__empty-title">No matching records</div>
+                <div class="meta-grid__empty-hint">Try a different search term</div>
+              </template>
+              <template v-else>
+                <div class="meta-grid__empty-icon">&#x1F4CB;</div>
+                <div class="meta-grid__empty-title">No records yet</div>
+                <div class="meta-grid__empty-hint">Click <strong>+ New Record</strong> to add your first row</div>
+              </template>
             </td>
           </tr>
         </tbody>
@@ -155,6 +162,7 @@ const props = defineProps<{
   columnWidths?: Record<string, number>
   enableMultiSelect?: boolean
   groupField?: MetaField | null
+  searchText?: string
 }>()
 
 const emit = defineEmits<{
@@ -173,7 +181,20 @@ const focusRow = ref(-1)
 const focusCol = ref(-1)
 const selectedIds = ref<Set<string>>(new Set())
 
-const allSelected = computed(() => props.rows.length > 0 && selectedIds.value.size === props.rows.length)
+const allSelected = computed(() => filteredRows.value.length > 0 && selectedIds.value.size === filteredRows.value.length)
+
+// --- Search filter ---
+const filteredRows = computed(() => {
+  const q = props.searchText?.trim().toLowerCase()
+  if (!q) return props.rows
+  return props.rows.filter((row) =>
+    props.visibleFields.some((f) => {
+      const v = row.data[f.id]
+      if (v == null) return false
+      return String(v).toLowerCase().includes(q)
+    }),
+  )
+})
 
 // --- GroupBy ---
 const collapsedGroups = ref<Set<string>>(new Set())
@@ -184,7 +205,7 @@ const groupedRows = computed<RowGroup[] | null>(() => {
   if (!props.groupField) return null
   const fid = props.groupField.id
   const map = new Map<string, MetaRecord[]>()
-  for (const row of props.rows) {
+  for (const row of filteredRows.value) {
     const val = row.data[fid]
     const key = val == null || val === '' ? '__ungrouped__' : String(val)
     if (!map.has(key)) map.set(key, [])
@@ -206,7 +227,7 @@ function toggleGroup(key: string) {
 
 // Flat list for keyboard nav (respects collapsed groups)
 const displayRows = computed(() => {
-  if (!groupedRows.value) return props.rows
+  if (!groupedRows.value) return filteredRows.value
   const result: MetaRecord[] = []
   for (const g of groupedRows.value) {
     if (!collapsedGroups.value.has(g.key)) result.push(...g.rows)
@@ -216,7 +237,7 @@ const displayRows = computed(() => {
 
 function toggleSelectAll() {
   if (allSelected.value) selectedIds.value = new Set()
-  else selectedIds.value = new Set(props.rows.map((r) => r.id))
+  else selectedIds.value = new Set(filteredRows.value.map((r) => r.id))
   emit('selection-change', [...selectedIds.value])
 }
 
@@ -304,7 +325,7 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__table-wrap { flex: 1; overflow: auto; }
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .meta-grid__row-num { width: 48px; min-width: 48px; text-align: center; color: #999; font-size: 12px; background: #f9fafb; border-bottom: 1px solid #eee; border-right: 1px solid #eee; padding: 6px 4px; }
-.meta-grid__row { transition: background 0.1s; }
+.meta-grid__row { transition: background 0.1s; content-visibility: auto; contain-intrinsic-size: auto 36px; }
 .meta-grid__row:hover { background: #f5f7fa; }
 .meta-grid__row--selected, .meta-grid__row--focused { background: #ecf5ff; }
 .meta-grid__cell { padding: 6px 12px; border-bottom: 1px solid #eee; overflow: hidden; text-overflow: ellipsis; cursor: default; }
