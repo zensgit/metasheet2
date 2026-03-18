@@ -9,7 +9,7 @@
 
 ## 1. Executive Summary
 
-The multi-table module delivers a complete, self-contained Feishu/Airtable-style spreadsheet experience built over **10 development phases**. The module lives entirely within `apps/web/src/multitable/` with zero modifications to existing MetaSheet2 backend, openapi, or routing code.
+The multi-table module delivers a complete, self-contained Feishu/Airtable-style spreadsheet experience built over **11 development phases**. The module lives entirely within `apps/web/src/multitable/` with zero modifications to existing MetaSheet2 backend, openapi, or routing code.
 
 | Metric | Value |
 |--------|-------|
@@ -17,13 +17,14 @@ The multi-table module delivers a complete, self-contained Feishu/Airtable-style
 | Components (Vue SFC) | 21 |
 | Composables | 4 |
 | API client methods | 25 |
-| Type definitions | ~276 lines |
-| Total source LOC | ~4,687 |
-| Test files | 13 |
-| Total tests | 139 |
-| Total test LOC | ~1,726 |
+| Type definitions | ~280 lines |
+| Total source LOC | ~4,800 |
+| Test files | 14 |
+| Total tests | 157 |
+| Total test LOC | ~1,870 |
 | View types | 5 (grid, form, kanban, gallery, calendar) |
-| Phases completed | 10/10 |
+| Field types | 9 (string, number, boolean, date, formula, select, link, lookup, rollup) |
+| Phases completed | 11/11 |
 
 ---
 
@@ -216,6 +217,16 @@ Comment thread management: load, add, resolve comments with loading/error states
 | Row expand inline preview | MetaGridTable |
 | Print-friendly CSS (@media print) | MetaGridTable, MultitableWorkbench |
 
+### Phase 11 — Final Polish
+| Feature | Component |
+|---------|-----------|
+| Print button | MetaToolbar, MultitableWorkbench |
+| Row density toggle (compact/normal/expanded) | MetaToolbar, MetaGridTable, MultitableWorkbench |
+| Column auto-fit | MetaToolbar, MultitableWorkbench |
+| Date field type (formal) | types.ts, MetaCellEditor, MetaCellRenderer, MetaFieldManager |
+| Date filter operators (before/after) | useMultitableGrid |
+| Toolbar accessible from all view types | MultitableWorkbench |
+
 ---
 
 ## 6. Complete Feature Matrix
@@ -262,6 +273,12 @@ Comment thread management: load, add, resolve comments with loading/error states
 | 38 | Frozen columns | 10 | Done |
 | 39 | Row expand inline preview | 10 | Done |
 | 40 | Print-friendly CSS | 10 | Done |
+| 41 | Print button | 11 | Done |
+| 42 | Row density toggle | 11 | Done |
+| 43 | Column auto-fit | 11 | Done |
+| 44 | Date field type (formal) | 11 | Done |
+| 45 | Date filter operators | 11 | Done |
+| 46 | Toolbar for all view types | 11 | Done |
 
 ---
 
@@ -281,8 +298,9 @@ Comment thread management: load, add, resolve comments with loading/error states
  ✓ multitable-phase8.spec.ts           13 tests
  ✓ multitable-phase9.spec.ts           17 tests
  ✓ multitable-phase10.spec.ts          15 tests
+ ✓ multitable-phase11.spec.ts          18 tests
 ─────────────────────────────────────────────
- Total                                139 tests  ✓ all passing
+ Total                                157 tests  ✓ all passing
 ```
 
 ### Test Coverage by Domain
@@ -302,6 +320,7 @@ Comment thread management: load, add, resolve comments with loading/error states
 | ARIA/skeleton/clipboard | 13 | multitable-phase8.spec.ts |
 | Import/reorder/formatting | 17 | multitable-phase9.spec.ts |
 | Frozen/expand/print | 15 | multitable-phase10.spec.ts |
+| Print/density/date/auto-fit | 18 | multitable-phase11.spec.ts |
 
 ---
 
@@ -309,7 +328,7 @@ Comment thread management: load, add, resolve comments with loading/error states
 
 | Component | Lines | Role |
 |-----------|-------|------|
-| MultitableWorkbench.vue | 579 | Top-level orchestrator |
+| MultitableWorkbench.vue | ~600 | Top-level orchestrator |
 | useMultitableGrid.ts | 454 | Grid state management |
 | MetaGridTable.vue | 443 | Main data grid |
 | MultitableApiClient | 285 | API abstraction layer |
@@ -336,7 +355,7 @@ Comment thread management: load, add, resolve comments with loading/error states
 | useMultitableComments.ts | 64 | Comments composable |
 | useMultitableCapabilities.ts | 60 | Capability composable |
 | index.ts | 43 | Public exports |
-| **Total** | **4,687** | |
+| **Total** | **~4,800** | |
 
 ---
 
@@ -389,7 +408,8 @@ Throughout all 10 phases, the following constraints were strictly followed:
 | 7 | `094a3fdf6` | Search, perf, keyboard legend, date editing |
 | 8 | `5014ff6b1` | ARIA accessibility, skeleton, clipboard |
 | 9 | `de615c89f` | Import modal, column reorder, conditional formatting |
-| 10 | (pending) | Frozen columns, row expand, print CSS |
+| 10 | `1b49e184d` | Frozen columns, row expand, print CSS |
+| 11 | (pending) | Print button, row density, date field, column auto-fit |
 
 ---
 

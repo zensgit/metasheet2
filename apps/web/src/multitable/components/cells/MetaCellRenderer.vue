@@ -3,6 +3,11 @@
     <!-- string / formula -->
     <template v-if="field.type === 'string' || field.type === 'formula'">{{ displayValue }}</template>
 
+    <!-- date -->
+    <template v-else-if="field.type === 'date'">
+      <span class="meta-cell-renderer__date">{{ dateDisplay }}</span>
+    </template>
+
     <!-- number -->
     <template v-else-if="field.type === 'number'">{{ displayValue }}</template>
 
@@ -42,6 +47,16 @@ const displayValue = computed(() => {
   if (v === null || v === undefined) return ''
   if (Array.isArray(v)) return v.join(', ')
   return String(v)
+})
+
+const dateDisplay = computed(() => {
+  const v = props.value
+  if (v === null || v === undefined || v === '') return ''
+  try {
+    const d = new Date(String(v))
+    if (isNaN(d.getTime())) return String(v)
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+  } catch { return String(v) }
 })
 
 const selectTags = computed(() => {
@@ -85,6 +100,7 @@ const conditionalClass = computed(() => {
   display: inline-block; padding: 1px 6px; background: #ecf5ff;
   color: #409eff; border-radius: 3px; font-size: 11px; margin-right: 4px;
 }
+.meta-cell-renderer__date { color: #606266; }
 .meta-cell-renderer--empty { color: #ccc; }
 .meta-cell-renderer--positive { color: #67c23a; }
 .meta-cell-renderer--negative { color: #f56c6c; }

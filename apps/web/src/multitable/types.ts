@@ -7,11 +7,14 @@ export type MetaFieldType =
   | 'string'
   | 'number'
   | 'boolean'
+  | 'date'
   | 'formula'
   | 'select'
   | 'link'
   | 'lookup'
   | 'rollup'
+
+export type RowDensity = 'compact' | 'normal' | 'expanded'
 
 // --- Core entities ---
 export interface MetaBase {

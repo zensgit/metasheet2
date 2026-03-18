@@ -78,9 +78,9 @@
 import { ref } from 'vue'
 import type { MetaField, MetaFieldType } from '../types'
 
-const FIELD_TYPES: MetaFieldType[] = ['string', 'number', 'boolean', 'select', 'link', 'formula', 'lookup', 'rollup']
+const FIELD_TYPES: MetaFieldType[] = ['string', 'number', 'boolean', 'date', 'select', 'link', 'formula', 'lookup', 'rollup']
 const FIELD_ICONS: Record<string, string> = {
-  string: 'Aa', number: '#', boolean: '\u2611', select: '\u25CF',
+  string: 'Aa', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF',
   link: '\u21C4', lookup: '\u2197', rollup: '\u03A3', formula: 'fx',
 }
 

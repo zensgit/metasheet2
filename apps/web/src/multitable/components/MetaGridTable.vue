@@ -1,5 +1,5 @@
 <template>
-  <div class="meta-grid" tabindex="0" role="grid" aria-label="Data grid" @keydown="onKeydown">
+  <div class="meta-grid" :class="[rowDensity ? `meta-grid--${rowDensity}` : '']" tabindex="0" role="grid" aria-label="Data grid" @keydown="onKeydown">
     <div v-if="enableMultiSelect && selectedIds.size > 0" class="meta-grid__bulk-bar">
       <span class="meta-grid__bulk-count">{{ selectedIds.size }} selected</span>
       <button v-if="canDelete" class="meta-grid__bulk-btn meta-grid__bulk-btn--danger" aria-label="Delete selected records" @click="onBulkDelete">Delete selected</button>
@@ -164,13 +164,13 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import type { MetaField, MetaRecord } from '../types'
+import type { MetaField, MetaRecord, RowDensity } from '../types'
 import type { SortRule } from '../composables/useMultitableGrid'
 import MetaCellRenderer from './cells/MetaCellRenderer.vue'
 import MetaCellEditor from './cells/MetaCellEditor.vue'
 import MetaFieldHeader from './MetaFieldHeader.vue'
 
-const EDITABLE = new Set(['string', 'number', 'boolean', 'select', 'link'])
+const EDITABLE = new Set(['string', 'number', 'boolean', 'date', 'select', 'link'])
 
 interface EditingCell { recordId: string; fieldId: string; value: unknown }
 
@@ -189,6 +189,7 @@ const props = defineProps<{
   enableMultiSelect?: boolean
   groupField?: MetaField | null
   searchText?: string
+  rowDensity?: RowDensity
 }>()
 
 const emit = defineEmits<{
@@ -428,6 +429,11 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__group-toggle { display: inline-block; width: 16px; font-size: 10px; color: #999; }
 .meta-grid__group-label { margin-right: 6px; }
 .meta-grid__group-count { font-weight: 400; color: #999; font-size: 12px; }
+.meta-grid--compact .meta-grid__cell { padding: 3px 8px; font-size: 12px; }
+.meta-grid--compact .meta-grid__row { contain-intrinsic-size: auto 28px; }
+.meta-grid--compact .meta-grid__row-num { padding: 3px 4px; font-size: 11px; }
+.meta-grid--expanded .meta-grid__cell { padding: 10px 12px; }
+.meta-grid--expanded .meta-grid__row { contain-intrinsic-size: auto 52px; }
 @media print {
   .meta-grid { overflow: visible !important; height: auto !important; }
   .meta-grid__table-wrap { overflow: visible !important; }

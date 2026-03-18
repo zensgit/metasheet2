@@ -1,8 +1,19 @@
 <template>
   <div class="meta-cell-editor">
+    <!-- date field type -->
+    <input
+      v-if="field.type === 'date'"
+      ref="inputRef"
+      class="meta-cell-editor__input"
+      type="date"
+      :value="modelValue ?? ''"
+      @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
+      @keydown.enter="emit('confirm')"
+      @keydown.escape="emit('cancel')"
+    />
     <!-- string: date-like -->
     <input
-      v-if="field.type === 'string' && isDateLike"
+      v-else-if="field.type === 'string' && isDateLike"
       ref="inputRef"
       class="meta-cell-editor__input"
       type="date"

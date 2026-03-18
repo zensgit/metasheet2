@@ -18,9 +18,10 @@
       @update-sort="onUpdateSort" @add-filter="grid.addFilterRule" @update-filter="grid.updateFilterRule"
       @remove-filter="grid.removeFilterRule" @clear-filters="onClearFilters" @set-conjunction="onSetConjunction"
       :group-field-id="grid.groupFieldId.value"
-      :search-text="searchText" :total-rows="grid.page.value.total"
+      :search-text="searchText" :total-rows="grid.page.value.total" :row-density="rowDensity"
       @apply-sort-filter="grid.applySortFilter" @add-record="onAddRecord" @undo="grid.undo" @redo="grid.redo"
       @set-group-field="grid.setGroupField" @export-csv="onExportCsv" @import="showImportModal = true" @update:search-text="searchText = $event"
+      @print="onPrint" @set-row-density="rowDensity = $event" @auto-fit-columns="onAutoFitColumns"
     />
     <div class="mt-workbench__content">
       <div class="mt-workbench__main">
@@ -60,7 +61,7 @@
           :can-delete="caps.canDeleteRecord.value" :column-widths="grid.columnWidths.value"
           :enable-multi-select="caps.canDeleteRecord.value"
           :group-field="grid.groupField.value"
-          :search-text="searchText"
+          :search-text="searchText" :row-density="rowDensity"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
           @bulk-delete="onBulkDelete" @reorder-field="onReorderField"
@@ -117,7 +118,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import type { MetaField, MetaRecord, MetaFieldType } from '../types'
+import type { MetaField, MetaRecord, MetaFieldType, RowDensity } from '../types'
 import type { MultitableRole } from '../composables/useMultitableCapabilities'
 import type { SortRule, FilterConjunction } from '../composables/useMultitableGrid'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
@@ -165,6 +166,7 @@ const commentDraft = ref('')
 const searchText = ref('')
 const showShortcuts = ref(false)
 const showImportModal = ref(false)
+const rowDensity = ref<RowDensity>('normal')
 const formSubmitting = ref(false)
 const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
@@ -396,6 +398,24 @@ async function onCreateBase(name: string) {
     bases.value.push(res.base)
     await onSelectBase(res.base.id)
   } catch (e: any) { showError(e.message ?? 'Failed to create base') }
+}
+
+// --- Print ---
+function onPrint() { window.print() }
+
+// --- Column auto-fit ---
+function onAutoFitColumns() {
+  const fields = grid.visibleFields.value
+  const rows = grid.rows.value
+  for (const f of fields) {
+    let maxLen = f.name.length
+    for (const r of rows) {
+      const v = r.data[f.id]
+      if (v != null) maxLen = Math.max(maxLen, String(v).length)
+    }
+    const width = Math.max(80, Math.min(400, maxLen * 8 + 24))
+    grid.setColumnWidth(f.id, width)
+  }
 }
 
 // --- Field reorder ---

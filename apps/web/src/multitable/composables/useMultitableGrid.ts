@@ -80,6 +80,14 @@ export const FILTER_OPERATORS_BY_TYPE: Record<string, Array<{ value: string; lab
     { value: 'isEmpty', label: 'is empty' },
     { value: 'isNotEmpty', label: 'is not empty' },
   ],
+  date: [
+    { value: 'is', label: 'is' },
+    { value: 'isNot', label: 'is not' },
+    { value: 'greater', label: 'after' },
+    { value: 'less', label: 'before' },
+    { value: 'isEmpty', label: 'is empty' },
+    { value: 'isNotEmpty', label: 'is not empty' },
+  ],
   link: [
     { value: 'isEmpty', label: 'is empty' },
     { value: 'isNotEmpty', label: 'is not empty' },

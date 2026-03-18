@@ -100,6 +100,18 @@
         <button v-if="searchText" class="meta-toolbar__search-clear" aria-label="Clear search" @click="emit('update:search-text', '')">&times;</button>
       </div>
       <span v-if="totalRows !== undefined" class="meta-toolbar__row-count">{{ totalRows }} rows</span>
+      <!-- Row density -->
+      <div class="meta-toolbar__dropdown">
+        <button class="meta-toolbar__btn" title="Row height" aria-label="Row height" @click="showDensityPanel = !showDensityPanel">&#x2195; Rows</button>
+        <div v-if="showDensityPanel" class="meta-toolbar__panel meta-toolbar__panel--density">
+          <label v-for="d in DENSITIES" :key="d.value" class="meta-toolbar__field-toggle">
+            <input type="radio" name="density" :checked="rowDensity === d.value" @change="emit('set-row-density', d.value); showDensityPanel = false" />
+            <span>{{ d.label }}</span>
+          </label>
+        </div>
+      </div>
+      <button class="meta-toolbar__btn" title="Auto-fit columns" aria-label="Auto-fit columns" @click="emit('auto-fit-columns')">&#x2194; Fit</button>
+      <button class="meta-toolbar__btn" title="Print" aria-label="Print grid" @click="emit('print')">&#x1F5A8; Print</button>
       <button v-if="canCreateRecord" class="meta-toolbar__btn" title="Import records" aria-label="Import records" @click="emit('import')">&#x2B71; Import</button>
       <button class="meta-toolbar__btn" title="Export CSV" @click="emit('export-csv')">&#x2B73; Export</button>
       <button v-if="canCreateRecord" class="meta-toolbar__btn meta-toolbar__btn--primary" @click="emit('add-record')">+ New Record</button>
@@ -109,7 +121,7 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import type { MetaField } from '../types'
+import type { MetaField, RowDensity } from '../types'
 import type { SortRule, FilterRule, FilterConjunction } from '../composables/useMultitableGrid'
 import { FILTER_OPERATORS_BY_TYPE } from '../composables/useMultitableGrid'
 
@@ -125,6 +137,7 @@ const props = defineProps<{
   groupFieldId?: string | null
   searchText?: string
   totalRows?: number
+  rowDensity?: RowDensity
 }>()
 
 const emit = defineEmits<{
@@ -145,20 +158,34 @@ const emit = defineEmits<{
   (e: 'export-csv'): void
   (e: 'import'): void
   (e: 'update:search-text', text: string): void
+  (e: 'print'): void
+  (e: 'set-row-density', density: RowDensity): void
+  (e: 'auto-fit-columns'): void
 }>()
 
 const showFieldPicker = ref(false)
 const showSortPanel = ref(false)
 const showFilterPanel = ref(false)
 const showGroupPanel = ref(false)
-const GROUPABLE_TYPES = new Set(['select', 'string', 'boolean', 'number'])
+const showDensityPanel = ref(false)
+const DENSITIES: Array<{ value: RowDensity; label: string }> = [
+  { value: 'compact', label: 'Compact' },
+  { value: 'normal', label: 'Normal' },
+  { value: 'expanded', label: 'Expanded' },
+]
+const GROUPABLE_TYPES = new Set(['select', 'string', 'boolean', 'number', 'date'])
 const groupableFields = computed(() => props.fields.filter((f) => GROUPABLE_TYPES.has(f.type)))
 const hiddenCount = computed(() => props.hiddenFieldIds.length)
 const UNARY = new Set(['isEmpty', 'isNotEmpty'])
 const isUnaryOp = (op: string) => UNARY.has(op)
 const getFieldType = (id: string) => props.fields.find((f) => f.id === id)?.type ?? 'string'
 const getOperatorsForField = (id: string) => FILTER_OPERATORS_BY_TYPE[getFieldType(id)] ?? FILTER_OPERATORS_BY_TYPE.string
-const getInputType = (id: string) => getFieldType(id) === 'number' ? 'number' : 'text'
+const getInputType = (id: string) => {
+  const t = getFieldType(id)
+  if (t === 'number') return 'number'
+  if (t === 'date') return 'date'
+  return 'text'
+}
 
 function onSortFieldChange(idx: number, fieldId: string) { emit('update-sort', idx, { ...props.sortRules[idx], fieldId }) }
 function onSortDirChange(idx: number, direction: 'asc'|'desc') { emit('update-sort', idx, { ...props.sortRules[idx], direction }) }
@@ -196,6 +223,7 @@ function onFilterValueChange(idx: number, value: string) {
 .meta-toolbar__dropdown { position: relative; }
 .meta-toolbar__panel { position: absolute; top: 100%; left: 0; z-index: 20; min-width: 200px; background: #fff; border: 1px solid #ddd; border-radius: 4px; box-shadow: 0 4px 12px rgba(0,0,0,.1); padding: 8px; margin-top: 4px; }
 .meta-toolbar__panel--filter { min-width: 420px; }
+.meta-toolbar__panel--density { min-width: 120px; }
 .meta-toolbar__field-toggle { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; cursor: pointer; }
 .meta-toolbar__sort-rule, .meta-toolbar__filter-rule { display: flex; gap: 4px; margin-bottom: 4px; align-items: center; }
 .meta-toolbar__sort-rule select, .meta-toolbar__filter-rule select { padding: 2px 6px; font-size: 12px; border: 1px solid #ddd; border-radius: 3px; }
