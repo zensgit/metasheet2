@@ -56,6 +56,20 @@
         </button>
       </section>
 
+      <section v-if="currentSession" class="session-center__actions-row">
+        <p class="session-center__status-text">
+          {{ otherActiveSessionCount > 0 ? `当前有 ${otherActiveSessionCount} 个其他活跃会话` : '当前只有本设备会话' }}
+        </p>
+        <button
+          class="session-center__button"
+          type="button"
+          :disabled="!currentSessionId || revokingOthers || otherActiveSessionCount === 0"
+          @click="void revokeOtherSessions()"
+        >
+          {{ revokingOthers ? '退出中...' : '退出其他会话' }}
+        </button>
+      </section>
+
       <div v-if="loading && sessions.length === 0" class="session-center__empty">
         正在加载会话列表...
       </div>
@@ -157,15 +171,19 @@ const auth = useAuth()
 const loading = ref(false)
 const heartbeatLoading = ref(false)
 const busySessionId = ref<string | null>(null)
+const revokingOthers = ref(false)
 const sessions = ref<SessionRecord[]>([])
 const currentSessionId = ref<string | null>(null)
 const status = ref('')
 const statusTone = ref<StatusTone>('info')
 let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
 
-const accountEmail = computed(() => auth.getAccessSnapshot().email)
+const accountEmail = computed(() => auth.getAccessSnapshot().user.email)
 const activeSessionCount = computed(() => sessions.value.filter((session) => !session.revokedAt).length)
 const revokedSessionCount = computed(() => sessions.value.filter((session) => Boolean(session.revokedAt)).length)
+const otherActiveSessionCount = computed(() =>
+  sessions.value.filter((session) => !session.revokedAt && session.id !== currentSessionId.value).length,
+)
 const currentSession = computed(() => sessions.value.find((session) => session.id === currentSessionId.value) ?? null)
 
 function setStatus(message: string, tone: StatusTone = 'info') {
@@ -356,6 +374,47 @@ async function revokeSession(sessionId: string) {
   }
 }
 
+async function revokeOtherSessions() {
+  revokingOthers.value = true
+  setStatus('')
+
+  try {
+    const response = await apiFetch('/api/auth/sessions/others/logout', {
+      method: 'POST',
+    })
+    const payload = await response.json().catch(() => null)
+
+    if (response.status === 401) {
+      await redirectToLogin()
+      return
+    }
+
+    if (!response.ok) {
+      setStatus(extractError(payload) || '退出其他会话失败', 'error')
+      return
+    }
+
+    const data = payload && typeof payload === 'object' ? (payload as Record<string, unknown>).data : null
+    const record = data && typeof data === 'object' ? data as Record<string, unknown> : {}
+    const revokedCount = Number.parseInt(
+      typeof record.revokedCount === 'string' ? record.revokedCount : String(record.revokedCount ?? ''),
+      10,
+    )
+
+    if (Number.isFinite(revokedCount) && revokedCount > 0) {
+      setStatus(`已退出 ${revokedCount} 个其他会话，当前会话保持在线`)
+    } else {
+      setStatus('暂无其他会话可退出')
+    }
+
+    await loadSessions()
+  } catch {
+    setStatus('退出其他会话失败，请稍后重试', 'error')
+  } finally {
+    revokingOthers.value = false
+  }
+}
+
 onMounted(() => {
   void loadSessions()
 })
@@ -484,6 +543,19 @@ onBeforeUnmount(() => {
 }
 
 .session-center__current-meta {
+  margin: 0;
+  color: #475569;
+}
+
+.session-center__actions-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.session-center__status-text {
   margin: 0;
   color: #475569;
 }

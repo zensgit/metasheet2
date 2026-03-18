@@ -2,7 +2,7 @@ import { computed, reactive, readonly } from 'vue'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
 
-export type ProductMode = 'platform' | 'attendance' | 'plm-workbench'
+export type ProductMode = 'platform' | 'attendance'
 
 export interface ProductFeatures {
   attendance: boolean
@@ -81,7 +81,7 @@ function parseOverrideFeatures(): Partial<ProductFeatures> {
   if (typeof localStorage === 'undefined') return {}
 
   const modeRaw = localStorage.getItem('metasheet_product_mode')
-  const mode: ProductMode | undefined = modeRaw === 'attendance' || modeRaw === 'platform' || modeRaw === 'plm-workbench'
+  const mode: ProductMode | undefined = modeRaw === 'attendance' || modeRaw === 'platform'
     ? modeRaw
     : undefined
 
@@ -101,9 +101,7 @@ function parseOverrideFeatures(): Partial<ProductFeatures> {
 
 function normalizeMode(value: unknown): ProductMode | undefined {
   if (value === 'attendance' || value === 'platform') return value
-  if (value === 'plm-workbench' || value === 'plmWorkbench') return 'plm-workbench'
   if (value === 'attendance-focused') return 'attendance'
-  if (value === 'plm-focused') return 'plm-workbench'
   return undefined
 }
 
@@ -253,6 +251,7 @@ async function loadProductFeatures(
     let pluginPayload: any = null
     let backendFeatures: Partial<ProductFeatures> = {}
     const { ensureToken, getToken, bootstrapSession } = useAuth()
+    let sessionStatus = 0
 
     try {
       const currentToken = getToken()
@@ -262,10 +261,27 @@ async function loadProductFeatures(
       }
 
       if (!options.skipSessionProbe && getToken()) {
-        const session = await bootstrapSession()
-        if (session.ok && session.payload) {
-          mePayload = session.payload
-          backendFeatures = extractFeaturesFromPayload(mePayload)
+        const tokenBefore = getToken()
+        const probe = async () => {
+          const session = await bootstrapSession()
+          sessionStatus = session.status ?? 0
+          if (session.ok && session.payload) {
+            mePayload = session.payload
+            backendFeatures = extractFeaturesFromPayload(mePayload)
+            return true
+          }
+          return false
+        }
+
+        const firstAttemptOk = await probe()
+        if (!firstAttemptOk && sessionStatus === 401) {
+          await ensureToken()
+          const tokenAfterRetry = getToken()
+          if (typeof tokenAfterRetry === 'string' && tokenAfterRetry.length > 0) {
+            await probe()
+          } else if (tokenBefore && !tokenAfterRetry) {
+            await probe()
+          }
         }
       }
 
@@ -305,13 +321,8 @@ function isAttendanceFocused(): boolean {
   return state.features.mode === 'attendance' && state.features.attendance
 }
 
-function isPlmWorkbenchFocused(): boolean {
-  return state.features.mode === 'plm-workbench'
-}
-
 function resolveHomePath(): string {
   if (isAttendanceFocused()) return '/attendance'
-  if (isPlmWorkbenchFocused()) return '/plm'
   return '/grid'
 }
 
@@ -323,7 +334,6 @@ export function useFeatureFlags() {
     loadProductFeatures,
     hasFeature,
     isAttendanceFocused,
-    isPlmWorkbenchFocused,
     resolveHomePath,
   }
 }

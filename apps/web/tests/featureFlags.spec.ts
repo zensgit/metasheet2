@@ -71,7 +71,7 @@ describe('featureFlags', () => {
     expect(features).toMatchObject({
       workflow: true,
       attendanceAdmin: true,
-      mode: 'plm-workbench',
+      mode: 'platform',
     })
     expect(localStorage.getItem('auth_token')).toBe('dev-bootstrap-token')
     expect(localStorage.getItem('jwt')).toBe('dev-bootstrap-token')

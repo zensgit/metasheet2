@@ -204,6 +204,12 @@ async function submit(): Promise<void> {
     const data = payload.data && typeof payload.data === 'object'
       ? payload.data as Record<string, unknown>
       : {}
+    const acceptedUser = data.user && typeof data.user === 'object'
+      ? (data.user as Record<string, unknown>)
+      : undefined
+    const acceptedFeatures = data.features && typeof data.features === 'object'
+      ? (data.features as Record<string, unknown>)
+      : undefined
     const acceptedToken = typeof data.token === 'string' ? data.token : ''
 
     if (!response.ok || payload.success !== true || !acceptedToken) {
@@ -223,8 +229,8 @@ async function submit(): Promise<void> {
     primeSession({
       success: true,
       data: {
-        user: data.user,
-        features: data.features,
+        user: acceptedUser,
+        features: acceptedFeatures,
       },
     })
     await flags.loadProductFeatures(true)

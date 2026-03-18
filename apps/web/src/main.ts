@@ -4,182 +4,161 @@
 import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
+import ElementPlus from 'element-plus'
+import 'element-plus/dist/index.css'
 import App from './App.vue'
+import { AppRouteNames, ROUTE_PATHS } from './router/types'
 import { useAuth } from './composables/useAuth'
 import { useFeatureFlags } from './stores/featureFlags'
 
-const coreRoutes: RouteRecordRaw[] = [
+// Import views
+import GridView from './views/GridView.vue'
+import KanbanView from './views/KanbanView.vue'
+import CalendarView from './views/CalendarView.vue'
+import GalleryView from './views/GalleryView.vue'
+import FormView from './views/FormView.vue'
+import PlmProductView from './views/PlmProductView.vue'
+import SpreadsheetsView from './views/SpreadsheetsView.vue'
+import SpreadsheetDetailView from './views/SpreadsheetDetailView.vue'
+import PluginManagerView from './views/PluginManagerView.vue'
+import PluginViewHost from './views/PluginViewHost.vue'
+import AttendanceExperienceView from './views/attendance/AttendanceExperienceView.vue'
+import HomeRedirect from './views/HomeRedirect.vue'
+import LoginView from './views/LoginView.vue'
+import AcceptInviteView from './views/AcceptInviteView.vue'
+import UserManagementView from './views/UserManagementView.vue'
+import SessionCenterView from './views/SessionCenterView.vue'
+import RoleManagementView from './views/RoleManagementView.vue'
+import PermissionManagementView from './views/PermissionManagementView.vue'
+import AdminAuditView from './views/AdminAuditView.vue'
+import WorkflowDesigner from './views/WorkflowDesigner.vue'
+
+const routes: RouteRecordRaw[] = [
   {
     path: '/',
     name: 'home',
-    component: () => import('./views/HomeRedirect.vue'),
-    meta: { title: 'Home', hideNavbar: true }
+    component: HomeRedirect,
+    meta: { title: 'Home', hideNavbar: true, requiresAuth: true },
   },
   {
-    path: '/login',
-    name: 'login',
-    component: () => import('./views/LoginView.vue'),
-    meta: { title: 'Login', hideNavbar: true, requiresAuth: false }
+    path: ROUTE_PATHS.LOGIN,
+    name: AppRouteNames.LOGIN,
+    component: LoginView,
+    meta: { title: 'Sign In', hideNavbar: true, requiresGuest: true },
   },
   {
     path: '/accept-invite',
     name: 'accept-invite',
-    component: () => import('./views/AcceptInviteView.vue'),
-    meta: { title: 'Accept Invite', hideNavbar: true, requiresAuth: false }
+    component: AcceptInviteView,
+    meta: { title: 'Accept Invite', hideNavbar: true, requiresAuth: false },
   },
-]
-
-const workbenchRoutes: RouteRecordRaw[] = [
   {
     path: '/grid',
     name: 'grid',
-    component: () => import('./views/GridView.vue'),
+    component: GridView,
     meta: { title: 'Grid View' }
   },
   {
     path: '/kanban',
     name: 'kanban',
-    component: () => import('./views/KanbanView.vue'),
+    component: KanbanView,
     meta: { title: 'Kanban View' }
   },
   {
     path: '/calendar',
     name: 'calendar',
-    component: () => import('./views/CalendarView.vue'),
+    component: CalendarView,
     meta: { title: 'Calendar View' }
   },
   {
     path: '/gallery',
     name: 'gallery',
-    component: () => import('./views/GalleryView.vue'),
+    component: GalleryView,
     meta: { title: 'Gallery View' }
   },
   {
     path: '/form',
     name: 'form',
-    component: () => import('./views/FormView.vue'),
+    component: FormView,
     meta: { title: 'Form View' }
   },
-]
-
-const attendanceRoutes: RouteRecordRaw[] = [
   {
     path: '/attendance',
     name: 'attendance',
-    component: () => import('./views/attendance/AttendanceExperienceView.vue'),
+    component: AttendanceExperienceView,
     meta: { title: 'Attendance', requiredFeature: 'attendance' }
   },
-]
-
-const dataRoutes: RouteRecordRaw[] = [
   {
     path: '/spreadsheets',
     name: 'spreadsheet-list',
-    component: () => import('./views/SpreadsheetsView.vue'),
+    component: SpreadsheetsView,
     meta: { title: 'Spreadsheets' }
   },
   {
     path: '/spreadsheets/:id',
     name: 'spreadsheet-detail',
-    component: () => import('./views/SpreadsheetDetailView.vue'),
+    component: SpreadsheetDetailView,
     meta: { title: 'Spreadsheet' }
-  },
-  {
-    path: '/workflows',
-    name: 'workflow-list',
-    component: () => import('./views/WorkflowHubView.vue'),
-    meta: { title: 'Workflows', requiredFeature: 'workflow' }
   },
   {
     path: '/workflows/designer/:id?',
     name: 'workflow-designer',
-    component: () => import('./views/WorkflowDesigner.vue'),
+    component: WorkflowDesigner,
     meta: { title: 'Workflow Designer', requiredFeature: 'workflow' }
   },
   {
-    path: '/approvals',
-    name: 'approval-list',
-    component: () => import('./views/ApprovalInboxView.vue'),
-    meta: { title: 'Approvals' }
-  },
-]
-
-const plmRoutes: RouteRecordRaw[] = [
-  {
     path: '/plm',
     name: 'plm',
-    component: () => import('./views/PlmProductView.vue'),
+    component: PlmProductView,
     meta: { title: 'PLM' }
   },
   {
-    path: '/plm/audit',
-    name: 'plm-audit',
-    component: () => import('./views/PlmAuditView.vue'),
-    meta: { title: 'PLM Audit' }
-  },
-]
-
-const adminRoutes: RouteRecordRaw[] = [
-  {
     path: '/admin/users',
     name: 'user-management',
-    component: () => import('./views/UserManagementView.vue'),
+    component: UserManagementView,
     meta: { title: 'User Management' }
   },
   {
     path: '/settings',
     name: 'user-settings',
-    component: () => import('./views/SessionCenterView.vue'),
+    component: SessionCenterView,
     meta: { title: 'My Sessions' }
   },
   {
     path: '/admin/roles',
     name: 'role-management',
-    component: () => import('./views/RoleManagementView.vue'),
+    component: RoleManagementView,
     meta: { title: 'Role Management' }
   },
   {
     path: '/admin/permissions',
     name: 'permission-management',
-    component: () => import('./views/PermissionManagementView.vue'),
+    component: PermissionManagementView,
     meta: { title: 'Permission Management' }
   },
   {
     path: '/admin/audit',
     name: 'admin-audit',
-    component: () => import('./views/AdminAuditView.vue'),
+    component: AdminAuditView,
     meta: { title: 'Admin Audit' }
   },
   {
     path: '/admin/plugins',
     name: 'plugin-manager',
-    component: () => import('./views/PluginManagerView.vue'),
+    component: PluginManagerView,
     meta: { title: 'Plugins', requiredFeature: 'attendanceAdmin' }
   },
-]
-
-const fallbackRoutes: RouteRecordRaw[] = [
   {
     path: '/p/:plugin/:viewId',
     name: 'plugin-view',
-    component: () => import('./views/PluginViewHost.vue'),
-    meta: { title: 'Plugin' }
+    component: PluginViewHost,
+    meta: { title: 'Plugin', requiresAuth: true },
   },
   {
     path: '/:pathMatch(.*)*',
     name: 'not-found',
     redirect: '/',
   }
-]
-
-const routes: RouteRecordRaw[] = [
-  ...coreRoutes,
-  ...workbenchRoutes,
-  ...attendanceRoutes,
-  ...dataRoutes,
-  ...plmRoutes,
-  ...adminRoutes,
-  ...fallbackRoutes,
 ]
 
 // Create router
@@ -212,7 +191,12 @@ router.beforeEach(async (to, _from, next) => {
         } catch {
           // Fallback to a stable shell route when features are temporarily unavailable.
         }
-        return next(flags.resolveHomePath())
+        const redirect =
+          typeof to.query?.redirect === 'string'
+            && to.query.redirect.trim().length > 0
+            ? to.query.redirect
+            : ''
+        return next(redirect || flags.resolveHomePath())
       }
     }
     return next()
@@ -270,15 +254,6 @@ router.beforeEach(async (to, _from, next) => {
         return next('/attendance')
       }
     }
-
-    if (typeof flags.isPlmWorkbenchFocused === 'function' && flags.isPlmWorkbenchFocused()) {
-      const path = String(to.path || '')
-      const allowedPrefixes = ['/plm', '/workflows', '/approvals']
-      const allowed = allowedPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
-      if (!allowed) {
-        return next('/plm')
-      }
-    }
   } catch {
     // If guard fails (network/offline), don't block navigation.
   }
@@ -288,6 +263,7 @@ router.beforeEach(async (to, _from, next) => {
 // Create and mount app
 const app = createApp(App)
 
+app.use(ElementPlus)
 app.use(router)
 
 app.mount('#app')
