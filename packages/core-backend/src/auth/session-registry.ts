@@ -227,6 +227,37 @@ export async function touchUserSession(
   }
 }
 
+export async function revokeOtherUserSessions(
+  userId: string,
+  currentSessionId: string,
+  options: {
+    revokedBy: string
+    reason: string
+  },
+): Promise<number> {
+  try {
+    const result = await query<{ revoked_count: string }>(
+      `UPDATE user_sessions
+       SET revoked_at = NOW(),
+           revoked_by = $3,
+           revoke_reason = $4,
+           updated_at = NOW()
+       WHERE user_id = $1
+         AND id <> $2
+         AND revoked_at IS NULL
+       RETURNING id`,
+      [userId, currentSessionId, options.revokedBy, options.reason],
+    )
+
+    return result.rows.length
+  } catch (error) {
+    if (isDatabaseSchemaError(error)) {
+      return 0
+    }
+    throw error
+  }
+}
+
 export async function isUserSessionActive(userId: string, sessionId: string): Promise<boolean> {
   try {
     const result = await query<{ active: boolean }>(

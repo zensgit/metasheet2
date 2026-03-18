@@ -5,14 +5,118 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import { Router } from 'express'
+import { hash } from 'bcryptjs'
 import jwt, { type SignOptions } from 'jsonwebtoken'
 import { authService, type User } from '../auth/AuthService'
+import { buildOnboardingPacket, getAccessPreset } from '../auth/access-presets'
+import { verifyInviteToken } from '../auth/invite-tokens'
+import { getUserSession, listUserSessions, revokeOtherUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
+import { revokeUserSessions } from '../auth/session-revocation'
+import { query } from '../db/pg'
 import { FEATURE_FLAGS } from '../config/flags'
 import { Logger } from '../core/logger'
 
 const logger = new Logger('AuthRouter')
 
 export const authRouter = Router()
+
+type ProductMode = 'platform' | 'attendance'
+
+type ProductFeatures = {
+  attendance: boolean
+  workflow: boolean
+  attendanceAdmin: boolean
+  attendanceImport: boolean
+  mode: ProductMode
+}
+
+type SessionTokenPayload = {
+  sub?: unknown
+  sid?: unknown
+  id?: unknown
+}
+
+type InviteUserRecord = {
+  id: string
+  email: string
+  name: string
+  is_active: boolean | null
+  updated_at: string | Date
+}
+
+type InviteLedgerRecord = {
+  id: string
+  user_id: string
+  email: string
+  preset_id: string | null
+  product_mode: string | null
+  role_id: string | null
+  invited_by: string | null
+  invite_token: string
+  status: string
+  accepted_at: string | Date | null
+  consumed_by: string | null
+  last_sent_at: string | Date | null
+  created_at: string | Date
+  updated_at: string | Date
+}
+
+function normalizeProductMode(value: unknown): ProductMode {
+  return value === 'attendance' || value === 'attendance-focused' ? 'attendance' : 'platform'
+}
+
+function toText(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function normalizeSessionId(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function toPermissionsList(user: User): string[] {
+  return Array.isArray(user.permissions) ? user.permissions : []
+}
+
+function deriveProductFeatures(user: User): ProductFeatures {
+  const permissions = toPermissionsList(user)
+  const isAdmin = user.role === 'admin'
+
+  return {
+    attendance: isAdmin || permissions.some((permission) => permission.startsWith('attendance:')),
+    workflow: FEATURE_FLAGS.workflowEnabled,
+    attendanceAdmin: isAdmin || permissions.includes('attendance:admin'),
+    attendanceImport: isAdmin || permissions.includes('attendance:write'),
+    mode: normalizeProductMode(process.env.PRODUCT_MODE),
+  }
+}
+
+function extractBearerToken(req: Request): string | null {
+  const authHeader = req.headers.authorization
+  return authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null
+}
+
+function extractUserIdFromPayload(
+  payload: SessionTokenPayload | null,
+  user: User,
+): string {
+  const fallback = [payload?.sub, payload?.id, user.id, user.email]
+  for (const candidate of fallback) {
+    const trimmed = toText(candidate)
+    if (trimmed.length > 0) return trimmed
+  }
+  return user.id
+}
+
+function mapInviteUserPayload(user: InviteUserRecord): { id: string; email: string; name: string; isActive: boolean } {
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    isActive: user.is_active === true,
+  }
+}
 
 // ============================================
 // Dev Token (non-production only)
@@ -234,7 +338,8 @@ authRouter.post('/login', loginRateLimiter, async (req: Request, res: Response) 
       success: true,
       data: {
         user: result.user,
-        token: result.token
+        token: result.token,
+        features: deriveProductFeatures(result.user),
       }
     })
   } catch (error) {
@@ -404,12 +509,172 @@ authRouter.get('/verify', async (req: Request, res: Response) => {
 })
 
 /**
+ * 邀请预览
+ */
+authRouter.get('/invite/preview', async (req: Request, res: Response) => {
+  try {
+    const token = typeof req.query.token === 'string' ? req.query.token.trim() : ''
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invite token is required'
+      })
+    }
+
+    const invitePayload = verifyInviteToken(token)
+    if (!invitePayload) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid invite token'
+      })
+    }
+
+    const userRows = await query<InviteUserRecord>(
+      'SELECT id, email, name, is_active, updated_at FROM users WHERE id = $1',
+      [invitePayload.userId],
+    )
+    const user = userRows.rows[0]
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'Invite user not found'
+      })
+    }
+
+    const preset = getAccessPreset(invitePayload.presetId)
+    const onboarding = buildOnboardingPacket({
+      email: user.email,
+      temporaryPassword: null,
+      preset,
+      inviteToken: token,
+    })
+
+    res.json({
+      success: true,
+      data: {
+        user: mapInviteUserPayload(user),
+        onboarding,
+      }
+    })
+  } catch (error) {
+    logger.error('Invite preview error', error instanceof Error ? error : undefined)
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    })
+  }
+})
+
+/**
+ * 接受邀请并设置密码
+ */
+authRouter.post('/invite/accept', async (req: Request, res: Response) => {
+  try {
+    const token = typeof req.body?.token === 'string' ? req.body.token.trim() : ''
+    const password = typeof req.body?.password === 'string' ? req.body.password : ''
+    const name = typeof req.body?.name === 'string' ? sanitizeName(req.body.name) : ''
+
+    if (!token || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Token and password are required'
+      })
+    }
+
+    const invitePayload = verifyInviteToken(token)
+    if (!invitePayload) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid invite token'
+      })
+    }
+
+    const passwordValidation = validatePassword(password)
+    if (!passwordValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        error: 'Password does not meet requirements',
+        details: passwordValidation.errors,
+      })
+    }
+
+    const userRows = await query<InviteUserRecord>(
+      'SELECT id, email, name, is_active, updated_at FROM users WHERE id = $1',
+      [invitePayload.userId],
+    )
+    const user = userRows.rows[0]
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'Invite user not found'
+      })
+    }
+
+    const hashedPassword = await hash(password, Number(process.env.BCRYPT_SALT_ROUNDS || 10))
+    await query<{ rowCount: number }>(
+      'UPDATE users SET password_hash = $1, name = $2, is_active = TRUE, updated_at = NOW() WHERE id = $3 AND email = $4',
+      [hashedPassword, name || user.name, user.id, user.email]
+    )
+
+    const inviteRows = await query<InviteLedgerRecord>(
+      `UPDATE user_invites
+       SET status = 'accepted', accepted_at = NOW(), consumed_by = $2, updated_at = NOW()
+       WHERE id = (SELECT id FROM user_invites WHERE invite_token = $1 ORDER BY updated_at DESC LIMIT 1)
+       RETURNING id, user_id, email, preset_id, product_mode, role_id, invited_by, invite_token, status, accepted_at, consumed_by, last_sent_at, created_at, updated_at`,
+      [token, user.id],
+    )
+    const ledger = inviteRows.rows[0]
+
+    const preset = getAccessPreset(ledger?.preset_id || invitePayload.presetId)
+    const onboarding = buildOnboardingPacket({
+      email: user.email,
+      temporaryPassword: null,
+      preset,
+      inviteToken: token,
+    })
+
+    const result = await (authService.login as (email: string, password: string, options?: { ipAddress: string }) => Promise<{
+      user: User
+      token: string
+    } | null>)(user.email, password, {
+      ipAddress: getClientIP(req),
+    })
+    if (!result) {
+      return res.status(401).json({
+        success: false,
+        error: 'Failed to login after invite acceptance'
+      })
+    }
+
+    await revokeUserSessions(user.id, {
+      updatedBy: user.id,
+      reason: 'invite-accepted',
+    })
+
+    res.json({
+      success: true,
+      data: {
+        ...result,
+        onboarding,
+        features: deriveProductFeatures(result.user),
+      }
+    })
+  } catch (error) {
+    logger.error('Invite accept error', error instanceof Error ? error : undefined)
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    })
+  }
+})
+
+/**
  * 用户信息接口 (需要认证)
  */
 authRouter.get('/me', async (req: Request, res: Response) => {
   try {
-    const authHeader = req.headers.authorization
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null
+    const token = extractBearerToken(req)
 
     if (!token) {
       return res.status(401).json({
@@ -428,33 +693,294 @@ authRouter.get('/me', async (req: Request, res: Response) => {
     }
 
     const authUser = user as User
-    type ProductMode = 'platform' | 'attendance'
-    const normalizeProductMode = (value: unknown): ProductMode => {
-      if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
-      return 'platform'
-    }
-
-    const permissions = Array.isArray(authUser.permissions) ? authUser.permissions : []
-    const attendance = authUser.role === 'admin' || permissions.some((permission) => permission.startsWith('attendance:'))
-    const attendanceAdmin = authUser.role === 'admin' || permissions.includes('attendance:admin')
-    const attendanceImport = attendanceAdmin || permissions.includes('attendance:write')
-    const workflow = FEATURE_FLAGS.workflowEnabled
+    const features = deriveProductFeatures(authUser)
 
     res.json({
       success: true,
       data: {
         user: authUser,
-        features: {
-          attendance,
-          workflow,
-          attendanceAdmin,
-          attendanceImport,
-          mode: normalizeProductMode(process.env.PRODUCT_MODE),
-        },
+        features,
       }
     })
   } catch (error) {
     logger.error('Get user info error', error instanceof Error ? error : undefined)
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    })
+  }
+})
+
+/**
+ * 当前会话用户会话列表
+ */
+authRouter.get('/sessions', async (req: Request, res: Response) => {
+  try {
+    const token = extractBearerToken(req)
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: 'No token provided'
+      })
+    }
+
+    const user = await authService.verifyToken(token)
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid token'
+      })
+    }
+
+    const tokenPayload = authService.readTokenPayload(token) as SessionTokenPayload | null
+    const userId = extractUserIdFromPayload(tokenPayload, user as User)
+    const currentSessionId = normalizeSessionId(tokenPayload?.sid)
+
+    const items = await listUserSessions(userId)
+
+    res.json({
+      success: true,
+      data: {
+        currentSessionId,
+        items,
+      }
+    })
+  } catch (error) {
+    logger.error('List sessions error', error instanceof Error ? error : undefined)
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    })
+  }
+})
+
+/**
+ * 结束指定会话
+ */
+authRouter.post('/sessions/:sessionId/logout', async (req: Request, res: Response) => {
+  try {
+    const token = extractBearerToken(req)
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: 'No token provided'
+      })
+    }
+
+    const user = await authService.verifyToken(token)
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid token'
+      })
+    }
+
+    const rawSessionId = String(req.params.sessionId || '').trim()
+    if (!rawSessionId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Session ID is required'
+      })
+    }
+
+    const session = await getUserSession(rawSessionId)
+    if (!session || session.userId !== user.id) {
+      return res.status(404).json({
+        success: false,
+        error: 'Session not found'
+      })
+    }
+
+    const revoked = await revokeUserSession(rawSessionId, {
+      revokedBy: user.id,
+      reason: 'self-session-logout',
+    })
+
+    res.json({
+      success: true,
+      data: {
+        sessionId: revoked?.id || rawSessionId,
+      }
+    })
+  } catch (error) {
+    logger.error('Revoke session error', error instanceof Error ? error : undefined)
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    })
+  }
+})
+
+/**
+ * 上报当前会话心跳
+ */
+authRouter.post('/sessions/current/ping', async (req: Request, res: Response) => {
+  try {
+    const token = extractBearerToken(req)
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: 'No token provided'
+      })
+    }
+
+    const user = await authService.verifyToken(token)
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid token'
+      })
+    }
+
+    const tokenPayload = authService.readTokenPayload(token) as SessionTokenPayload | null
+    const sessionId = normalizeSessionId(tokenPayload?.sid)
+    if (!sessionId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Current session is unavailable'
+      })
+    }
+
+    const ipAddress = getClientIP(req)
+    const userAgent = typeof req.headers['user-agent'] === 'string'
+      ? req.headers['user-agent']
+      : ''
+
+    const touched = await touchUserSession(sessionId, {
+      ipAddress,
+      userAgent,
+      minIntervalMs: 60_000,
+    })
+
+    const session = touched ?? await getUserSession(sessionId)
+
+    res.json({
+      success: true,
+      data: {
+        sessionId,
+        session,
+        lastSeenAt: session?.lastSeenAt ?? null,
+      }
+    })
+  } catch (error) {
+    logger.error('Ping session error', error instanceof Error ? error : undefined)
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    })
+  }
+})
+
+/**
+ * 会话退出（当前会话优先）
+ */
+authRouter.post('/logout', async (req: Request, res: Response) => {
+  try {
+    const token = extractBearerToken(req)
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: 'No token provided'
+      })
+    }
+
+    const user = await authService.verifyToken(token)
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid token'
+      })
+    }
+
+    const tokenPayload = authService.readTokenPayload(token) as SessionTokenPayload | null
+    const currentSessionId = normalizeSessionId(tokenPayload?.sid)
+
+    if (currentSessionId) {
+      const revoked = await revokeUserSession(currentSessionId, {
+        revokedBy: user.id,
+        reason: 'self-logout',
+      })
+      if (revoked) {
+        return res.json({
+          success: true,
+          data: {
+            scope: 'current-session',
+            sessionId: revoked.id,
+          }
+        })
+      }
+    }
+
+    const revokedAll = await revokeUserSessions(user.id, {
+      updatedBy: user.id,
+      reason: 'self-logout',
+    })
+
+    res.json({
+      success: true,
+      data: {
+        scope: 'all-sessions',
+        revokedAfter: revokedAll?.revokedAfter ?? null,
+      }
+    })
+  } catch (error) {
+    logger.error('Logout error', error instanceof Error ? error : undefined)
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    })
+  }
+})
+
+/**
+ * 结束其他会话
+ */
+authRouter.post('/sessions/others/logout', async (req: Request, res: Response) => {
+  try {
+    const token = extractBearerToken(req)
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: 'No token provided'
+      })
+    }
+
+    const user = await authService.verifyToken(token)
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid token'
+      })
+    }
+
+    const tokenPayload = authService.readTokenPayload(token) as SessionTokenPayload | null
+    const currentSessionId = normalizeSessionId(tokenPayload?.sid)
+    if (!currentSessionId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Current session is unavailable'
+      })
+    }
+
+    const revokedCount = await revokeOtherUserSessions(user.id, currentSessionId, {
+      revokedBy: user.id,
+      reason: 'self-other-sessions-logout',
+    })
+
+    res.json({
+      success: true,
+      data: {
+        currentSessionId,
+        revokedCount,
+      }
+    })
+  } catch (error) {
+    logger.error('Revoke other sessions error', error instanceof Error ? error : undefined)
     res.status(500).json({
       success: false,
       error: 'Internal server error'

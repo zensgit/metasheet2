@@ -7,7 +7,9 @@ import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { authenticate } from '../middleware/auth'
 import { Logger } from '../core/logger'
+import { getPermissionTemplate, listPermissionTemplates } from '../auth/permission-templates'
 import { pool } from '../db/pg'
+import { auditLog } from '../audit/audit'
 import { userHasPermission, listUserPermissions, isAdmin, invalidateUserPerms } from '../rbac/service'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 
@@ -55,6 +57,35 @@ export function permissionsRouter(): Router {
     }
   })
 
+  // List permission templates (admin only)
+  r.get('/api/admin/permission-templates', authenticate, async (req: Request, res: Response) => {
+    try {
+      const adminUserId = String(req.user?.id || req.user?.sub || req.user?.userId || '')
+      if (!adminUserId) {
+        return res.status(401).json({ error: 'User ID not found in token' })
+      }
+
+      const isAdminUser = await isAdmin(adminUserId)
+      if (!isAdminUser) {
+        return res.status(403).json({ error: 'Only admins can list permission templates' })
+      }
+
+      const mode = typeof req.query.mode === 'string' ? req.query.mode.trim() : ''
+      const templates = listPermissionTemplates(mode || undefined)
+      return res.json({ data: templates })
+    } catch (error) {
+      if (isDatabaseSchemaError(error) && allowDegradation) {
+        if (!permsDegraded) {
+          logger.warn('Permissions service degraded - templates unavailable')
+          permsDegraded = true
+        }
+        return res.json({ data: [], degraded: true })
+      }
+      logger.error('Failed to list permission templates', error instanceof Error ? error : undefined)
+      res.status(500).json({ error: 'Failed to list permission templates' })
+    }
+  })
+
   // Get permissions for current user
   r.get('/api/permissions/me', authenticate, async (req: Request, res: Response) => {
     try {
@@ -81,6 +112,79 @@ export function permissionsRouter(): Router {
       }
       logger.error('Failed to get user permissions', error instanceof Error ? error : undefined)
       res.status(500).json({ error: 'Failed to get user permissions' })
+    }
+  })
+
+  // Apply permission template to a user (admin only)
+  r.post('/api/admin/permission-templates/apply', authenticate, async (req: Request, res: Response) => {
+    try {
+      const adminUserId = String(req.user?.id || req.user?.sub || req.user?.userId || '')
+      if (!adminUserId) {
+        return res.status(401).json({ error: 'User ID not found in token' })
+      }
+
+      const userId = String(req.body?.userId || '').trim()
+      const templateId = String(req.body?.templateId || '').trim()
+
+      if (!userId || !templateId) {
+        return res.status(400).json({ error: 'userId and templateId are required' })
+      }
+
+      const isRequestingAdmin = await isAdmin(adminUserId)
+      if (!isRequestingAdmin) {
+        return res.status(403).json({ error: 'Only admins can apply permission templates' })
+      }
+
+      const template = getPermissionTemplate(templateId)
+      if (!template) {
+        return res.status(404).json({ error: `Permission template '${templateId}' not found` })
+      }
+
+      const targetIsAdmin = await isAdmin(userId)
+      if (targetIsAdmin) {
+        return res.status(409).json({ error: 'Cannot apply permission template to admin users' })
+      }
+
+      await pool!.query(
+        'DELETE FROM user_permissions WHERE user_id = $1',
+        [userId],
+      )
+      for (const permission of template.permissions) {
+        await pool!.query(
+          'INSERT INTO user_permissions(user_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [userId, permission],
+        )
+      }
+
+      invalidateUserPerms(userId)
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'grant',
+        resourceType: 'permission-template',
+        resourceId: `${userId}:${template.id}`,
+        meta: {
+          adminUserId,
+          userId,
+          templateId: template.id,
+          permissions: template.permissions,
+        },
+      })
+
+      return res.json({
+        template,
+        permissions: template.permissions,
+      })
+    } catch (error) {
+      if (isDatabaseSchemaError(error) && allowDegradation) {
+        if (!permsDegraded) {
+          logger.warn('Permissions service degraded - templates unavailable')
+          permsDegraded = true
+        }
+        return res.json({ success: true, degraded: true, template: null })
+      }
+      logger.error('Failed to apply permission template', error instanceof Error ? error : undefined)
+      res.status(500).json({ error: 'Failed to apply permission template' })
     }
   })
 
@@ -171,6 +275,19 @@ export function permissionsRouter(): Router {
       // Invalidate cache for the user
       invalidateUserPerms(userId)
 
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'grant',
+        resourceType: 'permission',
+        resourceId: `${userId}:${permission}`,
+        meta: {
+          adminUserId,
+          userId,
+          permission,
+        },
+      })
+
       logger.info(`Permission '${permission}' granted to user ${userId} by admin ${adminUserId}`)
       res.json({
         success: true,
@@ -222,6 +339,19 @@ export function permissionsRouter(): Router {
 
       // Invalidate cache for the user
       invalidateUserPerms(userId)
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'revoke',
+        resourceType: 'permission',
+        resourceId: `${userId}:${permission}`,
+        meta: {
+          adminUserId,
+          userId,
+          permission,
+        },
+      })
 
       if (result.rowCount === 0) {
         return res.status(404).json({ error: 'Permission not found for user' })

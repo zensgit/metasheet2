@@ -32,6 +32,9 @@ export interface TokenPayload {
   userId: string
   email: string
   role: string
+  sub?: string
+  sid?: string
+  id?: string
   iat: number
   exp: number
 }
@@ -148,6 +151,15 @@ export class AuthService {
     return jwt.sign(payload, this.config.jwtSecret, {
       expiresIn: this.config.jwtExpiry
     } as jwt.SignOptions)
+  }
+
+  readTokenPayload(token: string): Record<string, unknown> {
+    const payload = jwt.decode(token)
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid token payload')
+    }
+
+    return payload as Record<string, unknown>
   }
 
   /**

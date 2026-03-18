@@ -51,8 +51,23 @@ export function rolesRouter(): Router {
       const before = rows[0]
       const name = req.body?.name ?? before.name
       await pool.query('UPDATE roles SET name=$1, updated_at=now() WHERE id=$2', [name, id])
+
+      const perms: string[] = Array.isArray(req.body?.permissions)
+        ? req.body.permissions.filter((permission) => typeof permission === 'string')
+        : []
+
+      if (perms.length > 0) {
+        await pool.query('DELETE FROM role_permissions WHERE role_id = $1', [id])
+        for (const permission of perms) {
+          await pool.query(
+            'INSERT INTO role_permissions(role_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+            [id, permission],
+          )
+        }
+      }
+
       await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'update', resourceType: 'role', resourceId: id, meta: { before, after: { id, name } } })
-      return res.json({ ok: true, data: { id, name } })
+      return res.json({ ok: true, data: { id, name, permissions: perms } })
     }
     const before = roles.get(id)
     if (!before) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Role not found' } })
@@ -67,6 +82,7 @@ export function rolesRouter(): Router {
     if (pool) {
       const { rows } = await pool.query('SELECT id, name FROM roles WHERE id=$1', [id])
       const before = rows[0] || null
+      await pool.query('DELETE FROM role_permissions WHERE role_id=$1', [id])
       await pool.query('DELETE FROM roles WHERE id=$1', [id])
       await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'delete', resourceType: 'role', resourceId: id, meta: { before } })
       return res.json({ ok: true, data: { id } })

@@ -1,10 +1,6 @@
-import type { Request, Response, NextFunction } from 'express'
-import jwt from 'jsonwebtoken'
-import crypto from 'crypto'
+import type { NextFunction, Request, Response } from 'express'
 import { metrics } from '../metrics/metrics'
-import { Logger } from '../core/logger'
-
-const logger = new Logger('JWTMiddleware')
+import { authService } from './AuthService'
 
 const AUTH_WHITELIST = [
   '/health',
@@ -31,36 +27,7 @@ export function isWhitelisted(path: string): boolean {
   return AUTH_WHITELIST.some(p => path.startsWith(p))
 }
 
-/**
- * Get JWT secret with proper security handling
- * In production: requires JWT_SECRET env var or generates secure temporary secret
- * In development: uses fallback secret with warning
- */
-function getJwtSecret(): string {
-  if (process.env.JWT_SECRET) {
-    return process.env.JWT_SECRET
-  }
-
-  if (process.env.NODE_ENV === 'production') {
-    logger.error('CRITICAL: JWT_SECRET missing in production!')
-    // Generate a cryptographically secure random secret for this session
-    return crypto.randomBytes(64).toString('hex')
-  }
-
-  logger.warn('JWT_SECRET not set! Using fallback (NOT FOR PRODUCTION)')
-  return 'fallback-development-secret-change-in-production'
-}
-
-// Cache the secret to avoid regenerating for each request
-let cachedSecret: string | null = null
-function getSecret(): string {
-  if (!cachedSecret) {
-    cachedSecret = getJwtSecret()
-  }
-  return cachedSecret
-}
-
-export function jwtAuthMiddleware(req: Request, res: Response, next: NextFunction) {
+export async function jwtAuthMiddleware(req: Request, res: Response, next: NextFunction) {
   try {
     const auth = req.headers['authorization'] || ''
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : undefined
@@ -71,20 +38,17 @@ export function jwtAuthMiddleware(req: Request, res: Response, next: NextFunctio
       return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Missing Bearer token' } })
     }
 
-    const secret = getSecret()
-    const payload = jwt.verify(token, secret)
-    // JWT payload is an object with user information
-    if (typeof payload === 'object' && payload !== null) {
-      const normalized = payload as Record<string, unknown>
-      if (normalized.id == null) {
-        const fallbackId = normalized.userId ?? normalized.sub
-        if (fallbackId != null) normalized.id = fallbackId
-      }
-      req.user = normalized as Express.Request['user']
+    const user = await authService.verifyToken(token)
+    if (!user) {
+      metrics.jwtAuthFail.inc({ reason: 'invalid_token' })
+      metrics.authFailures.inc()
+      return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Invalid token' } })
     }
+
+    req.user = user as Express.Request['user']
     return next()
   } catch (err: unknown) {
-    const errorMessage = err instanceof jwt.TokenExpiredError ? 'expired_token' : 'invalid_token'
+    const errorMessage = 'invalid_token'
     metrics.jwtAuthFail.inc({ reason: errorMessage })
     metrics.authFailures.inc()
     return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Invalid token' } })
