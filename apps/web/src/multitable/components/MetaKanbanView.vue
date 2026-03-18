@@ -1,0 +1,182 @@
+<template>
+  <div class="meta-kanban">
+    <div v-if="!groupField" class="meta-kanban__empty">
+      <div class="meta-kanban__empty-icon">&#x1F4CA;</div>
+      <p>Select a <strong>select</strong>-type field to group by:</p>
+      <select class="meta-kanban__field-select" @change="onPickGroupField($event)">
+        <option value="">— Choose field —</option>
+        <option v-for="f in selectFields" :key="f.id" :value="f.id">{{ f.name }}</option>
+      </select>
+      <p v-if="!selectFields.length" class="meta-kanban__empty-hint">No select-type fields found. Add a select field first.</p>
+    </div>
+
+    <template v-else>
+      <div class="meta-kanban__header">
+        <span class="meta-kanban__group-label">Grouped by: <strong>{{ groupField.name }}</strong></span>
+        <button class="meta-kanban__change-btn" @click="groupFieldId = null">Change</button>
+      </div>
+
+      <div class="meta-kanban__board">
+        <!-- Uncategorized column -->
+        <div class="meta-kanban__column">
+          <div class="meta-kanban__column-header meta-kanban__column-header--uncategorized">
+            <span>Uncategorized</span>
+            <span class="meta-kanban__count">{{ uncategorized.length }}</span>
+          </div>
+          <div class="meta-kanban__cards" @dragover.prevent @drop="onDrop(null, $event)">
+            <div
+              v-for="row in uncategorized"
+              :key="row.id"
+              class="meta-kanban__card"
+              draggable="true"
+              @dragstart="onDragStart(row, $event)"
+              @click="emit('select-record', row.id)"
+            >
+              <div class="meta-kanban__card-title">{{ cardTitle(row) }}</div>
+              <div class="meta-kanban__card-fields">
+                <span v-for="f in previewFields" :key="f.id" class="meta-kanban__card-field">
+                  <span class="meta-kanban__card-field-label">{{ f.name }}:</span>
+                  {{ row.data[f.id] ?? '—' }}
+                </span>
+              </div>
+            </div>
+          </div>
+          <button v-if="canCreate" class="meta-kanban__add-btn" @click="emit('create-record', { })">+ Add</button>
+        </div>
+
+        <!-- Option columns -->
+        <div v-for="opt in groupOptions" :key="opt.value" class="meta-kanban__column">
+          <div class="meta-kanban__column-header" :style="{ borderTopColor: opt.color ?? '#409eff' }">
+            <span>{{ opt.value }}</span>
+            <span class="meta-kanban__count">{{ columnRows(opt.value).length }}</span>
+          </div>
+          <div class="meta-kanban__cards" @dragover.prevent @drop="onDrop(opt.value, $event)">
+            <div
+              v-for="row in columnRows(opt.value)"
+              :key="row.id"
+              class="meta-kanban__card"
+              draggable="true"
+              @dragstart="onDragStart(row, $event)"
+              @click="emit('select-record', row.id)"
+            >
+              <div class="meta-kanban__card-title">{{ cardTitle(row) }}</div>
+              <div class="meta-kanban__card-fields">
+                <span v-for="f in previewFields" :key="f.id" class="meta-kanban__card-field">
+                  <span class="meta-kanban__card-field-label">{{ f.name }}:</span>
+                  {{ row.data[f.id] ?? '—' }}
+                </span>
+              </div>
+            </div>
+          </div>
+          <button v-if="canCreate" class="meta-kanban__add-btn" @click="emit('create-record', { [groupField!.id]: opt.value })">+ Add</button>
+        </div>
+      </div>
+    </template>
+
+    <div v-if="loading" class="meta-kanban__loading">Loading...</div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed } from 'vue'
+import type { MetaField, MetaRecord } from '../types'
+
+const props = defineProps<{
+  rows: MetaRecord[]
+  fields: MetaField[]
+  loading: boolean
+  canCreate?: boolean
+  canEdit?: boolean
+}>()
+
+const emit = defineEmits<{
+  (e: 'select-record', recordId: string): void
+  (e: 'patch-cell', recordId: string, fieldId: string, value: unknown, version: number): void
+  (e: 'create-record', data: Record<string, unknown>): void
+}>()
+
+const groupFieldId = ref<string | null>(null)
+let dragRecordId: string | null = null
+let dragVersion = 0
+
+const selectFields = computed(() => props.fields.filter((f) => f.type === 'select'))
+
+const groupField = computed(() =>
+  groupFieldId.value ? props.fields.find((f) => f.id === groupFieldId.value) ?? null : null,
+)
+
+const groupOptions = computed<Array<{ value: string; color?: string }>>(() =>
+  groupField.value?.options ?? [],
+)
+
+const titleField = computed(() =>
+  props.fields.find((f) => f.type === 'string') ?? props.fields[0] ?? null,
+)
+
+const previewFields = computed(() =>
+  props.fields.filter((f) => f.id !== groupFieldId.value && f.id !== titleField.value?.id).slice(0, 2),
+)
+
+const uncategorized = computed(() => {
+  if (!groupField.value) return []
+  const optValues = new Set(groupOptions.value.map((o) => o.value))
+  return props.rows.filter((r) => {
+    const v = r.data[groupField.value!.id]
+    return !v || !optValues.has(String(v))
+  })
+})
+
+function columnRows(optionValue: string): MetaRecord[] {
+  if (!groupField.value) return []
+  return props.rows.filter((r) => String(r.data[groupField.value!.id] ?? '') === optionValue)
+}
+
+function cardTitle(row: MetaRecord): string {
+  if (!titleField.value) return row.id
+  return String(row.data[titleField.value.id] ?? '') || row.id
+}
+
+function onPickGroupField(e: Event) {
+  const val = (e.target as HTMLSelectElement).value
+  groupFieldId.value = val || null
+}
+
+function onDragStart(row: MetaRecord, e: DragEvent) {
+  if (!props.canEdit) { e.preventDefault(); return }
+  dragRecordId = row.id
+  dragVersion = row.version
+  e.dataTransfer?.setData('text/plain', row.id)
+}
+
+function onDrop(targetValue: string | null, _e: DragEvent) {
+  if (!dragRecordId || !groupField.value || !props.canEdit) return
+  emit('patch-cell', dragRecordId, groupField.value.id, targetValue ?? '', dragVersion)
+  dragRecordId = null
+}
+</script>
+
+<style scoped>
+.meta-kanban { display: flex; flex-direction: column; flex: 1; min-height: 0; position: relative; }
+.meta-kanban__empty { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; color: #666; font-size: 14px; gap: 12px; }
+.meta-kanban__empty-icon { font-size: 36px; opacity: 0.5; }
+.meta-kanban__empty-hint { font-size: 12px; color: #aaa; }
+.meta-kanban__field-select { padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+.meta-kanban__header { display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-bottom: 1px solid #eee; font-size: 13px; color: #666; }
+.meta-kanban__change-btn { padding: 2px 8px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 11px; color: #409eff; }
+.meta-kanban__board { display: flex; flex: 1; overflow-x: auto; padding: 12px 8px; gap: 12px; }
+.meta-kanban__column { min-width: 240px; width: 280px; flex-shrink: 0; background: #f5f7fa; border-radius: 8px; display: flex; flex-direction: column; max-height: 100%; }
+.meta-kanban__column-header { padding: 10px 12px; font-size: 13px; font-weight: 600; color: #333; display: flex; justify-content: space-between; align-items: center; border-top: 3px solid #409eff; border-radius: 8px 8px 0 0; }
+.meta-kanban__column-header--uncategorized { border-top-color: #999; color: #999; }
+.meta-kanban__count { font-size: 11px; font-weight: 400; color: #999; background: #e8e8e8; padding: 1px 6px; border-radius: 10px; }
+.meta-kanban__cards { flex: 1; overflow-y: auto; padding: 4px 8px; display: flex; flex-direction: column; gap: 6px; min-height: 40px; }
+.meta-kanban__card { background: #fff; border-radius: 6px; padding: 10px 12px; box-shadow: 0 1px 3px rgba(0,0,0,.08); cursor: pointer; transition: box-shadow 0.15s; }
+.meta-kanban__card:hover { box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+.meta-kanban__card[draggable="true"] { cursor: grab; }
+.meta-kanban__card-title { font-size: 13px; font-weight: 500; color: #333; margin-bottom: 4px; }
+.meta-kanban__card-fields { display: flex; flex-direction: column; gap: 2px; }
+.meta-kanban__card-field { font-size: 11px; color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta-kanban__card-field-label { color: #aaa; }
+.meta-kanban__add-btn { margin: 4px 8px 8px; padding: 4px; border: 1px dashed #ccc; border-radius: 4px; background: transparent; cursor: pointer; font-size: 12px; color: #999; }
+.meta-kanban__add-btn:hover { border-color: #409eff; color: #409eff; }
+.meta-kanban__loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.7); font-size: 14px; color: #666; z-index: 10; }
+</style>
