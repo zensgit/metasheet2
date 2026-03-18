@@ -15,6 +15,7 @@
           <input
             v-if="field.type === 'string'"
             class="meta-form-view__input"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="text"
             :disabled="readOnly"
             :value="formData[field.id] ?? ''"
@@ -23,6 +24,7 @@
           <input
             v-else-if="field.type === 'number'"
             class="meta-form-view__input"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="number"
             :disabled="readOnly"
             :value="formData[field.id] ?? ''"
@@ -35,6 +37,7 @@
           <input
             v-else-if="field.type === 'date'"
             class="meta-form-view__input"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="date"
             :disabled="readOnly"
             :value="formData[field.id] ?? ''"
@@ -43,6 +46,7 @@
           <select
             v-else-if="field.type === 'select'"
             class="meta-form-view__input"
+            :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             :disabled="readOnly"
             :value="formData[field.id] ?? ''"
             @change="formData[field.id] = ($event.target as HTMLSelectElement).value"
@@ -56,8 +60,10 @@
             class="meta-form-view__link-btn"
             :disabled="readOnly"
             @click="emit('open-link-picker', field)"
-          >Choose linked records...</button>
+          >{{ linkButtonLabel(field.id) }}</button>
           <span v-else class="meta-form-view__readonly-val">{{ record?.data[field.id] ?? '—' }}</span>
+          <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-form-view__link-summary">{{ linkPreview(field.id) }}</div>
+          <div v-if="fieldErrors?.[field.id] || validationErrors[field.id]" class="meta-form-view__field-error">{{ fieldErrors?.[field.id] || validationErrors[field.id] }}</div>
         </div>
         <div v-if="!readOnly" class="meta-form-view__actions">
           <button type="submit" class="meta-form-view__submit" :disabled="submitting">
@@ -71,8 +77,8 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, computed, watch } from 'vue'
-import type { MetaField, MetaRecord } from '../types'
+import { reactive, ref, computed, watch } from 'vue'
+import type { MetaField, MetaRecord, LinkedRecordSummary } from '../types'
 
 const props = defineProps<{
   fields: MetaField[]
@@ -83,6 +89,8 @@ const props = defineProps<{
   submitting?: boolean
   successMessage?: string | null
   errorMessage?: string | null
+  fieldErrors?: Record<string, string> | null
+  linkSummariesByField?: Record<string, LinkedRecordSummary[]> | null
 }>()
 
 const emit = defineEmits<{
@@ -104,12 +112,54 @@ function syncFromRecord(r: MetaRecord | null | undefined) {
 
 watch(() => props.record, syncFromRecord, { immediate: true })
 
-function resetForm() {
-  syncFromRecord(props.record)
+const validationErrors = ref<Record<string, string>>({})
+
+function validate(): boolean {
+  const errs: Record<string, string> = {}
+  for (const f of editableFields.value) {
+    const v = formData[f.id]
+    if (f.required && (v === undefined || v === null || v === '')) {
+      errs[f.id] = `${f.name} is required`
+    }
+  }
+  validationErrors.value = errs
+  return Object.keys(errs).length === 0
 }
 
 function onSubmit() {
+  if (!validate()) return
   emit('submit', { ...formData })
+}
+
+function resetForm() {
+  if (hasUnsavedChanges.value && !confirm('Discard unsaved changes?')) return
+  syncFromRecord(props.record)
+  validationErrors.value = {}
+}
+
+const hasUnsavedChanges = computed(() => {
+  if (!props.record) return Object.keys(formData).some((k) => formData[k] !== undefined && formData[k] !== '' && formData[k] !== null)
+  return Object.keys(formData).some((k) => formData[k] !== props.record!.data[k])
+})
+
+function linkButtonLabel(fieldId: string): string {
+  const count = linkSummaryCount(fieldId)
+  return count > 0 ? `Edit linked records (${count})` : 'Choose linked records...'
+}
+
+function linkPreview(fieldId: string): string {
+  const summaries = props.linkSummariesByField?.[fieldId] ?? []
+  if (summaries.length) return summaries.map((item) => item.display || item.id).join(', ')
+  const raw = formData[fieldId] ?? props.record?.data[fieldId]
+  const ids = Array.isArray(raw) ? raw.map(String) : raw ? [String(raw)] : []
+  return ids.join(', ')
+}
+
+function linkSummaryCount(fieldId: string): number {
+  const summaries = props.linkSummariesByField?.[fieldId] ?? []
+  if (summaries.length) return summaries.length
+  const raw = formData[fieldId] ?? props.record?.data[fieldId]
+  return Array.isArray(raw) ? raw.length : raw ? 1 : 0
 }
 </script>
 
@@ -123,11 +173,14 @@ function onSubmit() {
 .meta-form-view__field { margin-bottom: 16px; }
 .meta-form-view__label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 4px; color: #333; }
 .meta-form-view__input { width: 100%; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+.meta-form-view__input--error { border-color: #f56c6c; background: #fff7f7; }
 .meta-form-view__input:disabled { background: #f5f7fa; color: #999; cursor: not-allowed; }
 .meta-form-view__check { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
 .meta-form-view__link-btn { padding: 6px 12px; border: 1px solid #409eff; border-radius: 4px; background: #ecf5ff; color: #409eff; cursor: pointer; font-size: 13px; }
 .meta-form-view__link-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.meta-form-view__link-summary { margin-top: 6px; font-size: 12px; color: #606266; }
 .meta-form-view__readonly-val { color: #999; font-size: 13px; }
+.meta-form-view__field-error { margin-top: 6px; color: #f56c6c; font-size: 12px; }
 .meta-form-view__actions { display: flex; gap: 8px; margin-top: 16px; }
 .meta-form-view__submit { padding: 8px 24px; background: #409eff; color: #fff; border: none; border-radius: 4px; font-size: 14px; cursor: pointer; }
 .meta-form-view__submit:hover:not(:disabled) { background: #66b1ff; }

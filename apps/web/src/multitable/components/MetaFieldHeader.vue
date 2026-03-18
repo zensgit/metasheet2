@@ -27,7 +27,7 @@ import { ref, computed } from 'vue'
 import type { MetaField } from '../types'
 
 const FIELD_ICONS: Record<string, string> = {
-  string: 'Aa', number: '#', boolean: '\u2611', select: '\u25CF',
+  string: 'Aa', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF',
   link: '\u21C4', lookup: '\u2197', rollup: '\u03A3', formula: 'fx',
 }
 
@@ -97,7 +97,9 @@ function onResizeStart(e: MouseEvent) {
 .meta-field-header__icon { display: inline-block; width: 22px; text-align: center; color: #999; font-size: 12px; margin-right: 4px; }
 .meta-field-header__name { overflow: hidden; text-overflow: ellipsis; }
 .meta-field-header__sort { margin-left: 4px; font-size: 10px; color: #409eff; }
-.meta-field-header__resize { position: absolute; top: 0; right: -2px; width: 5px; height: 100%; cursor: col-resize; z-index: 2; }
+.meta-field-header__resize { position: absolute; top: 0; right: -4px; width: 9px; height: 100%; cursor: col-resize; z-index: 2; }
 .meta-field-header__resize:hover { background: #409eff; opacity: 0.5; }
+.meta-field-header__resize::after { content: ''; position: absolute; top: 25%; left: 3px; width: 3px; height: 50%; border-left: 1px solid transparent; border-right: 1px solid transparent; }
+.meta-field-header__resize:hover::after { border-left-color: #fff; border-right-color: #fff; }
 .meta-field-header--drag-over { background: #ecf5ff; border-left: 2px solid #409eff; }
 </style>

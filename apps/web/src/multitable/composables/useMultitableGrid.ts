@@ -1,5 +1,5 @@
 import { ref, computed, watch, type Ref, type ComputedRef } from 'vue'
-import type { MetaField, MetaRecord, MetaPage, PatchResult } from '../types'
+import type { MetaField, MetaRecord, MetaPage, PatchResult, LinkedRecordSummary } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
 
 // --- Sort / Filter types ---
@@ -127,6 +127,7 @@ export function useMultitableGrid(opts: {
   // Core state
   const fields = ref<MetaField[]>([])
   const rows = ref<MetaRecord[]>([])
+  const linkSummaries = ref<Record<string, Record<string, LinkedRecordSummary[]>>>({})
   const loading = ref(false)
   const error = ref<string | null>(null)
 
@@ -193,6 +194,7 @@ export function useMultitableGrid(opts: {
       })
       fields.value = data.fields ?? []
       rows.value = data.rows ?? []
+      linkSummaries.value = data.linkSummaries ?? {}
       if (data.page) page.value = data.page
       if (data.view) syncFromView(data.view)
     } catch (e: any) {
@@ -239,6 +241,7 @@ export function useMultitableGrid(opts: {
 
   function applySortFilter() {
     sortFilterDirty.value = true
+    page.value = { ...page.value, offset: 0 }
     loadViewData(0)
   }
 
@@ -443,7 +446,7 @@ export function useMultitableGrid(opts: {
 
   return {
     // State
-    fields, rows, loading, error, page, hiddenFieldIds, visibleFields,
+    fields, rows, linkSummaries, loading, error, page, hiddenFieldIds, visibleFields,
     sortRules, filterRules, filterConjunction, sortFilterDirty,
     columnWidths, groupFieldId, groupField,
     editHistory, historyIndex, canUndo, canRedo,

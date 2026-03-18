@@ -94,7 +94,7 @@
       <button class="meta-toolbar__btn" :disabled="!canRedo" title="Redo (Ctrl+Y)" aria-label="Redo" @click="emit('redo')">&#x21AA;</button>
     </div>
     <div class="meta-toolbar__right">
-      <div class="meta-toolbar__search" role="search">
+      <div class="meta-toolbar__search" :class="{ 'meta-toolbar__search--active': !!searchText }" role="search">
         <span class="meta-toolbar__search-icon" aria-hidden="true">&#x1F50D;</span>
         <input class="meta-toolbar__search-input" type="search" placeholder="Search records..." aria-label="Search records" :value="searchText" @input="emit('update:search-text', ($event.target as HTMLInputElement).value)" />
         <button v-if="searchText" class="meta-toolbar__search-clear" aria-label="Clear search" @click="emit('update:search-text', '')">&times;</button>
@@ -240,8 +240,9 @@ function onFilterValueChange(idx: number, value: string) {
 .meta-toolbar__apply:hover { background: #66b1ff; }
 .meta-toolbar__group-none { color: #999; }
 .meta-toolbar__field-type { font-size: 10px; color: #aaa; margin-left: auto; }
-.meta-toolbar__search { display: flex; align-items: center; gap: 4px; border: 1px solid #ddd; border-radius: 4px; padding: 2px 8px; background: #fafafa; }
+.meta-toolbar__search { display: flex; align-items: center; gap: 4px; border: 1px solid #ddd; border-radius: 4px; padding: 2px 8px; background: #fafafa; transition: border-color 0.2s, background 0.2s; }
 .meta-toolbar__search:focus-within { border-color: #409eff; background: #fff; }
+.meta-toolbar__search--active { border-color: #409eff; background: #ecf5ff; }
 .meta-toolbar__search-icon { font-size: 12px; opacity: 0.5; }
 .meta-toolbar__search-input { border: none; outline: none; font-size: 12px; width: 140px; background: transparent; color: #333; }
 .meta-toolbar__search-input::placeholder { color: #bbb; }

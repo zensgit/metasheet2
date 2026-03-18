@@ -23,7 +23,10 @@
       </div>
     </div>
     <div v-if="canComment" class="meta-comments-drawer__input-area">
-      <div v-if="error" class="meta-comments-drawer__error">{{ error }}</div>
+      <div v-if="error" class="meta-comments-drawer__error">
+        {{ error }}
+        <button class="meta-comments-drawer__retry" @click="emit('retry')">Retry</button>
+      </div>
       <div class="meta-comments-drawer__composer">
         <textarea
           :value="draft"
@@ -67,6 +70,7 @@ const emit = defineEmits<{
   (e: 'submit', content: string): void
   (e: 'resolve', commentId: string): void
   (e: 'update:draft', value: string): void
+  (e: 'retry'): void
 }>()
 
 function submitComment() {
@@ -101,7 +105,9 @@ function formatTime(iso: string): string {
 .meta-comments-drawer__content { margin: 0; font-size: 13px; color: #333; line-height: 1.4; }
 .meta-comments-drawer__input-area { padding: 10px 14px; border-top: 1px solid #eee; display: flex; flex-direction: column; gap: 8px; }
 .meta-comments-drawer__composer { display: flex; gap: 8px; }
-.meta-comments-drawer__error { margin-bottom: 8px; padding: 8px 10px; border-radius: 4px; background: #fef0f0; color: #f56c6c; font-size: 12px; }
+.meta-comments-drawer__error { margin-bottom: 8px; padding: 8px 10px; border-radius: 4px; background: #fef0f0; color: #f56c6c; font-size: 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.meta-comments-drawer__retry { border: 1px solid #f56c6c; background: #fff; color: #f56c6c; padding: 2px 8px; border-radius: 3px; font-size: 11px; cursor: pointer; white-space: nowrap; }
+.meta-comments-drawer__retry:hover { background: #fef0f0; }
 .meta-comments-drawer__textarea { flex: 1; padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; resize: none; }
 .meta-comments-drawer__submit { padding: 6px 14px; background: #409eff; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
 .meta-comments-drawer__submit:disabled { opacity: 0.4; cursor: not-allowed; }

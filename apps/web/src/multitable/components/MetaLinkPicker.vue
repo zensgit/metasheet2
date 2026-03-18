@@ -41,18 +41,20 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void
-  (e: 'confirm', recordIds: string[]): void
+  (e: 'confirm', payload: { recordIds: string[]; summaries: LinkedRecordSummary[] }): void
 }>()
 
 const search = ref('')
 const records = ref<LinkedRecordSummary[]>([])
 const loading = ref(false)
 const selected = reactive(new Set<string>())
+const summaryById = reactive<Record<string, LinkedRecordSummary>>({})
 
 watch(() => props.visible, async (v) => {
   if (!v || !props.field) return
   // Init selected from current value
   selected.clear()
+  Object.keys(summaryById).forEach((id) => delete summaryById[id])
   const cv = props.currentValue
   const ids = Array.isArray(cv) ? cv.map(String) : cv ? [String(cv)] : []
   ids.forEach((id) => selected.add(id))
@@ -66,6 +68,8 @@ async function loadRecords() {
   try {
     const data = await multitableClient.listLinkOptions(props.field.id, { search: search.value || undefined, limit: 50 })
     records.value = data.records ?? []
+    for (const record of data.selected ?? []) summaryById[record.id] = record
+    for (const record of data.records ?? []) summaryById[record.id] = record
   } catch {
     records.value = []
   } finally {
@@ -73,14 +77,28 @@ async function loadRecords() {
   }
 }
 
-function onSearch() { loadRecords() }
+let debounceTimer: ReturnType<typeof setTimeout> | null = null
+function onSearch() {
+  if (debounceTimer) clearTimeout(debounceTimer)
+  debounceTimer = setTimeout(() => loadRecords(), 300)
+}
 
 function toggleSelect(id: string) {
   if (selected.has(id)) selected.delete(id)
-  else selected.add(id)
+  else {
+    selected.add(id)
+    const record = records.value.find((item) => item.id === id)
+    if (record) summaryById[id] = record
+  }
 }
 
-function onConfirm() { emit('confirm', Array.from(selected)) }
+function onConfirm() {
+  const recordIds = Array.from(selected)
+  emit('confirm', {
+    recordIds,
+    summaries: recordIds.map((id) => summaryById[id]).filter((item): item is LinkedRecordSummary => !!item),
+  })
+}
 </script>
 
 <style scoped>

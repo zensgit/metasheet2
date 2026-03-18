@@ -127,7 +127,10 @@ function doImport() {
       const field = props.fields.find((f) => f.id === fieldId)
       if (field?.type === 'number' && val !== '') data[fieldId] = Number(val)
       else if (field?.type === 'boolean') data[fieldId] = val.toLowerCase() === 'true' || val === '1'
-      else data[fieldId] = val
+      else if (field?.type === 'date' && val !== '') {
+        const d = new Date(val)
+        data[fieldId] = !isNaN(d.getTime()) ? d.toISOString().split('T')[0] : val
+      } else data[fieldId] = val
     }
     if (Object.keys(data).length) records.push(data)
   }

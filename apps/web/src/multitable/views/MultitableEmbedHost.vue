@@ -63,7 +63,10 @@ onMounted(() => {
 
 // --- postMessage API ---
 function isOriginAllowed(origin: string): boolean {
-  if (!props.allowedOrigins?.length) return true // no restriction
+  if (!props.allowedOrigins?.length) {
+    // Default to same-origin if no restriction specified
+    try { return origin === window.location.origin } catch { return false }
+  }
   return props.allowedOrigins.includes(origin) || props.allowedOrigins.includes('*')
 }
 

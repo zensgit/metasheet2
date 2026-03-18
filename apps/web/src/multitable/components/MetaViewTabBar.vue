@@ -63,7 +63,9 @@ function viewTypeIcon(type: string): string {
 .meta-tab-bar__tab:hover { background: #f0f0f0; }
 .meta-tab-bar__tab--active { background: #fff; color: #333; font-weight: 500; box-shadow: 0 -1px 2px rgba(0,0,0,.06); }
 .meta-tab-bar__tab--add { color: #409eff; font-size: 16px; padding: 4px 10px; font-weight: 600; }
-.meta-tab-bar__views { display: flex; padding: 2px 8px 4px; gap: 2px; }
+.meta-tab-bar__views { display: flex; padding: 2px 8px 4px; gap: 2px; overflow-x: auto; scrollbar-width: thin; }
+.meta-tab-bar__views::-webkit-scrollbar { height: 3px; }
+.meta-tab-bar__views::-webkit-scrollbar-thumb { background: #ccc; border-radius: 2px; }
 .meta-tab-bar__view {
   display: flex; align-items: center; gap: 4px; padding: 3px 10px; font-size: 12px;
   border: none; border-radius: 3px; background: transparent; color: #888; cursor: pointer;
