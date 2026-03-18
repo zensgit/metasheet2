@@ -122,6 +122,13 @@ const router = createRouter({
 router.beforeEach(async (to, _from, next) => {
   const token = getStoredAuthToken()
   const isLoginRoute = to.path === ROUTE_PATHS.LOGIN
+  const title = to.meta?.title
+
+  if (title) {
+    document.title = `${title} - MetaSheet`
+  } else {
+    document.title = 'MetaSheet'
+  }
 
   if (!token && !isLoginRoute) {
     return next({
@@ -131,7 +138,9 @@ router.beforeEach(async (to, _from, next) => {
   }
 
   if (token && isLoginRoute) {
-    const verify = await apiFetch('/api/auth/me')
+    const verify = await apiFetch('/api/auth/me', {
+      suppressUnauthorizedRedirect: true,
+    })
     if (!verify.ok) {
       clearStoredAuthState()
       return next()
@@ -148,13 +157,6 @@ router.beforeEach(async (to, _from, next) => {
       // noop
     }
     return next(redirect || flags.resolveHomePath())
-  }
-
-  const title = to.meta?.title
-  if (title) {
-    document.title = `${title} - MetaSheet`
-  } else {
-    document.title = 'MetaSheet'
   }
 
   // Product capability guard + attendance focused mode restriction.
@@ -203,9 +205,14 @@ router.beforeEach(async (to, _from, next) => {
 })
 
 // Create and mount app
-const app = createApp(App)
+async function bootstrap(): Promise<void> {
+  const app = createApp(App)
 
-app.use(ElementPlus)
-app.use(router)
+  app.use(ElementPlus)
+  app.use(router)
 
-app.mount('#app')
+  await router.isReady()
+  app.mount('#app')
+}
+
+void bootstrap()
