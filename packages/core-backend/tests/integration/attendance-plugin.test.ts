@@ -198,8 +198,9 @@ describe('Attendance Plugin Integration', () => {
   it('registers attendance routes and lists plugin', async () => {
     if (!baseUrl) return
     const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-test-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -386,7 +387,7 @@ describe('Attendance Plugin Integration', () => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        userId: 'attendance-test',
+        userId: testUserId,
         shiftId,
         startDate: workDate,
         isActive: true,
@@ -452,7 +453,7 @@ describe('Attendance Plugin Integration', () => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        userId: 'attendance-test',
+        userId: testUserId,
         rotationRuleId,
         startDate: workDate,
         isActive: true,
@@ -564,7 +565,7 @@ describe('Attendance Plugin Integration', () => {
     expect(importTemplateData?.payloadExample?.ruleSetId).toBeUndefined()
 
     const importPayload = {
-      userId: 'attendance-test',
+      userId: testUserId,
       rows: [
         {
           workDate,
@@ -645,7 +646,7 @@ describe('Attendance Plugin Integration', () => {
     })()
 
     const anomalyPayload = {
-      userId: 'attendance-test',
+      userId: testUserId,
       rows: [
         {
           workDate: anomalyDate,
@@ -737,7 +738,7 @@ describe('Attendance Plugin Integration', () => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          userIds: ['attendance-test'],
+          userIds: [testUserId],
         }),
       })
       expect(addGroupMemberRes.status).toBe(200)
@@ -749,12 +750,12 @@ describe('Attendance Plugin Integration', () => {
       })
       expect(listGroupMembersRes.status).toBe(200)
       const groupMemberItems = (listGroupMembersRes.body as { data?: { items?: { userId?: string }[] } } | undefined)?.data?.items ?? []
-      expect(groupMemberItems.some(item => item.userId === 'attendance-test')).toBe(true)
+      expect(groupMemberItems.some(item => item.userId === testUserId)).toBe(true)
     }
 
     const csvGroupName = `CSV Group ${runSuffix}`
     const csvImportPayload = {
-      userId: 'attendance-test',
+      userId: testUserId,
       csvText: `日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果\n${workDate},A001,${csvGroupName},09:00,18:00,正常`,
       mapping: {
         columns: [
@@ -767,7 +768,7 @@ describe('Attendance Plugin Integration', () => {
         ],
       },
       userMap: {
-        A001: 'attendance-test',
+        A001: testUserId,
       },
       groupSync: {
         autoCreate: true,
@@ -809,7 +810,7 @@ describe('Attendance Plugin Integration', () => {
       })
       expect(csvGroupMembersRes.status).toBe(200)
       const csvGroupMembers = (csvGroupMembersRes.body as { data?: { items?: { userId?: string }[] } } | undefined)?.data?.items ?? []
-      expect(csvGroupMembers.some(item => item.userId === 'attendance-test')).toBe(true)
+      expect(csvGroupMembers.some(item => item.userId === testUserId)).toBe(true)
     }
 
     const numericGroupName = '1'
@@ -822,7 +823,7 @@ describe('Attendance Plugin Integration', () => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        userId: 'attendance-test',
+        userId: testUserId,
         csvText: `日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果\n${workDate},A001,${numericGroupName},09:05,18:05,正常`,
         mapping: {
           columns: [
@@ -835,7 +836,7 @@ describe('Attendance Plugin Integration', () => {
           ],
         },
         userMap: {
-          A001: 'attendance-test',
+          A001: testUserId,
         },
         groupSync: {
           autoCreate: true,
@@ -980,8 +981,10 @@ describe('Attendance Plugin Integration', () => {
 
     const healthRes = await requestJson(`${baseUrl}/api/health`)
     expect(healthRes.status).toBe(200)
-    const body = (healthRes.body as { status?: string; timestamp?: string } | undefined) ?? {}
+    const body = (healthRes.body as { status?: string; ok?: boolean; success?: boolean; timestamp?: string } | undefined) ?? {}
     expect(body.status).toBe('ok')
+    expect(body.ok).toBe(true)
+    expect(body.success).toBe(true)
     expect(typeof body.timestamp).toBe('string')
   })
 
@@ -1029,9 +1032,80 @@ describe('Attendance Plugin Integration', () => {
     )
 
     expect(calendarRes.status).toBe(200)
-    const body = (calendarRes.body as { ok?: boolean; data?: { items?: unknown[] } } | undefined) ?? {}
+    const body = (calendarRes.body as { ok?: boolean; success?: boolean; data?: { items?: unknown[] } } | undefined) ?? {}
     expect(body.ok).toBe(true)
+    expect(body.success).toBe(true)
     expect(Array.isArray(body.data?.items)).toBe(true)
+  })
+
+  it('rejects invalid attendance calendar date ranges with 400', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-calendar-invalid-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const calendarRes = await requestJson(
+      `${baseUrl}/api/attendance/calendar?from=invalid&to=invalid`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    )
+
+    expect(calendarRes.status).toBe(400)
+    const body = (calendarRes.body as { ok?: boolean; error?: { code?: string; message?: string } } | undefined) ?? {}
+    expect(body.ok).toBe(false)
+    expect(body.error?.code).toBe('VALIDATION_ERROR')
+    expect(body.error?.message).toContain('YYYY-MM-DD')
+  })
+
+  it('rejects duplicate attendance requests for the same day and request payload', async () => {
+    if (!baseUrl) return
+
+    const testUserId = `attendance-request-dedupe-${Date.now().toString(36)}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const requestedInAt = new Date().toISOString()
+    const payload = {
+      workDate,
+      requestType: 'missed_check_in',
+      requestedInAt,
+      reason: 'dedupe test',
+    }
+
+    const firstRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    })
+    expect(firstRes.status).toBe(201)
+
+    const secondRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    })
+    expect(secondRes.status).toBe(409)
+    const secondBody = (secondRes.body as { ok?: boolean; error?: { code?: string } } | undefined) ?? {}
+    expect(secondBody.ok).toBe(false)
+    expect(secondBody.error?.code).toBe('DUPLICATE_REQUEST')
   })
 
   it('exports attendance CSV with ISO date values and timezone-consistent timestamps', async () => {

@@ -106,6 +106,19 @@ scripts/ops/attendance-onprem-deploy-easy.sh
 5. 初始化管理员账号与权限
 6. 健康检查
 
+如果部署脚本没有把 migration 跑完，或者你手工覆盖安装包后想先单独补跑数据库迁移，就先在 Windows 侧执行：
+
+```powershell
+.\run-migrate.bat
+```
+
+常见需要补跑的情况：
+
+- `POST /api/attendance/leave-types` 之类接口返回 `503`
+- 健康检查能过，但考勤配置类接口提示表不存在
+
+先跑一次 `run-migrate.bat`，再继续验收或重试部署。
+
 ## 6) 打开系统
 
 - 页面：`http://<你的服务器IP>/attendance`
@@ -119,6 +132,8 @@ ENV_FILE=/opt/metasheet/docker/app.env \
 REQUIRE_ATTENDANCE_ONLY=1 \
 scripts/ops/attendance-onprem-update.sh
 ```
+
+`attendance-onprem-update.sh` 默认会自动跑 migration。只有在你显式设置 `RUN_MIGRATIONS=0`、跳过脚本，或遇到上面的 `503` / 表不存在情况时，才需要手工执行 `run-migrate.bat`。
 
 ## 8) 快速自检（照抄）
 

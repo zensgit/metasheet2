@@ -623,6 +623,83 @@ function parseDateInput(value) {
   return date
 }
 
+function normalizeDateOnlyStrict(value) {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return null
+  const date = new Date(`${normalized}T00:00:00.000Z`)
+  if (Number.isNaN(date.getTime())) return null
+  return date.toISOString().slice(0, 10) === normalized ? normalized : null
+}
+
+function resolveAttendanceDateRange(fromValue, toValue, fallbackDays = 30) {
+  const fallbackFrom = new Date(Date.now() - 1000 * 60 * 60 * 24 * fallbackDays).toISOString().slice(0, 10)
+  const fallbackTo = new Date().toISOString().slice(0, 10)
+  const from = fromValue === undefined ? fallbackFrom : normalizeDateOnlyStrict(fromValue)
+  if (fromValue !== undefined && !from) {
+    return { ok: false, message: 'Invalid "from" date. Use YYYY-MM-DD.' }
+  }
+  const to = toValue === undefined ? fallbackTo : normalizeDateOnlyStrict(toValue)
+  if (toValue !== undefined && !to) {
+    return { ok: false, message: 'Invalid "to" date. Use YYYY-MM-DD.' }
+  }
+  if (from > to) {
+    return { ok: false, message: '"from" date must be on or before "to" date.' }
+  }
+  return { ok: true, from, to }
+}
+
+function normalizeOptionalText(value) {
+  if (value === null || value === undefined) return null
+  const normalized = String(value).trim()
+  return normalized || null
+}
+
+function normalizeDuplicateRequestTimestamp(value) {
+  const parsed = value instanceof Date ? value : parseDateInput(value)
+  return parsed ? parsed.toISOString() : null
+}
+
+function buildAttendanceRequestFingerprint(input) {
+  return {
+    requestedInAt: normalizeDuplicateRequestTimestamp(input.requestedInAt),
+    requestedOutAt: normalizeDuplicateRequestTimestamp(input.requestedOutAt),
+    reason: normalizeOptionalText(input.reason),
+    minutes: Number.isFinite(Number(input.minutes)) ? Number(input.minutes) : null,
+    attachmentUrl: normalizeOptionalText(input.attachmentUrl),
+    leaveTypeId: normalizeOptionalText(input.leaveTypeId),
+    leaveTypeCode: normalizeOptionalText(input.leaveTypeCode),
+    overtimeRuleId: normalizeOptionalText(input.overtimeRuleId),
+    overtimeRuleName: normalizeOptionalText(input.overtimeRuleName),
+  }
+}
+
+function matchesAttendanceRequestFingerprint(row, fingerprint) {
+  const metadata = normalizeMetadata(row.metadata)
+  const rowFingerprint = buildAttendanceRequestFingerprint({
+    requestedInAt: row.requested_in_at,
+    requestedOutAt: row.requested_out_at,
+    reason: row.reason,
+    minutes: metadata.minutes,
+    attachmentUrl: metadata.attachmentUrl,
+    leaveTypeId: metadata.leaveType?.id,
+    leaveTypeCode: metadata.leaveType?.code,
+    overtimeRuleId: metadata.overtimeRule?.id,
+    overtimeRuleName: metadata.overtimeRule?.name,
+  })
+  return (
+    rowFingerprint.requestedInAt === fingerprint.requestedInAt
+    && rowFingerprint.requestedOutAt === fingerprint.requestedOutAt
+    && rowFingerprint.reason === fingerprint.reason
+    && rowFingerprint.minutes === fingerprint.minutes
+    && rowFingerprint.attachmentUrl === fingerprint.attachmentUrl
+    && rowFingerprint.leaveTypeId === fingerprint.leaveTypeId
+    && rowFingerprint.leaveTypeCode === fingerprint.leaveTypeCode
+    && rowFingerprint.overtimeRuleId === fingerprint.overtimeRuleId
+    && rowFingerprint.overtimeRuleName === fingerprint.overtimeRuleName
+  )
+}
+
 function normalizeStatusLabel(value) {
   if (value === null || value === undefined) return null
   const text = String(value).trim()
@@ -2258,9 +2335,9 @@ function mapImportBatchRow(row) {
 	  }
 	}
 
-	async function acquireImportIdempotencyLock(client, orgId, idempotencyKey) {
-	  const clean = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
-	  if (!clean) return
+		async function acquireImportIdempotencyLock(client, orgId, idempotencyKey) {
+		  const clean = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
+		  if (!clean) return
 	  try {
 	    await client.query(
 	      'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
@@ -2268,10 +2345,37 @@ function mapImportBatchRow(row) {
 	    )
 	  } catch (_error) {
 	    // Best-effort: keep functional behavior even if advisory locks are unavailable.
-	  }
-	}
+		  }
+		}
 
-function mapIntegrationRow(row) {
+		async function acquireAttendanceRequestLock(client, orgId, userId, workDate, requestType) {
+		  try {
+		    await client.query(
+		      'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+		      [String(orgId ?? '') + ':' + String(userId ?? ''), `${String(workDate ?? '')}:${String(requestType ?? '')}`]
+		    )
+		  } catch (_error) {
+		    // Best-effort: preserve functional behavior if advisory locks are unavailable.
+		  }
+		}
+
+		async function findDuplicateAttendanceRequest(client, { orgId, userId, workDate, requestType }) {
+		  const rows = await client.query(
+		    `SELECT id, requested_in_at, requested_out_at, reason, status, metadata
+		     FROM attendance_requests
+		     WHERE org_id = $1
+		       AND user_id = $2
+		       AND work_date = $3
+		       AND request_type = $4
+		       AND status IN ('pending', 'approved')
+		     ORDER BY created_at DESC
+		     LIMIT 20`,
+		    [orgId, userId, workDate, requestType]
+		  )
+		  return rows[0] ?? null
+		}
+
+	function mapIntegrationRow(row) {
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -8337,9 +8441,13 @@ module.exports = {
           }
         }
 
-        const { page, pageSize, offset } = parsePagination(req.query)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+		        const { page, pageSize, offset } = parsePagination(req.query)
+		        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+		        if (!dateRange.ok) {
+		          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+		          return
+		        }
+		        const { from, to } = dateRange
 
         try {
           const countRows = await db.query(
@@ -8372,9 +8480,10 @@ module.exports = {
             }
           })
 
-          res.json({
-            ok: true,
-            data: {
+			          res.json({
+			            ok: true,
+			            success: true,
+		            data: {
               items: records,
               total,
               page,
@@ -8443,8 +8552,12 @@ module.exports = {
 	        }
 
 	        const { page, pageSize, offset } = parsePagination(req.query)
-	        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-	        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
 	        const excludedStatuses = ['normal', 'off', 'adjusted']
 
@@ -8618,13 +8731,17 @@ module.exports = {
           }
         }
 
-        const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const orgId = getOrgId(req)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
-        try {
-          const summary = await loadAttendanceSummary(db, orgId, targetUserId, from, to)
-          res.json({ ok: true, data: summary })
+	        try {
+	          const summary = await loadAttendanceSummary(db, orgId, targetUserId, from, to)
+	          res.json({ ok: true, success: true, data: summary })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -8674,9 +8791,13 @@ module.exports = {
           }
         }
 
-        const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const orgId = getOrgId(req)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
         try {
           const rows = await db.query(
@@ -8697,7 +8818,7 @@ module.exports = {
             minutes: Number(row.total_minutes ?? 0),
           }))
 
-          res.json({ ok: true, data: { items, from, to } })
+	          res.json({ ok: true, success: true, data: { items, from, to } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -8735,15 +8856,20 @@ module.exports = {
           return
         }
 
-        const userId = getUserId(req)
-        if (!userId) {
-          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-          return
-        }
+	        const userId = getUserId(req)
+	        if (!userId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+	          return
+	        }
 
-        const orgId = getOrgId(req)
-        const requestedInAt = parseDateInput(parsed.data.requestedInAt)
-        const requestedOutAt = parseDateInput(parsed.data.requestedOutAt)
+	        const orgId = getOrgId(req)
+	        const workDate = normalizeDateOnlyStrict(parsed.data.workDate)
+	        if (!workDate) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'workDate must use YYYY-MM-DD format' } })
+	          return
+	        }
+	        const requestedInAt = parseDateInput(parsed.data.requestedInAt)
+	        const requestedOutAt = parseDateInput(parsed.data.requestedOutAt)
         if (requestedInAt && requestedOutAt && requestedOutAt <= requestedInAt) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedOutAt must be after requestedInAt' } })
           return
@@ -8811,11 +8937,11 @@ module.exports = {
           return
         }
 
-        const approvalFlow = await loadApprovalFlow(db, orgId, {
-          requestType,
-          flowId: parsed.data.approvalFlowId,
-        })
-        const metadata = {}
+	        const approvalFlow = await loadApprovalFlow(db, orgId, {
+	          requestType,
+	          flowId: parsed.data.approvalFlowId,
+	        })
+	        const metadata = {}
         if (durationMinutes) metadata.minutes = durationMinutes
         if (leaveType) {
           metadata.leaveType = {
@@ -8852,10 +8978,20 @@ module.exports = {
 
         const approvalId = `apv_${randomUUID()}`
 
-        try {
-          const request = await db.transaction(async (trx) => {
-            await trx.query(
-              'INSERT INTO approval_instances (id, status, version) VALUES ($1, $2, $3)',
+	        try {
+	          const request = await db.transaction(async (trx) => {
+	            await acquireAttendanceRequestLock(trx, orgId, userId, workDate, requestType)
+	            const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
+	              orgId,
+	              userId,
+	              workDate,
+	              requestType,
+	            })
+	            if (duplicateRequest) {
+	              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+	            }
+	            await trx.query(
+	              'INSERT INTO approval_instances (id, status, version) VALUES ($1, $2, $3)',
               [approvalId, 'pending', 0]
             )
 
@@ -8864,13 +9000,13 @@ module.exports = {
                (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
                RETURNING *`,
-              [
-                randomUUID(),
-                userId,
-                orgId,
-                parsed.data.workDate,
-                requestType,
-                requestedInAt,
+	              [
+	                randomUUID(),
+	                userId,
+	                orgId,
+	                workDate,
+	                requestType,
+	                requestedInAt,
                 requestedOutAt,
                 parsed.data.reason ?? null,
                 'pending',
@@ -8882,17 +9018,21 @@ module.exports = {
             return rows[0]
           })
 
-          emitEvent('attendance.requested', {
-            orgId,
-            userId,
-            workDate: parsed.data.workDate,
-            requestType,
-          })
-          res.status(201).json({ ok: true, data: { request } })
-        } catch (error) {
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-            return
+	          emitEvent('attendance.requested', {
+	            orgId,
+	            userId,
+	            workDate,
+	            requestType,
+	          })
+	          res.status(201).json({ ok: true, data: { request } })
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
           }
           logger.error('Attendance request creation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create request' } })
@@ -8940,10 +9080,14 @@ module.exports = {
           }
         }
 
-        const { page, pageSize, offset } = parsePagination(req.query)
-        const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const { page, pageSize, offset } = parsePagination(req.query)
+	        const orgId = getOrgId(req)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
         try {
           const params = [targetUserId, orgId, from, to]
@@ -8970,7 +9114,7 @@ module.exports = {
             params
           )
 
-          res.json({ ok: true, data: { items: rows, total, page, pageSize } })
+	          res.json({ ok: true, success: true, data: { items: rows, total, page, pageSize } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -12721,6 +12865,7 @@ module.exports = {
 
 	          res.json({
 	            ok: true,
+	            success: true,
 	            data: {
 	              batchId,
 	              imported: importedCount,
@@ -16216,9 +16361,13 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const orgId = getOrgId(req)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
         try {
           const countRows = await db.query(
@@ -16237,7 +16386,7 @@ module.exports = {
             [orgId, from, to]
           )
 
-          res.json({ ok: true, data: { items: rows.map(mapHolidayRow), total } })
+	          res.json({ ok: true, success: true, data: { items: rows.map(mapHolidayRow), total } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -16549,8 +16698,12 @@ module.exports = {
           }
         }
 
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
         const requestedLimit = parseNumber(parsed.data.limit, 1000)
         const limit = Math.min(Math.max(requestedLimit, 1), 5000)
 

@@ -9,7 +9,7 @@ import 'element-plus/dist/index.css'
 import App from './App.vue'
 import { ROUTE_PATHS } from './router/types'
 import { useFeatureFlags } from './stores/featureFlags'
-import { normalizePostLoginRedirect } from './utils/authRedirect'
+import { normalizePostLoginRedirect, normalizePreLoginRedirect } from './utils/authRedirect'
 import { apiFetch, clearStoredAuthState, getStoredAuthToken } from './utils/api'
 
 // Import views
@@ -132,9 +132,10 @@ router.beforeEach(async (to, _from, next) => {
   }
 
   if (!token && !isLoginRoute) {
+    const redirect = normalizePreLoginRedirect(to.fullPath || '/attendance')
     return next({
       path: ROUTE_PATHS.LOGIN,
-      query: { redirect: to.fullPath || '/attendance' },
+      query: { redirect },
     })
   }
 

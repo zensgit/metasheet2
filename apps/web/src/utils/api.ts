@@ -2,6 +2,8 @@
  * API utilities for frontend-backend communication
  */
 
+import { normalizePreLoginRedirect } from './authRedirect'
+
 // Vite environment type declaration
 declare global {
   interface ImportMetaEnv {
@@ -95,7 +97,8 @@ function buildLoginRedirectUrl(): string {
   if (typeof window === 'undefined') return '/login'
   const current = `${window.location.pathname || ''}${window.location.search || ''}${window.location.hash || ''}` || '/'
   if (current.startsWith('/login')) return '/login'
-  return `/login?redirect=${encodeURIComponent(current)}`
+  const redirect = normalizePreLoginRedirect(current)
+  return `/login?redirect=${encodeURIComponent(redirect)}`
 }
 
 function handleUnauthorized(path: string): void {

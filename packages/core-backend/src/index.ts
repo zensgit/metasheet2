@@ -484,6 +484,8 @@ export class MetaSheetServer {
         } catch { /* ignore plugin summary errors */ }
         res.json({
           status: 'ok',
+          ok: true,
+          success: true,
           timestamp: new Date().toISOString(),
           plugins: this.pluginLoader.getPlugins().size,
           pluginsSummary: pluginsSummary || undefined,
