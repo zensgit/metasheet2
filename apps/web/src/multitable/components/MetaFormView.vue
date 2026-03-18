@@ -11,22 +11,30 @@
           :key="field.id"
           class="meta-form-view__field"
         >
-          <label class="meta-form-view__label">{{ field.name }}</label>
+          <label class="meta-form-view__label" :for="`field_${field.id}`">{{ field.name }}</label>
           <input
             v-if="field.type === 'string'"
+            :id="`field_${field.id}`"
             class="meta-form-view__input"
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="text"
             :disabled="readOnly"
+            :aria-required="field.required ? 'true' : undefined"
+            :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
+            :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="formData[field.id] ?? ''"
             @input="formData[field.id] = ($event.target as HTMLInputElement).value"
           />
           <input
             v-else-if="field.type === 'number'"
+            :id="`field_${field.id}`"
             class="meta-form-view__input"
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="number"
             :disabled="readOnly"
+            :aria-required="field.required ? 'true' : undefined"
+            :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
+            :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="formData[field.id] ?? ''"
             @input="formData[field.id] = ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value)"
           />
@@ -36,18 +44,26 @@
           </label>
           <input
             v-else-if="field.type === 'date'"
+            :id="`field_${field.id}`"
             class="meta-form-view__input"
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="date"
             :disabled="readOnly"
+            :aria-required="field.required ? 'true' : undefined"
+            :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
+            :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="formData[field.id] ?? ''"
             @input="formData[field.id] = ($event.target as HTMLInputElement).value"
           />
           <select
             v-else-if="field.type === 'select'"
+            :id="`field_${field.id}`"
             class="meta-form-view__input"
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             :disabled="readOnly"
+            :aria-required="field.required ? 'true' : undefined"
+            :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
+            :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
             :value="formData[field.id] ?? ''"
             @change="formData[field.id] = ($event.target as HTMLSelectElement).value"
           >
@@ -63,7 +79,7 @@
           >{{ linkButtonLabel(field.id) }}</button>
           <span v-else class="meta-form-view__readonly-val">{{ record?.data[field.id] ?? '—' }}</span>
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-form-view__link-summary">{{ linkPreview(field.id) }}</div>
-          <div v-if="fieldErrors?.[field.id] || validationErrors[field.id]" class="meta-form-view__field-error">{{ fieldErrors?.[field.id] || validationErrors[field.id] }}</div>
+          <div v-if="fieldErrors?.[field.id] || validationErrors[field.id]" :id="`error_${field.id}`" class="meta-form-view__field-error">{{ fieldErrors?.[field.id] || validationErrors[field.id] }}</div>
         </div>
         <div v-if="!readOnly" class="meta-form-view__actions">
           <button type="submit" class="meta-form-view__submit" :disabled="submitting">

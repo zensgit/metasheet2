@@ -9,7 +9,7 @@
 
 ## 1. Executive Summary
 
-The multi-table module delivers a complete, self-contained Feishu/Airtable-style spreadsheet experience built over **13 development phases**. The module lives entirely within `apps/web/src/multitable/` with zero modifications to existing MetaSheet2 backend, openapi, or routing code.
+The multi-table module delivers a complete, self-contained Feishu/Airtable-style spreadsheet experience built over **14 development phases**. The module lives entirely within `apps/web/src/multitable/` with zero modifications to existing MetaSheet2 backend, openapi, or routing code.
 
 | Metric | Value |
 |--------|-------|
@@ -18,13 +18,13 @@ The multi-table module delivers a complete, self-contained Feishu/Airtable-style
 | Composables | 4 |
 | API client methods | 25 |
 | Type definitions | ~280 lines |
-| Total source LOC | ~4,900 |
-| Test files | 16 |
-| Total tests | 200 |
-| Total test LOC | ~2,220 |
+| Total source LOC | ~5,100 |
+| Test files | 17 |
+| Total tests | 237 |
+| Total test LOC | ~2,500 |
 | View types | 5 (grid, form, kanban, gallery, calendar) |
 | Field types | 9 (string, number, boolean, date, formula, select, link, lookup, rollup) |
-| Phases completed | 13/13 |
+| Phases completed | 14 |
 
 ---
 
@@ -251,6 +251,18 @@ Comment thread management: load, add, resolve comments with loading/error states
 | Embed host same-origin security default | MultitableEmbedHost |
 | Pagination reset on filter apply | useMultitableGrid |
 
+### Phase 14 — Keyboard Accessibility, ARIA Completeness & UX Depth
+| Feature | Component |
+|---------|-----------|
+| Kanban keyboard nav + ARIA (cards) | MetaKanbanView |
+| Gallery keyboard nav + ARIA (grid-aware) | MetaGalleryView |
+| Calendar keyboard nav + ARIA (dates) | MetaCalendarView |
+| Form ARIA (required/invalid/describedby) | MetaFormView |
+| Record drawer prev/next navigation | MetaRecordDrawer |
+| Record drawer ARIA (close label, for/id) | MetaRecordDrawer |
+| Beforeunload unsaved changes protection | MultitableWorkbench |
+| Toolbar dropdown escape-to-close | MetaToolbar |
+
 ---
 
 ## 6. Complete Feature Matrix
@@ -318,6 +330,13 @@ Comment thread management: load, add, resolve comments with loading/error states
 | 59 | Comments drawer error retry | 13 | Done |
 | 60 | Toolbar search active indicator | 13 | Done |
 | 61 | Embed host origin security | 13 | Done |
+| 62 | Kanban keyboard nav + ARIA | 14 | Done |
+| 63 | Gallery keyboard nav + ARIA | 14 | Done |
+| 64 | Calendar keyboard nav + ARIA | 14 | Done |
+| 65 | Form view ARIA (required/invalid/describedby) | 14 | Done |
+| 66 | Record drawer prev/next navigation | 14 | Done |
+| 67 | Beforeunload unsaved changes protection | 14 | Done |
+| 68 | Toolbar dropdown escape-to-close | 14 | Done |
 
 ---
 
@@ -340,8 +359,9 @@ Comment thread management: load, add, resolve comments with loading/error states
  ✓ multitable-phase11.spec.ts          18 tests
  ✓ multitable-phase12.spec.ts          20 tests
  ✓ multitable-phase13.spec.ts          22 tests
+ ✓ multitable-phase14.spec.ts          37 tests
 ─────────────────────────────────────────────
- Total                                200 tests  ✓ all passing
+ Total                                237 tests  ✓ all passing
 ```
 
 ### Test Coverage by Domain
@@ -364,6 +384,7 @@ Comment thread management: load, add, resolve comments with loading/error states
 | Print/density/date/auto-fit | 18 | multitable-phase11.spec.ts |
 | Field parity/view polish/error | 20 | multitable-phase12.spec.ts |
 | Validation/debounce/security | 22 | multitable-phase13.spec.ts |
+| Keyboard a11y/ARIA/UX depth | 37 | multitable-phase14.spec.ts |
 
 ---
 
@@ -428,7 +449,7 @@ Comment thread management: load, add, resolve comments with loading/error states
 
 ## 10. Constraints Honored
 
-Throughout all 13 phases, the following constraints were strictly followed:
+Throughout all 14 phases, the following constraints were strictly followed:
 
 | Constraint | Verified |
 |------------|----------|
@@ -454,7 +475,8 @@ Throughout all 13 phases, the following constraints were strictly followed:
 | 10 | `1b49e184d` | Frozen columns, row expand, print CSS |
 | 11 | `a447a62de` | Print button, row density, date field, column auto-fit |
 | 12 | `fd29bea9f` | Field parity, view polish, error resilience |
-| 13 | (pending) | Quick wins: validation, debounce, security, UX |
+| 13 | `b91d5a282` | Quick wins: validation, debounce, security, UX |
+| 14 | (pending) | Keyboard accessibility, ARIA completeness, UX depth |
 
 ---
 

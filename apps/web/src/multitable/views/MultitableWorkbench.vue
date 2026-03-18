@@ -33,6 +33,8 @@
           :submitting="formSubmitting"
           :success-message="formSuccessMessage"
           :error-message="formErrorMessage"
+          :field-errors="formFieldErrors"
+          :link-summaries-by-field="selectedRecordLinkSummaries"
           @submit="onFormSubmit" @open-link-picker="openLinkPicker"
         />
         <MetaKanbanView
@@ -58,7 +60,7 @@
           :rows="grid.rows.value" :visible-fields="grid.visibleFields.value" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="caps.canEditRecord.value"
-          :can-delete="caps.canDeleteRecord.value" :column-widths="grid.columnWidths.value"
+          :can-delete="caps.canDeleteRecord.value" :column-widths="grid.columnWidths.value" :link-summaries="grid.linkSummaries.value"
           :enable-multi-select="caps.canDeleteRecord.value"
           :group-field="grid.groupField.value"
           :search-text="searchText" :row-density="rowDensity"
@@ -70,8 +72,11 @@
       <MetaRecordDrawer
         :visible="!!selectedRecordId" :record="selectedRecordResolved" :fields="grid.fields.value"
         :can-edit="caps.canEditRecord.value" :can-comment="caps.canComment.value" :can-delete="caps.canDeleteRecord.value"
+        :link-summaries-by-field="selectedRecordLinkSummaries"
+        :record-ids="drawerRecordIds"
         @close="selectedRecordId = null" @delete="onDeleteRecord" @patch="onDrawerPatch"
         @toggle-comments="showComments = !showComments" @open-link-picker="openLinkPicker"
+        @navigate="onDrawerNavigate"
       />
       <MetaCommentsDrawer
         :visible="showComments && !!selectedRecordId" :comments="commentsState.comments.value"
@@ -117,8 +122,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
-import type { MetaField, MetaRecord, MetaFieldType, RowDensity } from '../types'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import type { MetaField, MetaRecord, MetaFieldType, RowDensity, LinkedRecordSummary } from '../types'
 import type { MultitableRole } from '../composables/useMultitableCapabilities'
 import type { SortRule, FilterConjunction } from '../composables/useMultitableGrid'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
@@ -170,6 +175,8 @@ const rowDensity = ref<RowDensity>('normal')
 const formSubmitting = ref(false)
 const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
+const formFieldErrors = ref<Record<string, string>>({})
+const deepLinkedRecordLinkSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
 
 function showError(msg: string) {
   workbench.error.value = null
@@ -189,6 +196,30 @@ const formReadOnly = computed(() => {
   return selectedRecordResolved.value ? !caps.canEditRecord.value : !caps.canCreateRecord.value
 })
 const pageStartIndex = computed(() => grid.page.value.offset)
+const selectedRecordLinkSummaries = computed<Record<string, LinkedRecordSummary[]>>(() => {
+  const recordId = selectedRecordId.value
+  if (!recordId) return {}
+  const fromGrid = grid.linkSummaries.value[recordId]
+  if (fromGrid) return fromGrid
+  if (deepLinkedRecord.value?.id === recordId) return deepLinkedRecordLinkSummaries.value
+  return {}
+})
+
+function applyLocalLinkSummaries(recordId: string, fieldId: string, summaries: LinkedRecordSummary[]) {
+  grid.linkSummaries.value = {
+    ...grid.linkSummaries.value,
+    [recordId]: {
+      ...(grid.linkSummaries.value[recordId] ?? {}),
+      [fieldId]: summaries,
+    },
+  }
+  if (deepLinkedRecord.value?.id === recordId) {
+    deepLinkedRecordLinkSummaries.value = {
+      ...deepLinkedRecordLinkSummaries.value,
+      [fieldId]: summaries,
+    }
+  }
+}
 
 async function loadCommentsForRecord(recordId: string) {
   if (workbench.activeSheetId.value) {
@@ -263,6 +294,7 @@ async function onFormSubmit(data: Record<string, unknown>) {
       formSubmitting.value = true
       formSuccessMessage.value = null
       formErrorMessage.value = null
+      formFieldErrors.value = {}
       const result = await workbench.client.submitForm(viewId, {
         recordId: selectedRecordResolved.value?.id,
         expectedVersion: selectedRecordResolved.value?.version,
@@ -272,10 +304,12 @@ async function onFormSubmit(data: Record<string, unknown>) {
       selectedRecordId.value = result.record.id
       await grid.loadViewData(grid.page.value.offset)
       formSuccessMessage.value = result.mode === 'create' ? 'Record created' : 'Changes saved'
+      formFieldErrors.value = {}
       showSuccess('Form submitted')
     } catch (e: any) {
       const message = e.message ?? 'Form submit failed'
       formErrorMessage.value = message
+      formFieldErrors.value = e.fieldErrors ?? {}
       showError(message)
     } finally {
       formSubmitting.value = false
@@ -312,7 +346,44 @@ async function onResolveComment(commentId: string) {
 
 function openLinkPicker(field: MetaField) { linkPickerField.value = field; linkPickerRecordId.value = selectedRecordId.value; linkPickerCurrentValue.value = selectedRecordResolved.value?.data[field.id] ?? null; linkPickerVisible.value = true }
 function onGridLinkPicker(ctx: { recordId: string; field: MetaField }) { const row = grid.rows.value.find((r) => r.id === ctx.recordId); linkPickerField.value = ctx.field; linkPickerRecordId.value = ctx.recordId; linkPickerCurrentValue.value = row?.data[ctx.field.id] ?? null; linkPickerVisible.value = true }
-async function onLinkPickerConfirm(recordIds: string[]) { linkPickerVisible.value = false; if (!linkPickerRecordId.value || !linkPickerField.value) return; const row = grid.rows.value.find((r) => r.id === linkPickerRecordId.value); if (row) await grid.patchCell(row.id, linkPickerField.value.id, recordIds, row.version) }
+async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: LinkedRecordSummary[] }) {
+  linkPickerVisible.value = false
+  if (!linkPickerRecordId.value || !linkPickerField.value) return
+  const recordId = linkPickerRecordId.value
+  const fieldId = linkPickerField.value.id
+  const row = grid.rows.value.find((r) => r.id === recordId)
+  if (row) {
+    await grid.patchCell(row.id, fieldId, payload.recordIds, row.version)
+    if (grid.error.value) {
+      showError(grid.error.value)
+      return
+    }
+  } else if (selectedRecordResolved.value?.id === recordId) {
+    try {
+      const result = await workbench.client.patchRecords({
+        sheetId: workbench.activeSheetId.value || undefined,
+        viewId: workbench.activeViewId.value || undefined,
+        changes: [{ recordId, fieldId, value: payload.recordIds, expectedVersion: selectedRecordResolved.value.version }],
+      })
+      const nextVersion = result.updated?.find((item) => item.recordId === recordId)?.version ?? selectedRecordResolved.value.version + 1
+      deepLinkedRecord.value = {
+        ...selectedRecordResolved.value,
+        version: nextVersion,
+        data: {
+          ...selectedRecordResolved.value.data,
+          [fieldId]: payload.recordIds,
+        },
+      }
+    } catch (e: any) {
+      showError(e.message ?? 'Failed to update linked records')
+      return
+    }
+  } else {
+    return
+  }
+  applyLocalLinkSummaries(recordId, fieldId, payload.summaries)
+  showSuccess('Linked records updated')
+}
 
 // --- Field management ---
 async function onCreateField(input: { sheetId: string; name: string; type: string }) {
@@ -427,11 +498,8 @@ function onReorderField(fromId: string, toId: string) {
   const [moved] = arr.splice(fromIdx, 1)
   arr.splice(toIdx, 0, moved)
   grid.fields.value = arr
-  // Persist order to server
-  const vid = workbench.activeViewId.value
-  if (vid) {
-    workbench.client.updateView(vid, { fieldOrder: arr.map((f) => f.id) }).catch(() => {})
-  }
+  // Persist order through field.order until backend exposes a dedicated view column-order contract.
+  Promise.all(arr.map((field, index) => workbench.client.updateField(field.id, { order: index }))).catch(() => {})
 }
 
 // --- Bulk import ---
@@ -475,6 +543,20 @@ function csvEscape(val: string): string {
   return val
 }
 
+const drawerRecordIds = computed(() => grid.rows.value.map((r) => r.id))
+
+function onDrawerNavigate(recordId: string) {
+  void selectRecord(recordId)
+}
+
+// --- Beforeunload: warn on unsaved changes ---
+function onBeforeUnload(e: BeforeUnloadEvent) {
+  if (formSubmitting.value) {
+    e.preventDefault()
+    e.returnValue = ''
+  }
+}
+
 function onGlobalKeydown(e: KeyboardEvent) {
   const mod = e.metaKey || e.ctrlKey
   if (mod && e.key === 'z' && !e.shiftKey) { e.preventDefault(); grid.undo() }
@@ -502,6 +584,7 @@ watch(selectedRecordId, (rid) => {
 watch([selectedRecordId, () => workbench.activeViewId.value], () => {
   formSuccessMessage.value = null
   formErrorMessage.value = null
+  formFieldErrors.value = {}
 })
 
 // --- Bulk delete ---
@@ -530,6 +613,7 @@ async function resolveDeepLink(recordId: string) {
       viewId: workbench.activeViewId.value || undefined,
     })
     deepLinkedRecord.value = ctx.record
+    deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
     await selectRecord(recordId)
   } catch (e: any) {
     showError(`Record not found: ${recordId}`)
@@ -556,7 +640,10 @@ async function loadStandaloneForm() {
       recordId: selectedRecordId.value || undefined,
     })
     if (ctx.fields?.length) grid.fields.value = ctx.fields
-    if (ctx.record) { deepLinkedRecord.value = ctx.record; selectedRecordId.value = ctx.record.id }
+    if (ctx.record) {
+      deepLinkedRecord.value = ctx.record
+      selectedRecordId.value = ctx.record.id
+    }
   } catch { /* silent — grid loadViewData will handle */ }
 }
 
@@ -568,6 +655,7 @@ watch(
 )
 
 onMounted(async () => {
+  window.addEventListener('beforeunload', onBeforeUnload)
   try {
     loadBases()
     await workbench.loadSheets()
@@ -577,6 +665,10 @@ onMounted(async () => {
   } catch (e: any) {
     showError(e.message ?? 'Failed to initialize workbench')
   }
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', onBeforeUnload)
 })
 </script>
 

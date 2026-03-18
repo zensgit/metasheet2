@@ -2,10 +2,14 @@
   <div class="meta-gallery">
     <div class="meta-gallery__grid">
       <div
-        v-for="row in rows"
+        v-for="(row, idx) in rows"
         :key="row.id"
         class="meta-gallery__card"
+        role="article"
+        tabindex="0"
+        :aria-label="cardTitle(row)"
         @click="emit('select-record', row.id)"
+        @keydown="onCardKeydown($event, idx)"
       >
         <div class="meta-gallery__card-title">{{ cardTitle(row) }}</div>
         <div class="meta-gallery__card-body">
@@ -31,7 +35,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 import type { MetaField, MetaRecord } from '../types'
 
 const props = defineProps<{
@@ -66,6 +70,38 @@ function formatValue(val: unknown, field: MetaField): string {
   if (Array.isArray(val)) return val.length ? `${val.length} linked` : '—'
   return String(val)
 }
+
+const focusedCardIndex = ref(-1)
+
+function onCardKeydown(e: KeyboardEvent, idx: number) {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    emit('select-record', props.rows[idx].id)
+    return
+  }
+  const cols = getColumnsCount()
+  let next = idx
+  if (e.key === 'ArrowRight') next = idx + 1
+  else if (e.key === 'ArrowLeft') next = idx - 1
+  else if (e.key === 'ArrowDown') next = idx + cols
+  else if (e.key === 'ArrowUp') next = idx - cols
+  else return
+
+  e.preventDefault()
+  if (next >= 0 && next < props.rows.length) {
+    focusedCardIndex.value = next
+    const cards = document.querySelectorAll('.meta-gallery__card[tabindex="0"]')
+    ;(cards[next] as HTMLElement)?.focus()
+  }
+}
+
+function getColumnsCount(): number {
+  const grid = document.querySelector('.meta-gallery__grid')
+  if (!grid) return 1
+  const style = getComputedStyle(grid)
+  const cols = style.gridTemplateColumns.split(' ').length
+  return cols || 1
+}
 </script>
 
 <style scoped>
@@ -73,6 +109,7 @@ function formatValue(val: unknown, field: MetaField): string {
 .meta-gallery__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; padding: 16px; overflow-y: auto; flex: 1; }
 .meta-gallery__card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px 16px; cursor: pointer; transition: box-shadow 0.15s, border-color 0.15s; }
 .meta-gallery__card:hover { border-color: #409eff; box-shadow: 0 2px 8px rgba(64,158,255,.15); }
+.meta-gallery__card:focus-visible { outline: 2px solid #409eff; outline-offset: 1px; }
 .meta-gallery__card-title { font-size: 14px; font-weight: 600; color: #333; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-gallery__card-body { display: flex; flex-direction: column; gap: 4px; }
 .meta-gallery__field { display: flex; gap: 8px; font-size: 12px; }

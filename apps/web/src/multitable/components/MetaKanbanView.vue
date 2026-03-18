@@ -28,9 +28,13 @@
               v-for="row in uncategorized"
               :key="row.id"
               class="meta-kanban__card"
+              role="article"
+              tabindex="0"
+              :aria-label="cardTitle(row)"
               draggable="true"
               @dragstart="onDragStart(row, $event)"
               @click="emit('select-record', row.id)"
+              @keydown="onCardKeydown($event, row.id)"
             >
               <div class="meta-kanban__card-title">{{ cardTitle(row) }}</div>
               <div class="meta-kanban__card-fields">
@@ -55,9 +59,13 @@
               v-for="row in columnRows(opt.value)"
               :key="row.id"
               class="meta-kanban__card"
+              role="article"
+              tabindex="0"
+              :aria-label="cardTitle(row)"
               draggable="true"
               @dragstart="onDragStart(row, $event)"
               @click="emit('select-record', row.id)"
+              @keydown="onCardKeydown($event, row.id)"
             >
               <div class="meta-kanban__card-title">{{ cardTitle(row) }}</div>
               <div class="meta-kanban__card-fields">
@@ -154,6 +162,42 @@ function onDrop(targetValue: string | null, _e: DragEvent) {
   emit('patch-cell', dragRecordId, groupField.value.id, targetValue ?? '', dragVersion)
   dragRecordId = null
 }
+
+const focusedCardId = ref<string | null>(null)
+
+function allCards(): string[] {
+  const ids: string[] = uncategorized.value.map((r) => r.id)
+  for (const opt of groupOptions.value) {
+    ids.push(...columnRows(opt.value).map((r) => r.id))
+  }
+  return ids
+}
+
+function onCardKeydown(e: KeyboardEvent, cardId: string) {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    emit('select-record', cardId)
+    return
+  }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault()
+    const ids = allCards()
+    const idx = ids.indexOf(cardId)
+    if (idx < 0) return
+    const next = e.key === 'ArrowDown' ? idx + 1 : idx - 1
+    if (next >= 0 && next < ids.length) {
+      focusedCardId.value = ids[next]
+      const el = (e.target as HTMLElement)?.parentElement?.querySelector(`[aria-label]`)?.parentElement?.querySelector(`[aria-label="${cardTitle(props.rows.find((r) => r.id === ids[next])!)}"]`) as HTMLElement
+      if (!el) {
+        // Fallback: find by iterating siblings / all cards
+        const allEls = document.querySelectorAll('.meta-kanban__card[tabindex="0"]')
+        ;(allEls[next] as HTMLElement)?.focus()
+      } else {
+        el.focus()
+      }
+    }
+  }
+}
 </script>
 
 <style scoped>
@@ -173,6 +217,7 @@ function onDrop(targetValue: string | null, _e: DragEvent) {
 .meta-kanban__cards--drag-over { background: #ecf5ff; border-color: #409eff; }
 .meta-kanban__card { background: #fff; border-radius: 6px; padding: 10px 12px; box-shadow: 0 1px 3px rgba(0,0,0,.08); cursor: pointer; transition: box-shadow 0.15s; }
 .meta-kanban__card:hover { box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+.meta-kanban__card:focus-visible { outline: 2px solid #409eff; outline-offset: 1px; }
 .meta-kanban__card[draggable="true"] { cursor: grab; }
 .meta-kanban__card-title { font-size: 13px; font-weight: 500; color: #333; margin-bottom: 4px; }
 .meta-kanban__card-fields { display: flex; flex-direction: column; gap: 2px; }

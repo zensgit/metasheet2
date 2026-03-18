@@ -7,7 +7,7 @@
           <span class="meta-toolbar__btn-icon">&#x2630;</span> Fields
           <span v-if="hiddenCount" class="meta-toolbar__badge">{{ hiddenCount }}</span>
         </button>
-        <div v-if="showFieldPicker" class="meta-toolbar__panel">
+        <div v-if="showFieldPicker" class="meta-toolbar__panel" @keydown.escape="showFieldPicker = false">
           <label v-for="field in fields" :key="field.id" class="meta-toolbar__field-toggle">
             <input type="checkbox" :checked="!hiddenFieldIds.includes(field.id)" @change="emit('toggle-field', field.id)" />
             <span>{{ field.name }}</span>
@@ -21,7 +21,7 @@
           <span class="meta-toolbar__btn-icon">&#x2195;</span> Sort
           <span v-if="sortRules.length" class="meta-toolbar__badge">{{ sortRules.length }}</span>
         </button>
-        <div v-if="showSortPanel" class="meta-toolbar__panel">
+        <div v-if="showSortPanel" class="meta-toolbar__panel" @keydown.escape="showSortPanel = false">
           <div v-for="(rule, idx) in sortRules" :key="idx" class="meta-toolbar__sort-rule">
             <select :value="rule.fieldId" @change="onSortFieldChange(idx, ($event.target as HTMLSelectElement).value)">
               <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
@@ -43,7 +43,7 @@
           <span class="meta-toolbar__btn-icon">&#x2A01;</span> Filter
           <span v-if="filterRules.length" class="meta-toolbar__badge">{{ filterRules.length }}</span>
         </button>
-        <div v-if="showFilterPanel" class="meta-toolbar__panel meta-toolbar__panel--filter">
+        <div v-if="showFilterPanel" class="meta-toolbar__panel meta-toolbar__panel--filter" @keydown.escape="showFilterPanel = false">
           <div v-if="filterRules.length > 1" class="meta-toolbar__conjunction">
             <span>Where</span>
             <select :value="filterConjunction" @change="emit('set-conjunction', ($event.target as HTMLSelectElement).value as 'and'|'or')">
@@ -76,7 +76,7 @@
           <span class="meta-toolbar__btn-icon">&#x229E;</span> Group
           <span v-if="groupFieldId" class="meta-toolbar__badge">1</span>
         </button>
-        <div v-if="showGroupPanel" class="meta-toolbar__panel">
+        <div v-if="showGroupPanel" class="meta-toolbar__panel" @keydown.escape="showGroupPanel = false">
           <label class="meta-toolbar__field-toggle">
             <input type="radio" name="groupBy" :checked="!groupFieldId" @change="emit('set-group-field', null)" />
             <span class="meta-toolbar__group-none">None</span>
@@ -103,7 +103,7 @@
       <!-- Row density -->
       <div class="meta-toolbar__dropdown">
         <button class="meta-toolbar__btn" title="Row height" aria-label="Row height" @click="showDensityPanel = !showDensityPanel">&#x2195; Rows</button>
-        <div v-if="showDensityPanel" class="meta-toolbar__panel meta-toolbar__panel--density">
+        <div v-if="showDensityPanel" class="meta-toolbar__panel meta-toolbar__panel--density" @keydown.escape="showDensityPanel = false">
           <label v-for="d in DENSITIES" :key="d.value" class="meta-toolbar__field-toggle">
             <input type="radio" name="density" :checked="rowDensity === d.value" @change="emit('set-row-density', d.value); showDensityPanel = false" />
             <span>{{ d.label }}</span>

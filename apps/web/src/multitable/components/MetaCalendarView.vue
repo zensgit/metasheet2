@@ -27,14 +27,19 @@
 
       <div class="meta-calendar__grid">
         <div
-          v-for="cell in calendarCells"
+          v-for="(cell, cellIdx) in calendarCells"
           :key="cell.key"
           class="meta-calendar__cell"
           :class="{
             'meta-calendar__cell--outside': !cell.inMonth,
             'meta-calendar__cell--today': cell.isToday,
           }"
+          :role="cell.inMonth ? 'button' : undefined"
+          :tabindex="cell.inMonth ? 0 : -1"
+          :aria-label="cellAriaLabel(cell)"
+          :aria-disabled="!cell.inMonth ? 'true' : undefined"
           @click="canCreate && cell.inMonth && emit('create-record', { [dateField!.id]: cell.dateStr })"
+          @keydown="onCellKeydown($event, cellIdx)"
         >
           <div class="meta-calendar__day-num">{{ cell.day }}</div>
           <div class="meta-calendar__events">
@@ -193,6 +198,42 @@ function goToday() {
   viewYear.value = now.getFullYear()
   viewMonth.value = now.getMonth()
 }
+
+const focusedCellIndex = ref(-1)
+
+function cellAriaLabel(cell: CalendarCell): string {
+  const d = new Date(cell.dateStr + 'T00:00:00')
+  const dateLabel = d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+  const total = cell.events.length + cell.overflow
+  if (total > 0) return `${dateLabel}, ${total} event${total > 1 ? 's' : ''}`
+  return dateLabel
+}
+
+function onCellKeydown(e: KeyboardEvent, cellIdx: number) {
+  const cells = calendarCells.value
+  let next = cellIdx
+  if (e.key === 'ArrowRight') next = cellIdx + 1
+  else if (e.key === 'ArrowLeft') next = cellIdx - 1
+  else if (e.key === 'ArrowDown') next = cellIdx + 7
+  else if (e.key === 'ArrowUp') next = cellIdx - 7
+  else if (e.key === 'Enter') {
+    e.preventDefault()
+    const cell = cells[cellIdx]
+    if (cell?.inMonth && props.canCreate && dateField.value) {
+      emit('create-record', { [dateField.value.id]: cell.dateStr })
+    }
+    return
+  } else return
+
+  e.preventDefault()
+  if (next >= 0 && next < cells.length && cells[next].inMonth) {
+    focusedCellIndex.value = next
+    const els = document.querySelectorAll('.meta-calendar__cell[tabindex="0"]')
+    // Find the actual element at the right position among in-month cells
+    const allCells = document.querySelectorAll('.meta-calendar__cell')
+    ;(allCells[next] as HTMLElement)?.focus()
+  }
+}
 </script>
 
 <style scoped>
@@ -213,6 +254,7 @@ function goToday() {
 .meta-calendar__grid { display: grid; grid-template-columns: repeat(7, 1fr); flex: 1; overflow-y: auto; }
 .meta-calendar__cell { min-height: 80px; border: 1px solid #f0f0f0; padding: 4px 6px; cursor: pointer; transition: background 0.1s; }
 .meta-calendar__cell:hover { background: #fafbfc; }
+.meta-calendar__cell:focus-visible { outline: 2px solid #409eff; outline-offset: -2px; }
 .meta-calendar__cell--outside { background: #fafafa; }
 .meta-calendar__cell--outside .meta-calendar__day-num { color: #ccc; }
 .meta-calendar__cell--today { background: #ecf5ff; }
