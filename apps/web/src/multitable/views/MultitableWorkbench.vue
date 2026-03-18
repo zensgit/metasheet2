@@ -20,7 +20,7 @@
       :group-field-id="grid.groupFieldId.value"
       :search-text="searchText" :total-rows="grid.page.value.total"
       @apply-sort-filter="grid.applySortFilter" @add-record="onAddRecord" @undo="grid.undo" @redo="grid.redo"
-      @set-group-field="grid.setGroupField" @export-csv="onExportCsv" @update:search-text="searchText = $event"
+      @set-group-field="grid.setGroupField" @export-csv="onExportCsv" @import="showImportModal = true" @update:search-text="searchText = $event"
     />
     <div class="mt-workbench__content">
       <div class="mt-workbench__main">
@@ -63,7 +63,7 @@
           :search-text="searchText"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
-          @bulk-delete="onBulkDelete"
+          @bulk-delete="onBulkDelete" @reorder-field="onReorderField"
         />
       </div>
       <MetaRecordDrawer
@@ -99,6 +99,7 @@
         </div>
       </div>
     </div>
+    <MetaImportModal :visible="showImportModal" :fields="grid.fields.value" @close="showImportModal = false" @import="onBulkImport" />
     <MetaLinkPicker :visible="linkPickerVisible" :field="linkPickerField" :current-value="linkPickerCurrentValue"
       @close="linkPickerVisible = false" @confirm="onLinkPickerConfirm"
     />
@@ -137,6 +138,7 @@ import MetaKanbanView from '../components/MetaKanbanView.vue'
 import MetaGalleryView from '../components/MetaGalleryView.vue'
 import MetaCalendarView from '../components/MetaCalendarView.vue'
 import MetaToast from '../components/MetaToast.vue'
+import MetaImportModal from '../components/MetaImportModal.vue'
 import type { MetaBase } from '../types'
 
 const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; mode?: string; role?: MultitableRole }>()
@@ -162,6 +164,7 @@ const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
 const commentDraft = ref('')
 const searchText = ref('')
 const showShortcuts = ref(false)
+const showImportModal = ref(false)
 const formSubmitting = ref(false)
 const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
@@ -393,6 +396,34 @@ async function onCreateBase(name: string) {
     bases.value.push(res.base)
     await onSelectBase(res.base.id)
   } catch (e: any) { showError(e.message ?? 'Failed to create base') }
+}
+
+// --- Field reorder ---
+function onReorderField(fromId: string, toId: string) {
+  const arr = [...grid.fields.value]
+  const fromIdx = arr.findIndex((f) => f.id === fromId)
+  const toIdx = arr.findIndex((f) => f.id === toId)
+  if (fromIdx < 0 || toIdx < 0) return
+  const [moved] = arr.splice(fromIdx, 1)
+  arr.splice(toIdx, 0, moved)
+  grid.fields.value = arr
+  // Persist order to server
+  const vid = workbench.activeViewId.value
+  if (vid) {
+    workbench.client.updateView(vid, { fieldOrder: arr.map((f) => f.id) }).catch(() => {})
+  }
+}
+
+// --- Bulk import ---
+async function onBulkImport(records: Array<Record<string, unknown>>) {
+  try {
+    await Promise.all(records.map((data) => grid.createRecord(data)))
+    showImportModal.value = false
+    showSuccess(`${records.length} record(s) imported`)
+    await grid.loadViewData(grid.page.value.offset)
+  } catch (e: any) {
+    showError(e.message ?? 'Import failed')
+  }
 }
 
 // --- CSV export ---

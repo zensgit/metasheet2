@@ -22,6 +22,7 @@
               :width="columnWidths?.[field.id]"
               @toggle-sort="emit('toggle-sort', field.id)"
               @resize="(fid, w) => emit('resize-column', fid, w)"
+              @reorder="(from, to) => emit('reorder-field', from, to)"
             />
           </tr>
         </thead>
@@ -186,6 +187,7 @@ const emit = defineEmits<{
   (e: 'resize-column', fieldId: string, width: number): void
   (e: 'selection-change', recordIds: string[]): void
   (e: 'bulk-delete', recordIds: string[]): void
+  (e: 'reorder-field', fromFieldId: string, toFieldId: string): void
 }>()
 
 const editCell = ref<EditingCell | null>(null)

@@ -1,5 +1,5 @@
 <template>
-  <span class="meta-cell-renderer" :class="`meta-cell-renderer--${field.type}`">
+  <span class="meta-cell-renderer" :class="[`meta-cell-renderer--${field.type}`, conditionalClass]">
     <!-- string / formula -->
     <template v-if="field.type === 'string' || field.type === 'formula'">{{ displayValue }}</template>
 
@@ -60,6 +60,18 @@ const linkIds = computed(() => {
   if (v) return [String(v)]
   return []
 })
+
+// Conditional formatting: subtle background hints
+const conditionalClass = computed(() => {
+  const v = props.value
+  if (v === null || v === undefined || v === '') return 'meta-cell-renderer--empty'
+  if (props.field.type === 'boolean') return v ? 'meta-cell-renderer--positive' : 'meta-cell-renderer--negative'
+  if (props.field.type === 'number' && typeof v === 'number') {
+    if (v > 0) return 'meta-cell-renderer--positive'
+    if (v < 0) return 'meta-cell-renderer--negative'
+  }
+  return ''
+})
 </script>
 
 <style scoped>
@@ -73,4 +85,7 @@ const linkIds = computed(() => {
   display: inline-block; padding: 1px 6px; background: #ecf5ff;
   color: #409eff; border-radius: 3px; font-size: 11px; margin-right: 4px;
 }
+.meta-cell-renderer--empty { color: #ccc; }
+.meta-cell-renderer--positive { color: #67c23a; }
+.meta-cell-renderer--negative { color: #f56c6c; }
 </style>

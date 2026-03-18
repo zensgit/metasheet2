@@ -1,9 +1,14 @@
 <template>
   <th
     class="meta-field-header"
-    :class="{ 'meta-field-header--sortable': sortable }"
+    :class="{ 'meta-field-header--sortable': sortable, 'meta-field-header--drag-over': isDragOver }"
     :style="headerStyle"
+    draggable="true"
     @click="sortable && emit('toggle-sort')"
+    @dragstart="onDragStart"
+    @dragover.prevent="onDragOver"
+    @dragleave="isDragOver = false"
+    @drop.prevent="onDrop"
   >
     <span class="meta-field-header__icon">{{ fieldTypeIcon }}</span>
     <span class="meta-field-header__name" :title="field.name">{{ field.name }}</span>
@@ -18,7 +23,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 import type { MetaField } from '../types'
 
 const FIELD_ICONS: Record<string, string> = {
@@ -36,7 +41,27 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'toggle-sort'): void
   (e: 'resize', fieldId: string, width: number): void
+  (e: 'reorder', fromFieldId: string, toFieldId: string): void
 }>()
+
+const isDragOver = ref(false)
+
+function onDragStart(e: DragEvent) {
+  e.dataTransfer?.setData('text/plain', props.field.id)
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+}
+
+function onDragOver() {
+  isDragOver.value = true
+}
+
+function onDrop(e: DragEvent) {
+  isDragOver.value = false
+  const fromId = e.dataTransfer?.getData('text/plain')
+  if (fromId && fromId !== props.field.id) {
+    emit('reorder', fromId, props.field.id)
+  }
+}
 
 const fieldTypeIcon = computed(() => FIELD_ICONS[props.field.type] ?? '?')
 
@@ -74,4 +99,5 @@ function onResizeStart(e: MouseEvent) {
 .meta-field-header__sort { margin-left: 4px; font-size: 10px; color: #409eff; }
 .meta-field-header__resize { position: absolute; top: 0; right: -2px; width: 5px; height: 100%; cursor: col-resize; z-index: 2; }
 .meta-field-header__resize:hover { background: #409eff; opacity: 0.5; }
+.meta-field-header--drag-over { background: #ecf5ff; border-left: 2px solid #409eff; }
 </style>

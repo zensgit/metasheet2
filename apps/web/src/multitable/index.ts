@@ -36,6 +36,7 @@ export { default as MetaRecordDrawer } from './components/MetaRecordDrawer.vue'
 export { default as MetaCommentsDrawer } from './components/MetaCommentsDrawer.vue'
 export { default as MetaLinkPicker } from './components/MetaLinkPicker.vue'
 export { default as MetaToast } from './components/MetaToast.vue'
+export { default as MetaImportModal } from './components/MetaImportModal.vue'
 
 // Views
 export { default as MultitableWorkbench } from './views/MultitableWorkbench.vue'

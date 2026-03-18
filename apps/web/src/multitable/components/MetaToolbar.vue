@@ -100,6 +100,7 @@
         <button v-if="searchText" class="meta-toolbar__search-clear" aria-label="Clear search" @click="emit('update:search-text', '')">&times;</button>
       </div>
       <span v-if="totalRows !== undefined" class="meta-toolbar__row-count">{{ totalRows }} rows</span>
+      <button v-if="canCreateRecord" class="meta-toolbar__btn" title="Import records" aria-label="Import records" @click="emit('import')">&#x2B71; Import</button>
       <button class="meta-toolbar__btn" title="Export CSV" @click="emit('export-csv')">&#x2B73; Export</button>
       <button v-if="canCreateRecord" class="meta-toolbar__btn meta-toolbar__btn--primary" @click="emit('add-record')">+ New Record</button>
     </div>
@@ -142,6 +143,7 @@ const emit = defineEmits<{
   (e: 'redo'): void
   (e: 'set-group-field', fieldId: string | null): void
   (e: 'export-csv'): void
+  (e: 'import'): void
   (e: 'update:search-text', text: string): void
 }>()
 
