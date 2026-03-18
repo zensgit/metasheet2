@@ -571,4 +571,9 @@ onMounted(async () => {
 .mt-workbench__shortcuts-grid { display: flex; flex-direction: column; gap: 8px; }
 .mt-workbench__shortcut { display: flex; align-items: center; gap: 12px; font-size: 13px; }
 .mt-workbench__shortcut kbd { background: #f0f0f0; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; font-family: monospace; font-size: 12px; min-width: 80px; text-align: center; }
+@media print {
+  .mt-workbench__base-bar, .mt-workbench__actions, .mt-workbench__shortcuts-overlay { display: none !important; }
+  .mt-workbench__content { overflow: visible !important; }
+  .mt-workbench__main { overflow: visible !important; }
+}
 </style>

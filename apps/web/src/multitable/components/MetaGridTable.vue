@@ -81,42 +81,55 @@
           </tr>
         </tbody>
         <tbody v-else>
-          <tr
-            v-for="(row, ri) in filteredRows"
-            :key="row.id"
-            role="row"
-            :aria-selected="row.id === selectedRecordId || undefined"
-            class="meta-grid__row"
-            :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === ri }"
-            @click="emit('select-record', row.id)"
-          >
-            <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
-              <input type="checkbox" :checked="selectedIds.has(row.id)" @change="toggleSelectRow(row.id)" />
-            </td>
-            <td class="meta-grid__row-num">{{ startIndex + ri + 1 }}</td>
-            <td
-              v-for="(field, ci) in visibleFields"
-              :key="field.id"
-              role="gridcell"
-              :aria-label="field.name"
-              class="meta-grid__cell"
-              :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci }"
-              :style="cellStyle(field.id)"
-              @dblclick="startEdit(row, field)"
-              @click.stop="onCellClick(ri, ci, row.id)"
+          <template v-for="(row, ri) in filteredRows" :key="row.id">
+            <tr
+              role="row"
+              :aria-selected="row.id === selectedRecordId || undefined"
+              class="meta-grid__row"
+              :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === ri }"
+              @click="emit('select-record', row.id)"
             >
-              <MetaCellEditor
-                v-if="isEditing(row.id, field.id)"
-                :field="field"
-                :model-value="editCell!.value"
-                @update:model-value="editCell!.value = $event"
-                @confirm="confirmEdit(row)"
-                @cancel="cancelEdit"
-                @open-link-picker="emit('open-link-picker', { recordId: row.id, field })"
-              />
-              <MetaCellRenderer v-else :field="field" :value="row.data[field.id]" />
-            </td>
-          </tr>
+              <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
+                <input type="checkbox" :checked="selectedIds.has(row.id)" @change="toggleSelectRow(row.id)" />
+              </td>
+              <td class="meta-grid__row-num">
+                <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? 'Collapse row' : 'Expand row'" @click.stop="toggleRowExpand(row.id)">&#x25B6;</button>
+                <span>{{ startIndex + ri + 1 }}</span>
+              </td>
+              <td
+                v-for="(field, ci) in visibleFields"
+                :key="field.id"
+                role="gridcell"
+                :aria-label="field.name"
+                class="meta-grid__cell"
+                :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci }"
+                :style="cellStyle(field.id)"
+                @dblclick="startEdit(row, field)"
+                @click.stop="onCellClick(ri, ci, row.id)"
+              >
+                <MetaCellEditor
+                  v-if="isEditing(row.id, field.id)"
+                  :field="field"
+                  :model-value="editCell!.value"
+                  @update:model-value="editCell!.value = $event"
+                  @confirm="confirmEdit(row)"
+                  @cancel="cancelEdit"
+                  @open-link-picker="emit('open-link-picker', { recordId: row.id, field })"
+                />
+                <MetaCellRenderer v-else :field="field" :value="row.data[field.id]" />
+              </td>
+            </tr>
+            <tr v-if="expandedRowIds.has(row.id)" class="meta-grid__expand-row">
+              <td :colspan="colSpan" class="meta-grid__expand-detail">
+                <div class="meta-grid__expand-fields">
+                  <div v-for="field in visibleFields" :key="field.id" class="meta-grid__expand-field">
+                    <span class="meta-grid__expand-label">{{ field.name }}</span>
+                    <span class="meta-grid__expand-value"><MetaCellRenderer :field="field" :value="row.data[field.id]" /></span>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          </template>
           <tr v-if="!filteredRows.length && !loading">
             <td :colspan="colSpan" class="meta-grid__empty">
               <template v-if="searchText">
@@ -194,6 +207,14 @@ const editCell = ref<EditingCell | null>(null)
 const focusRow = ref(-1)
 const focusCol = ref(-1)
 const selectedIds = ref<Set<string>>(new Set())
+const expandedRowIds = ref<Set<string>>(new Set())
+
+function toggleRowExpand(rowId: string) {
+  const s = new Set(expandedRowIds.value)
+  if (s.has(rowId)) s.delete(rowId)
+  else s.add(rowId)
+  expandedRowIds.value = s
+}
 
 const allSelected = computed(() => filteredRows.value.length > 0 && selectedIds.value.size === filteredRows.value.length)
 
@@ -363,7 +384,8 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; outline: none; }
 .meta-grid__table-wrap { flex: 1; overflow: auto; }
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.meta-grid__row-num { width: 48px; min-width: 48px; text-align: center; color: #999; font-size: 12px; background: #f9fafb; border-bottom: 1px solid #eee; border-right: 1px solid #eee; padding: 6px 4px; }
+.meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: #999; font-size: 12px; background: #f9fafb; border-bottom: 1px solid #eee; border-right: 1px solid #eee; padding: 6px 4px; position: sticky; left: 0; z-index: 1; }
+.meta-grid__check-col { position: sticky; z-index: 1; }
 .meta-grid__row { transition: background 0.1s; content-visibility: auto; contain-intrinsic-size: auto 36px; }
 .meta-grid__row:hover { background: #f5f7fa; }
 .meta-grid__row--selected, .meta-grid__row--focused { background: #ecf5ff; }
@@ -385,7 +407,16 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__skeleton-row { display: flex; gap: 12px; margin-bottom: 12px; }
 .meta-grid__skeleton-cell { flex: 1; height: 20px; background: linear-gradient(90deg, #eee 25%, #e0e0e0 50%, #eee 75%); background-size: 200% 100%; border-radius: 4px; animation: meta-skeleton-pulse 1.5s ease-in-out infinite; }
 @keyframes meta-skeleton-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-.meta-grid__check-col { width: 36px; min-width: 36px; text-align: center; padding: 4px; border-bottom: 1px solid #eee; border-right: 1px solid #eee; background: #f9fafb; }
+.meta-grid__check-col { width: 36px; min-width: 36px; text-align: center; padding: 4px; border-bottom: 1px solid #eee; border-right: 1px solid #eee; background: #f9fafb; position: sticky; left: 0; z-index: 1; }
+.meta-grid__expand-btn { border: none; background: none; cursor: pointer; font-size: 8px; color: #bbb; padding: 0 2px; transition: transform 0.15s; display: inline-block; }
+.meta-grid__expand-btn:hover { color: #666; }
+.meta-grid__expand-btn--open { transform: rotate(90deg); color: #409eff; }
+.meta-grid__expand-row td { padding: 0; background: #fafbfc; border-bottom: 1px solid #eee; }
+.meta-grid__expand-detail { padding: 8px 16px 12px !important; }
+.meta-grid__expand-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 16px; }
+.meta-grid__expand-field { display: flex; gap: 8px; font-size: 12px; padding: 3px 0; }
+.meta-grid__expand-label { color: #999; font-weight: 500; min-width: 80px; flex-shrink: 0; }
+.meta-grid__expand-value { color: #333; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .meta-grid__bulk-bar { display: flex; align-items: center; gap: 10px; padding: 6px 16px; background: #ecf5ff; border-bottom: 1px solid #c0d8f0; font-size: 12px; }
 .meta-grid__bulk-count { color: #409eff; font-weight: 500; }
 .meta-grid__bulk-btn { padding: 3px 10px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 11px; }
@@ -397,4 +428,16 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__group-toggle { display: inline-block; width: 16px; font-size: 10px; color: #999; }
 .meta-grid__group-label { margin-right: 6px; }
 .meta-grid__group-count { font-weight: 400; color: #999; font-size: 12px; }
+@media print {
+  .meta-grid { overflow: visible !important; height: auto !important; }
+  .meta-grid__table-wrap { overflow: visible !important; }
+  .meta-grid__table { font-size: 11px; }
+  .meta-grid__row { content-visibility: visible !important; break-inside: avoid; }
+  .meta-grid__cell--focused { outline: none !important; }
+  .meta-grid__row--selected, .meta-grid__row--focused { background: none !important; }
+  .meta-grid__bulk-bar, .meta-grid__pagination, .meta-grid__loading, .meta-grid__expand-btn { display: none !important; }
+  .meta-grid__cell { border: 1px solid #ccc !important; padding: 4px 8px !important; }
+  .meta-grid__row-num { border: 1px solid #ccc !important; }
+  .meta-grid__check-col { display: none !important; }
+}
 </style>
