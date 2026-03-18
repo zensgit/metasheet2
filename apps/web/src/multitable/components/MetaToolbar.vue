@@ -1,5 +1,5 @@
 <template>
-  <div class="meta-toolbar">
+  <div class="meta-toolbar" role="toolbar" aria-label="Grid toolbar">
     <div class="meta-toolbar__left">
       <!-- Hide Fields -->
       <div class="meta-toolbar__dropdown">
@@ -90,14 +90,14 @@
       </div>
 
       <!-- Undo/Redo -->
-      <button class="meta-toolbar__btn" :disabled="!canUndo" title="Undo (Ctrl+Z)" @click="emit('undo')">&#x21A9;</button>
-      <button class="meta-toolbar__btn" :disabled="!canRedo" title="Redo (Ctrl+Y)" @click="emit('redo')">&#x21AA;</button>
+      <button class="meta-toolbar__btn" :disabled="!canUndo" title="Undo (Ctrl+Z)" aria-label="Undo" @click="emit('undo')">&#x21A9;</button>
+      <button class="meta-toolbar__btn" :disabled="!canRedo" title="Redo (Ctrl+Y)" aria-label="Redo" @click="emit('redo')">&#x21AA;</button>
     </div>
     <div class="meta-toolbar__right">
-      <div class="meta-toolbar__search">
-        <span class="meta-toolbar__search-icon">&#x1F50D;</span>
-        <input class="meta-toolbar__search-input" type="text" placeholder="Search records..." :value="searchText" @input="emit('update:search-text', ($event.target as HTMLInputElement).value)" />
-        <button v-if="searchText" class="meta-toolbar__search-clear" @click="emit('update:search-text', '')">&times;</button>
+      <div class="meta-toolbar__search" role="search">
+        <span class="meta-toolbar__search-icon" aria-hidden="true">&#x1F50D;</span>
+        <input class="meta-toolbar__search-input" type="search" placeholder="Search records..." aria-label="Search records" :value="searchText" @input="emit('update:search-text', ($event.target as HTMLInputElement).value)" />
+        <button v-if="searchText" class="meta-toolbar__search-clear" aria-label="Clear search" @click="emit('update:search-text', '')">&times;</button>
       </div>
       <span v-if="totalRows !== undefined" class="meta-toolbar__row-count">{{ totalRows }} rows</span>
       <button class="meta-toolbar__btn" title="Export CSV" @click="emit('export-csv')">&#x2B73; Export</button>

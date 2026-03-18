@@ -1,9 +1,9 @@
 <template>
-  <div class="meta-grid" tabindex="0" @keydown="onKeydown">
+  <div class="meta-grid" tabindex="0" role="grid" aria-label="Data grid" @keydown="onKeydown">
     <div v-if="enableMultiSelect && selectedIds.size > 0" class="meta-grid__bulk-bar">
       <span class="meta-grid__bulk-count">{{ selectedIds.size }} selected</span>
-      <button v-if="canDelete" class="meta-grid__bulk-btn meta-grid__bulk-btn--danger" @click="onBulkDelete">Delete selected</button>
-      <button class="meta-grid__bulk-btn" @click="selectedIds = new Set(); emit('selection-change', [])">Clear</button>
+      <button v-if="canDelete" class="meta-grid__bulk-btn meta-grid__bulk-btn--danger" aria-label="Delete selected records" @click="onBulkDelete">Delete selected</button>
+      <button class="meta-grid__bulk-btn" aria-label="Clear selection" @click="selectedIds = new Set(); emit('selection-change', [])">Clear</button>
     </div>
     <div class="meta-grid__table-wrap">
       <table class="meta-grid__table">
@@ -38,6 +38,8 @@
               <tr
                 v-for="(row, ri) in group.rows"
                 :key="row.id"
+                role="row"
+                :aria-selected="row.id === selectedRecordId || undefined"
                 class="meta-grid__row"
                 :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === flatIndex(group, ri) }"
                 @click="emit('select-record', row.id)"
@@ -81,6 +83,8 @@
           <tr
             v-for="(row, ri) in filteredRows"
             :key="row.id"
+            role="row"
+            :aria-selected="row.id === selectedRecordId || undefined"
             class="meta-grid__row"
             :class="{ 'meta-grid__row--selected': row.id === selectedRecordId, 'meta-grid__row--focused': focusRow === ri }"
             @click="emit('select-record', row.id)"
@@ -92,6 +96,8 @@
             <td
               v-for="(field, ci) in visibleFields"
               :key="field.id"
+              role="gridcell"
+              :aria-label="field.name"
               class="meta-grid__cell"
               :class="{ 'meta-grid__cell--editing': isEditing(row.id, field.id), 'meta-grid__cell--readonly': !isEditable(field), 'meta-grid__cell--focused': focusRow === ri && focusCol === ci }"
               :style="cellStyle(field.id)"
@@ -132,7 +138,13 @@
       <span class="meta-grid__page-info">{{ currentPage }} / {{ totalPages }}</span>
       <button class="meta-grid__page-btn" :disabled="currentPage >= totalPages" @click="emit('go-to-page', currentPage + 1)">Next &rsaquo;</button>
     </div>
-    <div v-if="loading" class="meta-grid__loading">Loading...</div>
+    <div v-if="loading" class="meta-grid__loading" aria-live="polite" aria-label="Loading data">
+      <div class="meta-grid__skeleton">
+        <div v-for="i in 5" :key="i" class="meta-grid__skeleton-row">
+          <div v-for="j in Math.min(visibleFields.length || 4, 6)" :key="j" class="meta-grid__skeleton-cell"></div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -295,7 +307,32 @@ function confirmEdit(row: MetaRecord) {
 
 function cancelEdit() { editCell.value = null }
 
+function copyFocusedCell() {
+  if (focusRow.value < 0 || focusCol.value < 0) return
+  const row = displayRows.value[focusRow.value]
+  const field = props.visibleFields[focusCol.value]
+  if (!row || !field) return
+  const val = row.data[field.id]
+  const text = val == null ? '' : String(val)
+  navigator.clipboard?.writeText(text).catch(() => {})
+}
+
+async function pasteFocusedCell() {
+  if (focusRow.value < 0 || focusCol.value < 0) return
+  const row = displayRows.value[focusRow.value]
+  const field = props.visibleFields[focusCol.value]
+  if (!row || !field || !isEditable(field)) return
+  try {
+    const text = await navigator.clipboard.readText()
+    const value = field.type === 'number' && text !== '' ? Number(text) : text
+    emit('patch-cell', row.id, field.id, value, row.version)
+  } catch { /* clipboard access denied */ }
+}
+
 function onKeydown(e: KeyboardEvent) {
+  const mod = e.metaKey || e.ctrlKey
+  if (mod && e.key === 'c' && !editCell.value) { e.preventDefault(); copyFocusedCell(); return }
+  if (mod && e.key === 'v' && !editCell.value) { e.preventDefault(); pasteFocusedCell(); return }
   if (editCell.value) return
   const navRows = displayRows.value
   const maxR = navRows.length - 1, maxC = props.visibleFields.length - 1
@@ -341,7 +378,11 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__page-btn:hover:not(:disabled) { background: #f5f5f5; }
 .meta-grid__page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .meta-grid__page-info { font-size: 12px; color: #666; }
-.meta-grid__loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.7); font-size: 14px; color: #666; z-index: 10; }
+.meta-grid__loading { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: stretch; background: rgba(255,255,255,.85); z-index: 10; padding-top: 40px; }
+.meta-grid__skeleton { width: 100%; padding: 0 12px; }
+.meta-grid__skeleton-row { display: flex; gap: 12px; margin-bottom: 12px; }
+.meta-grid__skeleton-cell { flex: 1; height: 20px; background: linear-gradient(90deg, #eee 25%, #e0e0e0 50%, #eee 75%); background-size: 200% 100%; border-radius: 4px; animation: meta-skeleton-pulse 1.5s ease-in-out infinite; }
+@keyframes meta-skeleton-pulse { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 .meta-grid__check-col { width: 36px; min-width: 36px; text-align: center; padding: 4px; border-bottom: 1px solid #eee; border-right: 1px solid #eee; background: #f9fafb; }
 .meta-grid__bulk-bar { display: flex; align-items: center; gap: 10px; padding: 6px 16px; background: #ecf5ff; border-bottom: 1px solid #c0d8f0; font-size: 12px; }
 .meta-grid__bulk-count { color: #409eff; font-weight: 500; }

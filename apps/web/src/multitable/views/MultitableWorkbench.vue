@@ -91,6 +91,8 @@
           <div class="mt-workbench__shortcut"><kbd>Enter</kbd><span>Edit cell</span></div>
           <div class="mt-workbench__shortcut"><kbd>Escape</kbd><span>Cancel edit / close</span></div>
           <div class="mt-workbench__shortcut"><kbd>Tab</kbd><span>Next cell</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Ctrl+C</kbd><span>Copy cell value</span></div>
+          <div class="mt-workbench__shortcut"><kbd>Ctrl+V</kbd><span>Paste into cell</span></div>
           <div class="mt-workbench__shortcut"><kbd>Ctrl+Z</kbd><span>Undo</span></div>
           <div class="mt-workbench__shortcut"><kbd>Ctrl+Y</kbd><span>Redo</span></div>
           <div class="mt-workbench__shortcut"><kbd>?</kbd><span>Toggle this help</span></div>
