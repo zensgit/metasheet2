@@ -244,6 +244,7 @@ describe('Attendance Plugin Integration', () => {
 
     expect(cancelRes.status).toBe(200)
 
+    const leaveTypeCodeInput = `annual-${runSuffix}`
     const leaveTypeRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, {
       method: 'POST',
       headers: {
@@ -251,7 +252,7 @@ describe('Attendance Plugin Integration', () => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        code: 'annual',
+        code: leaveTypeCodeInput,
         name: 'Annual Leave',
         requiresApproval: true,
       }),
@@ -259,6 +260,8 @@ describe('Attendance Plugin Integration', () => {
 
     expect([201, 409]).toContain(leaveTypeRes.status)
     let leaveTypeId = (leaveTypeRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    const leaveTypeCode = (leaveTypeRes.body as { data?: { code?: string } } | undefined)?.data?.code
+    expect(leaveTypeCode).toBe(leaveTypeCodeInput)
     if (!leaveTypeId) {
       const leaveListRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, {
         headers: {
@@ -266,8 +269,24 @@ describe('Attendance Plugin Integration', () => {
         },
       })
       const items = (leaveListRes.body as { data?: { items?: { id?: string; code?: string }[] } } | undefined)?.data?.items ?? []
-      leaveTypeId = items.find(item => item.code === 'annual')?.id
+      leaveTypeId = items.find(item => item.code === leaveTypeCodeInput)?.id
     }
+
+    const autoLeaveTypeRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Auto Leave ${runSuffix}`,
+        paid: false,
+        requiresApproval: false,
+      }),
+    })
+    expect(autoLeaveTypeRes.status).toBe(201)
+    const autoLeaveTypeCode = (autoLeaveTypeRes.body as { data?: { code?: string } } | undefined)?.data?.code
+    expect(autoLeaveTypeCode).toMatch(/^[a-z0-9-]+-[a-f0-9]{8}$/)
 
     const overtimeRuleRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, {
       method: 'POST',
@@ -691,8 +710,26 @@ describe('Attendance Plugin Integration', () => {
     expect(createGroupRes.status).toBe(200)
     const groupId = (createGroupRes.body as { data?: { id?: string } } | undefined)?.data?.id
     expect(groupId).toBeTruthy()
+    const createdGroupCode = (createGroupRes.body as { data?: { code?: string } } | undefined)?.data?.code
+    expect(createdGroupCode).toMatch(/^[a-z0-9-]+-[a-f0-9]{8}$/)
 
     if (groupId) {
+      const updateGroupRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: `${groupName} Updated`,
+          timezone: 'UTC',
+          description: 'integration-test-updated',
+        }),
+      })
+      expect(updateGroupRes.status).toBe(200)
+      const updatedGroupCode = (updateGroupRes.body as { data?: { code?: string } } | undefined)?.data?.code
+      expect(updatedGroupCode).toBe(createdGroupCode)
+
       const addGroupMemberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, {
         method: 'POST',
         headers: {
@@ -887,6 +924,31 @@ describe('Attendance Plugin Integration', () => {
         const libraryNames = ((afterRestoreRes.body as { data?: { library?: { name?: string }[] } } | undefined)?.data?.library ?? [])
           .map(item => item.name)
         expect(libraryNames.includes(templateAName)).toBe(true)
+
+        const versionViewRes = await requestJson(
+          `${baseUrl}/api/attendance/rule-templates/versions/${encodeURIComponent(versionAId)}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        )
+        expect(versionViewRes.status).toBe(200)
+        const versionView = (versionViewRes.body as {
+          data?: {
+            id?: string
+            version?: number
+            itemCount?: number
+            templates?: unknown[]
+          }
+        } | undefined)?.data
+        expect(versionView?.id).toBe(versionAId)
+        expect(versionView?.version).toBeGreaterThan(0)
+        expect(Array.isArray(versionView?.templates)).toBe(true)
+        expect(versionView?.itemCount).toBeGreaterThanOrEqual(0)
+        if (Array.isArray(versionView?.templates)) {
+          expect(versionView.templates.length).toBeGreaterThan(0)
+        }
       }
     }
 

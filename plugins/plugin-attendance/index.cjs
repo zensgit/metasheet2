@@ -3916,7 +3916,16 @@ async function getTemplateLibraryVersionPayload(db, orgId, versionId, versionNum
     if (!rows.length) return null
     const row = rows[0]
     const templates = normalizeTemplateLibrary(row.templates ?? [])
-    return { id: row.id, version: Number(row.version ?? 0), templates }
+    const version = mapTemplateLibraryVersionRow(row)
+    return {
+      id: row.id,
+      version: version?.version ?? Number(row.version ?? 0),
+      createdAt: version?.createdAt ?? row.created_at ?? null,
+      createdBy: version?.createdBy ?? row.created_by ?? null,
+      sourceVersionId: version?.sourceVersionId ?? row.source_version_id ?? null,
+      itemCount: templates.length,
+      templates,
+    }
   } catch (error) {
     if (isDatabaseSchemaError(error)) return null
     throw error
@@ -5347,7 +5356,7 @@ function formatDateOnlyForCsv(value) {
 }
 
 function formatTimeZoneOffsetForCsv(offsetMinutes) {
-  const safeOffset = Number.isFinite(offsetMinutes) ? Number(offsetMinutes) : 0
+  const safeOffset = Number.isFinite(offsetMinutes) ? Math.round(Number(offsetMinutes)) : 0
   const sign = safeOffset >= 0 ? '+' : '-'
   const absolute = Math.abs(safeOffset)
   const hours = String(Math.floor(absolute / 60)).padStart(2, '0')
@@ -5375,6 +5384,28 @@ function formatCsvValue(value) {
     return `"${text.replace(/"/g, '""')}"`
   }
   return text
+}
+
+function normalizeCodeSegment(value) {
+  const text = String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return text.slice(0, 32)
+}
+
+function generateAttendanceCode(prefix, name) {
+  const base = normalizeCodeSegment(name) || normalizeCodeSegment(prefix) || 'attendance'
+  return `${base}-${randomUUID().slice(0, 8)}`
+}
+
+function resolveAttendanceCode({ explicitCode, existingCode, prefix, name }) {
+  const normalizedExplicit = typeof explicitCode === 'string' ? explicitCode.trim() : ''
+  if (normalizedExplicit) return normalizedExplicit
+  const normalizedExisting = typeof existingCode === 'string' ? existingCode.trim() : ''
+  if (normalizedExisting) return normalizedExisting
+  return generateAttendanceCode(prefix, name)
 }
 
 function buildCsv(rows, headers) {
@@ -5891,7 +5922,7 @@ module.exports = {
     })
 
     const leaveTypeCreateSchema = z.object({
-      code: z.string().min(1),
+      code: z.string().trim().optional().nullable(),
       name: z.string().min(1),
       paid: z.boolean().optional(),
       requiresApproval: z.boolean().optional(),
@@ -9411,7 +9442,12 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const payload = {
-          code: parsed.data.code,
+          code: resolveAttendanceCode({
+            explicitCode: parsed.data.code,
+            existingCode: null,
+            prefix: 'leave',
+            name: parsed.data.name,
+          }),
           name: parsed.data.name,
           paid: parsed.data.paid ?? true,
           requiresApproval: parsed.data.requiresApproval ?? true,
@@ -9482,7 +9518,12 @@ module.exports = {
 
           const existing = existingRows[0]
           const payload = {
-            code: parsed.data.code ?? existing.code,
+            code: resolveAttendanceCode({
+              explicitCode: parsed.data.code,
+              existingCode: existing.code,
+              prefix: 'leave',
+              name: parsed.data.name ?? existing.name,
+            }),
             name: parsed.data.name ?? existing.name,
             paid: parsed.data.paid ?? existing.paid ?? true,
             requiresApproval: parsed.data.requiresApproval ?? existing.requires_approval,
@@ -10612,6 +10653,23 @@ module.exports = {
             library,
             versions,
           },
+        })
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/rule-templates/versions/:versionId',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const target = await getTemplateLibraryVersionPayload(db, orgId, req.params.versionId, null)
+        if (!target) {
+          res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Template version not found' } })
+          return
+        }
+        res.json({
+          ok: true,
+          data: target,
         })
       })
     )
@@ -15395,7 +15453,7 @@ module.exports = {
       withPermission('attendance:admin', async (req, res) => {
         const schema = z.object({
           name: z.string().min(1),
-          code: z.string().optional().nullable(),
+          code: z.string().trim().optional().nullable(),
           timezone: z.string().optional().nullable(),
           ruleSetId: z.string().uuid().optional().nullable(),
           description: z.string().optional().nullable(),
@@ -15409,7 +15467,12 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const name = parsed.data.name.trim()
-        const code = parsed.data.code?.trim() || null
+        const code = resolveAttendanceCode({
+          explicitCode: parsed.data.code,
+          existingCode: null,
+          prefix: 'group',
+          name,
+        })
         const timezone = parsed.data.timezone?.trim() || DEFAULT_RULE.timezone
         const ruleSetId = parsed.data.ruleSetId ?? null
         const description = parsed.data.description?.trim() || null
@@ -15439,7 +15502,7 @@ module.exports = {
       withPermission('attendance:admin', async (req, res) => {
         const schema = z.object({
           name: z.string().min(1),
-          code: z.string().optional().nullable(),
+          code: z.string().trim().optional().nullable(),
           timezone: z.string().optional().nullable(),
           ruleSetId: z.string().uuid().optional().nullable(),
           description: z.string().optional().nullable(),
@@ -15453,8 +15516,23 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const groupId = req.params.id
+        const existingRows = await db.query(
+          'SELECT * FROM attendance_groups WHERE id = $1 AND org_id = $2',
+          [groupId, orgId]
+        )
+        if (!existingRows.length) {
+          res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+          return
+        }
+
+        const existing = existingRows[0]
         const name = parsed.data.name.trim()
-        const code = parsed.data.code?.trim() || null
+        const code = resolveAttendanceCode({
+          explicitCode: parsed.data.code,
+          existingCode: existing.code,
+          prefix: 'group',
+          name: parsed.data.name ?? existing.name,
+        })
         const timezone = parsed.data.timezone?.trim() || DEFAULT_RULE.timezone
         const ruleSetId = parsed.data.ruleSetId ?? null
         const description = parsed.data.description?.trim() || null
