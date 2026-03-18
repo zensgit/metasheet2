@@ -1921,6 +1921,10 @@ function classifyStatusError(
     message = tr('Session expired or token is invalid.', '登录已过期或令牌无效。')
     meta.hint = tr('Sign in again, then retry the action.', '请重新登录后再重试。')
     meta.action = 'refresh-overview'
+  } else if (code === 'DUPLICATE_REQUEST' || status === 409) {
+    message = tr('An identical attendance request already exists for this date.', '同一天同类型的相同申请已存在。')
+    meta.hint = tr('Refresh the request list before submitting again.', '请先刷新申请列表，确认现有申请状态后再提交。')
+    meta.action = 'reload-requests'
   } else if (status === 403 || code === 'FORBIDDEN' || code === 'PERMISSION_DENIED') {
     message = rawMessage === fallbackMessage ? tr('Permission denied for this action.', '当前操作无权限。') : rawMessage
     meta.hint = tr('Use an account with required attendance permissions, then reload data.', '请使用具备所需考勤权限的账号，并重新加载数据。')
@@ -2254,6 +2258,7 @@ function validateRequestForm(): string | null {
 }
 
 async function submitRequest() {
+  if (requestSubmitting.value) return
   requestSubmitting.value = true
   try {
     const validationMessage = validateRequestForm()
