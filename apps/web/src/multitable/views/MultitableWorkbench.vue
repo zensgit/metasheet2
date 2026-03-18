@@ -568,11 +568,15 @@ watch(
 )
 
 onMounted(async () => {
-  loadBases()
-  await workbench.loadSheets()
-  const deepRecordId = props.recordId ?? parseDeepLink()
-  if (deepRecordId) await resolveDeepLink(deepRecordId)
-  if (activeViewType.value === 'form') loadStandaloneForm()
+  try {
+    loadBases()
+    await workbench.loadSheets()
+    const deepRecordId = props.recordId ?? parseDeepLink()
+    if (deepRecordId) await resolveDeepLink(deepRecordId)
+    if (activeViewType.value === 'form') loadStandaloneForm()
+  } catch (e: any) {
+    showError(e.message ?? 'Failed to initialize workbench')
+  }
 })
 </script>
 

@@ -23,7 +23,7 @@
             <span>Uncategorized</span>
             <span class="meta-kanban__count">{{ uncategorized.length }}</span>
           </div>
-          <div class="meta-kanban__cards" @dragover.prevent @drop="onDrop(null, $event)">
+          <div class="meta-kanban__cards" :class="{ 'meta-kanban__cards--drag-over': dragOverColumn === '__uncategorized__' }" @dragover.prevent="dragOverColumn = '__uncategorized__'" @dragleave="dragOverColumn = null" @drop="dragOverColumn = null; onDrop(null, $event)">
             <div
               v-for="row in uncategorized"
               :key="row.id"
@@ -50,7 +50,7 @@
             <span>{{ opt.value }}</span>
             <span class="meta-kanban__count">{{ columnRows(opt.value).length }}</span>
           </div>
-          <div class="meta-kanban__cards" @dragover.prevent @drop="onDrop(opt.value, $event)">
+          <div class="meta-kanban__cards" :class="{ 'meta-kanban__cards--drag-over': dragOverColumn === opt.value }" @dragover.prevent="dragOverColumn = opt.value" @dragleave="dragOverColumn = null" @drop="dragOverColumn = null; onDrop(opt.value, $event)">
             <div
               v-for="row in columnRows(opt.value)"
               :key="row.id"
@@ -98,6 +98,7 @@ const emit = defineEmits<{
 const groupFieldId = ref<string | null>(null)
 let dragRecordId: string | null = null
 let dragVersion = 0
+const dragOverColumn = ref<string | null>(null)
 
 const selectFields = computed(() => props.fields.filter((f) => f.type === 'select'))
 
@@ -168,7 +169,8 @@ function onDrop(targetValue: string | null, _e: DragEvent) {
 .meta-kanban__column-header { padding: 10px 12px; font-size: 13px; font-weight: 600; color: #333; display: flex; justify-content: space-between; align-items: center; border-top: 3px solid #409eff; border-radius: 8px 8px 0 0; }
 .meta-kanban__column-header--uncategorized { border-top-color: #999; color: #999; }
 .meta-kanban__count { font-size: 11px; font-weight: 400; color: #999; background: #e8e8e8; padding: 1px 6px; border-radius: 10px; }
-.meta-kanban__cards { flex: 1; overflow-y: auto; padding: 4px 8px; display: flex; flex-direction: column; gap: 6px; min-height: 40px; }
+.meta-kanban__cards { flex: 1; overflow-y: auto; padding: 4px 8px; display: flex; flex-direction: column; gap: 6px; min-height: 40px; transition: background 0.15s, border-color 0.15s; border: 2px solid transparent; border-radius: 0 0 6px 6px; }
+.meta-kanban__cards--drag-over { background: #ecf5ff; border-color: #409eff; }
 .meta-kanban__card { background: #fff; border-radius: 6px; padding: 10px 12px; box-shadow: 0 1px 3px rgba(0,0,0,.08); cursor: pointer; transition: box-shadow 0.15s; }
 .meta-kanban__card:hover { box-shadow: 0 2px 8px rgba(0,0,0,.12); }
 .meta-kanban__card[draggable="true"] { cursor: grab; }

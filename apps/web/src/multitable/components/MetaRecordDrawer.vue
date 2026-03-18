@@ -26,9 +26,25 @@
             :value="record.data[field.id] ?? ''"
             @change="emit('patch', field.id, ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value))"
           />
+          <input
+            v-else-if="canEdit && field.type === 'date'"
+            class="meta-record-drawer__input"
+            type="date"
+            :value="record.data[field.id] ?? ''"
+            @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
+          />
           <label v-else-if="canEdit && field.type === 'boolean'" class="meta-record-drawer__check">
             <input type="checkbox" :checked="!!record.data[field.id]" @change="emit('patch', field.id, ($event.target as HTMLInputElement).checked)" />
           </label>
+          <select
+            v-else-if="canEdit && field.type === 'select'"
+            class="meta-record-drawer__input"
+            :value="record.data[field.id] ?? ''"
+            @change="emit('patch', field.id, ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="">—</option>
+            <option v-for="opt in field.options ?? []" :key="opt.value" :value="opt.value">{{ opt.value }}</option>
+          </select>
           <button
             v-else-if="canEdit && field.type === 'link'"
             class="meta-record-drawer__link-btn"

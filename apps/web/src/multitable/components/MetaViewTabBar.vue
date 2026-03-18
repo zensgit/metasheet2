@@ -71,4 +71,5 @@ function viewTypeIcon(type: string): string {
 .meta-tab-bar__view:hover { background: #eee; }
 .meta-tab-bar__view--active { background: #e8f0fe; color: #409eff; font-weight: 500; }
 .meta-tab-bar__view-icon { font-size: 14px; }
+@media print { .meta-tab-bar { display: none !important; } }
 </style>

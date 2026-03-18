@@ -81,7 +81,7 @@ const viewMonth = ref(new Date().getMonth()) // 0-indexed
 const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
 const dateFields = computed(() =>
-  props.fields.filter((f) => f.type === 'string' || f.type === 'number'),
+  props.fields.filter((f) => f.type === 'date' || f.type === 'string' || f.type === 'number'),
 )
 
 const dateField = computed(() =>

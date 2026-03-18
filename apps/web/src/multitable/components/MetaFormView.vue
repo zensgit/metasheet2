@@ -32,6 +32,14 @@
             <input type="checkbox" :disabled="readOnly" :checked="!!formData[field.id]" @change="formData[field.id] = ($event.target as HTMLInputElement).checked" />
             {{ formData[field.id] ? 'Yes' : 'No' }}
           </label>
+          <input
+            v-else-if="field.type === 'date'"
+            class="meta-form-view__input"
+            type="date"
+            :disabled="readOnly"
+            :value="formData[field.id] ?? ''"
+            @input="formData[field.id] = ($event.target as HTMLInputElement).value"
+          />
           <select
             v-else-if="field.type === 'select'"
             class="meta-form-view__input"

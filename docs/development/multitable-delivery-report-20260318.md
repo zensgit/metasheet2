@@ -9,7 +9,7 @@
 
 ## 1. Executive Summary
 
-The multi-table module delivers a complete, self-contained Feishu/Airtable-style spreadsheet experience built over **11 development phases**. The module lives entirely within `apps/web/src/multitable/` with zero modifications to existing MetaSheet2 backend, openapi, or routing code.
+The multi-table module delivers a complete, self-contained Feishu/Airtable-style spreadsheet experience built over **12 development phases**. The module lives entirely within `apps/web/src/multitable/` with zero modifications to existing MetaSheet2 backend, openapi, or routing code.
 
 | Metric | Value |
 |--------|-------|
@@ -18,13 +18,13 @@ The multi-table module delivers a complete, self-contained Feishu/Airtable-style
 | Composables | 4 |
 | API client methods | 25 |
 | Type definitions | ~280 lines |
-| Total source LOC | ~4,800 |
-| Test files | 14 |
-| Total tests | 157 |
-| Total test LOC | ~1,870 |
+| Total source LOC | ~4,850 |
+| Test files | 15 |
+| Total tests | 177 |
+| Total test LOC | ~2,020 |
 | View types | 5 (grid, form, kanban, gallery, calendar) |
 | Field types | 9 (string, number, boolean, date, formula, select, link, lookup, rollup) |
-| Phases completed | 11/11 |
+| Phases completed | 12/12 |
 
 ---
 
@@ -227,6 +227,16 @@ Comment thread management: load, add, resolve comments with loading/error states
 | Date filter operators (before/after) | useMultitableGrid |
 | Toolbar accessible from all view types | MultitableWorkbench |
 
+### Phase 12 — Field Parity, View Polish & Error Resilience
+| Feature | Component |
+|---------|-----------|
+| Date + select editing in record drawer | MetaRecordDrawer |
+| Date field input in form view | MetaFormView |
+| Kanban drag-over visual feedback | MetaKanbanView |
+| Calendar date-type recognition | MetaCalendarView |
+| Print CSS completeness (toolbar + tab bar) | MetaToolbar, MetaViewTabBar |
+| Initialization error resilience | MultitableWorkbench |
+
 ---
 
 ## 6. Complete Feature Matrix
@@ -279,6 +289,12 @@ Comment thread management: load, add, resolve comments with loading/error states
 | 44 | Date field type (formal) | 11 | Done |
 | 45 | Date filter operators | 11 | Done |
 | 46 | Toolbar for all view types | 11 | Done |
+| 47 | Date + select in record drawer | 12 | Done |
+| 48 | Date input in form view | 12 | Done |
+| 49 | Kanban drag-over feedback | 12 | Done |
+| 50 | Calendar date-type recognition | 12 | Done |
+| 51 | Print CSS completeness | 12 | Done |
+| 52 | Initialization error resilience | 12 | Done |
 
 ---
 
@@ -299,8 +315,9 @@ Comment thread management: load, add, resolve comments with loading/error states
  ✓ multitable-phase9.spec.ts           17 tests
  ✓ multitable-phase10.spec.ts          15 tests
  ✓ multitable-phase11.spec.ts          18 tests
+ ✓ multitable-phase12.spec.ts          20 tests
 ─────────────────────────────────────────────
- Total                                157 tests  ✓ all passing
+ Total                                177 tests  ✓ all passing
 ```
 
 ### Test Coverage by Domain
@@ -321,6 +338,7 @@ Comment thread management: load, add, resolve comments with loading/error states
 | Import/reorder/formatting | 17 | multitable-phase9.spec.ts |
 | Frozen/expand/print | 15 | multitable-phase10.spec.ts |
 | Print/density/date/auto-fit | 18 | multitable-phase11.spec.ts |
+| Field parity/view polish/error | 20 | multitable-phase12.spec.ts |
 
 ---
 
@@ -385,7 +403,7 @@ Comment thread management: load, add, resolve comments with loading/error states
 
 ## 10. Constraints Honored
 
-Throughout all 10 phases, the following constraints were strictly followed:
+Throughout all 12 phases, the following constraints were strictly followed:
 
 | Constraint | Verified |
 |------------|----------|
@@ -409,7 +427,8 @@ Throughout all 10 phases, the following constraints were strictly followed:
 | 8 | `5014ff6b1` | ARIA accessibility, skeleton, clipboard |
 | 9 | `de615c89f` | Import modal, column reorder, conditional formatting |
 | 10 | `1b49e184d` | Frozen columns, row expand, print CSS |
-| 11 | (pending) | Print button, row density, date field, column auto-fit |
+| 11 | `a447a62de` | Print button, row density, date field, column auto-fit |
+| 12 | (pending) | Field parity, view polish, error resilience |
 
 ---
 

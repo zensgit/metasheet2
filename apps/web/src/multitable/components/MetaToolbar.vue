@@ -248,4 +248,5 @@ function onFilterValueChange(idx: number, value: string) {
 .meta-toolbar__search-clear { border: none; background: none; color: #999; cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
 .meta-toolbar__search-clear:hover { color: #f56c6c; }
 .meta-toolbar__row-count { font-size: 11px; color: #999; white-space: nowrap; }
+@media print { .meta-toolbar { display: none !important; } }
 </style>
