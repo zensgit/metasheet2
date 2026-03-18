@@ -65,7 +65,9 @@ const showNav = computed(() => {
   return route.meta?.hideNavbar !== true
 })
 
-const isPublicRoute = computed(() => route.meta?.requiresAuth === false)
+const isPublicRoute = computed(() => {
+  return route.path === '/login' || route.meta?.requiresAuth === false || route.meta?.requiresGuest === true
+})
 const attendanceFocused = computed(() => isAttendanceFocused())
 const isAdmin = computed(() => hasFeature('attendanceAdmin'))
 const isLoggedIn = computed(() => getStoredAuthToken().length > 0)

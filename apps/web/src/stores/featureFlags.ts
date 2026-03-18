@@ -1,5 +1,5 @@
 import { computed, reactive, readonly } from 'vue'
-import { apiFetch } from '../utils/api'
+import { apiFetch, getStoredAuthToken } from '../utils/api'
 
 export type ProductMode = 'platform' | 'attendance' | 'plm-workbench'
 
@@ -240,7 +240,10 @@ async function loadProductFeatures(
   options: LoadProductFeatureOptions = {},
 ): Promise<ProductFeatures> {
   const requiresSessionProbe = !options.skipSessionProbe
-  if (state.loaded && !force && (!requiresSessionProbe || state.sessionAwareLoaded)) return state.features
+  if (state.loaded && !force) {
+    if (requiresSessionProbe && state.sessionAwareLoaded) return state.features
+    if (!requiresSessionProbe && !state.sessionAwareLoaded) return state.features
+  }
   if (state.loading && loadPromise) return loadPromise
 
   state.loading = true
@@ -249,18 +252,20 @@ async function loadProductFeatures(
   loadPromise = (async () => {
     let mePayload: any = null
     let pluginPayload: any = null
+    const hasStoredToken = getStoredAuthToken().length > 0
 
     try {
-      const requests: Array<Promise<Response | null>> = [
-        apiFetch('/api/plugins').catch(() => null),
-      ]
+      const requests: Array<Promise<Response | null>> = []
 
       if (requiresSessionProbe) {
-        requests.unshift(apiFetch('/api/auth/me').catch(() => null))
+        requests.push(apiFetch('/api/auth/me').catch(() => null))
+        requests.push(apiFetch('/api/plugins').catch(() => null))
+      } else if (hasStoredToken) {
+        requests.push(apiFetch('/api/plugins').catch(() => null))
       }
 
-      const responses = await Promise.all(requests)
-      const pluginRes = responses.at(-1) ?? null
+      const responses = requests.length > 0 ? await Promise.all(requests) : []
+      const pluginRes = requests.length > 0 ? (responses.at(-1) ?? null) : null
       const meRes = requiresSessionProbe ? (responses[0] ?? null) : null
 
       if (meRes?.ok) {
@@ -281,7 +286,7 @@ async function loadProductFeatures(
 
     state.features = resolveFeatures(backendFeatures, overrideFeatures, pluginInference, adminRole)
     state.loaded = true
-    state.sessionAwareLoaded = state.sessionAwareLoaded || requiresSessionProbe
+    state.sessionAwareLoaded = requiresSessionProbe
     state.loading = false
 
     return state.features
