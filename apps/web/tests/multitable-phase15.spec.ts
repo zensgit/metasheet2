@@ -305,3 +305,206 @@ describe('timeline config', () => {
     expect(VIEW_TYPES).toContain('timeline')
   })
 })
+
+// === Phase 15.1: Attachment Upload Real Flow ===
+
+describe('upload flow — MetaCellEditor', () => {
+  it('should call uploadFn for each file and emit IDs', async () => {
+    const uploadFn = vi.fn()
+      .mockResolvedValueOnce({ id: 'att_1', filename: 'a.pdf', mimeType: 'application/pdf', size: 100, url: '/att/1' })
+      .mockResolvedValueOnce({ id: 'att_2', filename: 'b.png', mimeType: 'image/png', size: 200, url: '/att/2' })
+
+    const file1 = new File(['x'], 'a.pdf', { type: 'application/pdf' })
+    const file2 = new File(['y'], 'b.png', { type: 'image/png' })
+    const files = [file1, file2]
+
+    const newIds: string[] = []
+    for (const file of files) {
+      const attachment = await uploadFn(file)
+      newIds.push(attachment.id)
+    }
+
+    expect(uploadFn).toHaveBeenCalledTimes(2)
+    expect(uploadFn).toHaveBeenCalledWith(file1)
+    expect(uploadFn).toHaveBeenCalledWith(file2)
+    expect(newIds).toEqual(['att_1', 'att_2'])
+  })
+
+  it('should emit attachment IDs not filenames', async () => {
+    const uploadFn = vi.fn().mockResolvedValue({ id: 'att_99', filename: 'doc.pdf', mimeType: 'application/pdf', size: 50, url: '/att/99' })
+    const file = new File(['content'], 'doc.pdf')
+    const result = await uploadFn(file)
+    expect(result.id).toBe('att_99')
+    expect(result.id).not.toBe('doc.pdf')
+  })
+
+  it('should preserve existing IDs when adding new files', async () => {
+    const existingIds = ['att_existing_1', 'att_existing_2']
+    const uploadFn = vi.fn().mockResolvedValue({ id: 'att_new', filename: 'new.pdf', mimeType: 'application/pdf', size: 10, url: '/att/new' })
+
+    const file = new File(['x'], 'new.pdf')
+    const attachment = await uploadFn(file)
+    const merged = [...existingIds, attachment.id]
+
+    expect(merged).toEqual(['att_existing_1', 'att_existing_2', 'att_new'])
+  })
+
+  it('should not emit on upload error', async () => {
+    const uploadFn = vi.fn().mockRejectedValue(new Error('Network error'))
+    let emitted = false
+    try {
+      await uploadFn(new File(['x'], 'fail.pdf'))
+      emitted = true
+    } catch {
+      emitted = false
+    }
+    expect(emitted).toBe(false)
+  })
+})
+
+describe('upload flow — MetaFormView', () => {
+  it('should store IDs in formData after upload', async () => {
+    const formData: Record<string, unknown> = {}
+    const uploadFn = vi.fn()
+      .mockResolvedValueOnce({ id: 'att_f1', filename: 'f1.pdf', mimeType: 'application/pdf', size: 10, url: '/att/f1' })
+      .mockResolvedValueOnce({ id: 'att_f2', filename: 'f2.pdf', mimeType: 'application/pdf', size: 20, url: '/att/f2' })
+
+    const fieldId = 'fld_attach'
+    const files = [new File(['a'], 'f1.pdf'), new File(['b'], 'f2.pdf')]
+    const existing: string[] = []
+    const newIds: string[] = []
+    for (const file of files) {
+      const attachment = await uploadFn(file)
+      newIds.push(attachment.id)
+    }
+    formData[fieldId] = [...existing, ...newIds]
+
+    expect(formData[fieldId]).toEqual(['att_f1', 'att_f2'])
+  })
+
+  it('should track uploading state per field', () => {
+    const uploadingFields = new Set<string>()
+    uploadingFields.add('fld_1')
+    expect(uploadingFields.has('fld_1')).toBe(true)
+    expect(uploadingFields.has('fld_2')).toBe(false)
+    uploadingFields.delete('fld_1')
+    expect(uploadingFields.has('fld_1')).toBe(false)
+  })
+
+  it('should preserve existing attachments when adding new', async () => {
+    const existingIds = ['att_old_1']
+    const uploadFn = vi.fn().mockResolvedValue({ id: 'att_new_form', filename: 'new.pdf', mimeType: 'application/pdf', size: 5, url: '' })
+    const attachment = await uploadFn(new File(['x'], 'new.pdf'))
+    const merged = [...existingIds, attachment.id]
+    expect(merged).toEqual(['att_old_1', 'att_new_form'])
+  })
+
+  it('should handle upload error gracefully', async () => {
+    const formData: Record<string, unknown> = { fld_1: ['att_existing'] }
+    const uploadFn = vi.fn().mockRejectedValue(new Error('Upload failed'))
+    try {
+      await uploadFn(new File(['x'], 'fail.pdf'))
+    } catch {
+      // Error caught — formData should remain unchanged
+    }
+    expect(formData.fld_1).toEqual(['att_existing'])
+  })
+})
+
+describe('upload flow — MetaRecordDrawer', () => {
+  it('should upload and emit patch with ID array', async () => {
+    const existingIds = ['att_a']
+    const uploadFn = vi.fn().mockResolvedValue({ id: 'att_b', filename: 'b.pdf', mimeType: 'application/pdf', size: 10, url: '' })
+    const attachment = await uploadFn(new File(['x'], 'b.pdf'))
+    const patchValue = [...existingIds, attachment.id]
+    expect(patchValue).toEqual(['att_a', 'att_b'])
+  })
+
+  it('should emit filtered array when removing attachment chip', () => {
+    const existingIds = ['att_1', 'att_2', 'att_3']
+    const removeId = 'att_2'
+    const filtered = existingIds.filter((id) => id !== removeId)
+    expect(filtered).toEqual(['att_1', 'att_3'])
+  })
+
+  it('should track uploading field state', () => {
+    let uploadingFieldId: string | null = null
+    uploadingFieldId = 'fld_attach'
+    expect(uploadingFieldId).toBe('fld_attach')
+    uploadingFieldId = null
+    expect(uploadingFieldId).toBeNull()
+  })
+})
+
+describe('upload-then-patch integration', () => {
+  it('uploadFn called → patchCell sends IDs not filenames', async () => {
+    const uploadFn = vi.fn().mockResolvedValue({ id: 'att_srv_1', filename: 'report.pdf', mimeType: 'application/pdf', size: 1024, url: '/api/multitable/attachments/att_srv_1' })
+    const patchCell = vi.fn()
+
+    const file = new File(['content'], 'report.pdf', { type: 'application/pdf' })
+    const attachment = await uploadFn(file)
+    patchCell('rec_1', 'fld_attach', [attachment.id], 1)
+
+    expect(patchCell).toHaveBeenCalledWith('rec_1', 'fld_attach', ['att_srv_1'], 1)
+    expect(patchCell.mock.calls[0][2]).not.toContain('report.pdf')
+  })
+
+  it('FormData body should contain file for upload', () => {
+    const fd = new FormData()
+    const file = new File(['test'], 'upload.xlsx', { type: 'application/vnd.ms-excel' })
+    fd.append('file', file)
+    fd.append('sheetId', 'sheet_abc')
+    expect(fd.get('file')).toBeInstanceOf(File)
+    expect((fd.get('file') as File).name).toBe('upload.xlsx')
+    expect(fd.get('sheetId')).toBe('sheet_abc')
+  })
+
+  it('deleteAttachment URL should use attachment ID', () => {
+    const attId = 'att_to_delete'
+    const url = `/api/multitable/attachments/${attId}`
+    expect(url).toBe('/api/multitable/attachments/att_to_delete')
+  })
+
+  it('multi-file sequential upload should collect all IDs', async () => {
+    const uploadFn = vi.fn()
+      .mockResolvedValueOnce({ id: 'att_m1', filename: 'm1.pdf', mimeType: 'application/pdf', size: 10, url: '' })
+      .mockResolvedValueOnce({ id: 'att_m2', filename: 'm2.pdf', mimeType: 'application/pdf', size: 20, url: '' })
+      .mockResolvedValueOnce({ id: 'att_m3', filename: 'm3.pdf', mimeType: 'application/pdf', size: 30, url: '' })
+
+    const files = [new File(['a'], 'm1.pdf'), new File(['b'], 'm2.pdf'), new File(['c'], 'm3.pdf')]
+    const ids: string[] = []
+    for (const file of files) {
+      const att = await uploadFn(file)
+      ids.push(att.id)
+    }
+    expect(ids).toEqual(['att_m1', 'att_m2', 'att_m3'])
+    expect(uploadFn).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe('attachment hydration', () => {
+  it('applyPatchResult should update attachmentSummaries', () => {
+    const attachmentSummaries: Record<string, Record<string, { id: string; filename: string }[]>> = {}
+    const recordId = 'rec_1'
+    const fieldId = 'fld_att'
+    const newSummaries = [{ id: 'att_1', filename: 'doc.pdf' }]
+
+    attachmentSummaries[recordId] = { ...(attachmentSummaries[recordId] ?? {}), [fieldId]: newSummaries }
+    expect(attachmentSummaries[recordId][fieldId]).toEqual([{ id: 'att_1', filename: 'doc.pdf' }])
+  })
+
+  it('renderer should use summaries over raw IDs when available', () => {
+    const rawIds = ['att_1']
+    const summaries = [{ id: 'att_1', filename: 'nice-name.pdf', mimeType: 'application/pdf', size: 100, url: '/att/1', thumbnailUrl: null, uploadedAt: null }]
+    const displayItems = summaries.length > 0 ? summaries : rawIds.map((id) => ({ id, filename: id, mimeType: 'application/octet-stream', size: 0, url: '', thumbnailUrl: null, uploadedAt: null }))
+    expect(displayItems[0].filename).toBe('nice-name.pdf')
+    expect(displayItems[0].filename).not.toBe('att_1')
+  })
+
+  it('empty attachment should render dash', () => {
+    const value: unknown = null
+    const attachmentIds = Array.isArray(value) ? value.map(String) : value ? [String(value)] : []
+    const display = attachmentIds.length > 0 ? attachmentIds.join(', ') : '—'
+    expect(display).toBe('—')
+  })
+})

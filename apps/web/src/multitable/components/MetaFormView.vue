@@ -81,10 +81,11 @@
             <input
               type="file"
               multiple
-              :disabled="readOnly"
+              :disabled="readOnly || uploadingFields.has(field.id)"
               class="meta-form-view__file-input"
               @change="onFormFileSelect(field.id, $event)"
             />
+            <span v-if="uploadingFields.has(field.id)" class="meta-form-view__uploading">Uploading...</span>
             <div v-if="attachmentItems(field.id).length" class="meta-form-view__attachment-list">
               <a
                 v-for="attachment in attachmentItems(field.id)"
@@ -103,7 +104,7 @@
           <div v-if="fieldErrors?.[field.id] || validationErrors[field.id]" :id="`error_${field.id}`" class="meta-form-view__field-error">{{ fieldErrors?.[field.id] || validationErrors[field.id] }}</div>
         </div>
         <div v-if="!readOnly" class="meta-form-view__actions">
-          <button type="submit" class="meta-form-view__submit" :disabled="submitting">
+          <button type="submit" class="meta-form-view__submit" :disabled="submitting || uploadingFields.size > 0">
             {{ submitting ? 'Saving...' : (record ? 'Save' : 'Create') }}
           </button>
           <button v-if="record" type="button" class="meta-form-view__reset" @click="resetForm">Reset</button>
@@ -129,6 +130,7 @@ const props = defineProps<{
   fieldErrors?: Record<string, string> | null
   linkSummariesByField?: Record<string, LinkedRecordSummary[]> | null
   attachmentSummariesByField?: Record<string, MetaAttachment[]> | null
+  uploadFn?: (file: File) => Promise<MetaAttachment>
 }>()
 
 const emit = defineEmits<{
@@ -221,11 +223,34 @@ function attachmentItems(fieldId: string): MetaAttachment[] {
   }))
 }
 
-function onFormFileSelect(fieldId: string, e: Event) {
+const uploadingFields = ref<Set<string>>(new Set())
+
+async function onFormFileSelect(fieldId: string, e: Event) {
   const files = (e.target as HTMLInputElement).files
-  if (files?.length) {
+  if (!files?.length) return
+  if (!props.uploadFn) {
+    // Fallback: store filenames when no uploadFn provided
     const existing = attachmentList(fieldId)
     formData[fieldId] = [...existing, ...Array.from(files).map((f) => f.name)]
+    return
+  }
+  const s = new Set(uploadingFields.value)
+  s.add(fieldId)
+  uploadingFields.value = s
+  try {
+    const existing = attachmentList(fieldId)
+    const newIds: string[] = []
+    for (const file of Array.from(files)) {
+      const attachment = await props.uploadFn(file)
+      newIds.push(attachment.id)
+    }
+    formData[fieldId] = [...existing, ...newIds]
+  } catch {
+    // Upload failed — leave field unchanged
+  } finally {
+    const s2 = new Set(uploadingFields.value)
+    s2.delete(fieldId)
+    uploadingFields.value = s2
   }
 }
 
@@ -271,6 +296,7 @@ function isSameFormValue(left: unknown, right: unknown): boolean {
   padding: 2px 8px; background: #f0f4f8; border-radius: 4px;
   font-size: 12px; color: #333; text-decoration: none;
 }
+.meta-form-view__uploading { font-size: 12px; color: #409eff; }
 .meta-form-view__readonly-val { color: #999; font-size: 13px; }
 .meta-form-view__field-error { margin-top: 6px; color: #f56c6c; font-size: 12px; }
 .meta-form-view__actions { display: flex; gap: 8px; margin-top: 16px; }

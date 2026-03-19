@@ -36,6 +36,7 @@
           :field-errors="formFieldErrors"
           :link-summaries-by-field="selectedRecordLinkSummaries"
           :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
+          :upload-fn="uploadAttachmentFn"
           @submit="onFormSubmit" @open-link-picker="openLinkPicker"
         />
         <MetaKanbanView
@@ -71,6 +72,7 @@
           :enable-multi-select="caps.canDeleteRecord.value"
           :group-field="grid.groupField.value"
           :search-text="searchText" :row-density="rowDensity"
+          :upload-fn="uploadAttachmentFn"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
           @bulk-delete="onBulkDelete" @reorder-field="onReorderField"
@@ -82,6 +84,7 @@
         :link-summaries-by-field="selectedRecordLinkSummaries"
         :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
         :record-ids="drawerRecordIds"
+        :upload-fn="uploadAttachmentFn"
         @close="selectedRecordId = null" @delete="onDeleteRecord" @patch="onDrawerPatch"
         @toggle-comments="showComments = !showComments" @open-link-picker="openLinkPicker"
         @navigate="onDrawerNavigate"
@@ -181,6 +184,12 @@ const searchText = ref('')
 const showShortcuts = ref(false)
 const showImportModal = ref(false)
 const rowDensity = ref<RowDensity>('normal')
+async function uploadAttachmentFn(file: File): Promise<MetaAttachment> {
+  return workbench.client.uploadAttachment(file, {
+    sheetId: workbench.activeSheetId.value || undefined,
+  })
+}
+
 const formSubmitting = ref(false)
 const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)

@@ -85,16 +85,19 @@
         type="file"
         multiple
         class="meta-cell-editor__file-input"
+        :disabled="uploading"
         @change="onFileSelect"
         @keydown.escape="emit('cancel')"
       />
       <div
+        v-if="!uploading"
         class="meta-cell-editor__drop-zone"
         @dragover.prevent
         @drop.prevent="onFileDrop"
       >
         Drop files or click to browse
       </div>
+      <div v-else class="meta-cell-editor__uploading">Uploading...</div>
     </div>
 
     <!-- readonly fallback -->
@@ -104,9 +107,13 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import type { MetaField } from '../../types'
+import type { MetaAttachment, MetaField } from '../../types'
 
-const props = defineProps<{ field: MetaField; modelValue: unknown }>()
+const props = defineProps<{
+  field: MetaField
+  modelValue: unknown
+  uploadFn?: (file: File) => Promise<MetaAttachment>
+}>()
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}/
 const DATE_FIELD_NAMES = /date|time|deadline|due|start|end|created|updated|birthday/i
@@ -131,20 +138,40 @@ const linkButtonLabel = computed(() => {
   return count > 0 ? `Edit links (${count})` : 'Choose linked records...'
 })
 
-function onFileSelect(e: Event) {
-  const files = (e.target as HTMLInputElement).files
-  if (files?.length) {
+const uploading = ref(false)
+
+async function uploadFiles(files: FileList) {
+  if (!props.uploadFn) {
+    // Fallback: emit filenames when no uploadFn provided
     emit('update:modelValue', Array.from(files).map((f) => f.name))
     emit('confirm')
+    return
   }
+  uploading.value = true
+  try {
+    const existingIds = Array.isArray(props.modelValue) ? [...props.modelValue] : props.modelValue ? [props.modelValue] : []
+    const newIds: string[] = []
+    for (const file of Array.from(files)) {
+      const attachment = await props.uploadFn(file)
+      newIds.push(attachment.id)
+    }
+    emit('update:modelValue', [...existingIds, ...newIds])
+    emit('confirm')
+  } catch {
+    // Upload failed — leave cell unchanged
+  } finally {
+    uploading.value = false
+  }
+}
+
+function onFileSelect(e: Event) {
+  const files = (e.target as HTMLInputElement).files
+  if (files?.length) void uploadFiles(files)
 }
 
 function onFileDrop(e: DragEvent) {
   const files = e.dataTransfer?.files
-  if (files?.length) {
-    emit('update:modelValue', Array.from(files).map((f) => f.name))
-    emit('confirm')
-  }
+  if (files?.length) void uploadFiles(files)
 }
 
 function onNumberInput(e: Event) {
@@ -182,5 +209,6 @@ onMounted(() => {
   background: #fafcff;
 }
 .meta-cell-editor__drop-zone:hover { border-color: #409eff; color: #409eff; }
+.meta-cell-editor__uploading { padding: 8px 12px; text-align: center; font-size: 11px; color: #409eff; }
 .meta-cell-editor__readonly { color: #999; font-size: 13px; }
 </style>

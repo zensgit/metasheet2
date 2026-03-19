@@ -62,6 +62,7 @@
                     v-if="isEditing(row.id, field.id)"
                     :field="field"
                     :model-value="editCell!.value"
+                    :upload-fn="props.uploadFn"
                     @update:model-value="editCell!.value = $event"
                     @confirm="confirmEdit(row)"
                     @cancel="cancelEdit"
@@ -117,6 +118,7 @@
                   v-if="isEditing(row.id, field.id)"
                   :field="field"
                   :model-value="editCell!.value"
+                  :upload-fn="props.uploadFn"
                   @update:model-value="editCell!.value = $event"
                   @confirm="confirmEdit(row)"
                   @cancel="cancelEdit"
@@ -211,6 +213,7 @@ const props = defineProps<{
   groupField?: MetaField | null
   searchText?: string
   rowDensity?: RowDensity
+  uploadFn?: (file: File) => Promise<MetaAttachment>
 }>()
 
 const emit = defineEmits<{

@@ -60,17 +60,28 @@
             @click="emit('open-link-picker', field)"
           >{{ linkButtonLabel(field.id) }}</button>
           <div v-else-if="field.type === 'attachment'" class="meta-record-drawer__attachments">
-            <a
-              v-for="attachment in attachmentItems(field.id)"
-              :key="attachment.id"
-              class="meta-record-drawer__attachment-chip"
-              :href="attachment.url || undefined"
-              :target="attachment.url ? '_blank' : undefined"
-              :rel="attachment.url ? 'noopener noreferrer' : undefined"
-            >
-              &#x1F4CE; {{ attachment.filename }}
-            </a>
+            <div v-for="attachment in attachmentItems(field.id)" :key="attachment.id" class="meta-record-drawer__attachment-row">
+              <a
+                class="meta-record-drawer__attachment-chip"
+                :href="attachment.url || undefined"
+                :target="attachment.url ? '_blank' : undefined"
+                :rel="attachment.url ? 'noopener noreferrer' : undefined"
+              >
+                &#x1F4CE; {{ attachment.filename }}
+              </a>
+              <button v-if="canEdit" class="meta-record-drawer__remove-btn" title="Remove attachment" @click="onRemoveAttachment(field.id, attachment.id)">&times;</button>
+            </div>
             <span v-if="!attachmentItems(field.id).length" class="meta-record-drawer__text">—</span>
+            <div v-if="canEdit" class="meta-record-drawer__attachment-add">
+              <input
+                type="file"
+                multiple
+                class="meta-record-drawer__file-input"
+                :disabled="uploadingFieldId === field.id"
+                @change="onDrawerFileSelect(field.id, $event)"
+              />
+              <span v-if="uploadingFieldId === field.id" class="meta-record-drawer__uploading">Uploading...</span>
+            </div>
           </div>
           <span v-else class="meta-record-drawer__text">{{ formatValue(record.data[field.id]) }}</span>
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-record-drawer__link-summary">{{ linkPreview(field.id) }}</div>
@@ -82,7 +93,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 import type { MetaAttachment, MetaField, MetaRecord, LinkedRecordSummary } from '../types'
 
 const props = withDefaults(defineProps<{
@@ -95,6 +106,7 @@ const props = withDefaults(defineProps<{
   linkSummariesByField?: Record<string, LinkedRecordSummary[]>
   attachmentSummariesByField?: Record<string, MetaAttachment[]>
   recordIds?: string[]
+  uploadFn?: (file: File) => Promise<MetaAttachment>
 }>(), {
   recordIds: () => [],
 })
@@ -169,6 +181,37 @@ function linkSummaryCount(fieldId: string): number {
   const raw = props.record?.data[fieldId]
   return Array.isArray(raw) ? raw.length : raw ? 1 : 0
 }
+
+const uploadingFieldId = ref<string | null>(null)
+
+async function onDrawerFileSelect(fieldId: string, e: Event) {
+  const files = (e.target as HTMLInputElement).files
+  if (!files?.length) return
+  if (!props.uploadFn) {
+    const existing = attachmentList(fieldId)
+    emit('patch', fieldId, [...existing, ...Array.from(files).map((f) => f.name)])
+    return
+  }
+  uploadingFieldId.value = fieldId
+  try {
+    const existing = attachmentList(fieldId)
+    const newIds: string[] = []
+    for (const file of Array.from(files)) {
+      const attachment = await props.uploadFn(file)
+      newIds.push(attachment.id)
+    }
+    emit('patch', fieldId, [...existing, ...newIds])
+  } catch {
+    // Upload failed
+  } finally {
+    uploadingFieldId.value = null
+  }
+}
+
+function onRemoveAttachment(fieldId: string, attachmentId: string) {
+  const existing = attachmentList(fieldId)
+  emit('patch', fieldId, existing.filter((id) => id !== attachmentId))
+}
 </script>
 
 <style scoped>
@@ -198,6 +241,12 @@ function linkSummaryCount(fieldId: string): number {
   font-size: 12px; color: #333; max-width: 180px; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; text-decoration: none;
 }
+.meta-record-drawer__attachment-row { display: inline-flex; align-items: center; gap: 2px; }
+.meta-record-drawer__remove-btn { border: none; background: none; color: #999; cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
+.meta-record-drawer__remove-btn:hover { color: #f56c6c; }
+.meta-record-drawer__attachment-add { margin-top: 4px; }
+.meta-record-drawer__file-input { font-size: 12px; }
+.meta-record-drawer__uploading { font-size: 12px; color: #409eff; margin-left: 4px; }
 .meta-record-drawer__text { font-size: 13px; color: #333; }
 .meta-record-drawer__empty { padding: 32px; text-align: center; color: #999; }
 </style>
