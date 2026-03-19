@@ -44,7 +44,7 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "lint": "pnpm lint:backend",
-    "lint:backend": "pnpm --filter @metasheet/core-backend exec eslint src --ext .ts",
+    "lint:backend": "pnpm --filter @metasheet/core-backend exec eslint src --ext .ts --max-warnings 0",
     "type-check": "pnpm type-check:backend && pnpm type-check:web",
     "type-check:backend": "pnpm --filter @metasheet/core-backend build",
     "type-check:web": "pnpm --filter @metasheet/web exec vue-tsc --noEmit",
