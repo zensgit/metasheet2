@@ -162,6 +162,41 @@ function makeIdempotencyKey() {
   return `attendance-smoke-${suffix}`
 }
 
+function hashString(value) {
+  let hash = 0
+  for (let i = 0; i < value.length; i += 1) {
+    hash = (hash * 31 + value.charCodeAt(i)) >>> 0
+  }
+  return hash
+}
+
+function resolveSmokeWorkDate() {
+  const override = String(process.env.SMOKE_WORK_DATE || '').trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(override)) return override
+
+  // Keep the work date stable within a specific CI run/attempt so retries are
+  // deterministic, but spread runs across many dates to avoid duplicate
+  // request collisions on shared long-lived environments.
+  const seedParts = [
+    String(process.env.GITHUB_RUN_ID || '').trim(),
+    String(process.env.GITHUB_RUN_ATTEMPT || '').trim(),
+    String(process.env.GITHUB_RUN_NUMBER || '').trim(),
+  ].filter(Boolean)
+  const seed = seedParts.length > 0
+    ? seedParts.join(':')
+    : `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+
+  const base = new Date(Date.UTC(2025, 0, 1))
+  base.setUTCDate(base.getUTCDate() + (hashString(seed) % 1825))
+  return toDateOnly(base)
+}
+
+function isoForWorkDate(workDate, hour, minute = 0) {
+  const hh = String(hour).padStart(2, '0')
+  const mm = String(minute).padStart(2, '0')
+  return `${workDate}T${hh}:${mm}:00.000Z`
+}
+
 function makeUuidV4() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (ch) => {
     const r = (Math.random() * 16) | 0
@@ -180,11 +215,6 @@ function makeCsv(workDate, userId, groupName) {
     '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果',
     `${workDate},${userId},${groupName},09:00,18:00,正常`,
   ].join('\n')
-}
-
-function isoMinutesAgo(minutes) {
-  const ms = Math.max(0, Number(minutes) || 0) * 60 * 1000
-  return new Date(Date.now() - ms).toISOString()
 }
 
 function sleep(ms) {
@@ -446,10 +476,11 @@ async function run() {
   log('template ok')
 
   // 5) preview
-  const workDate = toDateOnly(new Date())
+  const workDate = resolveSmokeWorkDate()
   const groupName = makeGroupName()
   const idempotencyKey = makeIdempotencyKey()
   const csvText = makeCsv(workDate, userId, groupName)
+  log(`workDate=${workDate}`)
 
   let csvFileId = ''
   if (requireImportUpload) {
@@ -779,8 +810,8 @@ async function run() {
   const requestPayload = {
     workDate,
     requestType: 'time_correction',
-    requestedInAt: isoMinutesAgo(60),
-    requestedOutAt: isoMinutesAgo(0),
+    requestedInAt: isoForWorkDate(workDate, 9, 0),
+    requestedOutAt: isoForWorkDate(workDate, 18, 0),
     reason: 'smoke test',
     orgId,
   }
