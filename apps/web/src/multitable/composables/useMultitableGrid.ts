@@ -126,6 +126,7 @@ export const FILTER_OPERATORS_BY_TYPE: Record<string, Array<{ value: string; lab
 // --- Main composable ---
 
 const DEFAULT_PAGE_SIZE = 50
+const SEARCH_DEBOUNCE_MS = 150
 
 export function useMultitableGrid(opts: {
   sheetId: Ref<string>
@@ -182,7 +183,7 @@ export function useMultitableGrid(opts: {
     searchDebounceTimer = setTimeout(() => {
       page.value = { ...page.value, offset: 0 }
       loadViewData(0)
-    }, 300)
+    }, SEARCH_DEBOUNCE_MS)
   }
 
   // Column widths (with localStorage persistence)

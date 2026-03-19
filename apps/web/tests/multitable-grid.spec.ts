@@ -302,7 +302,7 @@ describe('useMultitableGrid', () => {
 
       fetchFn.mockClear()
       grid.setSearchQuery('pilot')
-      vi.advanceTimersByTime(300)
+      vi.advanceTimersByTime(150)
       await vi.waitFor(() => {
         expect(fetchFn).toHaveBeenCalledTimes(1)
       })
@@ -310,7 +310,7 @@ describe('useMultitableGrid', () => {
 
       fetchFn.mockClear()
       grid.setSearchQuery('pilot')
-      vi.advanceTimersByTime(300)
+      vi.advanceTimersByTime(150)
       await nextTick()
 
       expect(fetchFn).not.toHaveBeenCalled()
