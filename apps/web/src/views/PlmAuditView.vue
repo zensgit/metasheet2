@@ -295,6 +295,59 @@
         {{ tr('Current default', '当前默认') }}: {{ defaultAuditTeamViewLabel }}
       </p>
 
+      <div v-if="recommendedAuditTeamViews.length" class="plm-audit__recommended-team-views">
+        <div class="plm-audit__recommended-header">
+          <div>
+            <h3>{{ tr('Recommended audit team views', '推荐审计团队视图') }}</h3>
+            <p class="plm-audit__muted">{{ auditTeamViewSummaryHint.description }}</p>
+          </div>
+          <div class="plm-audit__summary-chips">
+            <button
+              v-for="chip in auditTeamViewSummaryChips"
+              :key="`audit-team-view-chip-${chip.value || 'all'}`"
+              class="plm-audit__summary-chip"
+              :class="{ 'plm-audit__summary-chip--active': chip.active }"
+              type="button"
+              @click="setAuditTeamViewRecommendationFilter(chip.value)"
+            >
+              {{ chip.label }} · {{ chip.count }}
+            </button>
+          </div>
+        </div>
+
+        <div class="plm-audit__recommended-grid">
+          <article
+            v-for="view in recommendedAuditTeamViews"
+            :key="view.id"
+            class="plm-audit__recommended-card"
+            :class="{ 'plm-audit__recommended-card--default': view.isDefault }"
+          >
+            <div class="plm-audit__recommended-meta">
+              <strong>{{ view.name }}</strong>
+              <span class="plm-audit__saved-view-source">{{ view.recommendationSourceLabel }}</span>
+              <span class="plm-audit__muted">{{ tr('Owner', 'Owner') }}: {{ view.ownerUserId }}</span>
+              <span v-if="view.recommendationSourceTimestamp" class="plm-audit__muted">
+                {{ formatDate(view.recommendationSourceTimestamp) }}
+              </span>
+              <span class="plm-audit__muted">{{ view.actionNote }}</span>
+            </div>
+            <div class="plm-audit__recommended-actions">
+              <button
+                class="plm-audit__button plm-audit__button--primary"
+                type="button"
+                :disabled="auditTeamViewsLoading || !findAuditTeamViewById(view.id)"
+                @click="applyRecommendedAuditTeamView(view)"
+              >
+                {{ view.primaryActionLabel }}
+              </button>
+              <button class="plm-audit__button" type="button" :disabled="auditTeamViewsLoading" @click="runRecommendedAuditTeamViewSecondaryAction(view)">
+                {{ view.secondaryActionLabel }}
+              </button>
+            </div>
+          </article>
+        </div>
+      </div>
+
       <div class="plm-audit__saved-view-create">
         <input
           v-model="auditTeamViewName"
@@ -497,6 +550,13 @@ import {
   buildPlmAuditSavedViewSummary,
 } from './plmAuditSavedViewSummary'
 import {
+  buildAuditTeamViewSummaryChips,
+  buildAuditTeamViewSummaryHint,
+  buildRecommendedAuditTeamViews,
+  type PlmRecommendedAuditTeamView,
+  type PlmRecommendedAuditTeamViewFilter,
+} from './plmAuditTeamViewCatalog'
+import {
   buildPlmAuditSceneContextBanner,
   buildPlmAuditSceneFilterHighlight,
   resolvePlmAuditSceneSemantic,
@@ -540,6 +600,7 @@ const auditTeamViewName = ref('')
 const auditTeamViews = ref<PlmWorkbenchTeamView<'audit'>[]>([])
 const auditTeamViewsLoading = ref(false)
 const auditTeamViewsError = ref('')
+const auditTeamViewRecommendationFilter = ref<PlmRecommendedAuditTeamViewFilter>('')
 
 const query = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.q)
 const actorId = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.actorId)
@@ -572,6 +633,13 @@ const defaultAuditTeamView = computed(
   () => auditTeamViews.value.find((view) => view.isDefault && !view.isArchived) || null,
 )
 const defaultAuditTeamViewLabel = computed(() => defaultAuditTeamView.value?.name || '')
+const recommendedAuditTeamViews = computed(() => buildRecommendedAuditTeamViews(auditTeamViews.value, {
+  recommendationFilter: auditTeamViewRecommendationFilter.value,
+}))
+const auditTeamViewSummaryChips = computed(() => buildAuditTeamViewSummaryChips(auditTeamViews.value, {
+  recommendationFilter: auditTeamViewRecommendationFilter.value,
+}))
+const auditTeamViewSummaryHint = computed(() => buildAuditTeamViewSummaryHint(auditTeamViewSummaryChips.value))
 const canSaveAuditTeamView = computed(() => Boolean(auditTeamViewName.value.trim()))
 const auditSceneContext = computed(() => {
   return buildPlmAuditSceneContextBanner({
@@ -782,6 +850,14 @@ function sortAuditTeamViews(views: PlmWorkbenchTeamView<'audit'>[]) {
   })
 }
 
+function setAuditTeamViewRecommendationFilter(value: PlmRecommendedAuditTeamViewFilter) {
+  auditTeamViewRecommendationFilter.value = value
+}
+
+function findAuditTeamViewById(viewId: string) {
+  return auditTeamViews.value.find((entry) => entry.id === viewId) || null
+}
+
 function upsertAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
   const nextItems = auditTeamViews.value
     .filter((entry) => entry.id !== view.id)
@@ -951,15 +1027,31 @@ async function applyAuditTeamView() {
   const view = selectedAuditTeamView.value
   if (!view || !canApplyAuditTeamView.value) return
 
-  applyAuditTeamViewState(view)
-  await syncRouteState(buildPlmAuditRouteStateFromTeamView(view.id, view.state))
-  setStatus(tr('Audit team view applied.', '审计团队视图已应用。'))
+  await applyAuditTeamViewEntry(view)
 }
 
 async function shareAuditTeamView() {
   const view = selectedAuditTeamView.value
   if (!view || !canShareAuditTeamView.value) return
 
+  await shareAuditTeamViewEntry(view)
+}
+
+async function setAuditTeamViewDefault() {
+  const view = selectedAuditTeamView.value
+  if (!view || !canSetAuditTeamViewDefault.value) return
+
+  await setAuditTeamViewDefaultEntry(view)
+}
+
+async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
+  applyAuditTeamViewState(view)
+  auditTeamViewKey.value = view.id
+  await syncRouteState(buildPlmAuditRouteStateFromTeamView(view.id, view.state))
+  setStatus(tr('Audit team view applied.', '审计团队视图已应用。'))
+}
+
+async function shareAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
   const ok = await copyTextToClipboard(buildAuditTeamViewShareUrl(view))
   if (!ok) {
     setStatus(tr('Failed to copy team view link.', '复制团队视图链接失败。'), 'error')
@@ -968,10 +1060,7 @@ async function shareAuditTeamView() {
   setStatus(tr('Audit team view link copied.', '审计团队视图链接已复制。'))
 }
 
-async function setAuditTeamViewDefault() {
-  const view = selectedAuditTeamView.value
-  if (!view || !canSetAuditTeamViewDefault.value) return
-
+async function setAuditTeamViewDefaultEntry(view: PlmWorkbenchTeamView<'audit'>) {
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
   try {
@@ -993,6 +1082,24 @@ async function setAuditTeamViewDefault() {
   } finally {
     auditTeamViewsLoading.value = false
   }
+}
+
+async function applyRecommendedAuditTeamView(view: PlmRecommendedAuditTeamView) {
+  const target = findAuditTeamViewById(view.id)
+  if (!target || target.isArchived) return
+  await applyAuditTeamViewEntry(target)
+}
+
+async function runRecommendedAuditTeamViewSecondaryAction(view: PlmRecommendedAuditTeamView) {
+  const target = findAuditTeamViewById(view.id)
+  if (!target || target.isArchived) return
+
+  if (view.secondaryActionKind === 'set-default') {
+    await setAuditTeamViewDefaultEntry(target)
+    return
+  }
+
+  await shareAuditTeamViewEntry(target)
 }
 
 async function clearAuditTeamViewDefault() {
@@ -1341,6 +1448,72 @@ watch(
 
 .plm-audit__summary-grid {
   flex-wrap: wrap;
+}
+
+.plm-audit__recommended-team-views {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.plm-audit__recommended-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.plm-audit__summary-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.plm-audit__summary-chip {
+  border: 1px solid #d0d5dd;
+  background: #fff;
+  color: #344054;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.plm-audit__summary-chip--active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.plm-audit__recommended-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.plm-audit__recommended-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid #dbe4f0;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fbff 0%, #ffffff 100%);
+}
+
+.plm-audit__recommended-card--default {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.12);
+}
+
+.plm-audit__recommended-meta,
+.plm-audit__recommended-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .plm-audit__summary-panel {
