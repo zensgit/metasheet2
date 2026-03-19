@@ -176,6 +176,7 @@ export function useMultitableGrid(opts: {
   let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
   function setSearchQuery(q: string) {
+    if (q === searchQuery.value) return
     searchQuery.value = q
     if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
     searchDebounceTimer = setTimeout(() => {
@@ -292,6 +293,7 @@ export function useMultitableGrid(opts: {
   function goToPage(p: number) {
     const safePage = Math.min(Math.max(1, p), totalPages.value)
     const offset = Math.max(0, (safePage - 1) * pageSize)
+    if (offset === page.value.offset) return
     loadViewData(offset)
   }
 

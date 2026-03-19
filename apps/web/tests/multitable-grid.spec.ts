@@ -208,11 +208,48 @@ describe('useMultitableGrid', () => {
   it('clamps goToPage to the current total page count', async () => {
     const fetchFn = vi.fn(async (input: string) => {
       if (!input.startsWith('/api/multitable/view')) throw new Error(`Unexpected request: ${input}`)
+      const url = new URL(`http://localhost${input}`)
+      const offset = Number(url.searchParams.get('offset') ?? '0')
       return new Response(JSON.stringify({
         ok: true,
         data: {
           fields: [{ id: 'f1', name: 'Title', type: 'string' }],
           rows: [],
+          page: { offset, limit: 10, total: 23, hasMore: offset < 20 },
+        },
+      }), { status: 200 })
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref('s1'),
+      viewId: ref('v1'),
+      pageSize: 10,
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    await vi.waitFor(() => {
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    })
+    fetchFn.mockClear()
+
+    grid.page.value = { offset: 10, limit: 10, total: 23, hasMore: true }
+    grid.goToPage(99)
+
+    await vi.waitFor(() => {
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    })
+
+    expect(fetchFn.mock.calls[0]?.[0]).toContain('offset=20')
+  })
+
+  it('does not refetch when goToPage resolves to the current offset', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (!input.startsWith('/api/multitable/view')) throw new Error(`Unexpected request: ${input}`)
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          fields: [{ id: 'f1', name: 'Title', type: 'string' }],
+          rows: [{ id: 'r3', version: 1, data: { f1: 'page three' } }],
           page: { offset: 20, limit: 10, total: 23, hasMore: false },
         },
       }), { status: 200 })
@@ -231,13 +268,55 @@ describe('useMultitableGrid', () => {
     fetchFn.mockClear()
 
     grid.page.value = { offset: 20, limit: 10, total: 23, hasMore: false }
-    grid.goToPage(99)
+    grid.goToPage(3)
 
-    await vi.waitFor(() => {
-      expect(fetchFn).toHaveBeenCalledTimes(1)
-    })
+    await nextTick()
 
-    expect(fetchFn.mock.calls[0]?.[0]).toContain('offset=20')
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('does not refetch when the search query is unchanged', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetchFn = vi.fn(async (input: string) => {
+        if (!input.startsWith('/api/multitable/view')) throw new Error(`Unexpected request: ${input}`)
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            fields: [{ id: 'f1', name: 'Title', type: 'string' }],
+            rows: [{ id: 'r1', version: 1, data: { f1: 'Ship pilot' } }],
+            page: { offset: 0, limit: 50, total: 1, hasMore: false },
+          },
+        }), { status: 200 })
+      })
+
+      const grid = useMultitableGrid({
+        sheetId: ref('s1'),
+        viewId: ref('v1'),
+        client: new MultitableApiClient({ fetchFn }),
+      })
+
+      await vi.waitFor(() => {
+        expect(fetchFn).toHaveBeenCalledTimes(1)
+      })
+
+      fetchFn.mockClear()
+      grid.setSearchQuery('pilot')
+      vi.advanceTimersByTime(300)
+      await vi.waitFor(() => {
+        expect(fetchFn).toHaveBeenCalledTimes(1)
+      })
+      expect(fetchFn.mock.calls[0]?.[0]).toContain('search=pilot')
+
+      fetchFn.mockClear()
+      grid.setSearchQuery('pilot')
+      vi.advanceTimersByTime(300)
+      await nextTick()
+
+      expect(fetchFn).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('clearFilters resets all', () => {
