@@ -604,9 +604,233 @@ describe('admin-users routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
     expect((response.body as Record<string, any>).data.userId).toBe('user-1')
     expect((response.body as Record<string, any>).data.reason).toBe('admin-force-logout')
+    expect((response.body as Record<string, any>).data.revokedAfter).toBe('2026-03-12T00:03:00.000Z')
     expect(auditMocks.auditLog).toHaveBeenCalled()
+  })
+
+  it('defaults session revoke reason when not provided', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-2',
+          email: 'beta@example.com',
+          name: 'Beta',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          revoked_after: '2026-03-12T00:04:00.000Z',
+          updated_at: '2026-03-12T00:04:00.000Z',
+          updated_by: 'admin-1',
+          reason: 'admin-force-logout',
+        }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/revoke-sessions', {
+      params: { userId: 'user-2' },
+      body: {},
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect((response.body as Record<string, any>).data.userId).toBe('user-2')
+    expect((response.body as Record<string, any>).data.reason).toBe('admin-force-logout')
+    expect((response.body as Record<string, any>).data.revokedAfter).toBe('2026-03-12T00:04:00.000Z')
+  })
+
+  it('trims and truncates session revoke reason for all sessions', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-2',
+          email: 'beta@example.com',
+          name: 'Beta',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          revoked_after: '2026-03-12T00:07:00.000Z',
+          updated_at: '2026-03-12T00:07:00.000Z',
+          updated_by: 'admin-1',
+          reason: 'x'.repeat(255),
+        }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/revoke-sessions', {
+      params: { userId: 'user-2' },
+      body: { reason: `   ${'x'.repeat(255)}extra-extra-extra   ` },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect((response.body as Record<string, any>).data.reason).toHaveLength(255)
+    expect((response.body as Record<string, any>).data.reason).toBe('x'.repeat(255))
+  })
+
+  it('defaults reason when all-session revoke reason is blank', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-2',
+          email: 'beta@example.com',
+          name: 'Beta',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          revoked_after: '2026-03-12T00:08:00.000Z',
+          updated_at: '2026-03-12T00:08:00.000Z',
+          updated_by: 'admin-1',
+          reason: 'admin-force-logout',
+        }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/revoke-sessions', {
+      params: { userId: 'user-2' },
+      body: { reason: '   ' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect((response.body as Record<string, any>).data.reason).toBe('admin-force-logout')
+  })
+
+  it('returns bad request when all-session revoke missing user id', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    const response = await invokeRoute('post', '/api/admin/users/:userId/revoke-sessions', {
+      params: {},
+      body: {},
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).ok).toBe(false)
+    expect((response.body as Record<string, any>).error.code).toBe('USER_ID_REQUIRED')
+  })
+
+  it('trims user id before revoking all sessions', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-2',
+          email: 'beta@example.com',
+          name: 'Beta',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          revoked_after: '2026-03-12T00:09:00.000Z',
+          updated_at: '2026-03-12T00:09:00.000Z',
+          updated_by: 'admin-1',
+          reason: 'admin-force-logout',
+        }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/revoke-sessions', {
+      params: { userId: '  user-2  ' },
+      body: { reason: 'admin-force-logout' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('FROM users'),
+      ['user-2'],
+    )
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('INSERT INTO user_session_revocations'),
+      ['user-2', 'admin-1', 'admin-force-logout'],
+    )
+  })
+
+  it('returns null revokedAfter when no sessions were revoked', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-2',
+          email: 'beta@example.com',
+          name: 'Beta',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/revoke-sessions', {
+      params: { userId: 'user-2' },
+      body: { reason: 'maintenance' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect((response.body as Record<string, any>).data.userId).toBe('user-2')
+    expect((response.body as Record<string, any>).data.reason).toBe('maintenance')
+    expect((response.body as Record<string, any>).data.revokedAfter).toBeNull()
+  })
+
+  it('returns server error when all-session revoke operation fails', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-2',
+          email: 'beta@example.com',
+          name: 'Beta',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockRejectedValueOnce(new Error('revocation store error'))
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/revoke-sessions', {
+      params: { userId: 'user-2' },
+      body: { reason: 'maintenance' },
+    })
+
+    expect(response.statusCode).toBe(500)
+    expect((response.body as Record<string, any>).ok).toBe(false)
+    expect((response.body as Record<string, any>).error.code).toBe('SESSION_REVOKE_FAILED')
   })
 
   it('lists single sessions for a user', async () => {
@@ -652,6 +876,548 @@ describe('admin-users routes', () => {
       userId: 'user-1',
       ipAddress: '127.0.0.1',
     })
+  })
+
+  it('returns 404 when listing sessions for missing user', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('get', '/api/admin/users/:userId/sessions', {
+      params: { userId: 'missing-user' },
+    })
+
+    expect(response.statusCode).toBe(404)
+    expect((response.body as Record<string, any>).ok).toBe(false)
+    expect((response.body as Record<string, any>).error.code).toBe('NOT_FOUND')
+  })
+
+  it('returns empty session list for user without active sessions', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-empty',
+          email: 'empty@example.com',
+          name: 'Empty User',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('get', '/api/admin/users/:userId/sessions', {
+      params: { userId: 'user-empty' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect((response.body as Record<string, any>).data.userId).toBe('user-empty')
+    expect((response.body as Record<string, any>).data.items).toEqual([])
+  })
+
+  it('returns bad request when listing sessions without user id', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    const response = await invokeRoute('get', '/api/admin/users/:userId/sessions', {
+      params: {},
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).ok).toBe(false)
+    expect((response.body as Record<string, any>).error.code).toBe('USER_ID_REQUIRED')
+  })
+
+  it('trims user id when listing sessions', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('get', '/api/admin/users/:userId/sessions', {
+      params: { userId: '  user-1 ' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('FROM users'),
+      ['user-1'],
+    )
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('FROM user_sessions'),
+      ['user-1'],
+    )
+  })
+
+  it('returns server error when listing user sessions fails', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockRejectedValueOnce(new Error('session lookup failed'))
+
+    const response = await invokeRoute('get', '/api/admin/users/:userId/sessions', {
+      params: { userId: 'user-1' },
+    })
+
+    expect(response.statusCode).toBe(500)
+    expect((response.body as Record<string, any>).ok).toBe(false)
+    expect((response.body as Record<string, any>).error.code).toBe('SESSION_LIST_FAILED')
+  })
+
+  it('revokes a single session with default reason', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-3',
+          email: 'gamma@example.com',
+          name: 'Gamma',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'sess-3',
+          user_id: 'user-3',
+          issued_at: '2026-03-12T00:00:00.000Z',
+          expires_at: '2026-03-13T00:00:00.000Z',
+          last_seen_at: '2026-03-12T08:00:00.000Z',
+          revoked_at: null,
+          revoked_by: null,
+          revoke_reason: null,
+          ip_address: '127.0.0.1',
+          user_agent: 'Vitest',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T08:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'sess-3',
+          user_id: 'user-3',
+          issued_at: '2026-03-12T00:00:00.000Z',
+          expires_at: '2026-03-13T00:00:00.000Z',
+          last_seen_at: '2026-03-12T08:00:00.000Z',
+          revoked_at: '2026-03-12T08:45:00.000Z',
+          revoked_by: 'admin-1',
+          revoke_reason: 'admin-force-single-session-logout',
+          ip_address: '127.0.0.1',
+          user_agent: 'Vitest',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T08:45:00.000Z',
+        }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/sessions/:sessionId/revoke', {
+      params: { userId: 'user-3', sessionId: 'sess-3' },
+      body: {},
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect((response.body as Record<string, any>).data.userId).toBe('user-3')
+    expect((response.body as Record<string, any>).data.sessionId).toBe('sess-3')
+    expect((response.body as Record<string, any>).data.reason).toBe('admin-force-single-session-logout')
+    expect((response.body as Record<string, any>).data.revokedAt).toBe('2026-03-12T08:45:00.000Z')
+  })
+
+  it('trims and truncates session revoke reason for single session', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-3',
+          email: 'gamma@example.com',
+          name: 'Gamma',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'sess-4',
+          user_id: 'user-3',
+          issued_at: '2026-03-12T00:00:00.000Z',
+          expires_at: '2026-03-13T00:00:00.000Z',
+          last_seen_at: '2026-03-12T08:00:00.000Z',
+          revoked_at: null,
+          revoked_by: null,
+          revoke_reason: null,
+          ip_address: '127.0.0.1',
+          user_agent: 'Vitest',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T08:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'sess-4',
+          user_id: 'user-3',
+          issued_at: '2026-03-12T00:00:00.000Z',
+          expires_at: '2026-03-13T00:00:00.000Z',
+          last_seen_at: '2026-03-12T08:00:00.000Z',
+          revoked_at: '2026-03-12T08:50:00.000Z',
+          revoked_by: 'admin-1',
+          revoke_reason: 'x'.repeat(255),
+          ip_address: '127.0.0.1',
+          user_agent: 'Vitest',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T08:50:00.000Z',
+        }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/sessions/:sessionId/revoke', {
+      params: { userId: 'user-3', sessionId: 'sess-4' },
+      body: { reason: `   ${'x'.repeat(255)}extra-extra-extra   ` },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect((response.body as Record<string, any>).data.sessionId).toBe('sess-4')
+    expect((response.body as Record<string, any>).data.reason).toHaveLength(255)
+    expect((response.body as Record<string, any>).data.reason).toBe('x'.repeat(255))
+    expect((response.body as Record<string, any>).data.revokedAt).toBe('2026-03-12T08:50:00.000Z')
+  })
+
+  it('returns bad request when single-session revoke missing ids', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    const response = await invokeRoute('post', '/api/admin/users/:userId/sessions/:sessionId/revoke', {
+      params: { userId: 'user-1' },
+      body: {},
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).ok).toBe(false)
+    expect((response.body as Record<string, any>).error.code).toBe('SESSION_ID_REQUIRED')
+  })
+
+  it('returns bad request when single-session revoke missing user id', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    const response = await invokeRoute('post', '/api/admin/users/:userId/sessions/:sessionId/revoke', {
+      params: { sessionId: 'sess-1' },
+      body: { reason: 'check' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).ok).toBe(false)
+    expect((response.body as Record<string, any>).error.code).toBe('USER_ID_REQUIRED')
+  })
+
+  it('defaults reason when single-session revoke reason is not a string', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-3',
+          email: 'gamma@example.com',
+          name: 'Gamma',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'sess-5',
+          user_id: 'user-3',
+          issued_at: '2026-03-12T00:00:00.000Z',
+          expires_at: '2026-03-13T00:00:00.000Z',
+          last_seen_at: '2026-03-12T08:00:00.000Z',
+          revoked_at: null,
+          revoked_by: null,
+          revoke_reason: null,
+          ip_address: '127.0.0.1',
+          user_agent: 'Vitest',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T08:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'sess-5',
+          user_id: 'user-3',
+          issued_at: '2026-03-12T00:00:00.000Z',
+          expires_at: '2026-03-13T00:00:00.000Z',
+          last_seen_at: '2026-03-12T08:00:00.000Z',
+          revoked_at: '2026-03-12T08:55:00.000Z',
+          revoked_by: 'admin-1',
+          revoke_reason: 'admin-force-single-session-logout',
+          ip_address: '127.0.0.1',
+          user_agent: 'Vitest',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T08:55:00.000Z',
+        }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/sessions/:sessionId/revoke', {
+      params: { userId: 'user-3', sessionId: 'sess-5' },
+      body: { reason: 999 },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect((response.body as Record<string, any>).data.reason).toBe('admin-force-single-session-logout')
+    expect((response.body as Record<string, any>).data.sessionId).toBe('sess-5')
+  })
+
+  it('returns 404 when session disappears before revoke operation', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-3',
+          email: 'gamma@example.com',
+          name: 'Gamma',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'sess-stale',
+          user_id: 'user-3',
+          issued_at: '2026-03-12T00:00:00.000Z',
+          expires_at: '2026-03-13T00:00:00.000Z',
+          last_seen_at: '2026-03-12T08:00:00.000Z',
+          revoked_at: null,
+          revoked_by: null,
+          revoke_reason: null,
+          ip_address: '127.0.0.1',
+          user_agent: 'Vitest',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T08:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/sessions/:sessionId/revoke', {
+      params: { userId: 'user-3', sessionId: 'sess-stale' },
+      body: { reason: 'admin-force-single-session-logout' },
+    })
+
+    expect(response.statusCode).toBe(404)
+    expect((response.body as Record<string, any>).ok).toBe(false)
+    expect((response.body as Record<string, any>).error.code).toBe('NOT_FOUND')
+  })
+
+  it('trims identifiers before revoking a single session', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-3',
+          email: 'gamma@example.com',
+          name: 'Gamma',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'sess-3',
+          user_id: 'user-3',
+          issued_at: '2026-03-12T00:00:00.000Z',
+          expires_at: '2026-03-13T00:00:00.000Z',
+          last_seen_at: '2026-03-12T08:00:00.000Z',
+          revoked_at: null,
+          revoked_by: null,
+          revoke_reason: null,
+          ip_address: '127.0.0.1',
+          user_agent: 'Vitest',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T08:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'sess-3',
+          user_id: 'user-3',
+          issued_at: '2026-03-12T00:00:00.000Z',
+          expires_at: '2026-03-12T00:00:00.000Z',
+          last_seen_at: '2026-03-12T08:00:00.000Z',
+          revoked_at: '2026-03-12T08:30:00.000Z',
+          revoked_by: 'admin-1',
+          revoke_reason: 'admin-force-single-session-logout',
+          ip_address: '127.0.0.1',
+          user_agent: 'Vitest',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T08:30:00.000Z',
+        }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/sessions/:sessionId/revoke', {
+      params: { userId: '  user-3  ', sessionId: '  sess-3  ' },
+      body: { reason: 'admin-force-single-session-logout' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect((response.body as Record<string, any>).data.sessionId).toBe('sess-3')
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('FROM users'),
+      ['user-3'],
+    )
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('FROM user_sessions'),
+      ['sess-3'],
+    )
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining('UPDATE user_sessions'),
+      ['sess-3', 'admin-1', 'admin-force-single-session-logout'],
+    )
+  })
+
+  it('returns server error when single-session revoke operation fails', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-3',
+          email: 'gamma@example.com',
+          name: 'Gamma',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'sess-3',
+          user_id: 'user-3',
+          issued_at: '2026-03-12T00:00:00.000Z',
+          expires_at: '2026-03-13T00:00:00.000Z',
+          last_seen_at: '2026-03-12T08:00:00.000Z',
+          revoked_at: null,
+          revoked_by: null,
+          revoke_reason: null,
+          ip_address: '127.0.0.1',
+          user_agent: 'Vitest',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T08:00:00.000Z',
+        }],
+      })
+      .mockRejectedValueOnce(new Error('session revoke failed'))
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/sessions/:sessionId/revoke', {
+      params: { userId: 'user-3', sessionId: 'sess-3' },
+      body: { reason: 'admin-force-single-session-logout' },
+    })
+
+    expect(response.statusCode).toBe(500)
+    expect((response.body as Record<string, any>).ok).toBe(false)
+    expect((response.body as Record<string, any>).error.code).toBe('SESSION_REVOKE_FAILED')
+  })
+
+  it('returns 404 when session user does not exist', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query.mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/sessions/:sessionId/revoke', {
+      params: { userId: 'missing-user', sessionId: 'sess-3' },
+      body: { reason: 'manual-check' },
+    })
+
+    expect(response.statusCode).toBe(404)
+    expect((response.body as Record<string, any>).ok).toBe(false)
+    expect((response.body as Record<string, any>).error.code).toBe('NOT_FOUND')
+  })
+
+  it('returns 404 when session belongs to another user', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'sess-other',
+          user_id: 'user-2',
+          issued_at: '2026-03-12T00:00:00.000Z',
+          expires_at: '2026-03-13T00:00:00.000Z',
+          last_seen_at: '2026-03-12T08:00:00.000Z',
+          revoked_at: null,
+          revoked_by: null,
+          revoke_reason: null,
+          ip_address: '127.0.0.1',
+          user_agent: 'Vitest',
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T08:00:00.000Z',
+        }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/sessions/:sessionId/revoke', {
+      params: { userId: 'user-1', sessionId: 'sess-other' },
+      body: { reason: 'manual-match-check' },
+    })
+
+    expect(response.statusCode).toBe(404)
+    expect((response.body as Record<string, any>).ok).toBe(false)
+    expect((response.body as Record<string, any>).error.code).toBe('NOT_FOUND')
   })
 
   it('revokes a single session for a user', async () => {
@@ -709,7 +1475,10 @@ describe('admin-users routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
     expect((response.body as Record<string, any>).data.sessionId).toBe('sess-1')
+    expect((response.body as Record<string, any>).data.revokedAt).toBe('2026-03-12T08:30:00.000Z')
+    expect((response.body as Record<string, any>).data.reason).toBe('admin-force-single-session-logout')
     expect(auditMocks.auditLog).toHaveBeenCalled()
   })
 

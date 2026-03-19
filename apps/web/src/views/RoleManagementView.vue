@@ -108,6 +108,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { apiFetch } from '../utils/api'
+import { readErrorMessage } from '../utils/error'
 
 type RoleCatalogItem = {
   id: string
@@ -186,10 +187,10 @@ async function loadCatalog(): Promise<void> {
     ])
 
     if (!rolesResponse.ok || rolesPayload.ok !== true) {
-      throw new Error(String((rolesPayload.error as Record<string, unknown> | undefined)?.message || '加载角色失败'))
+      throw new Error(readErrorMessage(rolesPayload, '加载角色失败'))
     }
     if (!permissionsResponse.ok) {
-      throw new Error(String(permissionsPayload.error || '加载权限目录失败'))
+      throw new Error(readErrorMessage(permissionsPayload, '加载权限目录失败'))
     }
 
     const roleData = rolesPayload.data as { items?: RoleCatalogItem[] } | undefined
@@ -203,7 +204,7 @@ async function loadCatalog(): Promise<void> {
       applyRole(latest)
     }
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '加载角色失败', 'error')
+    setStatus(readErrorMessage(error, '加载角色失败'), 'error')
   } finally {
     loading.value = false
   }
@@ -213,28 +214,29 @@ async function saveRole(): Promise<void> {
   if (!canSave.value) return
   busy.value = true
   try {
+    const editing = isEditing.value
     const payload = {
       id: draftRoleId.value.trim(),
       name: draftRoleName.value.trim(),
       permissions: selectedPermissions.value,
     }
 
-    const response = await apiFetch(isEditing.value ? `/api/roles/${encodeURIComponent(draftRoleId.value.trim())}` : '/api/roles', {
-      method: isEditing.value ? 'PUT' : 'POST',
+    const response = await apiFetch(editing ? `/api/roles/${encodeURIComponent(draftRoleId.value.trim())}` : '/api/roles', {
+      method: editing ? 'PUT' : 'POST',
       body: JSON.stringify(payload),
     })
     const body = await readJson(response)
     if (!response.ok || body.ok !== true) {
-      throw new Error(String((body.error as Record<string, unknown> | undefined)?.message || '保存角色失败'))
+      throw new Error(readErrorMessage(body, '保存角色失败'))
     }
 
     const currentId = String((body.data as Record<string, unknown> | undefined)?.id || payload.id)
     await loadCatalog()
     const latest = roles.value.find((role) => role.id === currentId) || null
     applyRole(latest)
-    setStatus(isEditing.value ? '角色已更新' : '角色已创建')
+    setStatus(editing ? '角色已更新' : '角色已创建')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '保存角色失败', 'error')
+    setStatus(readErrorMessage(error, '保存角色失败'), 'error')
   } finally {
     busy.value = false
   }
@@ -251,14 +253,14 @@ async function deleteRole(): Promise<void> {
     })
     const body = await readJson(response)
     if (!response.ok || body.ok !== true) {
-      throw new Error(String((body.error as Record<string, unknown> | undefined)?.message || '删除角色失败'))
+      throw new Error(readErrorMessage(body, '删除角色失败'))
     }
 
     resetForm()
     await loadCatalog()
     setStatus('角色已删除')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '删除角色失败', 'error')
+    setStatus(readErrorMessage(error, '删除角色失败'), 'error')
   } finally {
     busy.value = false
   }

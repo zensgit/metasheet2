@@ -61,6 +61,28 @@ components:
         created_at:
           type: string
           format: date-time
+    PermissionTemplate:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        productMode:
+          type: string
+          enum: [platform, attendance, plm-workbench]
+        permissions:
+          type: array
+          items:
+            type: string
+        presetId:
+          type: string
+          nullable: true
+        roleId:
+          type: string
+          nullable: true
     Role:
       type: object
       properties:
@@ -78,6 +100,62 @@ components:
         updated_at:
           type: string
           format: date-time
+    UserPermissionState:
+      type: object
+      properties:
+        userId: { type: string }
+        permissions:
+          type: array
+          items:
+            type: string
+        isAdmin: { type: boolean }
+        degraded: { type: boolean }
+    UserSessionRecord:
+      type: object
+      properties:
+        id: { type: string }
+        userId: { type: string }
+        issuedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time
+        revokedAt:
+          type: string
+          format: date-time
+          nullable: true
+        revokedBy:
+          type: string
+          nullable: true
+        revokeReason:
+          type: string
+          nullable: true
+        ipAddress:
+          type: string
+          nullable: true
+        userAgent:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    UserSessionsResponse:
+      type: object
+      properties:
+        currentSessionId:
+          type: string
+          nullable: true
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserSessionRecord'
     Comment:
       type: object
       properties:

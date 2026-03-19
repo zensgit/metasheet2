@@ -148,20 +148,9 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
-
-type SessionRecord = {
-  id: string
-  issuedAt: string
-  expiresAt: string
-  lastSeenAt: string
-  revokedAt: string | null
-  revokedBy: string | null
-  revokeReason: string | null
-  ipAddress: string | null
-  userAgent: string | null
-  createdAt: string
-  updatedAt: string
-}
+import { readErrorMessage } from '../utils/error'
+import { parseUserSessionRecord } from '../utils/session'
+import type { UserSessionRecord } from '../utils/session'
 
 type StatusTone = 'info' | 'error'
 
@@ -172,7 +161,7 @@ const loading = ref(false)
 const heartbeatLoading = ref(false)
 const busySessionId = ref<string | null>(null)
 const revokingOthers = ref(false)
-const sessions = ref<SessionRecord[]>([])
+const sessions = ref<UserSessionRecord[]>([])
 const currentSessionId = ref<string | null>(null)
 const status = ref('')
 const statusTone = ref<StatusTone>('info')
@@ -212,24 +201,13 @@ async function redirectToLogin() {
   }).catch(() => undefined)
 }
 
-function extractError(payload: unknown): string {
-  if (!payload || typeof payload !== 'object') return ''
-  const record = payload as Record<string, unknown>
-  if (typeof record.error === 'string') return record.error
-  const data = record.data
-  if (data && typeof data === 'object' && typeof (data as Record<string, unknown>).error === 'string') {
-    return (data as Record<string, unknown>).error as string
-  }
-  return ''
-}
-
 function summarizeUserAgent(userAgent: string): string {
   const trimmed = userAgent.trim()
   if (trimmed.length <= 96) return trimmed
   return `${trimmed.slice(0, 93)}...`
 }
 
-function summarizeDevice(session: SessionRecord): string {
+function summarizeDevice(session: UserSessionRecord): string {
   if (session.userAgent) return summarizeUserAgent(session.userAgent)
   if (session.ipAddress) return `IP ${session.ipAddress}`
   return '当前浏览器会话'
@@ -256,19 +234,23 @@ async function loadSessions() {
     }
 
     if (!response.ok) {
-      setStatus(extractError(payload) || '加载会话失败', 'error')
+      setStatus(readErrorMessage(payload, '加载会话失败'), 'error')
       return
     }
 
     const data = payload && typeof payload === 'object' ? (payload as Record<string, unknown>).data : null
     const record = data && typeof data === 'object' ? data as Record<string, unknown> : {}
-    const items = Array.isArray(record.items) ? record.items as SessionRecord[] : []
+    const items = Array.isArray(record.items)
+      ? record.items
+          .map(parseUserSessionRecord)
+          .filter((session): session is UserSessionRecord => session !== null)
+      : []
     sessions.value = items
     currentSessionId.value = typeof record.currentSessionId === 'string' ? record.currentSessionId : null
     setStatus(`已同步 ${items.length} 条会话记录`)
     scheduleHeartbeat()
-  } catch {
-    setStatus('加载会话失败，请稍后重试', 'error')
+  } catch (error) {
+    setStatus(readErrorMessage(error, '加载会话失败，请稍后重试'), 'error')
   } finally {
     loading.value = false
   }
@@ -289,7 +271,7 @@ function scheduleHeartbeat() {
   }, 60_000)
 }
 
-function mergeSessionRecord(updated: SessionRecord) {
+function mergeSessionRecord(updated: UserSessionRecord) {
   const index = sessions.value.findIndex((session) => session.id === updated.id)
   if (index >= 0) {
     sessions.value.splice(index, 1, updated)
@@ -315,14 +297,14 @@ async function pingCurrentSession(options: { quiet?: boolean } = {}) {
 
     if (!response.ok) {
       if (!options.quiet) {
-        setStatus(extractError(payload) || '同步当前设备失败', 'error')
+        setStatus(readErrorMessage(payload, '同步当前设备失败'), 'error')
       }
       return
     }
 
     const data = payload && typeof payload === 'object' ? (payload as Record<string, unknown>).data : null
     const record = data && typeof data === 'object' ? data as Record<string, unknown> : {}
-    const session = record.session as SessionRecord | null | undefined
+    const session = parseUserSessionRecord(record.session)
     const sessionId = typeof record.sessionId === 'string' ? record.sessionId : currentSessionId.value
     if (sessionId) currentSessionId.value = sessionId
     if (session) mergeSessionRecord(session)
@@ -330,9 +312,9 @@ async function pingCurrentSession(options: { quiet?: boolean } = {}) {
       setStatus('当前设备已同步')
     }
     scheduleHeartbeat()
-  } catch {
+  } catch (error) {
     if (!options.quiet) {
-      setStatus('同步当前设备失败，请稍后重试', 'error')
+      setStatus(readErrorMessage(error, '同步当前设备失败，请稍后重试'), 'error')
     }
   } finally {
     heartbeatLoading.value = false
@@ -355,7 +337,7 @@ async function revokeSession(sessionId: string) {
     }
 
     if (!response.ok) {
-      setStatus(extractError(payload) || '结束会话失败', 'error')
+      setStatus(readErrorMessage(payload, '结束会话失败'), 'error')
       return
     }
 
@@ -367,8 +349,8 @@ async function revokeSession(sessionId: string) {
 
     setStatus('会话已结束')
     await loadSessions()
-  } catch {
-    setStatus('结束会话失败，请稍后重试', 'error')
+  } catch (error) {
+    setStatus(readErrorMessage(error, '结束会话失败，请稍后重试'), 'error')
   } finally {
     busySessionId.value = null
   }
@@ -390,7 +372,7 @@ async function revokeOtherSessions() {
     }
 
     if (!response.ok) {
-      setStatus(extractError(payload) || '退出其他会话失败', 'error')
+      setStatus(readErrorMessage(payload, '退出其他会话失败'), 'error')
       return
     }
 
@@ -408,8 +390,8 @@ async function revokeOtherSessions() {
     }
 
     await loadSessions()
-  } catch {
-    setStatus('退出其他会话失败，请稍后重试', 'error')
+  } catch (error) {
+    setStatus(readErrorMessage(error, '退出其他会话失败，请稍后重试'), 'error')
   } finally {
     revokingOthers.value = false
   }

@@ -35,6 +35,7 @@ import { poolManager } from '../integration/db/connection-pool';
 import { messageBus } from '../integration/messaging/message-bus';
 import { getRateLimiter } from '../integration/rate-limiting';
 import { pluginConfigManager } from '../core/plugin-config-manager';
+import { readErrorMessage } from '../utils/error';
 import { isDatabaseSchemaError } from '../utils/database-errors';
 import type { PluginManifest } from '../types/plugin';
 
@@ -434,7 +435,7 @@ router.get('/plugins', requireAdminRole(), async (_req: Request, res: Response) 
     const err = error as Error;
     res.status(500).json({
       success: false,
-      error: err.message
+      error: readErrorMessage(err, 'Failed to list plugins')
     });
   }
 });
@@ -481,7 +482,7 @@ router.get('/plugins/:id', requireAdminRole(), async (req: Request, res: Respons
     const err = error as Error;
     res.status(500).json({
       success: false,
-      error: err.message,
+      error: readErrorMessage(err, `Failed to get plugin detail ${id}`),
       pluginId: id
     });
   }
@@ -515,7 +516,7 @@ router.post('/plugins/:id/enable', requireAdminRole(), async (req: Authenticated
     const err = error as Error;
     res.status(500).json({
       success: false,
-      error: err.message,
+      error: readErrorMessage(err, `Failed to enable plugin ${id}`),
       pluginId: id
     });
   }
@@ -549,7 +550,7 @@ router.post('/plugins/:id/disable', requireAdminRole(), async (req: Authenticate
     const err = error as Error;
     res.status(500).json({
       success: false,
-      error: err.message,
+      error: readErrorMessage(err, `Failed to disable plugin ${id}`),
       pluginId: id
     });
   }
@@ -568,7 +569,7 @@ router.get('/plugins/:id/config', requireAdminRole(), async (req: Request, res: 
     const err = error as Error;
     res.status(500).json({
       success: false,
-      error: err.message,
+      error: readErrorMessage(err, `Failed to get plugin config ${id}`),
       pluginId: id
     });
   }
@@ -614,7 +615,7 @@ router.put('/plugins/:id/config', requireAdminRole(), async (req: AuthenticatedR
     const err = error as Error;
     res.status(500).json({
       success: false,
-      error: err.message,
+      error: readErrorMessage(err, `Failed to update plugin config ${id}`),
       pluginId: id
     });
   }
@@ -661,7 +662,7 @@ router.post(
       logger.error(`Plugin reload failed: ${id} - ${err.message}`, err);
       res.status(500).json({
         success: false,
-        error: err.message,
+        error: readErrorMessage(err, `Failed to reload plugin ${id}`),
         pluginId: id
       });
     }
@@ -718,7 +719,7 @@ router.post(
       logger.error(`All plugins reload failed: ${err.message}`, err);
       res.status(500).json({
         success: false,
-        error: err.message
+        error: readErrorMessage(err, 'Failed to reload all plugins')
       });
     }
   }
@@ -770,7 +771,7 @@ router.post('/plugins/reload-all-unsafe', async (req: AuthenticatedRequest, res:
   } catch (error) {
     const err = error as Error
     logger.error('Unsafe reload-all failed', err)
-    return res.status(500).json({ success: false, error: err.message })
+    return res.status(500).json({ success: false, error: readErrorMessage(err, 'Failed to reload all plugins (unsafe)') })
   }
 })
 
@@ -785,6 +786,7 @@ router.post('/plugins/reload-all-unsafe', async (req: AuthenticatedRequest, res:
  *  - Intended for local development visibility only; DO NOT enable in staging/prod
  */
 router.post('/plugins/:id/reload-unsafe', async (req: AuthenticatedRequest, res: Response) => {
+  const { id } = req.params
   try {
     if (process.env.ALLOW_UNSAFE_ADMIN !== 'true') {
       return res.status(403).json({
@@ -805,14 +807,13 @@ router.post('/plugins/:id/reload-unsafe', async (req: AuthenticatedRequest, res:
     if (!services.pluginLoader) {
       return res.status(503).json({ success: false, error: 'PluginLoader service not available' })
     }
-    const { id } = req.params
     await services.pluginLoader.reloadPlugin(id)
     const runtime = services.activatePlugin ? await services.activatePlugin(id) : undefined
     return res.json({ success: true, message: `Plugin ${id} reloaded (unsafe local bypass)`, pluginId: id, runtime })
   } catch (error) {
     const err = error as Error
     logger.error('Unsafe single plugin reload failed', err)
-    return res.status(500).json({ success: false, error: err.message })
+    return res.status(500).json({ success: false, error: readErrorMessage(err, `Failed to reload plugin ${id} (unsafe)`) })
   }
 })
 
@@ -855,7 +856,7 @@ router.delete(
       logger.error(`Plugin unload failed: ${id} - ${err.message}`, err);
       res.status(500).json({
         success: false,
-        error: err.message,
+        error: readErrorMessage(err, `Failed to unload plugin ${id}`),
         pluginId: id
       });
     }
@@ -920,7 +921,7 @@ router.post(
       logger.error(`Snapshot restore failed: ${id} - ${err.message}`, err);
       res.status(500).json({
         success: false,
-        error: err.message,
+        error: readErrorMessage(err, `Failed to restore snapshot ${id}`),
         snapshotId: id
       });
     }
@@ -975,7 +976,7 @@ router.delete(
       logger.error(`Snapshot deletion failed: ${id} - ${err.message}`, err);
       res.status(500).json({
         success: false,
-        error: err.message,
+        error: readErrorMessage(err, `Failed to delete snapshot ${id}`),
         snapshotId: id
       });
     }
@@ -1033,7 +1034,7 @@ router.post(
       logger.error(`Snapshot cleanup failed: ${err.message}`, err);
       res.status(500).json({
         success: false,
-        error: err.message
+        error: readErrorMessage(err, 'Failed to cleanup snapshots')
       });
     }
   }
@@ -1088,7 +1089,7 @@ router.post(
       logger.error('Cache clear failed', err);
       res.status(500).json({
         success: false,
-        error: err.message
+        error: readErrorMessage(err, 'Failed to clear cache')
       });
     }
   }
@@ -1136,7 +1137,7 @@ router.post(
       logger.error('Metrics reset failed', err);
       res.status(500).json({
         success: false,
-        error: err.message
+        error: readErrorMessage(err, 'Failed to reset metrics')
       });
     }
   }
@@ -1225,7 +1226,7 @@ router.delete(
       logger.error('Bulk deletion failed', err);
       res.status(500).json({
         success: false,
-        error: err.message
+        error: readErrorMessage(err, 'Failed to delete data in bulk')
       });
     }
   }
@@ -1319,7 +1320,7 @@ router.put(
       logger.error('Bulk update failed', err);
       res.status(500).json({
         success: false,
-        error: err.message
+        error: readErrorMessage(err, 'Failed to update data in bulk')
       });
     }
   }
@@ -1344,7 +1345,7 @@ router.get('/slo/status', async (req: Request, res: Response) => {
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: (error as Error).message
+      error: readErrorMessage(error, 'Failed to get SLO status')
     });
   }
 });
@@ -1373,7 +1374,7 @@ router.get('/dlq', async (req: Request, res: Response) => {
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: (error as Error).message
+      error: readErrorMessage(error, 'Failed to list DLQ messages')
     });
   }
 });
@@ -1399,7 +1400,7 @@ router.post(
     } catch (error) {
       res.status(500).json({
         success: false,
-        error: (error as Error).message
+        error: readErrorMessage(error, 'Failed to retry DLQ message')
       });
     }
   }
@@ -1428,7 +1429,7 @@ router.delete(
     } catch (error) {
       res.status(500).json({
         success: false,
-        error: (error as Error).message
+        error: readErrorMessage(error, 'Failed to process DLQ message')
       });
     }
   }
@@ -1479,7 +1480,7 @@ router.get('/shards', async (req: Request, res: Response) => {
     logger.error('Failed to get shard status', err);
     res.status(500).json({
       success: false,
-      error: err.message
+      error: readErrorMessage(err, 'Failed to get shard status')
     });
   }
 });
@@ -1521,7 +1522,7 @@ router.get('/shards/:name', async (req: Request, res: Response) => {
     logger.error('Failed to get shard details', err);
     res.status(500).json({
       success: false,
-      error: err.message
+      error: readErrorMessage(err, 'Failed to get shard details')
     });
   }
 });
@@ -1571,7 +1572,7 @@ router.get('/queues', async (req: Request, res: Response) => {
     logger.error('Failed to get queue stats', err);
     res.status(500).json({
       success: false,
-      error: err.message
+      error: readErrorMessage(err, 'Failed to get queue stats')
     });
   }
 });
@@ -1617,7 +1618,7 @@ router.post(
       logger.error('DLQ retry-all failed', err);
       res.status(500).json({
         success: false,
-        error: err.message
+        error: readErrorMessage(err, 'Failed to retry DLQ messages')
       });
     }
   }
@@ -1651,7 +1652,7 @@ router.post(
       logger.error('DLQ cleanup failed', err);
       res.status(500).json({
         success: false,
-        error: err.message
+        error: readErrorMessage(err, 'Failed to cleanup DLQ messages')
       });
     }
   }
@@ -1718,7 +1719,7 @@ router.get('/ratelimits', async (req: Request, res: Response) => {
     logger.error('Failed to get rate limit status', err);
     res.status(500).json({
       success: false,
-      error: err.message
+      error: readErrorMessage(err, 'Failed to get rate limit status')
     });
   }
 });
@@ -1760,7 +1761,7 @@ router.get('/ratelimits/:key', async (req: Request, res: Response) => {
     logger.error('Failed to get rate limit status for key', err);
     res.status(500).json({
       success: false,
-      error: err.message
+      error: readErrorMessage(err, 'Failed to get rate limit status for key')
     });
   }
 });
@@ -1793,7 +1794,7 @@ router.post(
       logger.error('Failed to reset rate limit', err);
       res.status(500).json({
         success: false,
-        error: err.message
+        error: readErrorMessage(err, 'Failed to reset rate limit')
       });
     }
   }
@@ -1825,7 +1826,7 @@ router.post(
       logger.error('Failed to reset all rate limits', err);
       res.status(500).json({
         success: false,
-        error: err.message
+        error: readErrorMessage(err, 'Failed to reset all rate limits')
       });
     }
   }
@@ -1861,7 +1862,7 @@ router.get('/health/detailed', async (req: Request, res: Response) => {
     logger.error('Failed to get detailed health', err);
     res.status(500).json({
       success: false,
-      error: err.message
+      error: readErrorMessage(err, 'Failed to get detailed health')
     });
   }
 });
@@ -1894,7 +1895,7 @@ router.get('/health/summary', async (req: Request, res: Response) => {
     logger.error('Failed to get health summary', err);
     res.status(500).json({
       success: false,
-      error: err.message
+      error: readErrorMessage(err, 'Failed to get health summary')
     });
   }
 });
@@ -1930,7 +1931,7 @@ router.get('/health/subsystem/:name', async (req: Request, res: Response) => {
     logger.error('Failed to get subsystem health', err);
     res.status(500).json({
       success: false,
-      error: err.message
+      error: readErrorMessage(err, 'Failed to get subsystem health')
     });
   }
 });
@@ -1961,7 +1962,7 @@ router.post('/health/check', async (req: Request, res: Response) => {
     logger.error('Failed to perform health check', err);
     res.status(500).json({
       success: false,
-      error: err.message
+      error: readErrorMessage(err, 'Failed to perform health check')
     });
   }
 });
