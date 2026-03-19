@@ -16,12 +16,19 @@ export interface ContainerOptions {
 }
 
 class AdapterStub {
-  async getProducts() { return [] }
-  async getProductBOM() { return [] }
+  private connected = false
+
+  async connect() { this.connected = true }
+  async disconnect() { this.connected = false }
+  isConnected() { return this.connected }
+  async getProducts() { return { data: [], metadata: { totalCount: 0 } } }
+  async getProductBOM() { return { data: [], metadata: { totalCount: 0 } } }
+  async getProductById() { return null }
   async listFolders() { return [] }
-  async searchDocuments() { return [] }
+  async searchDocuments() { return { data: [], metadata: { totalCount: 0 } } }
   async getDocument() { return null }
   async uploadDocument() { return null }
+  async getVersionHistory() { return { data: [], metadata: { totalCount: 0 } } }
   async search() { return [] }
   async compare() { return null }
   async analyze() { return null }
