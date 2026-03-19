@@ -13,7 +13,11 @@
       </button>
     </nav>
 
-    <section v-if="desktopOnlyBlocked" class="attendance-shell__desktop-hint">
+    <section v-if="!featuresReady" class="attendance-shell__loading">
+      <p>{{ t.loadingAttendance }}</p>
+    </section>
+
+    <section v-else-if="desktopOnlyBlocked" class="attendance-shell__desktop-hint">
       <h3>{{ t.desktopRecommended }}</h3>
       <p>{{ desktopOnlyMessage }}</p>
       <button class="attendance-shell__btn" type="button" @click="selectTab('overview')">
@@ -55,6 +59,7 @@ const { hasFeature, loadProductFeatures } = useFeatureFlags()
 const { isZh } = useLocale()
 
 const activeTab = ref<AttendanceTab>('overview')
+const featuresReady = ref(false)
 const isMobile = ref(false)
 
 const canAccessAdmin = computed(() => hasFeature('attendanceAdmin'))
@@ -66,6 +71,7 @@ const t = computed(() => isZh.value
       overview: '总览',
       adminCenter: '管理中心',
       workflowDesigner: '流程设计',
+      loadingAttendance: '加载考勤模块...',
       desktopRecommended: '建议使用桌面端',
       backToOverview: '返回总览',
       capabilityUnavailable: '当前能力不可用',
@@ -78,6 +84,7 @@ const t = computed(() => isZh.value
       overview: 'Overview',
       adminCenter: 'Admin Center',
       workflowDesigner: 'Workflow Designer',
+      loadingAttendance: 'Loading attendance module...',
       desktopRecommended: 'Desktop recommended',
       backToOverview: 'Back to Overview',
       capabilityUnavailable: 'Capability not available',
@@ -161,10 +168,12 @@ async function selectTab(tab: AttendanceTab): Promise<void> {
 }
 
 watch(() => route.query.tab, () => {
+  if (!featuresReady.value) return
   syncFromRoute()
 })
 
 watch(availableTabs, () => {
+  if (!featuresReady.value) return
   activeTab.value = ensureTabAllowed(activeTab.value)
 })
 
@@ -172,6 +181,7 @@ onMounted(async () => {
   await loadProductFeatures()
   updateMobileState()
   syncFromRoute()
+  featuresReady.value = true
   window.addEventListener('resize', updateMobileState)
 })
 
@@ -234,5 +244,13 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   padding: 8px 12px;
   cursor: pointer;
+}
+
+.attendance-shell__loading {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 20px;
+  color: #4b5563;
 }
 </style>

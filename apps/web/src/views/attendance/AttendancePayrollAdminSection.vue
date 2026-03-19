@@ -18,12 +18,15 @@
       </label>
       <label class="attendance__field" for="attendance-payroll-template-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <input
+        <select
           id="attendance-payroll-template-timezone"
           v-model="payrollTemplateForm.timezone"
           name="payrollTemplateTimezone"
-          type="text"
-        />
+        >
+          <option v-for="timezone in payrollTemplateTimezones" :key="timezone" :value="timezone">
+            {{ timezone }}
+          </option>
+        </select>
       </label>
       <label class="attendance__field" for="attendance-payroll-template-start">
         <span>{{ tr('Start day', '起始日') }}</span>
@@ -369,12 +372,13 @@
 </template>
 
 <script setup lang="ts">
-import type { Ref } from 'vue'
+import { computed, type Ref } from 'vue'
 import type {
   AttendancePayrollCycle,
   AttendancePayrollSummary,
   AttendancePayrollTemplate,
 } from './useAttendanceAdminPayroll'
+import { buildTimezoneOptions } from './attendanceTimezones'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -462,6 +466,7 @@ const payrollCycleSummary = props.payroll.payrollCycleSummary
 const payrollTemplateForm = props.payroll.payrollTemplateForm
 const payrollCycleForm = props.payroll.payrollCycleForm
 const payrollCycleGenerateForm = props.payroll.payrollCycleGenerateForm
+const payrollTemplateTimezones = computed(() => buildTimezoneOptions(payrollTemplateForm.timezone))
 const payrollTemplateName = props.payroll.payrollTemplateName
 const resetPayrollTemplateForm = () => props.payroll.resetPayrollTemplateForm()
 const editPayrollTemplate = (item: AttendancePayrollTemplate) => props.payroll.editPayrollTemplate(item)

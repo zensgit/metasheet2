@@ -1,245 +1,65 @@
 <template>
   <div class="plm-page">
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <h2>产品搜索</h2>
-          <p class="subtext">基于联邦接口快速定位可用的 PLM 产品 ID</p>
-        </div>
-        <button class="btn primary" :disabled="searchLoading" @click="searchProducts">
-          {{ searchLoading ? '搜索中...' : '搜索' }}
-        </button>
-      </div>
-
-      <div class="form-grid">
-        <label for="plm-search-query">
-          关键词
-          <input
-            id="plm-search-query"
-            v-model.trim="searchQuery"
-            name="plmSearchQuery"
-            placeholder="可留空，返回最新记录"
-          />
-        </label>
-        <label for="plm-search-item-type">
-          Item Type
-          <input
-            id="plm-search-item-type"
-            v-model.trim="searchItemType"
-            name="plmSearchItemType"
-            placeholder="Part"
-          />
-        </label>
-        <label for="plm-search-limit">
-          Limit
-          <input
-            id="plm-search-limit"
-            v-model.number="searchLimit"
-            name="plmSearchLimit"
-            type="number"
-            min="1"
-            max="50"
-          />
-        </label>
-      </div>
-
-      <p v-if="searchError" class="status error">{{ searchError }}</p>
-      <p v-else-if="searchResults.length" class="status">
-        共 {{ searchTotal }} 条，当前展示 {{ searchResults.length }} 条
-      </p>
-      <div v-if="!searchResults.length" class="empty">暂无搜索结果</div>
-      <table v-else class="data-table">
-        <thead>
-          <tr>
-            <th>名称</th>
-            <th>料号</th>
-            <th>状态</th>
-            <th>类型</th>
-            <th>更新时间</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="item in searchResults" :key="item.id">
-            <td>{{ item.name || '-' }}</td>
-            <td>{{ item.partNumber || item.item_number || item.itemNumber || item.code || '-' }}</td>
-            <td>{{ item.status || '-' }}</td>
-            <td>{{ item.itemType || '-' }}</td>
-            <td>{{ item.updatedAt || item.updated_at || '-' }}</td>
-            <td>
-              <div class="inline-actions">
-                <button class="btn" @click="applySearchItem(item)">使用</button>
-                <button class="btn ghost mini" @click="applyCompareFromSearch(item, 'left')">
-                  左对比
-                </button>
-                <button class="btn ghost mini" @click="applyCompareFromSearch(item, 'right')">
-                  右对比
-                </button>
-                <button class="btn ghost mini" @click="copySearchValue(item, 'id')">
-                  复制 ID
-                </button>
-                <button class="btn ghost mini" @click="copySearchValue(item, 'number')">
-                  复制料号
-                </button>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </section>
+    <PlmSearchShell
+      :search-query="searchQuery"
+      :search-item-type="searchItemType"
+      :search-limit="searchLimit"
+      :search-results="searchResults"
+      :search-total="searchTotal"
+      :search-loading="searchLoading"
+      :search-error="searchError"
+      @update:search-query="searchQuery = $event"
+      @update:search-item-type="searchItemType = $event"
+      @update:search-limit="searchLimit = $event"
+      @search="searchProducts"
+      @apply-item="applySearchItem"
+      @compare-item="applyCompareFromSearch"
+      @copy-item="copySearchValue"
+    />
 
     <section class="panel">
-      <div class="panel-header">
-        <div>
-          <h1>PLM 产品详情</h1>
-          <p class="subtext">联邦接口：产品详情、BOM、where-used、BOM 对比、替代件</p>
-          <div class="auth-status">
-            <span class="auth-label">MetaSheet</span>
-            <span class="auth-pill" :class="authStateClass">{{ authStateText }}</span>
-            <span v-if="authExpiryText" class="auth-expiry">{{ authExpiryText }}</span>
-            <button class="btn ghost" @click="refreshAuthStatus">刷新状态</button>
-          </div>
-          <div class="auth-status secondary">
-            <span class="auth-label">PLM Token</span>
-            <span class="auth-pill" :class="plmAuthStateClass">{{ plmAuthStateText }}</span>
-            <span v-if="plmAuthExpiryText" class="auth-expiry">{{ plmAuthExpiryText }}</span>
-          </div>
-          <p v-if="authHint" class="hint">{{ authHint }}</p>
-          <p v-if="plmAuthHint" class="hint">{{ plmAuthHint }}</p>
-          <p v-if="authError" class="status error">{{ authError }}</p>
-          <p v-if="deepLinkStatus" class="status">{{ deepLinkStatus }}</p>
-          <p v-if="deepLinkError" class="status error">{{ deepLinkError }}</p>
-        </div>
-        <div class="panel-actions">
-          <button class="btn ghost" @click="copyDeepLink()">复制深链接</button>
-          <button class="btn" @click="resetAll">重置</button>
-        </div>
-      </div>
-
-      <div class="deep-link-scope">
-        <span class="deep-link-label">深链接范围</span>
-        <label class="deep-link-option" for="plm-deeplink-preset">
-          <span>预设</span>
-          <select
-            id="plm-deeplink-preset"
-            name="plmDeepLinkPreset"
-            class="deep-link-select"
-            v-model="deepLinkPreset"
-            @change="applyDeepLinkPreset"
-          >
-            <option value="">自动</option>
-            <option v-for="preset in deepLinkPresets" :key="preset.key" :value="preset.key">
-              {{ preset.label }}
-            </option>
-          </select>
-        </label>
-        <button
-          class="btn ghost"
-          :disabled="!deepLinkPreset.startsWith('custom:')"
-          @click="movePreset('up')"
-        >
-          上移
-        </button>
-        <button
-          class="btn ghost"
-          :disabled="!deepLinkPreset.startsWith('custom:')"
-          @click="movePreset('down')"
-        >
-          下移
-        </button>
-        <label
-          v-for="option in deepLinkPanelOptions"
-          :key="option.key"
-          class="deep-link-option"
-          :for="`plm-deeplink-scope-${option.key}`"
-        >
-          <input
-            :id="`plm-deeplink-scope-${option.key}`"
-            name="plmDeepLinkScope"
-            type="checkbox"
-            :value="option.key"
-            v-model="deepLinkScope"
-          />
-          <span>{{ option.label }}</span>
-        </label>
-        <button class="btn ghost" @click="clearDeepLinkScope">自动</button>
-        <label class="deep-link-option" for="plm-deeplink-preset-name">
-          <span>保存为</span>
-          <input
-            id="plm-deeplink-preset-name"
-            name="plmDeepLinkPresetName"
-            class="deep-link-input"
-            v-model.trim="customPresetName"
-            placeholder="输入名称"
-          />
-          <button
-            class="btn ghost"
-            :disabled="!customPresetName || !deepLinkScope.length"
-            @click="saveDeepLinkPreset"
-          >
-            保存
-          </button>
-        </label>
-        <button
-          class="btn ghost"
-          :disabled="!deepLinkPreset.startsWith('custom:')"
-          @click="deleteDeepLinkPreset"
-        >
-          删除预设
-        </button>
-        <label class="deep-link-option" for="plm-deeplink-preset-rename">
-          <span>重命名</span>
-          <input
-            id="plm-deeplink-preset-rename"
-            name="plmDeepLinkPresetRename"
-            class="deep-link-input"
-            v-model.trim="editingPresetLabel"
-            :disabled="!deepLinkPreset.startsWith('custom:')"
-            placeholder="新名称"
-          />
-          <button
-            class="btn ghost"
-            :disabled="!deepLinkPreset.startsWith('custom:') || !editingPresetLabel"
-            @click="applyPresetRename"
-          >
-            保存
-          </button>
-        </label>
-        <button class="btn ghost" @click="exportCustomPresets">导出预设</button>
-        <label class="deep-link-option" for="plm-deeplink-preset-import">
-          <span>导入</span>
-          <input
-            id="plm-deeplink-preset-import"
-            name="plmDeepLinkPresetImport"
-            class="deep-link-input"
-            v-model.trim="importPresetText"
-            placeholder="粘贴 JSON"
-          />
-          <button class="btn ghost" :disabled="!importPresetText" @click="importCustomPresets">
-            导入
-          </button>
-        </label>
-        <button class="btn ghost" @click="triggerPresetFileImport">选择文件</button>
-        <input
-          ref="importFileInput"
-          id="plm-deeplink-preset-file"
-          name="plmDeepLinkPresetFile"
-          class="deep-link-file"
-          type="file"
-          accept=".json,application/json"
-          @change="handlePresetFileImport"
-        />
-        <div
-          class="deep-link-drop"
-          :class="{ active: isPresetDropActive }"
-          @dragenter="handlePresetDragEnter"
-          @dragover="handlePresetDragOver"
-          @dragleave="handlePresetDragLeave"
-          @drop="handlePresetDrop"
-        >
-          <span>拖拽 JSON 预设文件到这里</span>
-        </div>
-      </div>
+      <PlmWorkbenchShell
+        :auth-state-text="authStateText"
+        :auth-state-class="authStateClass"
+        :auth-expiry-text="authExpiryText || ''"
+        :auth-hint="authHint || ''"
+        :auth-error="authError || ''"
+        :plm-auth-state-text="plmAuthStateText"
+        :plm-auth-state-class="plmAuthStateClass"
+        :plm-auth-expiry-text="plmAuthExpiryText || ''"
+        :plm-auth-hint="plmAuthHint || ''"
+        :deep-link-status="deepLinkStatus || ''"
+        :deep-link-error="deepLinkError || ''"
+        :deep-link-preset="deepLinkPreset"
+        :deep-link-presets="deepLinkPresets"
+        :deep-link-panel-options="deepLinkPanelOptions"
+        :deep-link-scope="deepLinkScope"
+        :custom-preset-name="customPresetName"
+        :editing-preset-label="editingPresetLabel"
+        :import-preset-text="importPresetText"
+        :is-preset-drop-active="isPresetDropActive"
+        @refresh-auth-status="refreshAuthStatus"
+        @copy-deep-link="copyDeepLink()"
+        @reset="resetAll"
+        @update:deep-link-preset="deepLinkPreset = $event"
+        @apply-deep-link-preset="applyDeepLinkPreset"
+        @move-preset="movePreset"
+        @update:deep-link-scope="deepLinkScope = $event"
+        @clear-deep-link-scope="clearDeepLinkScope"
+        @update:custom-preset-name="customPresetName = $event"
+        @save-deep-link-preset="saveDeepLinkPreset"
+        @delete-deep-link-preset="deleteDeepLinkPreset"
+        @update:editing-preset-label="editingPresetLabel = $event"
+        @apply-preset-rename="applyPresetRename"
+        @export-custom-presets="exportCustomPresets"
+        @update:import-preset-text="importPresetText = $event"
+        @import-custom-presets="importCustomPresets"
+        @file-import="handlePresetFileImport"
+        @preset-drag-enter="handlePresetDragEnter"
+        @preset-drag-over="handlePresetDragOver"
+        @preset-drag-leave="handlePresetDragLeave"
+        @preset-drop="handlePresetDrop"
+      />
 
       <div class="form-grid">
         <label for="plm-product-id">
@@ -2570,6 +2390,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { type LocationQueryValue, useRoute, useRouter } from 'vue-router'
 import { apiGet, apiPost } from '../utils/api'
+import PlmSearchShell from '../components/plm/PlmSearchShell.vue'
+import PlmWorkbenchShell from '../components/plm/PlmWorkbenchShell.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -2713,7 +2535,6 @@ const deepLinkPreset = ref('')
 const customPresetName = ref('')
 const editingPresetLabel = ref('')
 const importPresetText = ref('')
-const importFileInput = ref<HTMLInputElement | null>(null)
 const isPresetDropActive = ref(false)
 let presetDropDepth = 0
 const customDeepLinkPresets = ref<DeepLinkPreset[]>([])
@@ -7736,10 +7557,6 @@ function importCustomPresetsFromText(raw: string) {
 
 function importCustomPresets() {
   importCustomPresetsFromText(importPresetText.value)
-}
-
-function triggerPresetFileImport() {
-  importFileInput.value?.click()
 }
 
 async function importPresetFile(file: File) {

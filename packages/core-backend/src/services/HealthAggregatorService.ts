@@ -20,7 +20,7 @@ import { poolManager } from '../integration/db/connection-pool'
 import { messageBus } from '../integration/messaging/message-bus'
 import { pluginHealthService, type PluginHealth } from './PluginHealthService'
 import { getRateLimiter } from '../integration/rate-limiting'
-import { DeadLetterQueueService } from './DeadLetterQueueService'
+import type { DeadLetterQueueService } from './DeadLetterQueueService'
 import { coreMetrics } from '../integration/metrics/metrics'
 
 export type HealthStatus = 'healthy' | 'degraded' | 'unhealthy' | 'unknown'
