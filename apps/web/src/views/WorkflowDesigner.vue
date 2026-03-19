@@ -20,53 +20,12 @@
     <!-- Main Content -->
     <div class="designer-content">
       <!-- Tool Palette -->
-      <div class="tool-palette">
-        <div class="palette-section">
-          <div class="section-title">事件</div>
-          <div
-            v-for="item in eventElements"
-            :key="item.type"
-            class="palette-item"
-            draggable="true"
-            @dragstart="onDragStart($event, item)"
-          >
-            <div class="item-icon" :style="{ backgroundColor: item.color }">
-              <component :is="item.icon" />
-            </div>
-            <span class="item-label">{{ item.label }}</span>
-          </div>
-        </div>
-        <div class="palette-section">
-          <div class="section-title">任务</div>
-          <div
-            v-for="item in taskElements"
-            :key="item.type"
-            class="palette-item"
-            draggable="true"
-            @dragstart="onDragStart($event, item)"
-          >
-            <div class="item-icon" :style="{ backgroundColor: item.color }">
-              <component :is="item.icon" />
-            </div>
-            <span class="item-label">{{ item.label }}</span>
-          </div>
-        </div>
-        <div class="palette-section">
-          <div class="section-title">网关</div>
-          <div
-            v-for="item in gatewayElements"
-            :key="item.type"
-            class="palette-item"
-            draggable="true"
-            @dragstart="onDragStart($event, item)"
-          >
-            <div class="item-icon" :style="{ backgroundColor: item.color }">
-              <component :is="item.icon" />
-            </div>
-            <span class="item-label">{{ item.label }}</span>
-          </div>
-        </div>
-      </div>
+      <WorkflowPalette
+        :event-elements="eventElements"
+        :task-elements="taskElements"
+        :gateway-elements="gatewayElements"
+        @drag-start="onDragStart"
+      />
 
       <!-- BPMN Canvas -->
       <div class="canvas-container" ref="canvasContainer">
@@ -236,6 +195,7 @@ import { validateWorkflowElements } from './workflowDesignerValidation'
 import WorkflowTemplateDialog from '../components/workflow/WorkflowTemplateDialog.vue'
 import WorkflowPropertyPanel from '../components/workflow/WorkflowPropertyPanel.vue'
 import WorkflowDesignerToolbar from '../components/workflow/WorkflowDesignerToolbar.vue'
+import WorkflowPalette from '../components/workflow/WorkflowPalette.vue'
 
 // Types
 interface PaletteItem {
