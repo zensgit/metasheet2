@@ -150,7 +150,7 @@ function maybe_run_provision() {
     return 0
   fi
 
-  info "Running permission provisioning gate (PROVISION_USER_ID set)..."
+  info "Running access provisioning gate (PROVISION_USER_ID set)..."
   if API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" USER_ID="$PROVISION_USER_ID" ROLE="employee" "${ROOT_DIR}/scripts/ops/attendance-provision-user.sh" \
     >"${OUTPUT_ROOT}/gate-provision-employee.log" 2>&1 \
     && API_BASE="$API_BASE" AUTH_TOKEN="$AUTH_TOKEN" USER_ID="$PROVISION_USER_ID" ROLE="approver" "${ROOT_DIR}/scripts/ops/attendance-provision-user.sh" \
@@ -261,6 +261,14 @@ function detect_provision_reason() {
   fi
   if grep -qE 'error: 404' "$log"; then
     echo "ENDPOINT_MISSING"
+    return 0
+  fi
+  if grep -qE 'error: 400 .*ROLE_NOT_FOUND|error: 400 .*role not found' "$log"; then
+    echo "ROLE_NOT_FOUND"
+    return 0
+  fi
+  if grep -qE 'error: 5[0-9][0-9]' "$log"; then
+    echo "SERVER_ERROR"
     return 0
   fi
   if grep -qiE 'Could not resolve host' "$log"; then
