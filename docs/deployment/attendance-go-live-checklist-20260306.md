@@ -51,7 +51,7 @@ GRANT ALL PRIVILEGES ON DATABASE metasheet TO metasheet;
   - [ ] `DEPLOYMENT_MODEL=onprem`
   - [ ] `ATTENDANCE_IMPORT_REQUIRE_TOKEN=1`
   - [ ] `ATTENDANCE_IMPORT_UPLOAD_DIR=/opt/metasheet/storage/attendance-import`
-  - [ ] `ATTENDANCE_IMPORT_CSV_MAX_ROWS=20000`
+  - [ ] `ATTENDANCE_IMPORT_CSV_MAX_ROWS=100000`
   - [ ] `JWT_SECRET` 非默认值
   - [ ] `POSTGRES_PASSWORD` 非默认值
   - [ ] `DATABASE_URL` 非 `change-me`

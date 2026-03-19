@@ -176,6 +176,10 @@
           :format-request-type="formatRequestType"
           :format-status="formatStatus"
           :format-warnings-short="formatWarningsShort"
+          :calendar-days="calendarDays"
+          :calendar-label="calendarLabel"
+          :shift-month="shiftMonth"
+          :week-days="weekDays"
           :request-center="requestCenterSectionBindings"
           :tr="tr"
         />
@@ -237,8 +241,8 @@
         <div class="attendance__card attendance__card--admin">
           <div class="attendance__admin-header">
             <h3>{{ tr('Admin Console', '管理控制台') }}</h3>
-            <button class="attendance__btn" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
-              {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
+            <button class="attendance__btn" :disabled="adminLoading" @click="loadAdminData">
+              {{ adminLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
             </button>
           </div>
           <div v-if="statusMessage" class="attendance__status-block attendance__status-block--admin">
@@ -335,6 +339,13 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
+import {
+  formatCalendarMonthLabel,
+  formatLunarDayLabel,
+  normalizeDateKey,
+  toDateInput,
+  toDateKey,
+} from './attendanceCalendarUtils'
 import { useAttendanceAdminAuditLogs } from './attendance/useAttendanceAdminAuditLogs'
 import AttendanceAuditLogsSection from './attendance/AttendanceAuditLogsSection.vue'
 import AttendanceHolidayDataSection from './attendance/AttendanceHolidayDataSection.vue'
@@ -519,6 +530,7 @@ const statusMeta = ref<AttendanceStatusMeta | null>(null)
 const calendarMonth = ref(new Date())
 const pluginsLoaded = ref(false)
 const exporting = ref(false)
+const adminLoading = ref(false)
 const reportLoading = ref(false)
 const adminForbidden = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
@@ -706,8 +718,10 @@ const {
   removeAttendanceGroupMember,
   resetAttendanceGroupForm,
   resetRuleSetForm,
+  closeRuleTemplateVersionView,
   resolveRuleSetName,
   restoreRuleTemplates,
+  openRuleTemplateVersion,
   ruleSetEditingId,
   ruleSetForm,
   ruleSetLoading,
@@ -718,7 +732,9 @@ const {
   ruleTemplateRestoring,
   ruleTemplateSaving,
   ruleTemplateSystemText,
+  ruleTemplateVersionLoading,
   ruleTemplateVersions,
+  selectedRuleTemplateVersion,
   saveAttendanceGroup,
   saveRuleSet,
   saveRuleTemplates,
@@ -792,7 +808,7 @@ const statusActionBusy = computed(() => {
   const action = statusMeta.value?.action
   if (!action) return false
   if (action === 'refresh-overview') return loading.value
-  if (action === 'reload-admin') return settingsLoading.value || ruleLoading.value
+  if (action === 'reload-admin') return adminLoading.value
   if (action === 'reload-import-job') return importAsyncPolling.value
   if (action === 'resume-import-job') return importAsyncPolling.value
   if (action === 'reload-import-csv') return importLoading.value
@@ -823,7 +839,10 @@ const weekDays = computed(() => (
     : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 ))
 const calendarLabel = computed(() => {
-  return new Intl.DateTimeFormat(isZh.value ? 'zh-CN' : 'en-US', { year: 'numeric', month: 'long' }).format(calendarMonth.value)
+  return formatCalendarMonthLabel(calendarMonth.value, {
+    locale: isZh.value ? 'zh-CN' : 'en-US',
+    timeZone: isZh.value ? 'Asia/Shanghai' : defaultTimezone,
+  })
 })
 
 const recordMap = computed(() => {
@@ -900,7 +919,10 @@ const calendarDays = computed<CalendarDay[]>(() => {
     const holidayName = typeof holiday?.name === 'string' && holiday.name.trim().length > 0
       ? holiday.name.trim()
       : undefined
-    const lunarLabel = formatLunarDayLabel(date)
+    const lunarLabel = formatLunarDayLabel(date, {
+      enabled: isZh.value,
+      timeZone: 'Asia/Shanghai',
+    })
     let tooltip = record
       ? `${key} · ${statusLabel} · ${record.work_minutes} min`
       : key
@@ -1269,8 +1291,10 @@ const rulesAndGroupsSectionBindings = {
   removeAttendanceGroupMember,
   resetAttendanceGroupForm,
   resetRuleSetForm,
+  closeRuleTemplateVersionView,
   resolveRuleSetName,
   restoreRuleTemplates,
+  openRuleTemplateVersion,
   ruleSetEditingId,
   ruleSetForm,
   ruleSetLoading,
@@ -1281,7 +1305,9 @@ const rulesAndGroupsSectionBindings = {
   ruleTemplateRestoring,
   ruleTemplateSaving,
   ruleTemplateSystemText,
+  ruleTemplateVersionLoading,
   ruleTemplateVersions,
+  selectedRuleTemplateVersion,
   saveAttendanceGroup,
   saveRuleSet,
   saveRuleTemplates,
@@ -1406,28 +1432,16 @@ const requestCenterSectionBindings = {
   requests,
   requestSubmitting,
   resolveRequest,
+  focusCalendarMonth,
+  shiftMonth,
   submitRequest,
 }
 
-function toDateInput(date: Date): string {
-  return date.toISOString().slice(0, 10)
-}
-
-function toDateKey(date: Date): string {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function normalizeDateKey(value: string | null | undefined): string | null {
-  const raw = String(value || '').trim()
-  if (!raw) return null
-  const direct = raw.match(/^(\d{4}-\d{2}-\d{2})/)
-  if (direct) return direct[1]
-  const date = new Date(raw)
-  if (Number.isNaN(date.getTime())) return null
-  return date.toISOString().slice(0, 10)
+function parseDateValue(value: string | null | undefined): Date | null {
+  const key = normalizeDateKey(value)
+  if (!key) return null
+  const date = new Date(`${key}T00:00:00`)
+  return Number.isNaN(date.getTime()) ? null : date
 }
 
 function formatDateTime(value: string | null | undefined): string {
@@ -1571,20 +1585,6 @@ function formatRequestType(value: string): string {
         overtime: 'Overtime request',
       }
   return map[value] ?? value
-}
-
-function formatLunarDayLabel(date: Date): string | undefined {
-  if (!isZh.value || Number.isNaN(date.getTime())) return undefined
-  try {
-    const text = new Intl.DateTimeFormat('zh-CN-u-ca-chinese', {
-      month: 'short',
-      day: 'numeric',
-    }).format(date)
-    const normalized = text.replace(/\s+/g, '')
-    return normalized || undefined
-  } catch {
-    return undefined
-  }
 }
 
 function formatWarningsShort(warnings: string[]): string {
@@ -1900,6 +1900,10 @@ function classifyStatusError(
     message = tr('Session expired or token is invalid.', '登录已过期或令牌无效。')
     meta.hint = tr('Sign in again, then retry the action.', '请重新登录后再重试。')
     meta.action = 'refresh-overview'
+  } else if (code === 'DUPLICATE_REQUEST' || status === 409) {
+    message = tr('An identical attendance request already exists for this date.', '同一天同类型的相同申请已存在。')
+    meta.hint = tr('Refresh the request list before submitting again.', '请先刷新申请列表，确认现有申请状态后再提交。')
+    meta.action = 'reload-requests'
   } else if (status === 403 || code === 'FORBIDDEN' || code === 'PERMISSION_DENIED') {
     message = rawMessage === fallbackMessage ? tr('Permission denied for this action.', '当前操作无权限。') : rawMessage
     meta.hint = tr('Use an account with required attendance permissions, then reload data.', '请使用具备所需考勤权限的账号，并重新加载数据。')
@@ -2169,6 +2173,22 @@ function shiftMonth(delta: number) {
   refreshAll()
 }
 
+async function focusCalendarMonth(value: string | null | undefined) {
+  const next = parseDateValue(value) ?? new Date()
+  const nextMonth = new Date(next.getFullYear(), next.getMonth(), 1)
+  const currentMonth = calendarMonth.value
+  if (
+    currentMonth.getFullYear() === nextMonth.getFullYear()
+    && currentMonth.getMonth() === nextMonth.getMonth()
+  ) {
+    return
+  }
+  calendarMonth.value = nextMonth
+  fromDate.value = toDateInput(new Date(nextMonth.getFullYear(), nextMonth.getMonth(), 1))
+  toDate.value = toDateInput(new Date(nextMonth.getFullYear(), nextMonth.getMonth() + 1, 0))
+  await refreshAll()
+}
+
 function validateRequestForm(): string | null {
   if (!requestForm.workDate) return tr('Work date is required', '工作日期为必填项')
 
@@ -2217,6 +2237,7 @@ function validateRequestForm(): string | null {
 }
 
 async function submitRequest() {
+  if (requestSubmitting.value) return
   requestSubmitting.value = true
   try {
     const validationMessage = validateRequestForm()
@@ -2342,6 +2363,8 @@ async function exportCsv() {
 }
 
 async function loadAdminData() {
+  if (adminLoading.value) return
+  adminLoading.value = true
   try {
     await Promise.all([
       loadSettings(),
@@ -2366,6 +2389,8 @@ async function loadAdminData() {
     ])
   } catch (error) {
     setStatusFromError(error, tr('Failed to load admin data', '加载管理数据失败'), 'admin')
+  } finally {
+    adminLoading.value = false
   }
 }
 

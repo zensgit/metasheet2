@@ -1,5 +1,6 @@
-import { reactive, ref, type Ref } from 'vue'
+import { reactive, ref, watch, type Ref } from 'vue'
 import { apiFetch as defaultApiFetch } from '../../utils/api'
+import { generateAttendanceCode } from './attendanceCode'
 
 type Translate = (en: string, zh: string) => string
 type ConfirmFn = (message: string) => boolean
@@ -195,6 +196,16 @@ export function useAttendanceAdminLeavePolicies({
     setStatus(message, 'error')
   }
 
+  watch(
+    () => leaveTypeForm.name,
+    (name) => {
+      const trimmedName = name.trim()
+      if (!trimmedName || leaveTypeForm.code.trim().length > 0) return
+      leaveTypeForm.code = generateAttendanceCode(trimmedName, 'leave')
+    },
+    { immediate: true },
+  )
+
   function resetLeaveTypeForm() {
     leaveTypeEditingId.value = null
     leaveTypeForm.code = ''
@@ -246,11 +257,11 @@ export function useAttendanceAdminLeavePolicies({
     leaveTypeSaving.value = true
     const isEditing = Boolean(leaveTypeEditingId.value)
     try {
-      if (!leaveTypeForm.code.trim() || !leaveTypeForm.name.trim()) {
-        throw new Error(tr('Code and name are required', '编码和名称为必填项'))
+      if (!leaveTypeForm.name.trim()) {
+        throw new Error(tr('Name is required', '名称为必填项'))
       }
       const payload = {
-        code: leaveTypeForm.code.trim(),
+        code: leaveTypeForm.code.trim() || generateAttendanceCode(leaveTypeForm.name, 'leave'),
         name: leaveTypeForm.name.trim(),
         paid: leaveTypeForm.paid,
         requiresApproval: leaveTypeForm.requiresApproval,
