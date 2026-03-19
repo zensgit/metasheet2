@@ -189,20 +189,6 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Pagination' }
-              examples:
-                sample:
-                  value:
-                    items:
-                      - occurred_at: '2025-09-19T09:12:00Z'
-                        actor_id: 'u1'
-                        action: 'approve'
-                        comment: 'LGTM'
-                        from_status: 'PENDING'
-                        to_status: 'APPROVED'
-                        version: 1
-                    page: 1
-                    pageSize: 50
-                    total: 4
         '403': { $ref: '#/components/responses/Forbidden' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }

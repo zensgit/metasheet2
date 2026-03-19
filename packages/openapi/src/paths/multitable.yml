@@ -509,6 +509,8 @@ paths:
                           $ref: '#/components/schemas/MultitableRecord'
                       linkSummaries:
                         $ref: '#/components/schemas/MultitableViewLinkSummaries'
+                      attachmentSummaries:
+                        $ref: '#/components/schemas/MultitableViewAttachmentSummaries'
                       view:
                         allOf:
                           - $ref: '#/components/schemas/MultitableView'
@@ -775,6 +777,8 @@ paths:
                         $ref: '#/components/schemas/MultitableRecord'
                       commentsScope:
                         $ref: '#/components/schemas/MultitableCommentsScope'
+                      attachmentSummaries:
+                        $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
                     required: [mode, record, commentsScope]
         '400':
           description: Validation error
@@ -1011,6 +1015,8 @@ paths:
                           $ref: '#/components/schemas/MultitableComputedRecord'
                       linkSummaries:
                         $ref: '#/components/schemas/MultitableViewLinkSummaries'
+                      attachmentSummaries:
+                        $ref: '#/components/schemas/MultitableViewAttachmentSummaries'
                       relatedRecords:
                         type: array
                         items:

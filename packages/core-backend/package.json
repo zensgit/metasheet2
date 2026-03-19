@@ -42,6 +42,7 @@
     "jsonwebtoken": "^9.0.2",
     "kysely": "^0.28.8",
     "lodash": "^4.17.21",
+    "multer": "^2.1.1",
     "node-cron": "^4.2.1",
     "pg": "^8.11.3",
     "pg-copy-streams": "^6.0.6",

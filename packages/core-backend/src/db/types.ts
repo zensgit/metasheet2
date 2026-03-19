@@ -84,11 +84,13 @@ export interface Database {
   attendance_payroll_cycles: AttendancePayrollCyclesTable
   // Meta tables
   meta_sheets: MetaSheetsTable
+  meta_bases: MetaBasesTable
   meta_fields: MetaFieldsTable
   meta_views: MetaViewsTable
   meta_records: MetaRecordsTable
   meta_links: MetaLinksTable
   meta_comments: MetaCommentsTable
+  multitable_attachments: MultitableAttachmentsTable
   meta_dashboards: MetaDashboardsTable
   meta_widgets: MetaWidgetsTable
 }
@@ -585,8 +587,21 @@ export interface WorkflowIncidentsTable {
 }
 
 // Meta Tables
+export interface MetaBasesTable {
+  id: Generated<string>
+  name: string
+  icon: string | null
+  color: string | null
+  owner_id: string | null
+  workspace_id: string | null
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+  deleted_at: NullableTimestamp
+}
+
 export interface MetaSheetsTable {
   id: Generated<string>
+  base_id: string | null
   name: string
   description: string | null
   created_at: CreatedAt
@@ -640,6 +655,11 @@ export interface MetaCommentsTable {
   spreadsheet_id: string
   row_id: string
   field_id: string | null
+  target_type: string
+  target_id: string
+  target_field_id: string | null
+  container_type: string
+  container_id: string
   content: string
   author_id: string
   parent_id: string | null
@@ -647,6 +667,25 @@ export interface MetaCommentsTable {
   mentions: JSONColumnType<string[]>
   created_at: CreatedAt
   updated_at: UpdatedAt
+}
+
+export interface MultitableAttachmentsTable {
+  id: Generated<string>
+  sheet_id: string
+  record_id: string | null
+  field_id: string | null
+  storage_file_id: string
+  filename: string
+  original_name: string | null
+  mime_type: string
+  size: number
+  storage_path: string
+  storage_provider: string
+  metadata: JSONColumnType<Record<string, unknown> | null>
+  created_by: string | null
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+  deleted_at: NullableTimestamp
 }
 
 export interface MetaDashboardsTable {

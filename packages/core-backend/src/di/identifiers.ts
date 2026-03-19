@@ -70,16 +70,41 @@ export const IDashboardService = createIdentifier<IDashboardService>('dashboard-
 export const IPresenceService = createIdentifier<IPresenceService>('presence-service');
 export const ICommentService = createIdentifier<ICommentService>('comment-service');
 
+export interface CommentListScope {
+    spreadsheetId?: string;
+    containerType?: string;
+    containerId?: string;
+}
+
 export interface CommentQueryOptions {
     rowId?: string;
+    fieldId?: string;
+    targetType?: string;
+    targetId?: string;
+    targetFieldId?: string;
+    containerType?: string;
     resolved?: boolean;
     limit?: number;
     offset?: number;
 }
 
+export interface CommentCreateInput {
+    spreadsheetId?: string;
+    rowId?: string;
+    fieldId?: string;
+    targetType?: string;
+    targetId?: string;
+    targetFieldId?: string;
+    containerType?: string;
+    containerId?: string;
+    content: string;
+    authorId: string;
+    parentId?: string;
+}
+
 export interface ICommentService {
-    createComment(data: any): Promise<any>;
-    getComments(spreadsheetId: string, options?: CommentQueryOptions): Promise<{ items: any[]; total: number }>;
+    createComment(data: CommentCreateInput): Promise<any>;
+    getComments(scope: CommentListScope, options?: CommentQueryOptions): Promise<{ items: any[]; total: number }>;
     resolveComment(commentId: string): Promise<void>;
 }
 

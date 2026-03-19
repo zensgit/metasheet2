@@ -21,6 +21,35 @@ import { Logger } from '../core/logger'
 
 const logger = new Logger('ViewsRouter')
 
+type MetaViewRow = {
+  id: string
+  sheetId: string
+  name: string
+  type: string
+  filterInfo: Record<string, unknown>
+  sortInfo: Record<string, unknown>
+  groupInfo: Record<string, unknown>
+  hiddenFieldIds: string[]
+  createdAt?: string | Date | null
+  updatedAt?: string | Date | null
+}
+
+type MetaSheetRow = {
+  id: string
+  name: string
+  description: string | null
+}
+
+type MetaFieldRow = {
+  id: string
+  name: string
+  type: string
+  property: Record<string, unknown>
+  order: number
+}
+
+type MetaViewType = 'grid' | 'form' | 'gallery' | 'calendar'
+
 // Initialize event listener for provider registration
 let eventListenerInitialized = false
 
@@ -85,6 +114,10 @@ export function viewsRouter() {
       )
 
       if (viewResult.rows.length === 0) {
+        const metaConfig = await buildMetaViewConfig(viewId, pool)
+        if (metaConfig) {
+          return res.json({ success: true, data: metaConfig })
+        }
         return res.status(404).json({ success: false, error: 'View not found' })
       }
 
@@ -201,6 +234,10 @@ export function viewsRouter() {
       )
 
       if (viewResult.rows.length === 0) {
+        const metaData = await buildMetaViewData(viewId, Number(page), Number(pageSize), pool)
+        if (metaData) {
+          return res.json(metaData)
+        }
         return res.status(404).json({ success: false, error: 'View not found' })
       }
 
@@ -260,6 +297,40 @@ export function viewsRouter() {
     } catch (err) {
       logger.error('Failed to get view data', err instanceof Error ? err : undefined)
       res.status(500).json({ success: false, error: 'Internal server error' })
+    }
+  })
+
+  router.post('/:viewId/submit', async (req, res) => {
+    try {
+      const { viewId } = req.params
+      const pool = poolManager.get()
+      const metaView = await loadMetaView(viewId, pool)
+      if (!metaView) {
+        return res.status(404).json({ success: false, error: 'View not found' })
+      }
+
+      return res.redirect(307, `/api/multitable/views/${viewId}/submit`)
+    } catch (err) {
+      console.error('Failed to submit view form:', err)
+      return res.status(500).json({ success: false, error: 'Internal server error' })
+    }
+  })
+
+  router.get('/:viewId/responses', async (req, res) => {
+    try {
+      const { viewId } = req.params
+      const page = Number(req.query.page ?? 1)
+      const pageSize = Number(req.query.pageSize ?? 20)
+      const pool = poolManager.get()
+      const responses = await buildMetaFormResponses(viewId, page, pageSize, pool)
+      if (!responses) {
+        return res.status(404).json({ success: false, error: 'View not found' })
+      }
+
+      return res.json(responses)
+    } catch (err) {
+      console.error('Failed to get form responses:', err)
+      return res.status(500).json({ success: false, error: 'Internal server error' })
     }
   })
 
@@ -348,6 +419,482 @@ export function viewsRouter() {
   })
 
   return router
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function normalizeJson(value: unknown): Record<string, unknown> {
+  if (!value) return {}
+  if (isPlainObject(value)) return value
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown
+      return isPlainObject(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+  return {}
+}
+
+function normalizeJsonArray(value: unknown): string[] {
+  if (!value) return []
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter(Boolean)
+  }
+  if (typeof value === 'string') {
+    try {
+      return normalizeJsonArray(JSON.parse(value))
+    } catch {
+      return []
+    }
+  }
+  return []
+}
+
+function extractSelectOptions(property: unknown): Array<{ value: string; label: string }> {
+  const config = normalizeJson(property)
+  const raw = Array.isArray(config.options) ? config.options : []
+  return raw
+    .map((option) => {
+      if (typeof option === 'string') {
+        return { value: option, label: option }
+      }
+      if (isPlainObject(option) && typeof option.value === 'string') {
+        return { value: option.value, label: typeof option.label === 'string' ? option.label : option.value }
+      }
+      return null
+    })
+    .filter((option): option is { value: string; label: string } => !!option)
+}
+
+function parseLinkFieldConfig(property: unknown): { foreignSheetId: string; limitSingleRecord: boolean } | null {
+  const config = normalizeJson(property)
+  const foreignSheetId = config.foreignDatasheetId ?? config.foreignSheetId ?? config.datasheetId
+  if (typeof foreignSheetId !== 'string' || foreignSheetId.trim().length === 0) return null
+  return {
+    foreignSheetId: foreignSheetId.trim(),
+    limitSingleRecord: config.limitSingleRecord === true,
+  }
+}
+
+function normalizeMetaViewType(type: string): MetaViewType {
+  if (type === 'form' || type === 'gallery' || type === 'calendar') return type
+  return 'grid'
+}
+
+function normalizeFieldName(name: string): string {
+  return name.trim().toLowerCase().replace(/[\s_-]+/g, '')
+}
+
+function findFieldByNames(fields: MetaFieldRow[], candidates: string[]): MetaFieldRow | undefined {
+  const normalizedCandidates = new Set(candidates.map(normalizeFieldName))
+  return fields.find((field) => normalizedCandidates.has(normalizeFieldName(field.name)))
+}
+
+function findFirstFieldByType(fields: MetaFieldRow[], types: string[]): MetaFieldRow | undefined {
+  const allowedTypes = new Set(types)
+  return fields.find((field) => allowedTypes.has(field.type))
+}
+
+function findLikelyDateField(fields: MetaFieldRow[], preferredNames: string[]): MetaFieldRow | undefined {
+  const exactMatch = findFieldByNames(fields, preferredNames)
+  if (exactMatch) return exactMatch
+
+  const fuzzy = fields.find((field) => {
+    const normalized = normalizeFieldName(field.name)
+    return normalized.includes('date') || normalized.includes('time') || normalized.includes('deadline')
+  })
+  if (fuzzy) return fuzzy
+
+  return fields.find((field) => field.type === 'string')
+}
+
+function findLikelyImageField(fields: MetaFieldRow[]): MetaFieldRow | undefined {
+  const exactMatch = findFieldByNames(fields, ['image', 'thumbnail', 'cover', 'avatar', 'photo', 'picture'])
+  if (exactMatch) return exactMatch
+  return fields.find((field) => {
+    const normalized = normalizeFieldName(field.name)
+    return normalized.includes('image') || normalized.includes('thumb') || normalized.includes('cover')
+  })
+}
+
+function findLikelyTagFields(fields: MetaFieldRow[]): MetaFieldRow[] {
+  const nameMatches = fields.filter((field) => {
+    const normalized = normalizeFieldName(field.name)
+    return normalized.includes('tag') || normalized.includes('label') || normalized.includes('category')
+  })
+  if (nameMatches.length > 0) return nameMatches.slice(0, 2)
+
+  return fields
+    .filter((field) => field.type === 'select' || field.type === 'link')
+    .slice(0, 2)
+}
+
+function mapSortInfoToLegacySorting(sortInfo: Record<string, unknown>, fields: MetaFieldRow[]): Array<{ field: string; direction: 'asc' | 'desc' }> {
+  const rawEntries = Array.isArray(sortInfo.items)
+    ? sortInfo.items
+    : Array.isArray(sortInfo.sorts)
+      ? sortInfo.sorts
+      : []
+  if (!Array.isArray(rawEntries)) return []
+
+  const fieldNameById = new Map(fields.map((field) => [field.id, field.name]))
+
+  return rawEntries
+    .map((entry) => {
+      if (!isPlainObject(entry)) return null
+      const fieldId = typeof entry.fieldId === 'string' ? entry.fieldId : typeof entry.field === 'string' ? entry.field : null
+      if (!fieldId) return null
+      const direction = entry.direction === 'desc' ? 'desc' : 'asc'
+      return {
+        field: fieldNameById.get(fieldId) ?? fieldId,
+        direction,
+      }
+    })
+    .filter((entry): entry is { field: string; direction: 'asc' | 'desc' } => !!entry)
+}
+
+function mapMetaFieldTypeToFormType(field: MetaFieldRow): 'text' | 'number' | 'checkbox' | 'select' | 'multiselect' {
+  if (field.type === 'number' || field.type === 'rollup') return 'number'
+  if (field.type === 'boolean') return 'checkbox'
+  if (field.type === 'select') return 'select'
+  if (field.type === 'link') {
+    const link = parseLinkFieldConfig(field.property)
+    return link?.limitSingleRecord ? 'select' : 'multiselect'
+  }
+  return 'text'
+}
+
+function toResponseValue(value: unknown): string | number | boolean {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value
+  if (Array.isArray(value)) return value.join(', ')
+  if (value === null || value === undefined) return ''
+  return JSON.stringify(value)
+}
+
+async function loadMetaView(viewId: string, pool: DatabasePool): Promise<MetaViewRow | null> {
+  const result = await pool.query(
+    `SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, created_at, updated_at
+     FROM meta_views
+     WHERE id = $1`,
+    [viewId],
+  )
+  const row = result.rows[0] as any
+  if (!row) return null
+  return {
+    id: String(row.id),
+    sheetId: String(row.sheet_id),
+    name: String(row.name),
+    type: String(row.type ?? 'grid'),
+    filterInfo: normalizeJson(row.filter_info),
+    sortInfo: normalizeJson(row.sort_info),
+    groupInfo: normalizeJson(row.group_info),
+    hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+    createdAt: row.created_at ?? null,
+    updatedAt: row.updated_at ?? null,
+  }
+}
+
+async function loadMetaSheet(sheetId: string, pool: DatabasePool): Promise<MetaSheetRow | null> {
+  const result = await pool.query(
+    'SELECT id, name, description FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
+    [sheetId],
+  )
+  const row = result.rows[0] as any
+  if (!row) return null
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    description: typeof row.description === 'string' ? row.description : null,
+  }
+}
+
+async function loadMetaFields(sheetId: string, pool: DatabasePool): Promise<MetaFieldRow[]> {
+  const result = await pool.query(
+    'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
+    [sheetId],
+  )
+  return result.rows.map((row: any) => ({
+    id: String(row.id),
+    name: String(row.name),
+    type: String(row.type ?? 'string'),
+    property: normalizeJson(row.property),
+    order: Number(row.order ?? 0),
+  }))
+}
+
+async function loadRecordOptions(sheetId: string, pool: DatabasePool): Promise<Array<{ value: string; label: string }>> {
+  const fields = await loadMetaFields(sheetId, pool)
+  const displayFieldId = fields.find((field) => field.type === 'string')?.id ?? fields[0]?.id
+  const records = await pool.query(
+    'SELECT id, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC LIMIT 200',
+    [sheetId],
+  )
+  return (records.rows as any[]).map((row) => {
+    const data = normalizeJson(row.data)
+    const label = displayFieldId ? toResponseValue(data[displayFieldId]) : String(row.id)
+    return {
+      value: String(row.id),
+      label: typeof label === 'string' ? label : String(label),
+    }
+  })
+}
+
+async function buildMetaViewConfig(viewId: string, pool: DatabasePool): Promise<Record<string, unknown> | null> {
+  const view = await loadMetaView(viewId, pool)
+  if (!view) return null
+  const sheet = await loadMetaSheet(view.sheetId, pool)
+  if (!sheet) return null
+  const fields = await loadMetaFields(view.sheetId, pool)
+  const visibleFields = fields.filter((field) => !view.hiddenFieldIds.includes(field.id))
+  const normalizedType = normalizeMetaViewType(view.type)
+  const sorting = mapSortInfoToLegacySorting(view.sortInfo, fields)
+
+  const baseConfig: Record<string, unknown> = {
+    id: view.id,
+    name: view.name,
+    type: normalizedType,
+    description: sheet.description ?? '',
+    createdAt: view.createdAt ?? new Date().toISOString(),
+    updatedAt: view.updatedAt ?? new Date().toISOString(),
+    createdBy: 'system',
+    tableId: sheet.id,
+    filters: [],
+    sorting,
+    visibleFields: visibleFields.map((field) => field.id),
+    editable: true,
+    deletable: true,
+  }
+
+  if (normalizedType === 'gallery') {
+    const titleField = findFieldByNames(visibleFields, ['title', 'name', 'subject', 'summary'])
+      ?? findFirstFieldByType(visibleFields, ['string', 'formula', 'lookup'])
+      ?? visibleFields[0]
+    const imageField = findLikelyImageField(visibleFields)
+    const tagFields = findLikelyTagFields(visibleFields)
+      .filter((field) => field.id !== titleField?.id && field.id !== imageField?.id)
+    const contentFields = visibleFields
+      .filter((field) => field.id !== titleField?.id && field.id !== imageField?.id && !tagFields.some((tag) => tag.id === field.id))
+      .slice(0, 3)
+
+    return {
+      ...baseConfig,
+      cardTemplate: {
+        titleField: titleField?.name ?? 'title',
+        contentFields: contentFields.map((field) => field.name).length > 0
+          ? contentFields.map((field) => field.name)
+          : [titleField?.name ?? 'content'],
+        ...(imageField ? { imageField: imageField.name } : {}),
+        ...(tagFields.length > 0 ? { tagFields: tagFields.map((field) => field.name) } : {}),
+      },
+      layout: {
+        columns: 3,
+        cardSize: 'medium',
+        spacing: 'normal',
+      },
+      display: {
+        showTitle: true,
+        showContent: true,
+        showImage: true,
+        showTags: true,
+        truncateContent: true,
+        maxContentLength: 150,
+      },
+    }
+  }
+
+  if (normalizedType === 'calendar') {
+    const titleField = findFieldByNames(visibleFields, ['title', 'name', 'subject', 'summary'])
+      ?? findFirstFieldByType(visibleFields, ['string', 'formula', 'lookup'])
+      ?? visibleFields[0]
+    const startField = findLikelyDateField(visibleFields, ['startDate', 'start', 'date', 'dueDate', 'deadline'])
+      ?? titleField
+    const endField = findLikelyDateField(
+      visibleFields.filter((field) => field.id !== startField?.id),
+      ['endDate', 'end', 'dueDate', 'deadline'],
+    ) ?? startField
+    const descriptionField = findFieldByNames(visibleFields, ['description', 'content', 'notes', 'detail'])
+    const categoryField = findFieldByNames(visibleFields, ['category', 'status', 'type', 'priority'])
+    const locationField = findFieldByNames(visibleFields, ['location', 'place', 'room', 'venue'])
+
+    return {
+      ...baseConfig,
+      defaultView: 'month',
+      weekStartsOn: 1,
+      timeFormat: 24,
+      fields: {
+        title: titleField?.name ?? 'title',
+        start: startField?.name ?? 'startDate',
+        end: endField?.name ?? (startField?.name ?? 'endDate'),
+        startDate: startField?.name ?? 'startDate',
+        endDate: endField?.name ?? (startField?.name ?? 'endDate'),
+        ...(descriptionField ? { description: descriptionField.name } : {}),
+        ...(categoryField ? { category: categoryField.name } : {}),
+        ...(locationField ? { location: locationField.name } : {}),
+      },
+      colorRules: [],
+    }
+  }
+
+  if (normalizedType !== 'form') {
+    return {
+      ...baseConfig,
+      columns: visibleFields.map((field) => ({ field: field.id, hidden: false })),
+      rowHeight: 'normal',
+      showRowNumbers: true,
+      enableGrouping: true,
+      enableFiltering: true,
+      enableSorting: true,
+    }
+  }
+
+  const formFields = await Promise.all(visibleFields.map(async (field) => {
+    const type = mapMetaFieldTypeToFormType(field)
+    const link = field.type === 'link' ? parseLinkFieldConfig(field.property) : null
+    const options = field.type === 'select'
+      ? extractSelectOptions(field.property)
+      : link
+        ? await loadRecordOptions(link.foreignSheetId, pool)
+        : undefined
+
+    return {
+      id: field.id,
+      name: field.id,
+      label: field.name,
+      type,
+      required: field.property.required === true,
+      placeholder: field.name,
+      order: field.order,
+      width: 'full',
+      ...(options && options.length > 0 ? { options } : {}),
+    }
+  }))
+
+  return {
+    ...baseConfig,
+    fields: formFields,
+    settings: {
+      title: view.name,
+      description: sheet.description ?? '',
+      submitButtonText: '提交',
+      successMessage: '提交成功',
+      allowMultiple: true,
+      requireAuth: false,
+      enablePublicAccess: false,
+      notifyOnSubmission: false,
+    },
+    validation: {
+      enableValidation: true,
+    },
+    styling: {
+      theme: 'default',
+      layout: 'single-column',
+    },
+  }
+}
+
+async function buildMetaViewData(
+  viewId: string,
+  page: number,
+  pageSize: number,
+  pool: DatabasePool,
+): Promise<{ success: true; data: Record<string, unknown>[]; meta: { total: number; page: number; pageSize: number; hasMore: boolean } } | null> {
+  const view = await loadMetaView(viewId, pool)
+  if (!view) return null
+
+  const safePage = Number.isFinite(page) && page > 0 ? page : 1
+  const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? pageSize : 50
+  const offset = (safePage - 1) * safePageSize
+
+  const countRes = await pool.query(
+    'SELECT COUNT(*)::int AS total FROM meta_records WHERE sheet_id = $1',
+    [view.sheetId],
+  )
+  const total = Number((countRes.rows[0] as any)?.total ?? 0)
+  const recordRes = await pool.query(
+    'SELECT id, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3',
+    [view.sheetId, safePageSize, offset],
+  )
+
+  const fields = await loadMetaFields(view.sheetId, pool)
+  const labelById = new Map(fields.map((field) => [field.id, field.name]))
+  const data = (recordRes.rows as any[]).map((row) => {
+    const payload = normalizeJson(row.data)
+    const mapped: Record<string, unknown> = { id: String(row.id) }
+    for (const [key, value] of Object.entries(payload)) {
+      mapped[labelById.get(key) ?? key] = value
+    }
+    return mapped
+  })
+
+  return {
+    success: true,
+    data,
+    meta: {
+      total,
+      page: safePage,
+      pageSize: safePageSize,
+      hasMore: offset + data.length < total,
+    },
+  }
+}
+
+async function buildMetaFormResponses(
+  viewId: string,
+  page: number,
+  pageSize: number,
+  pool: DatabasePool,
+): Promise<{ success: true; data: Array<Record<string, unknown>>; meta: { total: number; page: number; pageSize: number; hasMore: boolean } } | null> {
+  const view = await loadMetaView(viewId, pool)
+  if (!view || view.type !== 'form') return null
+
+  const safePage = Number.isFinite(page) && page > 0 ? page : 1
+  const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? pageSize : 20
+  const offset = (safePage - 1) * safePageSize
+
+  const fields = await loadMetaFields(view.sheetId, pool)
+  const labelById = new Map(fields.map((field) => [field.id, field.name]))
+
+  const countRes = await pool.query(
+    'SELECT COUNT(*)::int AS total FROM meta_records WHERE sheet_id = $1',
+    [view.sheetId],
+  )
+  const total = Number((countRes.rows[0] as any)?.total ?? 0)
+  const recordRes = await pool.query(
+    'SELECT id, data, created_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3',
+    [view.sheetId, safePageSize, offset],
+  )
+
+  const data = (recordRes.rows as any[]).map((row) => {
+    const payload = normalizeJson(row.data)
+    const mappedData: Record<string, string | number | boolean> = {}
+    for (const [key, value] of Object.entries(payload)) {
+      mappedData[labelById.get(key) ?? key] = toResponseValue(value)
+    }
+    return {
+      id: String(row.id),
+      formId: viewId,
+      data: mappedData,
+      submittedAt: row.created_at ?? new Date().toISOString(),
+      status: 'submitted',
+    }
+  })
+
+  return {
+    success: true,
+    data,
+    meta: {
+      total,
+      page: safePage,
+      pageSize: safePageSize,
+      hasMore: offset + data.length < total,
+    },
+  }
 }
 
 // ============================================================

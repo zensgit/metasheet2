@@ -63,34 +63,48 @@ export function commentsRouter(injector?: Injector): Router {
   }
 
   router.get('/api/comments', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
-    const schema = z.object({
-      spreadsheetId: z.string().min(1),
-      rowId: z.string().min(1).optional(),
-      resolved: z.boolean().optional(),
-      limit: z.number().int().nonnegative().optional(),
-      offset: z.number().int().nonnegative().optional(),
-    })
-    const parsed = schema.safeParse({
+    const params = {
       spreadsheetId: readQueryValue(req.query.spreadsheetId),
+      containerType: readQueryValue(req.query.containerType),
+      containerId: readQueryValue(req.query.containerId),
       rowId: readQueryValue(req.query.rowId),
+      fieldId: readQueryValue(req.query.fieldId),
+      targetType: readQueryValue(req.query.targetType),
+      targetId: readQueryValue(req.query.targetId),
+      targetFieldId: readQueryValue(req.query.targetFieldId),
       resolved: parseBoolean(readQueryValue(req.query.resolved)),
       limit: parseNumberParam(readQueryValue(req.query.limit)),
       offset: parseNumberParam(readQueryValue(req.query.offset)),
-    })
-    if (!parsed.success) {
-      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    const hasLegacy = typeof params.spreadsheetId === 'string' && params.spreadsheetId.trim().length > 0
+    const hasContainer = typeof params.containerId === 'string' && params.containerId.trim().length > 0
+    if (!hasLegacy && !hasContainer) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'VALIDATION_ERROR', message: 'spreadsheetId or containerId is required' },
+      })
     }
 
     try {
-      const limit = clampLimit(parsed.data.limit)
-      const offset = clampOffset(parsed.data.offset)
+      const limit = clampLimit(params.limit)
+      const offset = clampOffset(params.offset)
       const options: CommentQueryOptions = {
-        rowId: parsed.data.rowId,
-        resolved: parsed.data.resolved,
+        rowId: params.rowId,
+        fieldId: params.fieldId,
+        targetType: params.targetType,
+        targetId: params.targetId,
+        targetFieldId: params.targetFieldId,
+        containerType: params.containerType,
+        resolved: params.resolved,
         limit,
         offset,
       }
-      const result = await commentService.getComments(parsed.data.spreadsheetId, options)
+      const result = await commentService.getComments({
+        spreadsheetId: params.spreadsheetId,
+        containerType: params.containerType,
+        containerId: params.containerId,
+      }, options)
       return res.json({ ok: true, data: { items: result.items, total: result.total, limit, offset } })
     } catch (error) {
       logger.error('Failed to list comments', error as Error)
@@ -99,25 +113,44 @@ export function commentsRouter(injector?: Injector): Router {
   })
 
   router.post('/api/comments', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
-    const schema = z.object({
-      spreadsheetId: z.string().min(1),
-      rowId: z.string().min(1),
+    const parsed = z.object({
+      spreadsheetId: z.string().min(1).optional(),
+      rowId: z.string().min(1).optional(),
       fieldId: z.string().min(1).optional(),
+      targetType: z.string().min(1).optional(),
+      targetId: z.string().min(1).optional(),
+      targetFieldId: z.string().min(1).optional(),
+      containerType: z.string().min(1).optional(),
+      containerId: z.string().min(1).optional(),
       content: z.string().min(1),
       parentId: z.string().min(1).optional(),
-    })
-    const parsed = schema.safeParse(req.body)
+    }).safeParse(req.body)
     if (!parsed.success) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
     }
 
+    const body = parsed.data
+    const hasLegacy = !!body.spreadsheetId && !!body.rowId
+    const hasTarget = !!body.targetId && !!body.containerId
+    if (!hasLegacy && !hasTarget) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'VALIDATION_ERROR', message: 'legacy spreadsheetId/rowId or targetId/containerId is required' },
+      })
+    }
+
     try {
       const comment = await commentService.createComment({
-        spreadsheetId: parsed.data.spreadsheetId,
-        rowId: parsed.data.rowId,
-        fieldId: parsed.data.fieldId,
-        content: parsed.data.content,
-        parentId: parsed.data.parentId,
+        spreadsheetId: body.spreadsheetId,
+        rowId: body.rowId,
+        fieldId: body.fieldId,
+        targetType: body.targetType,
+        targetId: body.targetId,
+        targetFieldId: body.targetFieldId,
+        containerType: body.containerType,
+        containerId: body.containerId,
+        content: body.content,
+        parentId: body.parentId,
         authorId: getUserId(req),
       })
       return res.status(201).json({ ok: true, data: { comment } })

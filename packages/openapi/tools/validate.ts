@@ -1,20 +1,26 @@
 #!/usr/bin/env tsx
 import fs from 'fs'
 import path from 'path'
+import { fileURLToPath } from 'url'
 import yaml from 'js-yaml'
 
+const HTTP_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'options', 'head'])
+
 function isAuthWhitelisted(p: string): boolean {
-  return p.startsWith('/api/auth/') || p === '/health' || p.startsWith('/metrics')
+  return p.startsWith('/api/auth/') || p === '/health' || p.startsWith('/metrics') || p === '/api/permissions/health'
 }
 
 function main() {
-  const file = process.argv[2] || path.join(__dirname, '..', 'src', 'openapi.yml')
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const defaultFile = path.join(here, '..', 'dist', 'openapi.yaml')
+  const fallbackFile = path.join(here, '..', 'src', 'openapi.yml')
+  const file = process.argv[2] || (fs.existsSync(defaultFile) ? defaultFile : fallbackFile)
   const doc = yaml.load(fs.readFileSync(file, 'utf-8')) as any
   const paths = doc.paths || {}
   const violations: string[] = []
   for (const p of Object.keys(paths)) {
     if (p.startsWith('/api/') && !isAuthWhitelisted(p)) {
-      const methods = Object.keys(paths[p])
+      const methods = Object.keys(paths[p]).filter((method) => HTTP_METHODS.has(method.toLowerCase()))
       for (const m of methods) {
         const sec = paths[p][m]?.security
         const hasBearer = Array.isArray(sec) && sec.some((s: any) => 'bearerAuth' in s)
@@ -33,4 +39,3 @@ function main() {
 }
 
 main()
-

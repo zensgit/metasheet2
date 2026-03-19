@@ -1314,6 +1314,16 @@ components:
       type: object
       additionalProperties:
         $ref: '#/components/schemas/MultitableLinkSummaryMap'
+    MultitableAttachmentSummaryMap:
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          $ref: '#/components/schemas/MultitableAttachment'
+    MultitableViewAttachmentSummaries:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
     MultitablePage:
       type: object
       properties:
@@ -1417,6 +1427,8 @@ components:
           $ref: '#/components/schemas/MultitableCommentsScope'
         linkSummaries:
           $ref: '#/components/schemas/MultitableLinkSummaryMap'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
       required:
         - sheet
         - fields
@@ -1454,6 +1466,8 @@ components:
           allOf:
             - $ref: '#/components/schemas/MultitableCommentsScope'
           nullable: true
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
       required:
         - mode
         - readOnly

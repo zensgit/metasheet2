@@ -6,10 +6,27 @@ paths:
       parameters:
         - in: query
           name: spreadsheetId
-          required: true
           schema: { type: string }
         - in: query
           name: rowId
+          schema: { type: string }
+        - in: query
+          name: fieldId
+          schema: { type: string }
+        - in: query
+          name: targetType
+          schema: { type: string }
+        - in: query
+          name: targetId
+          schema: { type: string }
+        - in: query
+          name: targetFieldId
+          schema: { type: string }
+        - in: query
+          name: containerType
+          schema: { type: string }
+        - in: query
+          name: containerId
           schema: { type: string }
         - in: query
           name: resolved
@@ -39,12 +56,17 @@ paths:
             schema:
               type: object
               properties:
+                targetType: { type: string }
+                targetId: { type: string }
+                targetFieldId: { type: string, nullable: true }
+                containerType: { type: string }
+                containerId: { type: string }
                 spreadsheetId: { type: string }
                 rowId: { type: string }
-                fieldId: { type: string }
+                fieldId: { type: string, nullable: true }
                 content: { type: string }
                 parentId: { type: string }
-              required: [spreadsheetId, rowId, content]
+              required: [content]
       responses:
         '201':
           description: Created
