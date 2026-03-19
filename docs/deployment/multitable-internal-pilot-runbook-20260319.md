@@ -161,6 +161,14 @@ docs/deployment/multitable-pilot-quickstart-20260319.md
 
 Use the runbook for operators and gate owners, not as the first document for business users.
 
+10. Use these pilot operation templates during the week:
+
+```text
+docs/deployment/multitable-pilot-team-checklist-20260319.md
+docs/deployment/multitable-pilot-daily-triage-template-20260319.md
+docs/deployment/multitable-pilot-go-no-go-template-20260319.md
+```
+
 ## Current Pilot Recommendation
 
 The branch is suitable for a first internal pilot when the readiness gate is green.
