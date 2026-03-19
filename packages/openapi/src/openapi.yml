@@ -186,6 +186,12 @@ paths:
       responses:
         '200':
           description: OK
+  /api/health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
   /api/plugins:
     get:
       summary: List plugins

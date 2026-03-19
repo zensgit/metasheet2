@@ -17,11 +17,18 @@ function writeDispatcher({
   commitAsync = true,
   payloadSource = 'auto',
   capacityMismatch = null,
+  perfLog = '',
 }) {
   const dispatcherPath = path.join(root, 'fake-dispatcher.sh');
   const capacityMismatchScript = capacityMismatch
     ? `cat > "\${DOWNLOAD_DIR}/\${run_id}/artifact/perf-capacity-mismatch.json" <<'EOF'
 ${JSON.stringify(capacityMismatch, null, 2)}
+EOF
+`
+    : '';
+  const perfLogScript = perfLog
+    ? `cat > "\${DOWNLOAD_DIR}/\${run_id}/artifact/perf.log" <<'EOF'
+${perfLog}
 EOF
 `
     : '';
@@ -42,6 +49,7 @@ cat > "\${DOWNLOAD_DIR}/\${run_id}/artifact/perf-summary.json" <<'EOF'
 }
 EOF
 ${capacityMismatchScript}
+${perfLogScript}
 echo "RUN_ID=\${run_id}"
 `;
   writeFileSync(dispatcherPath, script, 'utf8');
@@ -155,6 +163,40 @@ test('attendance-run-perf-highscale classifies known capacity mismatch from arti
   assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
   const summary = JSON.parse(readFileSync(path.join(outputRoot, 'summary.json'), 'utf8'));
   assert.equal(summary.status, 'known_capacity_mismatch');
+  assert.equal(summary.classification, 'capacity_mismatch');
+  assert.equal(summary.capacityMismatch.remoteCsvRowsLimit, 20000);
+  assert.equal(summary.capacityMismatch.requestedRows, 100000);
+});
+
+test('attendance-run-perf-highscale infers capacity mismatch from perf.log when artifact is missing', () => {
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'attendance-highscale-log-capacity-'));
+  const outputRoot = path.join(tempRoot, 'out');
+  const dispatcherPath = writeDispatcher({
+    root: tempRoot,
+    perfLog: [
+      '[attendance-import-perf] payload_source=csv reason=auto_csv upload_csv_requested=true upload_csv_effective=true csv_rows_limit_hint=100000',
+      '[attendance-import-perf] Failed: async commit job failed: CSV exceeds max rows (20000)',
+      '',
+    ].join('\n'),
+  });
+
+  const result = spawnSync('bash', [SCRIPT_PATH], {
+    cwd: ROOT_DIR,
+    env: {
+      ...process.env,
+      DOWNLOAD_ROOT: outputRoot,
+      DISPATCHER: dispatcherPath,
+      ROWS: '100000',
+      PAYLOAD_SOURCE: 'auto',
+      UPLOAD_CSV: 'true',
+      CSV_ROWS_LIMIT_HINT: '100000',
+      REMOTE_CSV_ROWS_LIMIT: '100000',
+    },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+  const summary = JSON.parse(readFileSync(path.join(outputRoot, 'summary.json'), 'utf8'));
   assert.equal(summary.classification, 'capacity_mismatch');
   assert.equal(summary.capacityMismatch.remoteCsvRowsLimit, 20000);
   assert.equal(summary.capacityMismatch.requestedRows, 100000);

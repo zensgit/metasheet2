@@ -120,7 +120,7 @@
           id="attendance-rule-template-system"
           v-model="ruleTemplateSystemText"
           name="ruleTemplateSystem"
-          rows="6"
+          rows="12"
           readonly
         />
       </label>
@@ -130,7 +130,7 @@
           id="attendance-rule-template-library"
           v-model="ruleTemplateLibraryText"
           name="ruleTemplateLibrary"
-          rows="8"
+          rows="18"
           placeholder="[]"
         />
       </label>
@@ -170,6 +170,9 @@
               <td>{{ formatDateTime(version.createdAt ?? null) }}</td>
               <td>{{ version.createdBy || '--' }}</td>
               <td class="attendance__table-actions">
+                <button class="attendance__btn" :disabled="ruleTemplateVersionLoading" @click="openRuleTemplateVersion(version.id)">
+                  {{ ruleTemplateVersionLoading && selectedRuleTemplateVersion && selectedRuleTemplateVersion.id === version.id ? tr('Loading...', '加载中...') : tr('View', '查看') }}
+                </button>
                 <button
                   class="attendance__btn"
                   :disabled="ruleTemplateRestoring || ruleTemplateSaving"
@@ -181,6 +184,19 @@
             </tr>
           </tbody>
         </table>
+      </div>
+      <div v-if="selectedRuleTemplateVersion" class="attendance__template-version-panel">
+        <div class="attendance__admin-section-header">
+          <h5>{{ tr('Selected version', '已选版本') }} #{{ selectedRuleTemplateVersion.version }}</h5>
+          <button class="attendance__btn" @click="closeRuleTemplateVersionView">{{ tr('Close', '关闭') }}</button>
+        </div>
+        <div class="attendance__template-version-meta">
+          <span>{{ tr('Created', '创建时间') }}: {{ formatDateTime(selectedRuleTemplateVersion.createdAt ?? null) }}</span>
+          <span>{{ tr('Created by', '创建人') }}: {{ selectedRuleTemplateVersion.createdBy || '--' }}</span>
+          <span>{{ tr('Items', '条目') }}: {{ selectedRuleTemplateVersion.itemCount ?? '--' }}</span>
+          <span>{{ tr('Source version', '来源版本') }}: {{ selectedRuleTemplateVersion.sourceVersionId || '--' }}</span>
+        </div>
+        <pre class="attendance__code attendance__code--viewer">{{ formatJson(selectedRuleTemplateVersion.templates ?? selectedRuleTemplateVersion) }}</pre>
       </div>
     </div>
   </div>
@@ -203,12 +219,16 @@
           id="attendance-group-code"
           v-model="attendanceGroupForm.code"
           type="text"
-          :placeholder="tr('optional', '可选')"
+          :placeholder="tr('Auto-generated from name', '名称自动生成')"
         />
       </label>
       <label class="attendance__field" for="attendance-group-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <input id="attendance-group-timezone" v-model="attendanceGroupForm.timezone" type="text" />
+        <select id="attendance-group-timezone" v-model="attendanceGroupForm.timezone">
+          <option v-for="timezone in attendanceGroupTimezones" :key="timezone" :value="timezone">
+            {{ timezone }}
+          </option>
+        </select>
       </label>
       <label class="attendance__field" for="attendance-group-rule-set">
         <span>{{ tr('Rule set', '规则集') }}</span>
@@ -338,13 +358,14 @@
 </template>
 
 <script setup lang="ts">
-import type { Ref } from 'vue'
+import { computed, type Ref } from 'vue'
 import type {
   AttendanceGroup,
   AttendanceGroupMember,
   AttendanceRuleSet,
   AttendanceRuleTemplateVersion,
 } from './useAttendanceAdminRulesAndGroups'
+import { buildTimezoneOptions } from './attendanceTimezones'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -391,8 +412,12 @@ interface RulesAndGroupsBindings {
   removeAttendanceGroupMember: (userId: string) => MaybePromise<void>
   resetAttendanceGroupForm: () => MaybePromise<void>
   resetRuleSetForm: () => MaybePromise<void>
+  closeRuleTemplateVersionView: () => MaybePromise<void>
   resolveRuleSetName: (ruleSetId?: string | null) => string
   restoreRuleTemplates: (versionId: string) => MaybePromise<void>
+  openRuleTemplateVersion: (versionId: string) => MaybePromise<void>
+  ruleTemplateVersionLoading: Ref<boolean>
+  selectedRuleTemplateVersion: Ref<AttendanceRuleTemplateVersion | null>
   ruleSetEditingId: Ref<string | null>
   ruleSetForm: RuleSetFormState
   ruleSetLoading: Ref<boolean>
@@ -419,6 +444,7 @@ const tr = props.tr
 const formatDateTime = props.formatDateTime
 const attendanceGroupEditingId = props.rules.attendanceGroupEditingId
 const attendanceGroupForm = props.rules.attendanceGroupForm
+const attendanceGroupTimezones = computed(() => buildTimezoneOptions(attendanceGroupForm.timezone))
 const attendanceGroupLoading = props.rules.attendanceGroupLoading
 const attendanceGroupMemberGroupId = props.rules.attendanceGroupMemberGroupId
 const attendanceGroupMemberLoading = props.rules.attendanceGroupMemberLoading
@@ -441,8 +467,11 @@ const addAttendanceGroupMembers = () => props.rules.addAttendanceGroupMembers()
 const removeAttendanceGroupMember = (userId: string) => props.rules.removeAttendanceGroupMember(userId)
 const resetAttendanceGroupForm = () => props.rules.resetAttendanceGroupForm()
 const resetRuleSetForm = () => props.rules.resetRuleSetForm()
+const closeRuleTemplateVersionView = () => props.rules.closeRuleTemplateVersionView()
 const resolveRuleSetName = props.rules.resolveRuleSetName
 const restoreRuleTemplates = (versionId: string) => props.rules.restoreRuleTemplates(versionId)
+const openRuleTemplateVersion = (versionId: string) => props.rules.openRuleTemplateVersion(versionId)
+const selectedRuleTemplateVersion = props.rules.selectedRuleTemplateVersion
 const ruleSetEditingId = props.rules.ruleSetEditingId
 const ruleSetForm = props.rules.ruleSetForm
 const ruleSetLoading = props.rules.ruleSetLoading
@@ -453,10 +482,15 @@ const ruleTemplateLoading = props.rules.ruleTemplateLoading
 const ruleTemplateRestoring = props.rules.ruleTemplateRestoring
 const ruleTemplateSaving = props.rules.ruleTemplateSaving
 const ruleTemplateSystemText = props.rules.ruleTemplateSystemText
+const ruleTemplateVersionLoading = props.rules.ruleTemplateVersionLoading
 const ruleTemplateVersions = props.rules.ruleTemplateVersions
 const saveAttendanceGroup = () => props.rules.saveAttendanceGroup()
 const saveRuleSet = () => props.rules.saveRuleSet()
 const saveRuleTemplates = () => props.rules.saveRuleTemplates()
+
+function formatJson(value: unknown): string {
+  return JSON.stringify(value, null, 2)
+}
 </script>
 
 <style scoped>
@@ -504,6 +538,29 @@ const saveRuleTemplates = () => props.rules.saveRuleTemplates()
 
 .attendance__field--checkbox {
   justify-content: flex-end;
+}
+
+.attendance__template-version-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #d9e3f1;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+
+.attendance__template-version-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  color: #44546a;
+  font-size: 13px;
+}
+
+.attendance__code--viewer {
+  min-height: 280px;
+  max-height: 520px;
+  overflow: auto;
 }
 
 .attendance__field-hint {
