@@ -115,6 +115,62 @@ describe('useMultitableGrid', () => {
     expect(grid.page.value.offset).toBe(50)
   })
 
+  it('falls back to the last non-empty page when a load lands beyond the new total', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (!input.startsWith('/api/multitable/view')) throw new Error(`Unexpected request: ${input}`)
+      const url = new URL(`http://localhost${input}`)
+      const offset = Number(url.searchParams.get('offset') ?? '0')
+      if (offset === 20) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            fields: [{ id: 'f1', name: 'Title', type: 'string' }],
+            rows: [],
+            page: { offset: 20, limit: 10, total: 15, hasMore: false },
+          },
+        }), { status: 200 })
+      }
+      if (offset === 10) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            fields: [{ id: 'f1', name: 'Title', type: 'string' }],
+            rows: [{ id: 'r2', version: 2, data: { f1: 'last valid page' } }],
+            page: { offset: 10, limit: 10, total: 15, hasMore: false },
+          },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          fields: [{ id: 'f1', name: 'Title', type: 'string' }],
+          rows: [{ id: 'r0', version: 1, data: { f1: 'initial page' } }],
+          page: { offset: 0, limit: 10, total: 15, hasMore: true },
+        },
+      }), { status: 200 })
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref('s1'),
+      viewId: ref('v1'),
+      pageSize: 10,
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    await vi.waitFor(() => {
+      expect(grid.rows.value).toEqual([{ id: 'r0', version: 1, data: { f1: 'initial page' } }])
+    })
+    fetchFn.mockClear()
+
+    await grid.loadViewData(20)
+
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(fetchFn.mock.calls[0]?.[0]).toContain('offset=20')
+    expect(fetchFn.mock.calls[1]?.[0]).toContain('offset=10')
+    expect(grid.page.value.offset).toBe(10)
+    expect(grid.rows.value).toEqual([{ id: 'r2', version: 2, data: { f1: 'last valid page' } }])
+  })
+
   it('toggle field visibility', () => {
     const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
     grid.toggleFieldVisibility('f1')
@@ -147,6 +203,41 @@ describe('useMultitableGrid', () => {
     grid.page.value = { offset: 20, limit: 10, total: 55, hasMore: true }
     expect(grid.currentPage.value).toBe(3)
     expect(grid.totalPages.value).toBe(6)
+  })
+
+  it('clamps goToPage to the current total page count', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (!input.startsWith('/api/multitable/view')) throw new Error(`Unexpected request: ${input}`)
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          fields: [{ id: 'f1', name: 'Title', type: 'string' }],
+          rows: [],
+          page: { offset: 20, limit: 10, total: 23, hasMore: false },
+        },
+      }), { status: 200 })
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref('s1'),
+      viewId: ref('v1'),
+      pageSize: 10,
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    await vi.waitFor(() => {
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    })
+    fetchFn.mockClear()
+
+    grid.page.value = { offset: 20, limit: 10, total: 23, hasMore: false }
+    grid.goToPage(99)
+
+    await vi.waitFor(() => {
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+    })
+
+    expect(fetchFn.mock.calls[0]?.[0]).toContain('offset=20')
   })
 
   it('clearFilters resets all', () => {

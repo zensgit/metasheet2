@@ -223,11 +223,20 @@ export function useMultitableGrid(opts: {
         search: searchQuery.value || undefined,
       })
       if (requestId !== latestLoadRequestId) return
+      const serverPage = data.page
+      const serverRows = data.rows ?? []
+      if (serverPage && !serverRows.length && offset > 0 && offset >= serverPage.total) {
+        const fallbackOffset = Math.max(0, Math.floor(Math.max(serverPage.total - 1, 0) / pageSize) * pageSize)
+        if (fallbackOffset !== offset) {
+          await loadViewData(fallbackOffset)
+          return
+        }
+      }
       fields.value = data.fields ?? []
-      rows.value = data.rows ?? []
+      rows.value = serverRows
       linkSummaries.value = data.linkSummaries ?? {}
       attachmentSummaries.value = data.attachmentSummaries ?? {}
-      if (data.page) page.value = data.page
+      if (serverPage) page.value = serverPage
       if (data.view) syncFromView(data.view)
     } catch (e: any) {
       if (requestId !== latestLoadRequestId) return
@@ -281,7 +290,8 @@ export function useMultitableGrid(opts: {
   // --- Pagination ---
 
   function goToPage(p: number) {
-    const offset = Math.max(0, (p - 1) * pageSize)
+    const safePage = Math.min(Math.max(1, p), totalPages.value)
+    const offset = Math.max(0, (safePage - 1) * pageSize)
     loadViewData(offset)
   }
 
