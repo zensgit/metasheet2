@@ -107,6 +107,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'PLM Audit', requiresAuth: true }
   },
   {
+    path: '/workflows',
+    name: 'workflow-list',
+    component: () => import('./views/WorkflowHubView.vue'),
+    meta: { title: 'Workflows', requiresAuth: true, requiredFeature: 'workflow' }
+  },
+  {
     path: '/admin/plugins',
     name: 'plugin-manager',
     component: PluginManagerView,
