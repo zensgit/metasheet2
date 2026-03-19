@@ -34,7 +34,12 @@
       <div class="nav-actions">
         <label class="nav-locale">
           <span class="nav-locale__label">{{ navLabels.language }}</span>
-          <select class="nav-locale__select" :value="locale" @change="onLocaleChange">
+          <select
+            class="nav-locale__select"
+            data-testid="locale-switcher"
+            :value="locale"
+            @change="onLocaleChange"
+          >
             <option value="en">English</option>
             <option value="zh-CN">中文</option>
           </select>

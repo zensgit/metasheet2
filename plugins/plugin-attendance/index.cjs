@@ -632,6 +632,37 @@ function normalizeDateOnlyStrict(value) {
   return date.toISOString().slice(0, 10) === normalized ? normalized : null
 }
 
+function isValidTimeZoneIdentifier(value) {
+  const zone = typeof value === 'string' ? value.trim() : ''
+  if (!zone) return false
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone }).format(new Date())
+    return true
+  } catch {
+    return false
+  }
+}
+
+function resolveExplicitTimeZoneOrThrow(value, fallback, fieldName = 'timezone') {
+  const zone = typeof value === 'string' ? value.trim() : ''
+  if (!zone) return fallback
+  if (!isValidTimeZoneIdentifier(zone)) {
+    throw new HttpError(400, 'VALIDATION_ERROR', `${fieldName} must be a valid IANA time zone`)
+  }
+  return zone
+}
+
+function normalizeSafeDisplayName(fieldName, value) {
+  const normalized = typeof value === 'string' ? value.trim() : ''
+  if (!normalized) {
+    throw new HttpError(400, 'VALIDATION_ERROR', `${fieldName} is required`)
+  }
+  if (/[<>]/.test(normalized) || /<\/?[a-z][^>]*>/i.test(normalized)) {
+    throw new HttpError(400, 'VALIDATION_ERROR', `${fieldName} cannot contain HTML tags`)
+  }
+  return normalized
+}
+
 function resolveAttendanceDateRange(fromValue, toValue, fallbackDays = 30) {
   const fallbackFrom = new Date(Date.now() - 1000 * 60 * 60 * 24 * fallbackDays).toISOString().slice(0, 10)
   const fallbackTo = new Date().toISOString().slice(0, 10)
@@ -2171,12 +2202,15 @@ function mapShiftFromAssignmentRow(row) {
 }
 
 function mapHolidayRow(row) {
+  const holidayType = row.is_working_day === true ? 'working_day_override' : 'holiday'
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
-    date: row.holiday_date,
+    date: normalizeDateOnly(row.holiday_date) ?? row.holiday_date,
     name: row.name ?? null,
     isWorkingDay: row.is_working_day ?? false,
+    type: holidayType,
+    holidayType,
   }
 }
 
@@ -2748,7 +2782,10 @@ function normalizeNumber(value) {
 function normalizeDateOnly(value) {
   if (!value) return null
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return value.toISOString().slice(0, 10)
+    const year = value.getFullYear()
+    const month = String(value.getMonth() + 1).padStart(2, '0')
+    const day = String(value.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
   }
   const raw = String(value).trim()
   if (!raw) return null
@@ -2820,12 +2857,7 @@ function parseHolidayDayIndex(name) {
 function resolveTimeZone(timeZone, fallback) {
   const zone = typeof timeZone === 'string' ? timeZone.trim() : ''
   if (!zone) return fallback
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: zone }).format(new Date())
-    return zone
-  } catch (error) {
-    return fallback
-  }
+  return isValidTimeZoneIdentifier(zone) ? zone : fallback
 }
 
 function resolveHolidayMeta(holiday) {
@@ -5550,7 +5582,7 @@ function buildPayrollSummaryCsv(summary, cycle) {
   return buildCsv(csvRows, headers)
 }
 
-async function enforcePunchConstraints({ db, userId, orgId, occurredAt, settings, req }) {
+async function enforcePunchConstraints({ db, userId, orgId, occurredAt, eventType, settings, req }) {
   if (settings.ipAllowlist && settings.ipAllowlist.length > 0) {
     const ip = getClientIp(req)
     if (!isIpAllowed(ip, settings.ipAllowlist)) {
@@ -5565,9 +5597,13 @@ async function enforcePunchConstraints({ db, userId, orgId, occurredAt, settings
     }
   }
 
+  if (occurredAt.getTime() > Date.now() + 5 * 60 * 1000) {
+    throw new HttpError(400, 'FUTURE_PUNCH_NOT_ALLOWED', 'Punch time cannot be in the future')
+  }
+
   if (settings.minPunchIntervalMinutes > 0) {
     const rows = await db.query(
-      `SELECT occurred_at
+      `SELECT occurred_at, event_type
        FROM attendance_events
        WHERE user_id = $1 AND org_id = $2
        ORDER BY occurred_at DESC
@@ -5575,6 +5611,9 @@ async function enforcePunchConstraints({ db, userId, orgId, occurredAt, settings
       [userId, orgId]
     )
     if (rows.length > 0 && rows[0].occurred_at) {
+      if (rows[0].event_type && rows[0].event_type !== eventType) {
+        return
+      }
       const last = new Date(rows[0].occurred_at)
       const diffMinutes = (occurredAt.getTime() - last.getTime()) / 60000
       if (diffMinutes < settings.minPunchIntervalMinutes) {
@@ -6032,6 +6071,7 @@ module.exports = {
       requiresApproval: z.boolean().optional(),
       requiresAttachment: z.boolean().optional(),
       defaultMinutesPerDay: z.number().int().min(0).optional(),
+      daily_minutes: z.number().int().min(0).optional(),
       isActive: z.boolean().optional(),
       orgId: z.string().optional(),
     })
@@ -8316,10 +8356,18 @@ module.exports = {
 
         try {
           const settings = await getSettings(db)
-          await enforcePunchConstraints({ db, userId, orgId, occurredAt, settings, req })
+          await enforcePunchConstraints({
+            db,
+            userId,
+            orgId,
+            occurredAt,
+            eventType: parsed.data.eventType,
+            settings,
+            req,
+          })
 
           const baseRule = await loadDefaultRule(db, orgId)
-          const baseTimezone = parsed.data.timezone ?? baseRule.timezone
+          const baseTimezone = resolveExplicitTimeZoneOrThrow(parsed.data.timezone, baseRule.timezone)
           let workDate = toWorkDate(occurredAt, baseTimezone)
           let context = await resolveWorkContext({
             db,
@@ -8328,7 +8376,7 @@ module.exports = {
             workDate,
             defaultRule: baseRule,
           })
-          let timezone = parsed.data.timezone ?? context.rule.timezone
+          let timezone = resolveExplicitTimeZoneOrThrow(parsed.data.timezone, context.rule.timezone)
           if (timezone !== baseTimezone) {
             const recalculated = toWorkDate(occurredAt, timezone)
             if (recalculated !== workDate) {
@@ -9596,7 +9644,7 @@ module.exports = {
           paid: parsed.data.paid ?? true,
           requiresApproval: parsed.data.requiresApproval ?? true,
           requiresAttachment: parsed.data.requiresAttachment ?? false,
-          defaultMinutesPerDay: parsed.data.defaultMinutesPerDay ?? 480,
+          defaultMinutesPerDay: parsed.data.defaultMinutesPerDay ?? parsed.data.daily_minutes ?? 480,
           isActive: parsed.data.isActive ?? true,
         }
 
@@ -9672,7 +9720,7 @@ module.exports = {
             paid: parsed.data.paid ?? existing.paid ?? true,
             requiresApproval: parsed.data.requiresApproval ?? existing.requires_approval,
             requiresAttachment: parsed.data.requiresAttachment ?? existing.requires_attachment,
-            defaultMinutesPerDay: parsed.data.defaultMinutesPerDay ?? existing.default_minutes_per_day,
+            defaultMinutesPerDay: parsed.data.defaultMinutesPerDay ?? parsed.data.daily_minutes ?? existing.default_minutes_per_day,
             isActive: parsed.data.isActive ?? existing.is_active,
           }
 
@@ -14819,15 +14867,24 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const payload = {
-          name: parsed.data.name,
-          timezone: parsed.data.timezone ?? 'UTC',
-          startDay: parsed.data.startDay ?? 1,
-          endDay: parsed.data.endDay ?? 30,
-          endMonthOffset: parsed.data.endMonthOffset ?? 0,
-          autoGenerate: parsed.data.autoGenerate ?? true,
-          config: parsed.data.config ?? {},
-          isDefault: parsed.data.isDefault ?? false,
+        let payload
+        try {
+          payload = {
+            name: parsed.data.name,
+            timezone: resolveExplicitTimeZoneOrThrow(parsed.data.timezone, 'UTC'),
+            startDay: parsed.data.startDay ?? 1,
+            endDay: parsed.data.endDay ?? 30,
+            endMonthOffset: parsed.data.endMonthOffset ?? 0,
+            autoGenerate: parsed.data.autoGenerate ?? true,
+            config: parsed.data.config ?? {},
+            isDefault: parsed.data.isDefault ?? false,
+          }
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          throw error
         }
 
         try {
@@ -14897,15 +14954,24 @@ module.exports = {
             return
           }
           const existing = existingRows[0]
-          const payload = {
-            name: parsed.data.name ?? existing.name,
-            timezone: parsed.data.timezone ?? existing.timezone ?? 'UTC',
-            startDay: parsed.data.startDay ?? existing.start_day ?? 1,
-            endDay: parsed.data.endDay ?? existing.end_day ?? 30,
-            endMonthOffset: parsed.data.endMonthOffset ?? existing.end_month_offset ?? 0,
-            autoGenerate: parsed.data.autoGenerate ?? existing.auto_generate ?? true,
-            config: parsed.data.config ?? normalizeMetadata(existing.config),
-            isDefault: parsed.data.isDefault ?? existing.is_default ?? false,
+          let payload
+          try {
+            payload = {
+              name: parsed.data.name ?? existing.name,
+              timezone: resolveExplicitTimeZoneOrThrow(parsed.data.timezone, existing.timezone ?? 'UTC'),
+              startDay: parsed.data.startDay ?? existing.start_day ?? 1,
+              endDay: parsed.data.endDay ?? existing.end_day ?? 30,
+              endMonthOffset: parsed.data.endMonthOffset ?? existing.end_month_offset ?? 0,
+              autoGenerate: parsed.data.autoGenerate ?? existing.auto_generate ?? true,
+              config: parsed.data.config ?? normalizeMetadata(existing.config),
+              isDefault: parsed.data.isDefault ?? existing.is_default ?? false,
+            }
+          } catch (error) {
+            if (error instanceof HttpError) {
+              res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+              return
+            }
+            throw error
           }
 
           const updated = await db.transaction(async (trx) => {
@@ -15611,14 +15677,24 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const name = parsed.data.name.trim()
+        let name
+        let timezone
+        try {
+          name = normalizeSafeDisplayName('name', parsed.data.name)
+          timezone = resolveExplicitTimeZoneOrThrow(parsed.data.timezone, DEFAULT_RULE.timezone)
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          throw error
+        }
         const code = resolveAttendanceCode({
           explicitCode: parsed.data.code,
           existingCode: null,
           prefix: 'group',
           name,
         })
-        const timezone = parsed.data.timezone?.trim() || DEFAULT_RULE.timezone
         const ruleSetId = parsed.data.ruleSetId ?? null
         const description = parsed.data.description?.trim() || null
 
@@ -15631,6 +15707,10 @@ module.exports = {
           )
           res.json({ ok: true, data: mapAttendanceGroupRow(rows[0]) })
         } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Group name or code already exists' } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -15671,14 +15751,24 @@ module.exports = {
         }
 
         const existing = existingRows[0]
-        const name = parsed.data.name.trim()
+        let name
+        let timezone
+        try {
+          name = normalizeSafeDisplayName('name', parsed.data.name)
+          timezone = resolveExplicitTimeZoneOrThrow(parsed.data.timezone, DEFAULT_RULE.timezone)
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          throw error
+        }
         const code = resolveAttendanceCode({
           explicitCode: parsed.data.code,
           existingCode: existing.code,
           prefix: 'group',
           name: parsed.data.name ?? existing.name,
         })
-        const timezone = parsed.data.timezone?.trim() || DEFAULT_RULE.timezone
         const ruleSetId = parsed.data.ruleSetId ?? null
         const description = parsed.data.description?.trim() || null
 
@@ -15701,6 +15791,10 @@ module.exports = {
           }
           res.json({ ok: true, data: mapAttendanceGroupRow(rows[0]) })
         } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Group name or code already exists' } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -16667,6 +16761,7 @@ module.exports = {
           from: z.string().optional(),
           to: z.string().optional(),
           limit: z.string().optional(),
+          format: z.enum(['csv', 'json']).optional(),
         })
 
         const parsed = schema.safeParse({
@@ -16675,6 +16770,7 @@ module.exports = {
           from: typeof req.query.from === 'string' ? req.query.from : undefined,
           to: typeof req.query.to === 'string' ? req.query.to : undefined,
           limit: typeof req.query.limit === 'string' ? req.query.limit : undefined,
+          format: typeof req.query.format === 'string' ? req.query.format.toLowerCase() : undefined,
         })
 
         if (!parsed.success) {
@@ -16731,7 +16827,7 @@ module.exports = {
             'status',
             'is_workday',
           ]
-          const csvRows = rows.map((row) => ({
+          const exportItems = rows.map((row) => ({
             user_id: row.user_id ?? '',
             org_id: row.org_id ?? '',
             work_date: formatDateOnlyForCsv(row.work_date),
@@ -16744,7 +16840,29 @@ module.exports = {
             status: row.status ?? '',
             is_workday: row.is_workday ?? '',
           }))
-          const csv = buildCsv(csvRows, headers)
+          if (parsed.data.format === 'json') {
+            emitEvent('attendance.exported', {
+              orgId,
+              userId: targetUserId,
+              from,
+              to,
+              total: rows.length,
+              format: 'json',
+            })
+            res.json({
+              ok: true,
+              success: true,
+              data: {
+                items: exportItems,
+                total: rows.length,
+                from,
+                to,
+                format: 'json',
+              },
+            })
+            return
+          }
+          const csv = buildCsv(exportItems, headers)
           const filename = `attendance-${orgId}-${from}-to-${to}.csv`
 
           emitEvent('attendance.exported', {
