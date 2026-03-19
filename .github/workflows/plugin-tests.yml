@@ -10,7 +10,7 @@ on:
       - 'apps/web/src/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
-      - '.github/workflows/plugin-tests.yml'
+      - '.github/workflows/*.yml'
   pull_request:
     branches: [main, develop]
     paths:
@@ -19,7 +19,7 @@ on:
       - 'apps/web/src/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
-      - '.github/workflows/plugin-tests.yml'
+      - '.github/workflows/*.yml'
 
 jobs:
   test:
