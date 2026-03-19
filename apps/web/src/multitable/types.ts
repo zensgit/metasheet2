@@ -13,6 +13,7 @@ export type MetaFieldType =
   | 'link'
   | 'lookup'
   | 'rollup'
+  | 'attachment'
 
 export type RowDensity = 'compact' | 'normal' | 'expanded'
 
@@ -39,6 +40,7 @@ export interface MetaField {
   type: MetaFieldType
   property?: Record<string, unknown>
   order?: number
+  required?: boolean
   // Convenience — populated by backend for select fields
   options?: Array<{ value: string; color?: string }>
 }
@@ -189,6 +191,7 @@ export interface RecordVersion {
 export interface PatchResult {
   updated: RecordVersion[]
   records?: Array<{ recordId: string; data: Record<string, unknown> }>
+  linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
   relatedRecords?: Array<{ sheetId: string; recordId: string; data: Record<string, unknown> }>
 }
 
@@ -276,4 +279,22 @@ export interface FormSubmitInput {
   recordId?: string
   expectedVersion?: number
   data: Record<string, unknown>
+}
+
+// --- Attachments ---
+export interface MetaAttachment {
+  id: string
+  filename: string
+  mimeType: string
+  size: number
+  url: string
+  thumbnailUrl?: string | null
+  uploadedAt: string
+}
+
+// --- Timeline config ---
+export interface TimelineConfig {
+  startFieldId: string
+  endFieldId: string
+  zoom: 'day' | 'week' | 'month'
 }

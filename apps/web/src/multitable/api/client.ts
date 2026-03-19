@@ -26,6 +26,7 @@ import type {
   PatchRecordsInput,
   FormSubmitInput,
   MultitableComment,
+  MetaAttachment,
 } from '../types'
 import { apiFetch } from '../../utils/api'
 
@@ -83,6 +84,15 @@ function firstFieldError(fieldErrors?: Record<string, string>): string | null {
   if (!fieldErrors) return null
   const first = Object.values(fieldErrors).find((msg) => typeof msg === 'string' && msg.trim())
   return first ?? null
+}
+
+function normalizeCommentsList(payload: { comments?: MultitableComment[]; items?: MultitableComment[] } | null | undefined): {
+  comments: MultitableComment[]
+} {
+  if (!payload) return { comments: [] }
+  if (Array.isArray(payload.comments)) return { comments: payload.comments }
+  if (Array.isArray(payload.items)) return { comments: payload.items }
+  return { comments: [] }
 }
 
 export class MultitableApiClient {
@@ -194,6 +204,7 @@ export class MultitableApiClient {
     limit?: number
     offset?: number
     includeLinkSummaries?: boolean
+    search?: string
   }): Promise<MetaViewData> {
     const res = await this.fetch(`/api/multitable/view${qs(params as Record<string, string | number | boolean | undefined>)}`)
     return parseJson(res)
@@ -260,10 +271,30 @@ export class MultitableApiClient {
     return parseJson(res)
   }
 
+  // --- Attachments ---
+  async uploadAttachment(file: File, opts?: { sheetId?: string; recordId?: string; fieldId?: string }): Promise<MetaAttachment> {
+    const formData = new FormData()
+    formData.append('file', file)
+    if (opts?.sheetId) formData.append('sheetId', opts.sheetId)
+    if (opts?.recordId) formData.append('recordId', opts.recordId)
+    if (opts?.fieldId) formData.append('fieldId', opts.fieldId)
+    const res = await this.fetch('/api/multitable/attachments', {
+      method: 'POST',
+      body: formData,
+    })
+    return parseJson(res)
+  }
+
+  async deleteAttachment(attachmentId: string): Promise<{ deleted: string }> {
+    const res = await this.fetch(`/api/multitable/attachments/${attachmentId}`, { method: 'DELETE' })
+    return parseJson(res)
+  }
+
   // --- Comments (uses /api/comments) ---
   async listComments(params: { containerId: string; targetId: string }): Promise<{ comments: MultitableComment[] }> {
     const res = await this.fetch(`/api/comments${qs(params)}`)
-    return parseJson(res)
+    const data = await parseJson<{ comments?: MultitableComment[]; items?: MultitableComment[] }>(res)
+    return normalizeCommentsList(data)
   }
 
   async createComment(input: { containerId: string; targetId: string; content: string }): Promise<{ comment: MultitableComment }> {

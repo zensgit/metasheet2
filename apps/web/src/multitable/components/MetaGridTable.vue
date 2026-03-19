@@ -65,9 +65,9 @@
                     @update:model-value="editCell!.value = $event"
                     @confirm="confirmEdit(row)"
                     @cancel="cancelEdit"
-                    @open-link-picker="emit('open-link-picker', { recordId: row.id, field })"
+                    @open-link-picker="openLinkPickerFromCell(row.id, field)"
                   />
-                  <MetaCellRenderer v-else :field="field" :value="row.data[field.id]" />
+                  <MetaCellRenderer v-else :field="field" :value="row.data[field.id]" :link-summaries="props.linkSummaries?.[row.id]?.[field.id]" />
                 </td>
               </tr>
             </template>
@@ -114,9 +114,9 @@
                   @update:model-value="editCell!.value = $event"
                   @confirm="confirmEdit(row)"
                   @cancel="cancelEdit"
-                  @open-link-picker="emit('open-link-picker', { recordId: row.id, field })"
+                  @open-link-picker="openLinkPickerFromCell(row.id, field)"
                 />
-                <MetaCellRenderer v-else :field="field" :value="row.data[field.id]" />
+                <MetaCellRenderer v-else :field="field" :value="row.data[field.id]" :link-summaries="props.linkSummaries?.[row.id]?.[field.id]" />
               </td>
             </tr>
             <tr v-if="expandedRowIds.has(row.id)" class="meta-grid__expand-row">
@@ -124,7 +124,7 @@
                 <div class="meta-grid__expand-fields">
                   <div v-for="field in visibleFields" :key="field.id" class="meta-grid__expand-field">
                     <span class="meta-grid__expand-label">{{ field.name }}</span>
-                    <span class="meta-grid__expand-value"><MetaCellRenderer :field="field" :value="row.data[field.id]" /></span>
+                    <span class="meta-grid__expand-value"><MetaCellRenderer :field="field" :value="row.data[field.id]" :link-summaries="props.linkSummaries?.[row.id]?.[field.id]" /></span>
                   </div>
                 </div>
               </td>
@@ -170,7 +170,7 @@ import MetaCellRenderer from './cells/MetaCellRenderer.vue'
 import MetaCellEditor from './cells/MetaCellEditor.vue'
 import MetaFieldHeader from './MetaFieldHeader.vue'
 
-const EDITABLE = new Set(['string', 'number', 'boolean', 'date', 'select', 'link'])
+const EDITABLE = new Set(['string', 'number', 'boolean', 'date', 'select', 'link', 'attachment'])
 
 interface EditingCell { recordId: string; fieldId: string; value: unknown }
 
@@ -186,6 +186,7 @@ const props = defineProps<{
   canEdit: boolean
   canDelete?: boolean
   columnWidths?: Record<string, number>
+  linkSummaries?: Record<string, Record<string, { id: string; display: string }[]>>
   enableMultiSelect?: boolean
   groupField?: MetaField | null
   searchText?: string
@@ -219,18 +220,9 @@ function toggleRowExpand(rowId: string) {
 
 const allSelected = computed(() => filteredRows.value.length > 0 && selectedIds.value.size === filteredRows.value.length)
 
-// --- Search filter ---
-const filteredRows = computed(() => {
-  const q = props.searchText?.trim().toLowerCase()
-  if (!q) return props.rows
-  return props.rows.filter((row) =>
-    props.visibleFields.some((f) => {
-      const v = row.data[f.id]
-      if (v == null) return false
-      return String(v).toLowerCase().includes(q)
-    }),
-  )
-})
+// Server-side search replaces client-side filtering.
+// filteredRows now passes through rows directly (search is handled by the API).
+const filteredRows = computed(() => props.rows)
 
 // --- GroupBy ---
 const collapsedGroups = ref<Set<string>>(new Set())
@@ -330,6 +322,11 @@ function confirmEdit(row: MetaRecord) {
 }
 
 function cancelEdit() { editCell.value = null }
+
+function openLinkPickerFromCell(recordId: string, field: MetaField) {
+  cancelEdit()
+  emit('open-link-picker', { recordId, field })
+}
 
 function copyFocusedCell() {
   if (focusRow.value < 0 || focusCol.value < 0) return

@@ -1,4 +1,4 @@
-import { ref, computed, watch, type Ref, type ComputedRef } from 'vue'
+import { ref, computed, watch, type Ref, type ComputedRef, type WatchStopHandle } from 'vue'
 import type { MetaField, MetaRecord, MetaPage, PatchResult, LinkedRecordSummary } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
 
@@ -29,6 +29,8 @@ export interface CellEdit {
   oldValue: unknown
   newValue: unknown
   version: number
+  oldLinkSummaries?: LinkedRecordSummary[]
+  newLinkSummaries?: LinkedRecordSummary[]
 }
 
 // --- Serialisation helpers ---
@@ -156,6 +158,19 @@ export function useMultitableGrid(opts: {
     groupFieldId.value ? fields.value.find((f) => f.id === groupFieldId.value) ?? null : null,
   )
 
+  // Server-side search
+  const searchQuery = ref('')
+  let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
+
+  function setSearchQuery(q: string) {
+    searchQuery.value = q
+    if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
+    searchDebounceTimer = setTimeout(() => {
+      page.value = { ...page.value, offset: 0 }
+      loadViewData(0)
+    }, 300)
+  }
+
   // Column widths (with localStorage persistence)
   const colWidthKey = computed(() => `mt_col_widths_${opts.sheetId.value}_${opts.viewId.value}`)
   function loadColumnWidths(): Record<string, number> {
@@ -191,6 +206,7 @@ export function useMultitableGrid(opts: {
         limit: pageSize,
         offset,
         includeLinkSummaries: true,
+        search: searchQuery.value || undefined,
       })
       fields.value = data.fields ?? []
       rows.value = data.rows ?? []
@@ -346,13 +362,28 @@ export function useMultitableGrid(opts: {
     }
   }
 
-  async function patchCell(recordId: string, fieldId: string, value: unknown, version: number) {
+  async function patchCell(
+    recordId: string,
+    fieldId: string,
+    value: unknown,
+    version: number,
+    options?: {
+      previousLinkSummaries?: LinkedRecordSummary[]
+      nextLinkSummaries?: LinkedRecordSummary[]
+    },
+  ) {
     error.value = null
     const row = rows.value.find((r) => r.id === recordId)
     const oldValue = row?.data[fieldId]
+    const oldLinkSummaries = options?.previousLinkSummaries ?? linkSummaries.value[recordId]?.[fieldId]
+    let nextLinkSummaries: LinkedRecordSummary[] | undefined
 
     // Optimistic update
     if (row) row.data[fieldId] = value
+    if (Array.isArray(value) && fields.value.find((field) => field.id === fieldId)?.type === 'link') {
+      nextLinkSummaries = options?.nextLinkSummaries ?? oldLinkSummaries?.filter((item) => value.map(String).includes(item.id))
+      setLinkSummaries(recordId, fieldId, nextLinkSummaries)
+    }
 
     try {
       const result = await client.patchRecords({
@@ -363,11 +394,12 @@ export function useMultitableGrid(opts: {
       applyPatchResult(result)
       // Push to undo history
       editHistory.value = editHistory.value.slice(0, historyIndex.value + 1)
-      editHistory.value.push({ recordId, fieldId, oldValue, newValue: value, version })
+      editHistory.value.push({ recordId, fieldId, oldValue, newValue: value, version, oldLinkSummaries, newLinkSummaries: nextLinkSummaries })
       historyIndex.value = editHistory.value.length - 1
     } catch (e: any) {
       // Revert optimistic update
       if (row) row.data[fieldId] = oldValue
+      setLinkSummaries(recordId, fieldId, oldLinkSummaries)
       error.value = e.message ?? 'Failed to patch cell'
     }
   }
@@ -380,6 +412,7 @@ export function useMultitableGrid(opts: {
     historyIndex.value--
     const row = rows.value.find((r) => r.id === edit.recordId)
     if (row) row.data[edit.fieldId] = edit.oldValue
+    setLinkSummaries(edit.recordId, edit.fieldId, edit.oldLinkSummaries)
     try {
       const result = await client.patchRecords({
         sheetId: opts.sheetId.value || undefined,
@@ -397,6 +430,7 @@ export function useMultitableGrid(opts: {
     const edit = editHistory.value[historyIndex.value]
     const row = rows.value.find((r) => r.id === edit.recordId)
     if (row) row.data[edit.fieldId] = edit.newValue
+    setLinkSummaries(edit.recordId, edit.fieldId, edit.newLinkSummaries)
     try {
       const result = await client.patchRecords({
         sheetId: opts.sheetId.value || undefined,
@@ -418,11 +452,37 @@ export function useMultitableGrid(opts: {
       const row = rows.value.find((item) => item.id === record.recordId)
       if (row) row.data = { ...row.data, ...record.data }
     }
+    if (result.linkSummaries) {
+      for (const [recordId, fieldMap] of Object.entries(result.linkSummaries)) {
+        for (const [fieldId, summaries] of Object.entries(fieldMap)) {
+          setLinkSummaries(recordId, fieldId, summaries)
+        }
+      }
+    }
   }
 
   function clearEditHistory() {
     editHistory.value = []
     historyIndex.value = -1
+  }
+
+  function setLinkSummaries(recordId: string, fieldId: string, summaries?: LinkedRecordSummary[]) {
+    const currentRecordMap = linkSummaries.value[recordId] ?? {}
+    const nextRecordMap = { ...currentRecordMap }
+    if (summaries && summaries.length > 0) nextRecordMap[fieldId] = summaries
+    else delete nextRecordMap[fieldId]
+
+    if (Object.keys(nextRecordMap).length === 0) {
+      const next = { ...linkSummaries.value }
+      delete next[recordId]
+      linkSummaries.value = next
+      return
+    }
+
+    linkSummaries.value = {
+      ...linkSummaries.value,
+      [recordId]: nextRecordMap,
+    }
   }
 
   // --- Column width ---
@@ -450,6 +510,7 @@ export function useMultitableGrid(opts: {
     sortRules, filterRules, filterConjunction, sortFilterDirty,
     columnWidths, groupFieldId, groupField,
     editHistory, historyIndex, canUndo, canRedo,
+    searchQuery,
     // Computed
     currentPage, totalPages,
     // Methods
@@ -461,5 +522,6 @@ export function useMultitableGrid(opts: {
     createRecord, deleteRecord, patchCell,
     undo, redo, clearEditHistory,
     setColumnWidth, setGroupField,
+    setSearchQuery,
   }
 }

@@ -20,7 +20,7 @@
       :group-field-id="grid.groupFieldId.value"
       :search-text="searchText" :total-rows="grid.page.value.total" :row-density="rowDensity"
       @apply-sort-filter="grid.applySortFilter" @add-record="onAddRecord" @undo="grid.undo" @redo="grid.redo"
-      @set-group-field="grid.setGroupField" @export-csv="onExportCsv" @import="showImportModal = true" @update:search-text="searchText = $event"
+      @set-group-field="grid.setGroupField" @export-csv="onExportCsv" @import="showImportModal = true" @update:search-text="onSearchTextUpdate"
       @print="onPrint" @set-row-density="rowDensity = $event" @auto-fit-columns="onAutoFitColumns"
     />
     <div class="mt-workbench__content">
@@ -54,6 +54,11 @@
           :rows="grid.rows.value" :fields="grid.fields.value" :loading="grid.loading.value"
           :can-create="caps.canCreateRecord.value"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
+        />
+        <MetaTimelineView
+          v-else-if="activeViewType === 'timeline'"
+          :rows="grid.rows.value" :fields="grid.fields.value" :loading="grid.loading.value"
+          @select-record="onSelectRecord"
         />
         <MetaGridTable
           v-else
@@ -143,6 +148,7 @@ import MetaBasePicker from '../components/MetaBasePicker.vue'
 import MetaKanbanView from '../components/MetaKanbanView.vue'
 import MetaGalleryView from '../components/MetaGalleryView.vue'
 import MetaCalendarView from '../components/MetaCalendarView.vue'
+import MetaTimelineView from '../components/MetaTimelineView.vue'
 import MetaToast from '../components/MetaToast.vue'
 import MetaImportModal from '../components/MetaImportModal.vue'
 import type { MetaBase } from '../types'
@@ -250,6 +256,11 @@ function onUpdateSort(index: number, rule: SortRule) {
   grid.sortRules.value[index] = rule; grid.sortFilterDirty.value = true
 }
 
+function onSearchTextUpdate(text: string) {
+  searchText.value = text
+  grid.setSearchQuery(text)
+}
+
 function onClearFilters() { grid.clearFilters(); grid.applySortFilter() }
 function onSetConjunction(c: FilterConjunction) { grid.filterConjunction.value = c; grid.sortFilterDirty.value = true }
 
@@ -351,9 +362,13 @@ async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: Li
   if (!linkPickerRecordId.value || !linkPickerField.value) return
   const recordId = linkPickerRecordId.value
   const fieldId = linkPickerField.value.id
+  const previousSummaries = selectedRecordLinkSummaries.value[fieldId] ?? grid.linkSummaries.value[recordId]?.[fieldId]
   const row = grid.rows.value.find((r) => r.id === recordId)
   if (row) {
-    await grid.patchCell(row.id, fieldId, payload.recordIds, row.version)
+    await grid.patchCell(row.id, fieldId, payload.recordIds, row.version, {
+      previousLinkSummaries: previousSummaries,
+      nextLinkSummaries: payload.summaries,
+    })
     if (grid.error.value) {
       showError(grid.error.value)
       return
@@ -374,6 +389,7 @@ async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: Li
           [fieldId]: payload.recordIds,
         },
       }
+      applyLocalLinkSummaries(recordId, fieldId, result.linkSummaries?.[recordId]?.[fieldId] ?? payload.summaries)
     } catch (e: any) {
       showError(e.message ?? 'Failed to update linked records')
       return
@@ -381,7 +397,6 @@ async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: Li
   } else {
     return
   }
-  applyLocalLinkSummaries(recordId, fieldId, payload.summaries)
   showSuccess('Linked records updated')
 }
 

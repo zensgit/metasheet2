@@ -75,9 +75,9 @@
 import { ref } from 'vue'
 import type { MetaView } from '../types'
 
-const VIEW_TYPES = ['grid', 'form', 'kanban', 'gallery', 'calendar'] as const
+const VIEW_TYPES = ['grid', 'form', 'kanban', 'gallery', 'calendar', 'timeline'] as const
 const VIEW_ICONS: Record<string, string> = {
-  grid: '\u2637', form: '\u2263', kanban: '\u2630', gallery: '\u25A6', calendar: '\u2339',
+  grid: '\u2637', form: '\u2263', kanban: '\u2630', gallery: '\u25A6', calendar: '\u2339', timeline: '\u2500',
 }
 
 const props = defineProps<{

@@ -28,7 +28,16 @@
 
     <!-- link -->
     <template v-else-if="field.type === 'link'">
-      <span v-for="(id, i) in linkIds" :key="i" class="meta-cell-renderer__link">{{ id }}</span>
+      <span v-for="item in linkItems" :key="item.id" class="meta-cell-renderer__link">{{ item.display }}</span>
+    </template>
+
+    <!-- attachment -->
+    <template v-else-if="field.type === 'attachment'">
+      <span v-if="!attachmentIds.length" class="meta-cell-renderer--empty"></span>
+      <span v-for="attId in attachmentIds" :key="attId" class="meta-cell-renderer__attachment" :title="attId">
+        <span class="meta-cell-renderer__attachment-icon">{{ mimeIcon(attId) }}</span>
+        <span class="meta-cell-renderer__attachment-name">{{ attId }}</span>
+      </span>
     </template>
 
     <!-- lookup / rollup -->
@@ -38,9 +47,9 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { MetaField } from '../../types'
+import type { MetaField, LinkedRecordSummary } from '../../types'
 
-const props = defineProps<{ field: MetaField; value: unknown }>()
+const props = defineProps<{ field: MetaField; value: unknown; linkSummaries?: LinkedRecordSummary[] }>()
 
 const displayValue = computed(() => {
   const v = props.value
@@ -76,6 +85,28 @@ const linkIds = computed(() => {
   return []
 })
 
+const linkItems = computed(() => {
+  if (props.linkSummaries?.length) {
+    return props.linkSummaries.map((item) => ({
+      id: item.id,
+      display: item.display || item.id,
+    }))
+  }
+  return linkIds.value.map((id) => ({ id, display: id }))
+})
+
+const attachmentIds = computed(() => {
+  const v = props.value
+  if (Array.isArray(v)) return v.map(String)
+  if (v) return [String(v)]
+  return []
+})
+
+function mimeIcon(_id: string): string {
+  // Simple icon based on file extension heuristic
+  return '\uD83D\uDCCE' // paperclip emoji
+}
+
 // Conditional formatting: subtle background hints
 const conditionalClass = computed(() => {
   const v = props.value
@@ -101,6 +132,14 @@ const conditionalClass = computed(() => {
   color: #409eff; border-radius: 3px; font-size: 11px; margin-right: 4px;
 }
 .meta-cell-renderer__date { color: #606266; }
+.meta-cell-renderer__attachment {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 1px 6px; background: #f0f4f8; border-radius: 3px;
+  font-size: 11px; margin-right: 4px; white-space: nowrap;
+  max-width: 120px; overflow: hidden; text-overflow: ellipsis;
+}
+.meta-cell-renderer__attachment-icon { font-size: 12px; }
+.meta-cell-renderer__attachment-name { overflow: hidden; text-overflow: ellipsis; }
 .meta-cell-renderer--empty { color: #ccc; }
 .meta-cell-renderer--positive { color: #67c23a; }
 .meta-cell-renderer--negative { color: #f56c6c; }

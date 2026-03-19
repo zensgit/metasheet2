@@ -59,6 +59,12 @@
             class="meta-record-drawer__link-btn"
             @click="emit('open-link-picker', field)"
           >{{ linkButtonLabel(field.id) }}</button>
+          <div v-else-if="field.type === 'attachment'" class="meta-record-drawer__attachments">
+            <span v-for="attId in attachmentList(field.id)" :key="attId" class="meta-record-drawer__attachment-chip">
+              &#x1F4CE; {{ attId }}
+            </span>
+            <span v-if="!attachmentList(field.id).length" class="meta-record-drawer__text">—</span>
+          </div>
           <span v-else class="meta-record-drawer__text">{{ formatValue(record.data[field.id]) }}</span>
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-record-drawer__link-summary">{{ linkPreview(field.id) }}</div>
         </div>
@@ -128,6 +134,13 @@ function linkPreview(fieldId: string): string {
   return ids.join(', ')
 }
 
+function attachmentList(fieldId: string): string[] {
+  const raw = props.record?.data[fieldId]
+  if (Array.isArray(raw)) return raw.map(String)
+  if (raw) return [String(raw)]
+  return []
+}
+
 function linkSummaryCount(fieldId: string): number {
   const summaries = props.linkSummariesByField?.[fieldId] ?? []
   if (summaries.length) return summaries.length
@@ -156,6 +169,13 @@ function linkSummaryCount(fieldId: string): number {
 .meta-record-drawer__check { cursor: pointer; }
 .meta-record-drawer__link-btn { padding: 4px 10px; border: 1px solid #409eff; border-radius: 3px; background: #ecf5ff; color: #409eff; cursor: pointer; font-size: 12px; }
 .meta-record-drawer__link-summary { margin-top: 6px; font-size: 12px; color: #606266; }
+.meta-record-drawer__attachments { display: flex; flex-wrap: wrap; gap: 4px; }
+.meta-record-drawer__attachment-chip {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px 8px; background: #f0f4f8; border-radius: 4px;
+  font-size: 12px; color: #333; max-width: 180px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
 .meta-record-drawer__text { font-size: 13px; color: #333; }
 .meta-record-drawer__empty { padding: 32px; text-align: center; color: #999; }
 </style>

@@ -77,6 +77,20 @@
             :disabled="readOnly"
             @click="emit('open-link-picker', field)"
           >{{ linkButtonLabel(field.id) }}</button>
+          <div v-else-if="field.type === 'attachment'" class="meta-form-view__attachment-field">
+            <input
+              type="file"
+              multiple
+              :disabled="readOnly"
+              class="meta-form-view__file-input"
+              @change="onFormFileSelect(field.id, $event)"
+            />
+            <div v-if="attachmentList(field.id).length" class="meta-form-view__attachment-list">
+              <span v-for="attId in attachmentList(field.id)" :key="attId" class="meta-form-view__attachment-chip">
+                &#x1F4CE; {{ attId }}
+              </span>
+            </div>
+          </div>
           <span v-else class="meta-form-view__readonly-val">{{ record?.data[field.id] ?? '—' }}</span>
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-form-view__link-summary">{{ linkPreview(field.id) }}</div>
           <div v-if="fieldErrors?.[field.id] || validationErrors[field.id]" :id="`error_${field.id}`" class="meta-form-view__field-error">{{ fieldErrors?.[field.id] || validationErrors[field.id] }}</div>
@@ -134,7 +148,7 @@ function validate(): boolean {
   const errs: Record<string, string> = {}
   for (const f of editableFields.value) {
     const v = formData[f.id]
-    if (f.required && (v === undefined || v === null || v === '')) {
+    if (f.required && isEmptyFormValue(v)) {
       errs[f.id] = `${f.name} is required`
     }
   }
@@ -154,8 +168,8 @@ function resetForm() {
 }
 
 const hasUnsavedChanges = computed(() => {
-  if (!props.record) return Object.keys(formData).some((k) => formData[k] !== undefined && formData[k] !== '' && formData[k] !== null)
-  return Object.keys(formData).some((k) => formData[k] !== props.record!.data[k])
+  if (!props.record) return Object.keys(formData).some((k) => !isEmptyFormValue(formData[k]))
+  return Object.keys(formData).some((k) => !isSameFormValue(formData[k], props.record!.data[k]))
 })
 
 function linkButtonLabel(fieldId: string): string {
@@ -177,6 +191,38 @@ function linkSummaryCount(fieldId: string): number {
   const raw = formData[fieldId] ?? props.record?.data[fieldId]
   return Array.isArray(raw) ? raw.length : raw ? 1 : 0
 }
+
+function attachmentList(fieldId: string): string[] {
+  const raw = formData[fieldId] ?? props.record?.data[fieldId]
+  if (Array.isArray(raw)) return raw.map(String)
+  if (raw) return [String(raw)]
+  return []
+}
+
+function onFormFileSelect(fieldId: string, e: Event) {
+  const files = (e.target as HTMLInputElement).files
+  if (files?.length) {
+    const existing = attachmentList(fieldId)
+    formData[fieldId] = [...existing, ...Array.from(files).map((f) => f.name)]
+  }
+}
+
+function isEmptyFormValue(value: unknown): boolean {
+  if (value === undefined || value === null) return true
+  if (typeof value === 'string') return value.trim() === ''
+  if (Array.isArray(value)) return value.length === 0
+  return false
+}
+
+function isSameFormValue(left: unknown, right: unknown): boolean {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    const leftValues = Array.isArray(left) ? left.map(String) : left == null ? [] : [String(left)]
+    const rightValues = Array.isArray(right) ? right.map(String) : right == null ? [] : [String(right)]
+    if (leftValues.length !== rightValues.length) return false
+    return leftValues.every((value, index) => value === rightValues[index])
+  }
+  return left === right
+}
 </script>
 
 <style scoped>
@@ -195,6 +241,14 @@ function linkSummaryCount(fieldId: string): number {
 .meta-form-view__link-btn { padding: 6px 12px; border: 1px solid #409eff; border-radius: 4px; background: #ecf5ff; color: #409eff; cursor: pointer; font-size: 13px; }
 .meta-form-view__link-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .meta-form-view__link-summary { margin-top: 6px; font-size: 12px; color: #606266; }
+.meta-form-view__attachment-field { display: flex; flex-direction: column; gap: 6px; }
+.meta-form-view__file-input { font-size: 12px; }
+.meta-form-view__attachment-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.meta-form-view__attachment-chip {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px 8px; background: #f0f4f8; border-radius: 4px;
+  font-size: 12px; color: #333;
+}
 .meta-form-view__readonly-val { color: #999; font-size: 13px; }
 .meta-form-view__field-error { margin-top: 6px; color: #f56c6c; font-size: 12px; }
 .meta-form-view__actions { display: flex; gap: 8px; margin-top: 16px; }

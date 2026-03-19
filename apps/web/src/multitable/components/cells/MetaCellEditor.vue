@@ -76,7 +76,26 @@
       v-else-if="field.type === 'link'"
       class="meta-cell-editor__link-btn"
       @click="emit('open-link-picker')"
-    >Choose linked records...</button>
+    >{{ linkButtonLabel }}</button>
+
+    <!-- attachment -->
+    <div v-else-if="field.type === 'attachment'" class="meta-cell-editor__attachment">
+      <input
+        ref="inputRef"
+        type="file"
+        multiple
+        class="meta-cell-editor__file-input"
+        @change="onFileSelect"
+        @keydown.escape="emit('cancel')"
+      />
+      <div
+        class="meta-cell-editor__drop-zone"
+        @dragover.prevent
+        @drop.prevent="onFileDrop"
+      >
+        Drop files or click to browse
+      </div>
+    </div>
 
     <!-- readonly fallback -->
     <span v-else class="meta-cell-editor__readonly">{{ modelValue ?? '' }}</span>
@@ -106,6 +125,27 @@ const emit = defineEmits<{
 }>()
 
 const inputRef = ref<HTMLElement | null>(null)
+const linkButtonLabel = computed(() => {
+  if (props.field.type !== 'link') return 'Choose linked records...'
+  const count = Array.isArray(props.modelValue) ? props.modelValue.length : props.modelValue ? 1 : 0
+  return count > 0 ? `Edit links (${count})` : 'Choose linked records...'
+})
+
+function onFileSelect(e: Event) {
+  const files = (e.target as HTMLInputElement).files
+  if (files?.length) {
+    emit('update:modelValue', Array.from(files).map((f) => f.name))
+    emit('confirm')
+  }
+}
+
+function onFileDrop(e: DragEvent) {
+  const files = e.dataTransfer?.files
+  if (files?.length) {
+    emit('update:modelValue', Array.from(files).map((f) => f.name))
+    emit('confirm')
+  }
+}
 
 function onNumberInput(e: Event) {
   const v = (e.target as HTMLInputElement).value
@@ -134,5 +174,13 @@ onMounted(() => {
   padding: 2px 8px; border: 1px solid #409eff; border-radius: 3px;
   background: #ecf5ff; color: #409eff; cursor: pointer; font-size: 12px;
 }
+.meta-cell-editor__attachment { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+.meta-cell-editor__file-input { font-size: 12px; }
+.meta-cell-editor__drop-zone {
+  padding: 8px 12px; border: 2px dashed #c0d8f0; border-radius: 4px;
+  text-align: center; font-size: 11px; color: #999; cursor: pointer;
+  background: #fafcff;
+}
+.meta-cell-editor__drop-zone:hover { border-color: #409eff; color: #409eff; }
 .meta-cell-editor__readonly { color: #999; font-size: 13px; }
 </style>
