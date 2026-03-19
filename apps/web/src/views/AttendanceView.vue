@@ -241,8 +241,8 @@
         <div class="attendance__card attendance__card--admin">
           <div class="attendance__admin-header">
             <h3>{{ tr('Admin Console', '管理控制台') }}</h3>
-            <button class="attendance__btn" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
-              {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
+            <button class="attendance__btn" :disabled="adminLoading" @click="loadAdminData">
+              {{ adminLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
             </button>
           </div>
           <div v-if="statusMessage" class="attendance__status-block attendance__status-block--admin">
@@ -523,6 +523,7 @@ const statusMeta = ref<AttendanceStatusMeta | null>(null)
 const calendarMonth = ref(new Date())
 const pluginsLoaded = ref(false)
 const exporting = ref(false)
+const adminLoading = ref(false)
 const reportLoading = ref(false)
 const adminForbidden = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
@@ -800,7 +801,7 @@ const statusActionBusy = computed(() => {
   const action = statusMeta.value?.action
   if (!action) return false
   if (action === 'refresh-overview') return loading.value
-  if (action === 'reload-admin') return settingsLoading.value || ruleLoading.value
+  if (action === 'reload-admin') return adminLoading.value
   if (action === 'reload-import-job') return importAsyncPolling.value
   if (action === 'resume-import-job') return importAsyncPolling.value
   if (action === 'reload-import-csv') return importLoading.value
@@ -2384,6 +2385,8 @@ async function exportCsv() {
 }
 
 async function loadAdminData() {
+  if (adminLoading.value) return
+  adminLoading.value = true
   try {
     await Promise.all([
       loadSettings(),
@@ -2408,6 +2411,8 @@ async function loadAdminData() {
     ])
   } catch (error) {
     setStatusFromError(error, tr('Failed to load admin data', '加载管理数据失败'), 'admin')
+  } finally {
+    adminLoading.value = false
   }
 }
 
