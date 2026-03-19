@@ -286,6 +286,9 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
+import { readErrorMessage } from '../utils/error'
+import { parseUserSessionRecord } from '../utils/session'
+import type { UserSessionRecord } from '../utils/session'
 
 type ManagedUser = {
   id: string
@@ -363,19 +366,6 @@ type InviteLedgerRecord = {
   inviteToken: string
   lastSentAt: string
   createdAt: string
-}
-
-type UserSessionRecord = {
-  id: string
-  userId: string
-  issuedAt: string
-  expiresAt: string
-  lastSeenAt: string
-  revokedAt: string | null
-  revokedBy: string | null
-  revokeReason: string | null
-  ipAddress: string | null
-  userAgent: string | null
 }
 
 const { hasAdminAccess } = useAuth()
@@ -461,7 +451,7 @@ async function loadUsers(): Promise<void> {
     const response = await apiFetch(`/api/admin/users${query ? `?${query}` : ''}`)
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载用户失败'))
+      throw new Error(readErrorMessage(payload, '加载用户失败'))
     }
 
     const data = payload.data as { items?: ManagedUser[] } | undefined
@@ -471,7 +461,7 @@ async function loadUsers(): Promise<void> {
       await selectUser(users.value[0].id)
     }
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '加载用户失败', 'error')
+    setStatus(readErrorMessage(error, '加载用户失败'), 'error')
   } finally {
     loading.value = false
   }
@@ -482,13 +472,13 @@ async function loadRoles(): Promise<void> {
     const response = await apiFetch('/api/admin/roles')
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载角色失败'))
+      throw new Error(readErrorMessage(payload, '加载角色失败'))
     }
 
     const data = payload.data as { items?: RoleCatalogItem[] } | undefined
     roleCatalog.value = Array.isArray(data?.items) ? data.items : []
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '加载角色失败', 'error')
+    setStatus(readErrorMessage(error, '加载角色失败'), 'error')
   }
 }
 
@@ -499,13 +489,13 @@ async function loadAccessPresets(): Promise<void> {
     const response = await apiFetch(`/api/admin/access-presets${params.size ? `?${params.toString()}` : ''}`)
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载访问预设失败'))
+      throw new Error(readErrorMessage(payload, '加载访问预设失败'))
     }
 
     const data = payload.data as { items?: AccessPreset[] } | undefined
     accessPresets.value = Array.isArray(data?.items) ? data.items : []
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '加载访问预设失败', 'error')
+    setStatus(readErrorMessage(error, '加载访问预设失败'), 'error')
   }
 }
 
@@ -517,7 +507,7 @@ async function loadInviteRecords(userId?: string): Promise<void> {
     const response = await apiFetch(`/api/admin/invites?${params.toString()}`)
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载邀请记录失败'))
+      throw new Error(readErrorMessage(payload, '加载邀请记录失败'))
     }
 
     const data = payload.data as { items?: Array<Record<string, unknown>> } | undefined
@@ -540,7 +530,7 @@ async function loadInviteRecords(userId?: string): Promise<void> {
         }))
       : []
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '加载邀请记录失败', 'error')
+    setStatus(readErrorMessage(error, '加载邀请记录失败'), 'error')
   } finally {
     loadingInvites.value = false
   }
@@ -557,26 +547,17 @@ async function loadUserSessions(userId?: string): Promise<void> {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/sessions`)
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载用户会话失败'))
+      throw new Error(readErrorMessage(payload, '加载用户会话失败'))
     }
 
     const data = payload.data as { items?: Array<Record<string, unknown>> } | undefined
     userSessions.value = Array.isArray(data?.items)
-      ? data.items.map((item) => ({
-          id: String(item.id || ''),
-          userId: String(item.userId || item.user_id || ''),
-          issuedAt: String(item.issuedAt || item.issued_at || ''),
-          expiresAt: String(item.expiresAt || item.expires_at || ''),
-          lastSeenAt: String(item.lastSeenAt || item.last_seen_at || ''),
-          revokedAt: typeof item.revokedAt === 'string' ? item.revokedAt : typeof item.revoked_at === 'string' ? item.revoked_at : null,
-          revokedBy: typeof item.revokedBy === 'string' ? item.revokedBy : typeof item.revoked_by === 'string' ? item.revoked_by : null,
-          revokeReason: typeof item.revokeReason === 'string' ? item.revokeReason : typeof item.revoke_reason === 'string' ? item.revoke_reason : null,
-          ipAddress: typeof item.ipAddress === 'string' ? item.ipAddress : typeof item.ip_address === 'string' ? item.ip_address : null,
-          userAgent: typeof item.userAgent === 'string' ? item.userAgent : typeof item.user_agent === 'string' ? item.user_agent : null,
-        }))
+      ? data.items
+          .map(parseUserSessionRecord)
+          .filter((session): session is UserSessionRecord => session !== null)
       : []
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '加载用户会话失败', 'error')
+    setStatus(readErrorMessage(error, '加载用户会话失败'), 'error')
   } finally {
     loadingSessions.value = false
   }
@@ -592,13 +573,13 @@ async function selectUser(userId: string): Promise<void> {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/access`)
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载用户权限失败'))
+      throw new Error(readErrorMessage(payload, '加载用户权限失败'))
     }
 
     access.value = payload.data as UserAccess
     await Promise.all([loadInviteRecords(userId), loadUserSessions(userId)])
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '加载用户权限失败', 'error')
+    setStatus(readErrorMessage(error, '加载用户权限失败'), 'error')
   }
 }
 
@@ -624,7 +605,7 @@ async function createUser(): Promise<void> {
     if (!response.ok || payload.ok !== true) {
       const errorPayload = payload.error as Record<string, unknown> | undefined
       const detailText = Array.isArray(errorPayload?.details) ? `：${(errorPayload?.details as string[]).join('；')}` : ''
-      throw new Error(String(errorPayload?.message || '创建用户失败') + detailText)
+      throw new Error(readErrorMessage(payload, '创建用户失败') + detailText)
     }
 
     access.value = payload.data as UserAccess
@@ -645,7 +626,7 @@ async function createUser(): Promise<void> {
     await Promise.all([loadUsers(), loadInviteRecords(access.value?.user.id)])
     setStatus('用户已创建')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '创建用户失败', 'error')
+    setStatus(readErrorMessage(error, '创建用户失败'), 'error')
   } finally {
     busy.value = false
   }
@@ -659,13 +640,13 @@ async function revokeInvite(record: InviteLedgerRecord): Promise<void> {
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '撤销邀请失败'))
+      throw new Error(readErrorMessage(payload, '撤销邀请失败'))
     }
 
     await loadInviteRecords(selectedUserId.value || undefined)
     setStatus(`邀请已撤销：${record.email}`)
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '撤销邀请失败', 'error')
+    setStatus(readErrorMessage(error, '撤销邀请失败'), 'error')
   } finally {
     busy.value = false
   }
@@ -679,7 +660,7 @@ async function resendInvite(record: InviteLedgerRecord): Promise<void> {
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '重发邀请失败'))
+      throw new Error(readErrorMessage(payload, '重发邀请失败'))
     }
 
     const data = payload.data as Record<string, unknown>
@@ -688,7 +669,7 @@ async function resendInvite(record: InviteLedgerRecord): Promise<void> {
     await loadInviteRecords(selectedUserId.value || undefined)
     setStatus(`邀请已重发：${record.email}`)
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '重发邀请失败', 'error')
+    setStatus(readErrorMessage(error, '重发邀请失败'), 'error')
   } finally {
     busy.value = false
   }
@@ -700,7 +681,7 @@ async function copyInviteMessage(): Promise<void> {
     await navigator.clipboard.writeText(createdInviteMessage.value)
     setStatus('邀请文案已复制')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '复制邀请文案失败', 'error')
+    setStatus(readErrorMessage(error, '复制邀请文案失败'), 'error')
   }
 }
 
@@ -727,14 +708,14 @@ async function toggleUserStatus(): Promise<void> {
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '更新用户状态失败'))
+      throw new Error(readErrorMessage(payload, '更新用户状态失败'))
     }
 
     access.value = payload.data as UserAccess
     await loadUsers()
     setStatus(access.value.user.is_active ? '账号已启用' : '账号已停用')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '更新用户状态失败', 'error')
+    setStatus(readErrorMessage(error, '更新用户状态失败'), 'error')
   } finally {
     busy.value = false
   }
@@ -752,14 +733,14 @@ async function resetPassword(): Promise<void> {
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '重置密码失败'))
+      throw new Error(readErrorMessage(payload, '重置密码失败'))
     }
 
     temporaryPassword.value = String((payload.data as Record<string, unknown> | undefined)?.temporaryPassword || '')
     manualPassword.value = ''
     setStatus('密码已重置')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '重置密码失败', 'error')
+    setStatus(readErrorMessage(error, '重置密码失败'), 'error')
   } finally {
     busy.value = false
   }
@@ -775,12 +756,19 @@ async function revokeSessions(): Promise<void> {
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '强制下线失败'))
+      throw new Error(readErrorMessage(payload, '强制下线失败'))
     }
 
-    setStatus('该用户现有会话已失效')
+    const data = payload.data as Record<string, unknown> | undefined
+    const revokedAfter = typeof data?.revokedAfter === 'string' ? data.revokedAfter : null
+    if (revokedAfter) {
+      setStatus(`该用户会话已失效（截止：${formatDate(revokedAfter)}）`)
+    } else {
+      setStatus('该用户现有会话已失效')
+    }
+    await loadUserSessions(access.value.user.id)
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '强制下线失败', 'error')
+    setStatus(readErrorMessage(error, '强制下线失败'), 'error')
   } finally {
     busy.value = false
   }
@@ -796,13 +784,19 @@ async function revokeSingleSession(sessionId: string): Promise<void> {
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '踢下线失败'))
+      throw new Error(readErrorMessage(payload, '踢下线失败'))
     }
 
+    const data = payload.data as Record<string, unknown> | undefined
+    const revokedAt = typeof data?.revokedAt === 'string' ? data.revokedAt : null
+    if (revokedAt) {
+      setStatus(`会话已踢下线（${formatDate(revokedAt)}）`)
+    } else {
+      setStatus('会话已踢下线')
+    }
     await loadUserSessions(access.value.user.id)
-    setStatus('会话已踢下线')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '踢下线失败', 'error')
+    setStatus(readErrorMessage(error, '踢下线失败'), 'error')
   } finally {
     busy.value = false
   }
@@ -818,14 +812,14 @@ async function updateRole(action: 'assign' | 'unassign'): Promise<void> {
     })
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '保存角色失败'))
+      throw new Error(readErrorMessage(payload, '保存角色失败'))
     }
 
     access.value = payload.data as UserAccess
     await loadUsers()
     setStatus(action === 'assign' ? '角色已分配' : '角色已撤销')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '保存角色失败', 'error')
+    setStatus(readErrorMessage(error, '保存角色失败'), 'error')
   } finally {
     busy.value = false
   }

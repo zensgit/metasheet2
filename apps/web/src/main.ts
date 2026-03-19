@@ -10,6 +10,7 @@ import App from './App.vue'
 import { AppRouteNames, ROUTE_PATHS } from './router/types'
 import { useAuth } from './composables/useAuth'
 import { useFeatureFlags } from './stores/featureFlags'
+import { resolvePostLoginRedirect } from './utils/navigation'
 
 // Import views
 import GridView from './views/GridView.vue'
@@ -182,6 +183,17 @@ router.beforeEach(async (to, _from, next) => {
   const isLoginRoute = to.name === 'login'
   const currentToken = auth.getToken()
 
+  const resolveHomeRedirect = async (): Promise<string> => {
+    let fallbackPath = '/attendance'
+    try {
+      await flags.loadProductFeatures(false, { skipSessionProbe: true })
+      fallbackPath = flags.resolveHomePath()
+    } catch {
+      // Fall back to the attendance shell route when feature detection is unavailable.
+    }
+    return fallbackPath
+  }
+
   if (isLoginRoute) {
     if (currentToken) {
       const session = await auth.bootstrapSession()
@@ -191,12 +203,7 @@ router.beforeEach(async (to, _from, next) => {
         } catch {
           // Fallback to a stable shell route when features are temporarily unavailable.
         }
-        const redirect =
-          typeof to.query?.redirect === 'string'
-            && to.query.redirect.trim().length > 0
-            ? to.query.redirect
-            : ''
-        return next(redirect || flags.resolveHomePath())
+        return next(resolvePostLoginRedirect(to.query?.redirect, flags.resolveHomePath()))
       }
     }
     return next()
@@ -205,7 +212,10 @@ router.beforeEach(async (to, _from, next) => {
   if (requiresAuth) {
     const ensuredToken = currentToken || await auth.ensureToken()
     if (!ensuredToken) {
-      const redirect = typeof to.fullPath === 'string' && to.fullPath.length > 0 ? to.fullPath : '/attendance'
+      const redirect = resolvePostLoginRedirect(
+        typeof to.fullPath === 'string' && to.fullPath.length > 0 ? to.fullPath : '',
+        await resolveHomeRedirect(),
+      )
       return next({
         name: 'login',
         query: {
@@ -216,7 +226,10 @@ router.beforeEach(async (to, _from, next) => {
 
     const session = await auth.bootstrapSession()
     if (!session.ok) {
-      const redirect = typeof to.fullPath === 'string' && to.fullPath.length > 0 ? to.fullPath : '/attendance'
+      const redirect = resolvePostLoginRedirect(
+        typeof to.fullPath === 'string' && to.fullPath.length > 0 ? to.fullPath : '',
+        await resolveHomeRedirect(),
+      )
       return next({
         name: 'login',
         query: {

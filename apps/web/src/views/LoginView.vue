@@ -35,11 +35,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getApiBase } from '../utils/api'
 import { useAuth } from '../composables/useAuth'
 import { useFeatureFlags } from '../stores/featureFlags'
+import { readErrorMessage } from '../utils/error'
+import { resolvePostLoginRedirect } from '../utils/navigation'
 
 type LoginData = {
   token?: string
@@ -55,15 +57,6 @@ const email = ref('')
 const password = ref('')
 const loading = ref(false)
 const error = ref('')
-
-const redirectTarget = computed(() => {
-  const raw = route.query.redirect
-  if (typeof raw === 'string') {
-    const trimmed = raw.trim()
-    return trimmed.length > 0 ? trimmed : '/attendance'
-  }
-  return '/attendance'
-})
 
 async function readJson(response: Response): Promise<Record<string, unknown>> {
   try {
@@ -99,9 +92,7 @@ async function submit(): Promise<void> {
     const ok = payload.success === true && token.length > 0 && response.ok
 
     if (!ok) {
-      error.value = typeof payload.error === 'string'
-        ? payload.error
-        : '登录失败，请稍后再试。'
+      error.value = readErrorMessage(payload, '登录失败，请稍后再试。')
       return
     }
 
@@ -113,10 +104,16 @@ async function submit(): Promise<void> {
         features: body.features,
       },
     })
-    await featureFlags.loadProductFeatures(true)
-    await router.replace(redirectTarget.value)
+    let fallbackPath = '/attendance'
+    try {
+      await featureFlags.loadProductFeatures(true)
+      fallbackPath = featureFlags.resolveHomePath()
+    } catch {
+      // Keep login successful even when feature probing is temporarily unavailable.
+    }
+    await router.replace(resolvePostLoginRedirect(route.query.redirect, fallbackPath))
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : '网络异常，请稍后再试。'
+    error.value = readErrorMessage(cause, '网络异常，请稍后再试。')
   } finally {
     loading.value = false
   }

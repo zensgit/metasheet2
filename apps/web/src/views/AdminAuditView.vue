@@ -158,6 +158,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { apiFetch } from '../utils/api'
+import { readErrorMessage } from '../utils/error'
 
 type AdminAuditLogItem = {
   id: number
@@ -298,7 +299,7 @@ async function loadActivityLogs(page = 1): Promise<void> {
     const response = await apiFetch(`/api/admin/audit-activity?${params.toString()}`)
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载管理审计失败'))
+      throw new Error(readErrorMessage(payload, '加载管理审计失败'))
     }
 
     const data = payload.data as { items?: AdminAuditLogItem[]; total?: number; page?: number } | undefined
@@ -306,7 +307,7 @@ async function loadActivityLogs(page = 1): Promise<void> {
     activityTotal.value = Number(data?.total ?? activityLogs.value.length) || 0
     activityPage.value = Number(data?.page ?? page) || page
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '加载管理审计失败', 'error')
+    setStatus(readErrorMessage(error, '加载管理审计失败'), 'error')
   } finally {
     activityLoading.value = false
   }
@@ -326,7 +327,7 @@ async function loadSessionRevocations(page = 1): Promise<void> {
     const response = await apiFetch(`/api/admin/session-revocations?${params.toString()}`)
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载会话撤销记录失败'))
+      throw new Error(readErrorMessage(payload, '加载会话撤销记录失败'))
     }
 
     const data = payload.data as { items?: SessionRevocationItem[]; total?: number; page?: number } | undefined
@@ -334,7 +335,7 @@ async function loadSessionRevocations(page = 1): Promise<void> {
     revocationTotal.value = Number(data?.total ?? sessionRevocations.value.length) || 0
     revocationPage.value = Number(data?.page ?? page) || page
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '加载会话撤销记录失败', 'error')
+    setStatus(readErrorMessage(error, '加载会话撤销记录失败'), 'error')
   } finally {
     revocationLoading.value = false
   }
@@ -370,13 +371,13 @@ async function exportActivityCsv(): Promise<void> {
     const response = await apiFetch(`/api/admin/audit-activity/export.csv?${params.toString()}`)
     if (!response.ok) {
       const payload = await readJson(response)
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '导出管理审计失败'))
+      throw new Error(readErrorMessage(payload, '导出管理审计失败'))
     }
 
     downloadBlob(resolveExportFilename(response), await response.blob())
     setStatus('管理审计 CSV 已导出')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '导出管理审计失败', 'error')
+    setStatus(readErrorMessage(error, '导出管理审计失败'), 'error')
   } finally {
     exporting.value = false
   }

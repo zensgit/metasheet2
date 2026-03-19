@@ -45,7 +45,7 @@ function createMockResponse() {
 }
 
 async function invokeRoute(
-  method: 'put' | 'delete',
+  method: 'post' | 'put' | 'delete',
   path: string,
   options: {
     params?: Record<string, string>
@@ -132,6 +132,40 @@ describe('roles routes', () => {
       'INSERT INTO role_permissions(role_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING',
       ['role-1', 'permissions:write'],
     )
+  })
+
+  it('creates a role through the admin alias without exposing a duplicate list route', async () => {
+    pgQuery
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'role-2', name: 'Workflow Admin', created_at: '2026-03-18T00:00:00.000Z', updated_at: '2026-03-18T00:00:00.000Z' }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/roles', {
+      body: {
+        id: 'role-2',
+        name: 'Workflow Admin',
+        permissions: ['workflow:read', 'workflow:write'],
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        id: 'role-2',
+        name: 'Workflow Admin',
+      },
+    })
+    expect(pgQuery).toHaveBeenCalledWith(
+      'INSERT INTO role_permissions(role_id, permission_code) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+      ['role-2', 'workflow:read'],
+    )
+    expect(
+      rolesRouter().stack.find((entry) => entry.route?.path === '/api/admin/roles' && entry.route?.methods?.get),
+    ).toBeUndefined()
   })
 
   it('deletes role permissions before deleting the role', async () => {

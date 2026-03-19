@@ -85,6 +85,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { useFeatureFlags } from '../stores/featureFlags'
 import { getApiBase } from '../utils/api'
+import { readErrorMessage } from '../utils/error'
 
 type InvitePreview = {
   user: {
@@ -149,7 +150,7 @@ async function loadPreview(): Promise<void> {
     const response = await fetch(`${getApiBase()}/api/auth/invite/preview?token=${encodeURIComponent(token)}`)
     const payload = await readJson(response)
     if (!response.ok || payload.success !== true) {
-      throw new Error(String(payload.error || '邀请链接无效或已过期'))
+      throw new Error(readErrorMessage(payload, '邀请链接无效或已过期'))
     }
 
     const data = payload.data && typeof payload.data === 'object'
@@ -162,7 +163,7 @@ async function loadPreview(): Promise<void> {
     preview.value = data
     name.value = data.user.name || ''
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : '邀请链接无效或已过期'
+    error.value = readErrorMessage(cause, '邀请链接无效或已过期')
   } finally {
     loadingPreview.value = false
   }
@@ -217,11 +218,7 @@ async function submit(): Promise<void> {
       const nestedDetails = payload.error && typeof payload.error === 'object' && Array.isArray((payload.error as Record<string, unknown>).details)
         ? `：${((payload.error as Record<string, unknown>).details as string[]).join('；')}`
         : ''
-      const message = typeof payload.error === 'string'
-        ? payload.error
-        : typeof (payload.error as Record<string, unknown> | undefined)?.message === 'string'
-          ? String((payload.error as Record<string, unknown>).message)
-          : '初始化失败，请联系管理员重新发送邀请。'
+      const message = readErrorMessage(payload, '初始化失败，请联系管理员重新发送邀请。')
       throw new Error(`${message}${nestedDetails || details}`)
     }
 
@@ -240,7 +237,7 @@ async function submit(): Promise<void> {
       : {}
     await router.replace(onboarding.homePath || flags.resolveHomePath())
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : '初始化失败，请稍后重试。'
+    error.value = readErrorMessage(cause, '初始化失败，请稍后重试。')
   } finally {
     submitting.value = false
   }

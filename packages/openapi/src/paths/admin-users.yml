@@ -1,0 +1,754 @@
+paths:
+  /api/admin/users:
+    get:
+      summary: List users for IAM administration
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/User' }
+                      page: { type: integer }
+                      pageSize: { type: integer }
+                      total: { type: integer }
+                      query: { type: string }
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { description: Internal server error }
+    post:
+      summary: Create a managed user with IAM access bootstrap
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string }
+                name: { type: string }
+                password: { type: string }
+                role: { type: string }
+                roleId: { type: string }
+                presetId: { type: string }
+                isActive: { type: boolean }
+      responses:
+        '200':
+          description: User created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      user: { $ref: '#/components/schemas/User' }
+                      roles:
+                        type: array
+                        items: { type: string }
+                      permissions:
+                        type: array
+                        items: { type: string }
+                      isAdmin: { type: boolean }
+                      actorId: { type: string }
+                      temporaryPassword:
+                        type: string
+                        nullable: true
+                      inviteToken:
+                        type: string
+                        nullable: true
+                      onboarding:
+                        type: object
+                        additionalProperties: true
+                  meta: { type: object, additionalProperties: true }
+        '400': { description: Validation failed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: User already exists }
+        '500': { description: Internal server error }
+  /api/admin/access-presets:
+    get:
+      summary: List IAM access presets for provisioning
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: mode
+          schema:
+            type: string
+            enum: [platform, attendance, plm-workbench]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/admin/invites:
+    get:
+      summary: List IAM invite ledger entries
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: userId
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                      page: { type: integer }
+                      pageSize: { type: integer }
+                      total: { type: integer }
+                      actorId: { type: string }
+                      degraded: { type: boolean }
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { description: Internal server error }
+        '503': { description: Invite ledger unavailable }
+  /api/admin/invites/{inviteId}/revoke:
+    post:
+      summary: Revoke a pending invite
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: inviteId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Invite revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      item:
+                        type: object
+                        additionalProperties: true
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '400': { description: Bad request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { description: Internal server error }
+        '503': { description: Invite ledger unavailable }
+  /api/admin/invites/{inviteId}/resend:
+    post:
+      summary: Resend or reissue an invite
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: inviteId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Invite reissued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      item:
+                        type: object
+                        additionalProperties: true
+                      inviteToken: { type: string }
+                      onboarding:
+                        type: object
+                        additionalProperties: true
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '400': { description: Bad request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Invite already accepted }
+        '500': { description: Internal server error }
+        '503': { description: Invite ledger unavailable }
+  /api/admin/users/{userId}/access:
+    get:
+      summary: Get effective roles and permissions for a user
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      user: { $ref: '#/components/schemas/User' }
+                      roles:
+                        type: array
+                        items: { type: string }
+                      permissions:
+                        type: array
+                        items: { type: string }
+                      isAdmin: { type: boolean }
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '400': { description: Bad request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { description: Internal server error }
+  /api/admin/users/{userId}/roles/assign:
+    post:
+      summary: Assign a role to a user
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roleId]
+              properties:
+                roleId: { type: string }
+      responses:
+        '200':
+          description: Role assigned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      user: { $ref: '#/components/schemas/User' }
+                      roles:
+                        type: array
+                        items: { type: string }
+                      permissions:
+                        type: array
+                        items: { type: string }
+                      isAdmin: { type: boolean }
+                      changedRoleId: { type: string }
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '400': { description: Bad request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { description: Internal server error }
+  /api/admin/users/{userId}/roles/unassign:
+    post:
+      summary: Remove a role from a user
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roleId]
+              properties:
+                roleId: { type: string }
+      responses:
+        '200':
+          description: Role removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      user: { $ref: '#/components/schemas/User' }
+                      roles:
+                        type: array
+                        items: { type: string }
+                      permissions:
+                        type: array
+                        items: { type: string }
+                      isAdmin: { type: boolean }
+                      changedRoleId: { type: string }
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '400': { description: Bad request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { description: Internal server error }
+  /api/admin/users/{userId}/status:
+    patch:
+      summary: Update managed user active status
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [isActive]
+              properties:
+                isActive: { type: boolean }
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      user: { $ref: '#/components/schemas/User' }
+                      roles:
+                        type: array
+                        items: { type: string }
+                      permissions:
+                        type: array
+                        items: { type: string }
+                      isAdmin: { type: boolean }
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '400': { description: Bad request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { description: Internal server error }
+  /api/admin/users/{userId}/reset-password:
+    post:
+      summary: Reset a managed user password
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password: { type: string }
+      responses:
+        '200':
+          description: Password reset
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      userId: { type: string }
+                      temporaryPassword: { type: string }
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '400': { description: Bad request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { description: Internal server error }
+  /api/admin/users/{userId}/sessions:
+    get:
+      summary: List sessions for a user (admin)
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      userId: { type: string }
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/UserSessionRecord'
+                  meta: { type: object, additionalProperties: true }
+        '400': { description: Bad request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { description: Internal server error }
+  /api/admin/users/{userId}/sessions/{sessionId}/revoke:
+    post:
+      summary: Revoke a specific user session (admin)
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: sessionId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 255
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      userId: { type: string }
+                      sessionId: { type: string }
+                      revokedAt: { type: string, nullable: true }
+                      actorId: { type: string }
+                      reason: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '400': { description: Bad request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { description: Internal server error }
+  /api/admin/users/{userId}/revoke-sessions:
+    post:
+      summary: Revoke all sessions for a user (admin)
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 255
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      userId: { type: string }
+                      revokedAfter: { type: string, nullable: true }
+                      actorId: { type: string }
+                      reason: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '400': { description: Bad request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { description: Internal server error }
+  /api/admin/roles:
+    get:
+      summary: List IAM role catalog with permissions and member counts
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          allOf:
+                            - $ref: '#/components/schemas/Role'
+                            - type: object
+                              properties:
+                                memberCount: { type: integer }
+                      total: { type: integer }
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { description: Internal server error }
+  /api/admin/audit-activity:
+    get:
+      summary: List IAM admin audit activity
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: action
+          schema: { type: string }
+        - in: query
+          name: resourceType
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                      page: { type: integer }
+                      pageSize: { type: integer }
+                      total: { type: integer }
+                      query: { type: string }
+                      resourceType:
+                        type: string
+                        nullable: true
+                      action:
+                        type: string
+                        nullable: true
+                      from:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      to:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { description: Internal server error }
+  /api/admin/audit-activity/export.csv:
+    get:
+      summary: Export IAM admin audit activity as CSV
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: action
+          schema: { type: string }
+        - in: query
+          name: resourceType
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 1000, minimum: 1, maximum: 5000 }
+      responses:
+        '200':
+          description: CSV export
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { description: Internal server error }
+  /api/admin/session-revocations:
+    get:
+      summary: List bulk user session revocation history
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                      page: { type: integer }
+                      pageSize: { type: integer }
+                      total: { type: integer }
+                      query: { type: string }
+                      from:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      to:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { description: Internal server error }

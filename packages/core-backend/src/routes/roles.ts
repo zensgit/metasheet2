@@ -11,7 +11,7 @@ const roles = new Map<string, { id: string; name: string; permissions: string[] 
 export function rolesRouter(): Router {
   const r = Router()
 
-  r.get('/api/roles', rbacGuard('roles', 'read'), async (req: Request, res: Response) => {
+  const listRoles = async (req: Request, res: Response) => {
     const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>)
     if (pool) {
       const count = await pool.query('SELECT COUNT(*)::int AS c FROM roles')
@@ -23,9 +23,9 @@ export function rolesRouter(): Router {
     const total = arr.length
     const items = arr.slice(offset, offset + pageSize)
     return res.json({ ok: true, data: { items, page, pageSize, total } })
-  })
+  }
 
-  r.post('/api/roles', rbacGuard('roles', 'write'), async (req: Request, res: Response) => {
+  const createRole = async (req: Request, res: Response) => {
     const id = req.body?.id || `role_${Date.now()}`
     const name = req.body?.name || 'unnamed'
     const perms: string[] = Array.isArray(req.body?.permissions) ? req.body.permissions : []
@@ -41,9 +41,9 @@ export function rolesRouter(): Router {
     roles.set(id, { id, name, permissions: perms })
     await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'create', resourceType: 'role', resourceId: id, meta: { name, permissions: perms } })
     return res.json({ ok: true, data: roles.get(id) })
-  })
+  }
 
-  r.put('/api/roles/:id', rbacGuard('roles', 'write'), async (req: Request, res: Response) => {
+  const updateRole = async (req: Request, res: Response) => {
     const id = req.params.id
     if (pool) {
       const { rows } = await pool.query('SELECT id, name FROM roles WHERE id=$1', [id])
@@ -75,9 +75,9 @@ export function rolesRouter(): Router {
     roles.set(id, next)
     await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'update', resourceType: 'role', resourceId: id, meta: { before, after: next } })
     return res.json({ ok: true, data: next })
-  })
+  }
 
-  r.delete('/api/roles/:id', rbacGuard('roles', 'write'), async (req: Request, res: Response) => {
+  const deleteRole = async (req: Request, res: Response) => {
     const id = req.params.id
     if (pool) {
       const { rows } = await pool.query('SELECT id, name FROM roles WHERE id=$1', [id])
@@ -91,7 +91,15 @@ export function rolesRouter(): Router {
     roles.delete(id)
     await auditLog({ actorId: req.user?.id?.toString(), actorType: 'user', action: 'delete', resourceType: 'role', resourceId: id, meta: { before } })
     return res.json({ ok: true, data: { id } })
-  })
+  }
+
+  r.get('/api/roles', rbacGuard('roles', 'read'), listRoles)
+  r.post('/api/roles', rbacGuard('roles', 'write'), createRole)
+  r.post('/api/admin/roles', rbacGuard('roles', 'write'), createRole)
+  r.put('/api/roles/:id', rbacGuard('roles', 'write'), updateRole)
+  r.put('/api/admin/roles/:id', rbacGuard('roles', 'write'), updateRole)
+  r.delete('/api/roles/:id', rbacGuard('roles', 'write'), deleteRole)
+  r.delete('/api/admin/roles/:id', rbacGuard('roles', 'write'), deleteRole)
 
   return r
 }
