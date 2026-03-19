@@ -5,7 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 timestamp="$(date +%Y%m%d-%H%M%S)"
-OUTPUT_ROOT="${OUTPUT_ROOT:-output/playwright/multitable-pilot-local/${timestamp}}"
+RUNNER_SCRIPT="${RUNNER_SCRIPT:-scripts/verify-multitable-live-smoke.mjs}"
+RUN_LABEL="${RUN_LABEL:-multitable-pilot}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-output/playwright/${RUN_LABEL}-local/${timestamp}}"
 API_BASE="${API_BASE:-http://127.0.0.1:7778}"
 WEB_BASE="${WEB_BASE:-http://127.0.0.1:8899}"
 PILOT_DATABASE_URL="${PILOT_DATABASE_URL:-postgresql://metasheet:metasheet@127.0.0.1:5435/metasheet}"
@@ -13,6 +15,7 @@ RBAC_TOKEN_TRUST="${RBAC_TOKEN_TRUST:-true}"
 ENSURE_PLAYWRIGHT="${ENSURE_PLAYWRIGHT:-true}"
 HEADLESS="${HEADLESS:-true}"
 TIMEOUT_MS="${TIMEOUT_MS:-30000}"
+REPORT_NAME="${REPORT_NAME:-report.json}"
 
 mkdir -p "$OUTPUT_ROOT"
 BACK_PID=""
@@ -94,14 +97,14 @@ else
   info "Web already running at ${WEB_BASE}"
 fi
 
-info "Running multitable pilot smoke"
+info "Running ${RUN_LABEL}"
 API_BASE="${API_BASE}" \
 WEB_BASE="${WEB_BASE}" \
 OUTPUT_DIR="${OUTPUT_ROOT}" \
-REPORT_JSON="${OUTPUT_ROOT}/report.json" \
+REPORT_JSON="${OUTPUT_ROOT}/${REPORT_NAME}" \
 HEADLESS="${HEADLESS}" \
 TIMEOUT_MS="${TIMEOUT_MS}" \
-node scripts/verify-multitable-live-smoke.mjs
+node "${RUNNER_SCRIPT}"
 
-info "PASS: multitable pilot smoke completed"
+info "PASS: ${RUN_LABEL} completed"
 info "Artifacts: ${OUTPUT_ROOT}"

@@ -1,0 +1,77 @@
+name: Multitable Pilot E2E
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - 'codex/**'
+      - 'feat/**'
+    paths:
+      - 'apps/web/**'
+      - 'packages/core-backend/**'
+      - 'packages/openapi/**'
+      - 'scripts/verify-multitable-live-smoke.mjs'
+      - 'scripts/profile-multitable-grid.mjs'
+      - 'scripts/ops/multitable-pilot-local.sh'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/multitable-pilot-e2e.yml'
+
+jobs:
+  multitable-pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run multitable pilot smoke
+        env:
+          PILOT_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
+          RBAC_TOKEN_TRUST: 'true'
+          ENSURE_PLAYWRIGHT: 'false'
+          HEADLESS: 'true'
+          OUTPUT_ROOT: output/playwright/multitable-pilot-local/ci
+        run: pnpm verify:multitable-pilot:local
+
+      - name: Upload multitable pilot artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multitable-pilot-e2e
+          retention-days: 14
+          path: |
+            output/playwright/multitable-pilot-local
