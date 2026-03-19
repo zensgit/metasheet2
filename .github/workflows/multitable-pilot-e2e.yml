@@ -13,7 +13,10 @@ on:
       - 'packages/openapi/**'
       - 'scripts/verify-multitable-live-smoke.mjs'
       - 'scripts/profile-multitable-grid.mjs'
+      - 'scripts/ops/multitable-grid-profile-summary.mjs'
       - 'scripts/ops/multitable-pilot-local.sh'
+      - 'scripts/ops/multitable-pilot-readiness.mjs'
+      - 'scripts/ops/multitable-pilot-ready-local.sh'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - '.github/workflows/multitable-pilot-e2e.yml'
@@ -86,6 +89,15 @@ jobs:
           API_GRID_INITIAL_LOAD_MAX_MS: '25'
           API_GRID_SEARCH_HIT_MAX_MS: '25'
         run: pnpm verify:multitable-grid-profile:summary
+
+      - name: Summarize multitable pilot readiness
+        env:
+          SMOKE_REPORT_JSON: output/playwright/multitable-pilot-local/ci/report.json
+          PROFILE_REPORT_JSON: output/playwright/multitable-grid-profile-local/ci/report.json
+          PROFILE_SUMMARY_MD: output/playwright/multitable-grid-profile-local/ci/summary.md
+          READINESS_MD: output/playwright/multitable-grid-profile-local/ci/readiness.md
+          READINESS_JSON: output/playwright/multitable-grid-profile-local/ci/readiness.json
+        run: pnpm verify:multitable-pilot:readiness
 
       - name: Upload multitable pilot artifacts
         if: always()

@@ -53,6 +53,7 @@ It runs:
 1. pilot smoke
 2. 2000-row grid profile
 3. profile threshold summary
+4. pilot readiness summary
 
 Uploaded artifact root:
 
@@ -60,6 +61,11 @@ Uploaded artifact root:
 output/playwright/multitable-pilot-local
 output/playwright/multitable-grid-profile-local
 ```
+
+Readiness outputs in CI:
+
+- `output/playwright/multitable-grid-profile-local/ci/readiness.md`
+- `output/playwright/multitable-grid-profile-local/ci/readiness.json`
 
 ## Local Environment
 
@@ -102,6 +108,11 @@ Use this checklist before handing the branch to a real team:
 3. Confirm profile was run at `ROW_COUNT=2000`
 4. Confirm smoke report includes attachment, person preset, comments, and conflict retry
 5. Confirm no local-only flags are required for the target environment, except the documented dev-token `RBAC_TOKEN_TRUST=true` case
+6. Give the pilot team the feedback template:
+
+```text
+docs/deployment/multitable-pilot-feedback-template-20260319.md
+```
 
 ## Current Pilot Recommendation
 

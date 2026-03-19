@@ -122,14 +122,32 @@ async function main() {
     ? path.resolve(readinessJsonPath)
     : path.join(path.dirname(path.resolve(profileReportPath)), 'readiness.json')
 
-  await fs.writeFile(resolvedReadinessMdPath, markdown, 'utf8')
-  await fs.writeFile(resolvedReadinessJsonPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+  let wroteMarkdown = false
+  let wroteJson = false
+  try {
+    await fs.writeFile(resolvedReadinessMdPath, markdown, 'utf8')
+    wroteMarkdown = true
+  } catch (error) {
+    process.stderr.write(`[multitable-pilot-readiness] WARN: failed to write readiness markdown: ${error.message}\n`)
+  }
+  try {
+    await fs.writeFile(resolvedReadinessJsonPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8')
+    wroteJson = true
+  } catch (error) {
+    process.stderr.write(`[multitable-pilot-readiness] WARN: failed to write readiness json: ${error.message}\n`)
+  }
   if (stepSummaryPath) {
-    await fs.appendFile(stepSummaryPath, `${markdown}\n`, 'utf8')
+    try {
+      await fs.appendFile(stepSummaryPath, `${markdown}\n`, 'utf8')
+    } catch (error) {
+      process.stderr.write(`[multitable-pilot-readiness] WARN: failed to append GitHub step summary: ${error.message}\n`)
+    }
   }
 
-  process.stdout.write(`[multitable-pilot-readiness] readiness_md=${resolvedReadinessMdPath}\n`)
-  process.stdout.write(`[multitable-pilot-readiness] readiness_json=${resolvedReadinessJsonPath}\n`)
+  if (wroteMarkdown) process.stdout.write(`[multitable-pilot-readiness] readiness_md=${resolvedReadinessMdPath}\n`)
+  if (wroteJson) process.stdout.write(`[multitable-pilot-readiness] readiness_json=${resolvedReadinessJsonPath}\n`)
+  if (!wroteMarkdown) process.stdout.write(`${markdown}\n`)
+  if (!wroteJson) process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`)
   if (!overallOk) process.exit(1)
 }
 
