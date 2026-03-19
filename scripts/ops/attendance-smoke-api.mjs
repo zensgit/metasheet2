@@ -1,4 +1,5 @@
 import { assertImportTelemetry } from './attendance-import-telemetry-utils.mjs'
+import { resolveSmokeWorkDate } from './attendance-smoke-workdate.mjs'
 
 const apiBase = (process.env.API_BASE || '').replace(/\/+$/, '')
 let token = process.env.AUTH_TOKEN || ''
@@ -147,10 +148,6 @@ function assertOk({ res, raw, body }, label) {
   }
 }
 
-function toDateOnly(date) {
-  return date.toISOString().slice(0, 10)
-}
-
 function makeGroupName() {
   // Keep a stable group name so daily gates don't keep creating new groups.
   // The backend upserts on (org_id, name).
@@ -162,33 +159,8 @@ function makeIdempotencyKey() {
   return `attendance-smoke-${suffix}`
 }
 
-function hashString(value) {
-  let hash = 0
-  for (let i = 0; i < value.length; i += 1) {
-    hash = (hash * 31 + value.charCodeAt(i)) >>> 0
-  }
-  return hash
-}
-
-function resolveSmokeWorkDate() {
-  const override = String(process.env.SMOKE_WORK_DATE || '').trim()
-  if (/^\d{4}-\d{2}-\d{2}$/.test(override)) return override
-
-  // Keep the work date stable within a specific CI run/attempt so retries are
-  // deterministic, but spread runs across many dates to avoid duplicate
-  // request collisions on shared long-lived environments.
-  const seedParts = [
-    String(process.env.GITHUB_RUN_ID || '').trim(),
-    String(process.env.GITHUB_RUN_ATTEMPT || '').trim(),
-    String(process.env.GITHUB_RUN_NUMBER || '').trim(),
-  ].filter(Boolean)
-  const seed = seedParts.length > 0
-    ? seedParts.join(':')
-    : `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
-
-  const base = new Date(Date.UTC(2025, 0, 1))
-  base.setUTCDate(base.getUTCDate() + (hashString(seed) % 1825))
-  return toDateOnly(base)
+function toDateOnly(date) {
+  return date.toISOString().slice(0, 10)
 }
 
 function isoForWorkDate(workDate, hour, minute = 0) {
