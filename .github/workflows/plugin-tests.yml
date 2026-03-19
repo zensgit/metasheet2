@@ -76,8 +76,14 @@ jobs:
           path: install.log
 
       - name: Run linting
+        if: matrix.node-version == '20.x'
         run: |
-          pnpm lint || true # Non-blocking for now
+          pnpm lint
+
+      - name: Run type checking
+        if: matrix.node-version == '20.x'
+        run: |
+          pnpm type-check
 
       - name: Run core-backend tests
         run: |
