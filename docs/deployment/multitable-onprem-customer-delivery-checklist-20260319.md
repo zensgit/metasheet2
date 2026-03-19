@@ -58,6 +58,19 @@ scripts/ops/multitable-onprem-package-verify.sh output/releases/multitable-onpre
 scripts/ops/multitable-onprem-package-verify.sh output/releases/multitable-onprem/<PACKAGE_NAME>.zip
 ```
 
+Then prepare one customer-facing delivery directory:
+
+```bash
+cd /Users/huazhou/Downloads/Github/metasheet2-multitable
+pnpm prepare:multitable-onprem:delivery
+```
+
+This writes a final bundle under:
+
+```text
+output/delivery/multitable-onprem/<PACKAGE_NAME>/
+```
+
 If using GitHub Actions release publishing, also record:
 
 1. workflow run id

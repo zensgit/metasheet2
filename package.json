@@ -44,6 +44,7 @@
     "verify:multitable-pilot:ready:local": "bash scripts/ops/multitable-pilot-ready-local.sh",
     "prepare:multitable-pilot:handoff": "node scripts/ops/multitable-pilot-handoff.mjs",
     "build:multitable-onprem-package": "bash scripts/ops/multitable-onprem-package-build.sh",
+    "prepare:multitable-onprem:delivery": "node scripts/ops/multitable-onprem-delivery-bundle.mjs",
     "profile:multitable-grid": "node scripts/profile-multitable-grid.mjs",
     "profile:multitable-grid:local": "RUNNER_SCRIPT=scripts/profile-multitable-grid.mjs RUN_LABEL=multitable-grid-profile bash scripts/ops/multitable-pilot-local.sh",
     "verify:multitable-grid-profile:summary": "node scripts/ops/multitable-grid-profile-summary.mjs",
