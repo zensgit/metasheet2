@@ -2,6 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { readErrorMessage } from '../../src/utils/error'
 
 describe('readErrorMessage', () => {
+  it('returns the original Error message for thrown network failures', () => {
+    expect(
+      readErrorMessage(new Error('network down'), 'fallback'),
+    ).toBe('network down')
+  })
+
   it('returns top-level error when it is a string', () => {
     expect(
       readErrorMessage({ error: 'top error' }, 'fallback'),

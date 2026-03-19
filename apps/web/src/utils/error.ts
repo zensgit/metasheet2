@@ -1,4 +1,8 @@
 export function readErrorMessage(payload: unknown, fallback: string): string {
+  if (payload instanceof Error) {
+    return payload.message
+  }
+
   if (!payload || typeof payload !== 'object') {
     return fallback
   }

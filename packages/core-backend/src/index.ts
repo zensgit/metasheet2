@@ -80,6 +80,8 @@ type PluginRuntimeState = {
   lastAttempt?: string
 }
 
+// Transitional shim while older clients still mix `ok` and `success`.
+// Remove this once response payloads are standardized on a single flag.
 function applyResponseCompatibilityAliases(payload: unknown): unknown {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return payload
