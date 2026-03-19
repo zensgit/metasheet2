@@ -152,6 +152,7 @@ import MetaTimelineView from '../components/MetaTimelineView.vue'
 import MetaToast from '../components/MetaToast.vue'
 import MetaImportModal from '../components/MetaImportModal.vue'
 import type { MetaBase } from '../types'
+import { bulkImportRecords } from '../import/bulk-import'
 
 const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; mode?: string; role?: MultitableRole }>()
 
@@ -520,11 +521,28 @@ function onReorderField(fromId: string, toId: string) {
 // --- Bulk import ---
 async function onBulkImport(records: Array<Record<string, unknown>>) {
   try {
-    await Promise.all(records.map((data) => grid.createRecord(data)))
+    const result = await bulkImportRecords({
+      client: workbench.client,
+      sheetId: workbench.activeSheetId.value || undefined,
+      viewId: workbench.activeViewId.value || undefined,
+      records,
+    })
     showImportModal.value = false
-    showSuccess(`${records.length} record(s) imported`)
-    await grid.loadViewData(grid.page.value.offset)
+    if (result.succeeded > 0) {
+      await grid.loadViewData(grid.page.value.offset)
+    }
+    if (result.failed === 0) {
+      showSuccess(`${result.succeeded} record(s) imported`)
+      return
+    }
+    if (result.succeeded > 0) {
+      showError(`${result.failed} record(s) failed to import. ${result.firstError ?? ''}`.trim())
+      showSuccess(`${result.succeeded} record(s) imported`)
+      return
+    }
+    showError(result.firstError ?? 'Import failed')
   } catch (e: any) {
+    showImportModal.value = false
     showError(e.message ?? 'Import failed')
   }
 }
