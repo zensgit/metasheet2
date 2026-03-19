@@ -5,6 +5,7 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import { Router } from 'express'
+import { randomUUID } from 'node:crypto'
 import * as bcrypt from 'bcryptjs'
 import jwt, { type SignOptions } from 'jsonwebtoken'
 import { authService, type User } from '../auth/AuthService'
@@ -55,7 +56,7 @@ authRouter.get('/dev-token', async (req: Request, res: Response) => {
     id: userId,
     roles: roles.length > 0 ? roles : ['admin'],
     perms,
-    sid: crypto.randomUUID(),
+    sid: randomUUID(),
   }
 
   const token = jwt.sign(payload, secret, { algorithm: 'HS256', expiresIn })
