@@ -148,8 +148,11 @@ describe('usePlmProductPanel', () => {
           recommendationReason: 'default',
           recommendationSourceLabel: '当前团队默认场景',
           recommendationSourceTimestamp: '2026-03-19T10:00:00.000Z',
+          primaryActionKind: 'apply-scene',
           primaryActionLabel: '进入默认场景',
-          secondaryActionLabel: '查看默认变更',
+          secondaryActionKind: 'copy-link',
+          secondaryActionLabel: '复制默认链接',
+          actionNote: '当前默认场景更适合作为稳定入口，可直接复制链接发给团队成员。',
           updatedAt: '2026-03-13T08:00:00.000Z',
         },
       ]),
@@ -291,8 +294,11 @@ describe('usePlmProductPanel', () => {
     expect(panel.productPanel.recommendedWorkbenchScenes.value[0]).toMatchObject({
       recommendationSourceLabel: '当前团队默认场景',
       recommendationSourceTimestamp: '2026-03-19T10:00:00.000Z',
+      primaryActionKind: 'apply-scene',
       primaryActionLabel: '进入默认场景',
-      secondaryActionLabel: '查看默认变更',
+      secondaryActionKind: 'copy-link',
+      secondaryActionLabel: '复制默认链接',
+      actionNote: '当前默认场景更适合作为稳定入口，可直接复制链接发给团队成员。',
     })
 
     const scene = panel.productPanel.recommendedWorkbenchScenes.value[0]

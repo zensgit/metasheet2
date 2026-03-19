@@ -1,28 +1,55 @@
 # PLM Team Scene Card Actions Design
 
+Date: 2026-03-19
+Branch: `codex/plm-workbench-collab-20260312`
+
 ## Goal
 
-让推荐场景卡片根据推荐来源显示不同的主动作，而不再统一显示“应用 / 复制链接”。
+Promote the workbench scene catalog from label-only recommendation cards to action-layered cards:
+
+- current default scenes emphasize stable entry and sharing
+- recent default scenes emphasize audit traceability
+- recent update scenes emphasize update review before reuse
 
 ## Design
 
-在 [plmWorkbenchSceneCatalog.ts](/Users/huazhou/Downloads/Github/metasheet2-plm-workbench/apps/web/src/views/plm/plmWorkbenchSceneCatalog.ts) 中新增 `getRecommendationActions(...)`，并让 `buildRecommendedWorkbenchScenes(...)` 返回：
+## Action contract
 
+`PlmRecommendedWorkbenchScene` now carries:
+
+- `primaryActionKind`
 - `primaryActionLabel`
+- `secondaryActionKind`
 - `secondaryActionLabel`
+- `actionNote`
 
-当前规则：
+## Recommendation mapping
 
-- `default`: `进入默认场景` / `复制默认链接`
-- `recent-default`: `查看近期默认` / `复制近期默认链接`
-- `recent-update`: `查看最新更新` / `复制更新场景链接`
+- `default`
+  - primary: `进入默认场景`
+  - secondary: `复制默认链接`
+  - note: stable team entry
+- `recent-default`
+  - primary: `查看近期默认`
+  - secondary: `查看近期默认变更`
+  - note: recent default switch should be audited first
+- `recent-update`
+  - primary: `查看最新更新`
+  - secondary: `查看更新记录`
+  - note: recent update should be reviewed before reuse
 
-这样动作语义继续由 helper 固化，组件只负责渲染。
+## UI behavior
 
-在 [PlmProductPanel.vue](/Users/huazhou/Downloads/Github/metasheet2-plm-workbench/apps/web/src/components/plm/PlmProductPanel.vue) 中，卡片按钮直接消费这组动作文案。
+- scene cards render the action note under recommendation source
+- default scene primary action is visually stronger
+- secondary action dispatches by kind:
+  - `copy-link` -> copy scene link
+  - `open-audit` -> open scene audit
 
-## Why this is better
+## Scope
 
-- 卡片动作更符合推荐来源，不再所有卡片都像同一种入口
-- 语义集中在 helper 层，避免模板内散落条件判断
-- 和上一轮的“推荐来源说明”形成配套
+Frontend-only slice:
+
+- no federation contract changes
+- no backend schema changes
+- no Yuantus behavior changes

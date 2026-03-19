@@ -15,8 +15,11 @@ function createScene(
     isDefault: false,
     recommendationReason: 'recent-update',
     recommendationSourceLabel: '近期更新的团队场景',
+    primaryActionKind: 'apply-scene',
     primaryActionLabel: '查看最新更新',
-    secondaryActionLabel: '查看最近更新',
+    secondaryActionKind: 'open-audit',
+    secondaryActionLabel: '查看更新记录',
+    actionNote: '该场景因近期更新被推荐，建议先核对更新记录再决定是否复用。',
     updatedAt: '2026-03-19T08:00:00.000Z',
     ...overrides,
   }
@@ -52,6 +55,7 @@ describe('plmWorkbenchSceneAudit', () => {
       recommendationReason: 'recent-default',
       secondaryActionLabel: '查看近期默认变更',
       recommendationSourceLabel: '近期被设为团队默认场景',
+      secondaryActionKind: 'open-audit',
       lastDefaultSetAt: '2026-03-19T09:00:00.000Z',
     }))).toEqual({
       auditQ: 'scene-1',

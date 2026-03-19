@@ -62,21 +62,30 @@ function getRecommendationActions(
 ) {
   if (recommendationReason === 'default') {
     return {
+      primaryActionKind: 'apply-scene' as const,
       primaryActionLabel: '进入默认场景',
-      secondaryActionLabel: '查看默认变更',
+      secondaryActionKind: 'copy-link' as const,
+      secondaryActionLabel: '复制默认链接',
+      actionNote: '当前默认场景更适合作为稳定入口，可直接复制链接发给团队成员。',
     }
   }
 
   if (recommendationReason === 'recent-default') {
     return {
+      primaryActionKind: 'apply-scene' as const,
       primaryActionLabel: '查看近期默认',
+      secondaryActionKind: 'open-audit' as const,
       secondaryActionLabel: '查看近期默认变更',
+      actionNote: '该场景近期被提升为默认入口，建议先查看默认变更再继续扩散。',
     }
   }
 
   return {
+    primaryActionKind: 'apply-scene' as const,
     primaryActionLabel: '查看最新更新',
-    secondaryActionLabel: '查看最近更新',
+    secondaryActionKind: 'open-audit' as const,
+    secondaryActionLabel: '查看更新记录',
+    actionNote: '该场景因近期更新被推荐，建议先核对更新记录再决定是否复用。',
   }
 }
 
@@ -150,8 +159,11 @@ export function buildRecommendedWorkbenchScenes(
         recommendationReason,
         recommendationSourceLabel: recommendationSource.label,
         recommendationSourceTimestamp: recommendationSource.timestamp,
+        primaryActionKind: recommendationActions.primaryActionKind,
         primaryActionLabel: recommendationActions.primaryActionLabel,
+        secondaryActionKind: recommendationActions.secondaryActionKind,
         secondaryActionLabel: recommendationActions.secondaryActionLabel,
+        actionNote: recommendationActions.actionNote,
         updatedAt: view.updatedAt,
       }
     })

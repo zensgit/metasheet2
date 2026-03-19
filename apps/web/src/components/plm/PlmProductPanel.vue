@@ -297,12 +297,17 @@
                 · {{ panel.formatTime(scene.recommendationSourceTimestamp) }}
               </template>
             </span>
+            <span class="scene-catalog__action-note">{{ scene.actionNote }}</span>
           </div>
           <div class="scene-catalog__actions">
-            <button class="btn ghost mini" @click="panel.applyRecommendedWorkbenchScene(scene.id)">
+            <button
+              class="btn mini"
+              :class="scene.isDefault ? 'primary' : 'ghost'"
+              @click="panel.applyRecommendedWorkbenchScene(scene.id)"
+            >
               {{ scene.primaryActionLabel }}
             </button>
-            <button class="btn ghost mini" @click="panel.openRecommendedWorkbenchSceneAudit(scene)">
+            <button class="btn ghost mini" @click="handleSceneSecondaryAction(scene)">
               {{ scene.secondaryActionLabel }}
             </button>
           </div>
@@ -508,6 +513,15 @@ function sceneBadgeLabel(scene: PlmRecommendedWorkbenchScene) {
   if (scene.recommendationReason === 'recent-default') return '近期默认'
   if (scene.recommendationReason === 'recent-update') return '近期更新'
   return ''
+}
+
+async function handleSceneSecondaryAction(scene: PlmRecommendedWorkbenchScene) {
+  if (scene.secondaryActionKind === 'copy-link') {
+    await props.panel.copyRecommendedWorkbenchSceneLink(scene.id)
+    return
+  }
+
+  await props.panel.openRecommendedWorkbenchSceneAudit(scene)
 }
 </script>
 

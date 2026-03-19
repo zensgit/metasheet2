@@ -576,8 +576,11 @@ export type PlmRecommendedWorkbenchScene = {
   recommendationReason: 'default' | 'recent-default' | 'recent-update'
   recommendationSourceLabel: string
   recommendationSourceTimestamp?: string
+  primaryActionKind: 'apply-scene'
   primaryActionLabel: string
+  secondaryActionKind: 'copy-link' | 'open-audit'
   secondaryActionLabel: string
+  actionNote: string
   updatedAt?: string
 }
 

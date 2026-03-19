@@ -89,9 +89,15 @@ describe('plmWorkbenchSceneCatalog', () => {
     expect(scenes[0].recommendationSourceLabel).toBe('当前团队默认场景')
     expect(scenes[1].recommendationSourceLabel).toBe('近期被设为团队默认场景')
     expect(scenes[2].recommendationSourceLabel).toBe('近期更新的团队场景')
+    expect(scenes[0].primaryActionKind).toBe('apply-scene')
     expect(scenes[0].primaryActionLabel).toBe('进入默认场景')
+    expect(scenes[0].secondaryActionKind).toBe('copy-link')
+    expect(scenes[0].secondaryActionLabel).toBe('复制默认链接')
+    expect(scenes[0].actionNote).toContain('稳定入口')
     expect(scenes[1].primaryActionLabel).toBe('查看近期默认')
-    expect(scenes[2].secondaryActionLabel).toBe('查看最近更新')
+    expect(scenes[1].secondaryActionKind).toBe('open-audit')
+    expect(scenes[2].secondaryActionLabel).toBe('查看更新记录')
+    expect(scenes[2].actionNote).toContain('更新记录')
   })
 
   it('applies owner filter before ranking and truncates to 6 scenes', () => {
@@ -137,8 +143,11 @@ describe('plmWorkbenchSceneCatalog', () => {
       recommendationReason: 'recent-default',
       recommendationSourceLabel: '近期被设为团队默认场景',
       recommendationSourceTimestamp: '2026-03-19T09:00:00.000Z',
+      primaryActionKind: 'apply-scene',
       primaryActionLabel: '查看近期默认',
+      secondaryActionKind: 'open-audit',
       secondaryActionLabel: '查看近期默认变更',
+      actionNote: '该场景近期被提升为默认入口，建议先查看默认变更再继续扩散。',
     })
   })
 

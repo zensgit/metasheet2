@@ -399,6 +399,12 @@ textarea:focus {
   color: #475467;
 }
 
+.scene-catalog__action-note {
+  width: 100%;
+  font-size: 12px;
+  color: #667085;
+}
+
 .scene-catalog__actions {
   display: inline-flex;
   flex-wrap: wrap;
