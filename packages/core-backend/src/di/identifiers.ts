@@ -1,7 +1,7 @@
 import { createIdentifier } from '@wendellhu/redi';
-import { ConfigValue } from '../services/ConfigService';
-import { CollectionDefinition } from '../types/collection';
-import { Repository } from '../core/database/Repository';
+import type { ConfigValue } from '../services/ConfigService';
+import type { CollectionDefinition } from '../types/collection';
+import type { Repository } from '../core/database/Repository';
 import type { PluginLoader } from '../core/plugin-loader';
 import type { CoreAPI } from '../types/plugin';
 

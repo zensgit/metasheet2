@@ -1,7 +1,7 @@
 import { Inject, Optional } from '@wendellhu/redi'
 import { IConfigService, ILogger } from '../di/identifiers'
 import { HTTPAdapter } from './HTTPAdapter'
-import { QueryResult, DataSourceConfig } from './BaseAdapter'
+import type { QueryResult, DataSourceConfig } from './BaseAdapter'
 
 export interface PLMProduct {
   id: string

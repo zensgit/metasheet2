@@ -1,6 +1,6 @@
 
 import { ICollabService, ILogger, type CommentQueryOptions } from '../di/identifiers';
-import { CollabService } from './CollabService';
+import type { CollabService } from './CollabService';
 import { db } from '../db/db';
 
 export interface Comment {

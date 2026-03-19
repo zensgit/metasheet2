@@ -11,10 +11,11 @@ import { createServer } from 'http'
 import cors from 'cors'
 import crypto from 'crypto'
 import { EventEmitter } from 'eventemitter3'
-import { Injector } from '@wendellhu/redi' // IoC Container
+import type { Injector } from '@wendellhu/redi' // IoC Container
 import { createContainer } from './di/container'
 import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService } from './di/identifiers'
-import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
+import type { PluginLoader} from './core/plugin-loader';
+import { type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
 import type {
   CoreAPI,
