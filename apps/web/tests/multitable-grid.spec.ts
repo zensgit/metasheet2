@@ -67,6 +67,54 @@ describe('useMultitableGrid', () => {
     expect(grid.fields.value).toEqual([{ id: 'f1', name: 'Title', type: 'string' }])
   })
 
+  it('ignores stale load responses and keeps the latest page data', async () => {
+    let resolveFirst: ((value: Response) => void) | null = null
+    let resolveSecond: ((value: Response) => void) | null = null
+    const fetchFn = vi.fn((input: string) => {
+      if (!input.startsWith('/api/multitable/view')) throw new Error(`Unexpected request: ${input}`)
+      return new Promise<Response>((resolve) => {
+        if (!resolveFirst) {
+          resolveFirst = resolve
+          return
+        }
+        resolveSecond = resolve
+      })
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref('s1'),
+      viewId: ref('v1'),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.loadViewData(50)
+
+    resolveSecond?.(new Response(JSON.stringify({
+      ok: true,
+      data: {
+        fields: [{ id: 'f1', name: 'Title', type: 'string' }],
+        rows: [{ id: 'r2', version: 2, data: { f1: 'latest page' } }],
+        page: { offset: 50, limit: 50, total: 100, hasMore: false },
+      },
+    }), { status: 200 }))
+    await nextTick()
+    await nextTick()
+
+    resolveFirst?.(new Response(JSON.stringify({
+      ok: true,
+      data: {
+        fields: [{ id: 'f1', name: 'Title', type: 'string' }],
+        rows: [{ id: 'r1', version: 1, data: { f1: 'stale page' } }],
+        page: { offset: 0, limit: 50, total: 100, hasMore: true },
+      },
+    }), { status: 200 }))
+    await vi.waitFor(() => {
+      expect(grid.rows.value).toEqual([{ id: 'r2', version: 2, data: { f1: 'latest page' } }])
+    })
+
+    expect(grid.page.value.offset).toBe(50)
+  })
+
   it('toggle field visibility', () => {
     const grid = useMultitableGrid({ sheetId: ref('s1'), viewId: ref('v1'), client })
     grid.toggleFieldVisibility('f1')
@@ -211,6 +259,53 @@ describe('useMultitableGrid', () => {
       { id: 'vendor_1', display: 'Acme Supply' },
       { id: 'vendor_2', display: 'Beacon Labs' },
     ])
+  })
+
+  it('captures version conflicts and can retry against the latest version', async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: false,
+        error: {
+          code: 'VERSION_CONFLICT',
+          message: 'Version conflict for r1',
+          serverVersion: 2,
+        },
+      }), { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        data: {
+          updated: [{ recordId: 'r1', version: 3 }],
+          records: [{ recordId: 'r1', data: { f1: 'patched latest' } }],
+        },
+      }), { status: 200 }))
+
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.rows.value = [{ id: 'r1', version: 1, data: { f1: 'before' } }]
+
+    await grid.patchCell('r1', 'f1', 'patched latest', 1)
+
+    expect(grid.conflict.value).toMatchObject({
+      recordId: 'r1',
+      fieldId: 'f1',
+      attemptedValue: 'patched latest',
+      serverVersion: 2,
+    })
+    expect(grid.rows.value[0]?.data.f1).toBe('before')
+
+    grid.rows.value[0]!.version = 2
+    await expect(grid.retryConflict()).resolves.toBe(true)
+
+    expect(grid.conflict.value).toBeNull()
+    expect(grid.rows.value[0]).toMatchObject({
+      id: 'r1',
+      version: 3,
+      data: { f1: 'patched latest' },
+    })
   })
 
   it('patchCell, undo and redo round-trip a link-style cell value', async () => {

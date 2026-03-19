@@ -9,6 +9,17 @@
       <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; Fields</button>
       <button v-if="caps.canManageViews.value" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
     </div>
+    <div v-if="grid.conflict.value" class="mt-workbench__conflict" role="alert">
+      <div class="mt-workbench__conflict-copy">
+        <strong>Update conflict</strong>
+        <span>{{ conflictMessage }}</span>
+      </div>
+      <div class="mt-workbench__conflict-actions">
+        <button class="mt-workbench__conflict-btn" @click="onReloadConflict">Reload latest</button>
+        <button class="mt-workbench__conflict-btn mt-workbench__conflict-btn--primary" @click="onRetryConflict">Retry change</button>
+        <button class="mt-workbench__conflict-btn" @click="grid.dismissConflict()">Dismiss</button>
+      </div>
+    </div>
     <MetaToolbar
       :fields="grid.fields.value" :hidden-field-ids="grid.hiddenFieldIds.value"
       :sort-rules="grid.sortRules.value" :filter-rules="grid.filterRules.value"
@@ -242,6 +253,17 @@ const selectedRecordAttachmentSummaries = computed<Record<string, MetaAttachment
   if (deepLinkedRecord.value?.id === recordId) return deepLinkedRecordAttachmentSummaries.value
   return {}
 })
+const conflictFieldName = computed(() => {
+  const fieldId = grid.conflict.value?.fieldId
+  if (!fieldId) return 'cell'
+  return grid.fields.value.find((field) => field.id === fieldId)?.name ?? fieldId
+})
+const conflictMessage = computed(() => {
+  const current = grid.conflict.value
+  if (!current) return ''
+  const versionPart = typeof current.serverVersion === 'number' ? ` Latest version is ${current.serverVersion}.` : ''
+  return `${conflictFieldName.value} changed elsewhere.${versionPart} Reload the row or retry your edit.`
+})
 
 function applyLocalLinkSummaries(recordId: string, fieldId: string, summaries: LinkedRecordSummary[]) {
   grid.linkSummaries.value = {
@@ -307,6 +329,26 @@ async function onDeleteRecord() {
     showComments.value = false
     commentDraft.value = ''
     showSuccess('Record deleted')
+    return
+  }
+  if (grid.error.value) showError(grid.error.value)
+}
+
+async function onReloadConflict() {
+  await grid.reloadCurrentPage()
+  if (selectedRecordId.value) {
+    await resolveDeepLink(selectedRecordId.value)
+  }
+  showSuccess('Loaded the latest row state')
+}
+
+async function onRetryConflict() {
+  const retried = await grid.retryConflict()
+  if (retried) {
+    if (selectedRecordId.value) {
+      await resolveDeepLink(selectedRecordId.value)
+    }
+    showSuccess('Change reapplied')
     return
   }
   if (grid.error.value) showError(grid.error.value)
@@ -756,6 +798,29 @@ onBeforeUnmount(() => {
 .mt-workbench__actions { display: flex; gap: 6px; padding: 4px 16px 0; }
 .mt-workbench__mgr-btn { padding: 3px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #666; }
 .mt-workbench__mgr-btn:hover { background: #f5f7fa; color: #409eff; border-color: #c0d8f0; }
+.mt-workbench__conflict {
+  margin: 8px 16px 0;
+  padding: 10px 12px;
+  border: 1px solid #f3d19e;
+  border-radius: 8px;
+  background: #fff7e6;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.mt-workbench__conflict-copy { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #8a5a00; }
+.mt-workbench__conflict-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mt-workbench__conflict-btn {
+  padding: 5px 10px;
+  border: 1px solid #e0c58f;
+  border-radius: 4px;
+  background: #fff;
+  color: #7a4d00;
+  font-size: 12px;
+  cursor: pointer;
+}
+.mt-workbench__conflict-btn--primary { background: #f59e0b; border-color: #f59e0b; color: #fff; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }
 .mt-workbench__shortcuts-overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; }
 .mt-workbench__shortcuts { background: #fff; border-radius: 8px; padding: 20px 24px; min-width: 320px; box-shadow: 0 8px 24px rgba(0,0,0,.15); }

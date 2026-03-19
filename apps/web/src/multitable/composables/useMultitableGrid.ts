@@ -33,6 +33,16 @@ export interface CellEdit {
   newLinkSummaries?: LinkedRecordSummary[]
 }
 
+export interface GridConflictState {
+  recordId: string
+  fieldId: string
+  attemptedValue: unknown
+  message: string
+  serverVersion?: number
+  previousLinkSummaries?: LinkedRecordSummary[]
+  nextLinkSummaries?: LinkedRecordSummary[]
+}
+
 // --- Serialisation helpers ---
 
 export function buildSortInfo(rules: SortRule[]): { rules: Array<{ fieldId: string; desc: boolean }> } | undefined {
@@ -133,6 +143,8 @@ export function useMultitableGrid(opts: {
   const attachmentSummaries = ref<Record<string, Record<string, MetaAttachment[]>>>({})
   const loading = ref(false)
   const error = ref<string | null>(null)
+  const conflict = ref<GridConflictState | null>(null)
+  let latestLoadRequestId = 0
 
   // Pagination
   const page = ref<MetaPage>({ offset: 0, limit: pageSize, total: 0, hasMore: false })
@@ -194,6 +206,7 @@ export function useMultitableGrid(opts: {
     const sid = opts.sheetId.value
     const vid = opts.viewId.value
     if (!sid) return
+    const requestId = ++latestLoadRequestId
     loading.value = true
     error.value = null
     try {
@@ -209,6 +222,7 @@ export function useMultitableGrid(opts: {
         includeLinkSummaries: true,
         search: searchQuery.value || undefined,
       })
+      if (requestId !== latestLoadRequestId) return
       fields.value = data.fields ?? []
       rows.value = data.rows ?? []
       linkSummaries.value = data.linkSummaries ?? {}
@@ -216,9 +230,10 @@ export function useMultitableGrid(opts: {
       if (data.page) page.value = data.page
       if (data.view) syncFromView(data.view)
     } catch (e: any) {
+      if (requestId !== latestLoadRequestId) return
       error.value = e.message ?? 'Failed to load view data'
     } finally {
-      loading.value = false
+      if (requestId === latestLoadRequestId) loading.value = false
     }
   }
 
@@ -364,6 +379,10 @@ export function useMultitableGrid(opts: {
     }
   }
 
+  async function reloadCurrentPage() {
+    await loadViewData(page.value.offset)
+  }
+
   async function patchCell(
     recordId: string,
     fieldId: string,
@@ -375,6 +394,7 @@ export function useMultitableGrid(opts: {
     },
   ) {
     error.value = null
+    conflict.value = null
     const row = rows.value.find((r) => r.id === recordId)
     const oldValue = row?.data[fieldId]
     const oldLinkSummaries = options?.previousLinkSummaries ?? linkSummaries.value[recordId]?.[fieldId]
@@ -402,6 +422,17 @@ export function useMultitableGrid(opts: {
       // Revert optimistic update
       if (row) row.data[fieldId] = oldValue
       setLinkSummaries(recordId, fieldId, oldLinkSummaries)
+      if (e?.code === 'VERSION_CONFLICT') {
+        conflict.value = {
+          recordId,
+          fieldId,
+          attemptedValue: value,
+          message: e.message ?? 'This cell was updated elsewhere. Reload and retry.',
+          serverVersion: typeof e.serverVersion === 'number' ? e.serverVersion : undefined,
+          previousLinkSummaries: oldLinkSummaries,
+          nextLinkSummaries,
+        }
+      }
       error.value = e.message ?? 'Failed to patch cell'
     }
   }
@@ -442,6 +473,34 @@ export function useMultitableGrid(opts: {
     } catch {
       // silent
     }
+  }
+
+  function dismissConflict() {
+    conflict.value = null
+  }
+
+  async function retryConflict(): Promise<boolean> {
+    const pending = conflict.value
+    if (!pending) return false
+
+    let row = rows.value.find((record) => record.id === pending.recordId)
+    const needsReload = !row || (typeof pending.serverVersion === 'number' && row.version !== pending.serverVersion)
+    if (needsReload) {
+      await reloadCurrentPage()
+      row = rows.value.find((record) => record.id === pending.recordId)
+    }
+    if (!row) {
+      error.value = 'The latest record version is not available on this page anymore.'
+      return false
+    }
+
+    const pendingConflict = pending
+    conflict.value = null
+    await patchCell(row.id, pending.fieldId, pending.attemptedValue, row.version, {
+      previousLinkSummaries: pendingConflict.previousLinkSummaries,
+      nextLinkSummaries: pendingConflict.nextLinkSummaries,
+    })
+    return !conflict.value && !error.value
   }
 
   function applyPatchResult(result?: PatchResult) {
@@ -527,6 +586,7 @@ export function useMultitableGrid(opts: {
     () => {
       sortFilterDirty.value = false
       clearEditHistory()
+      dismissConflict()
       if (opts.sheetId.value) loadViewData(0)
     },
     { immediate: true },
@@ -534,7 +594,7 @@ export function useMultitableGrid(opts: {
 
   return {
     // State
-    fields, rows, linkSummaries, attachmentSummaries, loading, error, page, hiddenFieldIds, visibleFields,
+    fields, rows, linkSummaries, attachmentSummaries, loading, error, conflict, page, hiddenFieldIds, visibleFields,
     sortRules, filterRules, filterConjunction, sortFilterDirty,
     columnWidths, groupFieldId, groupField,
     editHistory, historyIndex, canUndo, canRedo,
@@ -542,13 +602,13 @@ export function useMultitableGrid(opts: {
     // Computed
     currentPage, totalPages,
     // Methods
-    loadViewData, goToPage,
+    loadViewData, reloadCurrentPage, goToPage,
     toggleFieldVisibility,
     addSortRule, removeSortRule,
     addFilterRule, updateFilterRule, removeFilterRule, clearFilters,
     applySortFilter,
     createRecord, deleteRecord, patchCell,
-    undo, redo, clearEditHistory,
+    undo, redo, clearEditHistory, dismissConflict, retryConflict,
     setColumnWidth, setGroupField,
     setSearchQuery,
   }
