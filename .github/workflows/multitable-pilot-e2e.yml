@@ -67,6 +67,26 @@ jobs:
           OUTPUT_ROOT: output/playwright/multitable-pilot-local/ci
         run: pnpm verify:multitable-pilot:local
 
+      - name: Run multitable grid profile
+        env:
+          PILOT_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/metasheet
+          RBAC_TOKEN_TRUST: 'true'
+          ENSURE_PLAYWRIGHT: 'false'
+          HEADLESS: 'true'
+          OUTPUT_ROOT: output/playwright/multitable-grid-profile-local/ci
+          ROW_COUNT: '2000'
+        run: pnpm profile:multitable-grid:local
+
+      - name: Summarize multitable grid profile
+        env:
+          REPORT_JSON: output/playwright/multitable-grid-profile-local/ci/report.json
+          SUMMARY_MD: output/playwright/multitable-grid-profile-local/ci/summary.md
+          UI_GRID_OPEN_MAX_MS: '350'
+          UI_GRID_SEARCH_HIT_MAX_MS: '300'
+          API_GRID_INITIAL_LOAD_MAX_MS: '25'
+          API_GRID_SEARCH_HIT_MAX_MS: '25'
+        run: pnpm verify:multitable-grid-profile:summary
+
       - name: Upload multitable pilot artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -75,3 +95,4 @@ jobs:
           retention-days: 14
           path: |
             output/playwright/multitable-pilot-local
+            output/playwright/multitable-grid-profile-local

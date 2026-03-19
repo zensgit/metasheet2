@@ -42,6 +42,7 @@
     "verify:multitable-pilot:local": "bash scripts/ops/multitable-pilot-local.sh",
     "profile:multitable-grid": "node scripts/profile-multitable-grid.mjs",
     "profile:multitable-grid:local": "RUNNER_SCRIPT=scripts/profile-multitable-grid.mjs RUN_LABEL=multitable-grid-profile bash scripts/ops/multitable-pilot-local.sh",
+    "verify:multitable-grid-profile:summary": "node scripts/ops/multitable-grid-profile-summary.mjs",
     "phase5:run-all": "bash scripts/phase5-run-all.sh",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
