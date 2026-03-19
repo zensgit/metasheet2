@@ -18,7 +18,6 @@ import type { BOMItem as AdapterBOMItem, PLMProduct as AdapterPLMProduct } from 
 import type { AthenaDocument as AdapterAthenaDocument, DocumentVersion as AdapterDocumentVersion } from '../data-adapters/AthenaAdapter'
 import {
   getAdapterMetrics,
-  recordCrossSystemOperation,
   startCrossSystemTimer,
 } from '../metrics/adapter-metrics'
 
