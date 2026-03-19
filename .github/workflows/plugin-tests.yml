@@ -14,14 +14,6 @@ on:
       - '.github/workflows/*.yml'
   pull_request:
     branches: [main, develop]
-    paths:
-      - 'packages/core-backend/**'
-      - 'plugins/**'
-      - 'apps/web/src/**'
-      - 'scripts/**'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - '.github/workflows/*.yml'
 
 jobs:
   test:
