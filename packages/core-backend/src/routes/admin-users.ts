@@ -197,7 +197,7 @@ function sanitizeEmail(email: string): string {
 }
 
 function sanitizeName(name: string): string {
-  return name.trim().replace(/[<>'\"&;]/g, '').slice(0, 100)
+  return name.trim().replace(/[<>'"&;]/g, '').slice(0, 100)
 }
 
 function parseAuditRangeBoundary(value: unknown, mode: AuditRangeBoundaryMode): string | null {
