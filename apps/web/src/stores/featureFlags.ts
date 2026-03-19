@@ -1,5 +1,6 @@
 import { computed, reactive, readonly } from 'vue'
-import { apiFetch, getStoredAuthToken } from '../utils/api'
+import { useAuth } from '../composables/useAuth'
+import { apiFetch } from '../utils/api'
 
 export type ProductMode = 'platform' | 'attendance' | 'plm-workbench'
 
@@ -113,6 +114,10 @@ function boolOrDefault(...values: Array<unknown>): boolean {
     if (typeof value === 'boolean') return value
   }
   return false
+}
+
+function needsPluginInference(features: Partial<ProductFeatures>): boolean {
+  return typeof features.attendance !== 'boolean' || typeof features.workflow !== 'boolean'
 }
 
 function extractFeaturesFromPayload(payload: any): Partial<ProductFeatures> {
@@ -240,10 +245,7 @@ async function loadProductFeatures(
   options: LoadProductFeatureOptions = {},
 ): Promise<ProductFeatures> {
   const requiresSessionProbe = !options.skipSessionProbe
-  if (state.loaded && !force) {
-    if (requiresSessionProbe && state.sessionAwareLoaded) return state.features
-    if (!requiresSessionProbe && !state.sessionAwareLoaded) return state.features
-  }
+  if (state.loaded && !force && (!requiresSessionProbe || state.sessionAwareLoaded)) return state.features
   if (state.loading && loadPromise) return loadPromise
 
   state.loading = true
@@ -252,41 +254,41 @@ async function loadProductFeatures(
   loadPromise = (async () => {
     let mePayload: any = null
     let pluginPayload: any = null
-    const hasStoredToken = getStoredAuthToken().length > 0
+    let backendFeatures: Partial<ProductFeatures> = {}
+    const { ensureToken, getToken, bootstrapSession } = useAuth()
 
     try {
-      const requests: Array<Promise<Response | null>> = []
+      const currentToken = getToken()
 
-      if (requiresSessionProbe) {
-        requests.push(apiFetch('/api/auth/me').catch(() => null))
-        requests.push(apiFetch('/api/plugins').catch(() => null))
-      } else if (hasStoredToken) {
-        requests.push(apiFetch('/api/plugins').catch(() => null))
+      if (!currentToken && requiresSessionProbe) {
+        await ensureToken()
       }
 
-      const responses = requests.length > 0 ? await Promise.all(requests) : []
-      const pluginRes = requests.length > 0 ? (responses.at(-1) ?? null) : null
-      const meRes = requiresSessionProbe ? (responses[0] ?? null) : null
-
-      if (meRes?.ok) {
-        mePayload = await meRes.json()
+      if (requiresSessionProbe && getToken()) {
+        const session = await bootstrapSession()
+        if (session.ok && session.payload) {
+          mePayload = session.payload
+          backendFeatures = extractFeaturesFromPayload(mePayload)
+        }
       }
 
-      if (pluginRes?.ok) {
-        pluginPayload = await pluginRes.json()
+      if (needsPluginInference(backendFeatures)) {
+        const pluginRes = await apiFetch('/api/plugins').catch(() => null)
+        if (pluginRes?.ok) {
+          pluginPayload = await pluginRes.json()
+        }
       }
     } catch (error) {
       state.error = error instanceof Error ? error.message : 'Failed to load product features'
     }
 
-    const backendFeatures = extractFeaturesFromPayload(mePayload)
     const pluginInference = inferPluginFeatures(pluginPayload)
     const overrideFeatures = parseOverrideFeatures()
     const adminRole = isAdminRole(mePayload)
 
     state.features = resolveFeatures(backendFeatures, overrideFeatures, pluginInference, adminRole)
     state.loaded = true
-    state.sessionAwareLoaded = requiresSessionProbe
+    state.sessionAwareLoaded = state.sessionAwareLoaded || requiresSessionProbe
     state.loading = false
 
     return state.features
