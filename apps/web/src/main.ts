@@ -7,10 +7,10 @@ import type { RouteRecordRaw } from 'vue-router'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
 import App from './App.vue'
+import { useAuth } from './composables/useAuth'
 import { ROUTE_PATHS } from './router/types'
 import { useFeatureFlags } from './stores/featureFlags'
 import { normalizePostLoginRedirect, normalizePreLoginRedirect } from './utils/authRedirect'
-import { apiFetch, clearStoredAuthState, getStoredAuthToken } from './utils/api'
 
 // Import views
 import GridView from './views/GridView.vue'
@@ -121,8 +121,11 @@ const router = createRouter({
 
 // Navigation guard for page title
 router.beforeEach(async (to, _from, next) => {
-  const token = getStoredAuthToken()
+  const auth = useAuth()
+  const token = auth.getToken()
   const isLoginRoute = to.path === ROUTE_PATHS.LOGIN
+  const requiresAuth = to.meta?.requiresAuth !== false
+  const flags = useFeatureFlags()
   const title = to.meta?.title
 
   if (title) {
@@ -131,39 +134,44 @@ router.beforeEach(async (to, _from, next) => {
     document.title = 'MetaSheet'
   }
 
-  if (!token && !isLoginRoute) {
-    const redirect = normalizePreLoginRedirect(to.fullPath || '/attendance')
-    return next({
-      path: ROUTE_PATHS.LOGIN,
-      query: { redirect },
-    })
+  if (isLoginRoute) {
+    if (token) {
+      const session = await auth.bootstrapSession()
+      if (session.ok) {
+        try {
+          await flags.loadProductFeatures()
+        } catch {
+          // Fall back to shell redirect when feature probing is temporarily unavailable.
+        }
+        const redirect = normalizePostLoginRedirect(to.query?.redirect)
+        return next(redirect || flags.resolveHomePath())
+      }
+    }
+    return next()
   }
 
-  if (token && isLoginRoute) {
-    const verify = await apiFetch('/api/auth/me', {
-      suppressUnauthorizedRedirect: true,
-    })
-    if (!verify.ok) {
-      clearStoredAuthState()
-      return next()
+  if (requiresAuth) {
+    const redirect = normalizePreLoginRedirect(to.fullPath || '/attendance')
+    const ensuredToken = token || await auth.ensureToken()
+    if (!ensuredToken) {
+      return next({
+        path: ROUTE_PATHS.LOGIN,
+        query: { redirect },
+      })
     }
 
-    const redirect = normalizePostLoginRedirect(to.query?.redirect)
-    const flags = useFeatureFlags()
-    try {
-      await flags.loadProductFeatures()
-    } catch {
-      // noop
+    const session = await auth.bootstrapSession()
+    if (!session.ok) {
+      return next({
+        path: ROUTE_PATHS.LOGIN,
+        query: { redirect },
+      })
     }
-    return next(redirect || flags.resolveHomePath())
   }
 
   // Product capability guard + attendance focused mode restriction.
   try {
-    const flags = useFeatureFlags()
-    if (token) {
-      await flags.loadProductFeatures()
-    }
+    await flags.loadProductFeatures()
 
     const required = to.meta?.requiredFeature
     const requiredFeature =

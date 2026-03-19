@@ -139,8 +139,8 @@ function onLocaleChange(event: Event): void {
 onMounted(async () => {
   await loadProductFeatures(false, {
     skipSessionProbe: isPublicRoute.value,
-  })
-  if (isPublicRoute.value) {
+  }).catch(() => null)
+  if (isPublicRoute.value || attendanceFocused.value) {
     return
   }
   await fetchPlugins()
