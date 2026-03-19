@@ -90,6 +90,33 @@ describe('useAttendanceAdminRulesAndGroups', () => {
     expect(options.setStatus).toHaveBeenCalledWith('Rule set saved.')
   })
 
+  it('auto-generates a group code from the name when the code is blank', async () => {
+    const apiFetch = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input === '/api/attendance/groups' && init?.method === 'POST') {
+        return jsonResponse(200, { ok: true, data: { id: 'group-1' } })
+      }
+      if (input === '/api/attendance/groups?orgId=org-1') {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    const options = createOptions({ apiFetch })
+    const rules = useAttendanceAdminRulesAndGroups(options)
+    rules.attendanceGroupForm.name = 'Operations Team'
+    rules.attendanceGroupForm.code = ''
+
+    await rules.saveAttendanceGroup()
+
+    const [, init] = apiFetch.mock.calls[0]!
+    expect(JSON.parse(String(init?.body || '{}'))).toMatchObject({
+      code: 'operations_team',
+      name: 'Operations Team',
+      timezone: 'Asia/Shanghai',
+      orgId: 'org-1',
+    })
+    expect(options.setStatus).toHaveBeenCalledWith('Attendance group saved.')
+  })
+
   it('validates rule template library schema before saving', async () => {
     const apiFetch = vi.fn()
     const options = createOptions({ apiFetch })
@@ -100,6 +127,62 @@ describe('useAttendanceAdminRulesAndGroups', () => {
 
     expect(apiFetch).not.toHaveBeenCalled()
     expect(options.setStatus).toHaveBeenCalledWith(expect.stringContaining('Template schema errors:'), 'error')
+  })
+
+  it('loads template version details when opening a stored version', async () => {
+    const apiFetch = vi.fn(async (input: string) => {
+      if (input === '/api/attendance/rule-templates') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            system: [],
+            library: [],
+            versions: [
+              {
+                id: 'version-1',
+                version: 2,
+                itemCount: 1,
+                createdAt: '2026-03-18T08:00:00.000Z',
+                createdBy: 'tester',
+              },
+            ],
+          },
+        })
+      }
+      if (input === '/api/attendance/rule-templates/versions/version-1') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            id: 'version-1',
+            version: 2,
+            itemCount: 1,
+            createdAt: '2026-03-18T08:00:00.000Z',
+            createdBy: 'tester',
+            templates: [
+              {
+                id: 'tpl-1',
+                name: 'Standard Weekday',
+                rules: [],
+              },
+            ],
+          },
+        })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    const options = createOptions({ apiFetch })
+    const rules = useAttendanceAdminRulesAndGroups(options)
+
+    await rules.loadRuleTemplates()
+    await rules.openRuleTemplateVersion('version-1')
+
+    expect(apiFetch).toHaveBeenNthCalledWith(1, '/api/attendance/rule-templates')
+    expect(apiFetch).toHaveBeenNthCalledWith(2, '/api/attendance/rule-templates/versions/version-1')
+    expect(rules.selectedRuleTemplateVersion.value?.id).toBe('version-1')
+    expect(rules.selectedRuleTemplateVersion.value?.templates).toEqual([
+      expect.objectContaining({ id: 'tpl-1', name: 'Standard Weekday' }),
+    ])
+    expect(rules.ruleTemplateVersionLoading.value).toBe(false)
   })
 
   it('loads groups, manages members, and keeps the selected group synced', async () => {

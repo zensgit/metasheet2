@@ -2,6 +2,8 @@
  * API utilities for frontend-backend communication
  */
 
+import { normalizePreLoginRedirect } from './authRedirect'
+
 // Vite environment type declaration
 declare global {
   interface ImportMetaEnv {
@@ -19,6 +21,10 @@ declare global {
 const TOKEN_STORAGE_KEYS = ['auth_token', 'jwt', 'devToken'] as const
 const USER_STATE_KEYS = ['metasheet_features', 'metasheet_product_mode', 'user_permissions', 'user_roles'] as const
 let authRedirecting = false
+
+export interface ApiFetchOptions extends RequestInit {
+  suppressUnauthorizedRedirect?: boolean
+}
 
 /**
  * Get the API base URL from environment or default to relative path
@@ -91,7 +97,8 @@ function buildLoginRedirectUrl(): string {
   if (typeof window === 'undefined') return '/login'
   const current = `${window.location.pathname || ''}${window.location.search || ''}${window.location.hash || ''}` || '/'
   if (current.startsWith('/login')) return '/login'
-  return `/login?redirect=${encodeURIComponent(current)}`
+  const redirect = normalizePreLoginRedirect(current)
+  return `/login?redirect=${encodeURIComponent(redirect)}`
 }
 
 function handleUnauthorized(path: string): void {
@@ -116,21 +123,22 @@ function handleUnauthorized(path: string): void {
  */
 export async function apiFetch(
   path: string,
-  options: RequestInit = {}
+  options: ApiFetchOptions = {},
 ): Promise<Response> {
   const base = getApiBase()
+  const { suppressUnauthorizedRedirect = false, ...requestOptions } = options
   const headers = {
     'Content-Type': 'application/json',
     ...authHeaders(),
-    ...(options.headers || {})
+    ...(requestOptions.headers || {})
   }
 
   const response = await fetch(`${base}${path}`, {
-    ...options,
+    ...requestOptions,
     headers
   })
 
-  if (response.status === 401) {
+  if (response.status === 401 && !suppressUnauthorizedRedirect) {
     handleUnauthorized(path)
   }
 
