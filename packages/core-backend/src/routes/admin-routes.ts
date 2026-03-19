@@ -1673,7 +1673,7 @@ router.get('/ratelimits', async (req: Request, res: Response) => {
 
     // Get individual bucket stats if requested
     const { showBuckets } = req.query;
-    let buckets: Array<{
+    const buckets: Array<{
       key: string;
       tokensRemaining: number;
       totalAccepted: number;

@@ -350,7 +350,7 @@ function isUndefinedTableError(err: unknown, tableName: string): boolean {
   const code = typeof (err as any)?.code === 'string' ? (err as any).code : null
   const msg = typeof (err as any)?.message === 'string' ? (err as any).message : ''
   if (code === '42P01') return msg.includes(tableName)
-  return msg.includes(`relation \"${tableName}\" does not exist`)
+  return msg.includes(`relation "${tableName}" does not exist`)
 }
 
 function mapFieldType(type: string): UniverMetaField['type'] {
@@ -787,7 +787,7 @@ async function computeDependentLookupRollupRecords(
   if (sheetIds.length === 0) return []
 
   const fieldRes = await query(
-    'SELECT id, sheet_id, name, type, property, \"order\" FROM meta_fields WHERE sheet_id = ANY($1::text[]) ORDER BY \"order\" ASC',
+    'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE sheet_id = ANY($1::text[]) ORDER BY "order" ASC',
     [sheetIds],
   )
 
@@ -2527,24 +2527,16 @@ export function univerMetaRouter(): Router {
           if (linkUpdates.size > 0) {
             for (const [fieldId, { ids }] of linkUpdates.entries()) {
               if (ids.length === 0) {
-                try {
-                  await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
-                } catch (err) {
-                  throw err
-                }
+                await query('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [fieldId, recordId])
                 continue
               }
 
               let existingIds: string[] = []
-              try {
-                const current = await query(
-                  'SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2',
-                  [fieldId, recordId],
-                )
-                existingIds = (current as any).rows.map((r: any) => String(r.foreign_record_id))
-              } catch (err) {
-                throw err
-              }
+              const current = await query(
+                'SELECT foreign_record_id FROM meta_links WHERE field_id = $1 AND record_id = $2',
+                [fieldId, recordId],
+              )
+              existingIds = (current as any).rows.map((r: any) => String(r.foreign_record_id))
 
               const existing = new Set(existingIds)
               const next = new Set(ids)
@@ -2552,27 +2544,19 @@ export function univerMetaRouter(): Router {
               const toInsert = ids.filter((id) => !existing.has(id))
 
               if (toDelete.length > 0) {
-                try {
-                  await query(
-                    'DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = ANY($3::text[])',
-                    [fieldId, recordId, toDelete],
-                  )
-                } catch (err) {
-                  throw err
-                }
+                await query(
+                  'DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = ANY($3::text[])',
+                  [fieldId, recordId, toDelete],
+                )
               }
 
               for (const foreignId of toInsert) {
-                try {
-                  await query(
-                    `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
-                     VALUES ($1, $2, $3, $4)
-                     ON CONFLICT DO NOTHING`,
-                    [buildId('lnk').slice(0, 50), fieldId, recordId, foreignId],
-                  )
-                } catch (err) {
-                  throw err
-                }
+                await query(
+                  `INSERT INTO meta_links (id, field_id, record_id, foreign_record_id)
+                   VALUES ($1, $2, $3, $4)
+                   ON CONFLICT DO NOTHING`,
+                  [buildId('lnk').slice(0, 50), fieldId, recordId, foreignId],
+                )
               }
             }
           }
