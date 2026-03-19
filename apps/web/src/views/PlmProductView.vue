@@ -216,163 +216,50 @@
         @update:bom-view="bomView = $event"
       />
       <div class="form-grid compact">
-        <label for="plm-bom-filter">
-          过滤
-          <div class="field-inline">
-            <select id="plm-bom-filter-field" v-model="bomFilterField" name="plmBomFilterField">
-              <option v-for="option in bomFilterFieldOptions" :key="option.value" :value="option.value">
-                {{ option.label }}
-              </option>
-            </select>
-            <input
-              id="plm-bom-filter"
-              v-model.trim="bomFilter"
-              name="plmBomFilter"
-              :placeholder="bomFilterPlaceholder"
-            />
-          </div>
-        </label>
-        <label for="plm-bom-filter-preset">
-          预设
-          <div class="field-inline">
-            <select
-              id="plm-bom-filter-preset-group-filter"
-              v-model="bomFilterPresetGroupFilter"
-              name="plmBomFilterPresetGroupFilter"
-            >
-              <option value="all">全部分组</option>
-              <option value="ungrouped">未分组</option>
-              <option v-for="group in bomFilterPresetGroups" :key="group" :value="group">
-                {{ group }}
-              </option>
-            </select>
-            <select id="plm-bom-filter-preset" v-model="bomFilterPresetKey" name="plmBomFilterPreset">
-              <option value="">选择预设</option>
-              <option v-for="preset in bomFilteredPresets" :key="preset.key" :value="preset.key">
-                {{ preset.label }}{{ preset.group ? ` (${preset.group})` : '' }}
-              </option>
-            </select>
-            <button class="btn ghost mini" :disabled="!bomFilterPresetKey" @click="applyBomFilterPreset">
-              应用
-            </button>
-            <button class="btn ghost mini" :disabled="!bomFilterPresetKey" @click="deleteBomFilterPreset">
-              删除
-            </button>
-            <button class="btn ghost mini" :disabled="!bomFilterPresetKey" @click="shareBomFilterPreset">
-              分享
-            </button>
-            <button
-              class="btn ghost mini"
-              :disabled="!bomFilterPresetKey"
-              @click="assignBomPresetGroup"
-            >
-              设为分组
-            </button>
-          </div>
-          <div class="field-inline">
-            <input
-              id="plm-bom-filter-preset-name"
-              v-model.trim="bomFilterPresetName"
-              name="plmBomFilterPresetName"
-              placeholder="新预设名称"
-            />
-            <input
-              id="plm-bom-filter-preset-group"
-              v-model.trim="bomFilterPresetGroup"
-              name="plmBomFilterPresetGroup"
-              class="deep-link-input"
-              placeholder="分组（可选）"
-            />
-            <button class="btn ghost mini" :disabled="!canSaveBomFilterPreset" @click="saveBomFilterPreset">
-              保存
-            </button>
-          </div>
-          <div class="field-inline field-actions">
-            <button
-              class="btn ghost mini"
-              :disabled="!bomFilterPresets.length"
-              @click="exportBomFilterPresets"
-            >
-              导出
-            </button>
-            <input
-              id="plm-bom-filter-preset-import"
-              v-model.trim="bomFilterPresetImportText"
-              name="plmBomFilterPresetImport"
-              class="deep-link-input"
-              placeholder="粘贴 JSON"
-            />
-            <select
-              id="plm-bom-filter-preset-import-mode"
-              v-model="bomFilterPresetImportMode"
-              name="plmBomFilterPresetImportMode"
-              class="deep-link-select"
-            >
-              <option value="merge">合并</option>
-              <option value="replace">覆盖</option>
-            </select>
-            <button
-              class="btn ghost mini"
-              :disabled="!bomFilterPresetImportText"
-              @click="importBomFilterPresets"
-            >
-              导入
-            </button>
-            <button class="btn ghost mini" @click="triggerBomFilterPresetFileImport">文件</button>
-            <input
-              ref="bomFilterPresetFileInput"
-              id="plm-bom-filter-preset-file"
-              name="plmBomFilterPresetFile"
-              class="deep-link-file"
-              type="file"
-              accept=".json,application/json"
-              @change="handleBomFilterPresetFileImport"
-            />
-            <button
-              id="plm-bom-filter-preset-clear"
-              class="btn ghost mini"
-              :disabled="!bomFilterPresets.length"
-              @click="clearBomFilterPresets"
-            >
-              清空
-            </button>
-            <button class="btn ghost mini" @click="showBomPresetManager = !showBomPresetManager">
-              {{ showBomPresetManager ? '收起' : '管理' }}
-            </button>
-          </div>
-          <div v-if="showBomPresetManager" class="preset-manager">
-            <div class="field-inline field-actions">
-              <button class="btn ghost mini" :disabled="!bomFilteredPresets.length" @click="selectAllBomPresets">
-                全选
-              </button>
-              <button class="btn ghost mini" :disabled="!bomPresetSelectionCount" @click="clearBomPresetSelection">
-                清空选择
-              </button>
-              <span class="muted">已选 {{ bomPresetSelectionCount }}/{{ bomFilteredPresets.length }}</span>
-            </div>
-            <div class="field-inline field-actions">
-              <input
-                id="plm-bom-filter-preset-batch-group"
-                v-model.trim="bomPresetBatchGroup"
-                name="plmBomFilterPresetBatchGroup"
-                class="deep-link-input"
-                placeholder="批量分组（留空清除）"
-              />
-              <button class="btn ghost mini" :disabled="!bomPresetSelectionCount" @click="applyBomPresetBatchGroup">
-                应用分组
-              </button>
-              <button class="btn ghost mini danger" :disabled="!bomPresetSelectionCount" @click="deleteBomPresetSelection">
-                批量删除
-              </button>
-            </div>
-            <div class="preset-list">
-              <label v-for="preset in bomFilteredPresets" :key="preset.key" class="preset-item">
-                <input type="checkbox" :value="preset.key" v-model="bomPresetSelection" />
-                <span>{{ preset.label }}{{ preset.group ? ` (${preset.group})` : '' }}</span>
-              </label>
-            </div>
-          </div>
-        </label>
+        <PlmBomFilterShell
+          :bom-filter-field="bomFilterField"
+          :bom-filter-field-options="bomFilterFieldOptions"
+          :bom-filter="bomFilter"
+          :bom-filter-placeholder="bomFilterPlaceholder"
+          :bom-filter-preset-group-filter="bomFilterPresetGroupFilter"
+          :bom-filter-preset-groups="bomFilterPresetGroups"
+          :bom-filter-preset-key="bomFilterPresetKey"
+          :bom-filtered-presets="bomFilteredPresets"
+          :bom-filter-preset-name="bomFilterPresetName"
+          :bom-filter-preset-group="bomFilterPresetGroup"
+          :can-save-bom-filter-preset="canSaveBomFilterPreset"
+          :bom-filter-presets-count="bomFilterPresets.length"
+          :bom-filter-preset-import-text="bomFilterPresetImportText"
+          :bom-filter-preset-import-mode="bomFilterPresetImportMode"
+          :show-bom-preset-manager="showBomPresetManager"
+          :bom-preset-selection="bomPresetSelection"
+          :bom-preset-selection-count="bomPresetSelectionCount"
+          :bom-preset-batch-group="bomPresetBatchGroup"
+          @update:bom-filter-field="bomFilterField = $event"
+          @update:bom-filter="bomFilter = $event"
+          @update:bom-filter-preset-group-filter="bomFilterPresetGroupFilter = $event"
+          @update:bom-filter-preset-key="bomFilterPresetKey = $event"
+          @apply-bom-filter-preset="applyBomFilterPreset"
+          @delete-bom-filter-preset="deleteBomFilterPreset"
+          @share-bom-filter-preset="shareBomFilterPreset"
+          @assign-bom-preset-group="assignBomPresetGroup"
+          @update:bom-filter-preset-name="bomFilterPresetName = $event"
+          @update:bom-filter-preset-group="bomFilterPresetGroup = $event"
+          @save-bom-filter-preset="saveBomFilterPreset"
+          @export-bom-filter-presets="exportBomFilterPresets"
+          @update:bom-filter-preset-import-text="bomFilterPresetImportText = $event"
+          @update:bom-filter-preset-import-mode="bomFilterPresetImportMode = $event"
+          @import-bom-filter-presets="importBomFilterPresets"
+          @file-import="handleBomFilterPresetFileImport"
+          @clear-bom-filter-presets="clearBomFilterPresets"
+          @toggle-bom-preset-manager="showBomPresetManager = !showBomPresetManager"
+          @select-all-bom-presets="selectAllBomPresets"
+          @clear-bom-preset-selection="clearBomPresetSelection"
+          @update:bom-preset-batch-group="bomPresetBatchGroup = $event"
+          @apply-bom-preset-batch-group="applyBomPresetBatchGroup"
+          @delete-bom-preset-selection="deleteBomPresetSelection"
+          @update:bom-preset-selection="bomPresetSelection = $event"
+        />
       </div>
       <p v-if="bomError" class="status error">{{ bomError }}</p>
       <p v-if="bomItems.length" class="status">共 {{ bomItems.length }} 条，展示 {{ bomDisplayCount }} 条</p>
@@ -2331,6 +2218,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { type LocationQueryValue, useRoute, useRouter } from 'vue-router'
 import { apiGet, apiPost } from '../utils/api'
 import PlmBomHeader from '../components/plm/PlmBomHeader.vue'
+import PlmBomFilterShell from '../components/plm/PlmBomFilterShell.vue'
 import PlmSearchShell from '../components/plm/PlmSearchShell.vue'
 import PlmWorkbenchShell from '../components/plm/PlmWorkbenchShell.vue'
 
