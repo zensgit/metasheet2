@@ -17,6 +17,20 @@ export interface Comment {
   mentions: string[];
 }
 
+type CommentRow = {
+  id: string;
+  spreadsheet_id: string;
+  row_id: string;
+  field_id: string | null;
+  content: string;
+  author_id: string;
+  parent_id: string | null;
+  resolved: boolean;
+  created_at: string | Date;
+  updated_at: string | Date;
+  mentions: string | string[] | null;
+}
+
 export class CommentService {
   static inject = [ICollabService, ILogger];
 
@@ -74,8 +88,7 @@ export class CommentService {
     const offset = Math.max(0, Number(options?.offset ?? 0));
 
     const totalObj = await query
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .select((eb: any) => eb.fn.countAll().as('c'))
+      .select(({ fn }) => fn.countAll<number>().as('c'))
       .executeTakeFirst();
     const total = totalObj ? Number((totalObj as { c: string | number }).c) : 0;
 
@@ -86,7 +99,7 @@ export class CommentService {
       .offset(offset)
       .execute();
 
-    return { items: rows.map(this.mapRowToComment), total };
+    return { items: rows.map((row) => this.mapRowToComment(row)), total };
   }
 
   async resolveComment(commentId: string): Promise<void> {
@@ -106,7 +119,11 @@ export class CommentService {
     return row ? this.mapRowToComment(row) : undefined;
   }
 
-  private mapRowToComment(row: any): Comment {
+  private mapRowToComment(row: CommentRow): Comment {
+    const mentions = typeof row.mentions === 'string'
+      ? JSON.parse(row.mentions) as unknown
+      : row.mentions
+
     return {
       id: row.id,
       spreadsheetId: row.spreadsheet_id,
@@ -116,9 +133,9 @@ export class CommentService {
       authorId: row.author_id,
       parentId: row.parent_id || undefined,
       resolved: row.resolved,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      mentions: typeof row.mentions === 'string' ? JSON.parse(row.mentions) : (row.mentions || [])
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+      updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
+      mentions: Array.isArray(mentions) ? mentions.filter((value): value is string => typeof value === 'string') : []
     };
   }
 

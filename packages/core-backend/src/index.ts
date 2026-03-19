@@ -74,6 +74,18 @@ import { cacheRegistry } from '../core/cache/CacheRegistry'
 import { loadObservabilityConfig } from './config/observability'
 import { initObservability } from './observability/otel'
 
+type RawQueryConfig = {
+  text: string
+  values?: unknown[]
+}
+
+function isRawQueryConfig(value: unknown): value is RawQueryConfig {
+  if (typeof value !== 'object' || value === null) return false
+  const maybeConfig = value as { text?: unknown; values?: unknown }
+  if (typeof maybeConfig.text !== 'string') return false
+  return maybeConfig.values === undefined || Array.isArray(maybeConfig.values)
+}
+
 type PluginRuntimeState = {
   status: 'active' | 'inactive' | 'failed'
   error?: string
@@ -238,7 +250,10 @@ export class MetaSheetServer {
                 return result.rows
               },
               rawQuery: async (queryConfig: unknown) => {
-                return client.query(queryConfig as any)
+                if (!isRawQueryConfig(queryConfig)) {
+                  throw new TypeError('rawQuery expects a query config with text and optional values')
+                }
+                return client.query(queryConfig.text, queryConfig.values)
               },
               __rawClient: client,
               commit: async () => {
