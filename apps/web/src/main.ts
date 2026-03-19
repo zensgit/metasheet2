@@ -7,9 +7,10 @@ import type { RouteRecordRaw } from 'vue-router'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
 import App from './App.vue'
+import { useAuth } from './composables/useAuth'
 import { ROUTE_PATHS } from './router/types'
 import { useFeatureFlags } from './stores/featureFlags'
-import { apiFetch, clearStoredAuthState, getStoredAuthToken } from './utils/api'
+import { normalizePostLoginRedirect, normalizePreLoginRedirect } from './utils/authRedirect'
 
 // Import views
 import GridView from './views/GridView.vue'
@@ -38,6 +39,12 @@ const routes: RouteRecordRaw[] = [
     name: 'login',
     component: LoginView,
     meta: { title: 'Sign In', hideNavbar: true, requiresGuest: true }
+  },
+  {
+    path: '/accept-invite',
+    name: 'accept-invite',
+    component: () => import('./views/AcceptInviteView.vue'),
+    meta: { title: 'Accept Invite', hideNavbar: true, requiresAuth: false }
   },
   {
     path: '/grid',
@@ -100,6 +107,42 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'PLM', requiresAuth: true }
   },
   {
+    path: '/plm/audit',
+    name: 'plm-audit',
+    component: () => import('./views/PlmAuditView.vue'),
+    meta: { title: 'PLM Audit', requiresAuth: true }
+  },
+  {
+    path: '/settings',
+    name: 'user-settings',
+    component: () => import('./views/SessionCenterView.vue'),
+    meta: { title: 'My Sessions', requiresAuth: true }
+  },
+  {
+    path: '/admin/users',
+    name: 'user-management',
+    component: () => import('./views/UserManagementView.vue'),
+    meta: { title: 'User Management', requiresAuth: true }
+  },
+  {
+    path: '/admin/roles',
+    name: 'role-management',
+    component: () => import('./views/RoleManagementView.vue'),
+    meta: { title: 'Role Management', requiresAuth: true }
+  },
+  {
+    path: '/admin/permissions',
+    name: 'permission-management',
+    component: () => import('./views/PermissionManagementView.vue'),
+    meta: { title: 'Permission Management', requiresAuth: true }
+  },
+  {
+    path: '/admin/audit',
+    name: 'admin-audit',
+    component: () => import('./views/AdminAuditView.vue'),
+    meta: { title: 'Admin Audit', requiresAuth: true }
+  },
+  {
     path: '/workflows',
     name: 'workflow-list',
     component: () => import('./views/WorkflowHubView.vue'),
@@ -126,49 +169,57 @@ const router = createRouter({
 
 // Navigation guard for page title
 router.beforeEach(async (to, _from, next) => {
-  const token = getStoredAuthToken()
+  const auth = useAuth()
+  const token = auth.getToken()
   const isLoginRoute = to.path === ROUTE_PATHS.LOGIN
-
-  if (!token && !isLoginRoute) {
-    return next({
-      path: ROUTE_PATHS.LOGIN,
-      query: { redirect: to.fullPath || '/attendance' },
-    })
-  }
-
-  if (token && isLoginRoute) {
-    const verify = await apiFetch('/api/auth/me')
-    if (!verify.ok) {
-      clearStoredAuthState()
-      return next()
-    }
-
-    const redirectRaw = to.query?.redirect
-    const redirect = typeof redirectRaw === 'string' && redirectRaw.startsWith('/') && !redirectRaw.startsWith('//')
-      ? redirectRaw
-      : null
-    const flags = useFeatureFlags()
-    try {
-      await flags.loadProductFeatures()
-    } catch {
-      // noop
-    }
-    return next(redirect || flags.resolveHomePath())
-  }
-
+  const requiresAuth = to.meta?.requiresAuth !== false
+  const flags = useFeatureFlags()
   const title = to.meta?.title
+
   if (title) {
     document.title = `${title} - MetaSheet`
   } else {
     document.title = 'MetaSheet'
   }
 
+  if (isLoginRoute) {
+    if (token) {
+      const session = await auth.bootstrapSession()
+      if (session.ok) {
+        try {
+          await flags.loadProductFeatures()
+        } catch {
+          // Fall back to shell redirect when feature probing is temporarily unavailable.
+        }
+        const redirect = normalizePostLoginRedirect(to.query?.redirect)
+        return next(redirect || flags.resolveHomePath())
+      }
+    }
+    return next()
+  }
+
+  if (requiresAuth) {
+    const redirect = normalizePreLoginRedirect(to.fullPath || '/attendance')
+    const ensuredToken = token || await auth.ensureToken()
+    if (!ensuredToken) {
+      return next({
+        path: ROUTE_PATHS.LOGIN,
+        query: { redirect },
+      })
+    }
+
+    const session = await auth.bootstrapSession()
+    if (!session.ok) {
+      return next({
+        path: ROUTE_PATHS.LOGIN,
+        query: { redirect },
+      })
+    }
+  }
+
   // Product capability guard + attendance focused mode restriction.
   try {
-    const flags = useFeatureFlags()
-    if (token) {
-      await flags.loadProductFeatures()
-    }
+    await flags.loadProductFeatures()
 
     const required = to.meta?.requiredFeature
     const requiredFeature =
@@ -187,6 +238,7 @@ router.beforeEach(async (to, _from, next) => {
       const allowed = new Set<string>([
         '/attendance',
         '/p/plugin-attendance/attendance',
+        '/settings',
       ])
       const path = String(to.path || '')
       if (!allowed.has(path)) {
@@ -209,9 +261,14 @@ router.beforeEach(async (to, _from, next) => {
 })
 
 // Create and mount app
-const app = createApp(App)
+async function bootstrap(): Promise<void> {
+  const app = createApp(App)
 
-app.use(ElementPlus)
-app.use(router)
+  app.use(ElementPlus)
+  app.use(router)
 
-app.mount('#app')
+  await router.isReady()
+  app.mount('#app')
+}
+
+void bootstrap()
