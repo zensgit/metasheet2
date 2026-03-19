@@ -107,12 +107,13 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import type { MetaAttachment, MetaField } from '../../types'
+import type { MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaField } from '../../types'
 
 const props = defineProps<{
   field: MetaField
   modelValue: unknown
-  uploadFn?: (file: File) => Promise<MetaAttachment>
+  uploadFn?: MetaAttachmentUploadFn
+  uploadContext?: MetaAttachmentUploadContext
 }>()
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}/
@@ -152,7 +153,10 @@ async function uploadFiles(files: FileList) {
     const existingIds = Array.isArray(props.modelValue) ? [...props.modelValue] : props.modelValue ? [props.modelValue] : []
     const newIds: string[] = []
     for (const file of Array.from(files)) {
-      const attachment = await props.uploadFn(file)
+      const attachment = await props.uploadFn(file, {
+        ...props.uploadContext,
+        fieldId: props.field.id,
+      })
       newIds.push(attachment.id)
     }
     emit('update:modelValue', [...existingIds, ...newIds])

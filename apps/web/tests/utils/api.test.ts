@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { getApiBase, authHeaders } from '../../src/utils/api'
+import { apiFetch, getApiBase, authHeaders } from '../../src/utils/api'
 
 describe('API Utils', () => {
   describe('getApiBase()', () => {
@@ -95,11 +95,11 @@ describe('API Utils', () => {
   })
 
   describe('authHeaders()', () => {
-    it('应返回包含 Content-Type 的基础 headers', () => {
+    it('应返回空的基础 headers（不强塞 Content-Type）', () => {
       const headers = authHeaders()
 
-      expect(headers).toHaveProperty('Content-Type')
-      expect(headers['Content-Type']).toBe('application/json')
+      expect(headers).not.toHaveProperty('Content-Type')
+      expect(Object.keys(headers)).toHaveLength(0)
     })
 
     it('应在提供 token 时添加 Authorization header', () => {
@@ -108,28 +108,28 @@ describe('API Utils', () => {
 
       expect(headers).toHaveProperty('Authorization')
       expect(headers.Authorization).toBe(`Bearer ${token}`)
-      expect(headers['Content-Type']).toBe('application/json')
+      expect(headers).not.toHaveProperty('Content-Type')
     })
 
     it('应在没有 token 时不添加 Authorization header', () => {
       const headers = authHeaders()
 
       expect(headers).not.toHaveProperty('Authorization')
-      expect(Object.keys(headers)).toHaveLength(1)
+      expect(Object.keys(headers)).toHaveLength(0)
     })
 
     it('应处理空字符串 token', () => {
       const headers = authHeaders('')
 
       expect(headers).not.toHaveProperty('Authorization')
-      expect(Object.keys(headers)).toHaveLength(1)
+      expect(Object.keys(headers)).toHaveLength(0)
     })
 
     it('应处理 undefined token', () => {
       const headers = authHeaders(undefined)
 
       expect(headers).not.toHaveProperty('Authorization')
-      expect(Object.keys(headers)).toHaveLength(1)
+      expect(Object.keys(headers)).toHaveLength(0)
     })
 
     it('应正确格式化不同长度的 token', () => {
@@ -163,7 +163,6 @@ describe('API Utils', () => {
       expect(typeof apiBase).toBe('string')
       expect(apiBase.length).toBeGreaterThan(0)
       expect(headers).toMatchObject({
-        'Content-Type': 'application/json',
         'Authorization': 'Bearer user-token'
       })
     })
@@ -181,7 +180,7 @@ describe('API Utils', () => {
       }
 
       expect(requestConfig.headers).toHaveProperty('Authorization')
-      expect(requestConfig.headers).toHaveProperty('Content-Type')
+      expect(requestConfig.headers).not.toHaveProperty('Content-Type')
     })
 
     it('应支持无认证的公开 API 调用', () => {
@@ -194,7 +193,46 @@ describe('API Utils', () => {
       }
 
       expect(requestConfig.headers).not.toHaveProperty('Authorization')
-      expect(requestConfig.headers['Content-Type']).toBe('application/json')
+      expect(requestConfig.headers).not.toHaveProperty('Content-Type')
+    })
+  })
+
+  describe('apiFetch()', () => {
+    const originalFetch = globalThis.fetch
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch
+    })
+
+    it('应在 JSON body 场景自动补 Content-Type', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }))
+      globalThis.fetch = fetchMock as unknown as typeof fetch
+
+      await apiFetch('/api/test', {
+        method: 'POST',
+        body: JSON.stringify({ ok: true }),
+      })
+
+      const [, init] = fetchMock.mock.calls[0]
+      const headers = new Headers(init?.headers)
+      expect(headers.get('Content-Type')).toBe('application/json')
+    })
+
+    it('应在 FormData 场景不强塞 Content-Type', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }))
+      globalThis.fetch = fetchMock as unknown as typeof fetch
+
+      const formData = new FormData()
+      formData.append('file', new File(['demo'], 'demo.txt', { type: 'text/plain' }))
+
+      await apiFetch('/api/test', {
+        method: 'POST',
+        body: formData,
+      })
+
+      const [, init] = fetchMock.mock.calls[0]
+      const headers = new Headers(init?.headers)
+      expect(headers.has('Content-Type')).toBe(false)
     })
   })
 

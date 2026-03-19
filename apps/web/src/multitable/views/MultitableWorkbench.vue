@@ -134,7 +134,15 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
-import type { MetaAttachment, MetaField, MetaRecord, MetaFieldType, RowDensity, LinkedRecordSummary } from '../types'
+import type {
+  LinkedRecordSummary,
+  MetaAttachment,
+  MetaAttachmentUploadContext,
+  MetaField,
+  MetaFieldType,
+  MetaRecord,
+  RowDensity,
+} from '../types'
 import type { MultitableRole } from '../composables/useMultitableCapabilities'
 import type { SortRule, FilterConjunction } from '../composables/useMultitableGrid'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
@@ -184,9 +192,11 @@ const searchText = ref('')
 const showShortcuts = ref(false)
 const showImportModal = ref(false)
 const rowDensity = ref<RowDensity>('normal')
-async function uploadAttachmentFn(file: File): Promise<MetaAttachment> {
+async function uploadAttachmentFn(file: File, context?: MetaAttachmentUploadContext): Promise<MetaAttachment> {
   return workbench.client.uploadAttachment(file, {
     sheetId: workbench.activeSheetId.value || undefined,
+    recordId: context?.recordId,
+    fieldId: context?.fieldId,
   })
 }
 

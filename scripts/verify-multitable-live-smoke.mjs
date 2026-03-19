@@ -191,43 +191,6 @@ async function createSmokeRecord(token, sheetId, fields) {
   }
 }
 
-async function uploadAttachment(token, sheetId, recordId, fieldId, filename, content) {
-  const form = new FormData()
-  form.set('sheetId', sheetId)
-  form.set('recordId', recordId)
-  form.set('fieldId', fieldId)
-  form.set('file', new Blob([content], { type: 'text/plain' }), filename)
-
-  const result = await fetchJson(`${apiBase}/api/multitable/attachments`, {
-    method: 'POST',
-    headers: headers(token),
-    body: form,
-  })
-  const json = await ensureOk('api.multitable.upload-attachment', result, { sheetId, recordId, fieldId })
-  return json.data.attachment
-}
-
-async function patchAttachment(token, sheetId, recordId, fieldId, attachmentId, expectedVersion) {
-  const result = await fetchJson(`${apiBase}/api/multitable/patch`, {
-    method: 'POST',
-    headers: headers(token, { 'Content-Type': 'application/json' }),
-    body: JSON.stringify({
-      sheetId,
-      changes: [{
-        recordId,
-        fieldId,
-        value: [attachmentId],
-        expectedVersion,
-      }],
-    }),
-  })
-  const json = await ensureOk('api.multitable.patch-attachment', result, { sheetId, recordId, fieldId })
-  return {
-    version: json.data.updated?.[0]?.version ?? expectedVersion,
-    attachmentSummaries: json.data.attachmentSummaries ?? {},
-  }
-}
-
 async function fetchRecord(token, sheetId, recordId) {
   const result = await fetchJson(`${apiBase}/api/multitable/records/${encodeURIComponent(recordId)}?sheetId=${encodeURIComponent(sheetId)}`, {
     headers: headers(token),
@@ -275,11 +238,19 @@ async function verifyGrid(page, baseId, sheetId, viewId, searchValue, attachment
   record('ui.grid.search', true, { searchValue, attachmentName })
 }
 
-async function verifyFormAndComments(page, baseId, sheetId, viewId, recordId, attachmentName) {
+async function verifyFormUploadAndComments(page, baseId, sheetId, viewId, recordId, attachmentFieldName, attachmentName) {
   const url = `${webBase}/multitable/${encodeURIComponent(sheetId)}/${encodeURIComponent(viewId)}?baseId=${encodeURIComponent(baseId)}&mode=form&recordId=${encodeURIComponent(recordId)}`
-  await openAndWait(page, url, '附件')
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+  await page.getByRole('button', { name: 'Save' }).waitFor({ state: 'visible', timeout: timeoutMs })
 
-  await page.getByText(attachmentName).first().waitFor({ state: 'visible', timeout: timeoutMs })
+  const uploadPath = path.join(outputDir, attachmentName)
+  fs.writeFileSync(uploadPath, `multitable smoke ${new Date().toISOString()}\n`)
+  const attachmentField = page.locator('.meta-form-view__field').filter({ hasText: attachmentFieldName }).first()
+  await attachmentField.locator('input[type="file"]').setInputFiles(uploadPath)
+  await attachmentField.getByText('Uploading...').waitFor({ state: 'visible', timeout: timeoutMs })
+  await attachmentField.getByText('Uploading...').waitFor({ state: 'hidden', timeout: timeoutMs })
+  await page.getByRole('button', { name: 'Save' }).click()
+  await page.getByText('Changes saved').first().waitFor({ state: 'visible', timeout: timeoutMs })
 
   const commentsButton = page.getByRole('button', { name: '💬' })
   await commentsButton.click()
@@ -294,7 +265,7 @@ async function verifyFormAndComments(page, baseId, sheetId, viewId, recordId, at
   await page.locator('.meta-comments-drawer__badge').getByText('Resolved', { exact: true }).waitFor({ state: 'visible', timeout: timeoutMs })
 
   await page.screenshot({ path: path.join(outputDir, 'form-comments.png'), fullPage: true })
-  record('ui.form.comments', true, { recordId, attachmentName })
+  record('ui.form.upload-comments', true, { recordId, attachmentName })
 }
 
 async function run() {
@@ -329,38 +300,6 @@ async function run() {
     createdRecordVersion = created.version
 
     const attachmentName = `multitable-smoke-${Date.now()}.txt`
-    const attachment = await uploadAttachment(
-      token,
-      sheetId,
-      created.recordId,
-      attachmentField.id,
-      attachmentName,
-      `multitable smoke ${new Date().toISOString()}\n`,
-    )
-    attachmentId = attachment.id
-
-    const patched = await patchAttachment(
-      token,
-      sheetId,
-      created.recordId,
-      attachmentField.id,
-      attachment.id,
-      created.version,
-    )
-    createdRecordVersion = patched.version
-
-    const recordData = await fetchRecord(token, sheetId, created.recordId)
-
-    const hydrated = recordData.attachmentSummaries?.[attachmentField.id] ?? []
-    const hydratedOk = Array.isArray(hydrated) && hydrated.some((item) => item.id === attachment.id)
-    record('api.multitable.attachment-hydration', hydratedOk, {
-      recordId: created.recordId,
-      fieldId: attachmentField.id,
-      attachmentId: attachment.id,
-    })
-    if (!hydratedOk) {
-      throw new Error('Attachment hydration missing from record response')
-    }
 
     const browser = await chromium.launch({ headless })
     const browserContext = await browser.newContext()
@@ -371,8 +310,29 @@ async function run() {
     const page = await browserContext.newPage()
 
     try {
+      await verifyFormUploadAndComments(
+        page,
+        base.id,
+        sheetId,
+        formView.id,
+        created.recordId,
+        attachmentField.name,
+        attachmentName,
+      )
+      const recordData = await fetchRecord(token, sheetId, created.recordId)
+      createdRecordVersion = recordData.record.version
+      const hydrated = recordData.attachmentSummaries?.[attachmentField.id] ?? []
+      attachmentId = hydrated[0]?.id || ''
+      const hydratedOk = Array.isArray(hydrated) && hydrated.some((item) => item.filename === attachmentName)
+      record('api.multitable.attachment-hydration', hydratedOk, {
+        recordId: created.recordId,
+        fieldId: attachmentField.id,
+        attachmentId,
+      })
+      if (!hydratedOk || !attachmentId) {
+        throw new Error('Attachment hydration missing from record response after UI upload')
+      }
       await verifyGrid(page, base.id, sheetId, gridView.id, created.nameValue, attachmentName)
-      await verifyFormAndComments(page, base.id, sheetId, formView.id, created.recordId, attachmentName)
     } finally {
       await browser.close()
     }

@@ -45,9 +45,7 @@ export function getApiBase(): string {
  * Build authorization headers for authenticated requests
  */
 export function authHeaders(token?: string): Record<string, string> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json'
-  }
+  const headers: Record<string, string> = {}
   const storedToken = typeof localStorage !== 'undefined' ? localStorage.getItem('auth_token') : null
   const resolvedToken = typeof token === 'string' ? token : storedToken ?? ''
   if (resolvedToken.trim().length > 0) {
@@ -64,10 +62,14 @@ export async function apiFetch(
   options: RequestInit = {}
 ): Promise<Response> {
   const base = getApiBase()
-  const headers = {
-    'Content-Type': 'application/json',
+  const headers = new Headers({
     ...authHeaders(),
     ...(options.headers || {})
+  })
+  const body = options.body
+  const isFormData = typeof FormData !== 'undefined' && body instanceof FormData
+  if (!isFormData && body != null && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
   }
 
   return fetch(`${base}${path}`, {

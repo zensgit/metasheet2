@@ -297,6 +297,17 @@ export interface MetaAttachment {
   uploadedAt?: string | null
 }
 
+export interface MetaAttachmentUploadContext {
+  sheetId?: string
+  recordId?: string
+  fieldId?: string
+}
+
+export type MetaAttachmentUploadFn = (
+  file: File,
+  context?: MetaAttachmentUploadContext,
+) => Promise<MetaAttachment>
+
 // --- Timeline config ---
 export interface TimelineConfig {
   startFieldId: string

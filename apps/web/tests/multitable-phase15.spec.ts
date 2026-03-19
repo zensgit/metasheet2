@@ -309,7 +309,7 @@ describe('timeline config', () => {
 // === Phase 15.1: Attachment Upload Real Flow ===
 
 describe('upload flow — MetaCellEditor', () => {
-  it('should call uploadFn for each file and emit IDs', async () => {
+  it('should call uploadFn for each file with field/record context and emit IDs', async () => {
     const uploadFn = vi.fn()
       .mockResolvedValueOnce({ id: 'att_1', filename: 'a.pdf', mimeType: 'application/pdf', size: 100, url: '/att/1' })
       .mockResolvedValueOnce({ id: 'att_2', filename: 'b.png', mimeType: 'image/png', size: 200, url: '/att/2' })
@@ -317,16 +317,17 @@ describe('upload flow — MetaCellEditor', () => {
     const file1 = new File(['x'], 'a.pdf', { type: 'application/pdf' })
     const file2 = new File(['y'], 'b.png', { type: 'image/png' })
     const files = [file1, file2]
+    const uploadContext = { recordId: 'rec_1', fieldId: 'fld_attach' }
 
     const newIds: string[] = []
     for (const file of files) {
-      const attachment = await uploadFn(file)
+      const attachment = await uploadFn(file, uploadContext)
       newIds.push(attachment.id)
     }
 
     expect(uploadFn).toHaveBeenCalledTimes(2)
-    expect(uploadFn).toHaveBeenCalledWith(file1)
-    expect(uploadFn).toHaveBeenCalledWith(file2)
+    expect(uploadFn).toHaveBeenCalledWith(file1, uploadContext)
+    expect(uploadFn).toHaveBeenCalledWith(file2, uploadContext)
     expect(newIds).toEqual(['att_1', 'att_2'])
   })
 
@@ -374,11 +375,13 @@ describe('upload flow — MetaFormView', () => {
     const existing: string[] = []
     const newIds: string[] = []
     for (const file of files) {
-      const attachment = await uploadFn(file)
+      const attachment = await uploadFn(file, { recordId: 'rec_form', fieldId })
       newIds.push(attachment.id)
     }
     formData[fieldId] = [...existing, ...newIds]
 
+    expect(uploadFn).toHaveBeenNthCalledWith(1, files[0], { recordId: 'rec_form', fieldId })
+    expect(uploadFn).toHaveBeenNthCalledWith(2, files[1], { recordId: 'rec_form', fieldId })
     expect(formData[fieldId]).toEqual(['att_f1', 'att_f2'])
   })
 
@@ -415,8 +418,9 @@ describe('upload flow — MetaRecordDrawer', () => {
   it('should upload and emit patch with ID array', async () => {
     const existingIds = ['att_a']
     const uploadFn = vi.fn().mockResolvedValue({ id: 'att_b', filename: 'b.pdf', mimeType: 'application/pdf', size: 10, url: '' })
-    const attachment = await uploadFn(new File(['x'], 'b.pdf'))
+    const attachment = await uploadFn(new File(['x'], 'b.pdf'), { recordId: 'rec_drawer', fieldId: 'fld_attach' })
     const patchValue = [...existingIds, attachment.id]
+    expect(uploadFn).toHaveBeenCalledWith(expect.any(File), { recordId: 'rec_drawer', fieldId: 'fld_attach' })
     expect(patchValue).toEqual(['att_a', 'att_b'])
   })
 
@@ -442,21 +446,27 @@ describe('upload-then-patch integration', () => {
     const patchCell = vi.fn()
 
     const file = new File(['content'], 'report.pdf', { type: 'application/pdf' })
-    const attachment = await uploadFn(file)
+    const uploadContext = { recordId: 'rec_1', fieldId: 'fld_attach' }
+    const attachment = await uploadFn(file, uploadContext)
     patchCell('rec_1', 'fld_attach', [attachment.id], 1)
 
+    expect(uploadFn).toHaveBeenCalledWith(file, uploadContext)
     expect(patchCell).toHaveBeenCalledWith('rec_1', 'fld_attach', ['att_srv_1'], 1)
     expect(patchCell.mock.calls[0][2]).not.toContain('report.pdf')
   })
 
-  it('FormData body should contain file for upload', () => {
+  it('FormData body should contain file and upload context', () => {
     const fd = new FormData()
     const file = new File(['test'], 'upload.xlsx', { type: 'application/vnd.ms-excel' })
     fd.append('file', file)
     fd.append('sheetId', 'sheet_abc')
+    fd.append('recordId', 'rec_1')
+    fd.append('fieldId', 'fld_attach')
     expect(fd.get('file')).toBeInstanceOf(File)
     expect((fd.get('file') as File).name).toBe('upload.xlsx')
     expect(fd.get('sheetId')).toBe('sheet_abc')
+    expect(fd.get('recordId')).toBe('rec_1')
+    expect(fd.get('fieldId')).toBe('fld_attach')
   })
 
   it('deleteAttachment URL should use attachment ID', () => {
@@ -474,11 +484,14 @@ describe('upload-then-patch integration', () => {
     const files = [new File(['a'], 'm1.pdf'), new File(['b'], 'm2.pdf'), new File(['c'], 'm3.pdf')]
     const ids: string[] = []
     for (const file of files) {
-      const att = await uploadFn(file)
+      const att = await uploadFn(file, { recordId: 'rec_multi', fieldId: 'fld_attach' })
       ids.push(att.id)
     }
     expect(ids).toEqual(['att_m1', 'att_m2', 'att_m3'])
     expect(uploadFn).toHaveBeenCalledTimes(3)
+    expect(uploadFn).toHaveBeenNthCalledWith(1, files[0], { recordId: 'rec_multi', fieldId: 'fld_attach' })
+    expect(uploadFn).toHaveBeenNthCalledWith(2, files[1], { recordId: 'rec_multi', fieldId: 'fld_attach' })
+    expect(uploadFn).toHaveBeenNthCalledWith(3, files[2], { recordId: 'rec_multi', fieldId: 'fld_attach' })
   })
 })
 

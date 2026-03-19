@@ -116,7 +116,13 @@
 
 <script setup lang="ts">
 import { reactive, ref, computed, watch } from 'vue'
-import type { MetaAttachment, MetaField, MetaRecord, LinkedRecordSummary } from '../types'
+import type {
+  LinkedRecordSummary,
+  MetaAttachment,
+  MetaAttachmentUploadFn,
+  MetaField,
+  MetaRecord,
+} from '../types'
 
 const props = defineProps<{
   fields: MetaField[]
@@ -130,7 +136,7 @@ const props = defineProps<{
   fieldErrors?: Record<string, string> | null
   linkSummariesByField?: Record<string, LinkedRecordSummary[]> | null
   attachmentSummariesByField?: Record<string, MetaAttachment[]> | null
-  uploadFn?: (file: File) => Promise<MetaAttachment>
+  uploadFn?: MetaAttachmentUploadFn
 }>()
 
 const emit = defineEmits<{
@@ -241,7 +247,10 @@ async function onFormFileSelect(fieldId: string, e: Event) {
     const existing = attachmentList(fieldId)
     const newIds: string[] = []
     for (const file of Array.from(files)) {
-      const attachment = await props.uploadFn(file)
+      const attachment = await props.uploadFn(file, {
+        recordId: props.record?.id,
+        fieldId,
+      })
       newIds.push(attachment.id)
     }
     formData[fieldId] = [...existing, ...newIds]

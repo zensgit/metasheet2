@@ -63,6 +63,7 @@
                     :field="field"
                     :model-value="editCell!.value"
                     :upload-fn="props.uploadFn"
+                    :upload-context="{ recordId: row.id, fieldId: field.id }"
                     @update:model-value="editCell!.value = $event"
                     @confirm="confirmEdit(row)"
                     @cancel="cancelEdit"
@@ -119,6 +120,7 @@
                   :field="field"
                   :model-value="editCell!.value"
                   :upload-fn="props.uploadFn"
+                  :upload-context="{ recordId: row.id, fieldId: field.id }"
                   @update:model-value="editCell!.value = $event"
                   @confirm="confirmEdit(row)"
                   @cancel="cancelEdit"
@@ -185,7 +187,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import type { MetaAttachment, MetaField, MetaRecord, RowDensity } from '../types'
+import type { MetaAttachment, MetaAttachmentUploadFn, MetaField, MetaRecord, RowDensity } from '../types'
 import type { SortRule } from '../composables/useMultitableGrid'
 import MetaCellRenderer from './cells/MetaCellRenderer.vue'
 import MetaCellEditor from './cells/MetaCellEditor.vue'
@@ -213,7 +215,7 @@ const props = defineProps<{
   groupField?: MetaField | null
   searchText?: string
   rowDensity?: RowDensity
-  uploadFn?: (file: File) => Promise<MetaAttachment>
+  uploadFn?: MetaAttachmentUploadFn
 }>()
 
 const emit = defineEmits<{

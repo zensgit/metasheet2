@@ -94,7 +94,13 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import type { MetaAttachment, MetaField, MetaRecord, LinkedRecordSummary } from '../types'
+import type {
+  LinkedRecordSummary,
+  MetaAttachment,
+  MetaAttachmentUploadFn,
+  MetaField,
+  MetaRecord,
+} from '../types'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -106,7 +112,7 @@ const props = withDefaults(defineProps<{
   linkSummariesByField?: Record<string, LinkedRecordSummary[]>
   attachmentSummariesByField?: Record<string, MetaAttachment[]>
   recordIds?: string[]
-  uploadFn?: (file: File) => Promise<MetaAttachment>
+  uploadFn?: MetaAttachmentUploadFn
 }>(), {
   recordIds: () => [],
 })
@@ -197,7 +203,10 @@ async function onDrawerFileSelect(fieldId: string, e: Event) {
     const existing = attachmentList(fieldId)
     const newIds: string[] = []
     for (const file of Array.from(files)) {
-      const attachment = await props.uploadFn(file)
+      const attachment = await props.uploadFn(file, {
+        recordId: props.record?.id,
+        fieldId,
+      })
       newIds.push(attachment.id)
     }
     emit('patch', fieldId, [...existing, ...newIds])
