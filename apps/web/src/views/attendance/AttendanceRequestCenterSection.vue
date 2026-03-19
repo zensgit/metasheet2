@@ -4,11 +4,18 @@
     <div class="attendance__request-form">
       <label class="attendance__field" for="attendance-request-work-date">
         <span>{{ tr('Work date', '工作日期') }}</span>
-        <input
-          id="attendance-request-work-date"
+        <AttendanceScheduledDateInput
           v-model="requestForm.workDate"
-          name="requestWorkDate"
-          type="date"
+          default-time="00:00"
+          field-id="attendance-request-work-date"
+          field-name="requestWorkDate"
+          input-type="date"
+          :calendar-days="calendarDays"
+          :calendar-label="calendarLabel"
+          :focus-calendar-month="focusCalendarMonth"
+          :shift-month="shiftMonth"
+          :tr="tr"
+          :week-days="weekDays"
         />
       </label>
       <label class="attendance__field" for="attendance-request-type">
@@ -51,20 +58,34 @@
       </label>
       <label class="attendance__field" for="attendance-request-in">
         <span>{{ isLeaveOrOvertimeRequest ? tr('Start', '开始') : tr('Requested in', '申请打卡入') }}</span>
-        <input
-          id="attendance-request-in"
+        <AttendanceScheduledDateInput
           v-model="requestForm.requestedInAt"
-          name="requestedInAt"
-          type="datetime-local"
+          default-time="09:00"
+          field-id="attendance-request-in"
+          field-name="requestedInAt"
+          input-type="datetime-local"
+          :calendar-days="calendarDays"
+          :calendar-label="calendarLabel"
+          :focus-calendar-month="focusCalendarMonth"
+          :shift-month="shiftMonth"
+          :tr="tr"
+          :week-days="weekDays"
         />
       </label>
       <label class="attendance__field" for="attendance-request-out">
         <span>{{ isLeaveOrOvertimeRequest ? tr('End', '结束') : tr('Requested out', '申请打卡出') }}</span>
-        <input
-          id="attendance-request-out"
+        <AttendanceScheduledDateInput
           v-model="requestForm.requestedOutAt"
-          name="requestedOutAt"
-          type="datetime-local"
+          default-time="18:00"
+          field-id="attendance-request-out"
+          field-name="requestedOutAt"
+          input-type="datetime-local"
+          :calendar-days="calendarDays"
+          :calendar-label="calendarLabel"
+          :focus-calendar-month="focusCalendarMonth"
+          :shift-month="shiftMonth"
+          :tr="tr"
+          :week-days="weekDays"
         />
       </label>
       <label v-if="isLeaveOrOvertimeRequest" class="attendance__field" for="attendance-request-minutes">
@@ -219,6 +240,7 @@
 
 <script setup lang="ts">
 import type { Ref } from 'vue'
+import AttendanceScheduledDateInput from './AttendanceScheduledDateInput.vue'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -294,6 +316,18 @@ interface AttendanceRequestReportItem {
   minutes: number
 }
 
+interface CalendarDay {
+  key: string
+  day: number
+  isToday: boolean
+  isCurrentMonth: boolean
+  status?: string
+  statusLabel?: string
+  tooltip: string
+  holidayName?: string
+  lunarLabel?: string
+}
+
 interface RequestCenterBindings {
   requestForm: RequestFormState
   requestSubmitting: Ref<boolean>
@@ -315,10 +349,15 @@ interface RequestCenterBindings {
   loadAnomalies: () => MaybePromise<void>
   prefillRequestFromAnomaly: (item: AttendanceAnomalyItem) => MaybePromise<void>
   loadRequestReport: () => MaybePromise<void>
+  focusCalendarMonth: (value: string | null | undefined) => MaybePromise<void>
+  shiftMonth: (delta: number) => MaybePromise<void>
 }
 
 const props = defineProps<{
   requestCenter: RequestCenterBindings
+  calendarDays: CalendarDay[]
+  calendarLabel: string
+  weekDays: string[]
   formatDate: (value: string | null | undefined) => string
   formatDateTime: (value: string | null | undefined) => string
   formatRequestType: (value: string) => string
@@ -354,6 +393,8 @@ const resolveRequest = (id: string, action: RequestResolutionAction) => props.re
 const loadAnomalies = () => props.requestCenter.loadAnomalies()
 const prefillRequestFromAnomaly = (item: AttendanceAnomalyItem) => props.requestCenter.prefillRequestFromAnomaly(item)
 const loadRequestReport = () => props.requestCenter.loadRequestReport()
+const focusCalendarMonth = (value: string | null | undefined) => props.requestCenter.focusCalendarMonth(value)
+const shiftMonth = (delta: number) => props.requestCenter.shiftMonth(delta)
 
 function formatLeaveTypeLabel(item: { name?: string | null; paid?: boolean | null }): string {
   const name = String(item?.name || '').trim()

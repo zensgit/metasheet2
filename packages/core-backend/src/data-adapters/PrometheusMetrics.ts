@@ -7,7 +7,7 @@
  * @see PROGRESSIVE_FEDERATION_PLAN.md Phase 4.1
  */
 
-import { Registry, Counter, Histogram, Gauge, Summary } from 'prom-client'
+import { Registry, Counter, Histogram, Gauge } from 'prom-client'
 
 // ─────────────────────────────────────────────────────────────
 // Types

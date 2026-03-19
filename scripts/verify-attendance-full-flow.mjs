@@ -372,6 +372,65 @@ async function assertRecordsTableContainer(page) {
   }
 }
 
+function squashWhitespace(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim()
+}
+
+async function collectAdminImportDebugState(page) {
+  const details = []
+
+  try {
+    const statusText = squashWhitespace(await page.locator('div.attendance__status-block--admin').first().innerText())
+    if (statusText) details.push(`adminStatus=${JSON.stringify(statusText.slice(0, 240))}`)
+  } catch {
+    // Best-effort debug capture only.
+  }
+
+  try {
+    const taskTexts = await page.locator('div.attendance__status').allInnerTexts()
+    const normalized = taskTexts.map((entry) => squashWhitespace(entry)).filter(Boolean)
+    if (normalized.length) {
+      details.push(`statusCards=${JSON.stringify(normalized.slice(0, 3).map((entry) => entry.slice(0, 240)))}`)
+    }
+  } catch {
+    // Best-effort debug capture only.
+  }
+
+  return details.join(' ')
+}
+
+async function assertAdminRetryState(page, importSection) {
+  const payloadInput = importSection.locator('#attendance-import-payload').first()
+  const previewButton = importSection.getByRole('button', { name: labels.preview }).first()
+  const adminStatusBlock = page.locator('div.attendance__status-block--admin').first()
+  const invalidJsonMessage = adminStatusBlock.getByText(labels.invalidImportJson).first()
+  const retryPreviewButton = adminStatusBlock.getByRole('button', { name: labels.retryPreview }).first()
+
+  await payloadInput.waitFor({ timeout: adminReadyTimeoutMs })
+  await previewButton.waitFor({ timeout: adminReadyTimeoutMs })
+
+  if (await invalidJsonMessage.isVisible().catch(() => false) || await retryPreviewButton.isVisible().catch(() => false)) {
+    throw new Error('Admin invalid JSON retry state was already visible before the preview click')
+  }
+
+  await payloadInput.click()
+  await payloadInput.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A')
+  await payloadInput.type('{', { delay: 40 })
+  await payloadInput.evaluate((node) => node.blur())
+  await page.waitForTimeout(150)
+
+  try {
+    await previewButton.click()
+    await invalidJsonMessage.waitFor({ timeout: timeoutMs })
+    await retryPreviewButton.waitFor({ timeout: timeoutMs })
+  } catch (error) {
+    await captureDebugScreenshot(page, '02-admin-invalid-json-missing.png')
+    const debugState = await collectAdminImportDebugState(page)
+    const message = (error && error.message) || String(error)
+    throw new Error(`Admin invalid JSON preview feedback not visible (${message})${debugState ? ` (${debugState})` : ''}`)
+  }
+}
+
 async function assertAdminSettingsSaveCycle(page) {
   const settingsSection = page.locator('div.attendance__admin-section').filter({
     has: page.getByRole('heading', { name: labels.settings }),
@@ -996,14 +1055,7 @@ async function run() {
       }
       const shouldAssertRetry = assertAdminRetry && importSectionCount > 0
       if (shouldAssertRetry) {
-        const payloadInput = importSection.locator('#attendance-import-payload').first()
-        const previewButton = importSection.getByRole('button', { name: labels.preview }).first()
-        await payloadInput.waitFor({ timeout: adminReadyTimeoutMs })
-        await previewButton.waitFor({ timeout: adminReadyTimeoutMs })
-        await payloadInput.fill('{')
-        await previewButton.click()
-        await page.getByText(labels.invalidImportJson).first().waitFor({ timeout: timeoutMs })
-        await page.getByRole('button', { name: labels.retryPreview }).first().waitFor({ timeout: timeoutMs })
+        await assertAdminRetryState(page, importSection)
         logInfo('Admin status + retry action verified')
       } else {
         logInfo('Admin retry assertions skipped (ASSERT_ADMIN_RETRY=false or section unavailable)')

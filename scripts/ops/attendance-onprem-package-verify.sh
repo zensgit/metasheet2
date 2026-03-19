@@ -126,6 +126,7 @@ required=(
   "plugins/plugin-attendance/index.cjs"
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"
+  "run-migrate.bat"
   "scripts/ops/attendance-wsl-portproxy-refresh.ps1"
   "scripts/ops/attendance-wsl-portproxy-task.ps1"
   "docker/app.env.example"

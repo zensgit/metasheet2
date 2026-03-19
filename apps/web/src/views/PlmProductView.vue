@@ -1,245 +1,65 @@
 <template>
   <div class="plm-page">
-    <section class="panel">
-      <div class="panel-header">
-        <div>
-          <h2>产品搜索</h2>
-          <p class="subtext">基于联邦接口快速定位可用的 PLM 产品 ID</p>
-        </div>
-        <button class="btn primary" :disabled="searchLoading" @click="searchProducts">
-          {{ searchLoading ? '搜索中...' : '搜索' }}
-        </button>
-      </div>
-
-      <div class="form-grid">
-        <label for="plm-search-query">
-          关键词
-          <input
-            id="plm-search-query"
-            v-model.trim="searchQuery"
-            name="plmSearchQuery"
-            placeholder="可留空，返回最新记录"
-          />
-        </label>
-        <label for="plm-search-item-type">
-          Item Type
-          <input
-            id="plm-search-item-type"
-            v-model.trim="searchItemType"
-            name="plmSearchItemType"
-            placeholder="Part"
-          />
-        </label>
-        <label for="plm-search-limit">
-          Limit
-          <input
-            id="plm-search-limit"
-            v-model.number="searchLimit"
-            name="plmSearchLimit"
-            type="number"
-            min="1"
-            max="50"
-          />
-        </label>
-      </div>
-
-      <p v-if="searchError" class="status error">{{ searchError }}</p>
-      <p v-else-if="searchResults.length" class="status">
-        共 {{ searchTotal }} 条，当前展示 {{ searchResults.length }} 条
-      </p>
-      <div v-if="!searchResults.length" class="empty">暂无搜索结果</div>
-      <table v-else class="data-table">
-        <thead>
-          <tr>
-            <th>名称</th>
-            <th>料号</th>
-            <th>状态</th>
-            <th>类型</th>
-            <th>更新时间</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="item in searchResults" :key="item.id">
-            <td>{{ item.name || '-' }}</td>
-            <td>{{ item.partNumber || item.item_number || item.itemNumber || item.code || '-' }}</td>
-            <td>{{ item.status || '-' }}</td>
-            <td>{{ item.itemType || '-' }}</td>
-            <td>{{ item.updatedAt || item.updated_at || '-' }}</td>
-            <td>
-              <div class="inline-actions">
-                <button class="btn" @click="applySearchItem(item)">使用</button>
-                <button class="btn ghost mini" @click="applyCompareFromSearch(item, 'left')">
-                  左对比
-                </button>
-                <button class="btn ghost mini" @click="applyCompareFromSearch(item, 'right')">
-                  右对比
-                </button>
-                <button class="btn ghost mini" @click="copySearchValue(item, 'id')">
-                  复制 ID
-                </button>
-                <button class="btn ghost mini" @click="copySearchValue(item, 'number')">
-                  复制料号
-                </button>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </section>
+    <PlmSearchShell
+      :search-query="searchQuery"
+      :search-item-type="searchItemType"
+      :search-limit="searchLimit"
+      :search-results="searchResults"
+      :search-total="searchTotal"
+      :search-loading="searchLoading"
+      :search-error="searchError"
+      @update:search-query="searchQuery = $event"
+      @update:search-item-type="searchItemType = $event"
+      @update:search-limit="searchLimit = $event"
+      @search="searchProducts"
+      @apply-item="applySearchItem"
+      @compare-item="applyCompareFromSearch"
+      @copy-item="copySearchValue"
+    />
 
     <section class="panel">
-      <div class="panel-header">
-        <div>
-          <h1>PLM 产品详情</h1>
-          <p class="subtext">联邦接口：产品详情、BOM、where-used、BOM 对比、替代件</p>
-          <div class="auth-status">
-            <span class="auth-label">MetaSheet</span>
-            <span class="auth-pill" :class="authStateClass">{{ authStateText }}</span>
-            <span v-if="authExpiryText" class="auth-expiry">{{ authExpiryText }}</span>
-            <button class="btn ghost" @click="refreshAuthStatus">刷新状态</button>
-          </div>
-          <div class="auth-status secondary">
-            <span class="auth-label">PLM Token</span>
-            <span class="auth-pill" :class="plmAuthStateClass">{{ plmAuthStateText }}</span>
-            <span v-if="plmAuthExpiryText" class="auth-expiry">{{ plmAuthExpiryText }}</span>
-          </div>
-          <p v-if="authHint" class="hint">{{ authHint }}</p>
-          <p v-if="plmAuthHint" class="hint">{{ plmAuthHint }}</p>
-          <p v-if="authError" class="status error">{{ authError }}</p>
-          <p v-if="deepLinkStatus" class="status">{{ deepLinkStatus }}</p>
-          <p v-if="deepLinkError" class="status error">{{ deepLinkError }}</p>
-        </div>
-        <div class="panel-actions">
-          <button class="btn ghost" @click="copyDeepLink()">复制深链接</button>
-          <button class="btn" @click="resetAll">重置</button>
-        </div>
-      </div>
-
-      <div class="deep-link-scope">
-        <span class="deep-link-label">深链接范围</span>
-        <label class="deep-link-option" for="plm-deeplink-preset">
-          <span>预设</span>
-          <select
-            id="plm-deeplink-preset"
-            name="plmDeepLinkPreset"
-            class="deep-link-select"
-            v-model="deepLinkPreset"
-            @change="applyDeepLinkPreset"
-          >
-            <option value="">自动</option>
-            <option v-for="preset in deepLinkPresets" :key="preset.key" :value="preset.key">
-              {{ preset.label }}
-            </option>
-          </select>
-        </label>
-        <button
-          class="btn ghost"
-          :disabled="!deepLinkPreset.startsWith('custom:')"
-          @click="movePreset('up')"
-        >
-          上移
-        </button>
-        <button
-          class="btn ghost"
-          :disabled="!deepLinkPreset.startsWith('custom:')"
-          @click="movePreset('down')"
-        >
-          下移
-        </button>
-        <label
-          v-for="option in deepLinkPanelOptions"
-          :key="option.key"
-          class="deep-link-option"
-          :for="`plm-deeplink-scope-${option.key}`"
-        >
-          <input
-            :id="`plm-deeplink-scope-${option.key}`"
-            name="plmDeepLinkScope"
-            type="checkbox"
-            :value="option.key"
-            v-model="deepLinkScope"
-          />
-          <span>{{ option.label }}</span>
-        </label>
-        <button class="btn ghost" @click="clearDeepLinkScope">自动</button>
-        <label class="deep-link-option" for="plm-deeplink-preset-name">
-          <span>保存为</span>
-          <input
-            id="plm-deeplink-preset-name"
-            name="plmDeepLinkPresetName"
-            class="deep-link-input"
-            v-model.trim="customPresetName"
-            placeholder="输入名称"
-          />
-          <button
-            class="btn ghost"
-            :disabled="!customPresetName || !deepLinkScope.length"
-            @click="saveDeepLinkPreset"
-          >
-            保存
-          </button>
-        </label>
-        <button
-          class="btn ghost"
-          :disabled="!deepLinkPreset.startsWith('custom:')"
-          @click="deleteDeepLinkPreset"
-        >
-          删除预设
-        </button>
-        <label class="deep-link-option" for="plm-deeplink-preset-rename">
-          <span>重命名</span>
-          <input
-            id="plm-deeplink-preset-rename"
-            name="plmDeepLinkPresetRename"
-            class="deep-link-input"
-            v-model.trim="editingPresetLabel"
-            :disabled="!deepLinkPreset.startsWith('custom:')"
-            placeholder="新名称"
-          />
-          <button
-            class="btn ghost"
-            :disabled="!deepLinkPreset.startsWith('custom:') || !editingPresetLabel"
-            @click="applyPresetRename"
-          >
-            保存
-          </button>
-        </label>
-        <button class="btn ghost" @click="exportCustomPresets">导出预设</button>
-        <label class="deep-link-option" for="plm-deeplink-preset-import">
-          <span>导入</span>
-          <input
-            id="plm-deeplink-preset-import"
-            name="plmDeepLinkPresetImport"
-            class="deep-link-input"
-            v-model.trim="importPresetText"
-            placeholder="粘贴 JSON"
-          />
-          <button class="btn ghost" :disabled="!importPresetText" @click="importCustomPresets">
-            导入
-          </button>
-        </label>
-        <button class="btn ghost" @click="triggerPresetFileImport">选择文件</button>
-        <input
-          ref="importFileInput"
-          id="plm-deeplink-preset-file"
-          name="plmDeepLinkPresetFile"
-          class="deep-link-file"
-          type="file"
-          accept=".json,application/json"
-          @change="handlePresetFileImport"
-        />
-        <div
-          class="deep-link-drop"
-          :class="{ active: isPresetDropActive }"
-          @dragenter="handlePresetDragEnter"
-          @dragover="handlePresetDragOver"
-          @dragleave="handlePresetDragLeave"
-          @drop="handlePresetDrop"
-        >
-          <span>拖拽 JSON 预设文件到这里</span>
-        </div>
-      </div>
+      <PlmWorkbenchShell
+        :auth-state-text="authStateText"
+        :auth-state-class="authStateClass"
+        :auth-expiry-text="authExpiryText || ''"
+        :auth-hint="authHint || ''"
+        :auth-error="authError || ''"
+        :plm-auth-state-text="plmAuthStateText"
+        :plm-auth-state-class="plmAuthStateClass"
+        :plm-auth-expiry-text="plmAuthExpiryText || ''"
+        :plm-auth-hint="plmAuthHint || ''"
+        :deep-link-status="deepLinkStatus || ''"
+        :deep-link-error="deepLinkError || ''"
+        :deep-link-preset="deepLinkPreset"
+        :deep-link-presets="deepLinkPresets"
+        :deep-link-panel-options="deepLinkPanelOptions"
+        :deep-link-scope="deepLinkScope"
+        :custom-preset-name="customPresetName"
+        :editing-preset-label="editingPresetLabel"
+        :import-preset-text="importPresetText"
+        :is-preset-drop-active="isPresetDropActive"
+        @refresh-auth-status="refreshAuthStatus"
+        @copy-deep-link="copyDeepLink()"
+        @reset="resetAll"
+        @update:deep-link-preset="deepLinkPreset = $event"
+        @apply-deep-link-preset="applyDeepLinkPreset"
+        @move-preset="movePreset"
+        @update:deep-link-scope="deepLinkScope = $event"
+        @clear-deep-link-scope="clearDeepLinkScope"
+        @update:custom-preset-name="customPresetName = $event"
+        @save-deep-link-preset="saveDeepLinkPreset"
+        @delete-deep-link-preset="deleteDeepLinkPreset"
+        @update:editing-preset-label="editingPresetLabel = $event"
+        @apply-preset-rename="applyPresetRename"
+        @export-custom-presets="exportCustomPresets"
+        @update:import-preset-text="importPresetText = $event"
+        @import-custom-presets="importCustomPresets"
+        @file-import="handlePresetFileImport"
+        @preset-drag-enter="handlePresetDragEnter"
+        @preset-drag-over="handlePresetDragOver"
+        @preset-drag-leave="handlePresetDragLeave"
+        @preset-drop="handlePresetDrop"
+      />
 
       <div class="form-grid">
         <label for="plm-product-id">
@@ -369,250 +189,77 @@
     </section>
 
     <section class="panel">
-      <div class="panel-header">
-        <h2>BOM 结构</h2>
-        <div class="panel-actions">
-          <button class="btn ghost" :disabled="bomView !== 'tree' || !bomHasTree" @click="expandAllBom">
-            展开全部
-          </button>
-          <button class="btn ghost" :disabled="bomView !== 'tree' || !bomHasTree" @click="collapseAllBom">
-            折叠全部
-          </button>
-          <button
-            class="btn ghost"
-            :disabled="bomView !== 'tree' || !bomHasTree"
-            @click="expandBomToDepth(bomDepth)"
-          >
-            展开到深度
-          </button>
-          <button
-            class="btn ghost"
-            :disabled="bomView !== 'table' || !bomTablePathIdsCount"
-            @click="copyBomTablePathIdsBulk"
-          >
-            复制所有路径 ID
-          </button>
-          <button
-            class="btn ghost"
-            :disabled="bomView !== 'tree' || !bomTreePathIdsCount"
-            @click="copyBomTreePathIdsBulk"
-          >
-            复制树形路径 ID
-          </button>
-          <button class="btn ghost" :disabled="!bomSelectedCount" @click="copyBomSelectedChildIds">
-            复制选中子件
-          </button>
-          <button class="btn ghost" :disabled="!bomSelectedCount" @click="clearBomSelection">
-            清空选择
-          </button>
-          <span v-if="bomSelectedCount" class="muted">已选 {{ bomSelectedCount }}</span>
-          <button class="btn ghost" :disabled="!bomExportCount" @click="exportBomCsv">
-            导出 CSV
-          </button>
-          <button class="btn" :disabled="!productId || bomLoading" @click="loadBom">
-            {{ bomLoading ? '加载中...' : '刷新 BOM' }}
-          </button>
-        </div>
-      </div>
+      <PlmBomHeader
+        :bom-view="bomView"
+        :bom-has-tree="bomHasTree"
+        :bom-table-path-ids-count="bomTablePathIdsCount"
+        :bom-tree-path-ids-count="bomTreePathIdsCount"
+        :bom-selected-count="bomSelectedCount"
+        :bom-export-count="bomExportCount"
+        :product-id="productId"
+        :bom-loading="bomLoading"
+        :bom-depth="bomDepth"
+        :bom-effective-at="bomEffectiveAt"
+        :quick-depth-options="BOM_DEPTH_QUICK_OPTIONS"
+        @expand-all="expandAllBom"
+        @collapse-all="collapseAllBom"
+        @expand-to-depth="expandBomToDepth"
+        @copy-table-path-ids="copyBomTablePathIdsBulk"
+        @copy-tree-path-ids="copyBomTreePathIdsBulk"
+        @copy-selected-child-ids="copyBomSelectedChildIds"
+        @clear-selection="clearBomSelection"
+        @export-csv="exportBomCsv"
+        @refresh-bom="loadBom"
+        @update:bom-depth="bomDepth = $event"
+        @set-depth-quick="setBomDepthQuick"
+        @update:bom-effective-at="bomEffectiveAt = $event"
+        @update:bom-view="bomView = $event"
+      />
       <div class="form-grid compact">
-        <label for="plm-bom-depth">
-          深度
-          <div class="field-inline">
-            <input
-              id="plm-bom-depth"
-              v-model.number="bomDepth"
-              name="plmBomDepth"
-              type="number"
-              min="1"
-              max="10"
-            />
-            <div class="field-actions">
-              <button
-                v-for="depth in BOM_DEPTH_QUICK_OPTIONS"
-                :key="`bom-depth-${depth}`"
-                class="btn ghost mini"
-                type="button"
-                :disabled="bomDepth === depth"
-                @click="setBomDepthQuick(depth)"
-              >
-                {{ depth }}
-              </button>
-            </div>
-          </div>
-        </label>
-        <label for="plm-bom-effective-at">
-          生效时间
-          <input
-            id="plm-bom-effective-at"
-            v-model="bomEffectiveAt"
-            name="plmBomEffectiveAt"
-            type="datetime-local"
-          />
-        </label>
-        <label for="plm-bom-view">
-          视图
-          <select id="plm-bom-view" v-model="bomView" name="plmBomView">
-            <option value="table">表格</option>
-            <option value="tree">树形</option>
-          </select>
-        </label>
-        <label for="plm-bom-filter">
-          过滤
-          <div class="field-inline">
-            <select id="plm-bom-filter-field" v-model="bomFilterField" name="plmBomFilterField">
-              <option v-for="option in bomFilterFieldOptions" :key="option.value" :value="option.value">
-                {{ option.label }}
-              </option>
-            </select>
-            <input
-              id="plm-bom-filter"
-              v-model.trim="bomFilter"
-              name="plmBomFilter"
-              :placeholder="bomFilterPlaceholder"
-            />
-          </div>
-        </label>
-        <label for="plm-bom-filter-preset">
-          预设
-          <div class="field-inline">
-            <select
-              id="plm-bom-filter-preset-group-filter"
-              v-model="bomFilterPresetGroupFilter"
-              name="plmBomFilterPresetGroupFilter"
-            >
-              <option value="all">全部分组</option>
-              <option value="ungrouped">未分组</option>
-              <option v-for="group in bomFilterPresetGroups" :key="group" :value="group">
-                {{ group }}
-              </option>
-            </select>
-            <select id="plm-bom-filter-preset" v-model="bomFilterPresetKey" name="plmBomFilterPreset">
-              <option value="">选择预设</option>
-              <option v-for="preset in bomFilteredPresets" :key="preset.key" :value="preset.key">
-                {{ preset.label }}{{ preset.group ? ` (${preset.group})` : '' }}
-              </option>
-            </select>
-            <button class="btn ghost mini" :disabled="!bomFilterPresetKey" @click="applyBomFilterPreset">
-              应用
-            </button>
-            <button class="btn ghost mini" :disabled="!bomFilterPresetKey" @click="deleteBomFilterPreset">
-              删除
-            </button>
-            <button class="btn ghost mini" :disabled="!bomFilterPresetKey" @click="shareBomFilterPreset">
-              分享
-            </button>
-            <button
-              class="btn ghost mini"
-              :disabled="!bomFilterPresetKey"
-              @click="assignBomPresetGroup"
-            >
-              设为分组
-            </button>
-          </div>
-          <div class="field-inline">
-            <input
-              id="plm-bom-filter-preset-name"
-              v-model.trim="bomFilterPresetName"
-              name="plmBomFilterPresetName"
-              placeholder="新预设名称"
-            />
-            <input
-              id="plm-bom-filter-preset-group"
-              v-model.trim="bomFilterPresetGroup"
-              name="plmBomFilterPresetGroup"
-              class="deep-link-input"
-              placeholder="分组（可选）"
-            />
-            <button class="btn ghost mini" :disabled="!canSaveBomFilterPreset" @click="saveBomFilterPreset">
-              保存
-            </button>
-          </div>
-          <div class="field-inline field-actions">
-            <button
-              class="btn ghost mini"
-              :disabled="!bomFilterPresets.length"
-              @click="exportBomFilterPresets"
-            >
-              导出
-            </button>
-            <input
-              id="plm-bom-filter-preset-import"
-              v-model.trim="bomFilterPresetImportText"
-              name="plmBomFilterPresetImport"
-              class="deep-link-input"
-              placeholder="粘贴 JSON"
-            />
-            <select
-              id="plm-bom-filter-preset-import-mode"
-              v-model="bomFilterPresetImportMode"
-              name="plmBomFilterPresetImportMode"
-              class="deep-link-select"
-            >
-              <option value="merge">合并</option>
-              <option value="replace">覆盖</option>
-            </select>
-            <button
-              class="btn ghost mini"
-              :disabled="!bomFilterPresetImportText"
-              @click="importBomFilterPresets"
-            >
-              导入
-            </button>
-            <button class="btn ghost mini" @click="triggerBomFilterPresetFileImport">文件</button>
-            <input
-              ref="bomFilterPresetFileInput"
-              id="plm-bom-filter-preset-file"
-              name="plmBomFilterPresetFile"
-              class="deep-link-file"
-              type="file"
-              accept=".json,application/json"
-              @change="handleBomFilterPresetFileImport"
-            />
-            <button
-              id="plm-bom-filter-preset-clear"
-              class="btn ghost mini"
-              :disabled="!bomFilterPresets.length"
-              @click="clearBomFilterPresets"
-            >
-              清空
-            </button>
-            <button class="btn ghost mini" @click="showBomPresetManager = !showBomPresetManager">
-              {{ showBomPresetManager ? '收起' : '管理' }}
-            </button>
-          </div>
-          <div v-if="showBomPresetManager" class="preset-manager">
-            <div class="field-inline field-actions">
-              <button class="btn ghost mini" :disabled="!bomFilteredPresets.length" @click="selectAllBomPresets">
-                全选
-              </button>
-              <button class="btn ghost mini" :disabled="!bomPresetSelectionCount" @click="clearBomPresetSelection">
-                清空选择
-              </button>
-              <span class="muted">已选 {{ bomPresetSelectionCount }}/{{ bomFilteredPresets.length }}</span>
-            </div>
-            <div class="field-inline field-actions">
-              <input
-                id="plm-bom-filter-preset-batch-group"
-                v-model.trim="bomPresetBatchGroup"
-                name="plmBomFilterPresetBatchGroup"
-                class="deep-link-input"
-                placeholder="批量分组（留空清除）"
-              />
-              <button class="btn ghost mini" :disabled="!bomPresetSelectionCount" @click="applyBomPresetBatchGroup">
-                应用分组
-              </button>
-              <button class="btn ghost mini danger" :disabled="!bomPresetSelectionCount" @click="deleteBomPresetSelection">
-                批量删除
-              </button>
-            </div>
-            <div class="preset-list">
-              <label v-for="preset in bomFilteredPresets" :key="preset.key" class="preset-item">
-                <input type="checkbox" :value="preset.key" v-model="bomPresetSelection" />
-                <span>{{ preset.label }}{{ preset.group ? ` (${preset.group})` : '' }}</span>
-              </label>
-            </div>
-          </div>
-        </label>
+        <PlmBomFilterShell
+          :bom-filter-field="bomFilterField"
+          :bom-filter-field-options="bomFilterFieldOptions"
+          :bom-filter="bomFilter"
+          :bom-filter-placeholder="bomFilterPlaceholder"
+          :bom-filter-preset-group-filter="bomFilterPresetGroupFilter"
+          :bom-filter-preset-groups="bomFilterPresetGroups"
+          :bom-filter-preset-key="bomFilterPresetKey"
+          :bom-filtered-presets="bomFilteredPresets"
+          :bom-filter-preset-name="bomFilterPresetName"
+          :bom-filter-preset-group="bomFilterPresetGroup"
+          :can-save-bom-filter-preset="canSaveBomFilterPreset"
+          :bom-filter-presets-count="bomFilterPresets.length"
+          :bom-filter-preset-import-text="bomFilterPresetImportText"
+          :bom-filter-preset-import-mode="bomFilterPresetImportMode"
+          :show-bom-preset-manager="showBomPresetManager"
+          :bom-preset-selection="bomPresetSelection"
+          :bom-preset-selection-count="bomPresetSelectionCount"
+          :bom-preset-batch-group="bomPresetBatchGroup"
+          @update:bom-filter-field="bomFilterField = $event"
+          @update:bom-filter="bomFilter = $event"
+          @update:bom-filter-preset-group-filter="bomFilterPresetGroupFilter = $event"
+          @update:bom-filter-preset-key="bomFilterPresetKey = $event"
+          @apply-bom-filter-preset="applyBomFilterPreset"
+          @delete-bom-filter-preset="deleteBomFilterPreset"
+          @share-bom-filter-preset="shareBomFilterPreset"
+          @assign-bom-preset-group="assignBomPresetGroup"
+          @update:bom-filter-preset-name="bomFilterPresetName = $event"
+          @update:bom-filter-preset-group="bomFilterPresetGroup = $event"
+          @save-bom-filter-preset="saveBomFilterPreset"
+          @export-bom-filter-presets="exportBomFilterPresets"
+          @update:bom-filter-preset-import-text="bomFilterPresetImportText = $event"
+          @update:bom-filter-preset-import-mode="bomFilterPresetImportMode = $event"
+          @import-bom-filter-presets="importBomFilterPresets"
+          @file-import="handleBomFilterPresetFileImport"
+          @clear-bom-filter-presets="clearBomFilterPresets"
+          @toggle-bom-preset-manager="showBomPresetManager = !showBomPresetManager"
+          @select-all-bom-presets="selectAllBomPresets"
+          @clear-bom-preset-selection="clearBomPresetSelection"
+          @update:bom-preset-batch-group="bomPresetBatchGroup = $event"
+          @apply-bom-preset-batch-group="applyBomPresetBatchGroup"
+          @delete-bom-preset-selection="deleteBomPresetSelection"
+          @update:bom-preset-selection="bomPresetSelection = $event"
+        />
       </div>
       <p v-if="bomError" class="status error">{{ bomError }}</p>
       <p v-if="bomItems.length" class="status">共 {{ bomItems.length }} 条，展示 {{ bomDisplayCount }} 条</p>
@@ -2570,6 +2217,10 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { type LocationQueryValue, useRoute, useRouter } from 'vue-router'
 import { apiGet, apiPost } from '../utils/api'
+import PlmBomHeader from '../components/plm/PlmBomHeader.vue'
+import PlmBomFilterShell from '../components/plm/PlmBomFilterShell.vue'
+import PlmSearchShell from '../components/plm/PlmSearchShell.vue'
+import PlmWorkbenchShell from '../components/plm/PlmWorkbenchShell.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -2713,7 +2364,6 @@ const deepLinkPreset = ref('')
 const customPresetName = ref('')
 const editingPresetLabel = ref('')
 const importPresetText = ref('')
-const importFileInput = ref<HTMLInputElement | null>(null)
 const isPresetDropActive = ref(false)
 let presetDropDepth = 0
 const customDeepLinkPresets = ref<DeepLinkPreset[]>([])
@@ -7736,10 +7386,6 @@ function importCustomPresetsFromText(raw: string) {
 
 function importCustomPresets() {
   importCustomPresetsFromText(importPresetText.value)
-}
-
-function triggerPresetFileImport() {
-  importFileInput.value?.click()
 }
 
 async function importPresetFile(file: File) {
