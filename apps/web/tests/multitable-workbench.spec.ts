@@ -17,6 +17,55 @@ describe('useMultitableWorkbench', () => {
     expect(wb.activeSheetId.value).toBe('s1')
   })
 
+  it('filters the system people sheet from navigation state', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (input.startsWith('/api/multitable/sheets')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            sheets: [
+              { id: 'sheet_people', name: 'People', description: '__metasheet_system:people__' },
+              { id: 'sheet_orders', name: 'Orders', description: null },
+            ],
+          },
+        }), { status: 200 })
+      }
+      if (input.startsWith('/api/multitable/fields')) {
+        return new Response(JSON.stringify({ ok: true, data: { fields: [] } }), { status: 200 })
+      }
+      if (input.startsWith('/api/multitable/context')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            sheet: { id: 'sheet_orders', name: 'Orders', description: null },
+            sheets: [{ id: 'sheet_orders', name: 'Orders', description: null }],
+            views: [],
+            capabilities: {
+              canRead: true,
+              canCreateRecord: true,
+              canEditRecord: true,
+              canDeleteRecord: false,
+              canManageFields: true,
+              canManageViews: false,
+              canComment: true,
+              canManageAutomation: false,
+            },
+          },
+        }), { status: 200 })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+
+    const client = new MultitableApiClient({ fetchFn })
+    const wb = useMultitableWorkbench({ client })
+    await wb.loadSheets()
+
+    expect(wb.sheets.value).toEqual([
+      expect.objectContaining({ id: 'sheet_orders', name: 'Orders' }),
+    ])
+    expect(wb.activeSheetId.value).toBe('sheet_orders')
+  })
+
   it('preserves initialSheetId', async () => {
     const client = mockClient({ sheets: [{ id: 's1', name: 'S1' }, { id: 's2', name: 'S2' }] })
     const wb = useMultitableWorkbench({ client, initialSheetId: 's2' })

@@ -1218,6 +1218,17 @@ components:
           additionalProperties: true
         order:
           type: integer
+    MultitablePreparedPersonField:
+      type: object
+      properties:
+        targetSheet:
+          $ref: '#/components/schemas/MultitableSheet'
+        fieldProperty:
+          type: object
+          additionalProperties: true
+      required:
+        - targetSheet
+        - fieldProperty
     MultitableRecord:
       type: object
       properties:
@@ -6662,6 +6673,44 @@ paths:
                         type: string
                     required:
                       - deleted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/person-fields/prepare:
+    post:
+      summary: Prepare a person-field preset backed by the system People sheet
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sheetId:
+                  type: string
+              required:
+                - sheetId
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/MultitablePreparedPersonField'
+                required:
+                  - data
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':

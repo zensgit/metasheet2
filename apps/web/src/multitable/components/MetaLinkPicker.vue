@@ -61,6 +61,7 @@ const records = ref<LinkedRecordSummary[]>([])
 const loading = ref(false)
 const selected = reactive(new Set<string>())
 const summaryById = reactive<Record<string, LinkedRecordSummary>>({})
+const singleSelect = computed(() => props.field?.property?.limitSingleRecord === true || props.field?.property?.refKind === 'user')
 
 watch(() => props.visible, async (v) => {
   if (!v) {
@@ -102,6 +103,7 @@ function onSearch() {
 function toggleSelect(id: string) {
   if (selected.has(id)) selected.delete(id)
   else {
+    if (singleSelect.value) selected.clear()
     selected.add(id)
     const record = records.value.find((item) => item.id === id)
     if (record) summaryById[id] = record

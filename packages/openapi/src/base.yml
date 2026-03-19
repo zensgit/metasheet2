@@ -1191,6 +1191,17 @@ components:
           additionalProperties: true
         order:
           type: integer
+    MultitablePreparedPersonField:
+      type: object
+      properties:
+        targetSheet:
+          $ref: '#/components/schemas/MultitableSheet'
+        fieldProperty:
+          type: object
+          additionalProperties: true
+      required:
+        - targetSheet
+        - fieldProperty
     MultitableRecord:
       type: object
       properties:

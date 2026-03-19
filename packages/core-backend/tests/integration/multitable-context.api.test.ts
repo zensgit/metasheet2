@@ -230,4 +230,131 @@ describe('Multitable context API', () => {
     expect(response.body).toEqual({ error: 'Insufficient permissions' })
     expect(mockPool.query).not.toHaveBeenCalled()
   })
+
+  test('hides the system people sheet from multitable context selection', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM meta_bases') && sql.includes('WHERE id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [{
+              id: 'base_ops',
+              name: 'Ops Base',
+              icon: null,
+              color: null,
+              owner_id: null,
+              workspace_id: null,
+            }],
+          }
+        }
+        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
+          return {
+            rows: [
+              { id: 'sheet_people', base_id: 'base_ops', name: 'People', description: '__metasheet_system:people__' },
+              { id: 'sheet_orders', base_id: 'base_ops', name: 'Orders', description: null },
+            ],
+          }
+        }
+        if (sql.includes('FROM meta_views') && sql.includes('WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_orders'])
+          return {
+            rows: [
+              { id: 'view_orders', sheet_id: 'sheet_orders', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [] },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/context')
+      .query({ baseId: 'base_ops' })
+      .expect(200)
+
+    expect(response.body.data.sheet).toMatchObject({ id: 'sheet_orders', name: 'Orders' })
+    expect(response.body.data.sheets).toEqual([
+      expect.objectContaining({ id: 'sheet_orders', name: 'Orders' }),
+    ])
+  })
+
+  test('prepares a person field preset by provisioning a people sheet and syncing users', async () => {
+    let peopleSheetId = ''
+    const fieldIdsByName = new Map<string, string>()
+
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }] }
+        }
+        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: null }] }
+        }
+        if (sql.includes('INSERT INTO meta_sheets')) {
+          peopleSheetId = String(params?.[0] ?? '')
+          expect(params).toEqual([
+            expect.any(String),
+            'base_ops',
+            'People',
+            '__metasheet_system:people__',
+          ])
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('SELECT id, name, type, "order" FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual([peopleSheetId])
+          return { rows: [] }
+        }
+        if (sql.includes('INSERT INTO meta_fields')) {
+          const fieldId = String(params?.[0] ?? '')
+          const fieldName = String(params?.[2] ?? '')
+          fieldIdsByName.set(fieldName, fieldId)
+          return { rows: [], rowCount: 1 }
+        }
+        if (sql.includes('SELECT id, email, name, avatar_url') && sql.includes('FROM users')) {
+          return {
+            rows: [
+              { id: 'user_amy', email: 'amy@example.com', name: 'Amy', avatar_url: 'https://cdn.example.com/amy.png' },
+            ],
+          }
+        }
+        if (sql.includes('SELECT id, data FROM meta_records WHERE sheet_id = $1')) {
+          expect(params).toEqual([peopleSheetId])
+          return { rows: [] }
+        }
+        if (sql.includes('INSERT INTO meta_records')) {
+          expect(params?.[1]).toBe(peopleSheetId)
+          const payload = JSON.parse(String(params?.[2] ?? '{}'))
+          expect(payload).toEqual({
+            [fieldIdsByName.get('User ID')!]: 'user_amy',
+            [fieldIdsByName.get('Name')!]: 'Amy',
+            [fieldIdsByName.get('Email')!]: 'amy@example.com',
+            [fieldIdsByName.get('Avatar URL')!]: 'https://cdn.example.com/amy.png',
+          })
+          return { rows: [], rowCount: 1 }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/person-fields/prepare')
+      .send({ sheetId: 'sheet_ops' })
+      .expect(200)
+
+    expect(response.body.data.targetSheet).toMatchObject({
+      id: peopleSheetId,
+      baseId: 'base_ops',
+      name: 'People',
+      description: '__metasheet_system:people__',
+    })
+    expect(response.body.data.fieldProperty).toEqual({
+      foreignSheetId: peopleSheetId,
+      limitSingleRecord: true,
+      refKind: 'user',
+    })
+  })
 })

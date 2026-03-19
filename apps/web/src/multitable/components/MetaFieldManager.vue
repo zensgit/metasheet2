@@ -13,7 +13,7 @@
           :key="field.id"
           class="meta-field-mgr__row"
         >
-          <span class="meta-field-mgr__icon">{{ FIELD_ICONS[field.type] ?? '?' }}</span>
+          <span class="meta-field-mgr__icon">{{ FIELD_ICONS[displayFieldType(field)] ?? '?' }}</span>
 
           <!-- Inline rename -->
           <template v-if="editingId === field.id">
@@ -30,7 +30,7 @@
           </template>
           <template v-else>
             <span class="meta-field-mgr__name" :title="field.name">{{ field.name }}</span>
-            <span class="meta-field-mgr__type">{{ field.type }}</span>
+            <span class="meta-field-mgr__type">{{ displayFieldType(field) }}</span>
             <button class="meta-field-mgr__action" title="Rename" @click="startRename(field)">&#x270E;</button>
             <!-- Reorder -->
             <button class="meta-field-mgr__action" :disabled="idx === 0" title="Move up" @click="moveField(field.id, idx - 1)">&#x25B2;</button>
@@ -76,12 +76,12 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
-import type { MetaField, MetaFieldType } from '../types'
+import type { MetaField, MetaFieldCreateType } from '../types'
 
-const FIELD_TYPES: MetaFieldType[] = ['string', 'number', 'boolean', 'date', 'select', 'link', 'formula', 'lookup', 'rollup', 'attachment']
+const FIELD_TYPES: MetaFieldCreateType[] = ['string', 'number', 'boolean', 'date', 'select', 'link', 'person', 'formula', 'lookup', 'rollup', 'attachment']
 const FIELD_ICONS: Record<string, string> = {
   string: 'Aa', number: '#', boolean: '\u2611', date: '\u{1F4C5}', select: '\u25CF',
-  link: '\u21C4', lookup: '\u2197', rollup: '\u03A3', formula: 'fx', attachment: '\uD83D\uDCCE',
+  link: '\u21C4', person: '\u{1F464}', lookup: '\u2197', rollup: '\u03A3', formula: 'fx', attachment: '\uD83D\uDCCE',
 }
 
 const props = defineProps<{
@@ -98,7 +98,7 @@ const emit = defineEmits<{
 }>()
 
 const newFieldName = ref('')
-const newFieldType = ref<MetaFieldType>('string')
+const newFieldType = ref<MetaFieldCreateType>('string')
 const editingId = ref<string | null>(null)
 const editingName = ref('')
 const deleteTarget = ref<MetaField | null>(null)
@@ -136,6 +136,11 @@ function moveField(fieldId: string, newIdx: number) {
 
 function onDeleteField(field: MetaField) {
   deleteTarget.value = field
+}
+
+function displayFieldType(field: MetaField): string {
+  if (field.type === 'link' && field.property?.refKind === 'user') return 'person'
+  return field.type
 }
 
 function confirmDelete() {

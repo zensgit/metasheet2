@@ -15,6 +15,8 @@ export type MetaFieldType =
   | 'rollup'
   | 'attachment'
 
+export type MetaFieldCreateType = MetaFieldType | 'person'
+
 export type RowDensity = 'compact' | 'normal' | 'expanded'
 
 // --- Core entities ---
@@ -239,6 +241,11 @@ export interface CreateFieldInput {
   type?: string
   property?: Record<string, unknown>
   order?: number
+}
+
+export interface MetaPreparedPersonField {
+  targetSheet: MetaSheet
+  fieldProperty: Record<string, unknown>
 }
 
 export interface UpdateFieldInput {

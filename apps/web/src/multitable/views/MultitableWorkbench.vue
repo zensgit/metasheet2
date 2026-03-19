@@ -436,7 +436,17 @@ async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: Li
 // --- Field management ---
 async function onCreateField(input: { sheetId: string; name: string; type: string }) {
   try {
-    await workbench.client.createField({ sheetId: input.sheetId, name: input.name, type: input.type as MetaFieldType })
+    if (input.type === 'person') {
+      const preset = await workbench.client.preparePersonField(input.sheetId)
+      await workbench.client.createField({
+        sheetId: input.sheetId,
+        name: input.name,
+        type: 'link',
+        property: preset.fieldProperty,
+      })
+    } else {
+      await workbench.client.createField({ sheetId: input.sheetId, name: input.name, type: input.type as MetaFieldType })
+    }
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
   } catch (e: any) { showError(e.message ?? 'Failed to create field') }

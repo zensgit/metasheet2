@@ -2,6 +2,7 @@ import { ref, computed, watch } from 'vue'
 import type { MetaSheet, MetaField, MetaView, MetaCapabilities } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
 
+const SYSTEM_PEOPLE_SHEET_DESCRIPTION = '__metasheet_system:people__'
 const EMPTY_CAPABILITIES: MetaCapabilities = {
   canRead: false,
   canCreateRecord: false,
@@ -11,6 +12,10 @@ const EMPTY_CAPABILITIES: MetaCapabilities = {
   canManageViews: false,
   canComment: false,
   canManageAutomation: false,
+}
+
+function filterVisibleSheets(sheets: MetaSheet[]): MetaSheet[] {
+  return sheets.filter((sheet) => sheet.description !== SYSTEM_PEOPLE_SHEET_DESCRIPTION)
 }
 
 export function useMultitableWorkbench(opts?: {
@@ -40,7 +45,7 @@ export function useMultitableWorkbench(opts?: {
     const hadActiveSheet = !!activeSheetId.value
     try {
       const data = await client.listSheets()
-      sheets.value = data.sheets ?? []
+      sheets.value = filterVisibleSheets(data.sheets ?? [])
       if (!activeSheetId.value && sheets.value.length) {
         activeSheetId.value = sheets.value[0].id
       }
@@ -66,10 +71,10 @@ export function useMultitableWorkbench(opts?: {
         }),
       ])
       fields.value = fData.fields ?? []
-      sheets.value = ctx.sheets ?? sheets.value
+      sheets.value = filterVisibleSheets(ctx.sheets ?? sheets.value)
       views.value = ctx.views ?? []
       capabilities.value = ctx.capabilities ?? { ...EMPTY_CAPABILITIES }
-      if (ctx.sheet?.id) {
+      if (ctx.sheet?.id && ctx.sheet.description !== SYSTEM_PEOPLE_SHEET_DESCRIPTION) {
         activeSheetId.value = ctx.sheet.id
       }
       if (!activeViewId.value && views.value.length) {

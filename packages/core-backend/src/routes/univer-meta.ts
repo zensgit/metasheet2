@@ -61,6 +61,8 @@ type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; r
 
 const DEFAULT_BASE_ID = 'base_legacy'
 const DEFAULT_BASE_NAME = 'Migrated Base'
+const SYSTEM_PEOPLE_SHEET_NAME = 'People'
+const SYSTEM_PEOPLE_SHEET_DESCRIPTION = '__metasheet_system:people__'
 const ATTACHMENT_PATH = process.env.ATTACHMENT_PATH || path.join(process.cwd(), 'data', 'attachments')
 const ATTACHMENT_UPLOAD_MAX_SIZE = Number.parseInt(process.env.ATTACHMENT_MAX_SIZE ?? '', 10) || 100 * 1024 * 1024
 const multitableMulter = loadMulter()
@@ -115,6 +117,16 @@ type RecordSummaryPage = {
   displayFieldId: string | null
 }
 
+type PeopleSheetPreset = {
+  sheet: {
+    id: string
+    baseId: string | null
+    name: string
+    description: string | null
+  }
+  fieldProperty: Record<string, unknown>
+}
+
 function buildId(prefix: string): string {
   return `${prefix}_${randomUUID()}`
 }
@@ -157,6 +169,14 @@ function normalizeJsonArray(value: unknown): string[] {
     }
   }
   return []
+}
+
+function isSystemPeopleSheetDescription(value: unknown): boolean {
+  return typeof value === 'string' && value.trim() === SYSTEM_PEOPLE_SHEET_DESCRIPTION
+}
+
+function filterVisibleSheetRows<T extends { description?: unknown }>(rows: T[]): T[] {
+  return rows.filter((row) => !isSystemPeopleSheetDescription(row.description))
 }
 
 type LinkFieldConfig = {
@@ -1049,6 +1069,144 @@ async function ensureLegacyBase(query: QueryFn): Promise<string> {
   return DEFAULT_BASE_ID
 }
 
+async function ensurePeopleSheetPreset(query: QueryFn, baseId: string): Promise<PeopleSheetPreset> {
+  const existingSheets = await query(
+    `SELECT id, base_id, name, description
+     FROM meta_sheets
+     WHERE base_id = $1 AND deleted_at IS NULL
+     ORDER BY created_at ASC`,
+    [baseId],
+  )
+
+  let peopleSheetRow = (existingSheets.rows as any[]).find((row) => isSystemPeopleSheetDescription(row.description)) ?? null
+  let peopleSheetId = typeof peopleSheetRow?.id === 'string' ? String(peopleSheetRow.id) : buildId('sheet').slice(0, 50)
+
+  if (!peopleSheetRow) {
+    await query(
+      `INSERT INTO meta_sheets (id, base_id, name, description)
+       VALUES ($1, $2, $3, $4)`,
+      [peopleSheetId, baseId, SYSTEM_PEOPLE_SHEET_NAME, SYSTEM_PEOPLE_SHEET_DESCRIPTION],
+    )
+    peopleSheetRow = {
+      id: peopleSheetId,
+      base_id: baseId,
+      name: SYSTEM_PEOPLE_SHEET_NAME,
+      description: SYSTEM_PEOPLE_SHEET_DESCRIPTION,
+    }
+  }
+
+  const fieldRows = await query(
+    'SELECT id, name, type, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC',
+    [peopleSheetId],
+  )
+  const fieldIdByName = new Map<string, string>()
+  for (const row of fieldRows.rows as any[]) {
+    const name = typeof row.name === 'string' ? row.name.trim() : ''
+    const id = typeof row.id === 'string' ? row.id : ''
+    if (name && id && !fieldIdByName.has(name)) fieldIdByName.set(name, id)
+  }
+
+  const ensureField = async (name: string, order: number): Promise<string> => {
+    const existingId = fieldIdByName.get(name)
+    if (existingId) return existingId
+    const id = buildId('fld').slice(0, 50)
+    await query(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1, $2, $3, 'string', '{}'::jsonb, $4)`,
+      [id, peopleSheetId, name, order],
+    )
+    fieldIdByName.set(name, id)
+    return id
+  }
+
+  const userIdFieldId = await ensureField('User ID', 0)
+  const nameFieldId = await ensureField('Name', 1)
+  const emailFieldId = await ensureField('Email', 2)
+  const avatarFieldId = await ensureField('Avatar URL', 3)
+
+  let userRows: Array<{ id: string; email: string; name: string | null; avatar_url: string | null }> = []
+  try {
+    const result = await query(
+      `SELECT id, email, name, avatar_url
+       FROM users
+       WHERE is_active = TRUE
+       ORDER BY created_at ASC, id ASC`,
+    )
+    userRows = (result.rows as any[]).map((row) => ({
+      id: String(row.id),
+      email: String(row.email),
+      name: typeof row.name === 'string' ? row.name : null,
+      avatar_url: typeof row.avatar_url === 'string' ? row.avatar_url : null,
+    }))
+  } catch (err: any) {
+    if (!(typeof err?.code === 'string' && err.code === '42P01')) {
+      throw err
+    }
+  }
+
+  if (userRows.length > 0) {
+    const existingRecords = await query(
+      'SELECT id, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
+      [peopleSheetId],
+    )
+    const recordByUserId = new Map<string, { id: string; data: Record<string, unknown> }>()
+    for (const row of existingRecords.rows as any[]) {
+      const data = normalizeJson(row.data)
+      const userId = typeof data[userIdFieldId] === 'string' ? String(data[userIdFieldId]) : ''
+      if (userId) {
+        recordByUserId.set(userId, { id: String(row.id), data })
+      }
+    }
+
+    for (const user of userRows) {
+      const nextData = {
+        [userIdFieldId]: user.id,
+        [nameFieldId]: user.name?.trim() || user.email,
+        [emailFieldId]: user.email,
+        [avatarFieldId]: user.avatar_url ?? '',
+      }
+      const existing = recordByUserId.get(user.id)
+      if (!existing) {
+        await query(
+          `INSERT INTO meta_records (id, sheet_id, data, version)
+           VALUES ($1, $2, $3::jsonb, 1)`,
+          [buildId('rec').slice(0, 50), peopleSheetId, JSON.stringify(nextData)],
+        )
+        continue
+      }
+
+      const changed =
+        existing.data[userIdFieldId] !== nextData[userIdFieldId] ||
+        existing.data[nameFieldId] !== nextData[nameFieldId] ||
+        existing.data[emailFieldId] !== nextData[emailFieldId] ||
+        existing.data[avatarFieldId] !== nextData[avatarFieldId]
+
+      if (changed) {
+        await query(
+          `UPDATE meta_records
+           SET data = $1::jsonb, version = version + 1, updated_at = now()
+           WHERE id = $2`,
+          [JSON.stringify(nextData), existing.id],
+        )
+      }
+    }
+  }
+
+  return {
+    sheet: {
+      id: peopleSheetId,
+      baseId,
+      name: SYSTEM_PEOPLE_SHEET_NAME,
+      description: SYSTEM_PEOPLE_SHEET_DESCRIPTION,
+    },
+    fieldProperty: {
+      foreignSheetId: peopleSheetId,
+      limitSingleRecord: true,
+      refKind: 'user',
+    },
+  }
+}
+
 async function loadSheetRow(
   query: QueryFn,
   sheetId: string,
@@ -1645,13 +1803,14 @@ export function univerMetaRouter(): Router {
           [resolvedBaseId],
         )
         : { rows: [] }
+      const visibleSheetRows = filterVisibleSheetRows(((sheetListResult as any).rows ?? []) as any[])
 
       const effectiveSheetId =
         resolvedSheetId ??
-        (typeof (sheetListResult as any).rows?.[0]?.id === 'string' ? String((sheetListResult as any).rows[0].id) : null)
+        (typeof visibleSheetRows[0]?.id === 'string' ? String(visibleSheetRows[0].id) : null)
       const selectedSheet =
-        sheetRow ??
-        ((sheetListResult as any).rows as any[]).find((row) => String(row.id) === effectiveSheetId) ??
+        (!isSystemPeopleSheetDescription(sheetRow?.description) ? sheetRow : null) ??
+        visibleSheetRows.find((row) => String(row.id) === effectiveSheetId) ??
         null
 
       const viewsResult = effectiveSheetId
@@ -1681,7 +1840,7 @@ export function univerMetaRouter(): Router {
             baseId: typeof row.base_id === 'string' ? row.base_id : null,
             name: String(row.name),
             description: typeof row.description === 'string' ? row.description : null,
-          })),
+          })).filter((row: any) => !isSystemPeopleSheetDescription(row.description)),
           views: (viewsResult as any).rows.map((row: any) => ({
             id: String(row.id),
             sheetId: String(row.sheet_id),
@@ -1712,7 +1871,7 @@ export function univerMetaRouter(): Router {
       const result = await pool.query(
         'SELECT id, base_id, name, description FROM meta_sheets WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT 200',
       )
-      const sheets = result.rows.map((r: any) => ({
+      const sheets = filterVisibleSheetRows((result.rows ?? []) as any[]).map((r: any) => ({
         id: String(r.id),
         baseId: typeof r.base_id === 'string' ? r.base_id : null,
         name: String(r.name),
@@ -1827,6 +1986,37 @@ export function univerMetaRouter(): Router {
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] create field failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create field' } })
+    }
+  })
+
+  router.post('/person-fields/prepare', rbacGuard('multitable', 'write'), async (req: Request, res: Response) => {
+    const schema = z.object({
+      sheetId: z.string().min(1).max(50),
+    })
+
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const preset = await pool.transaction(async ({ query }) => {
+        const sourceSheet = await loadSheetRow(query as unknown as QueryFn, parsed.data.sheetId)
+        if (!sourceSheet) throw new NotFoundError(`Sheet not found: ${parsed.data.sheetId}`)
+        const baseId = sourceSheet.baseId ?? await ensureLegacyBase(query as unknown as QueryFn)
+        return ensurePeopleSheetPreset(query as unknown as QueryFn, baseId)
+      })
+
+      return res.json({ ok: true, data: { targetSheet: preset.sheet, fieldProperty: preset.fieldProperty } })
+    } catch (err) {
+      if (err instanceof NotFoundError) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
+      }
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] prepare person field failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to prepare person field preset' } })
     }
   })
 

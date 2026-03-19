@@ -19,6 +19,16 @@ const linkField = {
   type: 'link',
 }
 
+const personField = {
+  id: 'fld_owner',
+  name: 'Owner',
+  type: 'link',
+  property: {
+    refKind: 'user',
+    limitSingleRecord: true,
+  },
+}
+
 const flushPromises = async () => {
   await Promise.resolve()
   await nextTick()
@@ -164,6 +174,66 @@ describe('MetaLinkPicker', () => {
 
     expect(container.textContent).toContain('(empty)')
     expect(container.querySelector('.meta-link-picker')).toBeNull()
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('replaces the previous selection for person-style single select links', async () => {
+    mockListLinkOptions.mockResolvedValue({
+      field: personField,
+      targetSheet: { id: 'sheet_people', baseId: 'base_1', name: 'People' },
+      selected: [{ id: 'user_1', display: 'Amy' }],
+      records: [
+        { id: 'user_1', display: 'Amy' },
+        { id: 'user_2', display: 'Jamie' },
+      ],
+      page: { offset: 0, limit: 50, total: 2, hasMore: false },
+    })
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const onConfirm = vi.fn()
+
+    const Harness = defineComponent({
+      setup() {
+        const visible = ref(false)
+        return {
+          visible,
+          onClose: () => {
+            visible.value = false
+          },
+        }
+      },
+      render() {
+        return h(MetaLinkPicker, {
+          visible: this.visible,
+          field: personField,
+          currentValue: ['user_1'],
+          onClose: this.onClose,
+          onConfirm,
+        })
+      },
+    })
+
+    const app = createApp(Harness)
+    const vm = app.mount(container) as any
+    vm.visible = true
+    await flushPromises()
+
+    const checkboxes = Array.from(container.querySelectorAll('.meta-link-picker__item input[type="checkbox"]')) as HTMLInputElement[]
+    expect(checkboxes).toHaveLength(2)
+    checkboxes[1]?.click()
+    await nextTick()
+
+    expect(container.textContent).toContain('1 selected')
+    const confirm = container.querySelector('.meta-link-picker__confirm') as HTMLButtonElement | null
+    confirm?.click()
+
+    expect(onConfirm).toHaveBeenCalledWith({
+      recordIds: ['user_2'],
+      summaries: [{ id: 'user_2', display: 'Jamie' }],
+    })
 
     app.unmount()
     container.remove()

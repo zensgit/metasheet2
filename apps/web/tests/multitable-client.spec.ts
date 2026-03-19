@@ -84,4 +84,39 @@ describe('MultitableApiClient', () => {
       uploadedAt: '2026-03-19T10:30:00.000Z',
     })
   })
+
+  it('prepares a person field preset', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: {
+        targetSheet: {
+          id: 'sheet_people',
+          baseId: 'base_ops',
+          name: 'People',
+          description: '__metasheet_system:people__',
+        },
+        fieldProperty: {
+          foreignSheetId: 'sheet_people',
+          limitSingleRecord: true,
+          refKind: 'user',
+        },
+      },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.preparePersonField('sheet_ops')).resolves.toEqual({
+      targetSheet: {
+        id: 'sheet_people',
+        baseId: 'base_ops',
+        name: 'People',
+        description: '__metasheet_system:people__',
+      },
+      fieldProperty: {
+        foreignSheetId: 'sheet_people',
+        limitSingleRecord: true,
+        refKind: 'user',
+      },
+    })
+    expect(fetchFn).toHaveBeenCalledWith('/api/multitable/person-fields/prepare', expect.objectContaining({ method: 'POST' }))
+  })
 })

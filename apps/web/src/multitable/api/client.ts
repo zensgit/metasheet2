@@ -19,6 +19,7 @@ import type {
   CreateBaseInput,
   CreateSheetInput,
   CreateFieldInput,
+  MetaPreparedPersonField,
   UpdateFieldInput,
   CreateViewInput,
   UpdateViewInput,
@@ -149,6 +150,15 @@ export class MultitableApiClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
+    })
+    return parseJson(res)
+  }
+
+  async preparePersonField(sheetId: string): Promise<MetaPreparedPersonField> {
+    const res = await this.fetch('/api/multitable/person-fields/prepare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sheetId }),
     })
     return parseJson(res)
   }
