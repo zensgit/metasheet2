@@ -169,6 +169,128 @@ describe('useMultitableGrid', () => {
     expect(grid.rows.value[0].version).toBe(2)
     expect(grid.error.value).toBeNull()
   })
+
+  it('patchCell applies canonical link summaries from the backend response', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (!input.startsWith('/api/multitable/patch')) throw new Error(`Unexpected request: ${input}`)
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          updated: [{ recordId: 'r1', version: 2 }],
+          records: [{ recordId: 'r1', data: { f1: ['vendor_1', 'vendor_2'] } }],
+          linkSummaries: {
+            r1: {
+              f1: [
+                { id: 'vendor_1', display: 'Acme Supply' },
+                { id: 'vendor_2', display: 'Beacon Labs' },
+              ],
+            },
+          },
+        },
+      }), { status: 200 })
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.fields.value = [{ id: 'f1', name: 'Vendor', type: 'link' }]
+    grid.rows.value = [{ id: 'r1', version: 1, data: { f1: ['vendor_1'] } }]
+    grid.linkSummaries.value = {
+      r1: {
+        f1: [{ id: 'vendor_1', display: 'Old Vendor Name' }],
+      },
+    }
+
+    await grid.patchCell('r1', 'f1', ['vendor_1', 'vendor_2'], 1)
+
+    expect(grid.rows.value[0].data.f1).toEqual(['vendor_1', 'vendor_2'])
+    expect(grid.linkSummaries.value.r1?.f1).toEqual([
+      { id: 'vendor_1', display: 'Acme Supply' },
+      { id: 'vendor_2', display: 'Beacon Labs' },
+    ])
+  })
+
+  it('patchCell, undo and redo round-trip a link-style cell value', async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        data: {
+          updated: [{ recordId: 'r1', version: 2 }],
+          records: [{ recordId: 'r1', data: { f1: ['after'] } }],
+        },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        data: {
+          updated: [{ recordId: 'r1', version: 3 }],
+          records: [{ recordId: 'r1', data: { f1: ['before'] } }],
+        },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        data: {
+          updated: [{ recordId: 'r1', version: 4 }],
+          records: [{ recordId: 'r1', data: { f1: ['after'] } }],
+        },
+      }), { status: 200 }))
+
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.fields.value = [{ id: 'f1', name: 'Vendor', type: 'link' }]
+    grid.rows.value = [{ id: 'r1', version: 1, data: { f1: ['before'] } }]
+    grid.linkSummaries.value = {
+      r1: {
+        f1: [{ id: 'before', display: 'Beacon Labs' }],
+      },
+    }
+
+    await grid.patchCell('r1', 'f1', ['after'], 1, {
+      previousLinkSummaries: [{ id: 'before', display: 'Beacon Labs' }],
+      nextLinkSummaries: [{ id: 'after', display: 'Acme Supply' }],
+    })
+    expect(grid.rows.value[0].data.f1).toEqual(['after'])
+    expect(grid.rows.value[0].version).toBe(2)
+    expect(grid.linkSummaries.value.r1?.f1).toEqual([{ id: 'after', display: 'Acme Supply' }])
+    expect(grid.canUndo.value).toBe(true)
+    expect(grid.canRedo.value).toBe(false)
+
+    await grid.undo()
+    expect(grid.rows.value[0].data.f1).toEqual(['before'])
+    expect(grid.rows.value[0].version).toBe(3)
+    expect(grid.linkSummaries.value.r1?.f1).toEqual([{ id: 'before', display: 'Beacon Labs' }])
+    expect(grid.canUndo.value).toBe(false)
+    expect(grid.canRedo.value).toBe(true)
+
+    await grid.redo()
+    expect(grid.rows.value[0].data.f1).toEqual(['after'])
+    expect(grid.rows.value[0].version).toBe(4)
+    expect(grid.linkSummaries.value.r1?.f1).toEqual([{ id: 'after', display: 'Acme Supply' }])
+    expect(grid.canUndo.value).toBe(true)
+    expect(grid.canRedo.value).toBe(false)
+
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    const undoRequest = JSON.parse(String(fetchFn.mock.calls[1]?.[1]?.body ?? '{}'))
+    const redoRequest = JSON.parse(String(fetchFn.mock.calls[2]?.[1]?.body ?? '{}'))
+    expect(undoRequest.changes[0]).toMatchObject({
+      recordId: 'r1',
+      fieldId: 'f1',
+      value: ['before'],
+      expectedVersion: 2,
+    })
+    expect(redoRequest.changes[0]).toMatchObject({
+      recordId: 'r1',
+      fieldId: 'f1',
+      value: ['after'],
+      expectedVersion: 3,
+    })
+  })
 })
 
 describe('buildSortInfo', () => {

@@ -23,6 +23,22 @@ import PluginManagerView from './views/PluginManagerView.vue'
 import PluginViewHost from './views/PluginViewHost.vue'
 import AttendanceExperienceView from './views/attendance/AttendanceExperienceView.vue'
 import HomeRedirect from './views/HomeRedirect.vue'
+import MultitableEmbedHost from './multitable/views/MultitableEmbedHost.vue'
+
+function multitableRouteProps(
+  route: { params: Record<string, unknown>; query: Record<string, unknown> },
+  embedded = false,
+) {
+  return {
+    sheetId: typeof route.params.sheetId === 'string' ? route.params.sheetId : typeof route.query.sheetId === 'string' ? route.query.sheetId : undefined,
+    viewId: typeof route.params.viewId === 'string' ? route.params.viewId : typeof route.query.viewId === 'string' ? route.query.viewId : undefined,
+    recordId: typeof route.query.recordId === 'string' ? route.query.recordId : undefined,
+    mode: typeof route.query.mode === 'string' ? route.query.mode : undefined,
+    baseId: typeof route.query.baseId === 'string' ? route.query.baseId : undefined,
+    role: typeof route.query.role === 'string' ? route.query.role : undefined,
+    embedded,
+  }
+}
 
 const routes: RouteRecordRaw[] = [
   {
@@ -44,22 +60,36 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'Kanban View' }
   },
   {
-    path: '/calendar',
+    path: '/calendar/:viewId?',
     name: 'calendar',
     component: CalendarView,
     meta: { title: 'Calendar View' }
   },
   {
-    path: '/gallery',
+    path: '/gallery/:viewId?',
     name: 'gallery',
     component: GalleryView,
     meta: { title: 'Gallery View' }
   },
   {
-    path: '/form',
+    path: '/form/:viewId?',
     name: 'form',
     component: FormView,
     meta: { title: 'Form View' }
+  },
+  {
+    path: '/multitable/embed/:sheetId?/:viewId?',
+    name: 'multitable-embed',
+    component: MultitableEmbedHost,
+    props: (route) => multitableRouteProps(route, true),
+    meta: { title: 'Multitable Embed' }
+  },
+  {
+    path: '/multitable/:sheetId?/:viewId?',
+    name: 'multitable',
+    component: MultitableEmbedHost,
+    props: (route) => multitableRouteProps(route),
+    meta: { title: 'Multitable' }
   },
   {
     path: '/attendance',

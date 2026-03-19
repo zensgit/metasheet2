@@ -34,4 +34,54 @@ describe('MultitableApiClient', () => {
       fld_status: 'Unknown field',
     })
   })
+
+  it('normalizes comment list responses that use items', async () => {
+    const client = new MultitableApiClient({
+      fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        ok: true,
+        data: {
+          items: [
+            { id: 'c1', targetId: 'r1', containerId: 's1', authorId: 'u1', content: 'hello', resolved: false, createdAt: '2026-01-01' },
+          ],
+        },
+      }), { status: 200 })),
+    })
+
+    await expect(client.listComments({ containerId: 's1', targetId: 'r1' })).resolves.toEqual({
+      comments: [
+        { id: 'c1', targetId: 'r1', containerId: 's1', authorId: 'u1', content: 'hello', resolved: false, createdAt: '2026-01-01' },
+      ],
+    })
+  })
+
+  it('unwraps nested attachment payloads from uploadAttachment', async () => {
+    const client = new MultitableApiClient({
+      fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        ok: true,
+        data: {
+          attachment: {
+            id: 'att_1',
+            filename: 'brief.txt',
+            mimeType: 'text/plain',
+            size: 11,
+            url: '/api/multitable/attachments/att_1',
+            thumbnailUrl: null,
+            uploadedAt: '2026-03-19T10:30:00.000Z',
+          },
+        },
+      }), { status: 201 })),
+    })
+
+    const file = new File(['hello world'], 'brief.txt', { type: 'text/plain' })
+
+    await expect(client.uploadAttachment(file, { sheetId: 'sheet_ops', fieldId: 'fld_files' })).resolves.toEqual({
+      id: 'att_1',
+      filename: 'brief.txt',
+      mimeType: 'text/plain',
+      size: 11,
+      url: '/api/multitable/attachments/att_1',
+      thumbnailUrl: null,
+      uploadedAt: '2026-03-19T10:30:00.000Z',
+    })
+  })
 })

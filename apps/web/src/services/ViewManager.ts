@@ -272,7 +272,25 @@ export class ViewManager {
         body: JSON.stringify({ data })
       })
 
-      return await response.json()
+      const result = await response.json()
+      if (typeof result?.success === 'boolean') {
+        return result as FormSubmissionResponse
+      }
+      if (result?.ok === true) {
+        const recordId = result.data?.record?.id ?? result.data?.id ?? ''
+        const message = result.data?.message ?? '提交成功'
+        return {
+          success: true,
+          data: {
+            id: recordId,
+            message
+          }
+        }
+      }
+      return {
+        success: false,
+        error: result?.error?.message || result?.message || 'Failed to submit form'
+      }
     } catch (error) {
       console.error('Failed to submit form:', error)
       return {

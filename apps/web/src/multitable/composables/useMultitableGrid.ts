@@ -1,5 +1,5 @@
 import { ref, computed, watch, type Ref, type ComputedRef, type WatchStopHandle } from 'vue'
-import type { MetaField, MetaRecord, MetaPage, PatchResult, LinkedRecordSummary } from '../types'
+import type { MetaAttachment, MetaField, MetaRecord, MetaPage, PatchResult, LinkedRecordSummary } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
 
 // --- Sort / Filter types ---
@@ -130,6 +130,7 @@ export function useMultitableGrid(opts: {
   const fields = ref<MetaField[]>([])
   const rows = ref<MetaRecord[]>([])
   const linkSummaries = ref<Record<string, Record<string, LinkedRecordSummary[]>>>({})
+  const attachmentSummaries = ref<Record<string, Record<string, MetaAttachment[]>>>({})
   const loading = ref(false)
   const error = ref<string | null>(null)
 
@@ -211,6 +212,7 @@ export function useMultitableGrid(opts: {
       fields.value = data.fields ?? []
       rows.value = data.rows ?? []
       linkSummaries.value = data.linkSummaries ?? {}
+      attachmentSummaries.value = data.attachmentSummaries ?? {}
       if (data.page) page.value = data.page
       if (data.view) syncFromView(data.view)
     } catch (e: any) {
@@ -459,6 +461,13 @@ export function useMultitableGrid(opts: {
         }
       }
     }
+    if (result.attachmentSummaries) {
+      for (const [recordId, fieldMap] of Object.entries(result.attachmentSummaries)) {
+        for (const [fieldId, summaries] of Object.entries(fieldMap)) {
+          setAttachmentSummaries(recordId, fieldId, summaries)
+        }
+      }
+    }
   }
 
   function clearEditHistory() {
@@ -485,6 +494,25 @@ export function useMultitableGrid(opts: {
     }
   }
 
+  function setAttachmentSummaries(recordId: string, fieldId: string, summaries?: MetaAttachment[]) {
+    const currentRecordMap = attachmentSummaries.value[recordId] ?? {}
+    const nextRecordMap = { ...currentRecordMap }
+    if (summaries && summaries.length > 0) nextRecordMap[fieldId] = summaries
+    else delete nextRecordMap[fieldId]
+
+    if (Object.keys(nextRecordMap).length === 0) {
+      const next = { ...attachmentSummaries.value }
+      delete next[recordId]
+      attachmentSummaries.value = next
+      return
+    }
+
+    attachmentSummaries.value = {
+      ...attachmentSummaries.value,
+      [recordId]: nextRecordMap,
+    }
+  }
+
   // --- Column width ---
 
   function setColumnWidth(fieldId: string, width: number) {
@@ -506,7 +534,7 @@ export function useMultitableGrid(opts: {
 
   return {
     // State
-    fields, rows, linkSummaries, loading, error, page, hiddenFieldIds, visibleFields,
+    fields, rows, linkSummaries, attachmentSummaries, loading, error, page, hiddenFieldIds, visibleFields,
     sortRules, filterRules, filterConjunction, sortFilterDirty,
     columnWidths, groupFieldId, groupField,
     editHistory, historyIndex, canUndo, canRedo,

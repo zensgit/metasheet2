@@ -76,6 +76,7 @@ export interface MetaViewData {
   fields: MetaField[]
   rows: MetaRecord[]
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
+  attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
   view?: MetaView | null
   meta?: MetaViewMeta
   page?: MetaPage
@@ -106,6 +107,7 @@ export interface MetaRecordContext {
   capabilities: MetaCapabilities
   commentsScope: MetaCommentsScope
   linkSummaries?: Record<string, LinkedRecordSummary[]>
+  attachmentSummaries?: Record<string, MetaAttachment[]>
 }
 
 // --- Form context (GET /api/multitable/form-context) ---
@@ -119,6 +121,7 @@ export interface MetaFormContext {
   capabilities: MetaCapabilities
   record?: MetaRecord | null
   commentsScope?: MetaCommentsScope | null
+  attachmentSummaries?: Record<string, MetaAttachment[]>
 }
 
 // --- Capabilities ---
@@ -192,6 +195,7 @@ export interface PatchResult {
   updated: RecordVersion[]
   records?: Array<{ recordId: string; data: Record<string, unknown> }>
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
+  attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
   relatedRecords?: Array<{ sheetId: string; recordId: string; data: Record<string, unknown> }>
 }
 
@@ -200,6 +204,7 @@ export interface FormSubmitResult {
   mode: 'create' | 'update'
   record: MetaRecord
   commentsScope: MetaCommentsScope
+  attachmentSummaries?: Record<string, MetaAttachment[]>
 }
 
 // --- Record summary ---
@@ -289,7 +294,7 @@ export interface MetaAttachment {
   size: number
   url: string
   thumbnailUrl?: string | null
-  uploadedAt: string
+  uploadedAt?: string | null
 }
 
 // --- Timeline config ---

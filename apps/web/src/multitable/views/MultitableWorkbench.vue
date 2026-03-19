@@ -35,6 +35,7 @@
           :error-message="formErrorMessage"
           :field-errors="formFieldErrors"
           :link-summaries-by-field="selectedRecordLinkSummaries"
+          :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
           @submit="onFormSubmit" @open-link-picker="openLinkPicker"
         />
         <MetaKanbanView
@@ -65,7 +66,8 @@
           :rows="grid.rows.value" :visible-fields="grid.visibleFields.value" :sort-rules="grid.sortRules.value"
           :loading="grid.loading.value" :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           :start-index="pageStartIndex" :selected-record-id="selectedRecordId" :can-edit="caps.canEditRecord.value"
-          :can-delete="caps.canDeleteRecord.value" :column-widths="grid.columnWidths.value" :link-summaries="grid.linkSummaries.value"
+          :can-delete="caps.canDeleteRecord.value" :column-widths="grid.columnWidths.value"
+          :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :enable-multi-select="caps.canDeleteRecord.value"
           :group-field="grid.groupField.value"
           :search-text="searchText" :row-density="rowDensity"
@@ -78,6 +80,7 @@
         :visible="!!selectedRecordId" :record="selectedRecordResolved" :fields="grid.fields.value"
         :can-edit="caps.canEditRecord.value" :can-comment="caps.canComment.value" :can-delete="caps.canDeleteRecord.value"
         :link-summaries-by-field="selectedRecordLinkSummaries"
+        :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
         :record-ids="drawerRecordIds"
         @close="selectedRecordId = null" @delete="onDeleteRecord" @patch="onDrawerPatch"
         @toggle-comments="showComments = !showComments" @open-link-picker="openLinkPicker"
@@ -128,7 +131,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
-import type { MetaField, MetaRecord, MetaFieldType, RowDensity, LinkedRecordSummary } from '../types'
+import type { MetaAttachment, MetaField, MetaRecord, MetaFieldType, RowDensity, LinkedRecordSummary } from '../types'
 import type { MultitableRole } from '../composables/useMultitableCapabilities'
 import type { SortRule, FilterConjunction } from '../composables/useMultitableGrid'
 import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
@@ -183,6 +186,7 @@ const formSuccessMessage = ref<string | null>(null)
 const formErrorMessage = ref<string | null>(null)
 const formFieldErrors = ref<Record<string, string>>({})
 const deepLinkedRecordLinkSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
+const deepLinkedRecordAttachmentSummaries = ref<Record<string, MetaAttachment[]>>({})
 
 function showError(msg: string) {
   workbench.error.value = null
@@ -208,6 +212,14 @@ const selectedRecordLinkSummaries = computed<Record<string, LinkedRecordSummary[
   const fromGrid = grid.linkSummaries.value[recordId]
   if (fromGrid) return fromGrid
   if (deepLinkedRecord.value?.id === recordId) return deepLinkedRecordLinkSummaries.value
+  return {}
+})
+const selectedRecordAttachmentSummaries = computed<Record<string, MetaAttachment[]>>(() => {
+  const recordId = selectedRecordId.value
+  if (!recordId) return {}
+  const fromGrid = grid.attachmentSummaries.value[recordId]
+  if (fromGrid) return fromGrid
+  if (deepLinkedRecord.value?.id === recordId) return deepLinkedRecordAttachmentSummaries.value
   return {}
 })
 
@@ -312,6 +324,7 @@ async function onFormSubmit(data: Record<string, unknown>) {
         data,
       })
       deepLinkedRecord.value = result.record
+      deepLinkedRecordAttachmentSummaries.value = result.attachmentSummaries ?? {}
       selectedRecordId.value = result.record.id
       await grid.loadViewData(grid.page.value.offset)
       formSuccessMessage.value = result.mode === 'create' ? 'Record created' : 'Changes saved'
@@ -629,6 +642,7 @@ async function resolveDeepLink(recordId: string) {
     })
     deepLinkedRecord.value = ctx.record
     deepLinkedRecordLinkSummaries.value = ctx.linkSummaries ?? {}
+    deepLinkedRecordAttachmentSummaries.value = ctx.attachmentSummaries ?? {}
     await selectRecord(recordId)
   } catch (e: any) {
     showError(`Record not found: ${recordId}`)
@@ -657,6 +671,7 @@ async function loadStandaloneForm() {
     if (ctx.fields?.length) grid.fields.value = ctx.fields
     if (ctx.record) {
       deepLinkedRecord.value = ctx.record
+      deepLinkedRecordAttachmentSummaries.value = ctx.attachmentSummaries ?? {}
       selectedRecordId.value = ctx.record.id
     }
   } catch { /* silent — grid loadViewData will handle */ }

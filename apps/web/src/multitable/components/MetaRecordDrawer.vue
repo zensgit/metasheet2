@@ -60,10 +60,17 @@
             @click="emit('open-link-picker', field)"
           >{{ linkButtonLabel(field.id) }}</button>
           <div v-else-if="field.type === 'attachment'" class="meta-record-drawer__attachments">
-            <span v-for="attId in attachmentList(field.id)" :key="attId" class="meta-record-drawer__attachment-chip">
-              &#x1F4CE; {{ attId }}
-            </span>
-            <span v-if="!attachmentList(field.id).length" class="meta-record-drawer__text">—</span>
+            <a
+              v-for="attachment in attachmentItems(field.id)"
+              :key="attachment.id"
+              class="meta-record-drawer__attachment-chip"
+              :href="attachment.url || undefined"
+              :target="attachment.url ? '_blank' : undefined"
+              :rel="attachment.url ? 'noopener noreferrer' : undefined"
+            >
+              &#x1F4CE; {{ attachment.filename }}
+            </a>
+            <span v-if="!attachmentItems(field.id).length" class="meta-record-drawer__text">—</span>
           </div>
           <span v-else class="meta-record-drawer__text">{{ formatValue(record.data[field.id]) }}</span>
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-record-drawer__link-summary">{{ linkPreview(field.id) }}</div>
@@ -76,7 +83,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { MetaField, MetaRecord, LinkedRecordSummary } from '../types'
+import type { MetaAttachment, MetaField, MetaRecord, LinkedRecordSummary } from '../types'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -86,6 +93,7 @@ const props = withDefaults(defineProps<{
   canComment: boolean
   canDelete: boolean
   linkSummariesByField?: Record<string, LinkedRecordSummary[]>
+  attachmentSummariesByField?: Record<string, MetaAttachment[]>
   recordIds?: string[]
 }>(), {
   recordIds: () => [],
@@ -141,6 +149,20 @@ function attachmentList(fieldId: string): string[] {
   return []
 }
 
+function attachmentItems(fieldId: string): MetaAttachment[] {
+  const summaries = props.attachmentSummariesByField?.[fieldId] ?? []
+  if (summaries.length > 0) return summaries
+  return attachmentList(fieldId).map((id) => ({
+    id,
+    filename: id,
+    mimeType: 'application/octet-stream',
+    size: 0,
+    url: '',
+    thumbnailUrl: null,
+    uploadedAt: null,
+  }))
+}
+
 function linkSummaryCount(fieldId: string): number {
   const summaries = props.linkSummariesByField?.[fieldId] ?? []
   if (summaries.length) return summaries.length
@@ -174,7 +196,7 @@ function linkSummaryCount(fieldId: string): number {
   display: inline-flex; align-items: center; gap: 2px;
   padding: 2px 8px; background: #f0f4f8; border-radius: 4px;
   font-size: 12px; color: #333; max-width: 180px; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap;
+  text-overflow: ellipsis; white-space: nowrap; text-decoration: none;
 }
 .meta-record-drawer__text { font-size: 13px; color: #333; }
 .meta-record-drawer__empty { padding: 32px; text-align: center; color: #999; }

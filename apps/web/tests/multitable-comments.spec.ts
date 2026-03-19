@@ -15,7 +15,7 @@ describe('useMultitableComments', () => {
 
   it('loads comments', async () => {
     const comments = [{ id: 'c1', containerId: 's1', targetId: 'r1', authorId: 'u1', content: 'hello', resolved: false, createdAt: '2026-01-01' }]
-    ;(client as any).fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { comments } }), { status: 200 }))
+    ;(client as any).fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { items: comments } }), { status: 200 }))
     const state = useMultitableComments(client)
     await state.loadComments({ containerId: 's1', targetId: 'r1' })
     expect(state.comments.value).toHaveLength(1)

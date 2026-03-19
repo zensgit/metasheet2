@@ -34,10 +34,18 @@
     <!-- attachment -->
     <template v-else-if="field.type === 'attachment'">
       <span v-if="!attachmentIds.length" class="meta-cell-renderer--empty"></span>
-      <span v-for="attId in attachmentIds" :key="attId" class="meta-cell-renderer__attachment" :title="attId">
-        <span class="meta-cell-renderer__attachment-icon">{{ mimeIcon(attId) }}</span>
-        <span class="meta-cell-renderer__attachment-name">{{ attId }}</span>
-      </span>
+      <a
+        v-for="attachment in attachmentItems"
+        :key="attachment.id"
+        class="meta-cell-renderer__attachment"
+        :href="attachment.url || undefined"
+        :title="attachment.filename"
+        :target="attachment.url ? '_blank' : undefined"
+        :rel="attachment.url ? 'noopener noreferrer' : undefined"
+      >
+        <span class="meta-cell-renderer__attachment-icon">{{ mimeIcon(attachment.mimeType) }}</span>
+        <span class="meta-cell-renderer__attachment-name">{{ attachment.filename }}</span>
+      </a>
     </template>
 
     <!-- lookup / rollup -->
@@ -47,9 +55,14 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { MetaField, LinkedRecordSummary } from '../../types'
+import type { MetaField, LinkedRecordSummary, MetaAttachment } from '../../types'
 
-const props = defineProps<{ field: MetaField; value: unknown; linkSummaries?: LinkedRecordSummary[] }>()
+const props = defineProps<{
+  field: MetaField
+  value: unknown
+  linkSummaries?: LinkedRecordSummary[]
+  attachmentSummaries?: MetaAttachment[]
+}>()
 
 const displayValue = computed(() => {
   const v = props.value
@@ -102,9 +115,24 @@ const attachmentIds = computed(() => {
   return []
 })
 
-function mimeIcon(_id: string): string {
-  // Simple icon based on file extension heuristic
-  return '\uD83D\uDCCE' // paperclip emoji
+const attachmentItems = computed<MetaAttachment[]>(() => {
+  if (props.attachmentSummaries?.length) return props.attachmentSummaries
+  return attachmentIds.value.map((id) => ({
+    id,
+    filename: id,
+    mimeType: 'application/octet-stream',
+    size: 0,
+    url: '',
+    thumbnailUrl: null,
+    uploadedAt: null,
+  }))
+})
+
+function mimeIcon(mimeType: string): string {
+  if (mimeType.startsWith('image/')) return '\uD83D\uDDBC'
+  if (mimeType.includes('pdf')) return '\uD83D\uDCC4'
+  if (mimeType.includes('sheet') || mimeType.includes('csv') || mimeType.includes('excel')) return '\uD83D\uDCCA'
+  return '\uD83D\uDCCE'
 }
 
 // Conditional formatting: subtle background hints
@@ -137,6 +165,7 @@ const conditionalClass = computed(() => {
   padding: 1px 6px; background: #f0f4f8; border-radius: 3px;
   font-size: 11px; margin-right: 4px; white-space: nowrap;
   max-width: 120px; overflow: hidden; text-overflow: ellipsis;
+  color: inherit; text-decoration: none;
 }
 .meta-cell-renderer__attachment-icon { font-size: 12px; }
 .meta-cell-renderer__attachment-name { overflow: hidden; text-overflow: ellipsis; }

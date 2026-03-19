@@ -282,7 +282,8 @@ export class MultitableApiClient {
       method: 'POST',
       body: formData,
     })
-    return parseJson(res)
+    const data = await parseJson<MetaAttachment | { attachment: MetaAttachment }>(res)
+    return 'attachment' in data ? data.attachment : data
   }
 
   async deleteAttachment(attachmentId: string): Promise<{ deleted: string }> {

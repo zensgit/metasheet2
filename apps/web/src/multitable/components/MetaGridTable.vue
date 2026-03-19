@@ -67,7 +67,13 @@
                     @cancel="cancelEdit"
                     @open-link-picker="openLinkPickerFromCell(row.id, field)"
                   />
-                  <MetaCellRenderer v-else :field="field" :value="row.data[field.id]" :link-summaries="props.linkSummaries?.[row.id]?.[field.id]" />
+                  <MetaCellRenderer
+                    v-else
+                    :field="field"
+                    :value="row.data[field.id]"
+                    :link-summaries="props.linkSummaries?.[row.id]?.[field.id]"
+                    :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
+                  />
                 </td>
               </tr>
             </template>
@@ -116,7 +122,13 @@
                   @cancel="cancelEdit"
                   @open-link-picker="openLinkPickerFromCell(row.id, field)"
                 />
-                <MetaCellRenderer v-else :field="field" :value="row.data[field.id]" :link-summaries="props.linkSummaries?.[row.id]?.[field.id]" />
+                <MetaCellRenderer
+                  v-else
+                  :field="field"
+                  :value="row.data[field.id]"
+                  :link-summaries="props.linkSummaries?.[row.id]?.[field.id]"
+                  :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
+                />
               </td>
             </tr>
             <tr v-if="expandedRowIds.has(row.id)" class="meta-grid__expand-row">
@@ -124,7 +136,14 @@
                 <div class="meta-grid__expand-fields">
                   <div v-for="field in visibleFields" :key="field.id" class="meta-grid__expand-field">
                     <span class="meta-grid__expand-label">{{ field.name }}</span>
-                    <span class="meta-grid__expand-value"><MetaCellRenderer :field="field" :value="row.data[field.id]" :link-summaries="props.linkSummaries?.[row.id]?.[field.id]" /></span>
+                    <span class="meta-grid__expand-value">
+                      <MetaCellRenderer
+                        :field="field"
+                        :value="row.data[field.id]"
+                        :link-summaries="props.linkSummaries?.[row.id]?.[field.id]"
+                        :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
+                      />
+                    </span>
                   </div>
                 </div>
               </td>
@@ -164,7 +183,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import type { MetaField, MetaRecord, RowDensity } from '../types'
+import type { MetaAttachment, MetaField, MetaRecord, RowDensity } from '../types'
 import type { SortRule } from '../composables/useMultitableGrid'
 import MetaCellRenderer from './cells/MetaCellRenderer.vue'
 import MetaCellEditor from './cells/MetaCellEditor.vue'
@@ -187,6 +206,7 @@ const props = defineProps<{
   canDelete?: boolean
   columnWidths?: Record<string, number>
   linkSummaries?: Record<string, Record<string, { id: string; display: string }[]>>
+  attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
   enableMultiSelect?: boolean
   groupField?: MetaField | null
   searchText?: string

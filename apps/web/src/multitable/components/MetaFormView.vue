@@ -85,10 +85,17 @@
               class="meta-form-view__file-input"
               @change="onFormFileSelect(field.id, $event)"
             />
-            <div v-if="attachmentList(field.id).length" class="meta-form-view__attachment-list">
-              <span v-for="attId in attachmentList(field.id)" :key="attId" class="meta-form-view__attachment-chip">
-                &#x1F4CE; {{ attId }}
-              </span>
+            <div v-if="attachmentItems(field.id).length" class="meta-form-view__attachment-list">
+              <a
+                v-for="attachment in attachmentItems(field.id)"
+                :key="attachment.id"
+                class="meta-form-view__attachment-chip"
+                :href="attachment.url || undefined"
+                :target="attachment.url ? '_blank' : undefined"
+                :rel="attachment.url ? 'noopener noreferrer' : undefined"
+              >
+                &#x1F4CE; {{ attachment.filename }}
+              </a>
             </div>
           </div>
           <span v-else class="meta-form-view__readonly-val">{{ record?.data[field.id] ?? '—' }}</span>
@@ -108,7 +115,7 @@
 
 <script setup lang="ts">
 import { reactive, ref, computed, watch } from 'vue'
-import type { MetaField, MetaRecord, LinkedRecordSummary } from '../types'
+import type { MetaAttachment, MetaField, MetaRecord, LinkedRecordSummary } from '../types'
 
 const props = defineProps<{
   fields: MetaField[]
@@ -121,6 +128,7 @@ const props = defineProps<{
   errorMessage?: string | null
   fieldErrors?: Record<string, string> | null
   linkSummariesByField?: Record<string, LinkedRecordSummary[]> | null
+  attachmentSummariesByField?: Record<string, MetaAttachment[]> | null
 }>()
 
 const emit = defineEmits<{
@@ -199,6 +207,20 @@ function attachmentList(fieldId: string): string[] {
   return []
 }
 
+function attachmentItems(fieldId: string): MetaAttachment[] {
+  const summaries = props.attachmentSummariesByField?.[fieldId] ?? []
+  if (summaries.length > 0) return summaries
+  return attachmentList(fieldId).map((id) => ({
+    id,
+    filename: id,
+    mimeType: 'application/octet-stream',
+    size: 0,
+    url: '',
+    thumbnailUrl: null,
+    uploadedAt: null,
+  }))
+}
+
 function onFormFileSelect(fieldId: string, e: Event) {
   const files = (e.target as HTMLInputElement).files
   if (files?.length) {
@@ -247,7 +269,7 @@ function isSameFormValue(left: unknown, right: unknown): boolean {
 .meta-form-view__attachment-chip {
   display: inline-flex; align-items: center; gap: 2px;
   padding: 2px 8px; background: #f0f4f8; border-radius: 4px;
-  font-size: 12px; color: #333;
+  font-size: 12px; color: #333; text-decoration: none;
 }
 .meta-form-view__readonly-val { color: #999; font-size: 13px; }
 .meta-form-view__field-error { margin-top: 6px; color: #f56c6c; font-size: 12px; }
