@@ -1,40 +1,21 @@
 <template>
   <div class="workflow-designer">
     <!-- Header -->
-    <div class="designer-header">
-      <div class="header-left">
-        <el-button :icon="ArrowLeft" @click="goBack">返回</el-button>
-        <el-divider direction="vertical" />
-        <span class="workflow-name">{{ workflowName || '新建工作流' }}</span>
-        <el-tag v-if="isDirty" type="warning" size="small">未保存</el-tag>
-      </div>
-      <div class="header-center">
-        <el-button-group>
-          <el-button :icon="ZoomOut" @click="zoom(-0.1)" />
-          <el-button>{{ Math.round(zoomLevel * 100) }}%</el-button>
-          <el-button :icon="ZoomIn" @click="zoom(0.1)" />
-          <el-button :icon="FullScreen" @click="fitViewport" />
-        </el-button-group>
-      </div>
-      <div class="header-right">
-        <el-button @click="showProperties = !showProperties">
-          <el-icon><Setting /></el-icon>
-          属性面板
-        </el-button>
-        <el-button @click="validateWorkflow">
-          <el-icon><CircleCheck /></el-icon>
-          验证
-        </el-button>
-        <el-button type="primary" @click="saveWorkflow" :loading="saving">
-          <el-icon><Upload /></el-icon>
-          保存
-        </el-button>
-        <el-button type="success" @click="deployWorkflow" :loading="deploying" :disabled="!workflowId">
-          <el-icon><Promotion /></el-icon>
-          部署
-        </el-button>
-      </div>
-    </div>
+    <WorkflowDesignerToolbar
+      :workflow-name="workflowName"
+      :is-dirty="isDirty"
+      :zoom-level="zoomLevel"
+      :saving="saving"
+      :deploying="deploying"
+      @go-back="goBack"
+      @zoom="zoom"
+      @fit-viewport="fitViewport"
+      @open-template-picker="openTemplatePicker"
+      @toggle-properties="showProperties = !showProperties"
+      @validate-workflow="validateWorkflow"
+      @save-workflow="saveWorkflow"
+      @deploy-workflow="deployWorkflow"
+    />
 
     <!-- Main Content -->
     <div class="designer-content">
@@ -103,87 +84,34 @@
 
       <!-- Properties Panel -->
       <transition name="slide-right">
-        <div v-if="showProperties" class="properties-panel">
-          <div class="panel-header">
-            <span>{{ selectedElement ? '元素属性' : '工作流属性' }}</span>
-            <el-button :icon="Close" text @click="showProperties = false" />
-          </div>
-          <div class="panel-content">
-            <!-- Workflow Properties -->
-            <template v-if="!selectedElement">
-              <el-form label-position="top" size="small">
-                <el-form-item label="工作流名称">
-                  <el-input v-model="workflowName" placeholder="输入工作流名称" />
-                </el-form-item>
-                <el-form-item label="工作流描述">
-                  <el-input
-                    v-model="workflowDescription"
-                    type="textarea"
-                    :rows="3"
-                    placeholder="输入工作流描述"
-                  />
-                </el-form-item>
-                <el-form-item label="版本">
-                  <el-input v-model="workflowVersion" disabled />
-                </el-form-item>
-              </el-form>
-            </template>
-            <!-- Element Properties -->
-            <template v-else>
-              <el-form label-position="top" size="small">
-                <el-form-item label="元素ID">
-                  <el-input :model-value="selectedElement.id" disabled />
-                </el-form-item>
-                <el-form-item label="元素名称">
-                  <el-input
-                    v-model="elementName"
-                    placeholder="输入元素名称"
-                    @change="updateElementName"
-                  />
-                </el-form-item>
-                <el-form-item label="元素类型">
-                  <el-tag>{{ getElementTypeLabel(selectedElement.type) }}</el-tag>
-                </el-form-item>
-                <!-- Task-specific properties -->
-                <template v-if="isTaskElement">
-                  <el-form-item label="执行人">
-                    <el-input v-model="taskAssignee" placeholder="输入执行人" />
-                  </el-form-item>
-                  <el-form-item label="候选人">
-                    <el-input v-model="taskCandidates" placeholder="多人用逗号分隔" />
-                  </el-form-item>
-                  <el-form-item label="到期时间">
-                    <el-input v-model="taskDueDate" placeholder="如: PT1H (1小时)" />
-                  </el-form-item>
-                </template>
-                <!-- Gateway-specific properties -->
-                <template v-if="isGatewayElement">
-                  <el-form-item label="默认流">
-                    <el-select v-model="gatewayDefault" placeholder="选择默认出口">
-                      <el-option
-                        v-for="flow in outgoingFlows"
-                        :key="flow.id"
-                        :label="flow.name || flow.id"
-                        :value="flow.id"
-                      />
-                    </el-select>
-                  </el-form-item>
-                </template>
-                <!-- Sequence Flow properties -->
-                <template v-if="isSequenceFlow">
-                  <el-form-item label="条件表达式">
-                    <el-input
-                      v-model="flowCondition"
-                      type="textarea"
-                      :rows="2"
-                      placeholder="${amount > 1000}"
-                    />
-                  </el-form-item>
-                </template>
-              </el-form>
-            </template>
-          </div>
-        </div>
+        <WorkflowPropertyPanel
+          v-if="showProperties"
+          :workflow-name="workflowName"
+          :workflow-description="workflowDescription"
+          :workflow-version="workflowVersion"
+          :selected-element="selectedElement"
+          :element-name="elementName"
+          :element-type-label="selectedElement ? getElementTypeLabel(selectedElement.type) : ''"
+          :task-assignee="taskAssignee"
+          :task-candidates="taskCandidates"
+          :task-due-date="taskDueDate"
+          :gateway-default="gatewayDefault"
+          :flow-condition="flowCondition"
+          :is-task-element="!!isTaskElement"
+          :is-gateway-element="!!isGatewayElement"
+          :is-sequence-flow="!!isSequenceFlow"
+          :outgoing-flows="outgoingFlows"
+          @close="showProperties = false"
+          @update:workflow-name="workflowName = $event"
+          @update:workflow-description="workflowDescription = $event"
+          @update:element-name="elementName = $event"
+          @commit-element-name="updateElementName"
+          @update:task-assignee="taskAssignee = $event"
+          @update:task-candidates="taskCandidates = $event"
+          @update:task-due-date="taskDueDate = $event"
+          @update:gateway-default="gatewayDefault = $event"
+          @update:flow-condition="flowCondition = $event"
+        />
       </transition>
     </div>
 
@@ -218,23 +146,42 @@
         />
       </div>
     </el-dialog>
+
+    <WorkflowTemplateDialog
+      v-model="showTemplates"
+      :template-loading="templateLoading"
+      :applying-template="applyingTemplate"
+      :template-error="templateError"
+      :template-search="templateSearch"
+      :template-source="templateSource"
+      :template-items="templateItems"
+      :template-pagination="templatePagination"
+      :template-range-label="templateRangeLabel"
+      :recent-template-items="recentTemplateItems"
+      :selected-template-id="selectedTemplateId"
+      :selected-template="selectedTemplate"
+      @update:template-search="templateSearch = $event"
+      @update:template-source="templateSource = $event"
+      @refresh-catalog="refreshTemplateCatalog"
+      @select-template="selectTemplate"
+      @select-recent-template="selectRecentTemplate"
+      @apply-selected="applyTemplate(selectedTemplateId || undefined)"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick, markRaw } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  ArrowLeft,
-  ZoomIn,
-  ZoomOut,
-  FullScreen,
-  Setting,
-  Close,
-  Upload,
-  Promotion,
-  CircleCheck,
+  ElAlert,
+  ElDialog,
+  ElDivider,
+  ElIcon,
+  ElMessage,
+  ElMessageBox,
+} from 'element-plus'
+import {
   CircleCheckFilled,
   VideoPlay,
   VideoPause,
@@ -246,11 +193,49 @@ import {
   Share,
   Operation
 } from '@element-plus/icons-vue'
-
-// BPMN.js imports
-import BpmnModeler from 'bpmn-js/lib/Modeler'
-import 'bpmn-js/dist/assets/diagram-js.css'
-import 'bpmn-js/dist/assets/bpmn-font/css/bpmn-embedded.css'
+import 'element-plus/es/components/alert/style/css'
+import 'element-plus/es/components/button/style/css'
+import 'element-plus/es/components/button-group/style/css'
+import 'element-plus/es/components/dialog/style/css'
+import 'element-plus/es/components/divider/style/css'
+import 'element-plus/es/components/form/style/css'
+import 'element-plus/es/components/form-item/style/css'
+import 'element-plus/es/components/icon/style/css'
+import 'element-plus/es/components/input/style/css'
+import 'element-plus/es/components/message/style/css'
+import 'element-plus/es/components/message-box/style/css'
+import 'element-plus/es/components/option/style/css'
+import 'element-plus/es/components/select/style/css'
+import 'element-plus/es/components/tag/style/css'
+import type { WorkflowModelerInstance } from './workflowDesignerRuntime'
+import {
+  DEFAULT_WORKFLOW_XML,
+  deploySavedWorkflowDraft,
+  deployWorkflowXml,
+  instantiateWorkflowTemplate,
+  loadWorkflowDraft,
+  saveWorkflowDraft,
+  type WorkflowDesignerPagination,
+  type WorkflowDesignerTemplateDetail,
+  type WorkflowDesignerTemplateListItem,
+} from './workflowDesignerPersistence'
+import {
+  invalidateWorkflowDraftCatalogCache,
+  invalidateWorkflowTemplateCatalogCache,
+  invalidateWorkflowTemplateDetailCache,
+  listWorkflowTemplatesCached,
+  loadWorkflowTemplateCached,
+} from './workflowDesignerCatalogCache'
+import {
+  buildRecentWorkflowTemplateItem,
+  readRecentWorkflowTemplates,
+  rememberRecentWorkflowTemplate,
+  type RecentWorkflowTemplateItem,
+} from './workflowDesignerRecentTemplates'
+import { validateWorkflowElements } from './workflowDesignerValidation'
+import WorkflowTemplateDialog from '../components/workflow/WorkflowTemplateDialog.vue'
+import WorkflowPropertyPanel from '../components/workflow/WorkflowPropertyPanel.vue'
+import WorkflowDesignerToolbar from '../components/workflow/WorkflowDesignerToolbar.vue'
 
 // Types
 interface PaletteItem {
@@ -258,12 +243,6 @@ interface PaletteItem {
   label: string
   icon: typeof VideoPlay
   color: string
-}
-
-interface ValidationError {
-  message: string
-  severity: 'error' | 'warning'
-  element?: string
 }
 
 interface BpmnElement {
@@ -289,7 +268,7 @@ const route = useRoute()
 const bpmnCanvas = ref<HTMLElement | null>(null)
 const canvasContainer = ref<HTMLElement | null>(null)
 const minimapContainer = ref<HTMLElement | null>(null)
-let modeler: BpmnModeler | null = null
+let modeler: WorkflowModelerInstance | null = null
 
 const workflowId = ref<string | null>(null)
 const workflowName = ref('')
@@ -303,7 +282,23 @@ const lastSaved = ref<Date | null>(null)
 const zoomLevel = ref(1)
 const showProperties = ref(true)
 const showValidation = ref(false)
-const validationErrors = ref<ValidationError[]>([])
+const showTemplates = ref(false)
+const validationErrors = ref<ReturnType<typeof validateWorkflowElements>>([])
+const templateLoading = ref(false)
+const applyingTemplate = ref(false)
+const templateError = ref('')
+const templateSearch = ref('')
+const templateSource = ref<'all' | 'builtin' | 'database'>('all')
+const templateItems = ref<WorkflowDesignerTemplateListItem[]>([])
+const templatePagination = ref<WorkflowDesignerPagination>({
+  total: 0,
+  limit: 6,
+  offset: 0,
+  returned: 0,
+})
+const recentTemplateItems = ref<RecentWorkflowTemplateItem[]>([])
+const selectedTemplateId = ref<string | null>(null)
+const selectedTemplate = ref<WorkflowDesignerTemplateDetail | null>(null)
 
 const selectedElement = ref<BpmnElement | null>(null)
 const elementName = ref('')
@@ -360,6 +355,13 @@ const outgoingFlows = computed(() => {
   }))
 })
 
+const templateRangeLabel = computed(() => {
+  if (!templatePagination.value.total) return '0 items'
+  const start = templatePagination.value.offset + 1
+  const end = templatePagination.value.offset + templatePagination.value.returned
+  return `${start}-${end} / ${templatePagination.value.total}`
+})
+
 // Element Type Labels
 function getElementTypeLabel(type: string): string {
   const labels: Record<string, string> = {
@@ -387,6 +389,9 @@ onMounted(async () => {
   if (id && id !== 'new') {
     workflowId.value = id
     await loadWorkflow(id)
+  } else if (typeof route.query.templateId === 'string' && route.query.templateId) {
+    await createNewWorkflow()
+    await applyTemplate(route.query.templateId, { skipConfirm: true })
   } else {
     // Create new workflow with default diagram
     await createNewWorkflow()
@@ -403,7 +408,9 @@ onBeforeUnmount(() => {
 async function initModeler() {
   if (!bpmnCanvas.value) return
 
-  modeler = markRaw(new BpmnModeler({
+  const { createWorkflowModeler } = await import('./workflowDesignerRuntime')
+
+  modeler = markRaw(createWorkflowModeler({
     container: bpmnCanvas.value,
     keyboard: { bindTo: document },
   }))
@@ -496,6 +503,10 @@ function fitViewport() {
   zoomLevel.value = canvas.zoom()
 }
 
+function refreshRecentTemplateItems() {
+  recentTemplateItems.value = readRecentWorkflowTemplates()
+}
+
 // Update element counts
 function updateCounts() {
   if (!modeler) return
@@ -537,9 +548,6 @@ function onDrop(event: DragEvent) {
   const elementFactory = modeler.get('elementFactory') as {
     createShape: (options: { type: string }) => BpmnElement
   }
-  const create = modeler.get('create') as {
-    start: (event: DragEvent, shape: BpmnElement) => void
-  }
 
   const shape = elementFactory.createShape({ type: draggedItem.value.type })
 
@@ -557,29 +565,9 @@ function onDrop(event: DragEvent) {
 
 // Create new workflow
 async function createNewWorkflow() {
-  const defaultXml = `<?xml version="1.0" encoding="UTF-8"?>
-<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
-                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
-                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
-                  id="Definitions_1"
-                  targetNamespace="http://bpmn.io/schema/bpmn">
-  <bpmn:process id="Process_1" isExecutable="true">
-    <bpmn:startEvent id="StartEvent_1" name="开始" />
-  </bpmn:process>
-  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
-    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_1">
-      <bpmndi:BPMNShape id="StartEvent_1_di" bpmnElement="StartEvent_1">
-        <dc:Bounds x="179" y="159" width="36" height="36" />
-        <bpmndi:BPMNLabel>
-          <dc:Bounds x="186" y="202" width="22" height="14" />
-        </bpmndi:BPMNLabel>
-      </bpmndi:BPMNShape>
-    </bpmndi:BPMNPlane>
-  </bpmndi:BPMNDiagram>
-</bpmn:definitions>`
-
   try {
-    await modeler?.importXML(defaultXml)
+    workflowId.value = null
+    await modeler?.importXML(DEFAULT_WORKFLOW_XML)
     await nextTick()
     fitViewport()
     updateCounts()
@@ -593,70 +581,178 @@ async function createNewWorkflow() {
 // Load workflow from backend
 async function loadWorkflow(id: string) {
   try {
-    const response = await fetch(`/api/workflow-designer/workflows/${id}`)
-    if (!response.ok) throw new Error('Failed to load workflow')
-
-    const data = await response.json()
+    const data = await loadWorkflowDraft(id)
+    workflowId.value = id
     workflowName.value = data.name
-    workflowDescription.value = data.description || ''
-    workflowVersion.value = data.version || '1.0.0'
-
-    if (data.bpmnXml) {
-      await modeler?.importXML(data.bpmnXml)
-      await nextTick()
-      fitViewport()
-      updateCounts()
-    }
+    workflowDescription.value = data.description
+    workflowVersion.value = data.version
+    await modeler?.importXML(data.bpmnXml)
+    await nextTick()
+    fitViewport()
+    updateCounts()
 
     isDirty.value = false
     ElMessage.success('工作流加载成功')
   } catch (err) {
     console.error('Failed to load workflow:', err)
-    ElMessage.error('加载工作流失败')
+    ElMessage.error(err instanceof Error ? err.message : '加载工作流失败')
     await createNewWorkflow()
   }
 }
 
+async function refreshTemplateCatalog(offset = templatePagination.value.offset) {
+  templateLoading.value = true
+  templateError.value = ''
+
+  try {
+    const result = await listWorkflowTemplatesCached({
+      search: templateSearch.value.trim() || undefined,
+      source: templateSource.value,
+      sortBy: 'usage_count',
+      sortOrder: 'desc',
+      limit: templatePagination.value.limit,
+      offset,
+    })
+
+    templateItems.value = result.items
+    templatePagination.value = {
+      ...result.pagination,
+      limit: templatePagination.value.limit,
+    }
+
+    const nextSelected = selectedTemplateId.value && result.items.some((item) => item.id === selectedTemplateId.value)
+      ? selectedTemplateId.value
+      : result.items[0]?.id
+
+    if (nextSelected) {
+      await selectTemplate(nextSelected)
+    } else {
+      selectedTemplateId.value = null
+      selectedTemplate.value = null
+    }
+  } catch (error) {
+    templateError.value = error instanceof Error ? error.message : '加载模板失败'
+    templateItems.value = []
+    selectedTemplateId.value = null
+    selectedTemplate.value = null
+    templatePagination.value = {
+      ...templatePagination.value,
+      total: 0,
+      offset: 0,
+      returned: 0,
+    }
+  } finally {
+    templateLoading.value = false
+  }
+}
+
+async function selectTemplate(templateId: string) {
+  selectedTemplateId.value = templateId
+  try {
+    selectedTemplate.value = await loadWorkflowTemplateCached(templateId)
+  } catch (error) {
+    templateError.value = error instanceof Error ? error.message : '加载模板详情失败'
+    selectedTemplate.value = null
+  }
+}
+
+async function selectRecentTemplate(templateId: string) {
+  await selectTemplate(templateId)
+}
+
+async function openTemplatePicker() {
+  refreshRecentTemplateItems()
+  showTemplates.value = true
+  if (!templateItems.value.length) {
+    await refreshTemplateCatalog(0)
+  }
+}
+
+async function applyTemplate(templateId?: string, options: { skipConfirm?: boolean } = {}) {
+  if (!templateId) return
+
+  if (!options.skipConfirm && (isDirty.value || workflowId.value)) {
+    await ElMessageBox.confirm('应用模板会创建一个新的工作流草稿并切换当前设计器，是否继续？', '提示', {
+      confirmButtonText: '继续',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  }
+
+  applyingTemplate.value = true
+  try {
+    const templateRecord =
+      selectedTemplate.value?.id === templateId
+        ? selectedTemplate.value
+        : await loadWorkflowTemplateCached(templateId)
+
+    const result = await instantiateWorkflowTemplate({
+      templateId,
+      name: !workflowId.value && workflowName.value.trim() ? workflowName.value.trim() : undefined,
+    })
+
+    invalidateWorkflowDraftCatalogCache()
+    invalidateWorkflowTemplateCatalogCache()
+    invalidateWorkflowTemplateDetailCache(templateId)
+
+    if (!result.workflowId) {
+      throw new Error('模板实例化后未返回工作流 ID')
+    }
+
+    recentTemplateItems.value = rememberRecentWorkflowTemplate(buildRecentWorkflowTemplateItem(templateRecord))
+
+    await router.replace({
+      name: 'workflow-designer',
+      params: { id: result.workflowId },
+      query: {},
+    })
+
+    showTemplates.value = false
+    await loadWorkflow(result.workflowId)
+    lastSaved.value = new Date()
+    ElMessage.success(result.message || '模板已应用')
+  } catch (error) {
+    if (error === 'cancel') return
+    console.error('Failed to apply template:', error)
+    ElMessage.error(error instanceof Error ? error.message : '应用模板失败')
+  } finally {
+    applyingTemplate.value = false
+  }
+}
+
+refreshRecentTemplateItems()
+
 // Save workflow
 async function saveWorkflow() {
-  if (!modeler) return
+  if (!modeler) return false
 
   saving.value = true
   try {
     const { xml } = await modeler.saveXML({ format: true })
 
-    const payload = {
-      name: workflowName.value || '未命名工作流',
+    const saved = await saveWorkflowDraft({
+      workflowId: workflowId.value,
+      name: workflowName.value,
       description: workflowDescription.value,
       version: workflowVersion.value,
-      bpmnXml: xml
-    }
-
-    const url = workflowId.value
-      ? `/api/workflow-designer/workflows/${workflowId.value}`
-      : '/api/workflow-designer/workflows'
-
-    const response = await fetch(url, {
-      method: workflowId.value ? 'PUT' : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      bpmnXml: xml,
     })
+    invalidateWorkflowDraftCatalogCache()
 
-    if (!response.ok) throw new Error('Failed to save workflow')
-
-    const data = await response.json()
-    if (!workflowId.value) {
-      workflowId.value = data.id
+    if (!workflowId.value && saved.workflowId) {
+      workflowId.value = saved.workflowId
       // Update URL without reload
-      router.replace({ params: { id: data.id } })
+      router.replace({ params: { id: saved.workflowId } })
     }
 
     isDirty.value = false
     lastSaved.value = new Date()
-    ElMessage.success('工作流保存成功')
+    ElMessage.success(saved.message || '工作流保存成功')
+    return true
   } catch (err) {
     console.error('Failed to save workflow:', err)
-    ElMessage.error('保存工作流失败')
+    ElMessage.error(err instanceof Error ? err.message : '保存工作流失败')
+    return false
   } finally {
     saving.value = false
   }
@@ -664,34 +760,44 @@ async function saveWorkflow() {
 
 // Deploy workflow
 async function deployWorkflow() {
-  if (!workflowId.value) {
-    ElMessage.warning('请先保存工作流')
+  if (!modeler) {
     return
   }
 
-  if (isDirty.value) {
-    await ElMessageBox.confirm('有未保存的更改，是否先保存？', '提示', {
+  const hasUnsavedChanges = isDirty.value || !workflowId.value
+
+  if (hasUnsavedChanges) {
+    await ElMessageBox.confirm('部署前将先保存当前草稿并发布，是否继续？', '提示', {
       confirmButtonText: '保存并部署',
       cancelButtonText: '取消',
-      type: 'warning'
+      type: 'warning',
     })
-    await saveWorkflow()
   }
 
   deploying.value = true
   try {
-    const response = await fetch(`/api/workflow/deploy`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workflowId: workflowId.value })
-    })
+    let deployed
 
-    if (!response.ok) throw new Error('Failed to deploy workflow')
+    if (hasUnsavedChanges) {
+      const saved = await saveWorkflow()
+      if (!saved || !workflowId.value) return
+      deployed = await deploySavedWorkflowDraft(workflowId.value)
+    } else if (workflowId.value) {
+      deployed = await deploySavedWorkflowDraft(workflowId.value)
+    } else {
+      const { xml } = await modeler.saveXML({ format: true })
+      deployed = await deployWorkflowXml({
+        name: workflowName.value,
+        description: workflowDescription.value,
+        bpmnXml: xml,
+      })
+    }
 
-    ElMessage.success('工作流部署成功')
+    ElMessage.success(deployed.message || '工作流部署成功')
   } catch (err) {
+    if (err === 'cancel') return
     console.error('Failed to deploy workflow:', err)
-    ElMessage.error('部署工作流失败')
+    ElMessage.error(err instanceof Error ? err.message : '部署工作流失败')
   } finally {
     deploying.value = false
   }
@@ -701,60 +807,10 @@ async function deployWorkflow() {
 function validateWorkflow() {
   if (!modeler) return
 
-  validationErrors.value = []
-
   const elementRegistry = modeler.get('elementRegistry') as {
     getAll: () => BpmnElement[]
-    filter: (fn: (e: BpmnElement) => boolean) => BpmnElement[]
   }
-  const elements = elementRegistry.getAll()
-
-  // Check for start event
-  const startEvents = elements.filter(e => e.type === 'bpmn:StartEvent')
-  if (startEvents.length === 0) {
-    validationErrors.value.push({
-      message: '工作流缺少开始事件',
-      severity: 'error'
-    })
-  } else if (startEvents.length > 1) {
-    validationErrors.value.push({
-      message: '工作流有多个开始事件',
-      severity: 'warning'
-    })
-  }
-
-  // Check for end event
-  const endEvents = elements.filter(e => e.type === 'bpmn:EndEvent')
-  if (endEvents.length === 0) {
-    validationErrors.value.push({
-      message: '工作流缺少结束事件',
-      severity: 'error'
-    })
-  }
-
-  // Check for unconnected elements
-  elements.forEach(element => {
-    if (element.type.includes('Task') || element.type.includes('Gateway')) {
-      const incoming = (element as { incoming?: unknown[] }).incoming || []
-      const outgoing = (element as { outgoing?: unknown[] }).outgoing || []
-
-      if (incoming.length === 0) {
-        validationErrors.value.push({
-          message: '元素没有入口连接',
-          severity: 'warning',
-          element: element.businessObject?.name || element.id
-        })
-      }
-      if (outgoing.length === 0) {
-        validationErrors.value.push({
-          message: '元素没有出口连接',
-          severity: 'warning',
-          element: element.businessObject?.name || element.id
-        })
-      }
-    }
-  })
-
+  validationErrors.value = validateWorkflowElements(elementRegistry.getAll())
   showValidation.value = true
 }
 
@@ -1000,6 +1056,176 @@ watch(isDirty, (dirty) => {
 
 .validation-item {
   margin-bottom: 0;
+}
+
+.template-dialog {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.1fr);
+}
+
+.template-dialog__catalog,
+.template-dialog__detail {
+  display: grid;
+  gap: 14px;
+  min-height: 420px;
+}
+
+.template-dialog__recent {
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid #dbeafe;
+  background: linear-gradient(180deg, #f8fbff 0%, #eef6ff 100%);
+}
+
+.template-dialog__toolbar,
+.template-dialog__pager,
+.template-dialog__pager-actions,
+.template-dialog__item-top,
+.template-dialog__meta-grid,
+.template-dialog__tag-list {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.template-dialog__list {
+  display: grid;
+  gap: 10px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.template-dialog__item {
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid var(--el-border-color-light);
+  background: #fff;
+  text-align: left;
+  display: grid;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.template-dialog__item.is-active {
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.12);
+}
+
+.template-dialog__item p,
+.template-dialog__detail-header p {
+  margin: 0;
+  color: var(--el-text-color-secondary);
+}
+
+.template-dialog__meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.template-dialog__badge,
+.template-dialog__tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.template-dialog__badge {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.template-dialog__badge[data-source='builtin'] {
+  background: #ecfccb;
+  color: #3f6212;
+}
+
+.template-dialog__badge[data-source='database'] {
+  background: #ede9fe;
+  color: #7c3aed;
+}
+
+.template-dialog__detail {
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 14px;
+  padding: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.template-dialog__detail-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.template-dialog__detail-header h3,
+.template-dialog__detail-block h4 {
+  margin: 0;
+}
+
+.template-dialog__meta-grid > div,
+.template-dialog__detail-block {
+  display: grid;
+  gap: 6px;
+}
+
+.template-dialog__tag-list--buttons {
+  gap: 10px;
+}
+
+.template-dialog__meta-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.template-dialog__tag {
+  background: #f3f4f6;
+  color: #374151;
+}
+
+.template-dialog__recent-chip {
+  border: 1px solid #dbeafe;
+  background: #fff;
+  border-radius: 999px;
+  padding: 8px 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: #1f2937;
+}
+
+.template-dialog__recent-chip small {
+  color: #64748b;
+  text-transform: uppercase;
+}
+
+.template-dialog__empty,
+.template-dialog__error {
+  padding: 18px;
+  border-radius: 12px;
+  background: #f8fafc;
+  color: #475569;
+}
+
+.template-dialog__error {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+@media (max-width: 960px) {
+  .template-dialog {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* BPMN.js overrides */

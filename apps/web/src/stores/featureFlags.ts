@@ -1,4 +1,5 @@
 import { computed, reactive, readonly } from 'vue'
+import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
 
 export type ProductMode = 'platform' | 'attendance' | 'plm-workbench'
@@ -113,6 +114,10 @@ function boolOrDefault(...values: Array<unknown>): boolean {
     if (typeof value === 'boolean') return value
   }
   return false
+}
+
+function needsPluginInference(features: Partial<ProductFeatures>): boolean {
+  return typeof features.attendance !== 'boolean' || typeof features.workflow !== 'boolean'
 }
 
 function extractFeaturesFromPayload(payload: any): Partial<ProductFeatures> {
@@ -249,32 +254,34 @@ async function loadProductFeatures(
   loadPromise = (async () => {
     let mePayload: any = null
     let pluginPayload: any = null
+    let backendFeatures: Partial<ProductFeatures> = {}
+    const { ensureToken, getToken, bootstrapSession } = useAuth()
 
     try {
-      const requests: Array<Promise<Response | null>> = [
-        apiFetch('/api/plugins').catch(() => null),
-      ]
+      const currentToken = getToken()
 
-      if (requiresSessionProbe) {
-        requests.unshift(apiFetch('/api/auth/me').catch(() => null))
+      if (!currentToken && requiresSessionProbe) {
+        await ensureToken()
       }
 
-      const responses = await Promise.all(requests)
-      const pluginRes = responses.at(-1) ?? null
-      const meRes = requiresSessionProbe ? (responses[0] ?? null) : null
-
-      if (meRes?.ok) {
-        mePayload = await meRes.json()
+      if (requiresSessionProbe && getToken()) {
+        const session = await bootstrapSession()
+        if (session.ok && session.payload) {
+          mePayload = session.payload
+          backendFeatures = extractFeaturesFromPayload(mePayload)
+        }
       }
 
-      if (pluginRes?.ok) {
-        pluginPayload = await pluginRes.json()
+      if (needsPluginInference(backendFeatures)) {
+        const pluginRes = await apiFetch('/api/plugins').catch(() => null)
+        if (pluginRes?.ok) {
+          pluginPayload = await pluginRes.json()
+        }
       }
     } catch (error) {
       state.error = error instanceof Error ? error.message : 'Failed to load product features'
     }
 
-    const backendFeatures = extractFeaturesFromPayload(mePayload)
     const pluginInference = inferPluginFeatures(pluginPayload)
     const overrideFeatures = parseOverrideFeatures()
     const adminRole = isAdminRole(mePayload)

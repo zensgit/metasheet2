@@ -83,10 +83,27 @@ components:
       properties:
         id:
           type: string
+        targetType:
+          type: string
+          nullable: true
+        targetId:
+          type: string
+          nullable: true
+        targetFieldId:
+          type: string
+          nullable: true
+        containerType:
+          type: string
+          nullable: true
+        containerId:
+          type: string
+          nullable: true
         spreadsheetId:
           type: string
+          nullable: true
         rowId:
           type: string
+          nullable: true
         fieldId:
           type: string
           nullable: true
@@ -766,6 +783,13 @@ components:
           type: integer
         failedRows:
           type: integer
+        skippedCount:
+          type: integer
+        skippedRows:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
         elapsedMs:
           type: integer
         throughputRowsPerSec:
@@ -1106,6 +1130,346 @@ components:
         updated_at:
           type: string
           format: date-time
+    MultitableBase:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        color:
+          type: string
+          nullable: true
+        ownerId:
+          type: string
+          nullable: true
+        workspaceId:
+          type: string
+          nullable: true
+    MultitableSheet:
+      type: object
+      properties:
+        id:
+          type: string
+        baseId:
+          type: string
+          nullable: true
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+    MultitableView:
+      type: object
+      properties:
+        id:
+          type: string
+        sheetId:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        filterInfo:
+          type: object
+          additionalProperties: true
+        sortInfo:
+          type: object
+          additionalProperties: true
+        groupInfo:
+          type: object
+          additionalProperties: true
+        hiddenFieldIds:
+          type: array
+          items:
+            type: string
+    MultitableField:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        property:
+          type: object
+          additionalProperties: true
+        order:
+          type: integer
+    MultitableRecord:
+      type: object
+      properties:
+        id:
+          type: string
+        version:
+          type: integer
+        data:
+          type: object
+          additionalProperties: true
+    MultitableCommentsScope:
+      type: object
+      properties:
+        targetType:
+          type: string
+        targetId:
+          type: string
+        targetFieldId:
+          type: string
+          nullable: true
+        containerType:
+          type: string
+        containerId:
+          type: string
+      required:
+        - targetType
+        - targetId
+        - containerType
+        - containerId
+    MultitableLinkedRecordSummary:
+      type: object
+      properties:
+        id:
+          type: string
+        display:
+          type: string
+      required:
+        - id
+        - display
+    MultitableAttachment:
+      type: object
+      properties:
+        id:
+          type: string
+        filename:
+          type: string
+        mimeType:
+          type: string
+        size:
+          type: integer
+        url:
+          type: string
+        thumbnailUrl:
+          type: string
+          nullable: true
+        uploadedAt:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - filename
+        - mimeType
+        - size
+        - url
+    MultitableRecordVersion:
+      type: object
+      properties:
+        recordId:
+          type: string
+        version:
+          type: integer
+      required:
+        - recordId
+        - version
+    MultitableComputedRecord:
+      type: object
+      properties:
+        recordId:
+          type: string
+        data:
+          type: object
+          additionalProperties: true
+      required:
+        - recordId
+        - data
+    MultitableRelatedRecord:
+      type: object
+      properties:
+        sheetId:
+          type: string
+        recordId:
+          type: string
+        data:
+          type: object
+          additionalProperties: true
+      required:
+        - sheetId
+        - recordId
+        - data
+    MultitableLinkFieldRef:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+      required:
+        - id
+        - name
+        - type
+    MultitableLinkSummaryMap:
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          $ref: '#/components/schemas/MultitableLinkedRecordSummary'
+    MultitableViewLinkSummaries:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/MultitableLinkSummaryMap'
+    MultitablePage:
+      type: object
+      properties:
+        offset:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+        hasMore:
+          type: boolean
+      required:
+        - offset
+        - limit
+        - total
+        - hasMore
+    MultitableViewMeta:
+      type: object
+      properties:
+        warnings:
+          type: array
+          items:
+            type: string
+        computedFilterSort:
+          type: boolean
+        ignoredSortFieldIds:
+          type: array
+          items:
+            type: string
+        ignoredFilterFieldIds:
+          type: array
+          items:
+            type: string
+    MultitableCapabilities:
+      type: object
+      properties:
+        canRead:
+          type: boolean
+        canCreateRecord:
+          type: boolean
+        canEditRecord:
+          type: boolean
+        canDeleteRecord:
+          type: boolean
+        canManageFields:
+          type: boolean
+        canManageViews:
+          type: boolean
+        canComment:
+          type: boolean
+        canManageAutomation:
+          type: boolean
+      required:
+        - canRead
+        - canCreateRecord
+        - canEditRecord
+        - canDeleteRecord
+        - canManageFields
+        - canManageViews
+        - canComment
+        - canManageAutomation
+    MultitableContext:
+      type: object
+      properties:
+        base:
+          allOf:
+            - $ref: '#/components/schemas/MultitableBase'
+          nullable: true
+        sheet:
+          allOf:
+            - $ref: '#/components/schemas/MultitableSheet'
+          nullable: true
+        sheets:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableSheet'
+        views:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableView'
+        capabilities:
+          $ref: '#/components/schemas/MultitableCapabilities'
+    MultitableRecordContext:
+      type: object
+      properties:
+        sheet:
+          $ref: '#/components/schemas/MultitableSheet'
+        view:
+          allOf:
+            - $ref: '#/components/schemas/MultitableView'
+          nullable: true
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableField'
+        record:
+          $ref: '#/components/schemas/MultitableRecord'
+        capabilities:
+          $ref: '#/components/schemas/MultitableCapabilities'
+        commentsScope:
+          $ref: '#/components/schemas/MultitableCommentsScope'
+        linkSummaries:
+          $ref: '#/components/schemas/MultitableLinkSummaryMap'
+      required:
+        - sheet
+        - fields
+        - record
+        - capabilities
+        - commentsScope
+        - linkSummaries
+    MultitableFormContext:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [form]
+        readOnly:
+          type: boolean
+        submitPath:
+          type: string
+        sheet:
+          $ref: '#/components/schemas/MultitableSheet'
+        view:
+          allOf:
+            - $ref: '#/components/schemas/MultitableView'
+          nullable: true
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableField'
+        capabilities:
+          $ref: '#/components/schemas/MultitableCapabilities'
+        record:
+          allOf:
+            - $ref: '#/components/schemas/MultitableRecord'
+          nullable: true
+        commentsScope:
+          allOf:
+            - $ref: '#/components/schemas/MultitableCommentsScope'
+          nullable: true
+      required:
+        - mode
+        - readOnly
+        - submitPath
+        - sheet
+        - fields
+        - capabilities
   responses:
     Unauthorized:
       description: Unauthorized - Missing or invalid JWT token
