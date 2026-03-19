@@ -187,5 +187,31 @@ describe('API Utils', () => {
 
       expect(replace).not.toHaveBeenCalled()
     })
+
+    it('does not redirect when unauthorized redirect suppression is enabled', async () => {
+      const replace = vi.fn()
+      Object.defineProperty(window, 'location', {
+        value: {
+          pathname: '/login',
+          search: '',
+          hash: '',
+          replace,
+          href: 'https://app.example.com/login',
+          origin: 'https://app.example.com',
+        },
+        writable: true,
+        configurable: true,
+      })
+
+      window.localStorage.setItem('auth_token', 'expired-token')
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401 }))
+
+      await apiFetch('/api/auth/me', {
+        suppressUnauthorizedRedirect: true,
+      })
+
+      expect(window.localStorage.getItem('auth_token')).toBe('expired-token')
+      expect(replace).not.toHaveBeenCalled()
+    })
   })
 })

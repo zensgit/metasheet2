@@ -65,6 +65,46 @@ type AttendanceAuditFilterInput = {
   to?: Date | null
 }
 
+type AttendanceAuditExportRow = {
+  id: unknown
+  actor_id: unknown
+  actor_type: unknown
+  action: unknown
+  route: unknown
+  status_code: unknown
+  latency_ms: unknown
+  resource_type: unknown
+  resource_id: unknown
+  request_id: unknown
+  ip: unknown
+  user_agent: unknown
+  occurred_at: unknown
+  meta: unknown
+}
+
+type AttendanceAuditMeta = Record<string, unknown> & {
+  error?: {
+    code?: unknown
+    message?: unknown
+  }
+}
+
+function normalizeAuditMeta(value: unknown): AttendanceAuditMeta {
+  return typeof value === 'object' && value !== null ? (value as AttendanceAuditMeta) : {}
+}
+
+function readAuditMetaText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return ''
+}
+
+function formatAuditOccurredAt(value: unknown): string {
+  if (value instanceof Date) return value.toISOString()
+  if (typeof value === 'string' || typeof value === 'number') return new Date(value).toISOString()
+  return ''
+}
+
 function normalizeStatusClass(raw: unknown): string | null {
   const text = String(raw || '').trim().toLowerCase()
   if (!text) return null
@@ -515,7 +555,7 @@ export function attendanceAdminRouter(): Router {
         LIMIT $${limitIdx}
       `
 
-      const rows = await query(sql, [...params, limit])
+      const rows = await query<AttendanceAuditExportRow>(sql, [...params, limit])
 
       const filename = `attendance-audit-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`
       res.setHeader('Content-Type', 'text/csv; charset=utf-8')
@@ -542,29 +582,24 @@ export function attendanceAdminRouter(): Router {
       const lines: string[] = [header]
 
       for (const row of rows.rows) {
-        const meta = (row as any).meta ?? {}
-        const errorCode = meta?.error?.code ?? ''
-        const errorMessage = meta?.error?.message ?? ''
-        const occurredRaw = (row as any).occurred_at
-        const occurredAt = occurredRaw instanceof Date
-          ? occurredRaw.toISOString()
-          : occurredRaw
-            ? new Date(occurredRaw).toISOString()
-            : ''
+        const meta = normalizeAuditMeta(row.meta)
+        const errorCode = readAuditMetaText(meta.error?.code)
+        const errorMessage = readAuditMetaText(meta.error?.message)
+        const occurredAt = formatAuditOccurredAt(row.occurred_at)
         lines.push([
           csvCell(occurredAt),
-          csvCell((row as any).id),
-          csvCell((row as any).actor_id),
-          csvCell((row as any).actor_type),
-          csvCell((row as any).action),
-          csvCell((row as any).route),
-          csvCell((row as any).status_code),
-          csvCell((row as any).latency_ms),
-          csvCell((row as any).resource_type),
-          csvCell((row as any).resource_id),
-          csvCell((row as any).request_id),
-          csvCell((row as any).ip),
-          csvCell((row as any).user_agent),
+          csvCell(row.id),
+          csvCell(row.actor_id),
+          csvCell(row.actor_type),
+          csvCell(row.action),
+          csvCell(row.route),
+          csvCell(row.status_code),
+          csvCell(row.latency_ms),
+          csvCell(row.resource_type),
+          csvCell(row.resource_id),
+          csvCell(row.request_id),
+          csvCell(row.ip),
+          csvCell(row.user_agent),
           csvCell(errorCode),
           csvCell(errorMessage),
           csvCell(meta),

@@ -11,6 +11,7 @@
 
 import fs from 'fs/promises'
 import path from 'path'
+import { fileURLToPath } from 'url'
 
 const currentRoot = String(process.env.CURRENT_ROOT || 'output/playwright/attendance-import-perf-longrun/current').trim()
 const historyRoot = String(process.env.HISTORY_ROOT || 'output/playwright/attendance-import-perf-longrun/history').trim()
@@ -110,7 +111,7 @@ function inferScenarioFromPerfLogPath(filePath) {
   return fallback ? String(fallback[0]).toLowerCase() : path.basename(path.dirname(filePath))
 }
 
-function classifyPerfFailure(logText) {
+export function classifyPerfFailure(logText) {
   const text = String(logText || '')
   const upper = text.toUpperCase()
   const failedLine = text
@@ -120,6 +121,32 @@ function classifyPerfFailure(logText) {
     .find((line) => line.startsWith('[attendance-import-perf] Failed:'))
     || ''
 
+  const csvLimitMatch = text.match(/CSV exceeds max rows \((\d+)\)/i)
+
+  if (upper.includes('CSV_TOO_LARGE') || upper.includes('CSV EXCEEDS')) {
+    const limit = csvLimitMatch ? csvLimitMatch[1] : undefined
+    return {
+      code: 'CSV_TOO_LARGE',
+      message: failedLine || 'CSV payload exceeds remote cap',
+      remediation: limit
+        ? `Respect the ${limit}-row cap and route to async lanes or split the file.`
+        : 'Respect the remote CSV cap or use rows payload when possible.',
+    }
+  }
+  if (upper.includes('NO ROWS TO IMPORT')) {
+    return {
+      code: 'NO_ROWS_TO_IMPORT',
+      message: failedLine || 'Import payload contains no rows',
+      remediation: 'Inspect CSV metadata to ensure rows are present before preview/commit.',
+    }
+  }
+  if (upper.includes('ASYNC POLL') && (upper.includes('TIMEOUT') || upper.includes('STALL') || upper.includes('STALLED'))) {
+    return {
+      code: 'ASYNC_POLL_TIMEOUT',
+      message: failedLine || 'Async job polling timed out or stalled',
+      remediation: 'Increase poll timeout budget or stabilize backend throughput, then rerun.',
+    }
+  }
   if (upper.includes('ASYNC COMMIT JOB TIMED OUT')) {
     return {
       code: 'ASYNC_JOB_TIMEOUT',
@@ -575,7 +602,10 @@ async function run() {
   console.log(`REPORT_JSON=${jsonPath}`)
 }
 
-run().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error)
-  die(message)
-})
+const scriptPath = fileURLToPath(import.meta.url)
+if (process.argv[1] === scriptPath) {
+  run().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error)
+    die(message)
+  })
+}
