@@ -361,6 +361,102 @@
         </button>
       </div>
 
+      <div v-if="auditTeamViewManagementItems.length" class="plm-audit__team-view-manager">
+        <div class="plm-audit__recommended-header">
+          <div>
+            <h3>{{ tr('Manage audit team views', '管理审计团队视图') }}</h3>
+            <p class="plm-audit__muted">
+              {{ tr('Batch archive, restore, or delete team views without leaving the audit workbench.', '在审计工作台内直接批量归档、恢复或删除团队视图。') }}
+            </p>
+          </div>
+          <div class="plm-audit__summary-chips">
+            <button
+              class="plm-audit__summary-chip"
+              type="button"
+              :class="{ 'plm-audit__summary-chip--active': allSelectableAuditTeamViewsSelected }"
+              :disabled="!selectableAuditTeamViewCount || auditTeamViewsLoading"
+              @click="setAllSelectableAuditTeamViewsSelected(!allSelectableAuditTeamViewsSelected)"
+            >
+              {{ allSelectableAuditTeamViewsSelected ? tr('Clear selection', '清空选择') : tr('Select all manageable', '全选可管理项') }}
+            </button>
+          </div>
+        </div>
+
+        <div class="plm-audit__team-view-batch-bar">
+          <span class="plm-audit__muted">
+            {{ tr('Selected', '已选') }} {{ selectedAuditTeamViewCount }} / {{ selectableAuditTeamViewCount }}
+          </span>
+          <button
+            v-for="batchAction in auditTeamViewBatchActions"
+            :key="`audit-team-batch-${batchAction.kind}`"
+            class="plm-audit__button"
+            type="button"
+            :disabled="batchAction.disabled || auditTeamViewsLoading"
+            @click="runAuditTeamViewBatchAction(batchAction.kind)"
+          >
+            {{ batchAction.label }} · {{ batchAction.eligibleCount }}
+          </button>
+        </div>
+
+        <div class="plm-audit__team-view-list">
+          <article
+            v-for="view in auditTeamViewManagementItems"
+            :key="view.id"
+            class="plm-audit__team-view-card"
+            :class="{
+              'plm-audit__team-view-card--selected': view.selected,
+              'plm-audit__team-view-card--archived': view.isArchived,
+              'plm-audit__team-view-card--default': view.isDefault,
+            }"
+          >
+            <label class="plm-audit__team-view-select">
+              <input
+                v-model="auditTeamViewSelection"
+                type="checkbox"
+                :value="view.id"
+                :disabled="!view.selectable || auditTeamViewsLoading"
+              />
+              <div class="plm-audit__team-view-card-meta">
+                <strong>{{ view.name }}</strong>
+                <div class="plm-audit__saved-view-badges">
+                  <span class="plm-audit__saved-view-source">
+                    {{ view.isArchived ? tr('Archived team view', '已归档团队视图') : tr('Active team view', '活跃团队视图') }}
+                  </span>
+                  <span v-if="view.isDefault" class="plm-audit__saved-view-badge">
+                    {{ tr('Default', '默认') }}
+                  </span>
+                  <span
+                    v-if="view.isArchived"
+                    class="plm-audit__saved-view-badge plm-audit__saved-view-badge--scene"
+                  >
+                    {{ tr('Archived', '已归档') }}
+                  </span>
+                </div>
+                <span class="plm-audit__muted">{{ tr('Owner', 'Owner') }}: {{ view.ownerUserId }}</span>
+                <span v-if="view.updatedAt" class="plm-audit__muted">
+                  {{ tr('Updated', '更新于') }}: {{ formatDate(view.updatedAt) }}
+                </span>
+                <span v-if="view.selectionHint" class="plm-audit__muted">
+                  {{ view.selectionHint }}
+                </span>
+              </div>
+            </label>
+            <div class="plm-audit__team-view-card-actions">
+              <button
+                v-for="actionItem in view.lifecycleActions"
+                :key="`${view.id}-${actionItem.kind}`"
+                class="plm-audit__button"
+                type="button"
+                :disabled="actionItem.disabled || auditTeamViewsLoading"
+                @click="runAuditTeamViewLifecycleAction(view.id, actionItem.kind)"
+              >
+                {{ actionItem.label }}
+              </button>
+            </div>
+          </article>
+        </div>
+      </div>
+
       <p v-if="auditTeamViewsError" class="plm-audit__status plm-audit__status--error">
         {{ auditTeamViewsError }}
       </p>
@@ -515,12 +611,15 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useLocale } from '../composables/useLocale'
 import {
+  archivePlmWorkbenchTeamView,
+  batchPlmWorkbenchTeamViews,
   clearPlmWorkbenchTeamViewDefault,
   deletePlmWorkbenchTeamView,
   exportPlmCollaborativeAuditLogsCsv,
   getPlmCollaborativeAuditSummary,
   listPlmCollaborativeAuditLogs,
   listPlmWorkbenchTeamViews,
+  restorePlmWorkbenchTeamView,
   savePlmWorkbenchTeamView,
   setPlmWorkbenchTeamViewDefault,
   type PlmCollaborativeAuditAction,
@@ -556,6 +655,10 @@ import {
   type PlmRecommendedAuditTeamView,
   type PlmRecommendedAuditTeamViewFilter,
 } from './plmAuditTeamViewCatalog'
+import {
+  buildPlmAuditTeamViewManagement,
+  type PlmAuditTeamViewLifecycleActionKind,
+} from './plmAuditTeamViewManagement'
 import {
   buildPlmAuditSceneContextBanner,
   buildPlmAuditSceneFilterHighlight,
@@ -598,6 +701,7 @@ const savedViews = ref<PlmAuditSavedView[]>(readPlmAuditSavedViews())
 const auditTeamViewKey = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.teamViewId)
 const auditTeamViewName = ref('')
 const auditTeamViews = ref<PlmWorkbenchTeamView<'audit'>[]>([])
+const auditTeamViewSelection = ref<string[]>([])
 const auditTeamViewsLoading = ref(false)
 const auditTeamViewsError = ref('')
 const auditTeamViewRecommendationFilter = ref<PlmRecommendedAuditTeamViewFilter>('')
@@ -640,6 +744,19 @@ const auditTeamViewSummaryChips = computed(() => buildAuditTeamViewSummaryChips(
   recommendationFilter: auditTeamViewRecommendationFilter.value,
 }))
 const auditTeamViewSummaryHint = computed(() => buildAuditTeamViewSummaryHint(auditTeamViewSummaryChips.value))
+const auditTeamViewManagement = computed(() => buildPlmAuditTeamViewManagement(
+  auditTeamViews.value,
+  auditTeamViewSelection.value,
+  tr,
+))
+const auditTeamViewManagementItems = computed(() => auditTeamViewManagement.value.items)
+const auditTeamViewBatchActions = computed(() => auditTeamViewManagement.value.batchActions)
+const selectedAuditTeamViewCount = computed(() => auditTeamViewManagement.value.selectedCount)
+const selectableAuditTeamViewCount = computed(() => auditTeamViewManagement.value.selectableCount)
+const allSelectableAuditTeamViewsSelected = computed(() => (
+  selectableAuditTeamViewCount.value > 0
+  && selectedAuditTeamViewCount.value === selectableAuditTeamViewCount.value
+))
 const canSaveAuditTeamView = computed(() => Boolean(auditTeamViewName.value.trim()))
 const auditSceneContext = computed(() => {
   return buildPlmAuditSceneContextBanner({
@@ -879,6 +996,37 @@ function replaceAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
   auditTeamViews.value = sortAuditTeamViews(
     auditTeamViews.value.map((entry) => (entry.id === view.id ? view : entry)),
   )
+}
+
+function trimAuditTeamViewSelection() {
+  const existingIds = new Set(auditTeamViews.value.map((view) => view.id))
+  auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => existingIds.has(id))
+}
+
+function setAllSelectableAuditTeamViewsSelected(nextSelected: boolean) {
+  if (!nextSelected) {
+    auditTeamViewSelection.value = []
+    return
+  }
+  auditTeamViewSelection.value = auditTeamViewManagementItems.value
+    .filter((item) => item.selectable)
+    .map((item) => item.id)
+}
+
+function removeAuditTeamViews(viewIds: string[]) {
+  const removed = new Set(viewIds)
+  auditTeamViews.value = auditTeamViews.value.filter((entry) => !removed.has(entry.id))
+  auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => !removed.has(id))
+}
+
+async function clearCurrentAuditTeamViewSelectionIfNeeded(viewIds: string[]) {
+  const selectedId = auditTeamViewKey.value
+  if (!selectedId || !viewIds.includes(selectedId)) return
+  auditTeamViewKey.value = ''
+  await syncRouteState({
+    ...readCurrentRouteState(),
+    teamViewId: '',
+  })
 }
 
 function buildCurrentAuditTeamViewState() {
@@ -1150,6 +1298,104 @@ async function deleteAuditTeamView() {
   }
 }
 
+async function runAuditTeamViewLifecycleAction(
+  viewId: string,
+  actionKind: PlmAuditTeamViewLifecycleActionKind,
+) {
+  const view = findAuditTeamViewById(viewId)
+  if (!view) return
+
+  auditTeamViewsLoading.value = true
+  auditTeamViewsError.value = ''
+  try {
+    if (actionKind === 'delete') {
+      await deletePlmWorkbenchTeamView(view.id)
+      removeAuditTeamViews([view.id])
+      await clearCurrentAuditTeamViewSelectionIfNeeded([view.id])
+      setStatus(tr('Audit team view deleted.', '审计团队视图已删除。'))
+      return
+    }
+
+    const saved = actionKind === 'archive'
+      ? await archivePlmWorkbenchTeamView('audit', view.id)
+      : await restorePlmWorkbenchTeamView('audit', view.id)
+
+    replaceAuditTeamView(saved)
+
+    if (actionKind === 'archive') {
+      auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => id !== view.id)
+      await clearCurrentAuditTeamViewSelectionIfNeeded([view.id])
+      setStatus(tr('Audit team view archived.', '审计团队视图已归档。'))
+      return
+    }
+
+    setStatus(tr('Audit team view restored.', '审计团队视图已恢复。'))
+  } catch (error: unknown) {
+    auditTeamViewsError.value = error instanceof Error
+      ? error.message
+      : actionKind === 'archive'
+        ? tr('Failed to archive audit team view', '归档审计团队视图失败')
+        : actionKind === 'restore'
+          ? tr('Failed to restore audit team view', '恢复审计团队视图失败')
+          : tr('Failed to delete audit team view', '删除审计团队视图失败')
+    setStatus(auditTeamViewsError.value, 'error')
+  } finally {
+    auditTeamViewsLoading.value = false
+  }
+}
+
+async function runAuditTeamViewBatchAction(actionKind: PlmAuditTeamViewLifecycleActionKind) {
+  const batchAction = auditTeamViewBatchActions.value.find((item) => item.kind === actionKind)
+  if (!batchAction || batchAction.disabled) return
+
+  auditTeamViewsLoading.value = true
+  auditTeamViewsError.value = ''
+  try {
+    const result = await batchPlmWorkbenchTeamViews('audit', actionKind, batchAction.eligibleIds)
+
+    if (actionKind === 'delete') {
+      removeAuditTeamViews(result.processedIds)
+      await clearCurrentAuditTeamViewSelectionIfNeeded(result.processedIds)
+    } else {
+      const updatedViews = new Map(result.items.map((item) => [item.id, item]))
+      auditTeamViews.value = sortAuditTeamViews(
+        auditTeamViews.value.map((entry) => updatedViews.get(entry.id) || entry),
+      )
+      if (actionKind === 'archive') {
+        auditTeamViewSelection.value = result.skippedIds
+      } else {
+        auditTeamViewSelection.value = result.skippedIds.length ? result.skippedIds : batchAction.eligibleIds
+      }
+      if (actionKind === 'archive') {
+        await clearCurrentAuditTeamViewSelectionIfNeeded(result.processedIds)
+      }
+    }
+
+    const processedTotal = result.processedIds.length
+    const skippedTotal = result.skippedIds.length
+    const actionLabelText = actionKind === 'archive'
+      ? tr('archived', '已归档')
+      : actionKind === 'restore'
+        ? tr('restored', '已恢复')
+        : tr('deleted', '已删除')
+    const skippedSuffix = skippedTotal
+      ? tr(` (${skippedTotal} skipped)`, `（跳过 ${skippedTotal} 项）`)
+      : ''
+    setStatus(tr(`${processedTotal} team views ${actionLabelText}${skippedSuffix}.`, `${processedTotal} 个团队视图${actionLabelText}${skippedSuffix}。`))
+  } catch (error: unknown) {
+    auditTeamViewsError.value = error instanceof Error
+      ? error.message
+      : actionKind === 'archive'
+        ? tr('Failed to batch archive audit team views', '批量归档审计团队视图失败')
+        : actionKind === 'restore'
+          ? tr('Failed to batch restore audit team views', '批量恢复审计团队视图失败')
+          : tr('Failed to batch delete audit team views', '批量删除审计团队视图失败')
+    setStatus(auditTeamViewsError.value, 'error')
+  } finally {
+    auditTeamViewsLoading.value = false
+  }
+}
+
 async function loadSummary(nextWindowMinutes = windowMinutes.value) {
   summaryLoading.value = true
   try {
@@ -1295,6 +1541,10 @@ function goToPage(nextPage: number) {
     page: nextPage,
   })
 }
+
+watch(auditTeamViews, () => {
+  trimAuditTeamViewSelection()
+})
 
 watch(
   () => route.query,
@@ -1457,6 +1707,12 @@ watch(
   margin-top: 8px;
 }
 
+.plm-audit__team-view-manager {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .plm-audit__recommended-header {
   display: flex;
   flex-wrap: wrap;
@@ -1514,6 +1770,64 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.plm-audit__team-view-batch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.plm-audit__team-view-list {
+  display: grid;
+  gap: 10px;
+}
+
+.plm-audit__team-view-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #dbe4f0;
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: #f8fafc;
+}
+
+.plm-audit__team-view-card--selected {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.12);
+}
+
+.plm-audit__team-view-card--default {
+  background: linear-gradient(180deg, #eff6ff 0%, #f8fafc 100%);
+}
+
+.plm-audit__team-view-card--archived {
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+}
+
+.plm-audit__team-view-select {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: 1 1 auto;
+}
+
+.plm-audit__team-view-select input {
+  margin-top: 4px;
+}
+
+.plm-audit__team-view-card-meta,
+.plm-audit__team-view-card-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plm-audit__team-view-card-actions {
+  align-items: flex-end;
 }
 
 .plm-audit__summary-panel {
@@ -1842,7 +2156,8 @@ watch(
   .plm-audit__header,
   .plm-audit__pagination,
   .plm-audit__saved-views-header,
-  .plm-audit__saved-view-card {
+  .plm-audit__saved-view-card,
+  .plm-audit__team-view-card {
     flex-direction: column;
     align-items: flex-start;
   }
@@ -1856,6 +2171,11 @@ watch(
   .plm-audit__team-view-row {
     width: 100%;
     flex-direction: column;
+    align-items: stretch;
+  }
+
+  .plm-audit__team-view-card-actions {
+    width: 100%;
     align-items: stretch;
   }
 
