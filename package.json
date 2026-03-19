@@ -40,6 +40,8 @@
     "verify:univer-ui-smoke": "node scripts/verify-univer-ui-smoke.mjs",
     "verify:multitable-pilot": "node scripts/verify-multitable-live-smoke.mjs",
     "verify:multitable-pilot:local": "bash scripts/ops/multitable-pilot-local.sh",
+    "verify:multitable-pilot:readiness": "node scripts/ops/multitable-pilot-readiness.mjs",
+    "verify:multitable-pilot:ready:local": "bash scripts/ops/multitable-pilot-ready-local.sh",
     "profile:multitable-grid": "node scripts/profile-multitable-grid.mjs",
     "profile:multitable-grid:local": "RUNNER_SCRIPT=scripts/profile-multitable-grid.mjs RUN_LABEL=multitable-grid-profile bash scripts/ops/multitable-pilot-local.sh",
     "verify:multitable-grid-profile:summary": "node scripts/ops/multitable-grid-profile-summary.mjs",
