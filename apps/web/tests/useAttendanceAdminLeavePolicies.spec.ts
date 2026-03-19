@@ -111,6 +111,39 @@ describe('useAttendanceAdminLeavePolicies', () => {
     expect(setStatusFromError).not.toHaveBeenCalled()
   })
 
+  it('auto-generates a leave type code from the name when the code is blank', async () => {
+    const adminForbidden = ref(false)
+    const requestForm = reactive({ leaveTypeId: '', overtimeRuleId: '' })
+    const apiFetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, data: { id: 'leave-3' } }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, data: { items: [] } }))
+
+    const policies = useAttendanceAdminLeavePolicies({
+      adminForbidden,
+      requestForm,
+      apiFetch,
+    })
+
+    policies.leaveTypeForm.code = '   '
+    policies.leaveTypeForm.name = 'Annual Leave'
+
+    await policies.saveLeaveType()
+
+    expect(apiFetch).toHaveBeenNthCalledWith(1, '/api/attendance/leave-types', {
+      method: 'POST',
+      body: JSON.stringify({
+        code: 'annual_leave',
+        name: 'Annual Leave',
+        paid: true,
+        requiresApproval: true,
+        requiresAttachment: false,
+        defaultMinutesPerDay: 480,
+        isActive: true,
+        orgId: undefined,
+      }),
+    })
+  })
+
   it('deletes an overtime rule after confirmation and reloads data', async () => {
     const adminForbidden = ref(false)
     const requestForm = reactive({ leaveTypeId: '', overtimeRuleId: '' })

@@ -11,10 +11,11 @@ import { createServer } from 'http'
 import cors from 'cors'
 import crypto from 'crypto'
 import { EventEmitter } from 'eventemitter3'
-import { Injector } from '@wendellhu/redi' // IoC Container
+import type { Injector } from '@wendellhu/redi' // IoC Container
 import { createContainer } from './di/container'
-import { IConfigService, ILogger, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService } from './di/identifiers'
-import { PluginLoader, type LoadedPlugin } from './core/plugin-loader'
+import { IConfigService, ICollabService, ICoreAPI, IPluginLoader, ICollectionManager, IPLMAdapter, IAthenaAdapter, IDedupCADAdapter, ICADMLAdapter, IVisionAdapter, IFormulaService } from './di/identifiers'
+import type { PluginLoader} from './core/plugin-loader';
+import { type LoadedPlugin } from './core/plugin-loader'
 import { Logger, setLogContext } from './core/logger'
 import type {
   CoreAPI,
@@ -52,6 +53,7 @@ import { snapshotsRouter } from './routes/snapshots'
 import changeManagementRouter from './routes/change-management'
 import { permissionsRouter } from './routes/permissions'
 import { attendanceAdminRouter } from './routes/attendance-admin'
+import { adminUsersRouter } from './routes/admin-users'
 import { filesRouter } from './routes/files'
 import { spreadsheetsRouter } from './routes/spreadsheets'
 import { spreadsheetPermissionsRouter } from './routes/spreadsheet-permissions'
@@ -73,6 +75,18 @@ import { SnapshotService } from './services/SnapshotService'
 import { cacheRegistry } from '../core/cache/CacheRegistry'
 import { loadObservabilityConfig } from './config/observability'
 import { initObservability } from './observability/otel'
+
+type RawQueryConfig = {
+  text: string
+  values?: unknown[]
+}
+
+function isRawQueryConfig(value: unknown): value is RawQueryConfig {
+  if (typeof value !== 'object' || value === null) return false
+  const maybeConfig = value as { text?: unknown; values?: unknown }
+  if (typeof maybeConfig.text !== 'string') return false
+  return maybeConfig.values === undefined || Array.isArray(maybeConfig.values)
+}
 
 type PluginRuntimeState = {
   status: 'active' | 'inactive' | 'failed'
@@ -238,7 +252,10 @@ export class MetaSheetServer {
                 return result.rows
               },
               rawQuery: async (queryConfig: unknown) => {
-                return client.query(queryConfig as any)
+                if (!isRawQueryConfig(queryConfig)) {
+                  throw new TypeError('rawQuery expects a query config with text and optional values')
+                }
+                return client.query(queryConfig.text, queryConfig.values)
               },
               __rawClient: client,
               commit: async () => {
@@ -473,8 +490,7 @@ export class MetaSheetServer {
     this.app.use(attendanceAuditMiddleware())
     this.app.use(attendanceSecurityMiddleware())
 
-    // 健康检查
-    this.app.get('/health', (req, res) => {
+    const handleHealth = (req: Request, res: Response) => {
       const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
       try {
         const stats = getPoolStats()
@@ -486,6 +502,8 @@ export class MetaSheetServer {
         } catch { /* ignore plugin summary errors */ }
         res.json({
           status: 'ok',
+          ok: true,
+          success: true,
           timestamp: new Date().toISOString(),
           plugins: this.pluginLoader.getPlugins().size,
           pluginsSummary: pluginsSummary || undefined,
@@ -496,7 +514,11 @@ export class MetaSheetServer {
         endTimer?.({ route: '/health', method: 'GET' })(500)
         throw err
       }
-    })
+    }
+
+    // 健康检查
+    this.app.get('/health', handleHealth)
+    this.app.get('/api/health', handleHealth)
 
     // 路由：认证（登录/注册/token管理）
     this.app.use('/api/auth', authRouter)
@@ -510,6 +532,7 @@ export class MetaSheetServer {
     // 路由：角色/权限/表/文件/表权限（占位）
     this.app.use(rolesRouter())
     this.app.use(permissionsRouter())
+    this.app.use(adminUsersRouter())
     this.app.use(attendanceAdminRouter())
     this.app.use(filesRouter())
     this.app.use(spreadsheetsRouter(this.injector))

@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       csv_max_rows:
-        description: 'Value for ATTENDANCE_IMPORT_CSV_MAX_ROWS (default 20000)'
+        description: 'Value for ATTENDANCE_IMPORT_CSV_MAX_ROWS (default 100000)'
         required: false
-        default: '20000'
+        default: '100000'
       skip_host_sync:
         description: 'Optional: skip deploy-host git sync step (true/false). Use for debugging when host sync is broken.'
         required: false
@@ -35,7 +35,7 @@ jobs:
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
-          CSV_MAX_ROWS: ${{ github.event.inputs.csv_max_rows || '20000' }}
+          CSV_MAX_ROWS: ${{ github.event.inputs.csv_max_rows || '100000' }}
           SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
         run: |
           set -euo pipefail
@@ -46,7 +46,7 @@ jobs:
 
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
-          CSV_MAX_ROWS="${CSV_MAX_ROWS:-20000}"
+          CSV_MAX_ROWS="${CSV_MAX_ROWS:-100000}"
           SKIP_HOST_SYNC="${SKIP_HOST_SYNC:-false}"
 
           if [[ ! "${CSV_MAX_ROWS}" =~ ^[0-9]+$ ]]; then
@@ -140,7 +140,7 @@ jobs:
         if: always()
         env:
           RECONCILE_RC: ${{ steps.remote_reconcile.outputs.reconcile_rc }}
-          CSV_MAX_ROWS: ${{ github.event.inputs.csv_max_rows || '20000' }}
+          CSV_MAX_ROWS: ${{ github.event.inputs.csv_max_rows || '100000' }}
           SKIP_HOST_SYNC: ${{ github.event.inputs.skip_host_sync || 'false' }}
         run: |
           set -euo pipefail

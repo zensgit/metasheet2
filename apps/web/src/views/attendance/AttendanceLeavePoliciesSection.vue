@@ -9,7 +9,13 @@
     <div class="attendance__admin-grid">
       <label class="attendance__field" for="attendance-leave-code">
         <span>{{ tr('Code', '编码') }}</span>
-        <input id="attendance-leave-code" v-model="leaveTypeForm.code" name="leaveCode" type="text" />
+        <input
+          id="attendance-leave-code"
+          v-model="leaveTypeForm.code"
+          name="leaveCode"
+          type="text"
+          :placeholder="tr('Auto-generated from name', '名称自动生成')"
+        />
       </label>
       <label class="attendance__field" for="attendance-leave-name">
         <span>{{ tr('Name', '名称') }}</span>

@@ -4,6 +4,7 @@ const fsp = require('fs/promises')
 const path = require('path')
 const { Transform, Readable } = require('stream')
 const { pipeline } = require('stream/promises')
+const { StringDecoder } = require('string_decoder')
 const { z } = require('zod')
 const { createRuleEngine } = require('./engine/index.cjs')
 const { validateConfig: validateEngineConfig } = require('./engine/schema.cjs')
@@ -622,6 +623,83 @@ function parseDateInput(value) {
   return date
 }
 
+function normalizeDateOnlyStrict(value) {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return null
+  const date = new Date(`${normalized}T00:00:00.000Z`)
+  if (Number.isNaN(date.getTime())) return null
+  return date.toISOString().slice(0, 10) === normalized ? normalized : null
+}
+
+function resolveAttendanceDateRange(fromValue, toValue, fallbackDays = 30) {
+  const fallbackFrom = new Date(Date.now() - 1000 * 60 * 60 * 24 * fallbackDays).toISOString().slice(0, 10)
+  const fallbackTo = new Date().toISOString().slice(0, 10)
+  const from = fromValue === undefined ? fallbackFrom : normalizeDateOnlyStrict(fromValue)
+  if (fromValue !== undefined && !from) {
+    return { ok: false, message: 'Invalid "from" date. Use YYYY-MM-DD.' }
+  }
+  const to = toValue === undefined ? fallbackTo : normalizeDateOnlyStrict(toValue)
+  if (toValue !== undefined && !to) {
+    return { ok: false, message: 'Invalid "to" date. Use YYYY-MM-DD.' }
+  }
+  if (from > to) {
+    return { ok: false, message: '"from" date must be on or before "to" date.' }
+  }
+  return { ok: true, from, to }
+}
+
+function normalizeOptionalText(value) {
+  if (value === null || value === undefined) return null
+  const normalized = String(value).trim()
+  return normalized || null
+}
+
+function normalizeDuplicateRequestTimestamp(value) {
+  const parsed = value instanceof Date ? value : parseDateInput(value)
+  return parsed ? parsed.toISOString() : null
+}
+
+function buildAttendanceRequestFingerprint(input) {
+  return {
+    requestedInAt: normalizeDuplicateRequestTimestamp(input.requestedInAt),
+    requestedOutAt: normalizeDuplicateRequestTimestamp(input.requestedOutAt),
+    reason: normalizeOptionalText(input.reason),
+    minutes: Number.isFinite(Number(input.minutes)) ? Number(input.minutes) : null,
+    attachmentUrl: normalizeOptionalText(input.attachmentUrl),
+    leaveTypeId: normalizeOptionalText(input.leaveTypeId),
+    leaveTypeCode: normalizeOptionalText(input.leaveTypeCode),
+    overtimeRuleId: normalizeOptionalText(input.overtimeRuleId),
+    overtimeRuleName: normalizeOptionalText(input.overtimeRuleName),
+  }
+}
+
+function matchesAttendanceRequestFingerprint(row, fingerprint) {
+  const metadata = normalizeMetadata(row.metadata)
+  const rowFingerprint = buildAttendanceRequestFingerprint({
+    requestedInAt: row.requested_in_at,
+    requestedOutAt: row.requested_out_at,
+    reason: row.reason,
+    minutes: metadata.minutes,
+    attachmentUrl: metadata.attachmentUrl,
+    leaveTypeId: metadata.leaveType?.id,
+    leaveTypeCode: metadata.leaveType?.code,
+    overtimeRuleId: metadata.overtimeRule?.id,
+    overtimeRuleName: metadata.overtimeRule?.name,
+  })
+  return (
+    rowFingerprint.requestedInAt === fingerprint.requestedInAt
+    && rowFingerprint.requestedOutAt === fingerprint.requestedOutAt
+    && rowFingerprint.reason === fingerprint.reason
+    && rowFingerprint.minutes === fingerprint.minutes
+    && rowFingerprint.attachmentUrl === fingerprint.attachmentUrl
+    && rowFingerprint.leaveTypeId === fingerprint.leaveTypeId
+    && rowFingerprint.leaveTypeCode === fingerprint.leaveTypeCode
+    && rowFingerprint.overtimeRuleId === fingerprint.overtimeRuleId
+    && rowFingerprint.overtimeRuleName === fingerprint.overtimeRuleName
+  )
+}
+
 function normalizeStatusLabel(value) {
   if (value === null || value === undefined) return null
   const text = String(value).trim()
@@ -848,6 +926,15 @@ const ATTENDANCE_IMPORT_CSV_MAX_ROWS = resolvePositiveIntEnv('ATTENDANCE_IMPORT_
   min: 1000,
 })
 
+const ATTENDANCE_IMPORT_SYNC_ASYNC_ROW_THRESHOLD = resolvePositiveIntEnv(
+  'ATTENDANCE_IMPORT_SYNC_ASYNC_ROW_THRESHOLD',
+  50000,
+  {
+    min: 10,
+    max: ATTENDANCE_IMPORT_CSV_MAX_ROWS,
+  }
+)
+
 const ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD = resolvePositiveIntEnv('ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD', 50000, {
   min: 1000,
   max: ATTENDANCE_IMPORT_CSV_MAX_ROWS,
@@ -903,7 +990,7 @@ const ATTENDANCE_IMPORT_RECORD_UPSERT_MODE = resolveEnumEnv(
 const ATTENDANCE_IMPORT_ITEMS_INSERT_MODE = resolveEnumEnv(
   'ATTENDANCE_IMPORT_ITEMS_INSERT_MODE',
   'unnest',
-  ['values', 'unnest']
+  ['values', 'unnest', 'staging']
 )
 
 const ATTENDANCE_IMPORT_COPY_ENABLED = resolveEnumEnv(
@@ -1008,6 +1095,173 @@ function iterateCsvRows(csvText, delimiter = ',', onRow) {
 
   if (!stoppedEarly) {
     emitRow()
+  }
+
+  return { rowCount, stoppedEarly }
+}
+
+async function iterateCsvRowsAsync(csvText, delimiter = ',', onRow) {
+  if (typeof csvText !== 'string' || !csvText.trim()) return { rowCount: 0, stoppedEarly: false }
+  const sep = typeof delimiter === 'string' && delimiter.length > 0 ? delimiter[0] : ','
+  let row = []
+  let field = ''
+  let inQuotes = false
+  let rowCount = 0
+  let stoppedEarly = false
+
+  const emitRow = async () => {
+    row.push(field)
+    field = ''
+    const keepRow = row.length > 1 || row[0]?.trim()
+    if (!keepRow) {
+      row = []
+      return true
+    }
+    const shouldContinue = typeof onRow === 'function'
+      ? await onRow(row, rowCount) !== false
+      : true
+    rowCount += 1
+    row = []
+    if (!shouldContinue) {
+      stoppedEarly = true
+      return false
+    }
+    return true
+  }
+
+  for (let i = 0; i < csvText.length; i += 1) {
+    const ch = csvText[i]
+    if (inQuotes) {
+      if (ch === '"') {
+        const next = csvText[i + 1]
+        if (next === '"') {
+          field += '"'
+          i += 1
+        } else {
+          inQuotes = false
+        }
+      } else if (ch === '\r') {
+        if (csvText[i + 1] === '\n') i += 1
+        field += '\n'
+      } else {
+        field += ch
+      }
+      continue
+    }
+
+    if (ch === '"') {
+      inQuotes = true
+      continue
+    }
+    if (ch === sep) {
+      row.push(field)
+      field = ''
+      continue
+    }
+    if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && csvText[i + 1] === '\n') i += 1
+      if (!await emitRow()) break
+      continue
+    }
+    field += ch
+  }
+
+  if (!stoppedEarly) {
+    await emitRow()
+  }
+
+  return { rowCount, stoppedEarly }
+}
+
+async function iterateCsvRowsStreamAsync(readable, delimiter = ',', onRow) {
+  if (!readable || typeof readable[Symbol.asyncIterator] !== 'function') {
+    return { rowCount: 0, stoppedEarly: false }
+  }
+  const sep = typeof delimiter === 'string' && delimiter.length > 0 ? delimiter[0] : ','
+  const decoder = new StringDecoder('utf8')
+  let row = []
+  let field = ''
+  let inQuotes = false
+  let rowCount = 0
+  let stoppedEarly = false
+
+  const emitRow = async () => {
+    row.push(field)
+    field = ''
+    const keepRow = row.length > 1 || row[0]?.trim()
+    if (!keepRow) {
+      row = []
+      return true
+    }
+    const shouldContinue = typeof onRow === 'function'
+      ? await onRow(row, rowCount) !== false
+      : true
+    rowCount += 1
+    row = []
+    if (!shouldContinue) {
+      stoppedEarly = true
+      return false
+    }
+    return true
+  }
+
+  const processChunk = async (text) => {
+    for (let i = 0; i < text.length; i += 1) {
+      const ch = text[i]
+      if (inQuotes) {
+        if (ch === '"') {
+          const next = text[i + 1]
+          if (next === '"') {
+            field += '"'
+            i += 1
+          } else {
+            inQuotes = false
+          }
+        } else if (ch === '\r') {
+          if (text[i + 1] === '\n') i += 1
+          field += '\n'
+        } else {
+          field += ch
+        }
+        continue
+      }
+
+      if (ch === '"') {
+        inQuotes = true
+        continue
+      }
+      if (ch === sep) {
+        row.push(field)
+        field = ''
+        continue
+      }
+      if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && text[i + 1] === '\n') i += 1
+        if (!await emitRow()) return false
+        continue
+      }
+      field += ch
+    }
+    return true
+  }
+
+  for await (const chunk of readable) {
+    const text = typeof chunk === 'string' ? chunk : decoder.write(chunk)
+    if (!text) continue
+    if (!await processChunk(text)) break
+  }
+
+  if (!stoppedEarly) {
+    const tail = decoder.end()
+    if (tail) {
+      await processChunk(tail)
+    }
+  } else {
+    decoder.end()
+  }
+
+  if (!stoppedEarly) {
+    await emitRow()
   }
 
   return { rowCount, stoppedEarly }
@@ -1158,24 +1412,66 @@ function shouldEnforcePunchRequired(row) {
   return true
 }
 
-function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
+function resolveImportCsvIterationOptions({ csvText, csvOptions, maxRows }) {
   const delimiter = csvOptions?.delimiter || ','
   const resolvedMaxRowsRaw = Number(maxRows ?? ATTENDANCE_IMPORT_CSV_MAX_ROWS)
   const resolvedMaxRows = Number.isFinite(resolvedMaxRowsRaw) && resolvedMaxRowsRaw > 0
     ? Math.floor(resolvedMaxRowsRaw)
     : ATTENDANCE_IMPORT_CSV_MAX_ROWS
+  return {
+    csvText,
+    delimiter,
+    resolvedMaxRows,
+    headerRowIndex: Number.isFinite(csvOptions?.headerRowIndex)
+      ? Math.max(0, Number(csvOptions.headerRowIndex))
+      : detectCsvHeaderIndex(csvText, delimiter),
+  }
+}
 
-  if (typeof csvText !== 'string' || !csvText.trim()) {
-    return { rows: [], warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
+function buildImportRowFromCsvRawRow(header, rawRow) {
+  const fields = {}
+  let hasValue = false
+  header.forEach((key, index) => {
+    if (!key) return
+    const value = rawRow[index] ?? ''
+    if (value !== '') hasValue = true
+    fields[key] = value
+  })
+  if (!hasValue) return null
+
+  const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.date)
+  const userId = fields.UserId ?? fields.userId ?? fields['用户ID']
+  return {
+    workDate: workDate ?? '',
+    fields,
+    userId: userId ? String(userId).trim() : undefined,
+  }
+}
+
+function finalizeImportCsvIteration({ seenRows, header, rowCount, limitExceeded, maxRows }) {
+  if (seenRows === 0) {
+    return { rowCount: 0, warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows }
+  }
+  if (!header.length || header.every((value) => !value)) {
+    return { rowCount: 0, warnings: ['CSV header row not found'], limitExceeded: false, maxRows }
   }
 
-  const headerRowIndex = Number.isFinite(csvOptions?.headerRowIndex)
-    ? Math.max(0, Number(csvOptions.headerRowIndex))
-    : detectCsvHeaderIndex(csvText, delimiter)
+  const warnings = []
+  if (limitExceeded) {
+    warnings.push(`CSV exceeds max rows (${maxRows}); only the first ${maxRows} rows were parsed.`)
+  }
+  return { rowCount, warnings, limitExceeded, maxRows }
+}
+
+function iterateImportRowsFromCsv({ csvText, csvOptions, maxRows, onRow }) {
+  const { delimiter, resolvedMaxRows, headerRowIndex } = resolveImportCsvIterationOptions({ csvText, csvOptions, maxRows })
+  if (typeof csvText !== 'string' || !csvText.trim()) {
+    return { rowCount: 0, warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
+  }
 
   let seenRows = 0
   let header = []
-  const rows = []
+  let rowCount = 0
   let limitExceeded = false
 
   iterateCsvRows(csvText, delimiter, (rawRow, rowIndex) => {
@@ -1186,46 +1482,165 @@ function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
       return true
     }
     if (!header.length) return true
-    if (rows.length >= resolvedMaxRows) {
+    if (rowCount >= resolvedMaxRows) {
       limitExceeded = true
       return false
     }
-    const fields = {}
-    let hasValue = false
-    header.forEach((key, index) => {
-      if (!key) return
-      const value = rawRow[index] ?? ''
-      if (value !== '') hasValue = true
-      fields[key] = value
-    })
-    if (!hasValue) return true
-    const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.date)
-    const userId = fields.UserId ?? fields.userId ?? fields['用户ID']
-    rows.push({
-      workDate: workDate ?? '',
-      fields,
-      userId: userId ? String(userId).trim() : undefined,
-    })
+    const row = buildImportRowFromCsvRawRow(header, rawRow)
+    if (!row) return true
+    const nextIndex = rowCount
+    rowCount += 1
+    if (typeof onRow === 'function') return onRow(row, nextIndex) !== false
     return true
   })
 
-  if (seenRows === 0) {
-    return { rows: [], warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
-  }
-  if (!header.length || header.every((value) => !value)) {
-    return { rows: [], warnings: ['CSV header row not found'], limitExceeded: false, maxRows: resolvedMaxRows }
+  return finalizeImportCsvIteration({
+    seenRows,
+    header,
+    rowCount,
+    limitExceeded,
+    maxRows: resolvedMaxRows,
+  })
+}
+
+async function iterateImportRowsFromCsvAsync({ csvText, csvOptions, maxRows, onRow }) {
+  const { delimiter, resolvedMaxRows, headerRowIndex } = resolveImportCsvIterationOptions({ csvText, csvOptions, maxRows })
+  if (typeof csvText !== 'string' || !csvText.trim()) {
+    return { rowCount: 0, warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
   }
 
-  const warnings = []
-  if (limitExceeded) {
-    warnings.push(`CSV exceeds max rows (${resolvedMaxRows}); only the first ${resolvedMaxRows} rows were parsed.`)
-  }
-  return { rows, warnings, limitExceeded, maxRows: resolvedMaxRows }
+  let seenRows = 0
+  let header = []
+  let rowCount = 0
+  let limitExceeded = false
+
+  await iterateCsvRowsAsync(csvText, delimiter, async (rawRow, rowIndex) => {
+    seenRows += 1
+    if (rowIndex < headerRowIndex) return true
+    if (rowIndex === headerRowIndex) {
+      header = rawRow.map(normalizeCsvHeaderValue)
+      return true
+    }
+    if (!header.length) return true
+    if (rowCount >= resolvedMaxRows) {
+      limitExceeded = true
+      return false
+    }
+    const row = buildImportRowFromCsvRawRow(header, rawRow)
+    if (!row) return true
+    const nextIndex = rowCount
+    rowCount += 1
+    if (typeof onRow === 'function') return await onRow(row, nextIndex) !== false
+    return true
+  })
+
+  return finalizeImportCsvIteration({
+    seenRows,
+    header,
+    rowCount,
+    limitExceeded,
+    maxRows: resolvedMaxRows,
+  })
+}
+
+async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows, onRow }) {
+  const delimiter = csvOptions?.delimiter || ','
+  const resolvedMaxRowsRaw = Number(maxRows ?? ATTENDANCE_IMPORT_CSV_MAX_ROWS)
+  const resolvedMaxRows = Number.isFinite(resolvedMaxRowsRaw) && resolvedMaxRowsRaw > 0
+    ? Math.floor(resolvedMaxRowsRaw)
+    : ATTENDANCE_IMPORT_CSV_MAX_ROWS
+  const explicitHeaderRowIndex = Number.isFinite(csvOptions?.headerRowIndex)
+    ? Math.max(0, Number(csvOptions.headerRowIndex))
+    : null
+
+  let seenRows = 0
+  let header = []
+  let rowCount = 0
+  let limitExceeded = false
+  let resolvedHeaderRowIndex = explicitHeaderRowIndex
+
+  const csvStream = fs.createReadStream(csvPath, { encoding: 'utf8' })
+  await iterateCsvRowsStreamAsync(csvStream, delimiter, async (rawRow, rowIndex) => {
+    seenRows += 1
+    if (resolvedHeaderRowIndex === null) {
+      const normalized = rawRow.map(normalizeCsvHeaderValue).filter(Boolean)
+      if (normalized.length > 0) {
+        const hasName = normalized.some((cell) => cell === '姓名' || cell.toLowerCase() === 'name')
+        const hasDate = normalized.some((cell) => ['日期', 'date', 'workdate', 'work_date'].includes(cell.toLowerCase()))
+        if (rowIndex === 0 || (hasName && hasDate)) {
+          resolvedHeaderRowIndex = rowIndex
+          header = rawRow.map(normalizeCsvHeaderValue)
+          return true
+        }
+      }
+      return true
+    }
+    if (rowIndex < resolvedHeaderRowIndex) return true
+    if (rowIndex === resolvedHeaderRowIndex) {
+      if (!header.length) header = rawRow.map(normalizeCsvHeaderValue)
+      return true
+    }
+    if (!header.length) return true
+    if (rowCount >= resolvedMaxRows) {
+      limitExceeded = true
+      return false
+    }
+    const row = buildImportRowFromCsvRawRow(header, rawRow)
+    if (!row) return true
+    const nextIndex = rowCount
+    rowCount += 1
+    if (typeof onRow === 'function') return await onRow(row, nextIndex) !== false
+    return true
+  })
+
+  return finalizeImportCsvIteration({
+    seenRows,
+    header,
+    rowCount,
+    limitExceeded,
+    maxRows: resolvedMaxRows,
+  })
+}
+
+function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
+  const rows = []
+  const result = iterateImportRowsFromCsv({
+    csvText,
+    csvOptions,
+    maxRows,
+    onRow: (row) => {
+      rows.push(row)
+      return true
+    },
+  })
+  return { rows, warnings: result.warnings, limitExceeded: result.limitExceeded, maxRows: result.maxRows }
 }
 
 function ensureCsvRowsWithinLimit(result) {
   if (!result?.limitExceeded) return
   throw new HttpError(400, 'CSV_TOO_LARGE', `CSV exceeds max rows (${result.maxRows})`)
+}
+
+function createSyncImportTooLargeError({ rowCount, operation }) {
+  const route = operation === 'preview' ? '/api/attendance/import/preview-async' : '/api/attendance/import/commit-async'
+  const normalizedRowCount = Number.isFinite(Number(rowCount)) ? Math.max(0, Math.floor(Number(rowCount))) : 0
+  return new HttpError(
+    400,
+    'IMPORT_TOO_LARGE_FOR_SYNC',
+    `Large imports (${normalizedRowCount} rows) must use ${route}`
+  )
+}
+
+function assertSyncImportWithinScale({ rowCount, operation }) {
+  const numeric = Number(rowCount ?? 0)
+  if (!Number.isFinite(numeric) || numeric <= 0) return
+  const normalizedRowCount = Math.max(0, Math.floor(numeric))
+  if (normalizedRowCount > ATTENDANCE_IMPORT_CSV_MAX_ROWS) {
+    throw new HttpError(400, 'CSV_TOO_LARGE', `CSV exceeds max rows (${ATTENDANCE_IMPORT_CSV_MAX_ROWS})`)
+  }
+  if (normalizedRowCount > ATTENDANCE_IMPORT_SYNC_ASYNC_ROW_THRESHOLD) {
+    throw createSyncImportTooLargeError({ rowCount: normalizedRowCount, operation })
+  }
 }
 
 function releaseImportRowMemory(row) {
@@ -1693,13 +2108,19 @@ function collectAttendanceGroupNames(rows) {
   const names = new Map()
   if (!Array.isArray(rows)) return names
   for (const row of rows) {
-    const name = resolveAttendanceGroupName(row)
-    const key = normalizeAttendanceGroupValue(name)
-    if (!key || !name) continue
-    // Avoid auto-creating placeholder-like numeric groups such as "1" from raw imports.
-    if (/^\d+$/.test(name)) continue
-    if (!names.has(key)) names.set(key, name)
+    appendAttendanceGroupName(names, row)
   }
+  return names
+}
+
+function appendAttendanceGroupName(names, row) {
+  if (!(names instanceof Map)) return names
+  const name = resolveAttendanceGroupName(row)
+  const key = normalizeAttendanceGroupValue(name)
+  if (!key || !name) return names
+  // Avoid auto-creating placeholder-like numeric groups such as "1" from raw imports.
+  if (/^\d+$/.test(name)) return names
+  if (!names.has(key)) names.set(key, name)
   return names
 }
 
@@ -1870,7 +2291,7 @@ function mapImportBatchRow(row) {
 	  }
 	  if (row && typeof row === 'object') {
 	    snapshot.row = {
-	      workDate: row.workDate ?? null,
+      workDate: normalizeImportWorkDateForStorage(row.workDate),
 	      userId: row.userId ?? row.user_id ?? null,
 	      fields: row.fields ?? {},
 	    }
@@ -1914,9 +2335,9 @@ function mapImportBatchRow(row) {
 	  }
 	}
 
-	async function acquireImportIdempotencyLock(client, orgId, idempotencyKey) {
-	  const clean = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
-	  if (!clean) return
+		async function acquireImportIdempotencyLock(client, orgId, idempotencyKey) {
+		  const clean = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
+		  if (!clean) return
 	  try {
 	    await client.query(
 	      'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
@@ -1924,10 +2345,37 @@ function mapImportBatchRow(row) {
 	    )
 	  } catch (_error) {
 	    // Best-effort: keep functional behavior even if advisory locks are unavailable.
-	  }
-	}
+		  }
+		}
 
-function mapIntegrationRow(row) {
+		async function acquireAttendanceRequestLock(client, orgId, userId, workDate, requestType) {
+		  try {
+		    await client.query(
+		      'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+		      [String(orgId ?? '') + ':' + String(userId ?? ''), `${String(workDate ?? '')}:${String(requestType ?? '')}`]
+		    )
+		  } catch (_error) {
+		    // Best-effort: preserve functional behavior if advisory locks are unavailable.
+		  }
+		}
+
+		async function findDuplicateAttendanceRequest(client, { orgId, userId, workDate, requestType }) {
+		  const rows = await client.query(
+		    `SELECT id, requested_in_at, requested_out_at, reason, status, metadata
+		     FROM attendance_requests
+		     WHERE org_id = $1
+		       AND user_id = $2
+		       AND work_date = $3
+		       AND request_type = $4
+		       AND status IN ('pending', 'approved')
+		     ORDER BY created_at DESC
+		     LIMIT 20`,
+		    [orgId, userId, workDate, requestType]
+		  )
+		  return rows[0] ?? null
+		}
+
+	function mapIntegrationRow(row) {
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -2343,6 +2791,10 @@ function augmentFieldValuesWithDates(fieldValues, workDate) {
   }
 
   return fieldValues
+}
+
+function normalizeImportWorkDateForStorage(value) {
+  return normalizeDateOnly(value) ?? null
 }
 
 function parseHolidayDayIndex(name) {
@@ -3568,7 +4020,16 @@ async function getTemplateLibraryVersionPayload(db, orgId, versionId, versionNum
     if (!rows.length) return null
     const row = rows[0]
     const templates = normalizeTemplateLibrary(row.templates ?? [])
-    return { id: row.id, version: Number(row.version ?? 0), templates }
+    const version = mapTemplateLibraryVersionRow(row)
+    return {
+      id: row.id,
+      version: version?.version ?? Number(row.version ?? 0),
+      createdAt: version?.createdAt ?? row.created_at ?? null,
+      createdBy: version?.createdBy ?? row.created_by ?? null,
+      sourceVersionId: version?.sourceVersionId ?? row.source_version_id ?? null,
+      itemCount: templates.length,
+      templates,
+    }
   } catch (error) {
     if (isDatabaseSchemaError(error)) return null
     throw error
@@ -4525,6 +4986,42 @@ async function copyAttendanceImportRowsToStage(client, rows) {
   return true
 }
 
+function* iterAttendanceImportItemsStageCsvLines({ batchId, orgId, items }) {
+  for (const item of items) {
+    const snapshotValue = typeof item?.previewSnapshot === 'string'
+      ? item.previewSnapshot
+      : JSON.stringify(item?.previewSnapshot ?? {})
+    const values = [
+      item?.id ?? null,
+      batchId ?? null,
+      orgId ?? null,
+      item?.userId ?? null,
+      normalizeImportWorkDateForStorage(item?.workDate),
+      item?.recordId ?? null,
+      snapshotValue,
+    ]
+    yield `${values.map((value) => encodeAttendanceImportCsvValue(value)).join(',')}\n`
+  }
+}
+
+async function copyAttendanceImportItemsToStage(client, { batchId, orgId, items }) {
+  const rawClient = resolveAttendanceImportRawClient(client)
+  const copyFromFactory = resolveAttendanceCopyFromFactory()
+  if (!rawClient || !copyFromFactory) return false
+  const copyStream = rawClient.query(
+    copyFromFactory(
+      `COPY attendance_import_items_stage
+        (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot)
+       FROM STDIN WITH (FORMAT csv, NULL '\\N')`
+    )
+  )
+  await pipeline(
+    Readable.from(iterAttendanceImportItemsStageCsvLines({ batchId, orgId, items })),
+    copyStream
+  )
+  return true
+}
+
 async function ensureAttendanceImportRecordsStageTable(client) {
   if (client && client.__attendanceImportStageReady === true) return
   await queryImportHeavy(
@@ -4547,6 +5044,24 @@ async function ensureAttendanceImportRecordsStageTable(client) {
     []
   )
   if (client) client.__attendanceImportStageReady = true
+}
+
+async function ensureAttendanceImportItemsStageTable(client) {
+  if (client && client.__attendanceImportItemsStageReady === true) return
+  await queryImportHeavy(
+    client,
+    `CREATE TEMP TABLE IF NOT EXISTS attendance_import_items_stage (
+       id uuid NOT NULL,
+       batch_id uuid NOT NULL,
+       org_id text NOT NULL,
+       user_id text,
+       work_date date,
+       record_id uuid,
+       preview_snapshot jsonb
+     ) ON COMMIT DROP`,
+    []
+  )
+  if (client) client.__attendanceImportItemsStageReady = true
 }
 
 async function batchUpsertAttendanceRecordsStaging(client, rows, options = {}) {
@@ -4732,29 +5247,128 @@ async function batchUpsertAttendanceRecords(client, rows, options = {}) {
   return batchUpsertAttendanceRecordsUnnest(client, rows)
 }
 
-async function batchInsertAttendanceImportItems(client, { batchId, orgId, items }) {
+async function batchInsertAttendanceImportItemsValues(client, { batchId, orgId, items }) {
+  const values = items
+    .map((_, idx) => {
+      const base = idx * 7
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}::jsonb, now())`
+    })
+    .join(', ')
+  const params = []
+  for (const item of items) {
+    params.push(
+      item.id,
+      batchId,
+      orgId,
+      item.userId,
+      normalizeImportWorkDateForStorage(item.workDate),
+      item.recordId,
+      item.previewSnapshot
+    )
+  }
+  await queryImportHeavy(
+    client,
+    `INSERT INTO attendance_import_items
+     (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+     VALUES ${values}`,
+    params
+  )
+}
+
+async function batchInsertAttendanceImportItemsStaging(client, { batchId, orgId, items, totalRows }) {
   if (!Array.isArray(items) || items.length === 0) return
 
-  if (ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'values') {
-    const values = items
-      .map((_, idx) => {
-        const base = idx * 7
-        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}::jsonb, now())`
-      })
-      .join(', ')
-    const params = []
-    for (const item of items) {
-      params.push(item.id, batchId, orgId, item.userId, item.workDate, item.recordId, item.previewSnapshot)
+  await ensureAttendanceImportItemsStageTable(client)
+  const numericTotalRows = Number.isFinite(Number(totalRows))
+    ? Math.max(0, Math.floor(Number(totalRows)))
+    : items.length
+  const allowCopyStdin = shouldUseAttendanceImportCopyStdin({ client, totalRows: numericTotalRows })
+
+  const ids = []
+  const batchIds = []
+  const orgIds = []
+  const userIds = []
+  const workDates = []
+  const recordIds = []
+  const snapshots = []
+
+  for (const item of items) {
+    ids.push(item.id ?? null)
+    batchIds.push(batchId ?? null)
+    orgIds.push(orgId ?? null)
+    userIds.push(item.userId ?? null)
+    workDates.push(normalizeImportWorkDateForStorage(item.workDate))
+    recordIds.push(item.recordId ?? null)
+    snapshots.push(item.previewSnapshot ?? '{}')
+  }
+
+  await queryImportHeavy(client, 'TRUNCATE attendance_import_items_stage', [])
+  let stagedByCopy = false
+  if (allowCopyStdin) {
+    try {
+      stagedByCopy = await copyAttendanceImportItemsToStage(client, { batchId, orgId, items })
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error)
+      console.warn(`[attendance-import] COPY FROM STDIN items stage load failed, fallback to unnest: ${message}`)
+      await queryImportHeavy(client, 'TRUNCATE attendance_import_items_stage', [])
+      stagedByCopy = false
     }
+  }
+  if (!stagedByCopy) {
     await queryImportHeavy(
       client,
-      `INSERT INTO attendance_import_items
-       (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
-       VALUES ${values}`,
-      params
+      `INSERT INTO attendance_import_items_stage
+        (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot)
+       SELECT
+         t.id,
+         t.batch_id,
+         t.org_id,
+         t.user_id,
+         t.work_date,
+         t.record_id,
+         t.preview_snapshot::jsonb
+       FROM unnest(
+         $1::uuid[],
+         $2::uuid[],
+         $3::text[],
+         $4::text[],
+         $5::date[],
+         $6::uuid[],
+         $7::text[]
+       ) AS t(
+         id,
+         batch_id,
+         org_id,
+         user_id,
+         work_date,
+         record_id,
+         preview_snapshot
+       )`,
+      [ids, batchIds, orgIds, userIds, workDates, recordIds, snapshots]
     )
-    return
   }
+
+  await queryImportHeavy(
+    client,
+    `INSERT INTO attendance_import_items
+      (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+     SELECT
+       s.id,
+       s.batch_id,
+       s.org_id,
+       s.user_id,
+       s.work_date,
+       s.record_id,
+       s.preview_snapshot,
+       now()
+     FROM attendance_import_items_stage s`,
+    []
+  )
+  await queryImportHeavy(client, 'TRUNCATE attendance_import_items_stage', [])
+}
+
+async function batchInsertAttendanceImportItemsUnnest(client, { batchId, orgId, items }) {
+  if (!Array.isArray(items) || items.length === 0) return
 
   const ids = []
   const userIds = []
@@ -4765,7 +5379,7 @@ async function batchInsertAttendanceImportItems(client, { batchId, orgId, items 
   for (const item of items) {
     ids.push(item.id ?? null)
     userIds.push(item.userId ?? null)
-    workDates.push(item.workDate ?? null)
+    workDates.push(normalizeImportWorkDateForStorage(item.workDate))
     recordIds.push(item.recordId ?? null)
     snapshots.push(item.previewSnapshot ?? '{}')
   }
@@ -4800,9 +5414,71 @@ async function batchInsertAttendanceImportItems(client, { batchId, orgId, items 
   )
 }
 
+async function batchInsertAttendanceImportItems(client, { batchId, orgId, items, totalRows, strategy }) {
+  if (!Array.isArray(items) || items.length === 0) return
+  const normalizedStrategy = typeof strategy === 'string'
+    ? strategy.trim().toLowerCase()
+    : resolveImportItemsInsertStrategy({
+        rowCount: totalRows,
+        engine: resolveImportEngineByRowCount(totalRows),
+      })
+
+  if (normalizedStrategy === 'values') {
+    return batchInsertAttendanceImportItemsValues(client, { batchId, orgId, items })
+  }
+  if (normalizedStrategy === 'staging') {
+    return batchInsertAttendanceImportItemsStaging(client, {
+      batchId,
+      orgId,
+      items,
+      totalRows,
+    })
+  }
+  return batchInsertAttendanceImportItemsUnnest(client, { batchId, orgId, items })
+}
+
 function getWeekdayFromDateKey(dateKey) {
   const date = new Date(`${dateKey}T00:00:00Z`)
   return date.getUTCDay()
+}
+
+function formatDateOnlyForCsv(value) {
+  if (value === null || value === undefined || value === '') return ''
+  if (typeof value === 'string') {
+    const match = value.match(/^(\d{4}-\d{2}-\d{2})/)
+    if (match?.[1]) return match[1]
+  }
+  if (value instanceof Date) {
+    const year = value.getFullYear()
+    const month = String(value.getMonth() + 1).padStart(2, '0')
+    const day = String(value.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  return date.toISOString().slice(0, 10)
+}
+
+function formatTimeZoneOffsetForCsv(offsetMinutes) {
+  const safeOffset = Number.isFinite(offsetMinutes) ? Math.round(Number(offsetMinutes)) : 0
+  const sign = safeOffset >= 0 ? '+' : '-'
+  const absolute = Math.abs(safeOffset)
+  const hours = String(Math.floor(absolute / 60)).padStart(2, '0')
+  const minutes = String(absolute % 60).padStart(2, '0')
+  return `${sign}${hours}:${minutes}`
+}
+
+function formatDateTimeForCsv(value, timeZone) {
+  if (value === null || value === undefined || value === '') return ''
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  const zone = resolveTimeZone(timeZone, null)
+  if (!zone) return date.toISOString()
+  const parts = getZonedParts(date, zone)
+  const offsetMinutes = getTimeZoneOffset(date, zone)
+  const datePart = `${String(parts.year).padStart(4, '0')}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`
+  const timePart = `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}:${String(parts.second).padStart(2, '0')}`
+  return `${datePart}T${timePart}${formatTimeZoneOffsetForCsv(offsetMinutes)}`
 }
 
 function formatCsvValue(value) {
@@ -4812,6 +5488,28 @@ function formatCsvValue(value) {
     return `"${text.replace(/"/g, '""')}"`
   }
   return text
+}
+
+function normalizeCodeSegment(value) {
+  const text = String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return text.slice(0, 32)
+}
+
+function generateAttendanceCode(prefix, name) {
+  const base = normalizeCodeSegment(name) || normalizeCodeSegment(prefix) || 'attendance'
+  return `${base}-${randomUUID().slice(0, 8)}`
+}
+
+function resolveAttendanceCode({ explicitCode, existingCode, prefix, name }) {
+  const normalizedExplicit = typeof explicitCode === 'string' ? explicitCode.trim() : ''
+  if (normalizedExplicit) return normalizedExplicit
+  const normalizedExisting = typeof existingCode === 'string' ? existingCode.trim() : ''
+  if (normalizedExisting) return normalizedExisting
+  return generateAttendanceCode(prefix, name)
 }
 
 function buildCsv(rows, headers) {
@@ -5328,7 +6026,7 @@ module.exports = {
     })
 
     const leaveTypeCreateSchema = z.object({
-      code: z.string().min(1),
+      code: z.string().trim().optional().nullable(),
       name: z.string().min(1),
       paid: z.boolean().optional(),
       requiresApproval: z.boolean().optional(),
@@ -5671,7 +6369,7 @@ module.exports = {
 		      return Date.now() - createdAt > ATTENDANCE_IMPORT_UPLOAD_TTL_MS
 		    }
 
-		    const readImportUploadCsvText = async ({ orgId, fileId }) => {
+		    const loadImportUploadMetaOrThrow = async ({ orgId, fileId }) => {
 		      if (!isUuidLike(fileId)) {
 		        throw new HttpError(400, 'VALIDATION_ERROR', 'csvFileId must be a UUID')
 		      }
@@ -5682,6 +6380,11 @@ module.exports = {
 		      if (isImportUploadExpired(meta)) {
 		        throw new HttpError(410, 'EXPIRED', 'Import upload expired')
 		      }
+		      return meta
+		    }
+
+		    const readImportUploadCsvText = async ({ orgId, fileId }) => {
+		      const meta = await loadImportUploadMetaOrThrow({ orgId, fileId })
 		      const paths = getImportUploadPaths({ orgId, fileId })
 		      const csvText = await fsp.readFile(paths.csvPath, 'utf8')
 		      return { csvText, meta }
@@ -5746,9 +6449,9 @@ module.exports = {
 		      importUploadCleanupInterval = null
 		    }
 
-		    const resolveImportRows = async ({ payload, orgId, fallbackUserId }) => {
-		      let csvWarnings = []
-		      let csvFileId = null
+	    const resolveImportRows = async ({ payload, orgId, fallbackUserId }) => {
+	      let csvWarnings = []
+	      let csvFileId = null
 		      if (Array.isArray(payload.rows)) return { rows: payload.rows, csvWarnings, csvFileId }
 		      if (typeof payload.csvFileId === 'string' && payload.csvFileId.trim()) {
 		        csvFileId = payload.csvFileId.trim()
@@ -5765,37 +6468,99 @@ module.exports = {
 		        return { rows: result.rows, csvWarnings, csvFileId }
 		      }
 		      if (Array.isArray(payload.entries)) return { rows: buildRowsFromEntries({ entries: payload.entries }), csvWarnings, csvFileId }
-		      return {
-		        rows: buildRowsFromDingTalk({
-		          columns: payload.columns,
+	      return {
+	        rows: buildRowsFromDingTalk({
+	          columns: payload.columns,
 		          data: payload.data,
 		          userId: payload.userId ?? fallbackUserId,
 		        }),
 		        csvWarnings,
-		        csvFileId,
+	        csvFileId,
+	      }
+	    }
+
+	    const createMaterializedImportRowSource = ({ rows, csvWarnings, csvFileId }) => ({
+	      csvFileId: csvFileId ?? null,
+	      iterateRows: async (onRow) => {
+	        let rowCount = 0
+	        for (const row of Array.isArray(rows) ? rows : []) {
+	          const nextIndex = rowCount
+	          rowCount += 1
+	          if (typeof onRow === 'function') {
+	            const shouldContinue = await onRow(row, nextIndex)
+	            if (shouldContinue === false) break
+	          }
+	        }
+	        return {
+	          rowCount,
+	          warnings: Array.isArray(csvWarnings) ? csvWarnings : [],
+	          limitExceeded: false,
+	          maxRows: rowCount,
+	        }
+	      },
+	    })
+
+	    const resolveAsyncImportRowSource = async ({ payload, orgId, fallbackUserId }) => {
+	      if (typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()) {
+	        const csvFileId = payload.csvFileId.trim()
+	        await loadImportUploadMetaOrThrow({ orgId, fileId: csvFileId })
+	        const { csvPath } = getImportUploadPaths({ orgId, fileId: csvFileId })
+	        return {
+	          csvFileId,
+	          iterateRows: async (onRow) => {
+	            const result = await iterateImportRowsFromCsvFileAsync({
+	              csvPath,
+	              csvOptions: payload.csvOptions,
+	              onRow,
+	            })
+	            ensureCsvRowsWithinLimit(result)
+	            return result
+	          },
+	        }
+	      }
+	      const { rows, csvWarnings, csvFileId } = await resolveImportRows({
+	        payload,
+	        orgId,
+	        fallbackUserId,
+	      })
+	      return createMaterializedImportRowSource({ rows, csvWarnings, csvFileId })
+	    }
+
+	    // ============================================================
+	    // Async Import Commit (large payloads)
+		    // ============================================================
+
+		    const ATTENDANCE_IMPORT_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED !== 'false'
+		    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED !== 'false'
+		    const ATTENDANCE_IMPORT_ASYNC_QUEUE = 'attendance-import'
+		    const ATTENDANCE_IMPORT_ASYNC_JOB = 'attendance-import-commit-async'
+		    const ATTENDANCE_IMPORT_ASYNC_PROGRESS_MIN_INTERVAL_MS = 1000
+		    const ATTENDANCE_IMPORT_ASYNC_SKIPPED_SAMPLE_LIMIT = resolvePositiveIntEnv(
+		      'ATTENDANCE_IMPORT_ASYNC_SKIPPED_SAMPLE_LIMIT',
+		      50,
+		      {
+		        min: 1,
+		        max: 500,
 		      }
+		    )
+		    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT = (() => {
+		      const raw = Number(process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT ?? 300)
+		      if (!Number.isFinite(raw)) return 300
+		      return Math.max(1, Math.min(1000, Math.floor(raw)))
+		    })()
+
+		    const normalizePreviewAsyncLimit = (value) => {
+		      const numeric = Number(value)
+		      if (!Number.isFinite(numeric)) return ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT
+		      return Math.max(1, Math.min(1000, Math.floor(numeric)))
 		    }
 
-		    // ============================================================
-		    // Async Import Commit (large payloads)
-		    // ============================================================
-
-	    const ATTENDANCE_IMPORT_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED !== 'false'
-	    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED !== 'false'
-	    const ATTENDANCE_IMPORT_ASYNC_QUEUE = 'attendance-import'
-	    const ATTENDANCE_IMPORT_ASYNC_JOB = 'attendance-import-commit-async'
-	    const ATTENDANCE_IMPORT_ASYNC_PROGRESS_MIN_INTERVAL_MS = 1000
-	    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT = (() => {
-	      const raw = Number(process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT ?? 300)
-	      if (!Number.isFinite(raw)) return 300
-	      return Math.max(1, Math.min(1000, Math.floor(raw)))
-	    })()
-
-	    const normalizePreviewAsyncLimit = (value) => {
-	      const numeric = Number(value)
-	      if (!Number.isFinite(numeric)) return ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT
-	      return Math.max(1, Math.min(1000, Math.floor(numeric)))
-	    }
+		    const normalizeImportSkippedSampleLimit = (value) => {
+		      if (value === undefined || value === null || value === '') return null
+		      const numeric = Number(value)
+		      if (!Number.isFinite(numeric)) return null
+		      return Math.max(0, Math.min(500, Math.floor(numeric)))
+		    }
 
 	    const toPreviewJobIdempotencyKey = (idempotencyKey) => {
 	      const clean = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
@@ -5822,6 +6587,10 @@ module.exports = {
 		        if (Array.isArray(next.entries) && next.entries.length > 30000 && typeof next.csvText === 'string') delete next.entries
 		        return next
 		      }
+	      next.returnItems = false
+	      next.skippedSampleLimit = normalizeImportSkippedSampleLimit(next.skippedSampleLimit)
+	        ?? ATTENDANCE_IMPORT_ASYNC_SKIPPED_SAMPLE_LIMIT
+	      delete next.itemsLimit
 	      // Prefer csvText over expanded rows/entries for large jobs to avoid DB bloat.
 	      // Keep rows/entries when they are the only payload source (no csvText/csvFileId),
 	      // otherwise commit-async workers can fail with "No rows to import".
@@ -5835,7 +6604,9 @@ module.exports = {
 	      const thresholdReached = Number.isFinite(numeric) && numeric >= ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD
 	      const supportsRecordBulkPath = ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'unnest'
 	        || ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'staging'
-	      const supportsBulkPath = supportsRecordBulkPath && ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'unnest'
+	      const supportsItemsBulkPath = ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'unnest'
+	        || ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'staging'
+	      const supportsBulkPath = supportsRecordBulkPath && supportsItemsBulkPath
 	      if (!supportsBulkPath) return 'standard'
 	      if (ATTENDANCE_IMPORT_BULK_ENGINE_MODE === 'off') return 'standard'
 	      if (ATTENDANCE_IMPORT_BULK_ENGINE_MODE === 'force') return 'bulk'
@@ -5862,6 +6633,30 @@ module.exports = {
 	        : ''
 	      if (['values', 'unnest', 'staging'].includes(explicit)) return explicit
 	      return resolveImportRecordUpsertStrategy({
+	        rowCount: rowCountHint,
+	        engine: engineHint,
+	      })
+	    }
+
+	    const resolveImportItemsInsertStrategy = ({ rowCount, engine }) => {
+	      if (ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'values') return 'values'
+	      if (ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'staging') return 'staging'
+	      const numeric = Number(rowCount ?? 0)
+	      const thresholdReached = Number.isFinite(numeric) && numeric >= ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS
+	      const isBulkEngine = String(engine ?? '').trim().toLowerCase() === 'bulk'
+	      if (ATTENDANCE_IMPORT_COPY_ENABLED && thresholdReached && isBulkEngine) {
+	        return 'staging'
+	      }
+	      return 'unnest'
+	    }
+
+	    const resolveImportItemsInsertStrategyFromMeta = (meta, rowCountHint, engineHint) => {
+	      const payload = normalizeMetadata(meta)
+	      const explicit = typeof payload?.itemsInsertStrategy === 'string'
+	        ? payload.itemsInsertStrategy.trim().toLowerCase()
+	        : ''
+	      if (['values', 'unnest', 'staging'].includes(explicit)) return explicit
+	      return resolveImportItemsInsertStrategy({
 	        rowCount: rowCountHint,
 	        engine: engineHint,
 	      })
@@ -5910,14 +6705,89 @@ module.exports = {
 	      return Math.max(0, Math.floor(endMs - startMs))
 	    }
 
+	    const normalizeImportJobSkippedRows = (value, limit = 50) => {
+	      if (!Array.isArray(value) || limit <= 0) return []
+	      return value
+	        .map((entry) => normalizeMetadata(entry))
+	        .filter((entry) => entry && typeof entry === 'object' && Object.keys(entry).length > 0)
+	        .slice(0, limit)
+	    }
+
+	    const extractImportJobSkippedSummary = (...sources) => {
+	      let skippedCount = 0
+	      let skippedRows = []
+	      for (const source of sources) {
+	        const normalized = normalizeMetadata(source)
+	        if (!skippedRows.length) {
+	          skippedRows = normalizeImportJobSkippedRows(normalized?.skippedRows)
+	        }
+	        const rawCount = Number(normalized?.skippedCount)
+	        if (Number.isFinite(rawCount) && rawCount >= 0) {
+	          skippedCount = Math.max(skippedCount, Math.floor(rawCount))
+	        }
+	      }
+	      if (!skippedCount && skippedRows.length) skippedCount = skippedRows.length
+	      return { skippedCount, skippedRows }
+	    }
+
+	    const buildAsyncCommitJobSummaryPayload = ({
+	      basePayload,
+	      rowCount,
+	      processedRows,
+	      failedRows,
+	      elapsedMs,
+	      engine,
+	      recordUpsertStrategy,
+	      itemsInsertStrategy,
+	      chunkConfig,
+	      skippedCount,
+	      skippedRows,
+	      idempotencyKey,
+	    }) => {
+	      const compactSummary = {
+	        processedRows: Math.max(0, Math.floor(Number(processedRows ?? rowCount ?? 0) || 0)),
+	        failedRows: Math.max(0, Math.floor(Number(failedRows ?? skippedCount ?? 0) || 0)),
+	        elapsedMs: Math.max(0, Math.floor(Number(elapsedMs ?? 0) || 0)),
+	        chunkConfig: chunkConfig ?? resolveImportChunkConfig(engine),
+	      }
+	      const normalizedSkippedCount = Math.max(0, Math.floor(Number(skippedCount ?? 0) || 0))
+	      const normalizedSkippedRows = normalizeImportJobSkippedRows(skippedRows)
+	      if (normalizedSkippedCount > 0) compactSummary.skippedCount = normalizedSkippedCount
+	      if (normalizedSkippedRows.length) compactSummary.skippedRows = normalizedSkippedRows
+	      return {
+	        __jobType: 'commit',
+	        idempotencyKey: basePayload?.idempotencyKey ?? idempotencyKey ?? null,
+	        __importEngine: engine ?? resolveImportEngineFromMeta(basePayload, rowCount ?? processedRows ?? 0),
+	        recordUpsertStrategy:
+	          recordUpsertStrategy
+	          ?? resolveImportRecordUpsertStrategyFromMeta(
+	            basePayload,
+	            rowCount ?? processedRows ?? 0,
+	            engine ?? resolveImportEngineFromMeta(basePayload, rowCount ?? processedRows ?? 0)
+	          ),
+	        itemsInsertStrategy:
+	          itemsInsertStrategy
+	          ?? resolveImportItemsInsertStrategyFromMeta(
+	            basePayload,
+	            rowCount ?? processedRows ?? 0,
+	            engine ?? resolveImportEngineFromMeta(basePayload, rowCount ?? processedRows ?? 0)
+	          ),
+	        summary: compactSummary,
+	      }
+	    }
+
 	    const mapImportJobRow = (row) => {
 	      const payload = normalizeMetadata(row.payload)
 	      const kind = payload?.__jobType === 'preview' ? 'preview' : 'commit'
 	      const status = normalizeImportJobStatus(row.status)
 	      const progress = Number(row.progress ?? 0)
 	      const total = Number(row.total ?? 0)
-	      const processedRowsRaw = Number(payload?.summary?.processedRows)
-	      const failedRowsRaw = Number(payload?.summary?.failedRows)
+	      const summary = normalizeMetadata(payload?.summary)
+	      const processedRowsRaw = Number(summary?.processedRows)
+	      const failedRowsRaw = Number(summary?.failedRows)
+	      const { skippedCount, skippedRows } = kind === 'commit'
+	        ? extractImportJobSkippedSummary(summary, payload)
+	        : { skippedCount: 0, skippedRows: [] }
 	      const processedRows = Number.isFinite(processedRowsRaw)
 	        ? Math.max(0, Math.floor(processedRowsRaw))
 	        : (status === 'completed' ? Math.max(0, Math.floor(total)) : Math.max(0, Math.floor(progress)))
@@ -5945,6 +6815,7 @@ module.exports = {
 	      const engine = resolveImportEngineFromMeta(payload, total)
 	      const chunkConfig = resolveImportChunkConfigFromMeta(payload, engine)
 	      const recordUpsertStrategy = resolveImportRecordUpsertStrategyFromMeta(payload, total, engine)
+	      const itemsInsertStrategy = resolveImportItemsInsertStrategyFromMeta(payload, total, engine)
 	      return {
 	        id: row.id,
 	        orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -5956,11 +6827,14 @@ module.exports = {
 	        engine,
 	        chunkConfig,
 	        recordUpsertStrategy,
+	        itemsInsertStrategy,
 	        progress,
 	        total,
 	        progressPercent,
 	        processedRows,
 	        failedRows,
+	        skippedCount,
+	        skippedRows,
 	        elapsedMs,
 	        throughputRowsPerSec,
 	        error: row.error ?? null,
@@ -5972,16 +6846,28 @@ module.exports = {
 	      }
 	    }
 
-	    const estimateCsvRowCount = (csvText) => {
-	      if (typeof csvText !== 'string' || csvText.length === 0) return 0
-	      // Count '\n' without splitting to reduce memory.
-	      let lines = 1
+		    const estimateCsvRowCount = (csvText) => {
+		      if (typeof csvText !== 'string' || csvText.length === 0) return 0
+		      // Count '\n' without splitting to reduce memory.
+		      let lines = 1
 	      for (let i = 0; i < csvText.length; i++) {
 	        if (csvText.charCodeAt(i) === 10) lines += 1
 	      }
-	      // Assume first line is header for CSV imports.
-	      return Math.max(0, lines - 1)
-	    }
+		      // Assume first line is header for CSV imports.
+		      return Math.max(0, lines - 1)
+		    }
+
+		    const estimateImportPayloadRowCount = async ({ payload, orgId }) => {
+		      if (Array.isArray(payload?.rows)) return payload.rows.length
+		      if (Array.isArray(payload?.entries)) return payload.entries.length
+		      if (typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()) {
+		        const meta = await loadImportUploadMetaOrThrow({ orgId, fileId: payload.csvFileId.trim() })
+		        const hint = Number(meta?.rowCount ?? 0)
+		        return Number.isFinite(hint) && hint > 0 ? hint : 0
+		      }
+		      if (typeof payload?.csvText === 'string') return estimateCsvRowCount(payload.csvText)
+		      return 0
+		    }
 
 	    const getQueueService = () => context?.services?.queue
 
@@ -6070,29 +6956,26 @@ module.exports = {
 	      return 'queued'
 	    }
 
-		    const buildAsyncPreviewResult = async ({ payload, requesterId, orgId }) => {
-		      const profile = findImportProfile(payload.mappingProfileId)
-		      const requiredFields = profile?.requiredFields ?? []
-		      const punchRequiredFields = profile?.punchRequiredFields ?? []
-		      const { rows, csvWarnings } = await resolveImportRows({
-		        payload,
-		        orgId,
-		        fallbackUserId: payload.userId ?? requesterId,
-		      })
-		      if (!rows.length) {
-		        throw new Error('No rows to preview')
-		      }
+	    const buildAsyncPreviewResult = async ({ payload, requesterId, orgId }) => {
+	      const profile = findImportProfile(payload.mappingProfileId)
+	      const requiredFields = profile?.requiredFields ?? []
+	      const punchRequiredFields = profile?.punchRequiredFields ?? []
+	      const rowSource = await resolveAsyncImportRowSource({
+	        payload,
+	        orgId,
+	        fallbackUserId: payload.userId ?? requesterId,
+	      })
 
 	      const previewLimit = normalizePreviewAsyncLimit(payload.previewLimit)
 	      const preview = []
 	      const previewStats = {
-	        rowCount: rows.length,
+	        rowCount: 0,
 	        invalid: 0,
 	        duplicates: 0,
 	      }
 	      const seenKeys = new Set()
-
-	      for (const row of rows) {
+	      const rowScan = await rowSource.iterateRows((row) => {
+	        previewStats.rowCount += 1
 	        const shouldRender = preview.length < previewLimit
 	        const workDate = row.workDate
 	        const rowUserId = resolveRowUserId({
@@ -6119,9 +7002,9 @@ module.exports = {
 	          })
 	          if (missingPunch.length) warnings.push(`Missing required: ${missingPunch.join(', ')}`)
 	        }
-	        if (warnings.length) {
-	          previewStats.invalid += 1
-	          if (shouldRender) {
+	          if (warnings.length) {
+	            previewStats.invalid += 1
+	            if (shouldRender) {
 	            preview.push({
 	              userId: rowUserId ?? 'unknown',
 	              workDate: workDate ?? '',
@@ -6139,7 +7022,7 @@ module.exports = {
 	              userGroups: [],
 	            })
 	          }
-	          continue
+	          return true
 	        }
 
 	        const dedupKey = `${rowUserId}:${workDate}`
@@ -6163,11 +7046,11 @@ module.exports = {
 	              userGroups: [],
 	            })
 	          }
-	          continue
+	          return true
 	        }
 	        seenKeys.add(dedupKey)
 
-	        if (!shouldRender) continue
+	        if (!shouldRender) return true
 
 	        preview.push({
 	          userId: rowUserId,
@@ -6185,9 +7068,14 @@ module.exports = {
 	          appliedPolicies: [],
 	          userGroups: [],
 	        })
+	        return true
+	      })
+	      if (!rowScan.rowCount) {
+	        throw new Error('No rows to preview')
 	      }
+	      const csvWarnings = rowScan.warnings
 
-	      const asyncPreviewEngine = resolveImportEngineFromMeta(payload, rows.length)
+	      const asyncPreviewEngine = resolveImportEngineFromMeta(payload, rowScan.rowCount)
 	      const asyncPreviewFailedRows = Math.max(
 	        0,
 	        Number(previewStats.invalid ?? 0) + Number(previewStats.duplicates ?? 0)
@@ -6195,16 +7083,16 @@ module.exports = {
 	      return {
 	        items: preview,
 	        total: preview.length,
-	        rowCount: rows.length,
+	        rowCount: rowScan.rowCount,
 	        engine: asyncPreviewEngine,
-	        processedRows: rows.length,
+	        processedRows: rowScan.rowCount,
 	        failedRows: asyncPreviewFailedRows,
 	        elapsedMs: 0,
 	        recordUpsertStrategy: resolveImportRecordUpsertStrategy({
-	          rowCount: rows.length,
+	          rowCount: rowScan.rowCount,
 	          engine: asyncPreviewEngine,
 	        }),
-	        truncated: rows.length > previewLimit,
+	        truncated: rowScan.rowCount > previewLimit,
 	        previewLimit,
 	        stats: previewStats,
 	        csvWarnings,
@@ -6266,25 +7154,63 @@ module.exports = {
 	      const payload = normalizeMetadata(jobRow.payload)
 	      const isPreviewJob = payload?.__jobType === 'preview'
 	      const status = normalizeImportJobStatus(jobRow.status)
+	      const idempotencyKey = typeof jobRow.idempotency_key === 'string' ? jobRow.idempotency_key : null
 	      if (status === 'completed') return
 
 	      if (!isPreviewJob) {
 	        // If the batch already exists, treat the job as complete (idempotent re-run).
 	        try {
 	          const batchRows = await db.query(
-	            'SELECT id, status, meta FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
+	            'SELECT id, status, meta, row_count FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
 	            [batchId, orgId]
 	          )
 	          if (batchRows.length && String(batchRows[0].status ?? '').toLowerCase() === 'committed') {
+	            const batchMeta = normalizeMetadata(batchRows[0].meta)
+	            const rowCount = Math.max(0, Number(batchRows[0].row_count ?? jobRow.total ?? 0))
+	            const { skippedCount, skippedRows } = extractImportJobSkippedSummary(batchMeta)
+	            const processedRows = Math.max(0, rowCount - skippedCount)
 	            await updateImportJobProgress({
 	              jobId: rowId,
 	              orgId,
 	              status: 'completed',
-	              progress: jobRow.total ?? 0,
-	              total: jobRow.total ?? 0,
+	              progress: rowCount,
+	              total: rowCount,
 	              error: null,
 	              finishedAt: true,
 	            })
+	            await db.query(
+	              'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
+	              [
+	                rowId,
+	                orgId,
+	                JSON.stringify(
+	                  buildAsyncCommitJobSummaryPayload({
+	                    basePayload: payload,
+	                    rowCount,
+	                    processedRows,
+	                    failedRows: skippedCount,
+	                    elapsedMs: 0,
+	                    engine: resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount),
+	                    recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
+	                      batchMeta,
+	                      rowCount,
+	                      resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
+	                    ),
+	                    itemsInsertStrategy: resolveImportItemsInsertStrategyFromMeta(
+	                      batchMeta,
+	                      rowCount,
+	                      resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
+	                    ),
+	                    chunkConfig: batchMeta?.chunkConfig ?? resolveImportChunkConfig(
+	                      resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
+	                    ),
+	                    skippedCount,
+	                    skippedRows,
+	                    idempotencyKey,
+	                  })
+	                ),
+	              ]
+	            )
 	            return
 	          }
 	        } catch (_error) {
@@ -6293,7 +7219,6 @@ module.exports = {
 	      }
 
 	      await updateImportJobProgress({ jobId: rowId, orgId, status: 'running', startedAt: true })
-	      const idempotencyKey = typeof jobRow.idempotency_key === 'string' ? jobRow.idempotency_key : null
 
 	      if (isPreviewJob) {
 	        try {
@@ -6357,11 +7282,19 @@ module.exports = {
 	          finishedAt: true,
 	        })
 
+	        const { skippedCount, skippedRows } = extractImportJobSkippedSummary(
+	          commitResult,
+	          commitResult?.meta,
+	          commitResult?.summary
+	        )
 	        // Drop large payload after completion while preserving compact progress metadata.
-		        const summaryPayload = {
-		          __jobType: 'commit',
-		          idempotencyKey: payload.idempotencyKey ?? idempotencyKey ?? null,
-		          __importEngine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
+		        const summaryPayload = buildAsyncCommitJobSummaryPayload({
+		          basePayload: payload,
+		          rowCount: commitResult.rowCount ?? commitResult.imported ?? 0,
+		          processedRows: commitResult.processedRows ?? commitResult.rowCount ?? 0,
+		          failedRows: Math.max(0, Number(commitResult.failedRows ?? skippedCount ?? 0)),
+		          elapsedMs: Number(commitResult.elapsedMs ?? 0),
+		          engine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
 		          recordUpsertStrategy:
 		            commitResult.recordUpsertStrategy
 		            ?? commitResult?.meta?.recordUpsertStrategy
@@ -6370,15 +7303,21 @@ module.exports = {
 		              commitResult.rowCount ?? commitResult.imported ?? 0,
 		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
 		            ),
-		          summary: {
-		            processedRows: Number(commitResult.processedRows ?? commitResult.rowCount ?? 0),
-		            failedRows: Math.max(0, Number(commitResult.failedRows ?? commitResult.skippedCount ?? 0)),
-		            elapsedMs: Number(commitResult.elapsedMs ?? 0),
-		            chunkConfig: commitResult?.meta?.chunkConfig ?? resolveImportChunkConfig(
+		          itemsInsertStrategy:
+		            commitResult.itemsInsertStrategy
+		            ?? commitResult?.meta?.itemsInsertStrategy
+		            ?? resolveImportItemsInsertStrategyFromMeta(
+		              payload,
+		              commitResult.rowCount ?? commitResult.imported ?? 0,
 		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
 		            ),
-		          },
-		        }
+		          chunkConfig: commitResult?.meta?.chunkConfig ?? resolveImportChunkConfig(
+		            commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
+		          ),
+		          skippedCount,
+		          skippedRows,
+		          idempotencyKey,
+		        })
 	        await db.query(
 	          'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
 	          [rowId, orgId, JSON.stringify(summaryPayload)]
@@ -6399,7 +7338,7 @@ module.exports = {
 	    // Shared background commit implementation. Intentionally mirrors the sync commit logic but:
 	    // - uses a stable batchId (job.batch_id)
 	    // - does NOT consume commit tokens (token is consumed when the job is enqueued)
-	    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress }) => {
+		    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress }) => {
 	      const cleanIdempotency = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
 	      const commitStartedAtMs = Date.now()
 	      if (cleanIdempotency) {
@@ -6446,28 +7385,50 @@ module.exports = {
 	        ?? []
 	      const requiredFields = profile?.requiredFields ?? []
 	      const punchRequiredFields = profile?.punchRequiredFields ?? []
+	      const rowSource = await resolveAsyncImportRowSource({
+	        payload,
+	        orgId,
+	        fallbackUserId: payload.userId ?? requesterId,
+	      })
+	      const groupSync = normalizeGroupSyncOptions(payload.groupSync, payload.ruleSetId, payload.timezone)
+	      const groupNames = new Map()
+	      const scopeWorkDates = new Set()
+	      const scopeUserIds = new Set()
+	      const rowScan = await rowSource.iterateRows((row) => {
+	        const workDate = row?.workDate
+	        if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
+	        const rowUserId = resolveRowUserId({
+	          row,
+	          fallbackUserId: requesterId,
+	          userMap: payload.userMap,
+	          userMapKeyField: payload.userMapKeyField,
+	          userMapSourceFields: payload.userMapSourceFields,
+	        })
+	        if (rowUserId) scopeUserIds.add(rowUserId)
+	        if (groupSync) appendAttendanceGroupName(groupNames, row)
+	        return true
+	      })
+	      const rowCount = rowScan.rowCount
+	      const csvWarnings = rowScan.warnings
+	      const csvFileId = rowSource.csvFileId ?? null
 
-		      const { rows, csvWarnings, csvFileId } = await resolveImportRows({
-		        payload,
-		        orgId,
-		        fallbackUserId: payload.userId ?? requesterId,
-		      })
-
-	      if (rows.length === 0) {
+	      if (rowCount === 0) {
 	        throw new Error('No rows to import')
 	      }
-	      const importEngine = resolveImportEngineByRowCount(rows.length)
+	      const importEngine = resolveImportEngineByRowCount(rowCount)
 	      const importChunkConfig = resolveImportChunkConfig(importEngine)
 	      const importRecordUpsertStrategy = resolveImportRecordUpsertStrategy({
-	        rowCount: rows.length,
+	        rowCount,
+	        engine: importEngine,
+	      })
+	      const importItemsInsertStrategy = resolveImportItemsInsertStrategy({
+	        rowCount,
 	        engine: importEngine,
 	      })
 
 	      const baseRule = await loadDefaultRule(db, orgId)
 	      const settings = await getSettings(db)
 	      const groupRuleSetMap = payload.ruleSetId ? new Map() : await loadAttendanceGroupRuleSetMap(db, orgId)
-	      const groupSync = normalizeGroupSyncOptions(payload.groupSync, payload.ruleSetId, payload.timezone)
-	      const groupNames = groupSync ? collectAttendanceGroupNames(rows) : new Map()
 	      const groupWarnings = []
 	      if (groupNames.size && !groupSync?.autoCreate) {
 	        const groupIdMap = await loadAttendanceGroupIdMap(db, orgId)
@@ -6494,13 +7455,19 @@ module.exports = {
 	        }
 	      }
 
-	      const statusMap = payload.statusMap ?? {}
-	      const returnItems = payload.returnItems !== false
-	      const itemsLimit = returnItems && typeof payload.itemsLimit === 'number' ? payload.itemsLimit : null
-	      const results = []
-	      let importedCount = 0
-	      const skipped = []
-	      const idempotencyEnabled = Boolean(cleanIdempotency) && await hasImportBatchIdempotencyColumn(db)
+		      const statusMap = payload.statusMap ?? {}
+		      const returnItems = payload.returnItems !== false
+		      const itemsLimit = returnItems && typeof payload.itemsLimit === 'number' ? payload.itemsLimit : null
+	      const skippedSampleLimit = normalizeImportSkippedSampleLimit(payload.skippedSampleLimit)
+		      const results = []
+		      let importedCount = 0
+		      const skipped = []
+	      let skippedCount = 0
+	      const appendSkipped = (entry) => {
+	        skippedCount += 1
+	        if (skippedSampleLimit === null || skipped.length < skippedSampleLimit) skipped.push(entry)
+	      }
+		      const idempotencyEnabled = Boolean(cleanIdempotency) && await hasImportBatchIdempotencyColumn(db)
 	      const resolvedBatchId = batchId || randomUUID()
 	      let batchMeta = null
 	      let idempotentInTransaction = null
@@ -6536,6 +7503,7 @@ module.exports = {
 		          engine: importEngine,
 		          chunkConfig: importChunkConfig,
 		          recordUpsertStrategy: importRecordUpsertStrategy,
+		          itemsInsertStrategy: importItemsInsertStrategy,
 		          mappingProfileId: payload.mappingProfileId ?? null,
 		          groupSync: groupSync
 		            ? {
@@ -6562,7 +7530,7 @@ module.exports = {
 	                payload.source ?? null,
 	                payload.ruleSetId ?? null,
 	                JSON.stringify(mapping),
-	                rows.length,
+	                rowCount,
 	                'committed',
 	                JSON.stringify(batchMeta),
 	              ],
@@ -6578,7 +7546,7 @@ module.exports = {
 	                payload.source ?? null,
 	                payload.ruleSetId ?? null,
 	                JSON.stringify(mapping),
-	                rows.length,
+	                rowCount,
 	                'committed',
 	                JSON.stringify(batchMeta),
 	              ],
@@ -6593,6 +7561,8 @@ module.exports = {
 		            batchId: resolvedBatchId,
 		            orgId,
 		            items: chunk,
+		            totalRows: rowCount,
+		            strategy: importItemsInsertStrategy,
 		          })
 		        }
 		        const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
@@ -6609,20 +7579,6 @@ module.exports = {
 	        }
 
 	        // Prefetch holidays + scheduling assignments for the import scope to reduce per-row DB roundtrips.
-	        const scopeWorkDates = new Set()
-	        const scopeUserIds = new Set()
-	        for (const row of rows) {
-	          const workDate = row?.workDate
-	          if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
-	          const rowUserId = resolveRowUserId({
-	            row,
-	            fallbackUserId: requesterId,
-	            userMap: payload.userMap,
-	            userMapKeyField: payload.userMapKeyField,
-	            userMapSourceFields: payload.userMapSourceFields,
-	          })
-	          if (rowUserId) scopeUserIds.add(rowUserId)
-	        }
 	        const scopeWorkDateList = Array.from(scopeWorkDates)
 	        const scopeUserIdList = Array.from(scopeUserIds)
 	        let scopeFromDate = null
@@ -6735,7 +7691,7 @@ module.exports = {
 
 	          const upserted = await batchUpsertAttendanceRecords(trx, upsertRows, {
 	            strategy: importRecordUpsertStrategy,
-            totalRows: rows.length,
+            totalRows: rowCount,
 	          })
 
 		          for (const item of chunk) {
@@ -6777,7 +7733,7 @@ module.exports = {
 	          }
 
 	          if (typeof onProgress === 'function') {
-	            await onProgress({ imported: importedCount, total: rows.length })
+	            await onProgress({ imported: importedCount, total: rowCount })
 	          }
 	        }
 	        const enqueueRecordUpsert = async (item) => {
@@ -6788,7 +7744,7 @@ module.exports = {
 	        }
 
 	        const seenRowKeys = new Set()
-	        for (const row of rows) {
+	        await rowSource.iterateRows(async (row) => {
 	          const workDate = row.workDate
 	          const groupKey = resolveAttendanceGroupKey(row)
 	          const rowUserId = resolveRowUserId({
@@ -6826,37 +7782,37 @@ module.exports = {
 	              importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
 	            }
 	          }
-	          if (importWarnings.length) {
-	            const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
-	            await enqueueImportItem({
+		          if (importWarnings.length) {
+		            const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
+		            await enqueueImportItem({
 	              userId: rowUserId ?? null,
 	              workDate: workDate ?? null,
-	              recordId: null,
-	              previewSnapshot: snapshot,
-	            })
-	            skipped.push({
-	              userId: rowUserId ?? null,
-	              workDate: workDate ?? null,
-	              warnings: importWarnings,
-	            })
-	            releaseImportRowMemory(row)
-	            continue
-	          }
+		              recordId: null,
+		              previewSnapshot: snapshot,
+		            })
+		            appendSkipped({
+		              userId: rowUserId ?? null,
+		              workDate: workDate ?? null,
+		              warnings: importWarnings,
+		            })
+		            releaseImportRowMemory(row)
+		            return true
+		          }
 
 	          const dedupKey = `${rowUserId}:${workDate}`
 	          if (seenRowKeys.has(dedupKey)) {
 	            const warnings = ['Duplicate row in payload (same userId + workDate)']
 	            const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
-	            await enqueueImportItem({
-	              userId: rowUserId,
-	              workDate,
-	              recordId: null,
-	              previewSnapshot: snapshot,
-	            })
-	            skipped.push({ userId: rowUserId, workDate, warnings })
-	            releaseImportRowMemory(row)
-	            continue
-	          }
+		            await enqueueImportItem({
+		              userId: rowUserId,
+		              workDate,
+		              recordId: null,
+		              previewSnapshot: snapshot,
+		            })
+		            appendSkipped({ userId: rowUserId, workDate, warnings })
+		            releaseImportRowMemory(row)
+		            return true
+		          }
 	          seenRowKeys.add(dedupKey)
 	          if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
 	            const groupEntry = groupIdMap.get(groupKey)
@@ -7147,7 +8103,8 @@ module.exports = {
 	              : null,
 	          })
 	          releaseImportRowMemory(row)
-	        }
+	          return true
+	        })
 
 	        await flushRecordUpserts()
 	        await flushImportItems()
@@ -7162,14 +8119,14 @@ module.exports = {
 	            )
 	          }
 	        }
-	        if (skipped.length) {
-	          const updatedMeta = {
-	            ...(batchMeta ?? {}),
-	            skippedCount: skipped.length,
-	            skippedRows: skipped.slice(0, 50),
-	          }
-	          await trx.query(
-	            'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
+		        if (skippedCount) {
+		          const updatedMeta = {
+		            ...(batchMeta ?? {}),
+		            skippedCount,
+		            skippedRows: skipped.slice(0, 50),
+		          }
+		          await trx.query(
+		            'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
 	            [resolvedBatchId, orgId, JSON.stringify(updatedMeta)]
 	          )
 			          batchMeta = updatedMeta
@@ -7209,18 +8166,18 @@ module.exports = {
 	        }
 	      }
 
-	      return {
-	        batchId: resolvedBatchId,
-	        imported: importedCount,
-	        rowCount: rows.length,
-	        processedRows: importedCount,
-	        failedRows: skipped.length,
-	        elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
-	        skippedCount: skipped.length,
-	        engine: importEngine,
-	        recordUpsertStrategy: importRecordUpsertStrategy,
-	        items: returnItems ? results : [],
-		        itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
+		      return {
+		        batchId: resolvedBatchId,
+		        imported: importedCount,
+		        rowCount,
+		        processedRows: importedCount,
+		        failedRows: skippedCount,
+		        elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
+		        skippedCount,
+		        engine: importEngine,
+		        recordUpsertStrategy: importRecordUpsertStrategy,
+		        items: returnItems ? results : [],
+			        itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
 		        skipped,
 	        csvWarnings: [...csvWarnings, ...groupWarnings],
 	        groupWarnings,
@@ -7448,10 +8405,7 @@ module.exports = {
       })
     )
 
-	    context.api.http.addRoute(
-	      'GET',
-	      '/api/attendance/records',
-	      withPermission('attendance:read', async (req, res) => {
+      const handleAttendanceRecordsGet = withPermission('attendance:read', async (req, res) => {
         const schema = z.object({
           userId: z.string().optional(),
           orgId: z.string().optional(),
@@ -7487,9 +8441,13 @@ module.exports = {
           }
         }
 
-        const { page, pageSize, offset } = parsePagination(req.query)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+		        const { page, pageSize, offset } = parsePagination(req.query)
+		        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+		        if (!dateRange.ok) {
+		          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+		          return
+		        }
+		        const { from, to } = dateRange
 
         try {
           const countRows = await db.query(
@@ -7522,9 +8480,10 @@ module.exports = {
             }
           })
 
-          res.json({
-            ok: true,
-            data: {
+			          res.json({
+			            ok: true,
+			            success: true,
+		            data: {
               items: records,
               total,
               page,
@@ -7538,8 +8497,19 @@ module.exports = {
           }
           logger.error('Attendance records query failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load records' } })
-	        }
-	      })
+        }
+      })
+
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/records',
+	      handleAttendanceRecordsGet
+	    )
+
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/calendar',
+	      handleAttendanceRecordsGet
 	    )
 
 	    context.api.http.addRoute(
@@ -7582,8 +8552,12 @@ module.exports = {
 	        }
 
 	        const { page, pageSize, offset } = parsePagination(req.query)
-	        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-	        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
 	        const excludedStatuses = ['normal', 'off', 'adjusted']
 
@@ -7757,13 +8731,17 @@ module.exports = {
           }
         }
 
-        const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const orgId = getOrgId(req)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
-        try {
-          const summary = await loadAttendanceSummary(db, orgId, targetUserId, from, to)
-          res.json({ ok: true, data: summary })
+	        try {
+	          const summary = await loadAttendanceSummary(db, orgId, targetUserId, from, to)
+	          res.json({ ok: true, success: true, data: summary })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -7813,9 +8791,13 @@ module.exports = {
           }
         }
 
-        const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const orgId = getOrgId(req)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
         try {
           const rows = await db.query(
@@ -7836,7 +8818,7 @@ module.exports = {
             minutes: Number(row.total_minutes ?? 0),
           }))
 
-          res.json({ ok: true, data: { items, from, to } })
+	          res.json({ ok: true, success: true, data: { items, from, to } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -7874,15 +8856,20 @@ module.exports = {
           return
         }
 
-        const userId = getUserId(req)
-        if (!userId) {
-          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-          return
-        }
+	        const userId = getUserId(req)
+	        if (!userId) {
+	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+	          return
+	        }
 
-        const orgId = getOrgId(req)
-        const requestedInAt = parseDateInput(parsed.data.requestedInAt)
-        const requestedOutAt = parseDateInput(parsed.data.requestedOutAt)
+	        const orgId = getOrgId(req)
+	        const workDate = normalizeDateOnlyStrict(parsed.data.workDate)
+	        if (!workDate) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'workDate must use YYYY-MM-DD format' } })
+	          return
+	        }
+	        const requestedInAt = parseDateInput(parsed.data.requestedInAt)
+	        const requestedOutAt = parseDateInput(parsed.data.requestedOutAt)
         if (requestedInAt && requestedOutAt && requestedOutAt <= requestedInAt) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedOutAt must be after requestedInAt' } })
           return
@@ -7950,11 +8937,11 @@ module.exports = {
           return
         }
 
-        const approvalFlow = await loadApprovalFlow(db, orgId, {
-          requestType,
-          flowId: parsed.data.approvalFlowId,
-        })
-        const metadata = {}
+	        const approvalFlow = await loadApprovalFlow(db, orgId, {
+	          requestType,
+	          flowId: parsed.data.approvalFlowId,
+	        })
+	        const metadata = {}
         if (durationMinutes) metadata.minutes = durationMinutes
         if (leaveType) {
           metadata.leaveType = {
@@ -7991,10 +8978,20 @@ module.exports = {
 
         const approvalId = `apv_${randomUUID()}`
 
-        try {
-          const request = await db.transaction(async (trx) => {
-            await trx.query(
-              'INSERT INTO approval_instances (id, status, version) VALUES ($1, $2, $3)',
+	        try {
+	          const request = await db.transaction(async (trx) => {
+	            await acquireAttendanceRequestLock(trx, orgId, userId, workDate, requestType)
+	            const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
+	              orgId,
+	              userId,
+	              workDate,
+	              requestType,
+	            })
+	            if (duplicateRequest) {
+	              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+	            }
+	            await trx.query(
+	              'INSERT INTO approval_instances (id, status, version) VALUES ($1, $2, $3)',
               [approvalId, 'pending', 0]
             )
 
@@ -8003,13 +9000,13 @@ module.exports = {
                (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
                RETURNING *`,
-              [
-                randomUUID(),
-                userId,
-                orgId,
-                parsed.data.workDate,
-                requestType,
-                requestedInAt,
+	              [
+	                randomUUID(),
+	                userId,
+	                orgId,
+	                workDate,
+	                requestType,
+	                requestedInAt,
                 requestedOutAt,
                 parsed.data.reason ?? null,
                 'pending',
@@ -8021,17 +9018,21 @@ module.exports = {
             return rows[0]
           })
 
-          emitEvent('attendance.requested', {
-            orgId,
-            userId,
-            workDate: parsed.data.workDate,
-            requestType,
-          })
-          res.status(201).json({ ok: true, data: { request } })
-        } catch (error) {
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-            return
+	          emitEvent('attendance.requested', {
+	            orgId,
+	            userId,
+	            workDate,
+	            requestType,
+	          })
+	          res.status(201).json({ ok: true, data: { request } })
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
           }
           logger.error('Attendance request creation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create request' } })
@@ -8079,10 +9080,14 @@ module.exports = {
           }
         }
 
-        const { page, pageSize, offset } = parsePagination(req.query)
-        const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const { page, pageSize, offset } = parsePagination(req.query)
+	        const orgId = getOrgId(req)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
         try {
           const params = [targetUserId, orgId, from, to]
@@ -8109,7 +9114,7 @@ module.exports = {
             params
           )
 
-          res.json({ ok: true, data: { items: rows, total, page, pageSize } })
+	          res.json({ ok: true, success: true, data: { items: rows, total, page, pageSize } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -8581,7 +9586,12 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const payload = {
-          code: parsed.data.code,
+          code: resolveAttendanceCode({
+            explicitCode: parsed.data.code,
+            existingCode: null,
+            prefix: 'leave',
+            name: parsed.data.name,
+          }),
           name: parsed.data.name,
           paid: parsed.data.paid ?? true,
           requiresApproval: parsed.data.requiresApproval ?? true,
@@ -8652,7 +9662,12 @@ module.exports = {
 
           const existing = existingRows[0]
           const payload = {
-            code: parsed.data.code ?? existing.code,
+            code: resolveAttendanceCode({
+              explicitCode: parsed.data.code,
+              existingCode: existing.code,
+              prefix: 'leave',
+              name: parsed.data.name ?? existing.name,
+            }),
             name: parsed.data.name ?? existing.name,
             paid: parsed.data.paid ?? existing.paid ?? true,
             requiresApproval: parsed.data.requiresApproval ?? existing.requires_approval,
@@ -9787,6 +10802,23 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/rule-templates/versions/:versionId',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const target = await getTemplateLibraryVersionPayload(db, orgId, req.params.versionId, null)
+        if (!target) {
+          res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Template version not found' } })
+          return
+        }
+        res.json({
+          ok: true,
+          data: target,
+        })
+      })
+    )
+
+    context.api.http.addRoute(
       'PUT',
       '/api/attendance/rule-templates',
       withPermission('attendance:admin', async (req, res) => {
@@ -10446,13 +11478,25 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const requesterId = getUserId(req)
-        const userId = parsed.data.userId ?? requesterId
-        if (!userId) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
-          return
-        }
-        const previewStartedAtMs = Date.now()
-        if (requireImportCommitToken) {
+	        const userId = parsed.data.userId ?? requesterId
+	        if (!userId) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
+	          return
+	        }
+	        try {
+	          const rowCountHint = await estimateImportPayloadRowCount({ payload: parsed.data, orgId })
+	          assertSyncImportWithinScale({ rowCount: rowCountHint, operation: 'preview' })
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          logger.error('Attendance import preview preflight failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate preview size' } })
+	          return
+	        }
+	        const previewStartedAtMs = Date.now()
+	        if (requireImportCommitToken) {
           if (!requesterId) {
             res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
             return
@@ -10936,9 +11980,9 @@ module.exports = {
 	          return
 	        }
 
-	        const idempotencyKey = typeof parsed.data.idempotencyKey === 'string'
-	          ? parsed.data.idempotencyKey.trim()
-	          : ''
+		        const idempotencyKey = typeof parsed.data.idempotencyKey === 'string'
+		          ? parsed.data.idempotencyKey.trim()
+		          : ''
 	        if (idempotencyKey) {
 	          const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
 	          if (existing) {
@@ -10966,12 +12010,25 @@ module.exports = {
 	                idempotent: true,
 	              },
 	            })
-	            return
-	          }
-	        }
+		            return
+		          }
+		        }
 
-	        const commitToken = parsed.data.commitToken
-	        if (!commitToken && requireImportCommitToken) {
+		        try {
+		          const rowCountHint = await estimateImportPayloadRowCount({ payload: parsed.data, orgId })
+		          assertSyncImportWithinScale({ rowCount: rowCountHint, operation: 'commit' })
+		        } catch (error) {
+		          if (error instanceof HttpError) {
+		            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+		            return
+		          }
+		          logger.error('Attendance import commit preflight failed', error)
+		          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate import size' } })
+		          return
+		        }
+
+		        const commitToken = parsed.data.commitToken
+		        if (!commitToken && requireImportCommitToken) {
 	          res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
 	          return
         }
@@ -11032,6 +12089,10 @@ module.exports = {
 	          const importEngine = resolveImportEngineByRowCount(rows.length)
 	          const importChunkConfig = resolveImportChunkConfig(importEngine)
 	          const importRecordUpsertStrategy = resolveImportRecordUpsertStrategy({
+	            rowCount: rows.length,
+	            engine: importEngine,
+	          })
+	          const importItemsInsertStrategy = resolveImportItemsInsertStrategy({
 	            rowCount: rows.length,
 	            engine: importEngine,
 	          })
@@ -11115,6 +12176,7 @@ module.exports = {
 	              engine: importEngine,
 	              chunkConfig: importChunkConfig,
 	              recordUpsertStrategy: importRecordUpsertStrategy,
+	              itemsInsertStrategy: importItemsInsertStrategy,
 	              mappingProfileId: parsed.data.mappingProfileId ?? null,
 	              groupSync: groupSync
 	                ? {
@@ -11170,6 +12232,8 @@ module.exports = {
 			                batchId,
 			                orgId,
 			                items: chunk,
+			                totalRows: rows.length,
+			                strategy: importItemsInsertStrategy,
 			              })
 			            }
 				            const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
@@ -11801,6 +12865,7 @@ module.exports = {
 
 	          res.json({
 	            ok: true,
+	            success: true,
 	            data: {
 	              batchId,
 	              imported: importedCount,
@@ -12218,12 +13283,24 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const requesterId = getUserId(req)
-        const userId = parsed.data.userId ?? requesterId
-        if (!userId) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
-          return
-        }
-        if (requireImportCommitToken) {
+		        const userId = parsed.data.userId ?? requesterId
+		        if (!userId) {
+		          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
+		          return
+		        }
+	        try {
+	          const rowCountHint = await estimateImportPayloadRowCount({ payload: parsed.data, orgId })
+	          assertSyncImportWithinScale({ rowCount: rowCountHint, operation: 'commit' })
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          logger.error('Attendance legacy import preflight failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate import size' } })
+	          return
+	        }
+	        if (requireImportCommitToken) {
           if (!requesterId) {
             res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
             return
@@ -14521,7 +15598,7 @@ module.exports = {
       withPermission('attendance:admin', async (req, res) => {
         const schema = z.object({
           name: z.string().min(1),
-          code: z.string().optional().nullable(),
+          code: z.string().trim().optional().nullable(),
           timezone: z.string().optional().nullable(),
           ruleSetId: z.string().uuid().optional().nullable(),
           description: z.string().optional().nullable(),
@@ -14535,7 +15612,12 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const name = parsed.data.name.trim()
-        const code = parsed.data.code?.trim() || null
+        const code = resolveAttendanceCode({
+          explicitCode: parsed.data.code,
+          existingCode: null,
+          prefix: 'group',
+          name,
+        })
         const timezone = parsed.data.timezone?.trim() || DEFAULT_RULE.timezone
         const ruleSetId = parsed.data.ruleSetId ?? null
         const description = parsed.data.description?.trim() || null
@@ -14565,7 +15647,7 @@ module.exports = {
       withPermission('attendance:admin', async (req, res) => {
         const schema = z.object({
           name: z.string().min(1),
-          code: z.string().optional().nullable(),
+          code: z.string().trim().optional().nullable(),
           timezone: z.string().optional().nullable(),
           ruleSetId: z.string().uuid().optional().nullable(),
           description: z.string().optional().nullable(),
@@ -14579,8 +15661,23 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const groupId = req.params.id
+        const existingRows = await db.query(
+          'SELECT * FROM attendance_groups WHERE id = $1 AND org_id = $2',
+          [groupId, orgId]
+        )
+        if (!existingRows.length) {
+          res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+          return
+        }
+
+        const existing = existingRows[0]
         const name = parsed.data.name.trim()
-        const code = parsed.data.code?.trim() || null
+        const code = resolveAttendanceCode({
+          explicitCode: parsed.data.code,
+          existingCode: existing.code,
+          prefix: 'group',
+          name: parsed.data.name ?? existing.name,
+        })
         const timezone = parsed.data.timezone?.trim() || DEFAULT_RULE.timezone
         const ruleSetId = parsed.data.ruleSetId ?? null
         const description = parsed.data.description?.trim() || null
@@ -15264,9 +16361,13 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const orgId = getOrgId(req)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
         try {
           const countRows = await db.query(
@@ -15285,7 +16386,7 @@ module.exports = {
             [orgId, from, to]
           )
 
-          res.json({ ok: true, data: { items: rows.map(mapHolidayRow), total } })
+	          res.json({ ok: true, success: true, data: { items: rows.map(mapHolidayRow), total } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -15597,8 +16698,12 @@ module.exports = {
           }
         }
 
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
         const requestedLimit = parseNumber(parsed.data.limit, 1000)
         const limit = Math.min(Math.max(requestedLimit, 1), 5000)
 
@@ -15626,7 +16731,20 @@ module.exports = {
             'status',
             'is_workday',
           ]
-          const csv = buildCsv(rows, headers)
+          const csvRows = rows.map((row) => ({
+            user_id: row.user_id ?? '',
+            org_id: row.org_id ?? '',
+            work_date: formatDateOnlyForCsv(row.work_date),
+            timezone: row.timezone ?? '',
+            first_in_at: formatDateTimeForCsv(row.first_in_at, row.timezone),
+            last_out_at: formatDateTimeForCsv(row.last_out_at, row.timezone),
+            work_minutes: row.work_minutes ?? 0,
+            late_minutes: row.late_minutes ?? 0,
+            early_leave_minutes: row.early_leave_minutes ?? 0,
+            status: row.status ?? '',
+            is_workday: row.is_workday ?? '',
+          }))
+          const csv = buildCsv(csvRows, headers)
           const filename = `attendance-${orgId}-${from}-to-${to}.csv`
 
           emitEvent('attendance.exported', {

@@ -44,6 +44,7 @@ import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useLocale } from '../composables/useLocale'
 import { useFeatureFlags } from '../stores/featureFlags'
+import { normalizePostLoginRedirect } from '../utils/authRedirect'
 import { apiFetch, clearStoredAuthState } from '../utils/api'
 
 interface AuthUserPayload {
@@ -98,13 +99,6 @@ const text = computed(() => {
     networkError: 'Sign-in failed. Please try again.',
   }
 })
-
-function normalizeRedirect(value: unknown): string | null {
-  if (typeof value !== 'string') return null
-  if (!value.startsWith('/') || value.startsWith('//')) return null
-  if (value.startsWith('/login')) return null
-  return value
-}
 
 function extractUserRoles(user: AuthUserPayload | null): string[] {
   if (!user) return []
@@ -190,7 +184,7 @@ async function onSubmit(): Promise<void> {
     await hydrateAuthContext()
     await loadProductFeatures(true)
 
-    const redirect = normalizeRedirect(route.query.redirect)
+    const redirect = normalizePostLoginRedirect(route.query.redirect)
     await router.replace(redirect || resolveHomePath())
   } catch {
     errorMessage.value = text.value.networkError
