@@ -148,6 +148,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { apiFetch } from '../utils/api'
+import { readErrorMessage } from '../utils/error'
 
 type ManagedUser = {
   id: string
@@ -167,6 +168,7 @@ type PermissionCatalogItem = {
 }
 
 type UserPermissionState = {
+  degraded?: boolean
   userId: string
   permissions: string[]
   isAdmin: boolean
@@ -220,7 +222,7 @@ async function loadUsers(): Promise<void> {
   const response = await apiFetch(`/api/admin/users${query ? `?${query}` : ''}`)
   const payload = await readJson(response)
   if (!response.ok || payload.ok !== true) {
-    throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '加载用户失败'))
+    throw new Error(readErrorMessage(payload, '加载用户失败'))
   }
 
   const data = payload.data as { items?: ManagedUser[] } | undefined
@@ -245,10 +247,10 @@ async function loadPermissions(): Promise<void> {
     readJson(templatesResponse),
   ])
   if (!permissionsResponse.ok) {
-    throw new Error(String(permissionsPayload.error || '加载权限目录失败'))
+    throw new Error(readErrorMessage(permissionsPayload, '加载权限目录失败'))
   }
   if (!templatesResponse.ok) {
-    throw new Error(String(templatesPayload.error || '加载权限模板失败'))
+    throw new Error(readErrorMessage(templatesPayload, '加载权限模板失败'))
   }
 
   permissions.value = Array.isArray(permissionsPayload.data) ? permissionsPayload.data as PermissionCatalogItem[] : []
@@ -262,13 +264,14 @@ async function loadUserAccess(userId: string): Promise<void> {
   const response = await apiFetch(`/api/permissions/user/${encodeURIComponent(userId)}`)
   const payload = await readJson(response)
   if (!response.ok) {
-    throw new Error(String(payload.error || '加载用户权限失败'))
+    throw new Error(readErrorMessage(payload, '加载用户权限失败'))
   }
 
   selectedUserAccess.value = {
     userId: String(payload.userId || userId),
     permissions: Array.isArray(payload.permissions) ? payload.permissions as string[] : [],
     isAdmin: Boolean(payload.isAdmin),
+    degraded: Boolean(payload.degraded),
   }
 }
 
@@ -281,8 +284,12 @@ async function loadAll(): Promise<void> {
     } else if (selectedUserId.value) {
       await loadUserAccess(selectedUserId.value)
     }
+
+    if (selectedUserAccess.value?.degraded) {
+      setStatus('权限服务当前为降级模式，展示为本地可用的结果', 'info')
+    }
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '加载权限管理数据失败', 'error')
+    setStatus(readErrorMessage(error, '加载权限管理数据失败'), 'error')
   } finally {
     loading.value = false
   }
@@ -294,7 +301,7 @@ async function selectUser(userId: string): Promise<void> {
   try {
     await loadUserAccess(userId)
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '加载用户权限失败', 'error')
+    setStatus(readErrorMessage(error, '加载用户权限失败'), 'error')
   }
 }
 
@@ -303,7 +310,7 @@ async function mutatePermission(action: 'grant' | 'revoke'): Promise<void> {
 
   busy.value = true
   try {
-    const response = await apiFetch(`/api/permissions/${action}`, {
+  const response = await apiFetch(`/api/permissions/${action}`, {
       method: 'POST',
       body: JSON.stringify({
         userId: selectedUserId.value,
@@ -312,13 +319,13 @@ async function mutatePermission(action: 'grant' | 'revoke'): Promise<void> {
     })
     const payload = await readJson(response)
     if (!response.ok) {
-      throw new Error(String(payload.error || `${action} permission failed`))
+      throw new Error(readErrorMessage(payload, `${action} permission failed`))
     }
 
     await loadUserAccess(selectedUserId.value)
     setStatus(action === 'grant' ? '权限已授予' : '权限已回收')
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '权限操作失败', 'error')
+    setStatus(readErrorMessage(error, '权限操作失败'), 'error')
   } finally {
     busy.value = false
   }
@@ -329,7 +336,7 @@ async function applyPermissionTemplate(): Promise<void> {
 
   busy.value = true
   try {
-    const response = await apiFetch('/api/admin/permission-templates/apply', {
+  const response = await apiFetch('/api/admin/permission-templates/apply', {
       method: 'POST',
       body: JSON.stringify({
         userId: selectedUserId.value,
@@ -338,17 +345,13 @@ async function applyPermissionTemplate(): Promise<void> {
     })
     const payload = await readJson(response)
     if (!response.ok) {
-      throw new Error(String(payload.error || '应用权限模板失败'))
+      throw new Error(readErrorMessage(payload, '应用权限模板失败'))
     }
 
-    selectedUserAccess.value = {
-      userId: selectedUserId.value,
-      permissions: Array.isArray(payload.permissions) ? payload.permissions as string[] : [],
-      isAdmin: Boolean(payload.isAdmin),
-    }
+    await loadUserAccess(selectedUserId.value)
     setStatus(`已按模板 ${selectedTemplate.value?.name || selectedTemplateId.value} 补齐权限`)
   } catch (error) {
-    setStatus(error instanceof Error ? error.message : '应用权限模板失败', 'error')
+    setStatus(readErrorMessage(error, '应用权限模板失败'), 'error')
   } finally {
     busy.value = false
   }
@@ -368,7 +371,7 @@ onMounted(async () => {
 
 watch(templateModeFilter, () => {
   void loadPermissions().catch((error) => {
-    setStatus(error instanceof Error ? error.message : '加载权限模板失败', 'error')
+    setStatus(readErrorMessage(error, '加载权限模板失败'), 'error')
   })
 })
 </script>

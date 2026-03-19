@@ -3286,6 +3286,7 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
+import { readErrorMessage } from '../utils/error'
 
 type AttendancePageMode = 'overview' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
@@ -5106,7 +5107,7 @@ async function loadImportTemplate() {
     const response = await apiFetch('/api/attendance/import/template')
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load import template', '加载导入模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load import template', '加载导入模板失败')))
     }
     const payloadExample = (data.data?.payloadExample ?? {}) as Record<string, any>
     importMode.value = payloadExample?.mode === 'merge' ? 'merge' : 'override'
@@ -5114,7 +5115,7 @@ async function loadImportTemplate() {
     importMappingProfiles.value = Array.isArray(data.data?.mappingProfiles) ? data.data.mappingProfiles : []
     setStatus(tr('Import template loaded.', '导入模板已加载。'))
   } catch (error) {
-    setStatus((error as Error).message || tr('Failed to load import template', '加载导入模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load import template', '加载导入模板失败')), 'error')
   } finally {
     importLoading.value = false
   }
@@ -5218,7 +5219,7 @@ async function handleImportUserMapChange(event: Event) {
     setStatus(tr(`User map loaded (${Object.keys(normalized).length} entries).`, `用户映射已加载（${Object.keys(normalized).length} 条）。`))
   } catch (error) {
     importUserMap.value = null
-    importUserMapError.value = (error as Error).message || tr('Failed to parse user map JSON', '解析用户映射 JSON 失败')
+    importUserMapError.value = readErrorMessage(error, tr('Failed to parse user map JSON', '解析用户映射 JSON 失败'))
     setStatus(importUserMapError.value, 'error')
   }
 }
@@ -5241,7 +5242,7 @@ async function uploadImportCsvFile(file: File): Promise<{ fileId: string; rowCou
 
   const data = await response.json().catch(() => ({} as any))
   if (!response.ok || !data?.ok) {
-    throw new Error(data?.error?.message || tr(`Failed to upload CSV (HTTP ${response.status})`, `上传 CSV 失败（HTTP ${response.status}）`))
+    throw new Error(readErrorMessage(data, tr(`Failed to upload CSV (HTTP ${response.status})`, `上传 CSV 失败（HTTP ${response.status}）`)))
   }
   const fileId = String(data.data?.fileId || '')
   if (!fileId) throw new Error(tr('Upload did not return fileId', '上传接口未返回 fileId'))
@@ -5334,13 +5335,13 @@ async function ensureImportCommitToken(options: { forceRefresh?: boolean } = {})
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to prepare import token', '准备导入令牌失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to prepare import token', '准备导入令牌失败')))
     }
     importCommitToken.value = data.data?.commitToken ?? ''
     importCommitTokenExpiresAt.value = data.data?.expiresAt ?? ''
     return Boolean(importCommitToken.value)
   } catch (error) {
-    setStatus((error as Error).message || tr('Failed to prepare import token', '准备导入令牌失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to prepare import token', '准备导入令牌失败')), 'error')
     return false
   }
 }
@@ -5387,10 +5388,10 @@ async function runChunkedImportPreview(payload: Record<string, any>, plan: Impor
     })
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || tr(
+      throw new Error(readErrorMessage(data, tr(
         `Failed to preview chunk ${chunkIndex + 1}/${plan.chunkCount}`,
         `预览分片 ${chunkIndex + 1}/${plan.chunkCount} 失败`
-      ))
+      )))
     }
 
     const chunkItems = Array.isArray(data.data?.items) ? data.data.items as AttendanceImportPreviewItem[] : []
@@ -5647,7 +5648,7 @@ async function previewImport() {
       importPreviewTask.value = {
         ...importPreviewTask.value,
         status: 'failed',
-        message: (error as Error).message || tr('Preview failed', '预览失败'),
+        message: readErrorMessage(error, tr('Preview failed', '预览失败')),
       }
     }
     setStatusFromError(error, tr('Failed to preview import', '预览导入失败'), 'import-preview')
@@ -5918,11 +5919,11 @@ async function loadImportBatches() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load import batches', '加载导入批次失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load import batches', '加载导入批次失败')))
     }
     importBatches.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load import batches', '加载导入批次失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load import batches', '加载导入批次失败')), 'error')
   } finally {
     importLoading.value = false
   }
@@ -5939,13 +5940,13 @@ async function loadImportBatchItems(batchId: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load import batch items', '加载导入批次明细失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load import batch items', '加载导入批次明细失败')))
     }
     importBatchSelectedId.value = batchId
     importBatchItems.value = data.data?.items ?? []
     importBatchSnapshot.value = null
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load import batch items', '加载导入批次明细失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load import batch items', '加载导入批次明细失败')), 'error')
   } finally {
     importLoading.value = false
   }
@@ -5974,7 +5975,7 @@ async function rollbackImportBatch(batchId: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to rollback import batch', '回滚导入批次失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to rollback import batch', '回滚导入批次失败')))
     }
     await loadImportBatches()
     if (importBatchSelectedId.value === batchId) {
@@ -5984,7 +5985,7 @@ async function rollbackImportBatch(batchId: string) {
     }
     setStatus(tr('Import batch rolled back.', '导入批次已回滚。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to rollback import batch', '回滚导入批次失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to rollback import batch', '回滚导入批次失败')), 'error')
   } finally {
     importLoading.value = false
   }
@@ -6050,7 +6051,7 @@ async function fetchAllImportBatchItems(batchId: string): Promise<AttendanceImpo
     }
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load import items', '加载导入条目失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load import items', '加载导入条目失败')))
     }
     const pageItems = Array.isArray(data.data?.items) ? data.data.items : []
     items.push(...pageItems)
@@ -6186,7 +6187,7 @@ async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
     downloadCsvText(filename, lines.join('\n'))
     setStatus(tr(`CSV exported (${rows.length}/${allItems.length}).`, `CSV 已导出（${rows.length}/${allItems.length}）。`))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to export CSV', '导出 CSV 失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to export CSV', '导出 CSV 失败')), 'error')
   } finally {
     importLoading.value = false
   }
@@ -6462,6 +6463,12 @@ function classifyStatusError(
     meta.action = context === 'request-submit' || context === 'request-resolve' || context === 'request-cancel'
       ? 'reload-requests'
       : 'reload-admin'
+  } else if (status === 409 || code === 'DUPLICATE_REQUEST' || code === 'ALREADY_EXISTS') {
+    message = context === 'request-submit'
+      ? tr('A request for the same date and type already exists.', '同一天同类型的申请已存在。')
+      : rawMessage
+    meta.hint = tr('Refresh the request list and continue from the existing item.', '请刷新申请列表，并基于已有申请继续处理。')
+    meta.action = context === 'request-submit' ? 'reload-requests' : defaultAction
   } else if (status >= 500 || code === 'SERVICE_UNAVAILABLE' || code === 'DB_NOT_READY') {
     if (!message) message = fallbackMessage
     meta.hint = tr('Server may be warming up or temporarily unavailable. Retry in a moment.', '服务可能正在预热或临时不可用，请稍后重试。')
@@ -6735,14 +6742,14 @@ async function searchProvisionUsers(page: number) {
     }
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || tr('Failed to search users', '搜索用户失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to search users', '搜索用户失败')))
     }
     const items = Array.isArray(data.data?.items) ? data.data.items : []
     provisionSearchResults.value = items
     provisionSearchTotal.value = Number(data.data?.total ?? items.length) || 0
     provisionSearchPage.value = Number(data.data?.page ?? page) || page
   } catch (error: any) {
-    setProvisionStatus(error?.message || tr('Failed to search users', '搜索用户失败'), 'error')
+    setProvisionStatus(readErrorMessage(error, tr('Failed to search users', '搜索用户失败')), 'error')
   } finally {
     provisionSearchLoading.value = false
   }
@@ -6764,8 +6771,7 @@ async function fetchProvisioningUser(userId: string) {
   }
   const data: PermissionUserResponse = await response.json()
   if (!response.ok) {
-    const message = (data as any)?.error || (data as any)?.message || tr('Failed to load permissions', '加载权限失败')
-    throw new Error(message)
+    throw new Error(readErrorMessage(data, tr('Failed to load permissions', '加载权限失败')))
   }
   provisionPermissions.value = Array.isArray(data.permissions) ? data.permissions : []
   provisionUserIsAdmin.value = Boolean(data.isAdmin)
@@ -6784,7 +6790,7 @@ async function fetchProvisioningUserAccess(userId: string) {
   }
   const data = await response.json().catch(() => null)
   if (!response.ok || !data?.ok) {
-    throw new Error(data?.error?.message || tr('Failed to load user access', '加载用户访问权限失败'))
+    throw new Error(readErrorMessage(data, tr('Failed to load user access', '加载用户访问权限失败')))
   }
   applyProvisionAccessPayload(data.data, userId)
 }
@@ -6801,7 +6807,7 @@ async function loadProvisioningUser() {
     await fetchProvisioningUserAccess(userId)
     setProvisionStatus(tr(`Loaded ${provisionPermissions.value.length} permission(s).`, `已加载 ${provisionPermissions.value.length} 项权限。`))
   } catch (error: any) {
-    setProvisionStatus(error?.message || tr('Failed to load permissions', '加载权限失败'), 'error')
+    setProvisionStatus(readErrorMessage(error, tr('Failed to load permissions', '加载权限失败')), 'error')
   } finally {
     provisionLoading.value = false
   }
@@ -6829,7 +6835,7 @@ async function grantProvisioningRole() {
       }
       const modernData = await modern.json().catch(() => null)
       if (!modern.ok || !modernData?.ok) {
-        throw new Error(modernData?.error?.message || tr('Failed to assign role', '分配角色失败'))
+        throw new Error(readErrorMessage(modernData, tr('Failed to assign role', '分配角色失败')))
       }
       applyProvisionAccessPayload(modernData.data, userId)
       setProvisionStatus(tr(`Role '${role}' assigned.`, `角色 '${role}' 已分配。`))
@@ -6849,13 +6855,13 @@ async function grantProvisioningRole() {
       }
       const data = await response.json()
       if (!response.ok) {
-        throw new Error(data?.error || data?.message || tr(`Failed to grant ${permission}`, `授予权限 ${permission} 失败`))
+        throw new Error(readErrorMessage(data, tr(`Failed to grant ${permission}`, `授予权限 ${permission} 失败`)))
       }
     }
     await fetchProvisioningUser(userId)
     setProvisionStatus(tr(`Role '${role}' granted.`, `角色 '${role}' 已授权。`))
   } catch (error: any) {
-    setProvisionStatus(error?.message || tr('Failed to grant role', '授权角色失败'), 'error')
+    setProvisionStatus(readErrorMessage(error, tr('Failed to grant role', '授权角色失败')), 'error')
   } finally {
     provisionLoading.value = false
   }
@@ -6883,7 +6889,7 @@ async function revokeProvisioningRole() {
       }
       const modernData = await modern.json().catch(() => null)
       if (!modern.ok || !modernData?.ok) {
-        throw new Error(modernData?.error?.message || tr('Failed to remove role', '移除角色失败'))
+        throw new Error(readErrorMessage(modernData, tr('Failed to remove role', '移除角色失败')))
       }
       applyProvisionAccessPayload(modernData.data, userId)
       setProvisionStatus(tr(`Role '${role}' removed.`, `角色 '${role}' 已移除。`))
@@ -6904,13 +6910,13 @@ async function revokeProvisioningRole() {
       const data = await response.json()
       // 404 is fine for revokes (permission not present).
       if (!response.ok && response.status !== 404) {
-        throw new Error(data?.error || data?.message || tr(`Failed to revoke ${permission}`, `撤销权限 ${permission} 失败`))
+        throw new Error(readErrorMessage(data, tr(`Failed to revoke ${permission}`, `撤销权限 ${permission} 失败`)))
       }
     }
     await fetchProvisioningUser(userId)
     setProvisionStatus(tr(`Role '${role}' revoked.`, `角色 '${role}' 已撤销。`))
   } catch (error: any) {
-    setProvisionStatus(error?.message || tr('Failed to revoke role', '撤销角色失败'), 'error')
+    setProvisionStatus(readErrorMessage(error, tr('Failed to revoke role', '撤销角色失败')), 'error')
   } finally {
     provisionLoading.value = false
   }
@@ -6950,7 +6956,7 @@ async function previewProvisionBatchUsers() {
 
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || tr('Failed to preview batch users', '批量预览用户失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to preview batch users', '批量预览用户失败')))
     }
 
     applyProvisionBatchResolvePayload(data.data, valid)
@@ -6960,7 +6966,7 @@ async function previewProvisionBatchUsers() {
     const kind = missing > 0 ? 'error' : 'info'
     setProvisionBatchStatus(tr(`Preview ready: found ${found}/${valid.length}, missing ${missing}, inactive ${inactive}.`, `预览完成：找到 ${found}/${valid.length}，缺失 ${missing}，停用 ${inactive}。`), kind)
   } catch (error: any) {
-    setProvisionBatchStatus(error?.message || tr('Failed to preview batch users', '批量预览用户失败'), 'error')
+    setProvisionBatchStatus(readErrorMessage(error, tr('Failed to preview batch users', '批量预览用户失败')), 'error')
   } finally {
     provisionBatchPreviewLoading.value = false
   }
@@ -6992,7 +6998,7 @@ async function grantProvisioningRoleBatch() {
       }
       const batchData = await batch.json().catch(() => null)
       if (!batch.ok || !batchData?.ok) {
-        throw new Error(batchData?.error?.message || tr('Failed to batch assign role', '批量分配角色失败'))
+        throw new Error(readErrorMessage(batchData, tr('Failed to batch assign role', '批量分配角色失败')))
       }
       applyProvisionBatchResolvePayload(batchData.data, valid)
       const updated = Number(batchData.data?.updated ?? 0) || 0
@@ -7021,7 +7027,7 @@ async function grantProvisioningRoleBatch() {
           }
           const modernData = await modern.json().catch(() => null)
           if (!modern.ok || !modernData?.ok) {
-            throw new Error(modernData?.error?.message || tr('Failed to assign role', '分配角色失败'))
+            throw new Error(readErrorMessage(modernData, tr('Failed to assign role', '分配角色失败')))
           }
           updated += 1
           continue
@@ -7039,7 +7045,7 @@ async function grantProvisioningRoleBatch() {
           }
           const data = await response.json().catch(() => null)
           if (!response.ok) {
-            throw new Error(data?.error || data?.message || tr(`Failed to grant ${permission}`, `授予权限 ${permission} 失败`))
+            throw new Error(readErrorMessage(data, tr(`Failed to grant ${permission}`, `授予权限 ${permission} 失败`)))
           }
         }
         updated += 1
@@ -7053,7 +7059,7 @@ async function grantProvisioningRoleBatch() {
       : tr(`Role '${role}' assigned to ${updated}/${valid.length} user(s).`, `角色 '${role}' 已分配给 ${updated}/${valid.length} 个用户。`)
     setProvisionBatchStatus(message, failed.length ? 'error' : 'info')
   } catch (error: any) {
-    setProvisionBatchStatus(error?.message || tr('Failed to batch assign role', '批量分配角色失败'), 'error')
+    setProvisionBatchStatus(readErrorMessage(error, tr('Failed to batch assign role', '批量分配角色失败')), 'error')
   } finally {
     provisionBatchLoading.value = false
   }
@@ -7085,7 +7091,7 @@ async function revokeProvisioningRoleBatch() {
       }
       const batchData = await batch.json().catch(() => null)
       if (!batch.ok || !batchData?.ok) {
-        throw new Error(batchData?.error?.message || tr('Failed to batch remove role', '批量移除角色失败'))
+        throw new Error(readErrorMessage(batchData, tr('Failed to batch remove role', '批量移除角色失败')))
       }
       applyProvisionBatchResolvePayload(batchData.data, valid)
       const updated = Number(batchData.data?.updated ?? 0) || 0
@@ -7114,7 +7120,7 @@ async function revokeProvisioningRoleBatch() {
           }
           const modernData = await modern.json().catch(() => null)
           if (!modern.ok || !modernData?.ok) {
-            throw new Error(modernData?.error?.message || tr('Failed to remove role', '移除角色失败'))
+            throw new Error(readErrorMessage(modernData, tr('Failed to remove role', '移除角色失败')))
           }
           updated += 1
           continue
@@ -7132,7 +7138,7 @@ async function revokeProvisioningRoleBatch() {
           }
           const data = await response.json().catch(() => null)
           if (!response.ok && response.status !== 404) {
-            throw new Error(data?.error || data?.message || tr(`Failed to revoke ${permission}`, `撤销权限 ${permission} 失败`))
+            throw new Error(readErrorMessage(data, tr(`Failed to revoke ${permission}`, `撤销权限 ${permission} 失败`)))
           }
         }
         updated += 1
@@ -7146,7 +7152,7 @@ async function revokeProvisioningRoleBatch() {
       : tr(`Role '${role}' removed from ${updated}/${valid.length} user(s).`, `角色 '${role}' 已从 ${updated}/${valid.length} 个用户移除。`)
     setProvisionBatchStatus(message, failed.length ? 'error' : 'info')
   } catch (error: any) {
-    setProvisionBatchStatus(error?.message || tr('Failed to batch remove role', '批量移除角色失败'), 'error')
+    setProvisionBatchStatus(readErrorMessage(error, tr('Failed to batch remove role', '批量移除角色失败')), 'error')
   } finally {
     provisionBatchLoading.value = false
   }
@@ -7204,7 +7210,7 @@ async function loadAuditSummary() {
     }
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load audit summary', '加载审计汇总失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load audit summary', '加载审计汇总失败')))
     }
 
     const actionsRaw = Array.isArray(data.data?.actions) ? data.data.actions : []
@@ -7219,7 +7225,7 @@ async function loadAuditSummary() {
       total: Number(row?.total ?? 0) || 0,
     }))
   } catch (error: any) {
-    setAuditLogStatus(error?.message || tr('Failed to load audit summary', '加载审计汇总失败'), 'error')
+    setAuditLogStatus(readErrorMessage(error, tr('Failed to load audit summary', '加载审计汇总失败')), 'error')
   } finally {
     auditSummaryLoading.value = false
   }
@@ -7261,7 +7267,7 @@ async function exportAuditLogsCsv() {
     downloadCsvText(filename, csvText)
     setAuditLogStatus(tr('Audit logs exported.', '审计日志已导出。'))
   } catch (error: any) {
-    setAuditLogStatus(error?.message || tr('Failed to export audit logs', '导出审计日志失败'), 'error')
+    setAuditLogStatus(readErrorMessage(error, tr('Failed to export audit logs', '导出审计日志失败')), 'error')
   } finally {
     auditLogExporting.value = false
   }
@@ -7290,7 +7296,7 @@ async function loadAuditLogs(page: number) {
     }
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load audit logs', '加载审计日志失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load audit logs', '加载审计日志失败')))
     }
     const items = Array.isArray(data.data?.items) ? data.data.items : []
     auditLogs.value = items
@@ -7298,7 +7304,7 @@ async function loadAuditLogs(page: number) {
     auditLogPage.value = Number(data.data?.page ?? page) || page
     setAuditLogStatus(tr(`Loaded ${items.length} log(s).`, `已加载 ${items.length} 条日志。`))
   } catch (error: any) {
-    setAuditLogStatus(error?.message || tr('Failed to load audit logs', '加载审计日志失败'), 'error')
+    setAuditLogStatus(readErrorMessage(error, tr('Failed to load audit logs', '加载审计日志失败')), 'error')
   } finally {
     auditLogLoading.value = false
   }
@@ -7317,12 +7323,12 @@ async function punch(eventType: 'check_in' | 'check_out') {
     })
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Punch failed', '打卡失败'))
+      throw new Error(readErrorMessage(data, tr('Punch failed', '打卡失败')))
     }
     setStatus(tr(`${eventType === 'check_in' ? 'Check in' : 'Check out'} recorded.`, `${eventType === 'check_in' ? '上班打卡' : '下班打卡'}已记录。`))
     await refreshAll()
   } catch (error: any) {
-    setStatus(error?.message || tr('Punch failed', '打卡失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Punch failed', '打卡失败')), 'error')
   } finally {
     punching.value = false
   }
@@ -7338,7 +7344,7 @@ async function loadSummary() {
   const response = await apiFetch(`/api/attendance/summary?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
-    throw new Error(data?.error?.message || tr('Failed to load summary', '加载汇总失败'))
+    throw new Error(readErrorMessage(data, tr('Failed to load summary', '加载汇总失败')))
   }
   summary.value = data.data
 }
@@ -7355,7 +7361,7 @@ async function loadRecords() {
   const response = await apiFetch(`/api/attendance/records?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
-    throw new Error(data?.error?.message || tr('Failed to load records', '加载记录失败'))
+    throw new Error(readErrorMessage(data, tr('Failed to load records', '加载记录失败')))
   }
   records.value = data.data.items
   recordsTotal.value = data.data.total
@@ -7373,7 +7379,7 @@ async function loadRequests() {
   const response = await apiFetch(`/api/attendance/requests?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
-    throw new Error(data?.error?.message || tr('Failed to load requests', '加载申请失败'))
+    throw new Error(readErrorMessage(data, tr('Failed to load requests', '加载申请失败')))
   }
   requests.value = data.data.items
 }
@@ -7392,7 +7398,7 @@ async function loadAnomalies() {
     const response = await apiFetch(`/api/attendance/anomalies?${query.toString()}`)
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load anomalies', '加载异常失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load anomalies', '加载异常失败')))
     }
     anomalies.value = data.data?.items ?? []
   } finally {
@@ -7412,11 +7418,11 @@ async function loadRequestReport() {
     const response = await apiFetch(`/api/attendance/reports/requests?${query.toString()}`)
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load request report', '加载申请报表失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load request report', '加载申请报表失败')))
     }
     requestReport.value = data.data.items || []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load request report', '加载申请报表失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load request report', '加载申请报表失败')), 'error')
   } finally {
     reportLoading.value = false
   }
@@ -7494,6 +7500,7 @@ function validateRequestForm(): string | null {
 }
 
 async function submitRequest() {
+  if (requestSubmitting.value) return
   requestSubmitting.value = true
   try {
     const validationMessage = validateRequestForm()
@@ -7592,7 +7599,7 @@ async function exportCsv() {
       let message = tr('Export failed', '导出失败')
       try {
         const parsed = JSON.parse(text)
-        message = parsed?.error?.message || message
+        message = readErrorMessage(parsed, message)
       } catch {
         message = text || message
       }
@@ -7612,7 +7619,7 @@ async function exportCsv() {
     URL.revokeObjectURL(url)
     setStatus(tr('Export ready.', '导出完成。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Export failed', '导出失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Export failed', '导出失败')), 'error')
   } finally {
     exporting.value = false
   }
@@ -7736,7 +7743,7 @@ async function loadSettings() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load settings', '加载设置失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load settings', '加载设置失败')))
     }
     adminForbidden.value = false
     applySettingsToForm(data.data || {})
@@ -7883,14 +7890,14 @@ async function syncHolidays() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Holiday sync failed', '节假日同步失败'))
+      throw new Error(readErrorMessage(data, tr('Holiday sync failed', '节假日同步失败')))
     }
     if (data?.data?.lastRun) {
       holidaySyncLastRun.value = data.data.lastRun
     }
     setStatus(tr(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`, `节假日同步完成（已应用 ${data.data?.totalApplied ?? 0} 条）。`))
   } catch (error: any) {
-    setStatus(error?.message || tr('Holiday sync failed', '节假日同步失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Holiday sync failed', '节假日同步失败')), 'error')
   } finally {
     holidaySyncLoading.value = false
   }
@@ -7937,14 +7944,14 @@ async function syncHolidaysForYears(years: number[]) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Holiday sync failed', '节假日同步失败'))
+      throw new Error(readErrorMessage(data, tr('Holiday sync failed', '节假日同步失败')))
     }
     if (data?.data?.lastRun) {
       holidaySyncLastRun.value = data.data.lastRun
     }
     setStatus(tr(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`, `节假日同步完成（已应用 ${data.data?.totalApplied ?? 0} 条）。`))
   } catch (error: any) {
-    setStatus(error?.message || tr('Holiday sync failed', '节假日同步失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Holiday sync failed', '节假日同步失败')), 'error')
   } finally {
     holidaySyncLoading.value = false
   }
@@ -7957,7 +7964,7 @@ async function loadRule() {
     const response = await apiFetchWithTimeout(`/api/attendance/rules/default?${query.toString()}`, {}, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load rule', '加载规则失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load rule', '加载规则失败')))
     }
     const rule: AttendanceRule = data.data
     ruleForm.name = rule.name || 'Default'
@@ -8049,7 +8056,7 @@ async function loadLeaveTypes() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load leave types', '加载请假类型失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load leave types', '加载请假类型失败')))
     }
     adminForbidden.value = false
     leaveTypes.value = data.data.items || []
@@ -8057,7 +8064,7 @@ async function loadLeaveTypes() {
       requestForm.leaveTypeId = leaveTypes.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load leave types', '加载请假类型失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load leave types', '加载请假类型失败')), 'error')
   } finally {
     leaveTypeLoading.value = false
   }
@@ -8092,14 +8099,14 @@ async function saveLeaveType() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save leave type', '保存请假类型失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save leave type', '保存请假类型失败')))
     }
     adminForbidden.value = false
     await loadLeaveTypes()
     resetLeaveTypeForm()
     setStatus(isEditing ? tr('Leave type updated.', '请假类型已更新。') : tr('Leave type created.', '请假类型已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save leave type', '保存请假类型失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save leave type', '保存请假类型失败')), 'error')
   } finally {
     leaveTypeSaving.value = false
   }
@@ -8115,13 +8122,13 @@ async function deleteLeaveType(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete leave type', '删除请假类型失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete leave type', '删除请假类型失败')))
     }
     adminForbidden.value = false
     await loadLeaveTypes()
     setStatus(tr('Leave type deleted.', '请假类型已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete leave type', '删除请假类型失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete leave type', '删除请假类型失败')), 'error')
   }
 }
 
@@ -8156,7 +8163,7 @@ async function loadOvertimeRules() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load overtime rules', '加载加班规则失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load overtime rules', '加载加班规则失败')))
     }
     adminForbidden.value = false
     overtimeRules.value = data.data.items || []
@@ -8164,7 +8171,7 @@ async function loadOvertimeRules() {
       requestForm.overtimeRuleId = overtimeRules.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load overtime rules', '加载加班规则失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load overtime rules', '加载加班规则失败')), 'error')
   } finally {
     overtimeRuleLoading.value = false
   }
@@ -8199,7 +8206,7 @@ async function saveOvertimeRule() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save overtime rule', '保存加班规则失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save overtime rule', '保存加班规则失败')))
     }
     adminForbidden.value = false
     await loadOvertimeRules()
@@ -8210,7 +8217,7 @@ async function saveOvertimeRule() {
         : tr('Overtime rule created.', '加班规则已创建。')
     )
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save overtime rule', '保存加班规则失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save overtime rule', '保存加班规则失败')), 'error')
   } finally {
     overtimeRuleSaving.value = false
   }
@@ -8226,13 +8233,13 @@ async function deleteOvertimeRule(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete overtime rule', '删除加班规则失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete overtime rule', '删除加班规则失败')))
     }
     adminForbidden.value = false
     await loadOvertimeRules()
     setStatus(tr('Overtime rule deleted.', '加班规则已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete overtime rule', '删除加班规则失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete overtime rule', '删除加班规则失败')), 'error')
   }
 }
 
@@ -8263,12 +8270,12 @@ async function loadApprovalFlows() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load approval flows', '加载审批流程失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load approval flows', '加载审批流程失败')))
     }
     adminForbidden.value = false
     approvalFlows.value = data.data.items || []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load approval flows', '加载审批流程失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load approval flows', '加载审批流程失败')), 'error')
   } finally {
     approvalFlowLoading.value = false
   }
@@ -8305,14 +8312,14 @@ async function saveApprovalFlow() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save approval flow', '保存审批流程失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save approval flow', '保存审批流程失败')))
     }
     adminForbidden.value = false
     await loadApprovalFlows()
     resetApprovalFlowForm()
     setStatus(isEditing ? tr('Approval flow updated.', '审批流程已更新。') : tr('Approval flow created.', '审批流程已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save approval flow', '保存审批流程失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save approval flow', '保存审批流程失败')), 'error')
   } finally {
     approvalFlowSaving.value = false
   }
@@ -8328,13 +8335,13 @@ async function deleteApprovalFlow(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete approval flow', '删除审批流程失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete approval flow', '删除审批流程失败')))
     }
     adminForbidden.value = false
     await loadApprovalFlows()
     setStatus(tr('Approval flow deleted.', '审批流程已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete approval flow', '删除审批流程失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete approval flow', '删除审批流程失败')), 'error')
   }
 }
 
@@ -8365,7 +8372,7 @@ async function loadRotationRules() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load rotation rules', '加载轮班规则失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load rotation rules', '加载轮班规则失败')))
     }
     adminForbidden.value = false
     rotationRules.value = data.data.items || []
@@ -8373,7 +8380,7 @@ async function loadRotationRules() {
       rotationAssignmentForm.rotationRuleId = rotationRules.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load rotation rules', '加载轮班规则失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load rotation rules', '加载轮班规则失败')), 'error')
   } finally {
     rotationRuleLoading.value = false
   }
@@ -8410,14 +8417,14 @@ async function saveRotationRule() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save rotation rule', '保存轮班规则失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save rotation rule', '保存轮班规则失败')))
     }
     adminForbidden.value = false
     await loadRotationRules()
     resetRotationRuleForm()
     setStatus(isEditing ? tr('Rotation rule updated.', '轮班规则已更新。') : tr('Rotation rule created.', '轮班规则已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save rotation rule', '保存轮班规则失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save rotation rule', '保存轮班规则失败')), 'error')
   } finally {
     rotationRuleSaving.value = false
   }
@@ -8433,14 +8440,14 @@ async function deleteRotationRule(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete rotation rule', '删除轮班规则失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete rotation rule', '删除轮班规则失败')))
     }
     adminForbidden.value = false
     await loadRotationRules()
     await loadRotationAssignments()
     setStatus(tr('Rotation rule deleted.', '轮班规则已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete rotation rule', '删除轮班规则失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete rotation rule', '删除轮班规则失败')), 'error')
   }
 }
 
@@ -8473,12 +8480,12 @@ async function loadRotationAssignments() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load rotation assignments', '加载轮班分配失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load rotation assignments', '加载轮班分配失败')))
     }
     adminForbidden.value = false
     rotationAssignments.value = data.data.items || []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load rotation assignments', '加载轮班分配失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load rotation assignments', '加载轮班分配失败')), 'error')
   } finally {
     rotationAssignmentLoading.value = false
   }
@@ -8516,7 +8523,7 @@ async function saveRotationAssignment() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save rotation assignment', '保存轮班分配失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save rotation assignment', '保存轮班分配失败')))
     }
     adminForbidden.value = false
     await loadRotationAssignments()
@@ -8527,7 +8534,7 @@ async function saveRotationAssignment() {
         : tr('Rotation assignment created.', '轮班分配已创建。')
     )
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save rotation assignment', '保存轮班分配失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save rotation assignment', '保存轮班分配失败')), 'error')
   } finally {
     rotationAssignmentSaving.value = false
   }
@@ -8543,13 +8550,13 @@ async function deleteRotationAssignment(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete rotation assignment', '删除轮班分配失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete rotation assignment', '删除轮班分配失败')))
     }
     adminForbidden.value = false
     await loadRotationAssignments()
     setStatus(tr('Rotation assignment deleted.', '轮班分配已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete rotation assignment', '删除轮班分配失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete rotation assignment', '删除轮班分配失败')), 'error')
   }
 }
 
@@ -8588,7 +8595,7 @@ async function loadShifts() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load shifts', '加载班次失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load shifts', '加载班次失败')))
     }
     adminForbidden.value = false
     shifts.value = data.data.items || []
@@ -8596,7 +8603,7 @@ async function loadShifts() {
       assignmentForm.shiftId = shifts.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load shifts', '加载班次失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load shifts', '加载班次失败')), 'error')
   } finally {
     shiftLoading.value = false
   }
@@ -8630,14 +8637,14 @@ async function saveShift() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save shift', '保存班次失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save shift', '保存班次失败')))
     }
     adminForbidden.value = false
     await loadShifts()
     resetShiftForm()
     setStatus(isEditing ? tr('Shift updated.', '班次已更新。') : tr('Shift created.', '班次已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save shift', '保存班次失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save shift', '保存班次失败')), 'error')
   } finally {
     shiftSaving.value = false
   }
@@ -8653,14 +8660,14 @@ async function deleteShift(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete shift', '删除班次失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete shift', '删除班次失败')))
     }
     adminForbidden.value = false
     await loadShifts()
     await loadAssignments()
     setStatus(tr('Shift deleted.', '班次已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete shift', '删除班次失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete shift', '删除班次失败')), 'error')
   }
 }
 
@@ -8693,12 +8700,12 @@ async function loadAssignments() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load assignments', '加载分配失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load assignments', '加载分配失败')))
     }
     adminForbidden.value = false
     assignments.value = data.data.items || []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load assignments', '加载分配失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load assignments', '加载分配失败')), 'error')
   } finally {
     assignmentLoading.value = false
   }
@@ -8736,14 +8743,14 @@ async function saveAssignment() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save assignment', '保存分配失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save assignment', '保存分配失败')))
     }
     adminForbidden.value = false
     await loadAssignments()
     resetAssignmentForm()
     setStatus(isEditing ? tr('Assignment updated.', '分配已更新。') : tr('Assignment created.', '分配已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save assignment', '保存分配失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save assignment', '保存分配失败')), 'error')
   } finally {
     assignmentSaving.value = false
   }
@@ -8759,13 +8766,13 @@ async function deleteAssignment(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete assignment', '删除分配失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete assignment', '删除分配失败')))
     }
     adminForbidden.value = false
     await loadAssignments()
     setStatus(tr('Assignment deleted.', '分配已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete assignment', '删除分配失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete assignment', '删除分配失败')), 'error')
   }
 }
 
@@ -8794,11 +8801,11 @@ async function loadHolidays() {
     const response = await apiFetch(`/api/attendance/holidays?${query.toString()}`)
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load holidays', '加载节假日失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load holidays', '加载节假日失败')))
     }
     holidays.value = data.data.items || []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load holidays', '加载节假日失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load holidays', '加载节假日失败')), 'error')
   } finally {
     holidayLoading.value = false
   }
@@ -8830,14 +8837,14 @@ async function saveHoliday() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save holiday', '保存节假日失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save holiday', '保存节假日失败')))
     }
     adminForbidden.value = false
     await loadHolidays()
     resetHolidayForm()
     setStatus(isEditing ? tr('Holiday updated.', '节假日已更新。') : tr('Holiday created.', '节假日已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save holiday', '保存节假日失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save holiday', '保存节假日失败')), 'error')
   } finally {
     holidaySaving.value = false
   }
@@ -8853,13 +8860,13 @@ async function deleteHoliday(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete holiday', '删除节假日失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete holiday', '删除节假日失败')))
     }
     adminForbidden.value = false
     await loadHolidays()
     setStatus(tr('Holiday deleted.', '节假日已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete holiday', '删除节假日失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete holiday', '删除节假日失败')), 'error')
   }
 }
 
@@ -8894,12 +8901,12 @@ async function loadRuleSets() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load rule sets', '加载规则集失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load rule sets', '加载规则集失败')))
     }
     adminForbidden.value = false
     ruleSets.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load rule sets', '加载规则集失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load rule sets', '加载规则集失败')), 'error')
   } finally {
     ruleSetLoading.value = false
   }
@@ -8936,14 +8943,14 @@ async function saveRuleSet() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save rule set', '保存规则集失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save rule set', '保存规则集失败')))
     }
     adminForbidden.value = false
     resetRuleSetForm()
     await loadRuleSets()
     setStatus(tr('Rule set saved.', '规则集已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save rule set', '保存规则集失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save rule set', '保存规则集失败')), 'error')
   } finally {
     ruleSetSaving.value = false
   }
@@ -8959,13 +8966,13 @@ async function deleteRuleSet(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete rule set', '删除规则集失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete rule set', '删除规则集失败')))
     }
     adminForbidden.value = false
     await loadRuleSets()
     setStatus(tr('Rule set deleted.', '规则集已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete rule set', '删除规则集失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete rule set', '删除规则集失败')), 'error')
   }
 }
 
@@ -9003,7 +9010,7 @@ async function loadAttendanceGroups() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load attendance groups', '加载考勤分组失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load attendance groups', '加载考勤分组失败')))
     }
     adminForbidden.value = false
     attendanceGroups.value = data.data?.items ?? []
@@ -9011,7 +9018,7 @@ async function loadAttendanceGroups() {
       attendanceGroupMemberGroupId.value = attendanceGroups.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load attendance groups', '加载考勤分组失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load attendance groups', '加载考勤分组失败')), 'error')
   } finally {
     attendanceGroupLoading.value = false
   }
@@ -9046,14 +9053,14 @@ async function saveAttendanceGroup() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save attendance group', '保存考勤分组失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save attendance group', '保存考勤分组失败')))
     }
     adminForbidden.value = false
     resetAttendanceGroupForm()
     await loadAttendanceGroups()
     setStatus(tr('Attendance group saved.', '考勤分组已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save attendance group', '保存考勤分组失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save attendance group', '保存考勤分组失败')), 'error')
   } finally {
     attendanceGroupSaving.value = false
   }
@@ -9074,12 +9081,12 @@ async function loadAttendanceGroupMembers() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load group members', '加载分组成员失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load group members', '加载分组成员失败')))
     }
     adminForbidden.value = false
     attendanceGroupMembers.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load group members', '加载分组成员失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load group members', '加载分组成员失败')), 'error')
   } finally {
     attendanceGroupMemberLoading.value = false
   }
@@ -9108,14 +9115,14 @@ async function addAttendanceGroupMembers() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to add group members', '添加分组成员失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to add group members', '添加分组成员失败')))
     }
     adminForbidden.value = false
     attendanceGroupMemberUserIds.value = ''
     await loadAttendanceGroupMembers()
     setStatus(tr('Group members added.', '分组成员已添加。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to add group members', '添加分组成员失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to add group members', '添加分组成员失败')), 'error')
   } finally {
     attendanceGroupMemberSaving.value = false
   }
@@ -9135,13 +9142,13 @@ async function removeAttendanceGroupMember(userId: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to remove group member', '移除分组成员失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to remove group member', '移除分组成员失败')))
     }
     adminForbidden.value = false
     await loadAttendanceGroupMembers()
     setStatus(tr('Group member removed.', '分组成员已移除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to remove group member', '移除分组成员失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to remove group member', '移除分组成员失败')), 'error')
   } finally {
     attendanceGroupMemberSaving.value = false
   }
@@ -9157,13 +9164,13 @@ async function deleteAttendanceGroup(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete attendance group', '删除考勤分组失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete attendance group', '删除考勤分组失败')))
     }
     adminForbidden.value = false
     await loadAttendanceGroups()
     setStatus(tr('Attendance group deleted.', '考勤分组已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete attendance group', '删除考勤分组失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete attendance group', '删除考勤分组失败')), 'error')
   }
 }
 
@@ -9176,12 +9183,12 @@ async function loadRuleSetTemplate() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load rule set template', '加载规则集模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load rule set template', '加载规则集模板失败')))
     }
     ruleSetForm.config = JSON.stringify(data.data ?? {}, null, 2)
     setStatus(tr('Rule set template loaded.', '规则集模板已加载。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load rule set template', '加载规则集模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load rule set template', '加载规则集模板失败')), 'error')
   }
 }
 
@@ -9195,7 +9202,7 @@ async function loadRuleTemplates() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load rule templates', '加载规则模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load rule templates', '加载规则模板失败')))
     }
     adminForbidden.value = false
     const systemTemplates = data.data?.system ?? []
@@ -9205,7 +9212,7 @@ async function loadRuleTemplates() {
     ruleTemplateLibraryText.value = JSON.stringify(libraryTemplates, null, 2)
     setStatus(tr('Rule templates loaded.', '规则模板已加载。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load rule templates', '加载规则模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load rule templates', '加载规则模板失败')), 'error')
   } finally {
     ruleTemplateLoading.value = false
   }
@@ -9233,13 +9240,13 @@ async function saveRuleTemplates() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save rule templates', '保存规则模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save rule templates', '保存规则模板失败')))
     }
     adminForbidden.value = false
     ruleTemplateLibraryText.value = JSON.stringify(data.data?.templates ?? templates, null, 2)
     setStatus(tr('Rule templates saved.', '规则模板已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save rule templates', '保存规则模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save rule templates', '保存规则模板失败')), 'error')
   } finally {
     ruleTemplateSaving.value = false
   }
@@ -9260,14 +9267,14 @@ async function restoreRuleTemplates(versionId: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to restore rule templates', '恢复规则模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to restore rule templates', '恢复规则模板失败')))
     }
     adminForbidden.value = false
     ruleTemplateLibraryText.value = JSON.stringify(data.data?.templates ?? [], null, 2)
     await loadRuleTemplates()
     setStatus(tr('Rule templates restored.', '规则模板已恢复。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to restore rule templates', '恢复规则模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to restore rule templates', '恢复规则模板失败')), 'error')
   } finally {
     ruleTemplateRestoring.value = false
   }
@@ -9313,12 +9320,12 @@ async function loadPayrollTemplates() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load payroll templates', '加载计薪模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load payroll templates', '加载计薪模板失败')))
     }
     adminForbidden.value = false
     payrollTemplates.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load payroll templates', '加载计薪模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load payroll templates', '加载计薪模板失败')), 'error')
   } finally {
     payrollTemplateLoading.value = false
   }
@@ -9359,14 +9366,14 @@ async function savePayrollTemplate() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save payroll template', '保存计薪模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save payroll template', '保存计薪模板失败')))
     }
     adminForbidden.value = false
     resetPayrollTemplateForm()
     await loadPayrollTemplates()
     setStatus(tr('Payroll template saved.', '计薪模板已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save payroll template', '保存计薪模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save payroll template', '保存计薪模板失败')), 'error')
   } finally {
     payrollTemplateSaving.value = false
   }
@@ -9382,13 +9389,13 @@ async function deletePayrollTemplate(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete payroll template', '删除计薪模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete payroll template', '删除计薪模板失败')))
     }
     adminForbidden.value = false
     await loadPayrollTemplates()
     setStatus(tr('Payroll template deleted.', '计薪模板已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete payroll template', '删除计薪模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete payroll template', '删除计薪模板失败')), 'error')
   }
 }
 
@@ -9435,12 +9442,12 @@ async function loadPayrollCycles() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load payroll cycles', '加载计薪周期失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load payroll cycles', '加载计薪周期失败')))
     }
     adminForbidden.value = false
     payrollCycles.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load payroll cycles', '加载计薪周期失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load payroll cycles', '加载计薪周期失败')), 'error')
   } finally {
     payrollCycleLoading.value = false
   }
@@ -9479,7 +9486,7 @@ async function generatePayrollCycles() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to generate payroll cycles', '生成计薪周期失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to generate payroll cycles', '生成计薪周期失败')))
     }
 
     const created = Array.isArray(data.data?.created) ? data.data.created.length : 0
@@ -9489,7 +9496,7 @@ async function generatePayrollCycles() {
     await loadPayrollCycles()
     setStatus(tr('Payroll cycles generated.', '计薪周期已生成。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to generate payroll cycles', '生成计薪周期失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to generate payroll cycles', '生成计薪周期失败')), 'error')
   } finally {
     payrollCycleGenerating.value = false
   }
@@ -9523,14 +9530,14 @@ async function savePayrollCycle() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save payroll cycle', '保存计薪周期失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save payroll cycle', '保存计薪周期失败')))
     }
     adminForbidden.value = false
     resetPayrollCycleForm()
     await loadPayrollCycles()
     setStatus(tr('Payroll cycle saved.', '计薪周期已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save payroll cycle', '保存计薪周期失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save payroll cycle', '保存计薪周期失败')), 'error')
   } finally {
     payrollCycleSaving.value = false
   }
@@ -9546,14 +9553,14 @@ async function deletePayrollCycle(id: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete payroll cycle', '删除计薪周期失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete payroll cycle', '删除计薪周期失败')))
     }
     adminForbidden.value = false
     await loadPayrollCycles()
     payrollCycleSummary.value = null
     setStatus(tr('Payroll cycle deleted.', '计薪周期已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete payroll cycle', '删除计薪周期失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete payroll cycle', '删除计薪周期失败')), 'error')
   }
 }
 
@@ -9572,12 +9579,12 @@ async function loadPayrollCycleSummary() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load payroll summary', '加载计薪汇总失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load payroll summary', '加载计薪汇总失败')))
     }
     payrollCycleSummary.value = data.data?.summary ?? null
     setStatus(tr('Payroll summary loaded.', '计薪汇总已加载。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load payroll summary', '加载计薪汇总失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load payroll summary', '加载计薪汇总失败')), 'error')
   }
 }
 
@@ -9605,7 +9612,7 @@ async function exportPayrollCycleSummary() {
     URL.revokeObjectURL(url)
     setStatus(tr('Payroll summary exported.', '计薪汇总已导出。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to export payroll summary', '导出计薪汇总失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to export payroll summary', '导出计薪汇总失败')), 'error')
   }
 }
 

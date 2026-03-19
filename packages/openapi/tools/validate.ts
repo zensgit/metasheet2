@@ -4,7 +4,10 @@ import path from 'path'
 import yaml from 'js-yaml'
 
 function isAuthWhitelisted(p: string): boolean {
-  return p.startsWith('/api/auth/') || p === '/health' || p.startsWith('/metrics')
+  const publicApiEndpoints = new Set([
+    '/api/permissions/health',
+  ])
+  return p.startsWith('/api/auth/') || publicApiEndpoints.has(p) || p === '/health' || p.startsWith('/metrics')
 }
 
 function main() {
@@ -12,10 +15,23 @@ function main() {
   const doc = yaml.load(fs.readFileSync(file, 'utf-8')) as any
   const paths = doc.paths || {}
   const violations: string[] = []
+  const httpMethods = new Set([
+    'get',
+    'post',
+    'put',
+    'delete',
+    'patch',
+    'head',
+    'options',
+    'trace',
+  ])
   for (const p of Object.keys(paths)) {
     if (p.startsWith('/api/') && !isAuthWhitelisted(p)) {
       const methods = Object.keys(paths[p])
       for (const m of methods) {
+        if (!httpMethods.has(m)) {
+          continue
+        }
         const sec = paths[p][m]?.security
         const hasBearer = Array.isArray(sec) && sec.some((s: any) => 'bearerAuth' in s)
         if (!hasBearer) {
@@ -33,4 +49,3 @@ function main() {
 }
 
 main()
-

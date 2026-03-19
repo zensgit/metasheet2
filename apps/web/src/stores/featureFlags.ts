@@ -1,6 +1,7 @@
 import { computed, reactive, readonly } from 'vue'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
+import { readErrorMessage } from '../utils/error'
 
 export type ProductMode = 'platform' | 'attendance'
 
@@ -292,7 +293,7 @@ async function loadProductFeatures(
         }
       }
     } catch (error) {
-      state.error = error instanceof Error ? error.message : 'Failed to load product features'
+      state.error = readErrorMessage(error, 'Failed to load product features')
     }
 
     const pluginInference = inferPluginFeatures(pluginPayload)

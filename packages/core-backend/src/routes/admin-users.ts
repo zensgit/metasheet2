@@ -13,6 +13,7 @@ import { authenticate } from '../middleware/auth'
 import { query } from '../db/pg'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { isDatabaseSchemaError } from '../utils/database-errors'
+import { readErrorMessage } from '../utils/error'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 
 type AdminUserProfile = {
@@ -263,7 +264,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'USER_LIST_FAILED', (error as Error)?.message || 'Failed to list users')
+      return jsonError(res, 500, 'USER_LIST_FAILED', readErrorMessage(error, 'Failed to list users'))
     }
   })
 
@@ -373,7 +374,7 @@ export function adminUsersRouter(): Router {
           degraded: true,
         })
       }
-      return jsonError(res, 500, 'INVITE_LEDGER_LIST_FAILED', (error as Error)?.message || 'Failed to load invite ledger')
+      return jsonError(res, 500, 'INVITE_LEDGER_LIST_FAILED', readErrorMessage(error, 'Failed to load invite ledger'))
     }
   })
 
@@ -427,7 +428,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseSchemaError(error)) {
         return jsonError(res, 503, 'INVITE_LEDGER_UNAVAILABLE', 'Invite ledger is not available until migrations are applied')
       }
-      return jsonError(res, 500, 'INVITE_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke invite')
+      return jsonError(res, 500, 'INVITE_REVOKE_FAILED', readErrorMessage(error, 'Failed to revoke invite'))
     }
   })
 
@@ -540,7 +541,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseSchemaError(error)) {
         return jsonError(res, 503, 'INVITE_LEDGER_UNAVAILABLE', 'Invite ledger is not available until migrations are applied')
       }
-      return jsonError(res, 500, 'INVITE_RESEND_FAILED', (error as Error)?.message || 'Failed to resend invite')
+      return jsonError(res, 500, 'INVITE_RESEND_FAILED', readErrorMessage(error, 'Failed to resend invite'))
     }
   })
 
@@ -678,7 +679,7 @@ export function adminUsersRouter(): Router {
         }),
       })
     } catch (error) {
-      return jsonError(res, 500, 'USER_CREATE_FAILED', (error as Error)?.message || 'Failed to create user')
+      return jsonError(res, 500, 'USER_CREATE_FAILED', readErrorMessage(error, 'Failed to create user'))
     }
   })
 
@@ -695,7 +696,7 @@ export function adminUsersRouter(): Router {
 
       return jsonOk(res, { ...snapshot, actorId: adminUserId })
     } catch (error) {
-      return jsonError(res, 500, 'USER_ACCESS_FAILED', (error as Error)?.message || 'Failed to load user access')
+      return jsonError(res, 500, 'USER_ACCESS_FAILED', readErrorMessage(error, 'Failed to load user access'))
     }
   })
 
@@ -744,7 +745,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to assign role')
+      return jsonError(res, 500, 'ROLE_ASSIGN_FAILED', readErrorMessage(error, 'Failed to assign role'))
     }
   })
 
@@ -788,7 +789,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to unassign role')
+      return jsonError(res, 500, 'ROLE_UNASSIGN_FAILED', readErrorMessage(error, 'Failed to unassign role'))
     }
   })
 
@@ -842,7 +843,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'USER_STATUS_FAILED', (error as Error)?.message || 'Failed to update user status')
+      return jsonError(res, 500, 'USER_STATUS_FAILED', readErrorMessage(error, 'Failed to update user status'))
     }
   })
 
@@ -895,7 +896,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'PASSWORD_RESET_FAILED', (error as Error)?.message || 'Failed to reset password')
+      return jsonError(res, 500, 'PASSWORD_RESET_FAILED', readErrorMessage(error, 'Failed to reset password'))
     }
   })
 
@@ -939,7 +940,7 @@ export function adminUsersRouter(): Router {
         reason,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke user sessions')
+      return jsonError(res, 500, 'SESSION_REVOKE_FAILED', readErrorMessage(error, 'Failed to revoke user sessions'))
     }
   })
 
@@ -955,7 +956,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_LIST_FAILED', (error as Error)?.message || 'Failed to list roles')
+      return jsonError(res, 500, 'ROLE_LIST_FAILED', readErrorMessage(error, 'Failed to list roles'))
     }
   })
 
@@ -1048,7 +1049,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ADMIN_AUDIT_LIST_FAILED', (error as Error)?.message || 'Failed to load admin audit activity')
+      return jsonError(res, 500, 'ADMIN_AUDIT_LIST_FAILED', readErrorMessage(error, 'Failed to load admin audit activity'))
     }
   })
 
@@ -1144,7 +1145,7 @@ export function adminUsersRouter(): Router {
 
       return res.end()
     } catch (error) {
-      return jsonError(res, 500, 'ADMIN_AUDIT_EXPORT_FAILED', (error as Error)?.message || 'Failed to export admin audit activity')
+      return jsonError(res, 500, 'ADMIN_AUDIT_EXPORT_FAILED', readErrorMessage(error, 'Failed to export admin audit activity'))
     }
   })
 
@@ -1165,7 +1166,7 @@ export function adminUsersRouter(): Router {
         items: sessions,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_LIST_FAILED', (error as Error)?.message || 'Failed to load user sessions')
+      return jsonError(res, 500, 'SESSION_LIST_FAILED', readErrorMessage(error, 'Failed to load user sessions'))
     }
   })
 
@@ -1223,7 +1224,7 @@ export function adminUsersRouter(): Router {
         reason,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke session')
+      return jsonError(res, 500, 'SESSION_REVOKE_FAILED', readErrorMessage(error, 'Failed to revoke session'))
     }
   })
 
@@ -1308,7 +1309,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_REVOCATION_LIST_FAILED', (error as Error)?.message || 'Failed to load session revocations')
+      return jsonError(res, 500, 'SESSION_REVOCATION_LIST_FAILED', readErrorMessage(error, 'Failed to load session revocations'))
     }
   })
 

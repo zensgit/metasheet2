@@ -18,6 +18,9 @@ import type { ViewConfigProvider, DatabasePool } from '../types/view-config'
 import type { ViewDataProvider, ViewDataContext, ViewDataQueryOptions, FilterCondition, SortOptions } from '../types/view-data'
 import { eventBus } from '../core/EventBusService'
 import { Logger } from '../core/logger'
+import { authenticate } from '../middleware/auth'
+import { isFeatureEnabled } from '../config/flags'
+import { canReadTable, canWriteTable } from '../rbac/table-perms'
 
 const logger = new Logger('ViewsRouter')
 
@@ -63,11 +66,52 @@ function initializeEventListeners(): void {
   logger.debug('View provider event listeners initialized')
 }
 
+type RequestUser = {
+  id?: string | number
+  userId?: string | number
+  sub?: string | number
+}
+
+function getRequestUserId(req: { user?: RequestUser }): string {
+  const raw = req.user
+  const userId = raw?.id ?? raw?.userId ?? raw?.sub
+  return userId == null ? '' : String(userId).trim()
+}
+
+async function ensureTableAccess(
+  req: { user?: RequestUser },
+  res: { status: (code: number) => { json: (payload: unknown) => unknown } },
+  tableId: string | null | undefined,
+  mode: 'read' | 'write'
+): Promise<boolean> {
+  if (!tableId || !isFeatureEnabled('FEATURE_TABLE_RBAC_ENABLED')) {
+    return true
+  }
+
+  const userId = getRequestUserId(req)
+  if (!userId) {
+    res.status(401).json({ success: false, error: 'Unauthorized' })
+    return false
+  }
+
+  const allowed = mode === 'write'
+    ? await canWriteTable({ id: userId }, tableId)
+    : await canReadTable({ id: userId }, tableId)
+
+  if (!allowed) {
+    res.status(403).json({ success: false, error: 'Forbidden' })
+    return false
+  }
+
+  return true
+}
+
 export function viewsRouter() {
   const router = Router()
   const registry = getViewConfigRegistry()
 
   initializeEventListeners()
+  router.use(authenticate)
 
   /**
    * Get view configuration
@@ -89,6 +133,9 @@ export function viewsRouter() {
       }
 
       const view = viewResult.rows[0]
+      if (!await ensureTableAccess(req, res, view.table_id as string | null | undefined, 'read')) {
+        return
+      }
       const config = typeof view.config === 'string' ? JSON.parse(view.config) : view.config || {}
 
       // Get view-specific config from registered provider
@@ -136,12 +183,16 @@ export function viewsRouter() {
 
       // Get view type first
       const viewResult = await pool.query(
-        'SELECT type FROM views WHERE id = $1 AND deleted_at IS NULL',
+        'SELECT type, table_id FROM views WHERE id = $1 AND deleted_at IS NULL',
         [viewId]
       )
 
       if (viewResult.rows.length === 0) {
         return res.status(404).json({ success: false, error: 'View not found' })
+      }
+
+      if (!await ensureTableAccess(req, res, viewResult.rows[0].table_id as string | null | undefined, 'write')) {
+        return
       }
 
       const viewType = (config.type || viewResult.rows[0].type) as string
@@ -208,6 +259,10 @@ export function viewsRouter() {
       const viewType = view.type as string
       const tableId = view.table_id as string
 
+      if (!await ensureTableAccess(req, res, tableId, 'read')) {
+        return
+      }
+
       // Build view context
       const viewConfig = typeof view.config === 'string' ? JSON.parse(view.config) : view.config || {}
       const viewFilters = typeof view.filters === 'string' ? JSON.parse(view.filters) : view.filters || []
@@ -270,9 +325,22 @@ export function viewsRouter() {
     try {
       const { viewId } = req.params
       const state = req.body
-      const userId = (req as unknown as { user?: { id: number } }).user?.id || 0
+      const userId = getRequestUserId(req)
 
       const pool = poolManager.get()
+      const viewResult = await pool.query(
+        'SELECT table_id FROM views WHERE id = $1 AND deleted_at IS NULL',
+        [viewId]
+      )
+
+      if (viewResult.rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'View not found' })
+      }
+
+      if (!await ensureTableAccess(req, res, viewResult.rows[0].table_id as string | null | undefined, 'read')) {
+        return
+      }
+
       await pool.query(
         `INSERT INTO view_states (view_id, user_id, state, updated_at)
          VALUES ($1, $2, $3, NOW())
@@ -295,9 +363,22 @@ export function viewsRouter() {
   router.get('/:viewId/state', async (req, res) => {
     try {
       const { viewId } = req.params
-      const userId = (req as unknown as { user?: { id: number } }).user?.id || 0
+      const userId = getRequestUserId(req)
 
       const pool = poolManager.get()
+      const viewResult = await pool.query(
+        'SELECT table_id FROM views WHERE id = $1 AND deleted_at IS NULL',
+        [viewId]
+      )
+
+      if (viewResult.rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'View not found' })
+      }
+
+      if (!await ensureTableAccess(req, res, viewResult.rows[0].table_id as string | null | undefined, 'read')) {
+        return
+      }
+
       const result = await pool.query(
         'SELECT state FROM view_states WHERE view_id = $1 AND user_id = $2',
         [viewId, userId]
@@ -324,20 +405,26 @@ export function viewsRouter() {
 
       // Get view type first
       const viewResult = await pool.query(
-        'SELECT type FROM views WHERE id = $1',
+        'SELECT type, table_id FROM views WHERE id = $1 AND deleted_at IS NULL',
         [viewId]
       )
 
-      if (viewResult.rows.length > 0) {
-        const viewType = viewResult.rows[0].type as string
-        const provider = registry.get(viewType)
+      if (viewResult.rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'View not found' })
+      }
 
-        if (provider) {
-          await provider.deleteConfig(viewId, pool)
-        } else {
-          // Fallback legacy cleanup
-          await deleteLegacyViewConfig(viewId, viewType, pool)
-        }
+      if (!await ensureTableAccess(req, res, viewResult.rows[0].table_id as string | null | undefined, 'write')) {
+        return
+      }
+
+      const viewType = viewResult.rows[0].type as string
+      const provider = registry.get(viewType)
+
+      if (provider) {
+        await provider.deleteConfig(viewId, pool)
+      } else {
+        // Fallback legacy cleanup
+        await deleteLegacyViewConfig(viewId, viewType, pool)
       }
 
       res.json({ success: true })

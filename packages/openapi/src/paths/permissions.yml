@@ -15,7 +15,10 @@ paths:
                     type: array
                     items: { $ref: '#/components/schemas/Permission' }
                   total: { type: integer }
+                  degraded: { type: boolean }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Internal server error }
+        '503': { description: Service unavailable }
   /api/permissions/me:
     get:
       summary: Get current user permissions
@@ -26,14 +29,9 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  userId: { type: string }
-                  permissions:
-                    type: array
-                    items: { type: string }
-                  isAdmin: { type: boolean }
+                $ref: '#/components/schemas/UserPermissionState'
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Internal server error }
   /api/permissions/check:
     post:
       summary: Check permission for a user
@@ -59,8 +57,11 @@ paths:
                   userId: { type: string }
                   permission: { type: string }
                   allowed: { type: boolean }
+                  degraded: { type: boolean }
+        '400': { description: Bad request }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { description: Internal server error }
   /api/permissions/grant:
     post:
       summary: Grant permission (admin only)
@@ -80,6 +81,8 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { description: Internal server error }
+        '503': { description: Service unavailable }
   /api/permissions/revoke:
     post:
       summary: Revoke permission (admin only)
@@ -99,6 +102,8 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { description: Internal server error }
+        '503': { description: Service unavailable }
   /api/permissions/health:
     get:
       summary: Permissions health check
@@ -113,3 +118,81 @@ paths:
                   status: { type: string }
                   degraded: { type: boolean }
                   timestamp: { type: string }
+  /api/admin/permission-templates:
+    get:
+      summary: List permission templates
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: mode
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/PermissionTemplate' }
+                  degraded: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { description: Internal server error }
+  /api/admin/permission-templates/apply:
+    post:
+      summary: Apply permission template to a user
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string }
+                templateId: { type: string }
+              required: [userId, templateId]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  template:
+                    allOf:
+                      - $ref: '#/components/schemas/PermissionTemplate'
+                    nullable: true
+                  permissions:
+                    type: array
+                    items: { type: string }
+                  degraded: { type: boolean }
+        '400': { description: Bad request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Conflict }
+        '500': { description: Internal server error }
+  /api/permissions/user/{userId}:
+    get:
+      summary: Get permissions for specific user
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPermissionState'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { description: Internal server error }

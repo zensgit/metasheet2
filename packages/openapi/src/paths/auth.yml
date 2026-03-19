@@ -161,3 +161,124 @@ paths:
                             type: string
                             enum: [platform, attendance]
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/auth/sessions:
+    get:
+      summary: List user sessions
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/UserSessionsResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Internal server error }
+  /api/auth/sessions/{sessionId}/logout:
+    post:
+      summary: Revoke a specific session
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: sessionId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      sessionId: { type: string }
+        '400': { description: Bad request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { description: Internal server error }
+  /api/auth/sessions/current/ping:
+    post:
+      summary: Heartbeat for current session
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      sessionId: { type: string }
+                      session:
+                        type: object
+                        nullable: true
+                        allOf:
+                          - $ref: '#/components/schemas/UserSessionRecord'
+                      lastSeenAt:
+                        type: string
+                        nullable: true
+        '400': { description: Bad request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Internal server error }
+  /api/auth/logout:
+    post:
+      summary: Logout current sessions
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      scope:
+                        type: string
+                        enum: [current-session, all-sessions]
+                      sessionId:
+                        type: string
+                        nullable: true
+                      revokedAfter:
+                        type: string
+                        nullable: true
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Internal server error }
+  /api/auth/sessions/others/logout:
+    post:
+      summary: Logout other sessions for current user
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      currentSessionId: { type: string }
+                      revokedCount:
+                        type: integer
+                        minimum: 0
+        '400': { description: Bad request }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { description: Internal server error }

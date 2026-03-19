@@ -64,6 +64,7 @@ import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
+import { adminUsersRouter } from './routes/admin-users'
 import workflowRouter from './routes/workflow'
 import workflowDesignerRouter from './routes/workflow-designer'
 import { univerMockRouter } from './routes/univer-mock'
@@ -77,6 +78,35 @@ type PluginRuntimeState = {
   status: 'active' | 'inactive' | 'failed'
   error?: string
   lastAttempt?: string
+}
+
+// Transitional shim while older clients still mix `ok` and `success`.
+// Remove this once response payloads are standardized on a single flag.
+function applyResponseCompatibilityAliases(payload: unknown): unknown {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return payload
+  }
+
+  const body = payload as Record<string, unknown>
+
+  if (body.ok === true && body.success === undefined) {
+    body.success = true
+  } else if (body.ok === false && body.success === undefined) {
+    body.success = false
+  }
+
+  if (body.success === true && body.ok === undefined) {
+    body.ok = true
+  } else if (body.success === false && body.ok === undefined) {
+    body.ok = false
+  }
+
+  if (body.status === 'ok') {
+    if (body.ok === undefined) body.ok = true
+    if (body.success === undefined) body.success = true
+  }
+
+  return body
 }
 
 export class MetaSheetServer {
@@ -472,6 +502,12 @@ export class MetaSheetServer {
     this.app.use(attendanceAuditMiddleware())
     this.app.use(attendanceSecurityMiddleware())
 
+    this.app.use((req: Request, res: Response, next: NextFunction) => {
+      const originalJson = res.json.bind(res)
+      res.json = ((body: unknown) => originalJson(applyResponseCompatibilityAliases(body) as any)) as Response['json']
+      next()
+    })
+
     // 健康检查
     this.app.get('/health', (req, res) => {
       const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
@@ -589,6 +625,9 @@ export class MetaSheetServer {
 
     // 路由：视图管理 (V2 Unified)
     this.app.use('/api/views', viewsRouter())
+
+    // 路由：IAM 用户/角色/会话/审计管理
+    this.app.use(adminUsersRouter())
 
     // 路由：管理员端点 (带 SafetyGuard 保护)
     this.app.use('/api/admin', initAdminRoutes({

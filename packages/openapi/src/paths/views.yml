@@ -10,6 +10,8 @@ paths:
           schema: { type: string }
       responses:
         '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
     put:
       summary: Update view configuration
@@ -26,6 +28,8 @@ paths:
             schema: { type: object }
       responses:
         '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
     delete:
       summary: Delete view configuration
@@ -37,6 +41,8 @@ paths:
           schema: { type: string }
       responses:
         '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
   /api/views/{viewId}/data:
     get:
@@ -70,6 +76,8 @@ paths:
           schema: { type: string }
       responses:
         '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
   /api/views/{viewId}/state:
     post:
@@ -87,6 +95,8 @@ paths:
             schema: { type: object }
       responses:
         '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
     get:
       summary: Get view state
