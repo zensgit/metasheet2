@@ -1,4 +1,4 @@
-import { Inject, Optional } from '@wendellhu/redi'
+import { Optional } from '@wendellhu/redi'
 import { IConfigService, ILogger } from '../di/identifiers'
 import { HTTPAdapter } from './HTTPAdapter'
 import type { QueryResult, DataSourceConfig } from './BaseAdapter'

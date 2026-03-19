@@ -1835,7 +1835,7 @@ router.post(
 // Sprint 7 Day 4: Health Aggregation APIs
 // ═══════════════════════════════════════════════════════════════════
 
-import { getHealthAggregator, type AggregatedHealth } from '../services/HealthAggregatorService';
+import { getHealthAggregator } from '../services/HealthAggregatorService';
 
 /**
  * GET /api/admin/health/detailed
