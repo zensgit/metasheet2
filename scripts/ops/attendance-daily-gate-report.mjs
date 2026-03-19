@@ -1335,11 +1335,15 @@ function renderMarkdown({
           lines.push(`- Strict Gates: \`provisioning\` failure reason detected: \`${provReason}\`.`)
         }
         if (provReason === 'AUTH_FAILED') {
-          lines.push('- Strict Gates: `provisioning` auth failed. Refresh the admin token and rerun (permission grants require admin).')
+          lines.push('- Strict Gates: `provisioning` auth failed. Refresh the admin token and rerun (access provisioning requires admin).')
         } else if (provReason === 'RATE_LIMITED') {
           lines.push('- Strict Gates: `provisioning` was rate-limited. Wait briefly and rerun.')
         } else if (provReason === 'ENDPOINT_MISSING') {
-          lines.push('- Strict Gates: `provisioning` endpoint missing. Ensure backend routes include `/api/permissions/grant`, then redeploy.')
+          lines.push('- Strict Gates: `provisioning` endpoint missing. Ensure backend routes include `/api/admin/users/:userId/roles/assign` or the legacy `/api/permissions/grant`, then redeploy.')
+        } else if (provReason === 'ROLE_NOT_FOUND') {
+          lines.push('- Strict Gates: `provisioning` attendance roles are missing. Run attendance role/RBAC migrations, confirm `attendance_employee|attendance_approver|attendance_admin` exist, then rerun.')
+        } else if (provReason === 'SERVER_ERROR') {
+          lines.push('- Strict Gates: `provisioning` returned a backend 5xx. Inspect backend logs for `/api/admin/users/:userId/roles/assign` or `/api/permissions/grant`, then rerun.')
         } else if (provReason === 'DNS_FAILED') {
           lines.push('- Strict Gates: `provisioning` failed due to DNS resolution. Check deploy DNS/network and rerun.')
         } else if (provReason === 'CONNECTION_REFUSED') {
