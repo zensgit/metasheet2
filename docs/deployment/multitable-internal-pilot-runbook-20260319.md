@@ -59,7 +59,11 @@ Key outputs:
 - `handoff.json`
 - `readiness.md`
 - `readiness.json`
+- `smoke/grid-import.png`
+- `smoke/grid-hydrated.png`
+- `smoke/form-comments.png`
 - `docs/multitable-internal-pilot-runbook-20260319.md`
+- `docs/multitable-pilot-quickstart-20260319.md`
 - `docs/multitable-pilot-feedback-template-20260319.md`
 
 ### CI readiness
@@ -125,21 +129,37 @@ Grid profile thresholds:
 
 Use this checklist before handing the branch to a real team:
 
-1. Run `pnpm verify:multitable-pilot:ready:local`
-2. Confirm `readiness.md` says `Overall: PASS`
-3. Confirm profile was run at `ROW_COUNT=2000`
-4. Confirm smoke report includes attachment, person preset, comments, and conflict retry
-5. Confirm no local-only flags are required for the target environment, except the documented dev-token `RBAC_TOKEN_TRUST=true` case
-6. Give the pilot team the feedback template:
+1. Prepare two direct URLs for the pilot owner:
+
+```text
+/multitable/<sheetId>/<viewId>?baseId=<baseId>
+/multitable/<sheetId>/<viewId>?baseId=<baseId>&mode=form&recordId=<recordId>
+```
+
+Do not ask the pilot team to assemble these URLs manually.
+
+2. Run `pnpm verify:multitable-pilot:ready:local`
+3. Confirm `readiness.md` says `Overall: PASS`
+4. Confirm profile was run at `ROW_COUNT=2000`
+5. Confirm smoke report includes attachment, person preset, comments, and conflict retry
+6. Confirm no local-only flags are required for the target environment, except the documented dev-token `RBAC_TOKEN_TRUST=true` case
+7. Give the pilot team the feedback template:
 
 ```text
 docs/deployment/multitable-pilot-feedback-template-20260319.md
 ```
-7. If the team uses GitHub issues for pilot tracking, open:
+8. If the team uses GitHub issues for pilot tracking, open:
 
 ```text
 .github/ISSUE_TEMPLATE/multitable-pilot-feedback.yml
 ```
+9. Start the team with:
+
+```text
+docs/deployment/multitable-pilot-quickstart-20260319.md
+```
+
+Use the runbook for operators and gate owners, not as the first document for business users.
 
 ## Current Pilot Recommendation
 

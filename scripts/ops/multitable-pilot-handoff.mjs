@@ -6,6 +6,7 @@ const outputRoot = process.env.HANDOFF_OUTPUT_ROOT || path.resolve('output/playw
 const sourceRoot = process.env.READINESS_ROOT || ''
 
 const runbookPath = path.resolve('docs/deployment/multitable-internal-pilot-runbook-20260319.md')
+const quickstartPath = path.resolve('docs/deployment/multitable-pilot-quickstart-20260319.md')
 const feedbackTemplatePath = path.resolve('docs/deployment/multitable-pilot-feedback-template-20260319.md')
 const issueTemplatePath = path.resolve('.github/ISSUE_TEMPLATE/multitable-pilot-feedback.yml')
 
@@ -55,14 +56,21 @@ async function main() {
   const smokeReport = path.join(readinessRoot, 'smoke', 'report.json')
   const profileReport = path.join(readinessRoot, 'profile', 'report.json')
   const profileSummary = path.join(readinessRoot, 'profile', 'summary.md')
+  const smokeGridImport = path.join(readinessRoot, 'smoke', 'grid-import.png')
+  const smokeGridHydrated = path.join(readinessRoot, 'smoke', 'grid-hydrated.png')
+  const smokeFormComments = path.join(readinessRoot, 'smoke', 'form-comments.png')
 
   const copied = {
     readinessMd: await safeCopy(readinessMd, path.join(handoffRoot, 'readiness.md')),
     readinessJson: await safeCopy(readinessJson, path.join(handoffRoot, 'readiness.json')),
     smokeReport: await safeCopy(smokeReport, path.join(handoffRoot, 'smoke', 'report.json')),
+    smokeGridImport: await safeCopy(smokeGridImport, path.join(handoffRoot, 'smoke', 'grid-import.png')),
+    smokeGridHydrated: await safeCopy(smokeGridHydrated, path.join(handoffRoot, 'smoke', 'grid-hydrated.png')),
+    smokeFormComments: await safeCopy(smokeFormComments, path.join(handoffRoot, 'smoke', 'form-comments.png')),
     profileReport: await safeCopy(profileReport, path.join(handoffRoot, 'profile', 'report.json')),
     profileSummary: await safeCopy(profileSummary, path.join(handoffRoot, 'profile', 'summary.md')),
     runbook: await safeCopy(runbookPath, path.join(handoffRoot, 'docs', path.basename(runbookPath))),
+    quickstart: await safeCopy(quickstartPath, path.join(handoffRoot, 'docs', path.basename(quickstartPath))),
     feedbackTemplate: await safeCopy(
       feedbackTemplatePath,
       path.join(handoffRoot, 'docs', path.basename(feedbackTemplatePath)),
@@ -93,15 +101,21 @@ async function main() {
     `- readiness.md: ${copied.readinessMd ? '`present`' : '`missing`'}`,
     `- readiness.json: ${copied.readinessJson ? '`present`' : '`missing`'}`,
     `- smoke/report.json: ${copied.smokeReport ? '`present`' : '`missing`'}`,
+    `- smoke/grid-import.png: ${copied.smokeGridImport ? '`present`' : '`missing`'}`,
+    `- smoke/grid-hydrated.png: ${copied.smokeGridHydrated ? '`present`' : '`missing`'}`,
+    `- smoke/form-comments.png: ${copied.smokeFormComments ? '`present`' : '`missing`'}`,
     `- profile/report.json: ${copied.profileReport ? '`present`' : '`missing`'}`,
     `- profile/summary.md: ${copied.profileSummary ? '`present`' : '`missing`'}`,
     `- runbook: ${copied.runbook ? '`present`' : '`missing`'}`,
+    `- quickstart: ${copied.quickstart ? '`present`' : '`missing`'}`,
     `- feedback template: ${copied.feedbackTemplate ? '`present`' : '`missing`'}`,
     `- issue template: ${copied.issueTemplate ? '`present`' : '`missing`'}`,
     '',
     '## Next Step',
     '',
-    '- Give the pilot team the `docs/` bundle plus the readiness artifacts, then collect feedback with the template or GitHub issue form.',
+    '- Give the pilot team the `docs/` bundle, the three smoke screenshots, and the readiness artifacts.',
+    '- Start with the quickstart, not the runbook.',
+    '- Collect feedback with the template or GitHub issue form.',
     '',
   ].join('\n')
 
