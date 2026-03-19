@@ -339,6 +339,13 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
+import {
+  formatCalendarMonthLabel,
+  formatLunarDayLabel,
+  normalizeDateKey,
+  toDateInput,
+  toDateKey,
+} from './attendanceCalendarUtils'
 import { useAttendanceAdminAuditLogs } from './attendance/useAttendanceAdminAuditLogs'
 import AttendanceAuditLogsSection from './attendance/AttendanceAuditLogsSection.vue'
 import AttendanceHolidayDataSection from './attendance/AttendanceHolidayDataSection.vue'
@@ -832,7 +839,10 @@ const weekDays = computed(() => (
     : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 ))
 const calendarLabel = computed(() => {
-  return new Intl.DateTimeFormat(isZh.value ? 'zh-CN' : 'en-US', { year: 'numeric', month: 'long' }).format(calendarMonth.value)
+  return formatCalendarMonthLabel(calendarMonth.value, {
+    locale: isZh.value ? 'zh-CN' : 'en-US',
+    timeZone: isZh.value ? 'Asia/Shanghai' : defaultTimezone,
+  })
 })
 
 const recordMap = computed(() => {
@@ -909,7 +919,10 @@ const calendarDays = computed<CalendarDay[]>(() => {
     const holidayName = typeof holiday?.name === 'string' && holiday.name.trim().length > 0
       ? holiday.name.trim()
       : undefined
-    const lunarLabel = formatLunarDayLabel(date)
+    const lunarLabel = formatLunarDayLabel(date, {
+      enabled: isZh.value,
+      timeZone: 'Asia/Shanghai',
+    })
     let tooltip = record
       ? `${key} · ${statusLabel} · ${record.work_minutes} min`
       : key
@@ -1424,27 +1437,6 @@ const requestCenterSectionBindings = {
   submitRequest,
 }
 
-function toDateInput(date: Date): string {
-  return date.toISOString().slice(0, 10)
-}
-
-function toDateKey(date: Date): string {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function normalizeDateKey(value: string | null | undefined): string | null {
-  const raw = String(value || '').trim()
-  if (!raw) return null
-  const direct = raw.match(/^(\d{4}-\d{2}-\d{2})/)
-  if (direct) return direct[1]
-  const date = new Date(raw)
-  if (Number.isNaN(date.getTime())) return null
-  return date.toISOString().slice(0, 10)
-}
-
 function parseDateValue(value: string | null | undefined): Date | null {
   const key = normalizeDateKey(value)
   if (!key) return null
@@ -1593,20 +1585,6 @@ function formatRequestType(value: string): string {
         overtime: 'Overtime request',
       }
   return map[value] ?? value
-}
-
-function formatLunarDayLabel(date: Date): string | undefined {
-  if (!isZh.value || Number.isNaN(date.getTime())) return undefined
-  try {
-    const text = new Intl.DateTimeFormat('zh-CN-u-ca-chinese', {
-      month: 'short',
-      day: 'numeric',
-    }).format(date)
-    const normalized = text.replace(/\s+/g, '')
-    return normalized || undefined
-  } catch {
-    return undefined
-  }
 }
 
 function formatWarningsShort(warnings: string[]): string {
