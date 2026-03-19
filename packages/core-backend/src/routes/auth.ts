@@ -5,11 +5,20 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import { Router } from 'express'
+import { randomUUID } from 'node:crypto'
+import * as bcrypt from 'bcryptjs'
 import jwt, { type SignOptions } from 'jsonwebtoken'
 import { authService, type User } from '../auth/AuthService'
+import { buildOnboardingPacket, getAccessPreset } from '../auth/access-presets'
+import { markInviteAccepted } from '../auth/invite-ledger'
+import { verifyInviteToken } from '../auth/invite-tokens'
+import { validatePassword } from '../auth/password-policy'
+import { createUserSession, getUserSession, listUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
+import { revokeUserSessions } from '../auth/session-revocation'
 import { FEATURE_FLAGS } from '../config/flags'
 import { Logger } from '../core/logger'
 import { query } from '../db/pg'
+import { secretManager } from '../security/SecretManager'
 
 const logger = new Logger('AuthRouter')
 
@@ -21,7 +30,7 @@ export const authRouter = Router()
 
 const DEV_FALLBACK_JWT_SECRET = 'fallback-development-secret-change-in-production'
 
-authRouter.get('/dev-token', (req: Request, res: Response) => {
+authRouter.get('/dev-token', async (req: Request, res: Response) => {
   if (process.env.NODE_ENV === 'production') {
     return res.status(404).json({ success: false, error: 'Not found' })
   }
@@ -30,7 +39,7 @@ authRouter.get('/dev-token', (req: Request, res: Response) => {
   const rolesParam = typeof req.query.roles === 'string' ? req.query.roles : 'admin'
   const permsParam = typeof req.query.perms === 'string'
     ? req.query.perms
-    : 'permissions:read,permissions:write,approvals:read,approvals:write,comments:read,comments:write'
+    : '*:*'
   const expiresIn = (typeof req.query.expiresIn === 'string' && req.query.expiresIn.trim()
     ? req.query.expiresIn.trim()
     : '2h') as SignOptions['expiresIn']
@@ -38,15 +47,32 @@ authRouter.get('/dev-token', (req: Request, res: Response) => {
   const roles = rolesParam.split(',').map((v) => v.trim()).filter(Boolean)
   const perms = permsParam.split(',').map((v) => v.trim()).filter(Boolean)
 
-  const secret = process.env.JWT_SECRET || DEV_FALLBACK_JWT_SECRET
+  const secret = secretManager.get('JWT_SECRET', {
+    required: process.env.NODE_ENV === 'production',
+    fallback: DEV_FALLBACK_JWT_SECRET,
+  }) || DEV_FALLBACK_JWT_SECRET
 
   const payload = {
     id: userId,
     roles: roles.length > 0 ? roles : ['admin'],
     perms,
+    sid: randomUUID(),
   }
 
   const token = jwt.sign(payload, secret, { algorithm: 'HS256', expiresIn })
+
+  const decoded = jwt.decode(token) as { exp?: number } | null
+  const expiresAt =
+    typeof decoded?.exp === 'number'
+      ? new Date(decoded.exp * 1000).toISOString()
+      : new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
+
+  await createUserSession(userId, {
+    sessionId: payload.sid,
+    expiresAt,
+    ipAddress: getClientIP(req),
+    userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
+  })
 
   return res.json({ token, payload })
 })
@@ -148,41 +174,6 @@ const registerRateLimiter = (req: Request, res: Response, next: NextFunction) =>
 }
 
 // ============================================
-// Password Validation
-// ============================================
-interface PasswordValidation {
-  valid: boolean
-  errors: string[]
-}
-
-function validatePassword(password: string): PasswordValidation {
-  const errors: string[] = []
-
-  if (password.length < 8) {
-    errors.push('Password must be at least 8 characters long')
-  }
-  if (password.length > 128) {
-    errors.push('Password must not exceed 128 characters')
-  }
-  if (!/[a-z]/.test(password)) {
-    errors.push('Password must contain at least one lowercase letter')
-  }
-  if (!/[A-Z]/.test(password)) {
-    errors.push('Password must contain at least one uppercase letter')
-  }
-  if (!/[0-9]/.test(password)) {
-    errors.push('Password must contain at least one number')
-  }
-  // Check for common weak patterns
-  const weakPatterns = ['password', '123456', 'qwerty', 'abc123', 'letmein', 'admin']
-  if (weakPatterns.some(p => password.toLowerCase().includes(p))) {
-    errors.push('Password contains a common weak pattern')
-  }
-
-  return { valid: errors.length === 0, errors }
-}
-
-// ============================================
 // Input Sanitization
 // ============================================
 function sanitizeEmail(email: string): string {
@@ -192,6 +183,47 @@ function sanitizeEmail(email: string): string {
 function sanitizeName(name: string): string {
   // Remove potentially dangerous characters, keep letters, numbers, spaces
   return name.trim().replace(/[<>'"&;]/g, '').slice(0, 100)
+}
+
+type ProductMode = 'platform' | 'attendance' | 'plm-workbench'
+
+function normalizeProductMode(value: unknown): ProductMode {
+  if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
+  if (value === 'plm-workbench' || value === 'plmWorkbench' || value === 'plm-focused') return 'plm-workbench'
+  return 'platform'
+}
+
+function buildFeaturePayload(authUser: User) {
+  const permissions = Array.isArray(authUser.permissions) ? authUser.permissions : []
+  const attendance = authUser.role === 'admin' || permissions.some((permission) => permission.startsWith('attendance:'))
+  const attendanceAdmin = authUser.role === 'admin' || permissions.includes('attendance:admin')
+  const attendanceImport = attendanceAdmin || permissions.includes('attendance:write')
+  const workflow = FEATURE_FLAGS.workflowEnabled
+
+  return {
+    attendance,
+    workflow,
+    attendanceAdmin,
+    attendanceImport,
+    mode: normalizeProductMode(process.env.PRODUCT_MODE),
+  }
+}
+
+async function getInviteTarget(userId: string, email: string) {
+  const result = await query<{ id: string; email: string; name: string | null; is_active: boolean; updated_at: string }>(
+    `SELECT id, email, name, is_active, updated_at
+     FROM users
+     WHERE id = $1 AND email = $2`,
+    [userId, email],
+  )
+  return result.rows[0] ?? null
+}
+
+function isInviteTokenConsumed(updatedAt: string, issuedAtSeconds?: number): boolean {
+  if (!issuedAtSeconds) return false
+  const updatedAtMs = new Date(updatedAt).getTime()
+  if (!Number.isFinite(updatedAtMs)) return false
+  return updatedAtMs > (issuedAtSeconds * 1000) + 1000
 }
 
 /**
@@ -216,7 +248,10 @@ authRouter.post('/login', loginRateLimiter, async (req: Request, res: Response) 
     const cleanEmail = sanitizeEmail(email)
 
     // 尝试登录
-    const result = await authService.login(cleanEmail, password)
+    const result = await authService.login(cleanEmail, password, {
+      ipAddress: ip,
+      userAgent: req.headers['user-agent'] || null,
+    })
 
     if (!result) {
       logger.warn(`Failed login attempt for ${cleanEmail} from ${ip}`)
@@ -235,7 +270,8 @@ authRouter.post('/login', loginRateLimiter, async (req: Request, res: Response) 
       success: true,
       data: {
         user: result.user,
-        token: result.token
+        token: result.token,
+        features: buildFeaturePayload(result.user),
       }
     })
   } catch (error) {
@@ -328,6 +364,172 @@ authRouter.post('/register', registerRateLimiter, async (req: Request, res: Resp
 })
 
 /**
+ * 邀请链接预览
+ */
+authRouter.get('/invite/preview', async (req: Request, res: Response) => {
+  try {
+    const token = typeof req.query.token === 'string' ? req.query.token.trim() : ''
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invite token is required',
+      })
+    }
+
+    const payload = verifyInviteToken(token)
+    if (!payload) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invite token is invalid or expired',
+      })
+    }
+
+    const target = await getInviteTarget(payload.userId, payload.email)
+    if (!target) {
+      return res.status(404).json({
+        success: false,
+        error: 'Invite target not found',
+      })
+    }
+
+    if (isInviteTokenConsumed(target.updated_at, payload.iat)) {
+      return res.status(409).json({
+        success: false,
+        error: 'Invite token has already been used',
+      })
+    }
+
+    const preset = getAccessPreset(payload.presetId)
+    return res.json({
+      success: true,
+      data: {
+        user: {
+          id: target.id,
+          email: target.email,
+          name: target.name,
+          isActive: target.is_active,
+        },
+        onboarding: buildOnboardingPacket({
+          email: payload.email,
+          preset,
+          temporaryPassword: null,
+          inviteToken: token,
+        }),
+      },
+    })
+  } catch (error) {
+    logger.error('Invite preview error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+    })
+  }
+})
+
+/**
+ * 接受邀请并完成首次密码设置
+ */
+authRouter.post('/invite/accept', async (req: Request, res: Response) => {
+  try {
+    const ip = getClientIP(req)
+    const token = typeof req.body?.token === 'string' ? req.body.token.trim() : ''
+    const password = typeof req.body?.password === 'string' ? req.body.password.trim() : ''
+    const requestedName = typeof req.body?.name === 'string' ? sanitizeName(req.body.name) : ''
+
+    if (!token || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invite token and password are required',
+      })
+    }
+
+    const payload = verifyInviteToken(token)
+    if (!payload) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invite token is invalid or expired',
+      })
+    }
+
+    const passwordValidation = validatePassword(password)
+    if (!passwordValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        error: 'Password does not meet requirements',
+        details: passwordValidation.errors,
+      })
+    }
+
+    const target = await getInviteTarget(payload.userId, payload.email)
+    if (!target) {
+      return res.status(404).json({
+        success: false,
+        error: 'Invite target not found',
+      })
+    }
+
+    if (isInviteTokenConsumed(target.updated_at, payload.iat)) {
+      return res.status(409).json({
+        success: false,
+        error: 'Invite token has already been used',
+      })
+    }
+
+    const passwordHash = await bcrypt.hash(password, Number(process.env.BCRYPT_SALT_ROUNDS || 10))
+    await query(
+      `UPDATE users
+       SET password_hash = $1,
+           is_active = true,
+           name = COALESCE(NULLIF($2, ''), name),
+           updated_at = NOW()
+       WHERE id = $3 AND email = $4`,
+      [passwordHash, requestedName, payload.userId, payload.email],
+    )
+
+    await revokeUserSessions(payload.userId, {
+      updatedBy: payload.userId,
+      reason: 'invite-accepted',
+    })
+    await markInviteAccepted(token, {
+      consumedBy: payload.userId,
+    })
+
+    const result = await authService.login(payload.email, password, {
+      ipAddress: ip,
+      userAgent: req.headers['user-agent'] || null,
+    })
+    if (!result) {
+      return res.status(500).json({
+        success: false,
+        error: 'Invite accepted but automatic login failed',
+      })
+    }
+
+    const preset = getAccessPreset(payload.presetId)
+    return res.json({
+      success: true,
+      data: {
+        user: result.user,
+        token: result.token,
+        onboarding: buildOnboardingPacket({
+          email: payload.email,
+          preset,
+          temporaryPassword: null,
+          inviteToken: null,
+        }),
+        features: buildFeaturePayload(result.user),
+      },
+    })
+  } catch (error) {
+    logger.error('Invite acceptance error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+    })
+  }
+})
+
+/**
  * Token刷新
  */
 authRouter.post('/refresh-token', async (req: Request, res: Response) => {
@@ -360,6 +562,224 @@ authRouter.post('/refresh-token', async (req: Request, res: Response) => {
   } catch (error) {
     logger.error('Token refresh error', error instanceof Error ? error : undefined)
     res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    })
+  }
+})
+
+/**
+ * 服务端注销当前账号所有会话
+ */
+authRouter.post('/logout', async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: 'No token provided'
+      })
+    }
+
+    const user = await authService.verifyToken(token)
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid token'
+      })
+    }
+
+    const payload = authService.readTokenPayload(token)
+    const sessionId = typeof payload?.sid === 'string' && payload.sid.trim().length > 0 ? payload.sid.trim() : null
+    const sessionRevocation = sessionId
+      ? await revokeUserSession(sessionId, {
+          revokedBy: user.id,
+          reason: 'self-logout',
+        })
+      : null
+    const revocation = sessionRevocation
+      ? null
+      : await revokeUserSessions(user.id, {
+          updatedBy: user.id,
+          reason: 'self-logout',
+        })
+
+    res.json({
+      success: true,
+      data: {
+        userId: user.id,
+        sessionId,
+        revokedAfter: sessionRevocation?.revokedAt || revocation?.revokedAfter || null,
+        scope: sessionRevocation ? 'current-session' : 'all-sessions',
+      },
+    })
+  } catch (error) {
+    logger.error('Logout error', error instanceof Error ? error : undefined)
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    })
+  }
+})
+
+/**
+ * 列出当前账号的会话
+ */
+authRouter.get('/sessions', async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: 'No token provided'
+      })
+    }
+
+    const user = await authService.verifyToken(token)
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid token'
+      })
+    }
+
+    const payload = authService.readTokenPayload(token)
+    const currentSessionId = typeof payload?.sid === 'string' && payload.sid.trim().length > 0 ? payload.sid.trim() : null
+    const sessions = await listUserSessions(user.id)
+
+    return res.json({
+      success: true,
+      data: {
+        userId: user.id,
+        currentSessionId,
+        items: sessions,
+      },
+    })
+  } catch (error) {
+    logger.error('List sessions error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    })
+  }
+})
+
+/**
+ * 更新当前会话的最近活跃时间
+ */
+authRouter.post('/sessions/current/ping', async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: 'No token provided'
+      })
+    }
+
+    const user = await authService.verifyToken(token)
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid token'
+      })
+    }
+
+    const payload = authService.readTokenPayload(token)
+    const sessionId = typeof payload?.sid === 'string' && payload.sid.trim().length > 0 ? payload.sid.trim() : null
+    if (!sessionId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Current session is unavailable'
+      })
+    }
+
+    const touched = await touchUserSession(sessionId, {
+      ipAddress: getClientIP(req),
+      userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
+      minIntervalMs: 60_000,
+    })
+    const session = touched ?? await getUserSession(sessionId)
+
+    return res.json({
+      success: true,
+      data: {
+        userId: user.id,
+        sessionId,
+        session,
+        lastSeenAt: session?.lastSeenAt || null,
+      },
+    })
+  } catch (error) {
+    logger.error('Current session ping error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    })
+  }
+})
+
+/**
+ * 注销当前账号的指定会话
+ */
+authRouter.post('/sessions/:sessionId/logout', async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: 'No token provided'
+      })
+    }
+
+    const user = await authService.verifyToken(token)
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid token'
+      })
+    }
+
+    const sessionId = String(req.params.sessionId || '').trim()
+    if (!sessionId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Session ID is required'
+      })
+    }
+
+    const targetSession = await getUserSession(sessionId)
+    if (!targetSession || targetSession.userId !== user.id) {
+      return res.status(404).json({
+        success: false,
+        error: 'Session not found'
+      })
+    }
+
+    const revoked = await revokeUserSession(sessionId, {
+      revokedBy: user.id,
+      reason: 'self-session-logout',
+    })
+
+    return res.json({
+      success: true,
+      data: {
+        userId: user.id,
+        sessionId,
+        revokedAt: revoked?.revokedAt || null,
+      },
+    })
+  } catch (error) {
+    logger.error('Logout session error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
       success: false,
       error: 'Internal server error'
     })
@@ -429,29 +849,12 @@ authRouter.get('/me', async (req: Request, res: Response) => {
     }
 
     const authUser = user as User
-    type ProductMode = 'platform' | 'attendance'
-    const normalizeProductMode = (value: unknown): ProductMode => {
-      if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
-      return 'platform'
-    }
-
-    const permissions = Array.isArray(authUser.permissions) ? authUser.permissions : []
-    const attendance = authUser.role === 'admin' || permissions.some((permission) => permission.startsWith('attendance:'))
-    const attendanceAdmin = authUser.role === 'admin' || permissions.includes('attendance:admin')
-    const attendanceImport = attendanceAdmin || permissions.includes('attendance:write')
-    const workflow = FEATURE_FLAGS.workflowEnabled
 
     res.json({
       success: true,
       data: {
         user: authUser,
-        features: {
-          attendance,
-          workflow,
-          attendanceAdmin,
-          attendanceImport,
-          mode: normalizeProductMode(process.env.PRODUCT_MODE),
-        },
+        features: buildFeaturePayload(authUser),
       }
     })
   } catch (error) {

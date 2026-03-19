@@ -1,8 +1,8 @@
 import type { Request, Response, NextFunction } from 'express'
-import jwt from 'jsonwebtoken'
 import crypto from 'crypto'
 import { metrics } from '../metrics/metrics'
 import { Logger } from '../core/logger'
+import { authService } from './AuthService'
 
 const logger = new Logger('JWTMiddleware')
 
@@ -13,6 +13,8 @@ const AUTH_WHITELIST = [
   '/metrics/prom',
   '/api/auth/login',
   '/api/auth/register',
+  '/api/auth/invite/preview',
+  '/api/auth/invite/accept',
   '/api/auth/refresh',
   '/api/auth/refresh-token',
   '/api/auth/dev-token',
@@ -61,7 +63,7 @@ function getSecret(): string {
   return cachedSecret
 }
 
-export function jwtAuthMiddleware(req: Request, res: Response, next: NextFunction) {
+export async function jwtAuthMiddleware(req: Request, res: Response, next: NextFunction) {
   try {
     const auth = req.headers['authorization'] || ''
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : undefined
@@ -72,20 +74,18 @@ export function jwtAuthMiddleware(req: Request, res: Response, next: NextFunctio
       return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Missing Bearer token' } })
     }
 
-    const secret = getSecret()
-    const payload = jwt.verify(token, secret)
-    // JWT payload is an object with user information
-    if (typeof payload === 'object' && payload !== null) {
-      const normalized = payload as Record<string, unknown>
-      if (normalized.id == null) {
-        const fallbackId = normalized.userId ?? normalized.sub
-        if (fallbackId != null) normalized.id = fallbackId
-      }
-      req.user = normalized as Express.Request['user']
+    void getSecret()
+    const user = await authService.verifyToken(token)
+    if (!user) {
+      metrics.jwtAuthFail.inc({ reason: 'invalid_token' })
+      metrics.authFailures.inc()
+      return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Invalid token' } })
     }
+
+    req.user = user as Express.Request['user']
     return next()
   } catch (err: unknown) {
-    const errorMessage = err instanceof jwt.TokenExpiredError ? 'expired_token' : 'invalid_token'
+    const errorMessage = err instanceof Error && err.name === 'TokenExpiredError' ? 'expired_token' : 'invalid_token'
     metrics.jwtAuthFail.inc({ reason: errorMessage })
     metrics.authFailures.inc()
     return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Invalid token' } })

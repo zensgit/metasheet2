@@ -22,6 +22,10 @@
           >
             {{ item.label }}
           </router-link>
+          <router-link v-if="canManageUsers" to="/admin/users" class="nav-link">{{ navLabels.users }}</router-link>
+          <router-link v-if="canManageUsers" to="/admin/roles" class="nav-link">{{ navLabels.roles }}</router-link>
+          <router-link v-if="canManageUsers" to="/admin/permissions" class="nav-link">{{ navLabels.permissions }}</router-link>
+          <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
           <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
           <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
         </template>
@@ -37,6 +41,7 @@
         </label>
         <template v-if="isLoggedIn">
           <span v-if="accountEmail" class="nav-user">{{ accountEmail }}</span>
+          <router-link to="/settings" class="nav-link">{{ navLabels.mySessions }}</router-link>
           <button class="nav-link nav-link--button" type="button" @click="logout">{{ navLabels.signOut }}</button>
         </template>
       </div>
@@ -51,14 +56,16 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
+import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
 import { useFeatureFlags } from './stores/featureFlags'
-import { clearStoredAuthState, getStoredAuthToken } from './utils/api'
+import { getApiBase } from './utils/api'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
 const { loadProductFeatures, isAttendanceFocused, hasFeature } = useFeatureFlags()
+const { clearToken, getAccessSnapshot, getToken } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 
 const showNav = computed(() => {
@@ -70,7 +77,14 @@ const isPublicRoute = computed(() => {
 })
 const attendanceFocused = computed(() => isAttendanceFocused())
 const isAdmin = computed(() => hasFeature('attendanceAdmin'))
-const isLoggedIn = computed(() => getStoredAuthToken().length > 0)
+const canManageUsers = computed(() => {
+  void route.fullPath
+  return getAccessSnapshot().isAdmin
+})
+const isLoggedIn = computed(() => {
+  void route.fullPath
+  return Boolean(getToken())
+})
 const navLabels = computed(() => {
   if (isZh.value) {
     return {
@@ -81,8 +95,13 @@ const navLabels = computed(() => {
       calendar: '日历',
       gallery: '画廊',
       form: '表单',
+      users: '用户',
+      roles: '角色',
+      permissions: '权限',
+      adminAudit: '管理审计',
       plugins: '插件',
       plm: 'PLM',
+      mySessions: '我的会话',
       signOut: '退出登录',
       language: '语言',
     }
@@ -95,8 +114,13 @@ const navLabels = computed(() => {
     calendar: 'Calendar',
     gallery: 'Gallery',
     form: 'Form',
+    users: 'Users',
+    roles: 'Roles',
+    permissions: 'Permissions',
+    adminAudit: 'Admin Audit',
     plugins: 'Plugins',
     plm: 'PLM',
+    mySessions: 'My Sessions',
     signOut: 'Sign out',
     language: 'Language',
   }
@@ -108,25 +132,33 @@ const brandText = computed(() => {
 })
 
 const accountEmail = computed(() => {
-  const token = getStoredAuthToken()
-  if (!token) return ''
-  const chunks = token.split('.')
-  if (chunks.length < 2) return ''
-  try {
-    const normalized = chunks[1]
-      .replace(/-/g, '+')
-      .replace(/_/g, '/')
-      .padEnd(Math.ceil(chunks[1].length / 4) * 4, '=')
-    const json = atob(normalized)
-    const payload = JSON.parse(json) as { email?: unknown }
-    return typeof payload.email === 'string' ? payload.email : ''
-  } catch {
-    return ''
-  }
+  void route.fullPath
+  return getAccessSnapshot().email
 })
 
-function logout(): void {
-  clearStoredAuthState()
+async function logout(): Promise<void> {
+  const token = getToken()
+  if (token) {
+    try {
+      await fetch(`${getApiBase()}/api/auth/logout`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+    } catch {
+      // Ignore logout network failures and still clear local session.
+    }
+  }
+  clearToken()
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem('metasheet_features')
+      localStorage.removeItem('metasheet_product_mode')
+    }
+  } catch {
+    // Ignore feature cache cleanup failures.
+  }
   window.location.assign('/login')
 }
 
