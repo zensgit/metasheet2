@@ -132,8 +132,7 @@ export class CollabService {
     this.logger.debug(`Left ${target} from room ${room}`)
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  onConnection(handler: (socket: any) => void): void {
+  onConnection(handler: (socket: Socket) => void): void {
     if (!this.io) return
     this.io.on('connection', handler)
   }
