@@ -137,7 +137,12 @@
               {{ preset.label }}{{ preset.group ? ` (${preset.group})` : '' }}
             </option>
           </select>
-          <button class="btn ghost mini" :disabled="!panel.whereUsedFilterPresetKey.value" @click="panel.applyWhereUsedFilterPreset">
+          <button
+            id="plm-where-used-filter-preset-apply"
+            class="btn ghost mini"
+            :disabled="!panel.whereUsedFilterPresetKey.value"
+            @click="panel.applyWhereUsedFilterPreset"
+          >
             应用
           </button>
           <button class="btn ghost mini" :disabled="!panel.whereUsedFilterPresetKey.value" @click="panel.duplicateWhereUsedFilterPreset">
@@ -155,10 +160,20 @@
           <button class="btn ghost mini" :disabled="!panel.whereUsedFilterPresetKey.value" @click="panel.promoteWhereUsedFilterPresetToTeamDefault">
             升默认
           </button>
-          <button class="btn ghost mini" :disabled="!panel.whereUsedFilterPresetKey.value" @click="panel.shareWhereUsedFilterPreset">
+          <button
+            id="plm-where-used-filter-preset-share"
+            class="btn ghost mini"
+            :disabled="!panel.whereUsedFilterPresetKey.value"
+            @click="panel.shareWhereUsedFilterPreset"
+          >
             分享
           </button>
-          <button class="btn ghost mini" :disabled="!panel.whereUsedFilterPresetKey.value" @click="panel.assignWhereUsedPresetGroup">
+          <button
+            id="plm-where-used-filter-preset-assign-group"
+            class="btn ghost mini"
+            :disabled="!panel.whereUsedFilterPresetKey.value"
+            @click="panel.assignWhereUsedPresetGroup"
+          >
             设为分组
           </button>
         </div>
@@ -176,12 +191,18 @@
             class="deep-link-input"
             placeholder="分组（可选）"
           />
-          <button class="btn ghost mini" :disabled="!panel.canSaveWhereUsedFilterPreset.value" @click="panel.saveWhereUsedFilterPreset">
+          <button
+            id="plm-where-used-filter-preset-save"
+            class="btn ghost mini"
+            :disabled="!panel.canSaveWhereUsedFilterPreset.value"
+            @click="panel.saveWhereUsedFilterPreset"
+          >
             保存
           </button>
         </div>
         <div class="field-inline field-actions">
           <button
+            id="plm-where-used-filter-preset-export"
             class="btn ghost mini"
             :disabled="!panel.whereUsedFilterPresets.value.length"
             @click="panel.exportWhereUsedFilterPresets"
@@ -205,6 +226,7 @@
             <option value="replace">覆盖</option>
           </select>
           <button
+            id="plm-where-used-filter-preset-import-apply"
             class="btn ghost mini"
             :disabled="!panel.whereUsedFilterPresetImportText.value"
             @click="panel.importWhereUsedFilterPresets"
@@ -229,7 +251,11 @@
           >
             清空
           </button>
-          <button class="btn ghost mini" @click="panel.showWhereUsedPresetManager.value = !panel.showWhereUsedPresetManager.value">
+          <button
+            id="plm-where-used-filter-preset-manager-toggle"
+            class="btn ghost mini"
+            @click="panel.showWhereUsedPresetManager.value = !panel.showWhereUsedPresetManager.value"
+          >
             {{ panel.showWhereUsedPresetManager.value ? '收起' : '管理' }}
           </button>
         </div>

@@ -123,7 +123,12 @@
               {{ preset.label }}{{ preset.group ? ` (${preset.group})` : '' }}
             </option>
           </select>
-          <button class="btn ghost mini" :disabled="!panel.bomFilterPresetKey.value" @click="panel.applyBomFilterPreset">
+          <button
+            id="plm-bom-filter-preset-apply"
+            class="btn ghost mini"
+            :disabled="!panel.bomFilterPresetKey.value"
+            @click="panel.applyBomFilterPreset"
+          >
             应用
           </button>
           <button class="btn ghost mini" :disabled="!panel.bomFilterPresetKey.value" @click="panel.duplicateBomFilterPreset">
@@ -141,10 +146,20 @@
           <button class="btn ghost mini" :disabled="!panel.bomFilterPresetKey.value" @click="panel.promoteBomFilterPresetToTeamDefault">
             升默认
           </button>
-          <button class="btn ghost mini" :disabled="!panel.bomFilterPresetKey.value" @click="panel.shareBomFilterPreset">
+          <button
+            id="plm-bom-filter-preset-share"
+            class="btn ghost mini"
+            :disabled="!panel.bomFilterPresetKey.value"
+            @click="panel.shareBomFilterPreset"
+          >
             分享
           </button>
-          <button class="btn ghost mini" :disabled="!panel.bomFilterPresetKey.value" @click="panel.assignBomPresetGroup">
+          <button
+            id="plm-bom-filter-preset-assign-group"
+            class="btn ghost mini"
+            :disabled="!panel.bomFilterPresetKey.value"
+            @click="panel.assignBomPresetGroup"
+          >
             设为分组
           </button>
         </div>
@@ -162,12 +177,22 @@
             class="deep-link-input"
             placeholder="分组（可选）"
           />
-          <button class="btn ghost mini" :disabled="!panel.canSaveBomFilterPreset.value" @click="panel.saveBomFilterPreset">
+          <button
+            id="plm-bom-filter-preset-save"
+            class="btn ghost mini"
+            :disabled="!panel.canSaveBomFilterPreset.value"
+            @click="panel.saveBomFilterPreset"
+          >
             保存
           </button>
         </div>
         <div class="field-inline field-actions">
-          <button class="btn ghost mini" :disabled="!panel.bomFilterPresets.value.length" @click="panel.exportBomFilterPresets">
+          <button
+            id="plm-bom-filter-preset-export"
+            class="btn ghost mini"
+            :disabled="!panel.bomFilterPresets.value.length"
+            @click="panel.exportBomFilterPresets"
+          >
             导出
           </button>
           <input
@@ -186,7 +211,12 @@
             <option value="merge">合并</option>
             <option value="replace">覆盖</option>
           </select>
-          <button class="btn ghost mini" :disabled="!panel.bomFilterPresetImportText.value" @click="panel.importBomFilterPresets">
+          <button
+            id="plm-bom-filter-preset-import-apply"
+            class="btn ghost mini"
+            :disabled="!panel.bomFilterPresetImportText.value"
+            @click="panel.importBomFilterPresets"
+          >
             导入
           </button>
           <button class="btn ghost mini" @click="panel.triggerBomFilterPresetFileImport">文件</button>
@@ -207,7 +237,11 @@
           >
             清空
           </button>
-          <button class="btn ghost mini" @click="panel.showBomPresetManager.value = !panel.showBomPresetManager.value">
+          <button
+            id="plm-bom-filter-preset-manager-toggle"
+            class="btn ghost mini"
+            @click="panel.showBomPresetManager.value = !panel.showBomPresetManager.value"
+          >
             {{ panel.showBomPresetManager.value ? '收起' : '管理' }}
           </button>
         </div>
