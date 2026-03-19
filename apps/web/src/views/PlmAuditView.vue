@@ -372,12 +372,21 @@
             >
               {{ savedViewContextBadge(view)?.quickAction?.hint }}
             </span>
+            <span v-if="savedViewTeamPromotionNote(view)" class="plm-audit__muted">
+              {{ savedViewTeamPromotionNote(view) }}
+            </span>
             <span class="plm-audit__muted">{{ savedViewSummary(view.state) }}</span>
             <span class="plm-audit__muted">{{ tr('Updated', '更新于') }}: {{ formatDate(view.updatedAt) }}</span>
           </div>
           <div class="plm-audit__saved-view-actions">
             <button class="plm-audit__button" type="button" @click="applySavedView(view)">
               {{ tr('Apply', '应用') }}
+            </button>
+            <button class="plm-audit__button" type="button" :disabled="auditTeamViewsLoading" @click="promoteSavedViewToTeam(view)">
+              {{ tr('Save to team', '保存到团队') }}
+            </button>
+            <button class="plm-audit__button" type="button" :disabled="auditTeamViewsLoading" @click="promoteSavedViewToTeam(view, { isDefault: true })">
+              {{ tr('Save as default team view', '保存为团队默认视图') }}
             </button>
             <button class="plm-audit__button" type="button" @click="deleteSavedViewEntry(view.id)">
               {{ tr('Delete', '删除') }}
@@ -482,6 +491,7 @@ import {
   savePlmAuditSavedView,
   type PlmAuditSavedView,
 } from './plmAuditSavedViews'
+import { buildPlmAuditSavedViewTeamPromotionDraft } from './plmAuditSavedViewPromotion'
 import {
   buildPlmAuditSavedViewContextBadge,
   buildPlmAuditSavedViewSummary,
@@ -773,9 +783,19 @@ function sortAuditTeamViews(views: PlmWorkbenchTeamView<'audit'>[]) {
 }
 
 function upsertAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
+  const nextItems = auditTeamViews.value
+    .filter((entry) => entry.id !== view.id)
+    .map((entry) => {
+      if (!view.isDefault || !entry.isDefault) return entry
+      return {
+        ...entry,
+        isDefault: false,
+      }
+    })
+
   auditTeamViews.value = sortAuditTeamViews([
     view,
-    ...auditTeamViews.value.filter((entry) => entry.id !== view.id),
+    ...nextItems,
   ])
 }
 
@@ -812,6 +832,10 @@ function savedViewSummary(state: PlmAuditRouteState) {
 
 function savedViewContextBadge(view: PlmAuditSavedView) {
   return buildPlmAuditSavedViewContextBadge(view.state, tr, readCurrentRouteState())
+}
+
+function savedViewTeamPromotionNote(view: PlmAuditSavedView) {
+  return buildPlmAuditSavedViewTeamPromotionDraft(view, tr).localContextNote
 }
 
 function buildSavedViewContextState(
@@ -1109,6 +1133,38 @@ function applySavedView(view: PlmAuditSavedView) {
 function deleteSavedViewEntry(id: string) {
   savedViews.value = deletePlmAuditSavedView(id)
   setStatus(tr('Audit saved view deleted.', '审计已保存视图已删除。'))
+}
+
+async function promoteSavedViewToTeam(
+  view: PlmAuditSavedView,
+  options?: {
+    isDefault?: boolean
+  },
+) {
+  auditTeamViewsLoading.value = true
+  auditTeamViewsError.value = ''
+  try {
+    const draft = buildPlmAuditSavedViewTeamPromotionDraft(view, tr)
+    const saved = await savePlmWorkbenchTeamView('audit', draft.name, draft.state, {
+      isDefault: options?.isDefault,
+    })
+    upsertAuditTeamView(saved)
+    setStatus(
+      [
+        options?.isDefault
+          ? tr('Saved view promoted as the default audit team view.', '已将保存视图提升为默认审计团队视图。')
+          : tr('Saved view promoted to the audit team views.', '已将保存视图提升到审计团队视图。'),
+        draft.localContextNote,
+      ].filter(Boolean).join(' '),
+    )
+  } catch (error: unknown) {
+    auditTeamViewsError.value = error instanceof Error
+      ? error.message
+      : tr('Failed to promote saved view to team', '提升保存视图到团队失败')
+    setStatus(auditTeamViewsError.value, 'error')
+  } finally {
+    auditTeamViewsLoading.value = false
+  }
 }
 
 function applyFilters() {

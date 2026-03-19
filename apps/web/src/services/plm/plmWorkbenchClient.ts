@@ -432,14 +432,23 @@ export async function savePlmWorkbenchTeamView<Kind extends PlmWorkbenchTeamView
   kind: Kind,
   name: string,
   state: PlmWorkbenchTeamViewStateByKind[Kind],
+  options?: {
+    isDefault?: boolean
+  },
 ): Promise<PlmWorkbenchTeamView<Kind>> {
+  const body: Record<string, unknown> = {
+    kind,
+    name,
+    state,
+  }
+
+  if (typeof options?.isDefault === 'boolean') {
+    body.isDefault = options.isDefault
+  }
+
   const payload = await requestJson<unknown>('/api/plm-workbench/views/team', {
     method: 'POST',
-    body: JSON.stringify({
-      kind,
-      name,
-      state,
-    }),
+    body: JSON.stringify(body),
   })
 
   return mapTeamView(kind, payload.data)

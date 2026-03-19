@@ -778,6 +778,72 @@ describe('plmWorkbenchClient', () => {
     )
   })
 
+  it('passes the default flag when saving an audit team view as default', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          id: 'audit-view-default',
+          kind: 'audit',
+          name: '默认审计共享',
+          ownerUserId: 'auditor',
+          canManage: true,
+          isDefault: true,
+          state: {
+            page: 1,
+            q: 'scene-1',
+            actorId: '',
+            kind: 'workbench',
+            action: 'set-default',
+            resourceType: 'plm-team-view-default',
+            from: '',
+            to: '',
+            windowMinutes: 180,
+          },
+        },
+      }),
+    })
+
+    const saved = await savePlmWorkbenchTeamView('audit', '默认审计共享', {
+      page: 1,
+      q: 'scene-1',
+      actorId: '',
+      kind: 'workbench',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+      from: '',
+      to: '',
+      windowMinutes: 180,
+    }, {
+      isDefault: true,
+    })
+
+    expect(saved.isDefault).toBe(true)
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plm-workbench/views/team'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          kind: 'audit',
+          name: '默认审计共享',
+          state: {
+            page: 1,
+            q: 'scene-1',
+            actorId: '',
+            kind: 'workbench',
+            action: 'set-default',
+            resourceType: 'plm-team-view-default',
+            from: '',
+            to: '',
+            windowMinutes: 180,
+          },
+          isDefault: true,
+        }),
+      }),
+    )
+  })
+
   it('normalizes approvals and cad team view states by kind', async () => {
     fetchMock
       .mockResolvedValueOnce({
