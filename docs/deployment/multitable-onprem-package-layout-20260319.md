@@ -33,6 +33,8 @@ The workflow builds:
 - checksum files
 - metadata json
 
+The workflow already supports GitHub Release publishing through `publish_release=true`.
+
 ## Verify before delivery
 
 ```bash
@@ -69,3 +71,9 @@ Current plugin policy:
 
 - ships `plugin-attendance` alongside the core app
 - does not restrict the app shell to `/attendance`
+
+## Customer delivery checklist
+
+Before sending a package to a customer or field team, use:
+
+- `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-onprem-customer-delivery-checklist-20260319.md`

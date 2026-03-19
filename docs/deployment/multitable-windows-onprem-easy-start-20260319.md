@@ -136,3 +136,9 @@ API_BASE="http://127.0.0.1/api" \
 BASE_URL="http://127.0.0.1" \
 scripts/ops/multitable-onprem-package-upgrade.sh
 ```
+
+## 11) Delivery checklist
+
+Before handing this package to a customer or field team, also review:
+
+- `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-onprem-customer-delivery-checklist-20260319.md`
