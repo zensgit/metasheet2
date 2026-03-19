@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { z } from 'zod'
-import { Injector } from '@wendellhu/redi'
+import type { Injector } from '@wendellhu/redi'
 import { ICommentService, type CommentQueryOptions } from '../di/identifiers'
 import { Logger } from '../core/logger'
 import { rbacGuard } from '../rbac/rbac'

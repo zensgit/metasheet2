@@ -60,7 +60,7 @@ PRODUCT_MODE="$(get_env_value PRODUCT_MODE)"
 REQUIRE_TOKEN="$(get_env_value ATTENDANCE_IMPORT_REQUIRE_TOKEN)"
 UPLOAD_DIR="$(get_env_value ATTENDANCE_IMPORT_UPLOAD_DIR)"
 CSV_MAX_ROWS="$(get_env_value ATTENDANCE_IMPORT_CSV_MAX_ROWS)"
-PREFLIGHT_MAX_CSV_ROWS="${ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS:-20000}"
+PREFLIGHT_MAX_CSV_ROWS="${ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS:-100000}"
 
 [[ -n "$JWT_SECRET" ]] || die "JWT_SECRET is missing in ${ENV_FILE}"
 [[ "$JWT_SECRET" != "change-me" ]] || die "JWT_SECRET is still 'change-me' in ${ENV_FILE}"
@@ -85,7 +85,7 @@ if (( PREFLIGHT_MAX_CSV_ROWS < 1000 )); then
 fi
 
 if [[ -z "${CSV_MAX_ROWS}" ]]; then
-  die "ATTENDANCE_IMPORT_CSV_MAX_ROWS is missing in ${ENV_FILE}. Set a production-safe cap (recommended: 20000)."
+  die "ATTENDANCE_IMPORT_CSV_MAX_ROWS is missing in ${ENV_FILE}. Set a production-safe cap (recommended: 100000)."
 fi
 if [[ ! "${CSV_MAX_ROWS}" =~ ^[0-9]+$ ]]; then
   die "ATTENDANCE_IMPORT_CSV_MAX_ROWS must be an integer (got: '${CSV_MAX_ROWS}')."

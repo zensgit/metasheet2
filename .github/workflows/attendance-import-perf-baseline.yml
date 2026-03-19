@@ -55,9 +55,9 @@ on:
         required: false
         default: 'auto'
       csv_rows_limit_hint:
-        description: 'CSV row limit hint used by auto payload selection'
+        description: 'Declared remote CSV row cap used by auto payload selection'
         required: false
-        default: '20000'
+        default: '100000'
       max_preview_ms:
         description: 'Fail if preview latency exceeds this value (optional)'
         required: false
@@ -168,7 +168,7 @@ jobs:
       EXPORT_CSV: ${{ inputs.export_csv || vars.ATTENDANCE_PERF_EXPORT_CSV || 'true' }}
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
       PAYLOAD_SOURCE: ${{ inputs.payload_source || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_PAYLOAD_SOURCE_HIGH || 'auto')) || vars.ATTENDANCE_PERF_PAYLOAD_SOURCE || 'auto' }}
-      CSV_ROWS_LIMIT_HINT: ${{ inputs.csv_rows_limit_hint || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_CSV_ROWS_LIMIT_HINT_HIGH || '100000')) || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '20000' }}
+      CSV_ROWS_LIMIT_HINT: ${{ inputs.csv_rows_limit_hint || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_CSV_ROWS_LIMIT_HINT_HIGH || '100000')) || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '100000' }}
       PERF_WORK_DATE_SPAN_DAYS: ${{ inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_WORK_DATE_SPAN_DAYS_HIGH || '180') || vars.ATTENDANCE_PERF_WORK_DATE_SPAN_DAYS || '366' }}
       MAX_PREVIEW_MS: ${{ inputs.max_preview_ms || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_MAX_PREVIEW_MS_HIGH || '240000')) || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '' }}
       MAX_COMMIT_MS: ${{ inputs.max_commit_ms || (inputs.profile == 'high-scale' && (vars.ATTENDANCE_PERF_MAX_COMMIT_MS_HIGH || '420000')) || vars.ATTENDANCE_PERF_MAX_COMMIT_MS_STANDARD || '420000' }}
