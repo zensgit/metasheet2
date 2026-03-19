@@ -40,6 +40,28 @@ Key outputs:
 - `readiness.md`
 - `readiness.json`
 
+### Pilot handoff bundle
+
+```bash
+cd /Users/huazhou/Downloads/Github/metasheet2-multitable
+pnpm prepare:multitable-pilot:handoff
+```
+
+This copies the latest readiness run plus pilot docs into:
+
+```text
+output/playwright/multitable-pilot-handoff/<timestamp>/
+```
+
+Key outputs:
+
+- `handoff.md`
+- `handoff.json`
+- `readiness.md`
+- `readiness.json`
+- `docs/multitable-internal-pilot-runbook-20260319.md`
+- `docs/multitable-pilot-feedback-template-20260319.md`
+
 ### CI readiness
 
 GitHub Actions workflow:
@@ -112,6 +134,11 @@ Use this checklist before handing the branch to a real team:
 
 ```text
 docs/deployment/multitable-pilot-feedback-template-20260319.md
+```
+7. If the team uses GitHub issues for pilot tracking, open:
+
+```text
+.github/ISSUE_TEMPLATE/multitable-pilot-feedback.yml
 ```
 
 ## Current Pilot Recommendation
