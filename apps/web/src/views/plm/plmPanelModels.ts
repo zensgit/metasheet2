@@ -495,6 +495,7 @@ export type PlmTeamView<TState extends object = PlmTeamViewState> = {
   permissions?: PlmCollaborativePermissions
   isDefault: boolean
   isArchived?: boolean
+  lastDefaultSetAt?: string
   state: TState
   archivedAt?: string
   createdAt?: string
@@ -565,6 +566,38 @@ export type PlmWorkbenchTeamViewStateByKind = {
 export type PlmWorkbenchTeamView<
   Kind extends PlmWorkbenchTeamViewKind = PlmWorkbenchTeamViewKind,
 > = PlmTeamView<PlmWorkbenchTeamViewStateByKind[Kind]> & { kind: Kind }
+
+export type PlmRecommendedWorkbenchScene = {
+  id: string
+  name: string
+  ownerUserId: string
+  isDefault: boolean
+  lastDefaultSetAt?: string
+  recommendationReason: 'default' | 'recent-default' | 'recent-update'
+  recommendationSourceLabel: string
+  recommendationSourceTimestamp?: string
+  primaryActionLabel: string
+  secondaryActionLabel: string
+  updatedAt?: string
+}
+
+export type PlmWorkbenchSceneRecommendationFilter =
+  | ''
+  | PlmRecommendedWorkbenchScene['recommendationReason']
+
+export type PlmWorkbenchSceneSummaryChip = {
+  value: PlmWorkbenchSceneRecommendationFilter
+  label: string
+  count: number
+  active: boolean
+}
+
+export type PlmWorkbenchSceneSummaryHint = {
+  value: PlmWorkbenchSceneRecommendationFilter
+  label: string
+  count: number
+  description: string
+}
 
 export type FilterFieldOption = {
   value: string
@@ -745,11 +778,23 @@ export type PlmProductPanelModel = {
   selectedBatchArchivableWorkbenchTeamViewIds: ComputedRef<string[]>
   selectedBatchRestorableWorkbenchTeamViewIds: ComputedRef<string[]>
   selectedBatchDeletableWorkbenchTeamViewIds: ComputedRef<string[]>
+  sceneCatalogOwnerFilter: Ref<string>
+  sceneCatalogOwnerOptions: ComputedRef<string[]>
+  sceneCatalogRecommendationFilter: Ref<PlmWorkbenchSceneRecommendationFilter>
+  sceneCatalogRecommendationOptions: FilterFieldOption[]
+  sceneCatalogSummaryChips: ComputedRef<PlmWorkbenchSceneSummaryChip[]>
+  sceneCatalogSummaryHint: ComputedRef<PlmWorkbenchSceneSummaryHint>
+  setSceneCatalogRecommendationFilter: (value: PlmWorkbenchSceneRecommendationFilter) => void
+  recommendedWorkbenchScenes: ComputedRef<PlmRecommendedWorkbenchScene[]>
   selectAllWorkbenchTeamViews: () => void
   clearWorkbenchTeamViewSelection: () => void
   archiveWorkbenchTeamViewSelection: PanelAction
   restoreWorkbenchTeamViewSelection: PanelAction
   deleteWorkbenchTeamViewSelection: PanelAction
+  applyRecommendedWorkbenchScene: (viewId: string) => void
+  openRecommendedWorkbenchSceneAudit: (scene: PlmRecommendedWorkbenchScene) => Promise<void>
+  copyRecommendedWorkbenchSceneLink: (viewId: string) => Promise<void>
+  openWorkbenchSceneAudit: PanelAction
   productId: Ref<string>
   productItemNumber: Ref<string>
   itemType: Ref<string>

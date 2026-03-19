@@ -41,6 +41,11 @@ describe('usePlmProductPanel', () => {
     const archiveWorkbenchTeamViewSelection = vi.fn().mockResolvedValue(undefined)
     const restoreWorkbenchTeamViewSelection = vi.fn().mockResolvedValue(undefined)
     const deleteWorkbenchTeamViewSelection = vi.fn().mockResolvedValue(undefined)
+    const applyRecommendedWorkbenchScene = vi.fn()
+    const copyRecommendedWorkbenchSceneLink = vi.fn().mockResolvedValue(undefined)
+    const openRecommendedWorkbenchSceneAudit = vi.fn().mockResolvedValue(undefined)
+    const openWorkbenchSceneAudit = vi.fn().mockResolvedValue(undefined)
+    const setSceneCatalogRecommendationFilter = vi.fn()
 
     const panel = usePlmProductPanel({
       authState: ref('expiring'),
@@ -115,11 +120,48 @@ describe('usePlmProductPanel', () => {
       selectedBatchArchivableWorkbenchTeamViewIds: computed(() => []),
       selectedBatchRestorableWorkbenchTeamViewIds: computed(() => []),
       selectedBatchDeletableWorkbenchTeamViewIds: computed(() => []),
+      sceneCatalogOwnerFilter: ref(''),
+      sceneCatalogOwnerOptions: computed(() => ['owner-1', 'owner-2']),
+      sceneCatalogRecommendationFilter: ref(''),
+      sceneCatalogRecommendationOptions: [
+        { value: '', label: '全部推荐' },
+        { value: 'default', label: '当前默认' },
+      ],
+      sceneCatalogSummaryChips: computed(() => [
+        { value: '', label: '全部推荐', count: 6, active: true },
+        { value: 'default', label: '当前默认', count: 2, active: false },
+      ]),
+      sceneCatalogSummaryHint: computed(() => ({
+        value: '',
+        label: '全部推荐',
+        count: 6,
+        description: '综合展示当前默认、近期默认和近期更新的团队场景，适合快速进入工作台。',
+      })),
+      setSceneCatalogRecommendationFilter,
+      recommendedWorkbenchScenes: computed(() => [
+        {
+          id: 'scene-1',
+          name: '采购默认场景',
+          ownerUserId: 'owner-1',
+          isDefault: true,
+          lastDefaultSetAt: '2026-03-19T10:00:00.000Z',
+          recommendationReason: 'default',
+          recommendationSourceLabel: '当前团队默认场景',
+          recommendationSourceTimestamp: '2026-03-19T10:00:00.000Z',
+          primaryActionLabel: '进入默认场景',
+          secondaryActionLabel: '查看默认变更',
+          updatedAt: '2026-03-13T08:00:00.000Z',
+        },
+      ]),
       selectAllWorkbenchTeamViews,
       clearWorkbenchTeamViewSelection,
       archiveWorkbenchTeamViewSelection,
       restoreWorkbenchTeamViewSelection,
       deleteWorkbenchTeamViewSelection,
+      applyRecommendedWorkbenchScene,
+      copyRecommendedWorkbenchSceneLink,
+      openRecommendedWorkbenchSceneAudit,
+      openWorkbenchSceneAudit,
       productId: ref('ITEM-1'),
       productItemNumber: ref('PN-1'),
       itemType: ref('Part'),
@@ -177,6 +219,11 @@ describe('usePlmProductPanel', () => {
       archiveWorkbenchTeamViewSelection,
       restoreWorkbenchTeamViewSelection,
       deleteWorkbenchTeamViewSelection,
+      applyRecommendedWorkbenchScene,
+      copyRecommendedWorkbenchSceneLink,
+      openRecommendedWorkbenchSceneAudit,
+      openWorkbenchSceneAudit,
+      setSceneCatalogRecommendationFilter,
     }
   }
 
@@ -220,5 +267,46 @@ describe('usePlmProductPanel', () => {
     expect(panel.archiveWorkbenchTeamViewSelection).toHaveBeenCalledTimes(1)
     expect(panel.restoreWorkbenchTeamViewSelection).toHaveBeenCalledTimes(1)
     expect(panel.deleteWorkbenchTeamViewSelection).toHaveBeenCalledTimes(1)
+  })
+
+  it('exposes scene catalog actions and state through the panel contract', async () => {
+    const panel = createPanel()
+
+    expect(panel.productPanel.sceneCatalogOwnerOptions.value).toEqual(['owner-1', 'owner-2'])
+    expect(panel.productPanel.sceneCatalogRecommendationOptions).toEqual([
+      { value: '', label: '全部推荐' },
+      { value: 'default', label: '当前默认' },
+    ])
+    expect(panel.productPanel.sceneCatalogSummaryChips.value).toEqual([
+      { value: '', label: '全部推荐', count: 6, active: true },
+      { value: 'default', label: '当前默认', count: 2, active: false },
+    ])
+    expect(panel.productPanel.sceneCatalogSummaryHint.value).toEqual({
+      value: '',
+      label: '全部推荐',
+      count: 6,
+      description: '综合展示当前默认、近期默认和近期更新的团队场景，适合快速进入工作台。',
+    })
+    expect(panel.productPanel.recommendedWorkbenchScenes.value).toHaveLength(1)
+    expect(panel.productPanel.recommendedWorkbenchScenes.value[0]).toMatchObject({
+      recommendationSourceLabel: '当前团队默认场景',
+      recommendationSourceTimestamp: '2026-03-19T10:00:00.000Z',
+      primaryActionLabel: '进入默认场景',
+      secondaryActionLabel: '查看默认变更',
+    })
+
+    const scene = panel.productPanel.recommendedWorkbenchScenes.value[0]
+
+    panel.productPanel.setSceneCatalogRecommendationFilter('default')
+    panel.productPanel.applyRecommendedWorkbenchScene('scene-1')
+    await panel.productPanel.openRecommendedWorkbenchSceneAudit(scene)
+    await panel.productPanel.copyRecommendedWorkbenchSceneLink('scene-1')
+    await panel.productPanel.openWorkbenchSceneAudit()
+
+    expect(panel.setSceneCatalogRecommendationFilter).toHaveBeenCalledWith('default')
+    expect(panel.applyRecommendedWorkbenchScene).toHaveBeenCalledWith('scene-1')
+    expect(panel.openRecommendedWorkbenchSceneAudit).toHaveBeenCalledWith(scene)
+    expect(panel.copyRecommendedWorkbenchSceneLink).toHaveBeenCalledWith('scene-1')
+    expect(panel.openWorkbenchSceneAudit).toHaveBeenCalledTimes(1)
   })
 })

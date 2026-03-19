@@ -21,6 +21,31 @@
       </div>
     </header>
 
+    <section v-if="auditSceneContext" class="plm-audit__context">
+      <div>
+        <small class="plm-audit__summary-source">{{ auditSceneContext.sourceLabel }}</small>
+        <strong>{{ auditSceneContext.title }}</strong>
+        <p class="plm-audit__muted">{{ auditSceneContext.description }}</p>
+      </div>
+      <div class="plm-audit__context-meta">
+        <span v-if="auditSceneContext.sceneName">{{ tr('Scene', '场景') }}: {{ auditSceneContext.sceneName }}</span>
+        <span v-if="auditSceneContext.sceneId">ID: {{ auditSceneContext.sceneId }}</span>
+        <span v-if="auditSceneContext.sceneOwnerUserId">Owner: {{ auditSceneContext.sceneOwnerUserId }}</span>
+      </div>
+      <div class="plm-audit__context-actions">
+        <button
+          v-for="actionItem in auditSceneToken?.actions || []"
+          :key="`scene-context-${actionItem.kind}-${actionItem.emphasis}`"
+          class="plm-audit__button"
+          type="button"
+          :disabled="logsLoading"
+          @click="runAuditSceneTokenAction(actionItem.kind)"
+        >
+          {{ actionItem.label }}
+        </button>
+      </div>
+    </section>
+
     <section class="plm-audit__summary">
       <article class="plm-audit__summary-card">
         <span class="plm-audit__summary-label">{{ tr('Window', '窗口') }}</span>
@@ -33,6 +58,29 @@
       <article class="plm-audit__summary-card">
         <span class="plm-audit__summary-label">{{ tr('Top actions', '主要动作') }}</span>
         <strong>{{ actionLabel(summary.actions[0]?.action || '') || '--' }}</strong>
+      </article>
+      <article
+        v-if="auditSceneSummaryCard"
+        class="plm-audit__summary-card plm-audit__summary-card--context"
+        :class="{
+          'plm-audit__summary-card--active': auditSceneSummaryCard.active,
+          'plm-audit__summary-card--owner': auditSceneSummaryCard.kind === 'owner',
+          'plm-audit__summary-card--scene': auditSceneSummaryCard.kind === 'scene',
+        }"
+      >
+        <small class="plm-audit__summary-source">{{ auditSceneSummaryCard.sourceLabel }}</small>
+        <span class="plm-audit__summary-label">{{ auditSceneSummaryCard.label }}</span>
+        <strong>{{ auditSceneSummaryCard.value }}</strong>
+        <span class="plm-audit__muted">{{ auditSceneSummaryCard.description }}</span>
+        <button
+          v-if="auditSceneSummaryCard.action"
+          class="plm-audit__button plm-audit__button--inline"
+          type="button"
+          :disabled="logsLoading"
+          @click="runAuditSceneSummaryAction(auditSceneSummaryCard.action)"
+        >
+          {{ auditSceneSummaryCard.actionLabel }}
+        </button>
       </article>
     </section>
 
@@ -58,8 +106,61 @@
     </section>
 
     <form class="plm-audit__filters" @submit.prevent="applyFilters">
-      <label class="plm-audit__field">
+      <div
+        v-if="auditSceneFilterHighlight"
+        class="plm-audit__filter-highlight"
+        :class="{
+          'plm-audit__filter-highlight--owner': auditSceneFilterHighlight.kind === 'owner',
+          'plm-audit__filter-highlight--scene': auditSceneFilterHighlight.kind === 'scene',
+        }"
+      >
+        <div>
+          <small class="plm-audit__summary-source">{{ auditSceneFilterHighlight.sourceLabel }}</small>
+          <strong>{{ auditSceneFilterHighlight.label }}</strong>
+          <span class="plm-audit__filter-highlight-value">{{ auditSceneFilterHighlight.value }}</span>
+          <p class="plm-audit__muted">{{ auditSceneFilterHighlight.description }}</p>
+        </div>
+        <button
+          v-for="actionItem in auditSceneFilterHighlight.actions"
+          :key="`scene-filter-${actionItem.kind}-${actionItem.emphasis}`"
+          class="plm-audit__button plm-audit__button--inline"
+          type="button"
+          :disabled="logsLoading"
+          @click="runAuditSceneTokenAction(actionItem.kind)"
+        >
+          {{ actionItem.label }}
+        </button>
+      </div>
+
+      <label class="plm-audit__field" :class="{ 'plm-audit__field--active': auditSceneOwnerContextActive || auditSceneQueryContextActive }">
         <span>{{ tr('Search', '搜索') }}</span>
+        <div
+          v-if="auditSceneInputToken"
+          class="plm-audit__field-token"
+          :class="{
+            'plm-audit__field-token--locked': auditSceneInputToken.locked,
+            'plm-audit__field-token--owner': auditSceneInputToken.kind === 'owner',
+            'plm-audit__field-token--scene': auditSceneInputToken.kind === 'scene',
+          }"
+        >
+          <div class="plm-audit__field-token-meta">
+            <strong>{{ auditSceneInputToken.label }}</strong>
+            <span class="plm-audit__field-token-value">{{ auditSceneInputToken.value }}</span>
+            <small class="plm-audit__muted">{{ auditSceneInputToken.description }}</small>
+          </div>
+          <div class="plm-audit__field-token-actions">
+            <button
+              v-for="actionItem in auditSceneInputToken.actions"
+              :key="`scene-input-${actionItem.kind}-${actionItem.emphasis}`"
+              class="plm-audit__button plm-audit__button--inline"
+              type="button"
+              :disabled="logsLoading"
+              @click="runAuditSceneTokenAction(actionItem.kind)"
+            >
+              {{ actionItem.label }}
+            </button>
+          </div>
+        </div>
         <input v-model="query" type="text" :placeholder="tr('Search actor, resource, or metadata', '搜索操作者、资源或元数据')" />
       </label>
       <label class="plm-audit__field">
@@ -85,6 +186,8 @@
           <option value="archive">{{ tr('Archive', '归档') }}</option>
           <option value="restore">{{ tr('Restore', '恢复') }}</option>
           <option value="delete">{{ tr('Delete', '删除') }}</option>
+          <option value="set-default">{{ tr('Set default', '设为默认') }}</option>
+          <option value="clear-default">{{ tr('Clear default', '取消默认') }}</option>
         </select>
       </label>
       <label class="plm-audit__field">
@@ -93,6 +196,7 @@
           <option value="">{{ tr('All', '全部') }}</option>
           <option value="plm-team-preset-batch">{{ tr('Team preset batch', '团队预设批量') }}</option>
           <option value="plm-team-view-batch">{{ tr('Team view batch', '团队视图批量') }}</option>
+          <option value="plm-team-view-default">{{ tr('Team default scene', '团队默认场景') }}</option>
         </select>
       </label>
       <label class="plm-audit__field">
@@ -159,6 +263,34 @@
         </button>
       </div>
 
+      <div
+        v-if="auditTeamViewContextNote"
+        class="plm-audit__team-view-context"
+        :class="{
+          'plm-audit__team-view-context--active': auditTeamViewContextNote.active,
+          'plm-audit__team-view-context--owner': auditTeamViewContextNote.kind === 'owner',
+          'plm-audit__team-view-context--scene': auditTeamViewContextNote.kind === 'scene',
+        }"
+      >
+        <div class="plm-audit__team-view-context-meta">
+          <small class="plm-audit__summary-source">{{ auditTeamViewContextNote.sourceLabel }}</small>
+          <strong>{{ auditTeamViewContextNote.label }}: {{ auditTeamViewContextNote.value }}</strong>
+          <span class="plm-audit__muted">{{ auditTeamViewContextNote.description }}</span>
+        </div>
+        <div class="plm-audit__team-view-context-actions">
+          <button
+            v-for="actionItem in auditTeamViewContextNote.actions"
+            :key="`team-view-context-${actionItem.kind}-${actionItem.emphasis}`"
+            class="plm-audit__button plm-audit__button--inline"
+            type="button"
+            :disabled="logsLoading || auditTeamViewsLoading"
+            @click="runAuditSceneTokenAction(actionItem.kind)"
+          >
+            {{ actionItem.label }}
+          </button>
+        </div>
+      </div>
+
       <p v-if="defaultAuditTeamViewLabel" class="plm-audit__muted">
         {{ tr('Current default', '当前默认') }}: {{ defaultAuditTeamViewLabel }}
       </p>
@@ -212,6 +344,34 @@
         >
           <div class="plm-audit__saved-view-meta">
             <strong>{{ view.name }}</strong>
+            <div v-if="savedViewContextBadge(view)" class="plm-audit__saved-view-badges">
+              <span class="plm-audit__saved-view-source">{{ savedViewContextBadge(view)?.sourceLabel }}</span>
+              <span
+                class="plm-audit__saved-view-badge"
+                :class="{
+                  'plm-audit__saved-view-badge--active': savedViewContextBadge(view)?.active,
+                  'plm-audit__saved-view-badge--owner': savedViewContextBadge(view)?.kind === 'owner',
+                  'plm-audit__saved-view-badge--scene': savedViewContextBadge(view)?.kind === 'scene',
+                }"
+              >
+                {{ savedViewContextBadge(view)?.label }}: {{ savedViewContextBadge(view)?.value }}
+              </span>
+              <button
+                v-if="savedViewContextBadge(view)?.quickAction"
+                class="plm-audit__button plm-audit__button--inline"
+                type="button"
+                :disabled="savedViewContextBadge(view)?.quickAction?.disabled"
+                @click="runSavedViewContextAction(view, savedViewContextBadge(view)!.quickAction!.kind)"
+              >
+                {{ savedViewContextBadge(view)?.quickAction?.label }}
+              </button>
+            </div>
+            <span
+              v-if="savedViewContextBadge(view)?.quickAction?.disabled"
+              class="plm-audit__muted"
+            >
+              {{ savedViewContextBadge(view)?.quickAction?.hint }}
+            </span>
             <span class="plm-audit__muted">{{ savedViewSummary(view.state) }}</span>
             <span class="plm-audit__muted">{{ tr('Updated', '更新于') }}: {{ formatDate(view.updatedAt) }}</span>
           </div>
@@ -322,6 +482,29 @@ import {
   savePlmAuditSavedView,
   type PlmAuditSavedView,
 } from './plmAuditSavedViews'
+import {
+  buildPlmAuditSavedViewContextBadge,
+  buildPlmAuditSavedViewSummary,
+} from './plmAuditSavedViewSummary'
+import {
+  buildPlmAuditSceneContextBanner,
+  buildPlmAuditSceneFilterHighlight,
+  resolvePlmAuditSceneSemantic,
+} from './plmAuditSceneCopy'
+import {
+  buildPlmAuditSceneQueryValue,
+  isPlmAuditSceneOwnerContextActive,
+  isPlmAuditSceneQueryContextActive,
+  withPlmAuditSceneOwnerContext,
+  withPlmAuditSceneQueryContext,
+} from './plmAuditSceneContext'
+import { buildPlmAuditSceneInputToken } from './plmAuditSceneInputToken'
+import { buildPlmAuditSceneSummaryCard } from './plmAuditSceneSummary'
+import {
+  buildPlmAuditSceneToken,
+  type PlmAuditSceneTokenActionKind,
+} from './plmAuditSceneToken'
+import { buildPlmAuditTeamViewContextNote } from './plmAuditTeamViewContext'
 import { copyTextToClipboard } from './plm/plmClipboard'
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
 import { buildPlmWorkbenchTeamViewShareUrl } from './plm/plmWorkbenchViewState'
@@ -356,6 +539,9 @@ const resourceType = ref<PlmCollaborativeAuditResourceType | ''>(DEFAULT_PLM_AUD
 const from = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.from)
 const to = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.to)
 const windowMinutes = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.windowMinutes)
+const auditSceneId = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.sceneId)
+const auditSceneName = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.sceneName)
+const auditSceneOwnerUserId = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.sceneOwnerUserId)
 
 const summary = ref<{
   windowMinutes: number
@@ -377,6 +563,39 @@ const defaultAuditTeamView = computed(
 )
 const defaultAuditTeamViewLabel = computed(() => defaultAuditTeamView.value?.name || '')
 const canSaveAuditTeamView = computed(() => Boolean(auditTeamViewName.value.trim()))
+const auditSceneContext = computed(() => {
+  return buildPlmAuditSceneContextBanner({
+    sceneId: auditSceneId.value,
+    sceneName: auditSceneName.value,
+    sceneOwnerUserId: auditSceneOwnerUserId.value,
+    action: action.value,
+    resourceType: resourceType.value,
+    semantic: resolvePlmAuditSceneSemantic({
+      sceneValue: buildPlmAuditSceneQueryValue(readCurrentRouteState()),
+      ownerValue: auditSceneOwnerUserId.value,
+      ownerContextActive: isPlmAuditSceneOwnerContextActive(readCurrentRouteState()),
+      sceneQueryContextActive: isPlmAuditSceneQueryContextActive(readCurrentRouteState()),
+    }),
+  }, tr)
+})
+const auditSceneOwnerContextActive = computed(() => isPlmAuditSceneOwnerContextActive(readCurrentRouteState()))
+const auditSceneQueryContextActive = computed(() => isPlmAuditSceneQueryContextActive(readCurrentRouteState()))
+const auditSceneToken = computed(() => buildPlmAuditSceneToken({
+  sceneValue: buildPlmAuditSceneQueryValue(readCurrentRouteState()),
+  ownerValue: auditSceneOwnerUserId.value,
+  ownerContextActive: auditSceneOwnerContextActive.value,
+  sceneQueryContextActive: auditSceneQueryContextActive.value,
+}, tr))
+const auditSceneInputToken = computed(() => buildPlmAuditSceneInputToken(auditSceneToken.value, tr))
+const auditTeamViewContextNote = computed(() => buildPlmAuditTeamViewContextNote(auditSceneToken.value, tr))
+const auditSceneSummaryCard = computed(() => buildPlmAuditSceneSummaryCard({
+  sceneId: auditSceneId.value,
+  sceneName: auditSceneName.value,
+  sceneOwnerUserId: auditSceneOwnerUserId.value,
+  ownerContextActive: auditSceneOwnerContextActive.value,
+  sceneQueryContextActive: auditSceneQueryContextActive.value,
+}, tr))
+const auditSceneFilterHighlight = computed(() => buildPlmAuditSceneFilterHighlight(auditSceneToken.value, tr))
 const canApplyAuditTeamView = computed(() => {
   const view = selectedAuditTeamView.value
   if (!view || view.isArchived) return false
@@ -415,6 +634,9 @@ function readCurrentRouteState(): PlmAuditRouteState {
     to: to.value,
     windowMinutes: windowMinutes.value,
     teamViewId: auditTeamViewKey.value,
+    sceneId: auditSceneId.value,
+    sceneName: auditSceneName.value,
+    sceneOwnerUserId: auditSceneOwnerUserId.value,
   }
 }
 
@@ -429,6 +651,9 @@ function applyRouteState(state: PlmAuditRouteState) {
   to.value = state.to
   windowMinutes.value = state.windowMinutes
   auditTeamViewKey.value = state.teamViewId
+  auditSceneId.value = state.sceneId
+  auditSceneName.value = state.sceneName
+  auditSceneOwnerUserId.value = state.sceneOwnerUserId
 }
 
 async function syncRouteState(nextState: PlmAuditRouteState, replace = false) {
@@ -440,6 +665,41 @@ async function syncRouteState(nextState: PlmAuditRouteState, replace = false) {
     name: 'plm-audit',
     query: nextQuery,
   })
+}
+
+async function clearAuditSceneContext() {
+  await syncRouteState({
+    ...readCurrentRouteState(),
+    sceneId: '',
+    sceneName: '',
+    sceneOwnerUserId: '',
+  })
+}
+
+async function applyAuditSceneOwnerContext() {
+  await syncRouteState(withPlmAuditSceneOwnerContext(readCurrentRouteState()))
+}
+
+async function restoreAuditSceneQuery() {
+  await syncRouteState(withPlmAuditSceneQueryContext(readCurrentRouteState()))
+}
+
+async function runAuditSceneTokenAction(actionKind: PlmAuditSceneTokenActionKind | null) {
+  if (actionKind === 'clear') {
+    await clearAuditSceneContext()
+    return
+  }
+  if (actionKind === 'owner') {
+    await applyAuditSceneOwnerContext()
+    return
+  }
+  if (actionKind === 'scene') {
+    await restoreAuditSceneQuery()
+  }
+}
+
+async function runAuditSceneSummaryAction(actionKind: 'owner' | 'scene' | null) {
+  await runAuditSceneTokenAction(actionKind)
 }
 
 function tr(en: string, zh: string): string {
@@ -455,12 +715,15 @@ function actionLabel(value: string): string {
   if (value === 'archive') return tr('Archive', '归档')
   if (value === 'restore') return tr('Restore', '恢复')
   if (value === 'delete') return tr('Delete', '删除')
+  if (value === 'set-default') return tr('Set default', '设为默认')
+  if (value === 'clear-default') return tr('Clear default', '取消默认')
   return value || '--'
 }
 
 function resourceTypeLabel(value: string): string {
   if (value === 'plm-team-preset-batch') return tr('Team preset batch', '团队预设批量')
   if (value === 'plm-team-view-batch') return tr('Team view batch', '团队视图批量')
+  if (value === 'plm-team-view-default') return tr('Team default scene', '团队默认场景')
   return value || '--'
 }
 
@@ -544,18 +807,32 @@ function buildAuditTeamViewShareUrl(view: PlmWorkbenchTeamView<'audit'>) {
 }
 
 function savedViewSummary(state: PlmAuditRouteState) {
-  const segments: string[] = []
-  if (state.q) segments.push(`${tr('Query', '查询')}: ${state.q}`)
-  if (state.actorId) segments.push(`${tr('Actor', '操作者')}: ${state.actorId}`)
-  if (state.kind) segments.push(`${tr('Kind', '类型')}: ${state.kind}`)
-  if (state.action) segments.push(`${tr('Action', '动作')}: ${actionLabel(state.action)}`)
-  if (state.resourceType) segments.push(`${tr('Resource', '资源')}: ${resourceTypeLabel(state.resourceType)}`)
-  segments.push(`${tr('Window', '窗口')}: ${state.windowMinutes} ${tr('minutes', '分钟')}`)
-  return segments.join(' · ') || tr('Default audit scope', '默认审计范围')
+  return buildPlmAuditSavedViewSummary(state, tr, actionLabel, resourceTypeLabel)
+}
+
+function savedViewContextBadge(view: PlmAuditSavedView) {
+  return buildPlmAuditSavedViewContextBadge(view.state, tr, readCurrentRouteState())
+}
+
+function buildSavedViewContextState(
+  view: PlmAuditSavedView,
+  actionKind: 'owner' | 'scene',
+) {
+  if (actionKind === 'owner') return withPlmAuditSceneOwnerContext(view.state)
+  return withPlmAuditSceneQueryContext(view.state)
 }
 
 function isSavedViewActive(view: PlmAuditSavedView) {
   return isPlmAuditRouteStateEqual(view.state, readCurrentRouteState())
+}
+
+function runSavedViewContextAction(
+  view: PlmAuditSavedView,
+  actionKind: 'owner' | 'scene',
+) {
+  const badge = savedViewContextBadge(view)
+  if (badge?.quickAction?.disabled) return
+  void syncRouteState(buildSavedViewContextState(view, actionKind))
 }
 
 function downloadCsvText(filename: string, csvText: string) {
@@ -919,6 +1196,32 @@ watch(
   gap: 8px;
 }
 
+.plm-audit__context {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 14px;
+}
+
+.plm-audit__context-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #1e3a8a;
+  font-size: 12px;
+}
+
+.plm-audit__context-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .plm-audit__summary {
   flex-wrap: wrap;
 }
@@ -943,10 +1246,41 @@ watch(
   gap: 6px;
 }
 
+.plm-audit__summary-card--context {
+  min-width: 240px;
+}
+
+.plm-audit__summary-card--active {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.18);
+}
+
+.plm-audit__summary-card--owner {
+  background: linear-gradient(180deg, #f8fbff 0%, #ffffff 100%);
+}
+
+.plm-audit__summary-card--scene {
+  background: linear-gradient(180deg, #f0fdf4 0%, #ffffff 100%);
+}
+
+.plm-audit__button--inline {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
 .plm-audit__summary-label,
 .plm-audit__muted {
   color: #64748b;
   font-size: 12px;
+}
+
+.plm-audit__summary-source,
+.plm-audit__saved-view-source {
+  color: #475569;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .plm-audit__summary-grid {
@@ -980,6 +1314,29 @@ watch(
   padding: 16px;
 }
 
+.plm-audit__filter-highlight {
+  display: flex;
+  flex: 1 1 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+
+.plm-audit__filter-highlight--scene {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.plm-audit__filter-highlight-value {
+  display: inline-flex;
+  margin-left: 8px;
+  font-weight: 700;
+}
+
 .plm-audit__team-views,
 .plm-audit__saved-views {
   display: flex;
@@ -999,6 +1356,35 @@ watch(
 .plm-audit__team-view-row {
   flex-wrap: wrap;
   align-items: center;
+}
+
+.plm-audit__team-view-context {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+
+.plm-audit__team-view-context--scene {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.plm-audit__team-view-context-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plm-audit__team-view-context-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .plm-audit__saved-views-header {
@@ -1044,6 +1430,36 @@ watch(
   gap: 4px;
 }
 
+.plm-audit__saved-view-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.plm-audit__saved-view-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid #dbeafe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.plm-audit__saved-view-badge--scene {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #15803d;
+}
+
+.plm-audit__saved-view-badge--active {
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.14);
+}
+
 .plm-audit__field {
   display: flex;
   flex: 1 1 180px;
@@ -1051,11 +1467,60 @@ watch(
   gap: 6px;
 }
 
+.plm-audit__field-token {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+
+.plm-audit__field-token--locked {
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.12);
+}
+
+.plm-audit__field-token--scene {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.plm-audit__field-token-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plm-audit__field-token-value {
+  display: inline-flex;
+  font-weight: 700;
+}
+
+.plm-audit__field-token-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .plm-audit__field input,
 .plm-audit__field select {
   border: 1px solid #cbd5e1;
   border-radius: 10px;
   padding: 10px 12px;
+}
+
+.plm-audit__field--active span {
+  color: #2563eb;
+  font-weight: 600;
+}
+
+.plm-audit__field--active input,
+.plm-audit__field--active select {
+  border-color: #93c5fd;
+  background: #eff6ff;
 }
 
 .plm-audit__button {

@@ -24,6 +24,9 @@ export interface PlmAuditRouteState {
   to: string
   windowMinutes: number
   teamViewId: string
+  sceneId: string
+  sceneName: string
+  sceneOwnerUserId: string
 }
 
 export const DEFAULT_PLM_AUDIT_ROUTE_STATE: PlmAuditRouteState = {
@@ -37,6 +40,9 @@ export const DEFAULT_PLM_AUDIT_ROUTE_STATE: PlmAuditRouteState = {
   to: '',
   windowMinutes: 180,
   teamViewId: '',
+  sceneId: '',
+  sceneName: '',
+  sceneOwnerUserId: '',
 }
 
 function readString(value: unknown) {
@@ -66,17 +72,26 @@ export function parsePlmAuditRouteState(query: LocationQuery): PlmAuditRouteStat
     actorId: readString(query.auditActor),
     kind: readString(query.auditKind),
     action:
-      action === 'archive' || action === 'restore' || action === 'delete'
+      action === 'archive'
+      || action === 'restore'
+      || action === 'delete'
+      || action === 'set-default'
+      || action === 'clear-default'
         ? action
         : '',
     resourceType:
-      resourceType === 'plm-team-preset-batch' || resourceType === 'plm-team-view-batch'
+      resourceType === 'plm-team-preset-batch'
+      || resourceType === 'plm-team-view-batch'
+      || resourceType === 'plm-team-view-default'
         ? resourceType
         : '',
     from: readString(query.auditFrom),
     to: readString(query.auditTo),
     windowMinutes: normalizeWindowMinutes(query.auditWindow),
     teamViewId: readString(query.auditTeamView),
+    sceneId: readString(query.auditSceneId),
+    sceneName: readString(query.auditSceneName),
+    sceneOwnerUserId: readString(query.auditSceneOwner),
   }
 }
 
@@ -95,6 +110,9 @@ export function buildPlmAuditRouteQuery(state: PlmAuditRouteState): LocationQuer
     query.auditWindow = String(state.windowMinutes)
   }
   if (state.teamViewId) query.auditTeamView = state.teamViewId
+  if (state.sceneId) query.auditSceneId = state.sceneId
+  if (state.sceneName) query.auditSceneName = state.sceneName
+  if (state.sceneOwnerUserId) query.auditSceneOwner = state.sceneOwnerUserId
 
   return query
 }
@@ -147,4 +165,7 @@ export function isPlmAuditRouteStateEqual(left: PlmAuditRouteState, right: PlmAu
     && left.to === right.to
     && left.windowMinutes === right.windowMinutes
     && left.teamViewId === right.teamViewId
+    && left.sceneId === right.sceneId
+    && left.sceneName === right.sceneName
+    && left.sceneOwnerUserId === right.sceneOwnerUserId
 }

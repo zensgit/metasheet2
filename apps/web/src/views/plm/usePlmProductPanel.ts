@@ -3,8 +3,13 @@ import type {
   AuthState,
   DeepLinkPreset,
   PlmDeepLinkPanelOption,
+  FilterFieldOption,
   PlmProductFieldCatalogEntry,
   PlmProductPanelModel,
+  PlmRecommendedWorkbenchScene,
+  PlmWorkbenchSceneSummaryChip,
+  PlmWorkbenchSceneSummaryHint,
+  PlmWorkbenchSceneRecommendationFilter,
   ProductRecord,
   PlmProductViewModel,
   PlmWorkbenchTeamView,
@@ -84,11 +89,23 @@ type UsePlmProductPanelOptions = {
   selectedBatchArchivableWorkbenchTeamViewIds: ComputedRef<string[]>
   selectedBatchRestorableWorkbenchTeamViewIds: ComputedRef<string[]>
   selectedBatchDeletableWorkbenchTeamViewIds: ComputedRef<string[]>
+  sceneCatalogOwnerFilter: Ref<string>
+  sceneCatalogOwnerOptions: ComputedRef<string[]>
+  sceneCatalogRecommendationFilter: Ref<PlmWorkbenchSceneRecommendationFilter>
+  sceneCatalogRecommendationOptions: FilterFieldOption[]
+  sceneCatalogSummaryChips: ComputedRef<PlmWorkbenchSceneSummaryChip[]>
+  sceneCatalogSummaryHint: ComputedRef<PlmWorkbenchSceneSummaryHint>
+  setSceneCatalogRecommendationFilter: (value: PlmWorkbenchSceneRecommendationFilter) => void
+  recommendedWorkbenchScenes: ComputedRef<PlmRecommendedWorkbenchScene[]>
   selectAllWorkbenchTeamViews: () => void
   clearWorkbenchTeamViewSelection: () => void
   archiveWorkbenchTeamViewSelection: () => Promise<void>
   restoreWorkbenchTeamViewSelection: () => Promise<void>
   deleteWorkbenchTeamViewSelection: () => Promise<void>
+  applyRecommendedWorkbenchScene: (viewId: string) => void
+  openRecommendedWorkbenchSceneAudit: (scene: PlmRecommendedWorkbenchScene) => Promise<void>
+  copyRecommendedWorkbenchSceneLink: (viewId: string) => Promise<void>
+  openWorkbenchSceneAudit: () => Promise<void>
   productId: Ref<string>
   productItemNumber: Ref<string>
   itemType: Ref<string>
@@ -248,11 +265,23 @@ export function usePlmProductPanel(options: UsePlmProductPanelOptions) {
     selectedBatchArchivableWorkbenchTeamViewIds: options.selectedBatchArchivableWorkbenchTeamViewIds,
     selectedBatchRestorableWorkbenchTeamViewIds: options.selectedBatchRestorableWorkbenchTeamViewIds,
     selectedBatchDeletableWorkbenchTeamViewIds: options.selectedBatchDeletableWorkbenchTeamViewIds,
+    sceneCatalogOwnerFilter: options.sceneCatalogOwnerFilter,
+    sceneCatalogOwnerOptions: options.sceneCatalogOwnerOptions,
+    sceneCatalogRecommendationFilter: options.sceneCatalogRecommendationFilter,
+    sceneCatalogRecommendationOptions: options.sceneCatalogRecommendationOptions,
+    sceneCatalogSummaryChips: options.sceneCatalogSummaryChips,
+    sceneCatalogSummaryHint: options.sceneCatalogSummaryHint,
+    setSceneCatalogRecommendationFilter: options.setSceneCatalogRecommendationFilter,
+    recommendedWorkbenchScenes: options.recommendedWorkbenchScenes,
     selectAllWorkbenchTeamViews: options.selectAllWorkbenchTeamViews,
     clearWorkbenchTeamViewSelection: options.clearWorkbenchTeamViewSelection,
     archiveWorkbenchTeamViewSelection: options.archiveWorkbenchTeamViewSelection,
     restoreWorkbenchTeamViewSelection: options.restoreWorkbenchTeamViewSelection,
     deleteWorkbenchTeamViewSelection: options.deleteWorkbenchTeamViewSelection,
+    applyRecommendedWorkbenchScene: options.applyRecommendedWorkbenchScene,
+    openRecommendedWorkbenchSceneAudit: options.openRecommendedWorkbenchSceneAudit,
+    copyRecommendedWorkbenchSceneLink: options.copyRecommendedWorkbenchSceneLink,
+    openWorkbenchSceneAudit: options.openWorkbenchSceneAudit,
     productId: options.productId,
     productItemNumber: options.productItemNumber,
     itemType: options.itemType,

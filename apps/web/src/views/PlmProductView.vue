@@ -52,11 +52,13 @@ import type {
   DocumentMetadata,
   DocumentEntry,
   FilterPreset,
+  FilterFieldOption,
   PlmApprovalsPanelModel,
   PlmCadPanelModel,
   PlmDocumentsPanelModel,
   ProductRecord,
   ProductCopyKind,
+  PlmRecommendedWorkbenchScene,
   QuickPickOption,
   SubstituteEntry,
   SubstituteMutationResult,
@@ -83,11 +85,19 @@ import { usePlmTeamViews } from './plm/usePlmTeamViews'
 import { usePlmWhereUsedPanel } from './plm/usePlmWhereUsedPanel'
 import { usePlmWhereUsedState } from './plm/usePlmWhereUsedState'
 import {
+  buildRecommendedWorkbenchScenes,
+  buildWorkbenchSceneCatalogOwnerOptions,
+  buildWorkbenchSceneSummaryChips,
+  buildWorkbenchSceneSummaryHint,
+  WORKBENCH_SCENE_RECOMMENDATION_OPTIONS,
+} from './plm/plmWorkbenchSceneCatalog'
+import {
   buildPlmWorkbenchTeamViewShareUrl,
   mergePlmWorkbenchRouteQuery,
   normalizePlmWorkbenchQuerySnapshot,
   PLM_WORKBENCH_QUERY_KEYS,
 } from './plm/plmWorkbenchViewState'
+import { buildRecommendedWorkbenchSceneAuditQuery } from './plm/plmWorkbenchSceneAudit'
 import {
   applyFilterPreset,
   buildFilterPresetShareUrl,
@@ -4187,6 +4197,12 @@ async function applyWorkbenchTeamViewState(state: PlmWorkbenchViewQueryState) {
 }
 
 const workbenchTeamViewQuery = ref('')
+const sceneCatalogOwnerFilter = ref('')
+const sceneCatalogRecommendationFilter = ref<''
+| 'default'
+| 'recent-default'
+| 'recent-update'>('')
+const sceneCatalogRecommendationOptions: FilterFieldOption[] = WORKBENCH_SCENE_RECOMMENDATION_OPTIONS
 const {
   teamViewKey: workbenchTeamViewKey,
   teamViewName: workbenchTeamViewName,
@@ -4248,6 +4264,71 @@ const {
   copyShareUrl: copyToClipboard,
   shouldAutoApplyDefault: () => !hasExplicitWorkbenchQueryState(),
 })
+
+const sceneCatalogOwnerOptions = computed(() =>
+  buildWorkbenchSceneCatalogOwnerOptions(workbenchTeamViews.value),
+)
+
+const recommendedWorkbenchScenes = computed<PlmRecommendedWorkbenchScene[]>(() =>
+  buildRecommendedWorkbenchScenes(workbenchTeamViews.value, {
+    ownerUserId: sceneCatalogOwnerFilter.value,
+    recommendationFilter: sceneCatalogRecommendationFilter.value,
+  }),
+)
+
+const sceneCatalogSummaryChips = computed(() =>
+  buildWorkbenchSceneSummaryChips(workbenchTeamViews.value, {
+    ownerUserId: sceneCatalogOwnerFilter.value,
+    recommendationFilter: sceneCatalogRecommendationFilter.value,
+  }),
+)
+
+const sceneCatalogSummaryHint = computed(() =>
+  buildWorkbenchSceneSummaryHint(sceneCatalogSummaryChips.value),
+)
+
+function setSceneCatalogRecommendationFilter(value: '' | 'default' | 'recent-default' | 'recent-update') {
+  sceneCatalogRecommendationFilter.value = value
+}
+
+function applyRecommendedWorkbenchScene(viewId: string) {
+  if (!viewId) return
+  workbenchTeamViewKey.value = viewId
+  applyWorkbenchTeamView()
+}
+
+async function copyRecommendedWorkbenchSceneLink(viewId: string) {
+  const view = workbenchTeamViews.value.find((entry) => entry.id === viewId)
+  if (!view) {
+    setDeepLinkMessage('未找到团队场景。', true)
+    return
+  }
+  const copied = await copyToClipboard(
+    buildPlmWorkbenchTeamViewShareUrl('workbench', view, route.path),
+  )
+  if (!copied) {
+    setDeepLinkMessage(`复制团队场景链接失败：${view.name}`, true)
+    return
+  }
+  setDeepLinkMessage(`已复制团队场景链接：${view.name}`)
+}
+
+async function openRecommendedWorkbenchSceneAudit(scene: PlmRecommendedWorkbenchScene) {
+  await router.push({
+    name: 'plm-audit',
+    query: buildRecommendedWorkbenchSceneAuditQuery(scene),
+  })
+}
+
+async function openWorkbenchSceneAudit() {
+  await router.push({
+    name: 'plm-audit',
+    query: {
+      auditType: 'plm-team-view-default',
+      auditKind: 'workbench',
+    },
+  })
+}
 
 const documentTeamViewQuery = ref('')
 const cadTeamViewQuery = ref('')
@@ -5315,11 +5396,23 @@ const { productPanel } = usePlmProductPanel({
   selectedBatchArchivableWorkbenchTeamViewIds,
   selectedBatchRestorableWorkbenchTeamViewIds,
   selectedBatchDeletableWorkbenchTeamViewIds,
+  sceneCatalogOwnerFilter,
+  sceneCatalogOwnerOptions,
+  sceneCatalogRecommendationFilter,
+  sceneCatalogRecommendationOptions,
+  sceneCatalogSummaryChips,
+  sceneCatalogSummaryHint,
+  setSceneCatalogRecommendationFilter,
+  recommendedWorkbenchScenes,
   selectAllWorkbenchTeamViews,
   clearWorkbenchTeamViewSelection,
   archiveWorkbenchTeamViewSelection,
   restoreWorkbenchTeamViewSelection,
   deleteWorkbenchTeamViewSelection,
+  applyRecommendedWorkbenchScene,
+  openRecommendedWorkbenchSceneAudit,
+  copyRecommendedWorkbenchSceneLink,
+  openWorkbenchSceneAudit,
   productId,
   productItemNumber,
   itemType,

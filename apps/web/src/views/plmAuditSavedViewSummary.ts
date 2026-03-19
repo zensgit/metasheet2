@@ -1,0 +1,93 @@
+import {
+  buildPlmAuditSceneQueryValue,
+  isPlmAuditSceneOwnerContextActive,
+  isPlmAuditSceneQueryContextActive,
+  withPlmAuditSceneOwnerContext,
+  withPlmAuditSceneQueryContext,
+} from './plmAuditSceneContext'
+import { buildPlmAuditSceneActionHint, buildPlmAuditSceneSourceCopy } from './plmAuditSceneCopy'
+import type { PlmAuditRouteState } from './plmAuditQueryState'
+import { buildPlmAuditSceneToken } from './plmAuditSceneToken'
+import type { PlmAuditSceneTokenActionKind } from './plmAuditSceneToken'
+
+export type PlmAuditSavedViewContextBadge = {
+  kind: 'owner' | 'scene'
+  sourceLabel: string
+  label: string
+  value: string
+  active: boolean
+  quickAction: {
+    kind: Exclude<PlmAuditSceneTokenActionKind, 'clear'>
+    label: string
+    disabled: boolean
+    hint: string
+  } | null
+}
+
+function isSameSceneContextTarget(
+  left: Pick<PlmAuditRouteState, 'q' | 'sceneId' | 'sceneName' | 'sceneOwnerUserId'>,
+  right: Pick<PlmAuditRouteState, 'q' | 'sceneId' | 'sceneName' | 'sceneOwnerUserId'>,
+) {
+  return left.q === right.q
+    && left.sceneId === right.sceneId
+    && left.sceneName === right.sceneName
+    && left.sceneOwnerUserId === right.sceneOwnerUserId
+}
+
+export function buildPlmAuditSavedViewContextBadge(
+  state: PlmAuditRouteState,
+  tr: (en: string, zh: string) => string,
+  currentState?: Pick<PlmAuditRouteState, 'q' | 'sceneId' | 'sceneName' | 'sceneOwnerUserId'>,
+): PlmAuditSavedViewContextBadge | null {
+  const token = buildPlmAuditSceneToken({
+    sceneValue: buildPlmAuditSceneQueryValue(state),
+    ownerValue: state.sceneOwnerUserId,
+    ownerContextActive: isPlmAuditSceneOwnerContextActive(state),
+    sceneQueryContextActive: isPlmAuditSceneQueryContextActive(state),
+  }, tr)
+
+  if (!token) return null
+
+  const primaryAction = token.actions.find((item) => item.emphasis === 'primary' && item.kind !== 'clear') ?? null
+  const ownerTarget = withPlmAuditSceneOwnerContext(state)
+  const sceneTarget = withPlmAuditSceneQueryContext(state)
+  const quickAction = primaryAction && primaryAction.kind !== 'clear'
+    ? {
+      kind: primaryAction.kind,
+      label: primaryAction.label,
+      disabled:
+        primaryAction.kind === 'owner'
+          ? Boolean(currentState && isSameSceneContextTarget(currentState, ownerTarget))
+          : Boolean(currentState && isSameSceneContextTarget(currentState, sceneTarget)),
+      hint:
+        buildPlmAuditSceneActionHint(primaryAction.kind, tr),
+    }
+    : null
+
+  return {
+    kind: token.kind,
+    sourceLabel: buildPlmAuditSceneSourceCopy('saved-view', tr).label,
+    label: token.label,
+    value: token.value,
+    active: token.active,
+    quickAction,
+  }
+}
+
+export function buildPlmAuditSavedViewSummary(
+  state: PlmAuditRouteState,
+  tr: (en: string, zh: string) => string,
+  actionLabel: (value: string) => string,
+  resourceTypeLabel: (value: string) => string,
+) {
+  const segments: string[] = []
+  if (state.sceneName) segments.push(`${tr('Scene', '场景')}: ${state.sceneName}`)
+  if (state.sceneOwnerUserId) segments.push(`Owner: ${state.sceneOwnerUserId}`)
+  if (state.q) segments.push(`${tr('Query', '查询')}: ${state.q}`)
+  if (state.actorId) segments.push(`${tr('Actor', '操作者')}: ${state.actorId}`)
+  if (state.kind) segments.push(`${tr('Kind', '类型')}: ${state.kind}`)
+  if (state.action) segments.push(`${tr('Action', '动作')}: ${actionLabel(state.action)}`)
+  if (state.resourceType) segments.push(`${tr('Resource', '资源')}: ${resourceTypeLabel(state.resourceType)}`)
+  segments.push(`${tr('Window', '窗口')}: ${state.windowMinutes} ${tr('minutes', '分钟')}`)
+  return segments.join(' · ') || tr('Default audit scope', '默认审计范围')
+}

@@ -263,6 +263,7 @@ function mapTeamView<Kind extends PlmWorkbenchTeamViewKind>(
     permissions,
     isDefault,
     isArchived,
+    lastDefaultSetAt: typeof record.lastDefaultSetAt === 'string' ? record.lastDefaultSetAt : undefined,
     state: normalizeTeamViewState(kind, record.state),
     archivedAt: typeof record.archivedAt === 'string' ? record.archivedAt : undefined,
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
@@ -583,8 +584,11 @@ export async function batchPlmWorkbenchTeamViews<Kind extends PlmWorkbenchTeamVi
   }
 }
 
-export type PlmCollaborativeAuditResourceType = 'plm-team-preset-batch' | 'plm-team-view-batch'
-export type PlmCollaborativeAuditAction = 'archive' | 'restore' | 'delete'
+export type PlmCollaborativeAuditResourceType =
+  | 'plm-team-preset-batch'
+  | 'plm-team-view-batch'
+  | 'plm-team-view-default'
+export type PlmCollaborativeAuditAction = 'archive' | 'restore' | 'delete' | 'set-default' | 'clear-default'
 
 export interface PlmCollaborativeAuditFilters {
   page?: number
@@ -602,6 +606,8 @@ export interface PlmCollaborativeAuditLogMeta {
   tenantId?: string
   ownerUserId?: string
   audit?: string
+  kind?: string
+  viewName?: string
   requestedIds?: string[]
   processedIds?: string[]
   skippedIds?: string[]
@@ -656,6 +662,8 @@ function mapPlmCollaborativeAuditMeta(value: unknown): PlmCollaborativeAuditLogM
     tenantId: typeof record.tenantId === 'string' ? record.tenantId : undefined,
     ownerUserId: typeof record.ownerUserId === 'string' ? record.ownerUserId : undefined,
     audit: typeof record.audit === 'string' ? record.audit : undefined,
+    kind: typeof record.kind === 'string' ? record.kind : undefined,
+    viewName: typeof record.viewName === 'string' ? record.viewName : undefined,
     requestedIds: toStringArray(record.requestedIds),
     processedIds: toStringArray(record.processedIds),
     skippedIds: toStringArray(record.skippedIds),
@@ -669,7 +677,9 @@ function mapPlmCollaborativeAuditMeta(value: unknown): PlmCollaborativeAuditLogM
 function mapPlmCollaborativeAuditLogItem(value: unknown): PlmCollaborativeAuditLogItem {
   const record = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   const resourceType =
-    record.resourceType === 'plm-team-preset-batch' || record.resourceType === 'plm-team-view-batch'
+    record.resourceType === 'plm-team-preset-batch'
+    || record.resourceType === 'plm-team-view-batch'
+    || record.resourceType === 'plm-team-view-default'
       ? record.resourceType
       : ''
 
@@ -763,7 +773,9 @@ export async function getPlmCollaborativeAuditSummary(params?: {
       ? payload.data.resourceTypes
         .map((row) => ({
           resourceType:
-            row.resourceType === 'plm-team-preset-batch' || row.resourceType === 'plm-team-view-batch'
+            row.resourceType === 'plm-team-preset-batch'
+            || row.resourceType === 'plm-team-view-batch'
+            || row.resourceType === 'plm-team-view-default'
               ? row.resourceType
               : undefined,
           total: typeof row.total === 'number' ? row.total : 0,

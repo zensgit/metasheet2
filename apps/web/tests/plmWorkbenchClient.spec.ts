@@ -437,6 +437,7 @@ describe('plmWorkbenchClient', () => {
               ownerUserId: 'dev-user',
               canManage: true,
               isDefault: true,
+              lastDefaultSetAt: '2026-03-19T10:00:00.000Z',
               state: {
                 role: 'primary',
                 filter: 'gear',
@@ -538,6 +539,7 @@ describe('plmWorkbenchClient', () => {
       id: 'view-1',
       kind: 'documents',
       isDefault: true,
+      lastDefaultSetAt: '2026-03-19T10:00:00.000Z',
     })
     expect(saved).toMatchObject({
       id: 'view-2',
@@ -596,6 +598,7 @@ describe('plmWorkbenchClient', () => {
               ownerUserId: 'dev-user',
               canManage: true,
               isDefault: true,
+              lastDefaultSetAt: '2026-03-19T09:00:00.000Z',
               state: {
                 query: {
                   productId: 'prod-100',
@@ -644,6 +647,7 @@ describe('plmWorkbenchClient', () => {
     expect(listed.items[0]).toMatchObject({
       id: 'view-workbench',
       kind: 'workbench',
+      lastDefaultSetAt: '2026-03-19T09:00:00.000Z',
       state: {
         query: {
           productId: 'prod-100',
@@ -1204,10 +1208,12 @@ describe('plmWorkbenchClient', () => {
           actions: [
             { action: 'archive', total: 6 },
             { action: 'restore', total: 2 },
+            { action: 'set-default', total: 1 },
           ],
           resourceTypes: [
             { resourceType: 'plm-team-view-batch', total: 5 },
             { resourceType: 'plm-team-preset-batch', total: 3 },
+            { resourceType: 'plm-team-view-default', total: 1 },
           ],
         },
       }),
@@ -1223,10 +1229,12 @@ describe('plmWorkbenchClient', () => {
       actions: [
         { action: 'archive', total: 6 },
         { action: 'restore', total: 2 },
+        { action: 'set-default', total: 1 },
       ],
       resourceTypes: [
         { resourceType: 'plm-team-view-batch', total: 5 },
         { resourceType: 'plm-team-preset-batch', total: 3 },
+        { resourceType: 'plm-team-view-default', total: 1 },
       ],
     })
     expect(fetchMock).toHaveBeenCalledWith(
@@ -1268,6 +1276,67 @@ describe('plmWorkbenchClient', () => {
       expect.objectContaining({
         headers: expect.objectContaining({
           Accept: 'text/csv',
+          Authorization: 'Bearer test-token',
+        }),
+      }),
+    )
+  })
+
+  it('maps default-scene audit logs', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          items: [
+            {
+              id: 'audit-default-1',
+              actorId: 'owner-1',
+              actorType: 'user',
+              action: 'set-default',
+              resourceType: 'plm-team-view-default',
+              resourceId: 'scene-1',
+              requestId: 'req-default-1',
+              ip: '127.0.0.1',
+              userAgent: 'Vitest',
+              occurredAt: '2026-03-13T07:00:00.000Z',
+              meta: {
+                kind: 'workbench',
+                viewName: '采购团队场景',
+                processedKinds: ['workbench'],
+                processedTotal: 1,
+              },
+            },
+          ],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+        },
+      }),
+    })
+
+    const result = await listPlmCollaborativeAuditLogs({
+      page: 1,
+      pageSize: 20,
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+      kind: 'workbench',
+    })
+
+    expect(result.items[0]).toMatchObject({
+      id: 'audit-default-1',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+      meta: {
+        kind: 'workbench',
+        viewName: '采购团队场景',
+        processedKinds: ['workbench'],
+      },
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plm-workbench/audit-logs?page=1&pageSize=20&action=set-default&resourceType=plm-team-view-default&kind=workbench'),
+      expect.objectContaining({
+        headers: expect.objectContaining({
           Authorization: 'Bearer test-token',
         }),
       }),

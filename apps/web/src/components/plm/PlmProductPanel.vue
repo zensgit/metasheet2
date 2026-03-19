@@ -205,6 +205,112 @@
       :delete-team-view-selection="panel.deleteWorkbenchTeamViewSelection"
     />
 
+    <div class="scene-catalog">
+      <div class="scene-catalog__header">
+        <div>
+          <h2>团队场景目录</h2>
+          <p class="muted">快速应用当前团队推荐场景，或跳转查看默认场景变更审计。</p>
+        </div>
+        <div class="scene-catalog__toolbar">
+          <label
+            v-if="panel.sceneCatalogOwnerOptions.value.length"
+            class="scene-catalog__filter"
+            for="plm-scene-catalog-owner"
+          >
+            <span>Owner</span>
+            <select
+              id="plm-scene-catalog-owner"
+              v-model="panel.sceneCatalogOwnerFilter.value"
+              name="plmSceneCatalogOwner"
+            >
+              <option value="">全部</option>
+              <option v-for="owner in panel.sceneCatalogOwnerOptions.value" :key="owner" :value="owner">
+                {{ owner }}
+              </option>
+            </select>
+          </label>
+          <label class="scene-catalog__filter" for="plm-scene-catalog-recommendation">
+            <span>推荐</span>
+            <select
+              id="plm-scene-catalog-recommendation"
+              v-model="panel.sceneCatalogRecommendationFilter.value"
+              name="plmSceneCatalogRecommendation"
+            >
+              <option
+                v-for="option in panel.sceneCatalogRecommendationOptions"
+                :key="option.value || 'all'"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+          <button class="btn ghost" @click="panel.openWorkbenchSceneAudit">查看场景审计</button>
+        </div>
+      </div>
+      <div v-if="panel.sceneCatalogSummaryChips.value.length" class="scene-catalog__summary">
+        <button
+          v-for="chip in panel.sceneCatalogSummaryChips.value"
+          :key="chip.value || 'all'"
+          class="scene-catalog__summary-chip"
+          :class="{ 'scene-catalog__summary-chip--active': chip.active }"
+          type="button"
+          :aria-pressed="chip.active"
+          @click="handleSceneCatalogSummaryClick(chip.value)"
+        >
+          <span>{{ chip.label }}</span>
+          <strong>{{ chip.count }}</strong>
+        </button>
+      </div>
+      <p v-if="panel.sceneCatalogSummaryHint.value" class="scene-catalog__summary-hint">
+        <strong>{{ panel.sceneCatalogSummaryHint.value.label }}</strong>
+        <span>共 {{ panel.sceneCatalogSummaryHint.value.count }} 个场景。</span>
+        <span>{{ panel.sceneCatalogSummaryHint.value.description }}</span>
+      </p>
+      <div v-if="panel.recommendedWorkbenchScenes.value.length" class="scene-catalog__list">
+        <article
+          v-for="scene in panel.recommendedWorkbenchScenes.value"
+          :key="scene.id"
+          class="scene-catalog__item"
+          :class="{ 'scene-catalog__item--highlighted': highlightedSceneId === scene.id }"
+          :ref="(el) => setSceneCatalogItemRef(scene.id, el)"
+          :data-scene-id="scene.id"
+          tabindex="-1"
+        >
+          <div class="scene-catalog__meta">
+            <strong>{{ scene.name }}</strong>
+            <span
+              v-if="sceneBadgeLabel(scene)"
+              class="scene-catalog__badge"
+              :class="{ 'scene-catalog__badge--default': scene.isDefault }"
+            >
+              {{ sceneBadgeLabel(scene) }}
+            </span>
+            <span class="muted">Owner: {{ scene.ownerUserId || '-' }}</span>
+            <span v-if="scene.lastDefaultSetAt" class="muted">
+              最近设默认 {{ panel.formatTime(scene.lastDefaultSetAt) }}
+            </span>
+            <span class="muted">更新于 {{ panel.formatTime(scene.updatedAt) }}</span>
+            <span class="scene-catalog__reason">
+              推荐来源：{{ scene.recommendationSourceLabel }}
+              <template v-if="scene.recommendationSourceTimestamp">
+                · {{ panel.formatTime(scene.recommendationSourceTimestamp) }}
+              </template>
+            </span>
+          </div>
+          <div class="scene-catalog__actions">
+            <button class="btn ghost mini" @click="panel.applyRecommendedWorkbenchScene(scene.id)">
+              {{ scene.primaryActionLabel }}
+            </button>
+            <button class="btn ghost mini" @click="panel.openRecommendedWorkbenchSceneAudit(scene)">
+              {{ scene.secondaryActionLabel }}
+            </button>
+          </div>
+        </article>
+      </div>
+      <p v-else class="muted">暂无团队场景。</p>
+    </div>
+
     <div class="form-grid">
       <label for="plm-product-id">
         产品 ID
@@ -334,12 +440,75 @@
 </template>
 
 <script setup lang="ts">
+import { nextTick, onBeforeUnmount, ref, type ComponentPublicInstance } from 'vue'
 import PlmTeamViewsBlock from './PlmTeamViewsBlock.vue'
-import type { PlmProductPanelModel } from '../../views/plm/plmPanelModels'
+import type {
+  PlmProductPanelModel,
+  PlmRecommendedWorkbenchScene,
+  PlmWorkbenchSceneRecommendationFilter,
+} from '../../views/plm/plmPanelModels'
 
-defineProps<{
+const props = defineProps<{
   panel: PlmProductPanelModel
 }>()
+
+const highlightedSceneId = ref('')
+const sceneCatalogItemRefs = new Map<string, HTMLElement>()
+let sceneCatalogHighlightTimer: ReturnType<typeof setTimeout> | null = null
+
+function setSceneCatalogItemRef(
+  sceneId: string,
+  el: Element | ComponentPublicInstance | null,
+) {
+  if (el instanceof HTMLElement) {
+    sceneCatalogItemRefs.set(sceneId, el)
+    return
+  }
+  sceneCatalogItemRefs.delete(sceneId)
+}
+
+function clearSceneCatalogHighlight() {
+  if (sceneCatalogHighlightTimer) {
+    clearTimeout(sceneCatalogHighlightTimer)
+    sceneCatalogHighlightTimer = null
+  }
+  highlightedSceneId.value = ''
+}
+
+function highlightScene(sceneId: string) {
+  clearSceneCatalogHighlight()
+  highlightedSceneId.value = sceneId
+  sceneCatalogHighlightTimer = setTimeout(() => {
+    highlightedSceneId.value = ''
+    sceneCatalogHighlightTimer = null
+  }, 1600)
+}
+
+async function handleSceneCatalogSummaryClick(value: PlmWorkbenchSceneRecommendationFilter) {
+  props.panel.setSceneCatalogRecommendationFilter(value)
+  await nextTick()
+  const targetScene = props.panel.recommendedWorkbenchScenes.value[0]
+  if (!targetScene) {
+    clearSceneCatalogHighlight()
+    return
+  }
+  highlightScene(targetScene.id)
+  const element = sceneCatalogItemRefs.get(targetScene.id)
+  element?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
+  element?.focus?.({ preventScroll: true })
+}
+
+onBeforeUnmount(() => {
+  clearSceneCatalogHighlight()
+  sceneCatalogItemRefs.clear()
+})
+
+function sceneBadgeLabel(scene: PlmRecommendedWorkbenchScene) {
+  if (scene.isDefault) return '默认'
+  if (scene.recommendationReason === 'recent-default') return '近期默认'
+  if (scene.recommendationReason === 'recent-update') return '近期更新'
+  return ''
+}
 </script>
 
 <style scoped src="./PlmPanelShared.css"></style>
