@@ -49,14 +49,19 @@ interface PlmWorkbenchTeamViewConflictBuilder {
 
 type PlmTeamPresetBatchAction = 'archive' | 'restore' | 'delete'
 type PlmTeamViewBatchAction = 'archive' | 'restore' | 'delete'
-type PlmCollaborativeAuditResourceType = 'plm-team-preset-batch' | 'plm-team-view-batch'
+type PlmTeamViewDefaultAuditAction = 'set-default' | 'clear-default'
+type PlmCollaborativeAuditResourceType = 'plm-team-preset-batch' | 'plm-team-view-batch' | 'plm-team-view-default'
 const UUID_LIKE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const PLM_COLLABORATIVE_AUDIT_RESOURCE_TYPES: PlmCollaborativeAuditResourceType[] = [
   'plm-team-preset-batch',
   'plm-team-view-batch',
+  'plm-team-view-default',
 ]
 
-type PlmCollaborativeAuditAction = PlmTeamPresetBatchAction | PlmTeamViewBatchAction
+type PlmCollaborativeAuditAction =
+  | PlmTeamPresetBatchAction
+  | PlmTeamViewBatchAction
+  | PlmTeamViewDefaultAuditAction
 
 interface PlmCollaborativeAuditEntry {
   id: string
@@ -173,7 +178,26 @@ function csvCell(value: unknown): string {
 function normalizePlmAuditResourceType(value: unknown): PlmCollaborativeAuditResourceType | null {
   if (typeof value !== 'string') return null
   const normalized = value.trim().toLowerCase()
-  if (normalized === 'plm-team-preset-batch' || normalized === 'plm-team-view-batch') {
+  if (
+    normalized === 'plm-team-preset-batch'
+    || normalized === 'plm-team-view-batch'
+    || normalized === 'plm-team-view-default'
+  ) {
+    return normalized
+  }
+  return null
+}
+
+function normalizePlmCollaborativeAuditAction(value: unknown): PlmCollaborativeAuditAction | null {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().toLowerCase()
+  if (
+    normalized === 'archive'
+    || normalized === 'restore'
+    || normalized === 'delete'
+    || normalized === 'set-default'
+    || normalized === 'clear-default'
+  ) {
     return normalized
   }
   return null
@@ -236,39 +260,15 @@ function buildPlmCollaborativeAuditWhere(paramsInput: PlmCollaborativeAuditWhere
   }
 }
 
-async function persistPlmCollaborativeBatchAudit(params: {
+async function persistPlmCollaborativeAuditEvent(params: {
+  route: string
   resourceType: PlmCollaborativeAuditResourceType
   action: PlmCollaborativeAuditAction
-  tenantId: string
   ownerUserId: string
-  requestedIds: string[]
-  processedIds: string[]
-  skippedIds: string[]
-  processedKinds?: string[]
+  resourceId: string
+  meta: Record<string, unknown>
 }) {
-  const resourceId =
-    params.processedIds[0]
-    || params.requestedIds[0]
-    || `${params.tenantId}:${params.resourceType}:${params.action}`
-
   try {
-    const route =
-      params.resourceType === 'plm-team-preset-batch'
-        ? '/api/plm-workbench/filter-presets/team/batch'
-        : '/api/plm-workbench/views/team/batch'
-    const meta = {
-      tenantId: params.tenantId,
-      ownerUserId: params.ownerUserId,
-      audit: params.resourceType,
-      requestedIds: params.requestedIds,
-      processedIds: params.processedIds,
-      skippedIds: params.skippedIds,
-      processedKinds: params.processedKinds ?? [],
-      requestedTotal: params.requestedIds.length,
-      processedTotal: params.processedIds.length,
-      skippedTotal: params.skippedIds.length,
-    }
-
     await pgQuery(
       `INSERT INTO operation_audit_logs (
         actor_id,
@@ -291,19 +291,61 @@ async function persistPlmCollaborativeBatchAudit(params: {
         'user',
         params.action,
         params.resourceType,
-        resourceId,
+        params.resourceId,
         null,
         null,
         null,
-        route,
+        params.route,
         200,
         0,
-        JSON.stringify(meta),
+        JSON.stringify(params.meta),
       ],
     )
   } catch (error: unknown) {
     logger.warn(`Failed to persist ${params.resourceType} audit event`, error as Error)
   }
+}
+
+async function persistPlmCollaborativeBatchAudit(params: {
+  resourceType: PlmCollaborativeAuditResourceType
+  action: PlmCollaborativeAuditAction
+  tenantId: string
+  ownerUserId: string
+  requestedIds: string[]
+  processedIds: string[]
+  skippedIds: string[]
+  processedKinds?: string[]
+}) {
+  const resourceId =
+    params.processedIds[0]
+    || params.requestedIds[0]
+    || `${params.tenantId}:${params.resourceType}:${params.action}`
+
+  const route =
+    params.resourceType === 'plm-team-preset-batch'
+      ? '/api/plm-workbench/filter-presets/team/batch'
+      : '/api/plm-workbench/views/team/batch'
+  const meta = {
+    tenantId: params.tenantId,
+    ownerUserId: params.ownerUserId,
+    audit: params.resourceType,
+    requestedIds: params.requestedIds,
+    processedIds: params.processedIds,
+    skippedIds: params.skippedIds,
+    processedKinds: params.processedKinds ?? [],
+    requestedTotal: params.requestedIds.length,
+    processedTotal: params.processedIds.length,
+    skippedTotal: params.skippedIds.length,
+  }
+
+  await persistPlmCollaborativeAuditEvent({
+    route,
+    resourceType: params.resourceType,
+    action: params.action,
+    ownerUserId: params.ownerUserId,
+    resourceId,
+    meta,
+  })
 }
 
 async function logPlmTeamPresetBatchAudit(params: {
@@ -374,6 +416,46 @@ async function logPlmTeamViewBatchAudit(params: {
   })
 }
 
+async function logPlmTeamViewDefaultAudit(params: {
+  action: PlmTeamViewDefaultAuditAction
+  tenantId: string
+  ownerUserId: string
+  viewId: string
+  kind: string
+  viewName: string
+}) {
+  logger.info('Processed PLM team view default action', {
+    audit: 'plm-team-view-default',
+    action: params.action,
+    tenantId: params.tenantId,
+    ownerUserId: params.ownerUserId,
+    viewId: params.viewId,
+    kind: params.kind,
+    viewName: params.viewName,
+    processedKinds: [params.kind],
+    processedTotal: 1,
+  })
+
+  await persistPlmCollaborativeAuditEvent({
+    route: '/api/plm-workbench/views/team/:id/default',
+    resourceType: 'plm-team-view-default',
+    action: params.action,
+    ownerUserId: params.ownerUserId,
+    resourceId: params.viewId,
+    meta: {
+      tenantId: params.tenantId,
+      ownerUserId: params.ownerUserId,
+      audit: 'plm-team-view-default',
+      kind: params.kind,
+      viewName: params.viewName,
+      processedKinds: [params.kind],
+      requestedTotal: 1,
+      processedTotal: 1,
+      skippedTotal: 0,
+    },
+  })
+}
+
 router.get(
   '/api/plm-workbench/audit-logs',
   authenticate,
@@ -388,7 +470,7 @@ router.get(
 
       const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
       const actorId = typeof req.query.actorId === 'string' ? req.query.actorId.trim() : ''
-      const action = normalizePlmTeamViewBatchAction(req.query.action)
+      const action = normalizePlmCollaborativeAuditAction(req.query.action)
       const resourceType = normalizePlmAuditResourceType(req.query.resourceType)
       const kind = typeof req.query.kind === 'string' ? req.query.kind.trim() : ''
       const from = parsePlmAuditDate(req.query.from)
@@ -463,7 +545,7 @@ router.get(
       const limit = Math.min(Math.max(rawLimit || 5000, 1), 10000)
       const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
       const actorId = typeof req.query.actorId === 'string' ? req.query.actorId.trim() : ''
-      const action = normalizePlmTeamViewBatchAction(req.query.action)
+      const action = normalizePlmCollaborativeAuditAction(req.query.action)
       const resourceType = normalizePlmAuditResourceType(req.query.resourceType)
       const kind = typeof req.query.kind === 'string' ? req.query.kind.trim() : ''
       const from = parsePlmAuditDate(req.query.from)
@@ -917,6 +999,15 @@ router.post(
           .executeTakeFirstOrThrow()
       })
 
+      await logPlmTeamViewDefaultAudit({
+        action: 'set-default',
+        tenantId,
+        ownerUserId: currentUserId,
+        viewId,
+        kind: String(view.kind || ''),
+        viewName: String(view.name || ''),
+      })
+
       return res.json({
         success: true,
         data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
@@ -986,6 +1077,15 @@ router.delete(
         .where('id', '=', viewId)
         .returningAll()
         .executeTakeFirstOrThrow()
+
+      await logPlmTeamViewDefaultAudit({
+        action: 'clear-default',
+        tenantId,
+        ownerUserId: currentUserId,
+        viewId,
+        kind: String(view.kind || ''),
+        viewName: String(view.name || ''),
+      })
 
       return res.json({
         success: true,
@@ -1109,6 +1209,17 @@ router.post(
               return upsertView(trxAny, true)
             })
           : await upsertView(dbAny, requestedDefault)
+
+      if (requestedDefault === true) {
+        await logPlmTeamViewDefaultAudit({
+          action: 'set-default',
+          tenantId,
+          ownerUserId: currentUserId,
+          viewId: String(saved.id || ''),
+          kind,
+          viewName: name,
+        })
+      }
 
       return res.status(201).json({
         success: true,

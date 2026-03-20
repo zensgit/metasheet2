@@ -22,11 +22,37 @@ function isPlmAuditRouteState(value: unknown): value is PlmAuditRouteState {
     && typeof record.q === 'string'
     && typeof record.actorId === 'string'
     && typeof record.kind === 'string'
-    && (record.action === '' || record.action === 'archive' || record.action === 'restore' || record.action === 'delete')
-    && (record.resourceType === '' || record.resourceType === 'plm-team-preset-batch' || record.resourceType === 'plm-team-view-batch')
+    && (
+      record.action === ''
+      || record.action === 'archive'
+      || record.action === 'restore'
+      || record.action === 'delete'
+      || record.action === 'set-default'
+      || record.action === 'clear-default'
+    )
+    && (
+      record.resourceType === ''
+      || record.resourceType === 'plm-team-preset-batch'
+      || record.resourceType === 'plm-team-view-batch'
+      || record.resourceType === 'plm-team-view-default'
+    )
     && typeof record.from === 'string'
     && typeof record.to === 'string'
     && typeof record.windowMinutes === 'number'
+    && (record.teamViewId === undefined || typeof record.teamViewId === 'string')
+    && (record.sceneId === undefined || typeof record.sceneId === 'string')
+    && (record.sceneName === undefined || typeof record.sceneName === 'string')
+    && (record.sceneOwnerUserId === undefined || typeof record.sceneOwnerUserId === 'string')
+}
+
+function normalizePlmAuditRouteState(state: PlmAuditRouteState): PlmAuditRouteState {
+  return {
+    ...state,
+    teamViewId: state.teamViewId || '',
+    sceneId: state.sceneId || '',
+    sceneName: state.sceneName || '',
+    sceneOwnerUserId: state.sceneOwnerUserId || '',
+  }
 }
 
 function isPlmAuditSavedView(value: unknown): value is PlmAuditSavedView {
@@ -65,7 +91,13 @@ export function readPlmAuditSavedViews(storage?: Storage | null): PlmAuditSavedV
     if (!raw) return []
     const parsed = JSON.parse(raw) as unknown
     return Array.isArray(parsed)
-      ? parsed.filter(isPlmAuditSavedView).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      ? parsed
+        .filter(isPlmAuditSavedView)
+        .map((item) => ({
+          ...item,
+          state: normalizePlmAuditRouteState(item.state),
+        }))
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
       : []
   } catch {
     return []
@@ -85,7 +117,7 @@ export function savePlmAuditSavedView(name: string, state: PlmAuditRouteState, s
   const nextEntry: PlmAuditSavedView = {
     id: existing?.id ?? generateSavedViewId(),
     name: trimmedName,
-    state,
+    state: normalizePlmAuditRouteState(state),
     updatedAt: now,
   }
 
