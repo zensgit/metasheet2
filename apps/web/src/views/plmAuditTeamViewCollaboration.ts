@@ -2,7 +2,7 @@ import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
 
 export type PlmAuditTeamViewCollaborationSource = 'recommendation' | 'saved-view-promotion'
 export type PlmAuditTeamViewCollaborationActionKind = 'share' | 'set-default' | 'dismiss'
-export type PlmAuditTeamViewCollaborationFollowupActionKind = 'set-default' | 'view-logs' | 'dismiss'
+export type PlmAuditTeamViewCollaborationFollowupActionKind = 'set-default' | 'view-logs' | 'focus-source' | 'dismiss'
 
 export type PlmAuditTeamViewCollaborationDraft = {
   teamViewId: string
@@ -29,6 +29,7 @@ export type PlmAuditTeamViewCollaborationFollowup = {
   source: PlmAuditTeamViewCollaborationSource
   action: 'share' | 'set-default'
   logsAnchorId: string
+  sourceAnchorId: string
 }
 
 export type PlmAuditTeamViewCollaborationFollowupNotice = {
@@ -90,6 +91,13 @@ export function buildPlmAuditTeamViewCollaborationFollowupNotice(
       })
     }
     actions.push({
+      kind: 'focus-source',
+      label: followup.source === 'saved-view-promotion'
+        ? tr('Back to saved views', '回到保存视图')
+        : tr('Back to recommendations', '回到推荐卡片'),
+      emphasis: 'secondary',
+    })
+    actions.push({
       kind: 'dismiss',
       label: tr('Done', '完成'),
       emphasis: 'secondary',
@@ -102,12 +110,12 @@ export function buildPlmAuditTeamViewCollaborationFollowupNotice(
       title: tr('Share link copied.', '分享链接已复制。'),
       description: followup.source === 'saved-view-promotion'
         ? tr(
-            'The promoted team view is ready to share across the audit workflow. You can still promote it to the default audit entry.',
-            '提升后的团队视图已经可以在审计协作流程中分享，你仍可继续将其设为默认审计入口。',
+            'This share link came from the saved-view promotion flow. You can return to the saved-view list or continue by promoting this team view to the default audit entry.',
+            '这条分享链接来自保存视图提升流程。你可以返回保存视图列表，或继续将该团队视图提升为默认审计入口。',
           )
         : tr(
-            'The recommended team view is ready to share across the audit workflow. You can still promote it to the default audit entry.',
-            '推荐团队视图已经可以在审计协作流程中分享，你仍可继续将其设为默认审计入口。',
+            'This share link came from a recommended team view card. You can jump back to recommendations or continue by promoting it to the default audit entry.',
+            '这条分享链接来自推荐团队视图卡片。你可以返回推荐区域，或继续将其提升为默认审计入口。',
           ),
       actions,
     }

@@ -122,18 +122,24 @@ describe('plmAuditTeamViewCollaboration', () => {
       source: 'recommendation',
       action: 'share',
       logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-recommended-team-views',
     }, {
       canSetDefault: true,
     }, tr)).toEqual({
       sourceLabel: 'Recommended team view|推荐团队视图',
       title: 'Share link copied.|分享链接已复制。',
       description:
-        'The recommended team view is ready to share across the audit workflow. You can still promote it to the default audit entry.|推荐团队视图已经可以在审计协作流程中分享，你仍可继续将其设为默认审计入口。',
+        'This share link came from a recommended team view card. You can jump back to recommendations or continue by promoting it to the default audit entry.|这条分享链接来自推荐团队视图卡片。你可以返回推荐区域，或继续将其提升为默认审计入口。',
       actions: [
         {
           kind: 'set-default',
           label: 'Set as default|设为默认',
           emphasis: 'primary',
+        },
+        {
+          kind: 'focus-source',
+          label: 'Back to recommendations|回到推荐卡片',
+          emphasis: 'secondary',
         },
         {
           kind: 'dismiss',
@@ -154,6 +160,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       source: 'saved-view-promotion',
       action: 'set-default',
       logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-saved-views',
     }, {
       canSetDefault: false,
     }, tr)).toEqual({
@@ -166,6 +173,39 @@ describe('plmAuditTeamViewCollaboration', () => {
           kind: 'view-logs',
           label: 'Review audit logs|查看审计日志',
           emphasis: 'primary',
+        },
+        {
+          kind: 'dismiss',
+          label: 'Done|完成',
+          emphasis: 'secondary',
+        },
+      ],
+    })
+  })
+
+  it('builds saved-view share follow-up with a return-to-source action', () => {
+    expect(buildPlmAuditTeamViewCollaborationFollowupNotice({
+      id: 'audit-view-6',
+      isDefault: false,
+      isArchived: false,
+    }, {
+      teamViewId: 'audit-view-6',
+      source: 'saved-view-promotion',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-saved-views',
+    }, {
+      canSetDefault: false,
+    }, tr)).toEqual({
+      sourceLabel: 'Saved view promotion|保存视图提升',
+      title: 'Share link copied.|分享链接已复制。',
+      description:
+        'This share link came from the saved-view promotion flow. You can return to the saved-view list or continue by promoting this team view to the default audit entry.|这条分享链接来自保存视图提升流程。你可以返回保存视图列表，或继续将该团队视图提升为默认审计入口。',
+      actions: [
+        {
+          kind: 'focus-source',
+          label: 'Back to saved views|回到保存视图',
+          emphasis: 'secondary',
         },
         {
           kind: 'dismiss',

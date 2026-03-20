@@ -346,7 +346,7 @@
         {{ tr('Current default', '当前默认') }}: {{ defaultAuditTeamViewLabel }}
       </p>
 
-      <div v-if="recommendedAuditTeamViews.length" class="plm-audit__recommended-team-views">
+      <div id="plm-audit-recommended-team-views" v-if="recommendedAuditTeamViews.length" class="plm-audit__recommended-team-views">
         <div class="plm-audit__recommended-header">
           <div>
             <h3>{{ tr('Recommended audit team views', '推荐审计团队视图') }}</h3>
@@ -534,7 +534,7 @@
       </p>
     </section>
 
-    <section class="plm-audit__saved-views">
+    <section id="plm-audit-saved-views" class="plm-audit__saved-views">
       <div class="plm-audit__saved-views-header">
         <div>
           <h2>{{ tr('Saved views', '已保存视图') }}</h2>
@@ -1423,13 +1423,16 @@ async function shareAuditTeamViewEntry(
       : tr('Audit team view link copied.', '审计团队视图链接已复制。'),
   )
   if (source) {
-    auditTeamViewCollaborationFollowup.value = {
-      teamViewId: view.id,
-      source,
-      action: 'share',
-      logsAnchorId: 'plm-audit-log-results',
+      auditTeamViewCollaborationFollowup.value = {
+        teamViewId: view.id,
+        source,
+        action: 'share',
+        logsAnchorId: 'plm-audit-log-results',
+        sourceAnchorId: source === 'saved-view-promotion'
+          ? 'plm-audit-saved-views'
+          : 'plm-audit-recommended-team-views',
+      }
     }
-  }
   return true
 }
 
@@ -1461,6 +1464,9 @@ async function setAuditTeamViewDefaultEntry(
         source,
         action: 'set-default',
         logsAnchorId: 'plm-audit-log-results',
+        sourceAnchorId: source === 'saved-view-promotion'
+          ? 'plm-audit-saved-views'
+          : 'plm-audit-recommended-team-views',
       }
     }
     await nextTick()
@@ -1577,6 +1583,14 @@ async function runAuditTeamViewCollaborationFollowupAction(
 
   if (actionKind === 'view-logs') {
     document.getElementById(followup.logsAnchorId)?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    })
+    return
+  }
+
+  if (actionKind === 'focus-source') {
+    document.getElementById(followup.sourceAnchorId)?.scrollIntoView({
       behavior: 'smooth',
       block: 'start',
     })
