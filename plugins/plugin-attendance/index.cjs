@@ -2189,8 +2189,8 @@ function mapAssignmentRow(row) {
     orgId: row.org_id ?? DEFAULT_ORG_ID,
     userId: row.user_id,
     shiftId: row.shift_id,
-    startDate: row.start_date,
-    endDate: row.end_date ?? null,
+    startDate: normalizeDateOnly(row.start_date) ?? row.start_date,
+    endDate: normalizeDateOnly(row.end_date) ?? row.end_date ?? null,
     isActive: row.is_active ?? true,
   }
 }
@@ -2559,8 +2559,8 @@ function mapRotationAssignmentRow(row) {
     orgId: row.org_id ?? DEFAULT_ORG_ID,
     userId: row.user_id,
     rotationRuleId: row.rotation_rule_id,
-    startDate: row.start_date,
-    endDate: row.end_date ?? null,
+    startDate: normalizeDateOnly(row.start_date) ?? row.start_date,
+    endDate: normalizeDateOnly(row.end_date) ?? row.end_date ?? null,
     isActive: row.is_active ?? true,
   }
 }
@@ -4534,6 +4534,79 @@ function resolveWorkContextFromPrefetch(options) {
     holiday,
     isWorkingDay,
     source: rotationInfo ? 'rotation' : assignmentInfo ? 'shift' : 'rule',
+  }
+}
+
+async function buildWorkContextPrefetch(db, options) {
+  const { orgId, userIds, workDates, defaultRule } = options
+  const normalizedUserIds = Array.from(new Set((Array.isArray(userIds) ? userIds : []).filter(Boolean)))
+  const normalizedWorkDates = Array.from(
+    new Set(
+      (Array.isArray(workDates) ? workDates : [])
+        .map((value) => normalizeDateOnly(value) ?? (typeof value === 'string' ? value.slice(0, 10) : null))
+        .filter(Boolean)
+    )
+  ).sort()
+
+  const resolvedDefaultRule = defaultRule ?? await loadDefaultRule(db, orgId)
+  if (!normalizedWorkDates.length || !normalizedUserIds.length) {
+    return {
+      defaultRule: resolvedDefaultRule,
+      prefetched: {
+        holidaysByDate: new Map(),
+        shiftAssignmentsByUser: new Map(),
+        rotationAssignmentsByUser: new Map(),
+        rotationShiftsById: new Map(),
+      },
+    }
+  }
+
+  const fromDate = normalizedWorkDates[0]
+  const toDate = normalizedWorkDates[normalizedWorkDates.length - 1]
+  const [holidaysByDate, shiftAssignmentsByUser, rotationPrefetch] = await Promise.all([
+    loadHolidayMapByDates(db, orgId, normalizedWorkDates),
+    loadShiftAssignmentMapForUsersRange(db, orgId, normalizedUserIds, fromDate, toDate),
+    loadRotationAssignmentMapForUsersRange(db, orgId, normalizedUserIds, fromDate, toDate),
+  ])
+
+  return {
+    defaultRule: resolvedDefaultRule,
+    prefetched: {
+      holidaysByDate,
+      shiftAssignmentsByUser,
+      rotationAssignmentsByUser: rotationPrefetch.assignmentsByUser,
+      rotationShiftsById: rotationPrefetch.shiftsById,
+    },
+  }
+}
+
+function buildWorkdayContextSummary(options) {
+  const { workDate, storedIsWorkday, resolvedContext } = options
+  if (!resolvedContext || !workDate) return null
+
+  const sourceName = resolvedContext.source === 'rotation'
+    ? resolvedContext.rotation?.name ?? resolvedContext.rule?.name ?? null
+    : resolvedContext.rule?.name ?? null
+  const holiday = resolvedContext.holiday
+    ? {
+        id: resolvedContext.holiday.id ?? null,
+        name: resolvedContext.holiday.name ?? null,
+        isWorkingDay: resolvedContext.holiday.isWorkingDay === true,
+        type: resolvedContext.holiday.type ?? (resolvedContext.holiday.isWorkingDay === true ? 'working_day_override' : 'holiday'),
+      }
+    : null
+  const normalizedStored = storedIsWorkday !== false
+  const normalizedResolved = resolvedContext.isWorkingDay !== false
+
+  return {
+    storedIsWorkday: normalizedStored,
+    resolvedIsWorkday: normalizedResolved,
+    matchesStored: normalizedStored === normalizedResolved,
+    source: resolvedContext.source ?? 'rule',
+    sourceName,
+    weekday: getWeekdayFromDateKey(workDate),
+    workingDays: Array.isArray(resolvedContext.rule?.workingDays) ? [...resolvedContext.rule.workingDays] : [...DEFAULT_RULE.workingDays],
+    holiday,
   }
 }
 
@@ -8529,12 +8602,31 @@ module.exports = {
             [targetUserId, orgId, from, to, pageSize, offset]
           )
 
+          const workContextPrefetch = await buildWorkContextPrefetch(db, {
+            orgId,
+            userIds: [targetUserId],
+            workDates: rows.map((row) => row.work_date),
+          })
           const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
           const records = rows.map((row) => {
+            const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
             const meta = normalizeMetadata(row.meta)
-            const approved = approvedMap.get(row.work_date) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
+            const approved = approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
+            const resolvedContext = resolveWorkContextFromPrefetch({
+              orgId,
+              userId: targetUserId,
+              workDate,
+              defaultRule: workContextPrefetch.defaultRule,
+              prefetched: workContextPrefetch.prefetched,
+            })
             return {
               ...row,
+              work_date: workDate,
+              workday_context: buildWorkdayContextSummary({
+                workDate,
+                storedIsWorkday: row.is_workday,
+                resolvedContext,
+              }),
               meta: {
                 ...meta,
                 leave_minutes: approved.leaveMinutes,
@@ -8674,6 +8766,12 @@ module.exports = {
 	            [targetUserId, orgId, from, to, excludedStatuses, pageSize, offset]
 	          )
 
+	          const workContextPrefetch = await buildWorkContextPrefetch(db, {
+	            orgId,
+	            userIds: [targetUserId],
+	            workDates: rows.map((row) => row.work_date),
+	          })
+
 	          const requestRows = await db.query(
 	            `SELECT id, work_date, request_type, status
 	             FROM attendance_requests
@@ -8683,7 +8781,7 @@ module.exports = {
 	          )
 	          const requestByDate = new Map()
 	          for (const row of requestRows) {
-	            const workDate = row.work_date
+	            const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
 	            const entry = requestByDate.get(workDate) ?? {
 	              hasPending: false,
 	              pending: null,
@@ -8704,16 +8802,24 @@ module.exports = {
 
 	          const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
 	          const items = rows.map((row) => {
+	            const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
 	            const meta = normalizeMetadata(row.meta)
-	            const approved = approvedMap.get(row.work_date) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
+	            const approved = approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
 	            const warnings = extractWarnings(meta)
-	            const requestSummary = requestByDate.get(row.work_date) ?? { hasPending: false, pending: null, latest: null }
+	            const requestSummary = requestByDate.get(workDate) ?? { hasPending: false, pending: null, latest: null }
 	            const suggestedRequestType = suggestRequestType(row)
 	            const state = requestSummary.hasPending ? 'pending' : 'open'
+	            const resolvedContext = resolveWorkContextFromPrefetch({
+	              orgId,
+	              userId: targetUserId,
+	              workDate,
+	              defaultRule: workContextPrefetch.defaultRule,
+	              prefetched: workContextPrefetch.prefetched,
+	            })
 
 	            return {
 	              recordId: row.id,
-	              workDate: row.work_date,
+	              workDate,
 	              status: row.status,
 	              isWorkday: row.is_workday,
 	              firstInAt: row.first_in_at,
@@ -8724,6 +8830,11 @@ module.exports = {
 	              leaveMinutes: approved.leaveMinutes,
 	              overtimeMinutes: approved.overtimeMinutes,
 	              warnings,
+	              workdayContext: buildWorkdayContextSummary({
+	                workDate,
+	                storedIsWorkday: row.is_workday,
+	                resolvedContext,
+	              }),
 	              state,
 	              request: requestSummary.pending ?? requestSummary.latest,
 	              suggestedRequestType,

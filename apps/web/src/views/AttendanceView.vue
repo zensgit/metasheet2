@@ -441,6 +441,7 @@ interface AttendanceRecord {
   early_leave_minutes: number
   status: string
   is_workday?: boolean
+  workday_context?: AttendanceWorkdayContext | null
   meta?: Record<string, any>
 }
 
@@ -457,6 +458,7 @@ interface AttendanceAnomaly {
   leaveMinutes?: number
   overtimeMinutes?: number
   warnings: string[]
+  workdayContext?: AttendanceWorkdayContext | null
   state: 'open' | 'pending'
   request?: {
     id: string
@@ -496,6 +498,22 @@ interface AttendanceImportPreviewItem {
   warnings?: string[]
   appliedPolicies?: string[]
   userGroups?: string[]
+}
+
+interface AttendanceWorkdayContext {
+  storedIsWorkday: boolean
+  resolvedIsWorkday: boolean
+  matchesStored: boolean
+  source: 'rule' | 'shift' | 'rotation'
+  sourceName?: string | null
+  weekday?: number
+  workingDays?: number[]
+  holiday?: {
+    id?: string | null
+    name?: string | null
+    isWorkingDay?: boolean
+    type?: string | null
+  } | null
 }
 
 interface CalendarDay {
@@ -901,6 +919,66 @@ const holidayMap = computed(() => {
   return map
 })
 
+function formatWorkdayWeekday(weekday: number | undefined): string {
+  if (!Number.isInteger(weekday) || weekday == null || weekday < 0 || weekday > 6) return tr('Unknown day', '未知星期')
+  return isZh.value
+    ? ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][weekday]
+    : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][weekday]
+}
+
+function formatWorkingDaysList(days: number[] | undefined): string {
+  if (!Array.isArray(days) || days.length === 0) return tr('No working days configured', '未配置工作日')
+  return days
+    .map((day) => formatWorkdayWeekday(day))
+    .join(isZh.value ? '、' : ', ')
+}
+
+function buildWorkdayTooltipLines(context: AttendanceWorkdayContext | null | undefined): string[] {
+  if (!context) return []
+
+  const resolvedLabel = context.resolvedIsWorkday
+    ? tr('Working day', '工作日')
+    : tr('Rest day', '休息日')
+  const sourceLabel = context.source === 'rotation'
+    ? tr('Rotation', '轮班')
+    : context.source === 'shift'
+      ? tr('Shift', '班次')
+      : tr('Default rule', '默认规则')
+  const lines = [
+    tr(`Workday decision: ${resolvedLabel}`, `工作日判定：${resolvedLabel}`),
+    context.sourceName
+      ? tr(`Source: ${sourceLabel} · ${context.sourceName}`, `来源：${sourceLabel} · ${context.sourceName}`)
+      : tr(`Source: ${sourceLabel}`, `来源：${sourceLabel}`),
+    tr(`Configured days: ${formatWorkingDaysList(context.workingDays)}`, `配置工作日：${formatWorkingDaysList(context.workingDays)}`),
+  ]
+
+  if (context.weekday != null) {
+    lines.push(tr(`Date weekday: ${formatWorkdayWeekday(context.weekday)}`, `当天星期：${formatWorkdayWeekday(context.weekday)}`))
+  }
+
+  if (context.holiday) {
+    const holidayLabel = context.holiday.isWorkingDay
+      ? tr('working-day override', '调班工作日')
+      : tr('holiday/rest override', '节假日/休息日覆盖')
+    lines.push(
+      context.holiday.name
+        ? tr(`Holiday override: ${context.holiday.name} (${holidayLabel})`, `节假日覆盖：${context.holiday.name}（${holidayLabel}）`)
+        : tr(`Holiday override: ${holidayLabel}`, `节假日覆盖：${holidayLabel}`)
+    )
+  }
+
+  if (!context.matchesStored) {
+    lines.push(
+      tr(
+        `Stored record differs: stored=${context.storedIsWorkday ? 'working day' : 'rest day'}`,
+        `记录值不同：存量记录=${context.storedIsWorkday ? '工作日' : '休息日'}`
+      )
+    )
+  }
+
+  return lines
+}
+
 const calendarDays = computed<CalendarDay[]>(() => {
   const year = calendarMonth.value.getFullYear()
   const month = calendarMonth.value.getMonth()
@@ -934,6 +1012,10 @@ const calendarDays = computed<CalendarDay[]>(() => {
       tooltip = holidayName ? `${key} · ${holidayName}` : `${key} · ${tr('Holiday', '休息日')}`
     } else if (record && status === 'off' && holidayName) {
       tooltip = `${key} · ${holidayName} · ${record.work_minutes} min`
+    }
+    const workdayTooltipLines = buildWorkdayTooltipLines(record?.workday_context)
+    if (workdayTooltipLines.length > 0) {
+      tooltip = `${tooltip}\n${workdayTooltipLines.join('\n')}`
     }
     return {
       key,

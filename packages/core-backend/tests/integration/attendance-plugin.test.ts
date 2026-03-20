@@ -1827,6 +1827,171 @@ describe('Attendance Plugin Integration', () => {
     expect(lastOutAtIso.startsWith(`${workDate}T18:00:00`)).toBe(true)
   })
 
+  it('exposes workday context for holiday overrides and shift schedules on attendance records', async () => {
+    if (!baseUrl) return
+
+    const userId = `attendance-workday-context-${Date.now().toString(36)}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const pickFutureWeekday = (targetDay: number): string => {
+      const cursor = new Date('2029-03-01T00:00:00.000Z')
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        if (cursor.getUTCDay() === targetDay) return cursor.toISOString().slice(0, 10)
+        cursor.setUTCDate(cursor.getUTCDate() + 1)
+      }
+      throw new Error(`Unable to reserve future weekday ${targetDay}`)
+    }
+
+    const sundayDate = pickFutureWeekday(0)
+    const wednesdayDate = pickFutureWeekday(3)
+    const rangeFrom = sundayDate < wednesdayDate ? sundayDate : wednesdayDate
+    const rangeTo = sundayDate > wednesdayDate ? sundayDate : wednesdayDate
+    const shiftName = `Sunday Shift ${Date.now().toString(36)}`
+
+    const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: shiftName,
+        timezone: 'UTC',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        workingDays: [0],
+      }),
+    })
+    expect(shiftRes.status).toBe(201)
+    const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(shiftId).toBeTruthy()
+
+    const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId,
+        shiftId,
+        startDate: sundayDate,
+        endDate: sundayDate,
+        isActive: true,
+      }),
+    })
+    expect(assignmentRes.status).toBe(201)
+
+    const holidayName = `Midweek Holiday ${Date.now().toString(36)}`
+    const holidayRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        date: wednesdayDate,
+        name: holidayName,
+        isWorkingDay: false,
+      }),
+    })
+    expect([201, 409]).toContain(holidayRes.status)
+
+    const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareRes.status).toBe(200)
+    const commitToken = (prepareRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+    if (!commitToken) return
+
+    const importRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId,
+        timezone: 'UTC',
+        rows: [
+          {
+            workDate: sundayDate,
+            fields: {
+              firstInAt: `${sundayDate}T09:00:00Z`,
+              lastOutAt: `${sundayDate}T18:00:00Z`,
+              status: 'normal',
+            },
+          },
+          {
+            workDate: wednesdayDate,
+            fields: {
+              firstInAt: `${wednesdayDate}T09:00:00Z`,
+              lastOutAt: `${wednesdayDate}T18:00:00Z`,
+              status: 'off',
+            },
+          },
+        ],
+        mode: 'override',
+        commitToken,
+      }),
+    })
+    expect(importRes.status).toBe(200)
+
+    const recordsRes = await requestJson(
+      `${baseUrl}/api/attendance/records?from=${encodeURIComponent(rangeFrom)}&to=${encodeURIComponent(rangeTo)}&userId=${encodeURIComponent(userId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    )
+    expect(recordsRes.status).toBe(200)
+    const items = (recordsRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+    expect(Array.isArray(items)).toBe(true)
+
+    const sundayRecord = items.find((row) => String(row?.work_date ?? '').slice(0, 10) === sundayDate)
+    expect(sundayRecord).toBeTruthy()
+    expect(sundayRecord?.is_workday).toBe(true)
+    expect(sundayRecord?.workday_context).toMatchObject({
+      storedIsWorkday: true,
+      resolvedIsWorkday: true,
+      matchesStored: true,
+      source: 'shift',
+      sourceName: shiftName,
+      weekday: 0,
+      workingDays: [0],
+      holiday: null,
+    })
+
+    const wednesdayRecord = items.find((row) => String(row?.work_date ?? '').slice(0, 10) === wednesdayDate)
+    expect(wednesdayRecord).toBeTruthy()
+    expect(wednesdayRecord?.is_workday).toBe(false)
+    expect(wednesdayRecord?.workday_context).toMatchObject({
+      storedIsWorkday: false,
+      resolvedIsWorkday: false,
+      matchesStored: true,
+      source: 'rule',
+      weekday: 3,
+      workingDays: [1, 2, 3, 4, 5],
+      holiday: {
+        isWorkingDay: false,
+        type: 'holiday',
+      },
+    })
+    expect(typeof wednesdayRecord?.workday_context?.holiday?.name).toBe('string')
+  })
+
   it('keeps existing records after rolling back a later update batch', async () => {
     if (!baseUrl) return
 
