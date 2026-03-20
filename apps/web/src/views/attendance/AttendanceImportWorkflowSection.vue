@@ -6,6 +6,101 @@
         {{ importLoading ? tr('Loading...', '加载中...') : tr('Load template', '加载模板') }}
       </button>
     </div>
+    <div v-if="importTemplateGuide" class="attendance__template-guide">
+      <div class="attendance__template-guide-header">
+        <strong>{{ tr('Template guide', '模板说明') }}</strong>
+        <span>
+          {{ tr('Source', '来源') }}: <code>{{ importTemplateGuide.source }}</code>
+          · {{ tr('Mode', '模式') }}: <code>{{ importTemplateGuide.mode }}</code>
+        </span>
+      </div>
+      <div class="attendance__template-guide-grid">
+        <div class="attendance__template-guide-card">
+          <div class="attendance__template-guide-title">{{ tr('Suggested CSV header', '建议 CSV 表头') }}</div>
+          <code class="attendance__template-code">{{ importTemplateGuide.sampleHeader || tr('(no header guidance yet)', '（暂无表头指导）') }}</code>
+          <small class="attendance__field-hint">
+            {{ tr('Use this header order when you export or hand-edit CSV rows.', '导出或手工编辑 CSV 行时，请按这个表头顺序。') }}
+          </small>
+        </div>
+        <div class="attendance__template-guide-card">
+          <div class="attendance__template-guide-title">{{ tr('Required fields', '必填字段') }}</div>
+          <div v-if="importTemplateGuide.requiredFields.length" class="attendance__template-chip-list">
+            <span v-for="field in importTemplateGuide.requiredFields" :key="field" class="attendance__template-chip">
+              {{ field }}
+            </span>
+          </div>
+          <small v-else class="attendance__field-hint">
+            {{ tr('No required fields were declared in the template response.', '模板响应中未声明必填字段。') }}
+          </small>
+        </div>
+        <div class="attendance__template-guide-card">
+          <div class="attendance__template-guide-title">{{ tr('Template columns', '模板列') }}</div>
+          <div v-if="importTemplateGuide.columns.length" class="attendance__template-chip-list">
+            <span v-for="column in importTemplateGuide.columns" :key="column" class="attendance__template-chip">
+              {{ column }}
+            </span>
+          </div>
+          <small v-else class="attendance__field-hint">
+            {{ tr('The template response did not declare explicit source columns.', '模板响应未声明明确的源列。') }}
+          </small>
+        </div>
+        <div class="attendance__template-guide-card attendance__template-guide-card--full">
+          <div class="attendance__template-guide-title">{{ tr('Field meanings', '字段说明') }}</div>
+          <table class="attendance__template-table">
+            <thead>
+              <tr>
+                <th>{{ tr('Field', '字段') }}</th>
+                <th>{{ tr('Meaning', '含义') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in importTemplateGuide.fieldGuides" :key="item.field">
+                <td><code>{{ item.field }}</code></td>
+                <td>
+                  {{ tr(item.meaningEn, item.meaningZh) }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="selectedImportProfileGuide" class="attendance__template-guide-card attendance__template-guide-card--full">
+          <div class="attendance__template-guide-title">
+            {{ tr('Selected mapping profile', '已选映射配置') }}: {{ selectedImportProfileGuide.name }}
+          </div>
+          <small v-if="selectedImportProfileGuide.description" class="attendance__field-hint">
+            {{ selectedImportProfileGuide.description }}
+          </small>
+          <small v-if="selectedImportProfileGuide.requiredFields.length" class="attendance__field-hint">
+            {{ tr('Profile required fields', '配置必填字段') }}: {{ selectedImportProfileGuide.requiredFields.join(', ') }}
+          </small>
+          <div v-if="selectedImportProfileGuide.userMapKeyField || selectedImportProfileGuide.userMapSourceFields?.length" class="attendance__field-hint">
+            <span v-if="selectedImportProfileGuide.userMapKeyField">
+              {{ tr('User map key field', '用户映射键字段') }}: <code>{{ selectedImportProfileGuide.userMapKeyField }}</code>
+            </span>
+            <span v-if="selectedImportProfileGuide.userMapSourceFields?.length">
+              {{ selectedImportProfileGuide.userMapKeyField ? ' · ' : '' }}
+              {{ tr('User map source fields', '用户映射源字段') }}: <code>{{ selectedImportProfileGuide.userMapSourceFields.join(', ') }}</code>
+            </span>
+          </div>
+          <table v-if="selectedImportProfileGuide.mappingEntries.length" class="attendance__template-table">
+            <thead>
+              <tr>
+                <th>{{ tr('Target field', '目标字段') }}</th>
+                <th>{{ tr('Meaning', '含义') }}</th>
+                <th>{{ tr('Source field', '源字段') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in selectedImportProfileGuide.mappingEntries" :key="item.targetField">
+                <td><code>{{ item.targetField }}</code></td>
+                <td>{{ tr(item.meaningEn, item.meaningZh) }}</td>
+                <td><code>{{ item.sourceField }}</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
     <div class="attendance__admin-grid">
       <label class="attendance__field" for="attendance-import-rule-set">
         <span>{{ tr('Rule set', '规则集') }}</span>
@@ -333,6 +428,8 @@ import type {
   AttendanceImportMode,
   AttendanceImportPreviewItem,
   AttendanceImportPreviewTask,
+  AttendanceImportProfileGuide,
+  AttendanceImportTemplateGuide,
 } from './useAttendanceAdminImportWorkflow'
 import type { AttendanceRuleSet } from './useAttendanceAdminRulesAndGroups'
 
@@ -346,6 +443,8 @@ interface ImportWorkflowBindings {
   importProfileId: Ref<string>
   importMappingProfiles: Ref<AttendanceImportMappingProfile[]>
   selectedImportProfile: ComputedRef<AttendanceImportMappingProfile | null>
+  importTemplateGuide: ComputedRef<AttendanceImportTemplateGuide | null>
+  selectedImportProfileGuide: ComputedRef<AttendanceImportProfileGuide | null>
   importCsvFileName: Ref<string>
   importCsvHeaderRow: Ref<string>
   importCsvDelimiter: Ref<string>
@@ -402,6 +501,8 @@ const importMode = props.workflow.importMode
 const importProfileId = props.workflow.importProfileId
 const importMappingProfiles = props.workflow.importMappingProfiles
 const selectedImportProfile = props.workflow.selectedImportProfile
+const importTemplateGuide = props.workflow.importTemplateGuide
+const selectedImportProfileGuide = props.workflow.selectedImportProfileGuide
 const importCsvFileName = props.workflow.importCsvFileName
 const importCsvHeaderRow = props.workflow.importCsvHeaderRow
 const importCsvDelimiter = props.workflow.importCsvDelimiter
@@ -479,6 +580,91 @@ const formatPolicyList = props.formatPolicyList
 
 .attendance__field-hint--error {
   color: #c0392b;
+}
+
+.attendance__template-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #dfe6ef;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #f8fbff 0%, #fff 100%);
+}
+
+.attendance__template-guide-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.attendance__template-guide-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.attendance__template-guide-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attendance__template-guide-card--full {
+  grid-column: 1 / -1;
+}
+
+.attendance__template-guide-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.attendance__template-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.attendance__template-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #e8eef9;
+  color: #17324f;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.attendance__template-code {
+  padding: 8px 10px;
+  border: 1px solid #d0d7e2;
+  border-radius: 8px;
+  background: #fff;
+  color: #111827;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.attendance__template-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.attendance__template-table th,
+.attendance__template-table td {
+  padding: 8px;
+  border-top: 1px solid #e5e7eb;
+  text-align: left;
+  vertical-align: top;
 }
 
 .attendance__btn {

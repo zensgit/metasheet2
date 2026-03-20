@@ -28,7 +28,7 @@
     </div>
     <div class="attendance__admin-actions">
       <button class="attendance__btn" :disabled="provisionSearchLoading" @click="searchProvisionUsers(1)">
-        {{ provisionSearchLoading ? tr('Searching...', '搜索中...') : tr('Search', '搜索') }}
+        {{ provisionSearchLoading ? tr('Searching...', '搜索中...') : tr('Search users', '搜索用户') }}
       </button>
       <button
         class="attendance__btn"
@@ -64,7 +64,8 @@
             <td>{{ user.name || '--' }}</td>
             <td><code>{{ user.id.slice(0, 8) }}</code></td>
             <td class="attendance__table-actions">
-              <button class="attendance__btn" @click="selectProvisionUser(user)">{{ tr('Select', '选择') }}</button>
+              <button class="attendance__btn" @click="selectProvisionUser(user)">{{ tr('Use for access', '用于授权') }}</button>
+              <button class="attendance__btn" @click="addProvisionUserToBatch(user)">{{ tr('Add to batch', '加入批量') }}</button>
             </td>
           </tr>
         </tbody>
@@ -72,19 +73,17 @@
     </div>
     <p v-else-if="provisionSearchHasSearched" class="attendance__empty">{{ tr('No users found.', '未找到用户。') }}</p>
     <div class="attendance__admin-grid">
-      <label class="attendance__field attendance__field--full" for="attendance-provision-user-id">
-        <span>{{ tr('User ID (UUID)', '用户 ID（UUID）') }}</span>
-        <input
-          id="attendance-provision-user-id"
-          v-model="provisionForm.userId"
-          name="provisionUserId"
-          type="text"
-          :placeholder="tr('e.g. 0cdf4a9c-4fe1-471b-be08-854b683dc930', '例如 0cdf4a9c-4fe1-471b-be08-854b683dc930')"
-        />
-        <small v-if="provisionUserProfile" class="attendance__field-hint">
-          {{ tr('Selected', '已选择') }}: {{ provisionUserProfile.email }}{{ provisionUserProfile.name ? ` (${provisionUserProfile.name})` : '' }}
-        </small>
-      </label>
+      <AttendanceUserPickerField
+        :model-value="provisionForm.userId"
+        @update:modelValue="handleProvisionUserIdChange"
+        :tr="tr"
+        :label="tr('User', '用户')"
+        name="provisionUserId"
+        :help-text="tr('Search by email, name, or user ID, then pick a user before loading or changing roles.', '按邮箱、姓名或用户 ID 搜索，然后选中用户再加载或调整角色。')"
+        :search-placeholder="tr('Search users for provisioning', '搜索授权用户')"
+        :full-width="true"
+        input-id="attendance-provision-user-id"
+      />
       <label class="attendance__field" for="attendance-provision-role">
         <span>{{ tr('Role template', '角色模板') }}</span>
         <select id="attendance-provision-role" v-model="provisionForm.role" name="provisionRole">
@@ -94,6 +93,15 @@
         </select>
       </label>
     </div>
+    <p v-if="provisionForm.userId" class="attendance__field-hint">
+      {{ tr('Current user', '当前用户') }}:
+      <template v-if="provisionUserProfile">
+        {{ provisionUserProfile.email }}{{ provisionUserProfile.name ? ` (${provisionUserProfile.name})` : '' }}
+      </template>
+      <template v-else>
+        <code>{{ provisionForm.userId }}</code>
+      </template>
+    </p>
     <p v-if="provisionStatusMessage" class="attendance__status" :class="{ 'attendance__status--error': provisionStatusKind === 'error' }">
       {{ provisionStatusMessage }}
     </p>
@@ -210,6 +218,7 @@
 
 <script setup lang="ts">
 import type { Ref } from 'vue'
+import AttendanceUserPickerField from './AttendanceUserPickerField.vue'
 
 type Translate = (en: string, zh: string) => string
 type ProvisionRole = 'employee' | 'approver' | 'admin'
@@ -286,6 +295,8 @@ interface ProvisioningBindings {
   revokeProvisioningRoleBatch: () => MaybePromise<void>
   searchProvisionUsers: (page: number) => MaybePromise<void>
   selectProvisionUser: (user: ProvisionSearchItem) => MaybePromise<void>
+  addProvisionUserToBatch: (user: ProvisionSearchItem) => void
+  syncProvisionUserId: (userId: string) => void
 }
 
 const props = defineProps<{
@@ -333,7 +344,9 @@ const provisionUserProfile = props.provisioning.provisionUserProfile
 const revokeProvisioningRole = () => props.provisioning.revokeProvisioningRole()
 const revokeProvisioningRoleBatch = () => props.provisioning.revokeProvisioningRoleBatch()
 const searchProvisionUsers = (page: number) => props.provisioning.searchProvisionUsers(page)
+const handleProvisionUserIdChange = (userId: string) => props.provisioning.syncProvisionUserId(userId)
 const selectProvisionUser = (user: ProvisionSearchItem) => props.provisioning.selectProvisionUser(user)
+const addProvisionUserToBatch = (user: ProvisionSearchItem) => props.provisioning.addProvisionUserToBatch(user)
 </script>
 
 <style scoped>

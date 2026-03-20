@@ -65,7 +65,19 @@ describe('useAttendanceAdminImportWorkflow', () => {
               columns: ['userId'],
             },
             mappingProfiles: [
-              { id: 'profile-a', name: 'DingTalk', source: 'dingtalk_csv' },
+              {
+                id: 'profile-a',
+                name: 'DingTalk',
+                source: 'dingtalk_csv',
+                description: 'Maps DingTalk CSV headers to attendance fields.',
+                requiredFields: ['userId', 'workDate'],
+                userMapKeyField: 'empNo',
+                userMapSourceFields: ['工号', '姓名'],
+                mapping: {
+                  userId: '工号',
+                  workDate: '日期',
+                },
+              },
             ],
           },
         })
@@ -81,8 +93,85 @@ describe('useAttendanceAdminImportWorkflow', () => {
       mode: 'merge',
       columns: ['userId'],
     })
+    expect(workflow.importTemplateGuide.value).toEqual({
+      source: 'dingtalk_csv',
+      mode: 'merge',
+      columns: ['userId'],
+      requiredFields: [],
+      sampleHeader: 'userId',
+      fieldGuides: [
+        { field: 'source', meaningEn: 'Import source that selects the parser and mapping path.', meaningZh: '导入来源，用于选择解析器和映射路径。' },
+        { field: 'mode', meaningEn: 'Import behavior. override replaces matching user/date rows; merge keeps existing values when new fields are missing.', meaningZh: '导入行为。override 会覆盖同用户同日期记录；merge 在缺少新字段时保留已有值。' },
+        { field: 'columns', meaningEn: 'Source column names or column definitions used by the template.', meaningZh: '模板使用的源列名或列定义。' },
+      ],
+    })
     expect(workflow.importMappingProfiles.value.map((item) => item.id)).toEqual(['profile-a'])
     expect(setStatus).toHaveBeenCalledWith('Import template loaded.', 'info', undefined)
+  })
+
+  it('builds a selected profile guide with readable field meanings', async () => {
+    const { workflow } = createWorkflow({
+      apiFetch: vi.fn(async () => jsonResponse(200, {
+        ok: true,
+        data: {
+          payloadExample: {
+            source: 'dingtalk_csv',
+            mode: 'override',
+            columns: ['userId', 'workDate', 'firstInAt'],
+          },
+          mappingProfiles: [
+            {
+              id: 'profile-a',
+              name: 'DingTalk',
+              source: 'dingtalk_csv',
+              description: 'Maps DingTalk CSV headers to attendance fields.',
+              requiredFields: ['userId', 'workDate'],
+              userMapKeyField: 'empNo',
+              userMapSourceFields: ['工号', '姓名'],
+              mapping: {
+                userId: '工号',
+                workDate: '日期',
+                firstInAt: '上班打卡',
+              },
+            },
+          ],
+        },
+      })),
+    })
+
+    await workflow.loadImportTemplate()
+    workflow.importProfileId.value = 'profile-a'
+
+    expect(workflow.selectedImportProfileGuide.value).toEqual({
+      name: 'DingTalk',
+      description: 'Maps DingTalk CSV headers to attendance fields.',
+      requiredFields: ['userId', 'workDate'],
+      userMapKeyField: 'empNo',
+      userMapSourceFields: ['工号', '姓名'],
+      mappingEntries: [
+        {
+          field: 'userId',
+          targetField: 'userId',
+          sourceField: '工号',
+          meaningEn: 'Target attendance user ID.',
+          meaningZh: '考勤目标用户 ID。',
+        },
+        {
+          field: 'workDate',
+          targetField: 'workDate',
+          sourceField: '日期',
+          meaningEn: 'Attendance date for the imported record.',
+          meaningZh: '导入记录对应的考勤日期。',
+        },
+        {
+          field: 'firstInAt',
+          targetField: 'firstInAt',
+          sourceField: '上班打卡',
+          meaningEn: 'First clock-in timestamp for the day.',
+          meaningZh: '当天第一次打卡时间。',
+        },
+      ],
+    })
   })
 
   it('applies the selected mapping profile into the payload', () => {

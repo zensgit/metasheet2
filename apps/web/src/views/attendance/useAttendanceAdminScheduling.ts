@@ -93,6 +93,14 @@ function toDateInput(date: Date): string {
   return date.toISOString().slice(0, 10)
 }
 
+function startOfYear(date: Date): Date {
+  return new Date(date.getFullYear(), 0, 1)
+}
+
+function endOfYear(date: Date): Date {
+  return new Date(date.getFullYear(), 11, 31)
+}
+
 function buildQuery(params: Record<string, string | undefined>): URLSearchParams {
   const query = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) {
@@ -194,9 +202,15 @@ export function useAttendanceAdminScheduling({
   })
 
   const holidays = ref<AttendanceHoliday[]>([])
+  const holidayTotal = ref(0)
   const holidayLoading = ref(false)
   const holidaySaving = ref(false)
   const holidayEditingId = ref<string | null>(null)
+  const initialRange = getDateRange()
+  const holidayRange = reactive({
+    from: initialRange.from || toDateInput(startOfYear(today)),
+    to: initialRange.to || toDateInput(endOfYear(today)),
+  })
   const holidayForm = reactive({
     date: toDateInput(today),
     name: '',
@@ -655,7 +669,10 @@ export function useAttendanceAdminScheduling({
   async function loadHolidays() {
     holidayLoading.value = true
     try {
-      const range = getDateRange()
+      const range = {
+        from: holidayRange.from || getDateRange().from,
+        to: holidayRange.to || getDateRange().to,
+      }
       const query = buildQuery({
         from: range.from,
         to: range.to,
@@ -666,12 +683,13 @@ export function useAttendanceAdminScheduling({
         adminForbidden.value = true
         return
       }
-      const data = await readJson(response) as { ok?: boolean; data?: { items?: AttendanceHoliday[] }; error?: { message?: string } } | null
+      const data = await readJson(response) as { ok?: boolean; data?: { items?: AttendanceHoliday[]; total?: number }; error?: { message?: string } } | null
       if (!response.ok || !data?.ok) {
         throw new Error(data?.error?.message || tr('Failed to load holidays', '加载节假日失败'))
       }
       adminForbidden.value = false
       holidays.value = data.data?.items || []
+      holidayTotal.value = Number(data.data?.total ?? holidays.value.length) || holidays.value.length
     } catch (error) {
       setStatus(extractErrorMessage(error, tr('Failed to load holidays', '加载节假日失败')), 'error')
     } finally {
@@ -686,9 +704,12 @@ export function useAttendanceAdminScheduling({
       if (!holidayForm.date) {
         throw new Error(tr('Holiday date is required', '节假日日期为必填项'))
       }
+      if (!holidayForm.name.trim()) {
+        throw new Error(tr('Holiday name is required', '节假日名称为必填项'))
+      }
       const payload = {
         date: holidayForm.date,
-        name: holidayForm.name.trim().length > 0 ? holidayForm.name.trim() : null,
+        name: holidayForm.name.trim(),
         isWorkingDay: holidayForm.isWorkingDay,
         orgId: getOrgId(),
       }
@@ -780,9 +801,11 @@ export function useAttendanceAdminScheduling({
     saveAssignment,
     deleteAssignment,
     holidays,
+    holidayTotal,
     holidayLoading,
     holidaySaving,
     holidayEditingId,
+    holidayRange,
     holidayForm,
     resetHolidayForm,
     editHoliday,
