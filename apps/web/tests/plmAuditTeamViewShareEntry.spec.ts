@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildPlmAuditSharedEntrySavedViewName,
   buildPlmAuditTeamViewShareEntryNotice,
   isPlmAuditSharedLinkEntry,
 } from '../src/views/plmAuditTeamViewShareEntry'
@@ -32,9 +33,14 @@ describe('plmAuditTeamViewShareEntry', () => {
         'This team view came from a share link. You can keep exploring it, duplicate it into your own workflow, or promote it to the default audit entry.|这个团队视图来自分享链接。你可以继续查看，也可以复制到自己的工作流里，或将其提升为默认审计入口。',
       actions: [
         {
+          kind: 'save-local',
+          label: 'Save as local view|保存为本地视图',
+          emphasis: 'primary',
+        },
+        {
           kind: 'duplicate',
           label: 'Duplicate for my workflow|复制为我的工作流视图',
-          emphasis: 'primary',
+          emphasis: 'secondary',
         },
         {
           kind: 'set-default',
@@ -67,5 +73,11 @@ describe('plmAuditTeamViewShareEntry', () => {
         emphasis: 'secondary',
       },
     ])
+  })
+
+  it('builds the default local saved-view name for shared entries', () => {
+    expect(buildPlmAuditSharedEntrySavedViewName({
+      name: 'Supplier audit baseline',
+    }, tr)).toBe('Supplier audit baseline · Local view|本地视图')
   })
 })

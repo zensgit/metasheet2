@@ -762,6 +762,7 @@ import {
   type PlmAuditTeamViewCollaborationFollowupActionKind,
 } from './plmAuditTeamViewCollaboration'
 import {
+  buildPlmAuditSharedEntrySavedViewName,
   buildPlmAuditTeamViewShareEntryNotice,
   isPlmAuditSharedLinkEntry,
   type PlmAuditTeamViewShareEntry,
@@ -1662,13 +1663,30 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
     return
   }
 
+  const view = selectedAuditTeamView.value
+  if (!view) return
+
+  if (actionKind === 'save-local') {
+    savedViews.value = savePlmAuditSavedView(
+      buildPlmAuditSharedEntrySavedViewName(view, tr),
+      readCurrentRouteState(),
+    )
+    savedViewName.value = ''
+    clearAuditTeamViewShareEntry()
+    setStatus(tr('Shared audit team view saved locally.', '已将分享的审计团队视图保存为本地视图。'))
+    await nextTick()
+    document.getElementById('plm-audit-saved-views')?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    })
+    return
+  }
+
   if (actionKind === 'duplicate') {
     await duplicateAuditTeamView()
     return
   }
 
-  const view = selectedAuditTeamView.value
-  if (!view) return
   const ok = await setAuditTeamViewDefaultEntry(view)
   if (ok) clearAuditTeamViewShareEntry()
 }

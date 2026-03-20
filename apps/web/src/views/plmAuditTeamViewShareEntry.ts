@@ -1,6 +1,6 @@
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
 
-export type PlmAuditTeamViewShareEntryActionKind = 'duplicate' | 'set-default' | 'dismiss'
+export type PlmAuditTeamViewShareEntryActionKind = 'save-local' | 'duplicate' | 'set-default' | 'dismiss'
 
 export type PlmAuditTeamViewShareEntry = {
   teamViewId: string
@@ -33,11 +33,18 @@ export function buildPlmAuditTeamViewShareEntryNotice(
   if (!entry || entry.teamViewId !== view.id) return null
 
   const actions: PlmAuditTeamViewShareEntryNotice['actions'] = []
+  if (!view.isArchived) {
+    actions.push({
+      kind: 'save-local',
+      label: tr('Save as local view', '保存为本地视图'),
+      emphasis: 'primary',
+    })
+  }
   if (options.canDuplicate && !view.isArchived) {
     actions.push({
       kind: 'duplicate',
       label: tr('Duplicate for my workflow', '复制为我的工作流视图'),
-      emphasis: 'primary',
+      emphasis: 'secondary',
     })
   }
   if (options.canSetDefault && !view.isArchived && !view.isDefault) {
@@ -62,4 +69,11 @@ export function buildPlmAuditTeamViewShareEntryNotice(
     ),
     actions,
   }
+}
+
+export function buildPlmAuditSharedEntrySavedViewName(
+  view: Pick<PlmWorkbenchTeamView<'audit'>, 'name'>,
+  tr: (en: string, zh: string) => string,
+) {
+  return `${view.name} · ${tr('Local view', '本地视图')}`
 }
