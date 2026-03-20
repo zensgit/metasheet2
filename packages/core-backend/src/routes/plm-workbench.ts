@@ -50,6 +50,7 @@ interface PlmWorkbenchTeamViewConflictBuilder {
 type PlmTeamPresetBatchAction = 'archive' | 'restore' | 'delete'
 type PlmTeamViewBatchAction = 'archive' | 'restore' | 'delete'
 type PlmTeamViewDefaultAuditAction = 'set-default' | 'clear-default'
+type PlmTeamViewLifecycleAuditAction = 'archive' | 'restore' | 'delete'
 type PlmCollaborativeAuditResourceType = 'plm-team-preset-batch' | 'plm-team-view-batch' | 'plm-team-view-default'
 const UUID_LIKE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const PLM_COLLABORATIVE_AUDIT_RESOURCE_TYPES: PlmCollaborativeAuditResourceType[] = [
@@ -449,6 +450,49 @@ async function logPlmTeamViewDefaultAudit(params: {
       kind: params.kind,
       viewName: params.viewName,
       processedKinds: [params.kind],
+      requestedTotal: 1,
+      processedTotal: 1,
+      skippedTotal: 0,
+    },
+  })
+}
+
+async function logPlmTeamViewLifecycleAudit(params: {
+  action: PlmTeamViewLifecycleAuditAction
+  tenantId: string
+  ownerUserId: string
+  viewId: string
+  kind: string
+  viewName: string
+}) {
+  logger.info('Processed PLM team view lifecycle action', {
+    audit: 'plm-team-view-batch',
+    action: params.action,
+    tenantId: params.tenantId,
+    ownerUserId: params.ownerUserId,
+    viewId: params.viewId,
+    kind: params.kind,
+    viewName: params.viewName,
+    processedKinds: [params.kind],
+    processedTotal: 1,
+  })
+
+  await persistPlmCollaborativeAuditEvent({
+    route: `/api/plm-workbench/views/team/:id/${params.action === 'delete' ? '' : params.action}`.replace(/\/$/, ''),
+    resourceType: 'plm-team-view-batch',
+    action: params.action,
+    ownerUserId: params.ownerUserId,
+    resourceId: params.viewId,
+    meta: {
+      tenantId: params.tenantId,
+      ownerUserId: params.ownerUserId,
+      audit: 'plm-team-view-batch',
+      kind: params.kind,
+      viewName: params.viewName,
+      processedKinds: [params.kind],
+      requestedIds: [params.viewId],
+      processedIds: [params.viewId],
+      skippedIds: [],
       requestedTotal: 1,
       processedTotal: 1,
       skippedTotal: 0,
@@ -1668,6 +1712,15 @@ router.delete(
         .where('id', '=', viewId)
         .execute()
 
+      await logPlmTeamViewLifecycleAudit({
+        action: 'delete',
+        tenantId,
+        ownerUserId: currentUserId,
+        viewId,
+        kind: String(view.kind || ''),
+        viewName: String(view.name || ''),
+      })
+
       return res.json({
         success: true,
         data: {
@@ -1742,6 +1795,15 @@ router.post(
         .returningAll()
         .executeTakeFirstOrThrow()
 
+      await logPlmTeamViewLifecycleAudit({
+        action: 'archive',
+        tenantId,
+        ownerUserId: currentUserId,
+        viewId,
+        kind: String(view.kind || ''),
+        viewName: String(view.name || ''),
+      })
+
       return res.json({
         success: true,
         data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
@@ -1811,6 +1873,15 @@ router.post(
         .where('id', '=', viewId)
         .returningAll()
         .executeTakeFirstOrThrow()
+
+      await logPlmTeamViewLifecycleAudit({
+        action: 'restore',
+        tenantId,
+        ownerUserId: currentUserId,
+        viewId,
+        kind: String(view.kind || ''),
+        viewName: String(view.name || ''),
+      })
 
       return res.json({
         success: true,

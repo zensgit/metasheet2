@@ -661,6 +661,10 @@ import {
   type PlmRecommendedAuditTeamViewFilter,
 } from './plmAuditTeamViewCatalog'
 import {
+  buildPlmAuditTeamViewBatchLogState,
+  buildPlmAuditTeamViewLogState,
+} from './plmAuditTeamViewAudit'
+import {
   buildPlmAuditTeamViewManagement,
   type PlmAuditTeamViewLifecycleActionKind,
 } from './plmAuditTeamViewManagement'
@@ -1229,8 +1233,9 @@ async function setAuditTeamViewDefaultEntry(view: PlmWorkbenchTeamView<'audit'>)
       }),
     )
     applyAuditTeamViewState(saved)
-    await syncRouteState(buildPlmAuditRouteStateFromTeamView(saved.id, saved.state))
-    setStatus(tr('Audit team view set as default.', '审计团队视图已设为默认。'))
+    focusedAuditTeamViewId.value = saved.id
+    await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'set-default', readCurrentRouteState()))
+    setStatus(tr('Audit team view set as default. Showing matching audit logs.', '审计团队视图已设为默认，已切换到对应审计日志。'))
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
       ? error.message
@@ -1286,8 +1291,9 @@ async function clearAuditTeamViewDefault() {
     const saved = await clearPlmWorkbenchTeamViewDefault('audit', view.id)
     replaceAuditTeamView(saved)
     applyAuditTeamViewState(saved)
-    await syncRouteState(buildPlmAuditRouteStateFromTeamView(saved.id, saved.state))
-    setStatus(tr('Audit team view default cleared.', '审计团队视图默认已取消。'))
+    focusedAuditTeamViewId.value = saved.id
+    await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'clear-default', readCurrentRouteState()))
+    setStatus(tr('Audit team view default cleared. Showing matching audit logs.', '审计团队视图默认已取消，已切换到对应审计日志。'))
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
       ? error.message
@@ -1338,7 +1344,9 @@ async function runAuditTeamViewLifecycleAction(
       await deletePlmWorkbenchTeamView(view.id)
       removeAuditTeamViews([view.id])
       await clearCurrentAuditTeamViewSelectionIfNeeded([view.id])
-      setStatus(tr('Audit team view deleted.', '审计团队视图已删除。'))
+      focusedAuditTeamViewId.value = ''
+      await syncRouteState(buildPlmAuditTeamViewLogState(view, 'delete', readCurrentRouteState()))
+      setStatus(tr('Audit team view deleted. Showing matching audit logs.', '审计团队视图已删除，已切换到对应审计日志。'))
       return
     }
 
@@ -1347,15 +1355,18 @@ async function runAuditTeamViewLifecycleAction(
       : await restorePlmWorkbenchTeamView('audit', view.id)
 
     replaceAuditTeamView(saved)
+    focusedAuditTeamViewId.value = saved.id
 
     if (actionKind === 'archive') {
       auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => id !== view.id)
       await clearCurrentAuditTeamViewSelectionIfNeeded([view.id])
-      setStatus(tr('Audit team view archived.', '审计团队视图已归档。'))
+      await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'archive', readCurrentRouteState()))
+      setStatus(tr('Audit team view archived. Showing matching audit logs.', '审计团队视图已归档，已切换到对应审计日志。'))
       return
     }
 
-    setStatus(tr('Audit team view restored.', '审计团队视图已恢复。'))
+    await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'restore', readCurrentRouteState()))
+    setStatus(tr('Audit team view restored. Showing matching audit logs.', '审计团队视图已恢复，已切换到对应审计日志。'))
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
       ? error.message
@@ -1407,7 +1418,16 @@ async function runAuditTeamViewBatchAction(actionKind: PlmAuditTeamViewLifecycle
     const skippedSuffix = skippedTotal
       ? tr(` (${skippedTotal} skipped)`, `（跳过 ${skippedTotal} 项）`)
       : ''
-    setStatus(tr(`${processedTotal} team views ${actionLabelText}${skippedSuffix}.`, `${processedTotal} 个团队视图${actionLabelText}${skippedSuffix}。`))
+    const processedViews = result.processedIds
+      .map((id) => findAuditTeamViewById(id))
+      .filter((view): view is PlmWorkbenchTeamView<'audit'> => Boolean(view))
+    await syncRouteState(buildPlmAuditTeamViewBatchLogState(
+      processedViews.length ? processedViews : batchAction.eligibleIds.map((id) => ({ id, kind: 'audit' as const })),
+      actionKind,
+      readCurrentRouteState(),
+    ))
+    focusedAuditTeamViewId.value = processedViews[0]?.id || ''
+    setStatus(tr(`${processedTotal} team views ${actionLabelText}${skippedSuffix}. Showing matching audit logs.`, `${processedTotal} 个团队视图${actionLabelText}${skippedSuffix}，已切换到对应审计日志。`))
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
       ? error.message

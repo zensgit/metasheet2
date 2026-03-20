@@ -693,6 +693,15 @@ describe('plm-workbench routes', () => {
       isArchived: true,
       archivedAt: '2026-03-10T08:00:00.000Z',
     })
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO operation_audit_logs'),
+      expect.arrayContaining([
+        'owner-1',
+        'archive',
+        'plm-team-view-batch',
+        'view-archive',
+      ]),
+    )
   })
 
   it('restores an archived workbench team view for the owner', async () => {
@@ -733,6 +742,50 @@ describe('plm-workbench routes', () => {
       kind: 'workbench',
       isArchived: false,
     })
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO operation_audit_logs'),
+      expect.arrayContaining([
+        'owner-1',
+        'restore',
+        'plm-team-view-batch',
+        'view-restore',
+      ]),
+    )
+  })
+
+  it('deletes a workbench team view for the owner and writes audit', async () => {
+    routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
+      id: 'view-delete',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'audit',
+      name: '待删除审计视图',
+      name_key: '待删除审计视图',
+      is_default: false,
+      archived_at: null,
+      state: JSON.stringify({ page: 1, q: '', actorId: '', kind: '', action: '', resourceType: '', from: '', to: '', windowMinutes: 180 }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-09T00:12:00.000Z',
+    })
+    routeMocks.state.builder.execute.mockResolvedValueOnce(undefined)
+
+    const response = await request(app).delete('/api/plm-workbench/views/team/view-delete')
+
+    expect(response.status).toBe(200)
+    expect(response.body.data).toEqual({
+      id: 'view-delete',
+      message: 'PLM team view deleted successfully',
+    })
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO operation_audit_logs'),
+      expect.arrayContaining([
+        'owner-1',
+        'delete',
+        'plm-team-view-batch',
+        'view-delete',
+      ]),
+    )
   })
 
   it('batch archives manageable team views and reports skipped ids', async () => {
