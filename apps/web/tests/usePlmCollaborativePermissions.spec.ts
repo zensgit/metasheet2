@@ -39,4 +39,59 @@ describe('usePlmCollaborativePermissions', () => {
     expect(model.canSetDefault.value).toBe(false)
     expect(ownerUserIdRef.value).toBe('')
   })
+
+  it('derives duplicate, rename, transfer, archive, and restore states from archived/manageable entries', () => {
+    const selectedEntry = ref({
+      canManage: true,
+      isArchived: false,
+      isDefault: false,
+      ownerUserId: 'owner-a',
+      permissions: {
+        canManage: true,
+        canApply: true,
+        canDuplicate: true,
+        canShare: true,
+        canDelete: true,
+        canArchive: true,
+        canRestore: false,
+        canRename: true,
+        canTransfer: true,
+        canSetDefault: true,
+        canClearDefault: false,
+      },
+    })
+    const nameRef = ref('新的审计视图')
+    const ownerUserIdRef = ref('owner-b')
+
+    const model = usePlmCollaborativePermissions({
+      selectedEntry: computed(() => selectedEntry.value),
+      nameRef,
+      ownerUserIdRef,
+    })
+
+    expect(model.canDuplicate.value).toBe(true)
+    expect(model.canRename.value).toBe(true)
+    expect(model.canTransfer.value).toBe(true)
+    expect(model.canArchive.value).toBe(true)
+    expect(model.canRestore.value).toBe(false)
+
+    nameRef.value = ''
+    ownerUserIdRef.value = 'owner-a'
+    selectedEntry.value = {
+      ...selectedEntry.value,
+      isArchived: true,
+      permissions: {
+        ...selectedEntry.value.permissions,
+        canArchive: false,
+        canRestore: true,
+        canRename: false,
+        canTransfer: false,
+      },
+    }
+
+    expect(model.canRename.value).toBe(false)
+    expect(model.canTransfer.value).toBe(false)
+    expect(model.canArchive.value).toBe(false)
+    expect(model.canRestore.value).toBe(true)
+  })
 })

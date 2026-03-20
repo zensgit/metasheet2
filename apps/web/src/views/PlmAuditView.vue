@@ -249,6 +249,9 @@
         <button class="plm-audit__button" type="button" :disabled="!canApplyAuditTeamView || auditTeamViewsLoading" @click="applyAuditTeamView">
           {{ tr('Apply', '应用') }}
         </button>
+        <button class="plm-audit__button" type="button" :disabled="!canDuplicateAuditTeamView || auditTeamViewsLoading" @click="duplicateAuditTeamView">
+          {{ tr('Duplicate', '复制副本') }}
+        </button>
         <button class="plm-audit__button" type="button" :disabled="!canShareAuditTeamView || auditTeamViewsLoading" @click="shareAuditTeamView">
           {{ tr('Share', '分享') }}
         </button>
@@ -260,6 +263,12 @@
         </button>
         <button class="plm-audit__button" type="button" :disabled="!canDeleteAuditTeamView || auditTeamViewsLoading" @click="deleteAuditTeamView">
           {{ tr('Delete', '删除') }}
+        </button>
+        <button class="plm-audit__button" type="button" :disabled="!canArchiveAuditTeamView || auditTeamViewsLoading" @click="archiveAuditTeamView">
+          {{ tr('Archive', '归档') }}
+        </button>
+        <button class="plm-audit__button" type="button" :disabled="!canRestoreAuditTeamView || auditTeamViewsLoading" @click="restoreAuditTeamView">
+          {{ tr('Restore', '恢复') }}
         </button>
       </div>
 
@@ -361,6 +370,22 @@
         />
         <button class="plm-audit__button plm-audit__button--primary" type="button" :disabled="!canSaveAuditTeamView || auditTeamViewsLoading" @click="saveAuditTeamView">
           {{ tr('Save to team', '保存到团队') }}
+        </button>
+        <button class="plm-audit__button" type="button" :disabled="!canRenameAuditTeamView || auditTeamViewsLoading" @click="renameAuditTeamView">
+          {{ tr('Rename', '重命名') }}
+        </button>
+      </div>
+
+      <div class="plm-audit__saved-view-create">
+        <input
+          v-model="auditTeamViewOwnerUserId"
+          class="plm-audit__saved-view-input"
+          type="text"
+          :placeholder="tr('Target owner user ID', '目标所有者用户 ID')"
+          @keydown.enter.prevent="transferAuditTeamView"
+        />
+        <button class="plm-audit__button" type="button" :disabled="!canTransferAuditTeamView || auditTeamViewsLoading" @click="transferAuditTeamView">
+          {{ tr('Transfer owner', '转移所有者') }}
         </button>
       </div>
 
@@ -620,13 +645,16 @@ import {
   batchPlmWorkbenchTeamViews,
   clearPlmWorkbenchTeamViewDefault,
   deletePlmWorkbenchTeamView,
+  duplicatePlmWorkbenchTeamView,
   exportPlmCollaborativeAuditLogsCsv,
   getPlmCollaborativeAuditSummary,
   listPlmCollaborativeAuditLogs,
   listPlmWorkbenchTeamViews,
+  renamePlmWorkbenchTeamView,
   restorePlmWorkbenchTeamView,
   savePlmWorkbenchTeamView,
   setPlmWorkbenchTeamViewDefault,
+  transferPlmWorkbenchTeamView,
   type PlmCollaborativeAuditAction,
   type PlmCollaborativeAuditLogItem,
   type PlmCollaborativeAuditResourceType,
@@ -689,6 +717,7 @@ import {
 import { buildPlmAuditTeamViewContextNote } from './plmAuditTeamViewContext'
 import { copyTextToClipboard } from './plm/plmClipboard'
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
+import { usePlmCollaborativePermissions } from './plm/usePlmCollaborativePermissions'
 import { buildPlmWorkbenchTeamViewShareUrl } from './plm/plmWorkbenchViewState'
 
 const route = useRoute()
@@ -709,6 +738,7 @@ const savedViewName = ref('')
 const savedViews = ref<PlmAuditSavedView[]>(readPlmAuditSavedViews())
 const auditTeamViewKey = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.teamViewId)
 const auditTeamViewName = ref('')
+const auditTeamViewOwnerUserId = ref('')
 const auditTeamViews = ref<PlmWorkbenchTeamView<'audit'>[]>([])
 const auditTeamViewSelection = ref<string[]>([])
 const focusedAuditTeamViewId = ref('')
@@ -801,30 +831,21 @@ const auditSceneSummaryCard = computed(() => buildPlmAuditSceneSummaryCard({
   sceneQueryContextActive: auditSceneQueryContextActive.value,
 }, tr))
 const auditSceneFilterHighlight = computed(() => buildPlmAuditSceneFilterHighlight(auditSceneToken.value, tr))
-const canApplyAuditTeamView = computed(() => {
-  const view = selectedAuditTeamView.value
-  if (!view || view.isArchived) return false
-  return view.permissions?.canApply ?? !view.isArchived
-})
-const canShareAuditTeamView = computed(() => {
-  const view = selectedAuditTeamView.value
-  if (!view || view.isArchived) return false
-  return view.permissions?.canShare ?? view.canManage
-})
-const canDeleteAuditTeamView = computed(() => {
-  const view = selectedAuditTeamView.value
-  if (!view) return false
-  return view.permissions?.canDelete ?? view.canManage
-})
-const canSetAuditTeamViewDefault = computed(() => {
-  const view = selectedAuditTeamView.value
-  if (!view || view.isArchived) return false
-  return view.permissions?.canSetDefault ?? (view.canManage && !view.isDefault)
-})
-const canClearAuditTeamViewDefault = computed(() => {
-  const view = selectedAuditTeamView.value
-  if (!view || view.isArchived) return false
-  return view.permissions?.canClearDefault ?? (view.canManage && view.isDefault)
+const {
+  canApply: canApplyAuditTeamView,
+  canDuplicate: canDuplicateAuditTeamView,
+  canShare: canShareAuditTeamView,
+  canDelete: canDeleteAuditTeamView,
+  canArchive: canArchiveAuditTeamView,
+  canRestore: canRestoreAuditTeamView,
+  canRename: canRenameAuditTeamView,
+  canTransfer: canTransferAuditTeamView,
+  canSetDefault: canSetAuditTeamViewDefault,
+  canClearDefault: canClearAuditTeamViewDefault,
+} = usePlmCollaborativePermissions({
+  selectedEntry: selectedAuditTeamView,
+  nameRef: auditTeamViewName,
+  ownerUserIdRef: auditTeamViewOwnerUserId,
 })
 
 function readCurrentRouteState(): PlmAuditRouteState {
@@ -1198,11 +1219,96 @@ async function shareAuditTeamView() {
   await shareAuditTeamViewEntry(view)
 }
 
+async function duplicateAuditTeamView() {
+  const view = selectedAuditTeamView.value
+  if (!view || !canDuplicateAuditTeamView.value) return
+
+  auditTeamViewsLoading.value = true
+  auditTeamViewsError.value = ''
+  try {
+    const duplicated = await duplicatePlmWorkbenchTeamView(
+      'audit',
+      view.id,
+      auditTeamViewName.value.trim() || undefined,
+    )
+    upsertAuditTeamView(duplicated)
+    applyAuditTeamViewState(duplicated)
+    auditTeamViewKey.value = duplicated.id
+    auditTeamViewName.value = ''
+    focusedAuditTeamViewId.value = duplicated.id
+    await syncRouteState(buildPlmAuditRouteStateFromTeamView(duplicated.id, duplicated.state))
+    setStatus(tr('Audit team view duplicated.', '审计团队视图已复制。'))
+  } catch (error: unknown) {
+    auditTeamViewsError.value = error instanceof Error
+      ? error.message
+      : tr('Failed to duplicate audit team view', '复制审计团队视图失败')
+    setStatus(auditTeamViewsError.value, 'error')
+  } finally {
+    auditTeamViewsLoading.value = false
+  }
+}
+
+async function renameAuditTeamView() {
+  const view = selectedAuditTeamView.value
+  if (!view || !canRenameAuditTeamView.value) return
+
+  auditTeamViewsLoading.value = true
+  auditTeamViewsError.value = ''
+  try {
+    const renamed = await renamePlmWorkbenchTeamView(
+      'audit',
+      view.id,
+      auditTeamViewName.value.trim(),
+    )
+    replaceAuditTeamView(renamed)
+    applyAuditTeamViewState(renamed)
+    auditTeamViewKey.value = renamed.id
+    auditTeamViewName.value = ''
+    focusedAuditTeamViewId.value = renamed.id
+    setStatus(tr('Audit team view renamed.', '审计团队视图已重命名。'))
+  } catch (error: unknown) {
+    auditTeamViewsError.value = error instanceof Error
+      ? error.message
+      : tr('Failed to rename audit team view', '重命名审计团队视图失败')
+    setStatus(auditTeamViewsError.value, 'error')
+  } finally {
+    auditTeamViewsLoading.value = false
+  }
+}
+
 async function setAuditTeamViewDefault() {
   const view = selectedAuditTeamView.value
   if (!view || !canSetAuditTeamViewDefault.value) return
 
   await setAuditTeamViewDefaultEntry(view)
+}
+
+async function transferAuditTeamView() {
+  const view = selectedAuditTeamView.value
+  if (!view || !canTransferAuditTeamView.value) return
+
+  auditTeamViewsLoading.value = true
+  auditTeamViewsError.value = ''
+  try {
+    const saved = await transferPlmWorkbenchTeamView(
+      'audit',
+      view.id,
+      auditTeamViewOwnerUserId.value.trim(),
+    )
+    replaceAuditTeamView(saved)
+    applyAuditTeamViewState(saved)
+    auditTeamViewKey.value = saved.id
+    auditTeamViewOwnerUserId.value = ''
+    focusedAuditTeamViewId.value = saved.id
+    setStatus(tr('Audit team view owner transferred.', '审计团队视图所有者已转移。'))
+  } catch (error: unknown) {
+    auditTeamViewsError.value = error instanceof Error
+      ? error.message
+      : tr('Failed to transfer audit team view owner', '转移审计团队视图所有者失败')
+    setStatus(auditTeamViewsError.value, 'error')
+  } finally {
+    auditTeamViewsLoading.value = false
+  }
 }
 
 async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
@@ -1302,6 +1408,18 @@ async function clearAuditTeamViewDefault() {
   } finally {
     auditTeamViewsLoading.value = false
   }
+}
+
+async function archiveAuditTeamView() {
+  const view = selectedAuditTeamView.value
+  if (!view || !canArchiveAuditTeamView.value) return
+  await runAuditTeamViewLifecycleAction(view.id, 'archive')
+}
+
+async function restoreAuditTeamView() {
+  const view = selectedAuditTeamView.value
+  if (!view || !canRestoreAuditTeamView.value) return
+  await runAuditTeamViewLifecycleAction(view.id, 'restore')
 }
 
 async function deleteAuditTeamView() {
