@@ -343,6 +343,9 @@
               <button class="plm-audit__button" type="button" :disabled="auditTeamViewsLoading" @click="runRecommendedAuditTeamViewSecondaryAction(view)">
                 {{ view.secondaryActionLabel }}
               </button>
+              <button class="plm-audit__button" type="button" :disabled="auditTeamViewsLoading" @click="focusAuditTeamViewManagement(view)">
+                {{ view.managementActionLabel }}
+              </button>
             </div>
           </article>
         </div>
@@ -402,11 +405,13 @@
           <article
             v-for="view in auditTeamViewManagementItems"
             :key="view.id"
+            :id="`plm-audit-team-view-${view.id}`"
             class="plm-audit__team-view-card"
             :class="{
               'plm-audit__team-view-card--selected': view.selected,
               'plm-audit__team-view-card--archived': view.isArchived,
               'plm-audit__team-view-card--default': view.isDefault,
+              'plm-audit__team-view-card--focused': focusedAuditTeamViewId === view.id,
             }"
           >
             <label class="plm-audit__team-view-select">
@@ -607,7 +612,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useLocale } from '../composables/useLocale'
 import {
@@ -702,6 +707,7 @@ const auditTeamViewKey = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.teamViewId)
 const auditTeamViewName = ref('')
 const auditTeamViews = ref<PlmWorkbenchTeamView<'audit'>[]>([])
 const auditTeamViewSelection = ref<string[]>([])
+const focusedAuditTeamViewId = ref('')
 const auditTeamViewsLoading = ref(false)
 const auditTeamViewsError = ref('')
 const auditTeamViewRecommendationFilter = ref<PlmRecommendedAuditTeamViewFilter>('')
@@ -1001,6 +1007,9 @@ function replaceAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
 function trimAuditTeamViewSelection() {
   const existingIds = new Set(auditTeamViews.value.map((view) => view.id))
   auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => existingIds.has(id))
+  if (focusedAuditTeamViewId.value && !existingIds.has(focusedAuditTeamViewId.value)) {
+    focusedAuditTeamViewId.value = ''
+  }
 }
 
 function setAllSelectableAuditTeamViewsSelected(nextSelected: boolean) {
@@ -1236,6 +1245,23 @@ async function applyRecommendedAuditTeamView(view: PlmRecommendedAuditTeamView) 
   const target = findAuditTeamViewById(view.id)
   if (!target || target.isArchived) return
   await applyAuditTeamViewEntry(target)
+}
+
+async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
+  const target = findAuditTeamViewById(view.id)
+  if (!target) return
+
+  auditTeamViewKey.value = target.id
+  if (auditTeamViewManagementItems.value.find((item) => item.id === target.id)?.selectable) {
+    auditTeamViewSelection.value = [target.id]
+  }
+  focusedAuditTeamViewId.value = target.id
+  await nextTick()
+  document.getElementById(`plm-audit-team-view-${target.id}`)?.scrollIntoView({
+    behavior: 'smooth',
+    block: 'center',
+  })
+  setStatus(tr('Focused the lifecycle controls for this audit team view.', '已定位到该审计团队视图的生命周期管理区。'))
 }
 
 async function runRecommendedAuditTeamViewSecondaryAction(view: PlmRecommendedAuditTeamView) {
@@ -1798,6 +1824,11 @@ watch(
 .plm-audit__team-view-card--selected {
   border-color: #2563eb;
   box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.12);
+}
+
+.plm-audit__team-view-card--focused {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
 }
 
 .plm-audit__team-view-card--default {

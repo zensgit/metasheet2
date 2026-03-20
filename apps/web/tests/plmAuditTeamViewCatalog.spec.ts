@@ -87,16 +87,19 @@ describe('plmAuditTeamViewCatalog', () => {
       recommendationReason: 'default',
       secondaryActionKind: 'copy-link',
       secondaryActionLabel: '复制默认链接',
+      managementActionLabel: '管理默认视图',
     })
     expect(views[1]).toMatchObject({
       recommendationReason: 'recent-default',
       secondaryActionKind: 'set-default',
       secondaryActionLabel: '重新设为默认',
+      managementActionLabel: '管理近期默认',
     })
     expect(views[2]).toMatchObject({
       recommendationReason: 'recent-update',
       secondaryActionKind: 'set-default',
       secondaryActionLabel: '设为默认',
+      managementActionLabel: '管理最新更新',
     })
   })
 
