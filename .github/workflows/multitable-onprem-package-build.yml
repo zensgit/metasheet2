@@ -1,0 +1,127 @@
+name: Multitable On-Prem Package Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_tag:
+        description: 'Optional package tag suffix (default: run number)'
+        required: false
+        default: ''
+      publish_release:
+        description: 'Publish build outputs to GitHub Releases'
+        required: false
+        default: 'false'
+      release_tag:
+        description: 'Release tag (required when publish_release=true)'
+        required: false
+        default: ''
+      release_name:
+        description: 'Release display name (optional)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web/backend dist
+        run: |
+          pnpm --filter @metasheet/web build
+          pnpm --filter @metasheet/core-backend build
+
+      - name: Build on-prem package
+        env:
+          PACKAGE_TAG: ${{ inputs.package_tag != '' && inputs.package_tag || format('run{0}', github.run_number) }}
+        run: |
+          chmod +x scripts/ops/multitable-onprem-package-build.sh scripts/ops/multitable-onprem-package-verify.sh
+          INSTALL_DEPS=0 BUILD_WEB=0 BUILD_BACKEND=0 scripts/ops/multitable-onprem-package-build.sh
+          pkg_tgz="$(ls -1 output/releases/multitable-onprem/*.tgz | sort | tail -n 1)"
+          pkg_zip="$(ls -1 output/releases/multitable-onprem/*.zip | sort | tail -n 1)"
+          pkg_meta="${pkg_tgz%.tgz}.json"
+          scripts/ops/multitable-onprem-package-verify.sh "$pkg_tgz"
+          scripts/ops/multitable-onprem-package-verify.sh "$pkg_zip"
+          echo "PACKAGE_FILE=$pkg_tgz" >> "$GITHUB_ENV"
+          echo "PACKAGE_FILE_ZIP=$pkg_zip" >> "$GITHUB_ENV"
+          echo "PACKAGE_META_FILE=$pkg_meta" >> "$GITHUB_ENV"
+
+      - name: Publish GitHub Release
+        if: ${{ inputs.publish_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_NAME: ${{ inputs.release_name }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${RELEASE_TAG}" ]]; then
+            echo "release_tag is required when publish_release=true" >&2
+            exit 1
+          fi
+
+          resolved_name="${RELEASE_NAME:-Multitable On-Prem Package ${RELEASE_TAG}}"
+          assets=(
+            "$PACKAGE_FILE"
+            "$PACKAGE_FILE_ZIP"
+            "${PACKAGE_FILE}.sha256"
+            "${PACKAGE_FILE_ZIP}.sha256"
+            "output/releases/multitable-onprem/SHA256SUMS"
+            "$PACKAGE_META_FILE"
+          )
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --title "$resolved_name" \
+              --notes "Automated multitable on-prem package build."
+          fi
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: multitable-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            output/releases/multitable-onprem/*.tgz
+            output/releases/multitable-onprem/*.zip
+            output/releases/multitable-onprem/*.sha256
+            output/releases/multitable-onprem/SHA256SUMS
+            output/releases/multitable-onprem/*.json
+          retention-days: 14
+
+      - name: Step summary
+        run: |
+          {
+            echo "## Multitable On-Prem Package Build"
+            echo ""
+            echo "- Package (.tgz): \`${PACKAGE_FILE}\`"
+            echo "- Package (.zip): \`${PACKAGE_FILE_ZIP}\`"
+            echo "- Artifact: \`multitable-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}\`"
+            if [[ "${{ inputs.publish_release }}" == "true" ]]; then
+              echo "- Release tag: \`${{ inputs.release_tag }}\`"
+            fi
+            echo ""
+            echo "Download:"
+            echo '```bash'
+            echo "gh run download ${{ github.run_id }} -n multitable-onprem-package-${{ github.run_id }}-${{ github.run_attempt }} -D output/playwright/ga/${{ github.run_id }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
