@@ -1080,6 +1080,89 @@ describe('Attendance Plugin Integration', () => {
     expect(missingOvertimeRes.status).toBe(404)
   })
 
+  it('keeps camelCase and snake_case field aliases on shift and assignment responses', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-alias-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Alias Shift ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        workStartTime: '08:30',
+        workEndTime: '17:30',
+        workingDays: [1, 2, 3, 4, 5],
+      }),
+    })
+    expect(shiftRes.status).toBe(201)
+    const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(shiftId).toBeTruthy()
+    if (!shiftId) return
+
+    const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: testUserId,
+        shiftId,
+        startDate: '2026-03-20',
+        isActive: true,
+      }),
+    })
+    expect(assignmentRes.status).toBe(201)
+    const assignmentId = (assignmentRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+    expect(assignmentId).toBeTruthy()
+    if (!assignmentId) return
+
+    const shiftListRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(shiftListRes.status).toBe(200)
+    const shiftItems = (shiftListRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+    const shiftRow = shiftItems.find((item) => item?.id === shiftId)
+    expect(shiftRow).toBeTruthy()
+    expect(shiftRow?.workStartTime).toBe('08:30:00')
+    expect(shiftRow?.work_start_time).toBe('08:30:00')
+    expect(shiftRow?.workEndTime).toBe('17:30:00')
+    expect(shiftRow?.work_end_time).toBe('17:30:00')
+
+    const assignmentListRes = await requestJson(
+      `${baseUrl}/api/attendance/assignments?userId=${encodeURIComponent(testUserId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    )
+    expect(assignmentListRes.status).toBe(200)
+    const assignmentItems = (assignmentListRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+    const assignmentRow = assignmentItems.find((item) => item?.assignment?.id === assignmentId)
+    expect(assignmentRow).toBeTruthy()
+    expect(assignmentRow?.assignment?.userId).toBe(testUserId)
+    expect(assignmentRow?.assignment?.user_id).toBe(testUserId)
+    expect(assignmentRow?.assignment?.shiftId).toBe(shiftId)
+    expect(assignmentRow?.assignment?.shift_id).toBe(shiftId)
+    expect(assignmentRow?.shift?.workStartTime).toBe('08:30:00')
+    expect(assignmentRow?.shift?.work_start_time).toBe('08:30:00')
+  })
+
   it('keeps /api/health public for probes', async () => {
     if (!baseUrl) return
 

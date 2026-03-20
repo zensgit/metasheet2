@@ -2005,14 +2005,21 @@ function mapShiftRow(row) {
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
+    org_id: row.org_id ?? DEFAULT_ORG_ID,
     name: row.name ?? DEFAULT_SHIFT.name,
     timezone: row.timezone ?? DEFAULT_SHIFT.timezone,
     workStartTime: row.work_start_time ?? DEFAULT_SHIFT.workStartTime,
+    work_start_time: row.work_start_time ?? DEFAULT_SHIFT.workStartTime,
     workEndTime: row.work_end_time ?? DEFAULT_SHIFT.workEndTime,
+    work_end_time: row.work_end_time ?? DEFAULT_SHIFT.workEndTime,
     lateGraceMinutes: Number(row.late_grace_minutes ?? DEFAULT_SHIFT.lateGraceMinutes),
+    late_grace_minutes: Number(row.late_grace_minutes ?? DEFAULT_SHIFT.lateGraceMinutes),
     earlyGraceMinutes: Number(row.early_grace_minutes ?? DEFAULT_SHIFT.earlyGraceMinutes),
+    early_grace_minutes: Number(row.early_grace_minutes ?? DEFAULT_SHIFT.earlyGraceMinutes),
     roundingMinutes: Number(row.rounding_minutes ?? DEFAULT_SHIFT.roundingMinutes),
+    rounding_minutes: Number(row.rounding_minutes ?? DEFAULT_SHIFT.roundingMinutes),
     workingDays: normalizeWorkingDays(row.working_days),
+    working_days: normalizeWorkingDays(row.working_days),
   }
 }
 
@@ -2200,11 +2207,17 @@ function mapAssignmentRow(row) {
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
+    org_id: row.org_id ?? DEFAULT_ORG_ID,
     userId: row.user_id,
+    user_id: row.user_id,
     shiftId: row.shift_id,
+    shift_id: row.shift_id,
     startDate: normalizeDateOnly(row.start_date) ?? row.start_date,
+    start_date: normalizeDateOnly(row.start_date) ?? row.start_date,
     endDate: normalizeDateOnly(row.end_date) ?? row.end_date ?? null,
+    end_date: normalizeDateOnly(row.end_date) ?? row.end_date ?? null,
     isActive: row.is_active ?? true,
+    is_active: row.is_active ?? true,
   }
 }
 

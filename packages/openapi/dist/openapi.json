@@ -1504,6 +1504,10 @@
           "orgId": {
             "type": "string"
           },
+          "org_id": {
+            "type": "string",
+            "deprecated": true
+          },
           "name": {
             "type": "string"
           },
@@ -1513,20 +1517,47 @@
           "workStartTime": {
             "type": "string"
           },
+          "work_start_time": {
+            "type": "string",
+            "deprecated": true
+          },
           "workEndTime": {
             "type": "string"
+          },
+          "work_end_time": {
+            "type": "string",
+            "deprecated": true
           },
           "lateGraceMinutes": {
             "type": "integer"
           },
+          "late_grace_minutes": {
+            "type": "integer",
+            "deprecated": true
+          },
           "earlyGraceMinutes": {
             "type": "integer"
+          },
+          "early_grace_minutes": {
+            "type": "integer",
+            "deprecated": true
           },
           "roundingMinutes": {
             "type": "integer"
           },
+          "rounding_minutes": {
+            "type": "integer",
+            "deprecated": true
+          },
           "workingDays": {
             "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "working_days": {
+            "type": "array",
+            "deprecated": true,
             "items": {
               "type": "integer"
             }
@@ -1542,23 +1573,50 @@
           "orgId": {
             "type": "string"
           },
+          "org_id": {
+            "type": "string",
+            "deprecated": true
+          },
           "userId": {
             "type": "string"
+          },
+          "user_id": {
+            "type": "string",
+            "deprecated": true
           },
           "shiftId": {
             "type": "string"
           },
+          "shift_id": {
+            "type": "string",
+            "deprecated": true
+          },
           "startDate": {
             "type": "string",
             "format": "date"
+          },
+          "start_date": {
+            "type": "string",
+            "format": "date",
+            "deprecated": true
           },
           "endDate": {
             "type": "string",
             "format": "date",
             "nullable": true
           },
+          "end_date": {
+            "type": "string",
+            "format": "date",
+            "nullable": true,
+            "deprecated": true
+          },
           "isActive": {
             "type": "boolean"
+          },
+          "is_active": {
+            "type": "boolean",
+            "deprecated": true
           }
         }
       },
