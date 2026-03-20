@@ -18,10 +18,10 @@ Deliver all of these together:
 
 Include these docs with the package:
 
-1. `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-windows-onprem-easy-start-20260319.md`
-2. `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-onprem-package-layout-20260319.md`
-3. `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-internal-pilot-runbook-20260319.md`
-4. `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-pilot-quickstart-20260319.md`
+1. `docs/deployment/multitable-windows-onprem-easy-start-20260319.md`
+2. `docs/deployment/multitable-onprem-package-layout-20260319.md`
+3. `docs/deployment/multitable-internal-pilot-runbook-20260319.md`
+4. `docs/deployment/multitable-pilot-quickstart-20260319.md`
 
 ## 3. Environment Assumptions
 
@@ -53,7 +53,7 @@ Recommended paths:
 Run these before sending the package:
 
 ```bash
-cd /Users/huazhou/Downloads/Github/metasheet2-multitable
+cd <REPO_ROOT>
 scripts/ops/multitable-onprem-package-verify.sh output/releases/multitable-onprem/<PACKAGE_NAME>.tgz
 scripts/ops/multitable-onprem-package-verify.sh output/releases/multitable-onprem/<PACKAGE_NAME>.zip
 ```
@@ -61,7 +61,7 @@ scripts/ops/multitable-onprem-package-verify.sh output/releases/multitable-onpre
 Then prepare one customer-facing delivery directory:
 
 ```bash
-cd /Users/huazhou/Downloads/Github/metasheet2-multitable
+cd <REPO_ROOT>
 pnpm prepare:multitable-onprem:delivery
 ```
 

@@ -13,7 +13,7 @@ PRODUCT_MODE=platform
 Local build on the release machine:
 
 ```bash
-cd /Users/huazhou/Downloads/Github/metasheet2-multitable
+cd <REPO_ROOT>
 chmod +x scripts/ops/multitable-onprem-package-build.sh scripts/ops/multitable-onprem-package-verify.sh
 scripts/ops/multitable-onprem-package-build.sh
 ```
@@ -141,4 +141,4 @@ scripts/ops/multitable-onprem-package-upgrade.sh
 
 Before handing this package to a customer or field team, also review:
 
-- `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-onprem-customer-delivery-checklist-20260319.md`
+- `docs/deployment/multitable-onprem-customer-delivery-checklist-20260319.md`

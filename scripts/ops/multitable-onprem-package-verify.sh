@@ -17,33 +17,80 @@ function info() {
   echo "[multitable-onprem-package-verify] $*" >&2
 }
 
+function collect_delivery_targets() {
+  local root="$1"
+  local targets=()
+  local docs=()
+
+  [[ -f "${root}/INSTALL.txt" ]] && targets+=("${root}/INSTALL.txt")
+  if [[ -d "${root}/docs/deployment" ]]; then
+    shopt -s nullglob
+    docs=("${root}"/docs/deployment/multitable-*.md)
+    shopt -u nullglob
+    if [[ ${#docs[@]} -gt 0 ]]; then
+      targets+=("${docs[@]}")
+    fi
+  fi
+
+  printf '%s\n' "${targets[@]}"
+}
+
+function scan_targets_for_pattern() {
+  local description="$1"
+  local patterns="$2"
+  shift 2
+  local targets=("$@")
+  local tmp_file
+
+  tmp_file="$(mktemp)"
+
+  if command -v rg >/dev/null 2>&1; then
+    if rg -n --ignore-case "$patterns" "${targets[@]}" >"$tmp_file" 2>/dev/null; then
+      cat "$tmp_file" >&2 || true
+      rm -f "$tmp_file" || true
+      die "Found ${description} in on-prem package delivery files"
+    fi
+  else
+    if grep -RInE "$patterns" "${targets[@]}" >"$tmp_file" 2>/dev/null; then
+      cat "$tmp_file" >&2 || true
+      rm -f "$tmp_file" || true
+      die "Found ${description} in on-prem package delivery files"
+    fi
+  fi
+
+  rm -f "$tmp_file" || true
+}
+
 function verify_no_github_links() {
   local root="$1"
   local patterns='github\.com|githubusercontent\.com|github\.io'
   local targets=()
 
-  [[ -f "${root}/INSTALL.txt" ]] && targets+=("${root}/INSTALL.txt")
-  [[ -d "${root}/docs/deployment" ]] && targets+=("${root}/docs/deployment")
+  while IFS= read -r target; do
+    [[ -n "$target" ]] && targets+=("$target")
+  done < <(collect_delivery_targets "$root")
 
   if [[ ${#targets[@]} -eq 0 ]]; then
     return 0
   fi
 
-  if command -v rg >/dev/null 2>&1; then
-    if rg -n --ignore-case "$patterns" "${targets[@]}" >/tmp/multitable_onprem_link_hits.txt 2>/dev/null; then
-      cat /tmp/multitable_onprem_link_hits.txt >&2 || true
-      rm -f /tmp/multitable_onprem_link_hits.txt || true
-      die "Found disallowed GitHub links in on-prem package delivery files"
-    fi
-    rm -f /tmp/multitable_onprem_link_hits.txt || true
-  else
-    if grep -RInE "$patterns" "${targets[@]}" >/tmp/multitable_onprem_link_hits.txt 2>/dev/null; then
-      cat /tmp/multitable_onprem_link_hits.txt >&2 || true
-      rm -f /tmp/multitable_onprem_link_hits.txt || true
-      die "Found disallowed GitHub links in on-prem package delivery files"
-    fi
-    rm -f /tmp/multitable_onprem_link_hits.txt || true
+  scan_targets_for_pattern "disallowed GitHub links" "$patterns" "${targets[@]}"
+}
+
+function verify_no_absolute_user_paths() {
+  local root="$1"
+  local patterns='(^|[^[:alnum:]_])(/Users/[^[:space:]]+|/home/[^[:space:]]+)'
+  local targets=()
+
+  while IFS= read -r target; do
+    [[ -n "$target" ]] && targets+=("$target")
+  done < <(collect_delivery_targets "$root")
+
+  if [[ ${#targets[@]} -eq 0 ]]; then
+    return 0
   fi
+
+  scan_targets_for_pattern "absolute local user paths" "$patterns" "${targets[@]}"
 }
 
 function verify_sha() {
@@ -143,6 +190,7 @@ done
 
 if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
   verify_no_github_links "$pkg_root"
+  verify_no_absolute_user_paths "$pkg_root"
 fi
 
 info "Package verify OK"

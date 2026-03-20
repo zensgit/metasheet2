@@ -2,7 +2,7 @@
 
 Date: 2026-03-19  
 Scope: Feishu-style multitable internal pilot  
-Repo: `/Users/huazhou/Downloads/Github/metasheet2-multitable`
+Repo root: `<REPO_ROOT>`
 
 ## Goal
 
@@ -15,7 +15,7 @@ This runbook does not add new product functionality. It standardizes how to deci
 ### Local one-shot readiness
 
 ```bash
-cd /Users/huazhou/Downloads/Github/metasheet2-multitable
+cd <REPO_ROOT>
 ENSURE_PLAYWRIGHT=false pnpm verify:multitable-pilot:ready:local
 ```
 
@@ -43,7 +43,7 @@ Key outputs:
 ### Pilot handoff bundle
 
 ```bash
-cd /Users/huazhou/Downloads/Github/metasheet2-multitable
+cd <REPO_ROOT>
 pnpm prepare:multitable-pilot:handoff
 ```
 

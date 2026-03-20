@@ -2,7 +2,7 @@
 
 Date: 2026-03-19  
 Scope: Internal pilot execution checklist  
-Repo: `/Users/huazhou/Downloads/Github/metasheet2-multitable`
+Repo root: `<REPO_ROOT>`
 
 ## Team A: Intake / Data Entry
 
@@ -58,8 +58,8 @@ Goal: validate `import + grid + search + person assignment + conflict recovery`.
 
 Use one of these for every issue or hesitation:
 
-- `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-pilot-feedback-template-20260319.md`
-- `/Users/huazhou/Downloads/Github/metasheet2-multitable/.github/ISSUE_TEMPLATE/multitable-pilot-feedback.yml`
+- `docs/deployment/multitable-pilot-feedback-template-20260319.md`
+- `.github/ISSUE_TEMPLATE/multitable-pilot-feedback.yml`
 
 Severity guide:
 
