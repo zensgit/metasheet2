@@ -23,6 +23,34 @@ export type PlmAuditTeamViewCollaborationNotice = {
   }>
 }
 
+export function buildPlmAuditTeamViewCollaborationActionStatus(
+  source: PlmAuditTeamViewCollaborationSource,
+  action: Exclude<PlmAuditTeamViewCollaborationActionKind, 'dismiss'>,
+  tr: (en: string, zh: string) => string,
+) {
+  if (action === 'share') {
+    return source === 'saved-view-promotion'
+      ? tr(
+          'Share link copied for the promoted audit team view.',
+          '已复制提升后的审计团队视图分享链接。',
+        )
+      : tr(
+          'Share link copied for the recommended audit team view.',
+          '已复制推荐审计团队视图的分享链接。',
+        )
+  }
+
+  return source === 'saved-view-promotion'
+    ? tr(
+        'Promoted audit team view set as default. Showing matching audit logs.',
+        '已将提升后的审计团队视图设为默认，并切换到对应审计日志。',
+      )
+    : tr(
+        'Recommended audit team view set as default. Showing matching audit logs.',
+        '已将推荐审计团队视图设为默认，并切换到对应审计日志。',
+      )
+}
+
 export function buildPlmAuditTeamViewCollaborationDraft(
   view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'name'>,
   tr: (en: string, zh: string) => string,

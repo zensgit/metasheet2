@@ -710,6 +710,7 @@ import {
   type PlmRecommendedAuditTeamViewFilter,
 } from './plmAuditTeamViewCatalog'
 import {
+  buildPlmAuditTeamViewCollaborationActionStatus,
   buildPlmAuditTeamViewCollaborationDraft,
   buildPlmAuditTeamViewCollaborationNotice,
   type PlmAuditTeamViewCollaborationActionKind,
@@ -1364,16 +1365,27 @@ async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
   setStatus(tr('Audit team view applied.', '审计团队视图已应用。'))
 }
 
-async function shareAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
+async function shareAuditTeamViewEntry(
+  view: PlmWorkbenchTeamView<'audit'>,
+  source?: 'recommendation' | 'saved-view-promotion',
+) {
   const ok = await copyTextToClipboard(buildAuditTeamViewShareUrl(view))
   if (!ok) {
     setStatus(tr('Failed to copy team view link.', '复制团队视图链接失败。'), 'error')
-    return
+    return false
   }
-  setStatus(tr('Audit team view link copied.', '审计团队视图链接已复制。'))
+  setStatus(
+    source
+      ? buildPlmAuditTeamViewCollaborationActionStatus(source, 'share', tr)
+      : tr('Audit team view link copied.', '审计团队视图链接已复制。'),
+  )
+  return true
 }
 
-async function setAuditTeamViewDefaultEntry(view: PlmWorkbenchTeamView<'audit'>) {
+async function setAuditTeamViewDefaultEntry(
+  view: PlmWorkbenchTeamView<'audit'>,
+  source?: 'recommendation' | 'saved-view-promotion',
+) {
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
   try {
@@ -1387,7 +1399,12 @@ async function setAuditTeamViewDefaultEntry(view: PlmWorkbenchTeamView<'audit'>)
     applyAuditTeamViewState(saved)
     focusedAuditTeamViewId.value = saved.id
     await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'set-default', readCurrentRouteState()))
-    setStatus(tr('Audit team view set as default. Showing matching audit logs.', '审计团队视图已设为默认，已切换到对应审计日志。'))
+    setStatus(
+      source
+        ? buildPlmAuditTeamViewCollaborationActionStatus(source, 'set-default', tr)
+        : tr('Audit team view set as default. Showing matching audit logs.', '审计团队视图已设为默认，已切换到对应审计日志。'),
+    )
+    return true
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
       ? error.message
@@ -1396,6 +1413,7 @@ async function setAuditTeamViewDefaultEntry(view: PlmWorkbenchTeamView<'audit'>)
   } finally {
     auditTeamViewsLoading.value = false
   }
+  return false
 }
 
 async function applyRecommendedAuditTeamView(view: PlmRecommendedAuditTeamView) {
@@ -1463,6 +1481,7 @@ async function clearAuditTeamViewDefault() {
 async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewCollaborationActionKind) {
   const view = selectedAuditTeamView.value
   if (!view) return
+  const source = auditTeamViewCollaborationDraft.value?.source
 
   if (actionKind === 'dismiss') {
     clearAuditTeamViewCollaborationDraft()
@@ -1470,11 +1489,12 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
   }
 
   if (actionKind === 'share') {
-    await shareAuditTeamViewEntry(view)
+    await shareAuditTeamViewEntry(view, source)
     return
   }
 
-  await setAuditTeamViewDefaultEntry(view)
+  const ok = await setAuditTeamViewDefaultEntry(view, source)
+  if (ok) clearAuditTeamViewCollaborationDraft()
 }
 
 async function archiveAuditTeamView() {

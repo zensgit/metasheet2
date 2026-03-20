@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildPlmAuditTeamViewCollaborationActionStatus,
   buildPlmAuditTeamViewCollaborationDraft,
   buildPlmAuditTeamViewCollaborationNotice,
 } from '../src/views/plmAuditTeamViewCollaboration'
@@ -99,5 +100,14 @@ describe('plmAuditTeamViewCollaboration', () => {
         emphasis: 'secondary',
       },
     ])
+  })
+
+  it('builds source-aware status messages for follow-up actions', () => {
+    expect(buildPlmAuditTeamViewCollaborationActionStatus('recommendation', 'share', tr)).toBe(
+      'Share link copied for the recommended audit team view.|已复制推荐审计团队视图的分享链接。',
+    )
+    expect(buildPlmAuditTeamViewCollaborationActionStatus('saved-view-promotion', 'set-default', tr)).toBe(
+      'Promoted audit team view set as default. Showing matching audit logs.|已将提升后的审计团队视图设为默认，并切换到对应审计日志。',
+    )
   })
 })
