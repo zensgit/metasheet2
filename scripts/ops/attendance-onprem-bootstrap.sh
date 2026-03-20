@@ -24,6 +24,29 @@ function run() {
   "$@"
 }
 
+function verify_prebuilt_dist() {
+  local web_index="${ROOT_DIR}/apps/web/dist/index.html"
+  local backend_migrate="${ROOT_DIR}/packages/core-backend/dist/src/db/migrate.js"
+
+  if [[ "$BUILD_WEB" != "1" && ! -f "$web_index" ]]; then
+    cat >&2 <<EOF
+[attendance-onprem-bootstrap] ERROR: Prebuilt web dist disappeared: ${web_index}
+Likely cause: a workspace dependency mutation (for example \`pnpm add -w ...\`) rebuilt the workspace and removed prebuilt artifacts.
+Fix: restore the packaged dist or rerun with BUILD_WEB=1.
+EOF
+    exit 1
+  fi
+
+  if [[ "$BUILD_BACKEND" != "1" && ! -f "$backend_migrate" ]]; then
+    cat >&2 <<EOF
+[attendance-onprem-bootstrap] ERROR: Prebuilt backend dist disappeared: ${backend_migrate}
+Likely cause: a workspace dependency mutation rebuilt the workspace and removed prebuilt artifacts.
+Fix: restore the packaged dist or rerun with BUILD_BACKEND=1.
+EOF
+    exit 1
+  fi
+}
+
 function load_env_file() {
   set +u
   set -a
@@ -39,6 +62,7 @@ run env ENV_FILE="$ENV_FILE" REQUIRE_ATTENDANCE_ONLY="$REQUIRE_ATTENDANCE_ONLY" 
 
 if [[ "$INSTALL_DEPS" == "1" ]]; then
   run pnpm install --frozen-lockfile
+  verify_prebuilt_dist
 fi
 
 if [[ "$BUILD_WEB" == "1" ]]; then
@@ -48,6 +72,8 @@ fi
 if [[ "$BUILD_BACKEND" == "1" ]]; then
   run pnpm --filter @metasheet/core-backend build
 fi
+
+verify_prebuilt_dist
 
 load_env_file
 

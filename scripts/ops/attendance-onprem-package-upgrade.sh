@@ -29,8 +29,12 @@ function info() {
 
 if [[ "$RUN_MIGRATIONS" == "1" && "$BUILD_BACKEND" != "1" ]]; then
   if [[ ! -f "${ROOT_DIR}/packages/core-backend/dist/src/db/migrate.js" ]]; then
-    die "Missing packages/core-backend/dist/src/db/migrate.js. Set BUILD_BACKEND=1 or provide prebuilt dist."
+    die "Missing packages/core-backend/dist/src/db/migrate.js. Set BUILD_BACKEND=1 or provide prebuilt dist. If this disappeared after dependency changes, do not run \`pnpm add -w\` in the packaged workspace."
   fi
+fi
+
+if [[ "$BUILD_WEB" != "1" && ! -f "${ROOT_DIR}/apps/web/dist/index.html" ]]; then
+  die "Missing apps/web/dist/index.html. Set BUILD_WEB=1 or restore the packaged dist. If this disappeared after dependency changes, do not run \`pnpm add -w\` in the packaged workspace."
 fi
 
 info "Applying package upgrade (no git pull)"
