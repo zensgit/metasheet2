@@ -644,8 +644,11 @@ function isValidTimeZoneIdentifier(value) {
 }
 
 function resolveExplicitTimeZoneOrThrow(value, fallback, fieldName = 'timezone') {
+  if (value === undefined || value === null) return fallback
   const zone = typeof value === 'string' ? value.trim() : ''
-  if (!zone) return fallback
+  if (!zone) {
+    throw new HttpError(400, 'VALIDATION_ERROR', `${fieldName} is required`)
+  }
   if (!isValidTimeZoneIdentifier(zone)) {
     throw new HttpError(400, 'VALIDATION_ERROR', `${fieldName} must be a valid IANA time zone`)
   }
@@ -657,8 +660,14 @@ function normalizeSafeDisplayName(fieldName, value) {
   if (!normalized) {
     throw new HttpError(400, 'VALIDATION_ERROR', `${fieldName} is required`)
   }
-  if (/[<>]/.test(normalized) || /<\/?[a-z][^>]*>/i.test(normalized)) {
-    throw new HttpError(400, 'VALIDATION_ERROR', `${fieldName} cannot contain HTML tags`)
+  if (
+    /[<>]/.test(normalized)
+    || /<\/?[a-z][^>]*>/i.test(normalized)
+    || /["'`]/.test(normalized)
+    || /\bjavascript\s*:/i.test(normalized)
+    || /\bon[a-z]+\s*=/i.test(normalized)
+  ) {
+    throw new HttpError(400, 'VALIDATION_ERROR', `${fieldName} contains unsafe characters`)
   }
   return normalized
 }
@@ -6016,6 +6025,7 @@ module.exports = {
     const punchSchema = z.object({
       eventType: z.enum(['check_in', 'check_out']),
       occurredAt: z.string().optional(),
+      occurred_at: z.string().optional(),
       timezone: z.string().optional(),
       source: z.string().optional(),
       location: z.record(z.unknown()).optional(),
@@ -6048,7 +6058,7 @@ module.exports = {
 
     const holidayCreateSchema = z.object({
       date: z.string().min(1),
-      name: z.string().nullable().optional(),
+      name: z.string().trim().min(1),
       isWorkingDay: z.boolean().optional(),
       orgId: z.string().optional(),
     })
@@ -8352,7 +8362,12 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const occurredAt = parseDateInput(parsed.data.occurredAt) ?? new Date()
+        const rawOccurredAt = parsed.data.occurredAt ?? parsed.data.occurred_at
+        const occurredAt = rawOccurredAt ? parseDateInput(rawOccurredAt) : new Date()
+        if (rawOccurredAt && !occurredAt) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'occurredAt must be a valid date-time' } })
+          return
+        }
 
         try {
           const settings = await getSettings(db)
@@ -8883,10 +8898,16 @@ module.exports = {
       '/api/attendance/requests',
       withPermission('attendance:write', async (req, res) => {
         const schema = z.object({
-          workDate: z.string(),
-          requestType: z.enum(REQUEST_TYPES),
+          workDate: z.string().optional(),
+          date: z.string().optional(),
+          requestType: z.string().optional(),
+          type: z.string().optional(),
           requestedInAt: z.string().optional(),
+          requested_in_at: z.string().optional(),
+          clockIn: z.string().optional(),
           requestedOutAt: z.string().optional(),
+          requested_out_at: z.string().optional(),
+          clockOut: z.string().optional(),
           reason: z.string().optional(),
           leaveTypeId: z.string().optional(),
           leaveTypeCode: z.string().optional(),
@@ -8904,26 +8925,30 @@ module.exports = {
           return
         }
 
-	        const userId = getUserId(req)
-	        if (!userId) {
-	          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-	          return
-	        }
+		        const userId = getUserId(req)
+		        if (!userId) {
+		          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+		          return
+		        }
 
-	        const orgId = getOrgId(req)
-	        const workDate = normalizeDateOnlyStrict(parsed.data.workDate)
-	        if (!workDate) {
-	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'workDate must use YYYY-MM-DD format' } })
-	          return
-	        }
-	        const requestedInAt = parseDateInput(parsed.data.requestedInAt)
-	        const requestedOutAt = parseDateInput(parsed.data.requestedOutAt)
+		        const orgId = getOrgId(req)
+		        const workDate = normalizeDateOnlyStrict(parsed.data.workDate ?? parsed.data.date)
+		        if (!workDate) {
+		          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'workDate must use YYYY-MM-DD format' } })
+		          return
+		        }
+		        const requestedInAt = parseDateInput(parsed.data.requestedInAt ?? parsed.data.requested_in_at ?? parsed.data.clockIn)
+		        const requestedOutAt = parseDateInput(parsed.data.requestedOutAt ?? parsed.data.requested_out_at ?? parsed.data.clockOut)
         if (requestedInAt && requestedOutAt && requestedOutAt <= requestedInAt) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedOutAt must be after requestedInAt' } })
           return
         }
 
-        const requestType = parsed.data.requestType
+        const requestType = parsed.data.requestType ?? parsed.data.type
+        if (!REQUEST_TYPES.includes(requestType)) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `requestType must be one of: ${REQUEST_TYPES.join(', ')}` } })
+          return
+        }
         if (requestType === 'missed_check_in' && !requestedInAt) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedInAt required' } })
           return
@@ -9618,6 +9643,34 @@ module.exports = {
           }
           logger.error('Attendance leave types query failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load leave types' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/leave-types/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const leaveTypeId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_leave_types WHERE id = $1 AND org_id = $2',
+            [leaveTypeId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Leave type not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapLeaveTypeRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance leave type lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load leave type' } })
         }
       })
     )
@@ -14857,6 +14910,34 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/payroll-templates/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const templateId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_payroll_templates WHERE id = $1 AND org_id = $2',
+            [templateId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll template not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapPayrollTemplateRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll template lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load payroll template' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/payroll-templates',
       withPermission('attendance:admin', async (req, res) => {
@@ -15654,6 +15735,34 @@ module.exports = {
           }
           logger.error('Attendance groups fetch failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load groups' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/groups/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const groupId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_groups WHERE id = $1 AND org_id = $2',
+            [groupId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapAttendanceGroupRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance group lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load group' } })
         }
       })
     )
@@ -16568,13 +16677,9 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const normalizedName = typeof parsed.data.name === 'string' && parsed.data.name.trim().length === 0
-          ? null
-          : parsed.data.name ?? null
-
         const payload = {
           date: parsed.data.date,
-          name: normalizedName,
+          name: parsed.data.name.trim(),
           isWorkingDay: parsed.data.isWorkingDay ?? false,
         }
 
@@ -16634,13 +16739,9 @@ module.exports = {
           }
 
           const existing = existingRows[0]
-          const normalizedName = typeof parsed.data.name === 'string' && parsed.data.name.trim().length === 0
-            ? null
-            : parsed.data.name
-
           const payload = {
             date: parsed.data.date ?? existing.holiday_date,
-            name: normalizedName ?? existing.name,
+            name: parsed.data.name ?? existing.name,
             isWorkingDay: parsed.data.isWorkingDay ?? existing.is_working_day,
           }
 

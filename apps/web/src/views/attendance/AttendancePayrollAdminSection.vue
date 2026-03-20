@@ -88,6 +88,9 @@
           rows="3"
           placeholder="{}"
         />
+        <small class="attendance__field-hint">
+          {{ tr('Use JSON for payroll-specific settings such as summary formulas, allowance flags, or export metadata.', '可用 JSON 配置计薪专属设置，例如汇总公式、补贴开关或导出元数据。') }}
+        </small>
       </label>
     </div>
     <div class="attendance__admin-actions">
@@ -603,6 +606,11 @@ const exportPayrollCycleSummary = () => props.payroll.exportPayrollCycleSummary(
   padding: 12px;
   border-radius: 8px;
   background: #f5f6f8;
+}
+
+.attendance__field-hint {
+  color: #666;
+  font-size: 12px;
 }
 
 .attendance__empty {

@@ -562,6 +562,33 @@ components:
           type: object
         isDefault:
           type: boolean
+    AttendanceGroup:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        name:
+          type: string
+        code:
+          type: string
+        timezone:
+          type: string
+        ruleSetId:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
     AttendancePayrollTemplate:
       type: object
       properties:

@@ -1064,7 +1064,7 @@ describe('Attendance Plugin Integration', () => {
     expect(body.error?.message).toContain('YYYY-MM-DD')
   })
 
-  it('rejects duplicate attendance requests for the same day and request payload', async () => {
+  it('accepts legacy attendance request aliases and rejects duplicate attendance requests for the same day and request payload', async () => {
     if (!baseUrl) return
 
     const testUserId = `attendance-request-dedupe-${Date.now().toString(36)}`
@@ -1078,9 +1078,9 @@ describe('Attendance Plugin Integration', () => {
     const workDate = new Date().toISOString().slice(0, 10)
     const requestedInAt = new Date().toISOString()
     const payload = {
-      workDate,
-      requestType: 'missed_check_in',
-      requestedInAt,
+      date: workDate,
+      type: 'missed_check_in',
+      clockIn: requestedInAt,
       reason: 'dedupe test',
     }
 
@@ -1247,7 +1247,7 @@ describe('Attendance Plugin Integration', () => {
     }
   })
 
-  it('rejects HTML group names and returns 409 for duplicate attendance group names', async () => {
+  it('rejects unsafe group names and returns 409 for duplicate attendance group names', async () => {
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
@@ -1257,21 +1257,23 @@ describe('Attendance Plugin Integration', () => {
     expect(token).toBeTruthy()
     if (!token) return
 
-    const unsafeRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        name: '<script>alert(1)</script>',
-        timezone: 'UTC',
-      }),
-    })
-    expect(unsafeRes.status).toBe(400)
-    const unsafeBody = (unsafeRes.body as { error?: { code?: string; message?: string } } | undefined) ?? {}
-    expect(unsafeBody.error?.code).toBe('VALIDATION_ERROR')
-    expect(unsafeBody.error?.message).toContain('HTML')
+    for (const unsafeName of ['<script>alert(1)</script>', 'test" onmouseover="alert(1)', 'javascript:alert(1)']) {
+      const unsafeRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: unsafeName,
+          timezone: 'UTC',
+        }),
+      })
+      expect(unsafeRes.status).toBe(400)
+      const unsafeBody = (unsafeRes.body as { error?: { code?: string; message?: string } } | undefined) ?? {}
+      expect(unsafeBody.error?.code).toBe('VALIDATION_ERROR')
+      expect(unsafeBody.error?.message).toContain('unsafe')
+    }
 
     const groupName = `Run15 Duplicate Group ${Date.now().toString(36)}`
     const firstRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
@@ -1303,7 +1305,7 @@ describe('Attendance Plugin Integration', () => {
     expect(secondBody.error?.code).toBe('ALREADY_EXISTS')
   })
 
-  it('rejects invalid timezones for attendance groups and payroll templates', async () => {
+  it('rejects invalid and empty timezones for attendance groups and payroll templates', async () => {
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
@@ -1326,6 +1328,19 @@ describe('Attendance Plugin Integration', () => {
     })
     expect(invalidGroupRes.status).toBe(400)
 
+    const emptyGroupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Empty TZ Group ${Date.now().toString(36)}`,
+        timezone: '',
+      }),
+    })
+    expect(emptyGroupRes.status).toBe(400)
+
     const invalidTemplateRes = await requestJson(`${baseUrl}/api/attendance/payroll-templates`, {
       method: 'POST',
       headers: {
@@ -1343,6 +1358,24 @@ describe('Attendance Plugin Integration', () => {
     const invalidTemplateBody = (invalidTemplateRes.body as { error?: { code?: string; message?: string } } | undefined) ?? {}
     expect(invalidTemplateBody.error?.code).toBe('VALIDATION_ERROR')
     expect(invalidTemplateBody.error?.message).toContain('IANA')
+
+    const emptyTemplateRes = await requestJson(`${baseUrl}/api/attendance/payroll-templates`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Empty TZ Payroll ${Date.now().toString(36)}`,
+        timezone: '',
+        startDay: 1,
+        endDay: 30,
+      }),
+    })
+    expect(emptyTemplateRes.status).toBe(400)
+    const emptyTemplateBody = (emptyTemplateRes.body as { error?: { code?: string; message?: string } } | undefined) ?? {}
+    expect(emptyTemplateBody.error?.code).toBe('VALIDATION_ERROR')
+    expect(emptyTemplateBody.error?.message).toContain('required')
   })
 
   it('rejects future punches and still allows immediate check-out after check-in when min interval is enabled', async () => {
@@ -1386,7 +1419,7 @@ describe('Attendance Plugin Integration', () => {
         },
         body: JSON.stringify({
           eventType: 'check_in',
-          occurredAt: '2027-03-19T09:00:00.000Z',
+          occurred_at: '2027-03-19T09:00:00.000Z',
         }),
       })
       expect(futurePunchRes.status).toBe(400)
@@ -1431,7 +1464,7 @@ describe('Attendance Plugin Integration', () => {
     }
   })
 
-  it('rejects negative leave type daily_minutes aliases and exposes holiday type fields', async () => {
+  it('rejects negative leave type daily_minutes aliases, empty holiday names, and exposes holiday type fields', async () => {
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
@@ -1453,6 +1486,20 @@ describe('Attendance Plugin Integration', () => {
       }),
     })
     expect(invalidLeaveTypeRes.status).toBe(400)
+
+    const invalidHolidayRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        date: '2029-03-15',
+        name: '   ',
+        isWorkingDay: false,
+      }),
+    })
+    expect(invalidHolidayRes.status).toBe(400)
 
     const holidayDate = '2029-03-15'
     const holidayCreateRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
@@ -1488,6 +1535,94 @@ describe('Attendance Plugin Integration', () => {
     expect(holiday).toBeTruthy()
     expect(holiday?.type).toBe('holiday')
     expect(holiday?.holidayType).toBe('holiday')
+  })
+
+  it('supports fetching attendance groups, leave types, and payroll templates by id', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-read-by-id-${Date.now().toString(36)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const groupName = `Read By Id Group ${Date.now().toString(36)}`
+    const groupCreateRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: groupName,
+        timezone: 'UTC',
+      }),
+    })
+    expect(groupCreateRes.status).toBe(200)
+    const groupId = ((groupCreateRes.body as { data?: { id?: string } } | undefined)?.data?.id) ?? ''
+    expect(groupId).toBeTruthy()
+
+    const groupGetRes = await requestJson(`${baseUrl}/api/attendance/groups/${encodeURIComponent(groupId)}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(groupGetRes.status).toBe(200)
+    expect(((groupGetRes.body as { data?: { id?: string; name?: string } } | undefined)?.data?.id)).toBe(groupId)
+    expect(((groupGetRes.body as { data?: { id?: string; name?: string } } | undefined)?.data?.name)).toBe(groupName)
+
+    const leaveTypeName = `Read By Id Leave ${Date.now().toString(36)}`
+    const leaveCreateRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: leaveTypeName,
+        paid: true,
+      }),
+    })
+    expect(leaveCreateRes.status).toBe(201)
+    const leaveTypeId = ((leaveCreateRes.body as { data?: { id?: string } } | undefined)?.data?.id) ?? ''
+    expect(leaveTypeId).toBeTruthy()
+
+    const leaveGetRes = await requestJson(`${baseUrl}/api/attendance/leave-types/${encodeURIComponent(leaveTypeId)}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(leaveGetRes.status).toBe(200)
+    expect(((leaveGetRes.body as { data?: { id?: string; name?: string } } | undefined)?.data?.id)).toBe(leaveTypeId)
+    expect(((leaveGetRes.body as { data?: { id?: string; name?: string } } | undefined)?.data?.name)).toBe(leaveTypeName)
+
+    const payrollName = `Read By Id Payroll ${Date.now().toString(36)}`
+    const payrollCreateRes = await requestJson(`${baseUrl}/api/attendance/payroll-templates`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: payrollName,
+        timezone: 'UTC',
+        startDay: 1,
+        endDay: 30,
+      }),
+    })
+    expect(payrollCreateRes.status).toBe(201)
+    const payrollTemplateId = ((payrollCreateRes.body as { data?: { id?: string } } | undefined)?.data?.id) ?? ''
+    expect(payrollTemplateId).toBeTruthy()
+
+    const payrollGetRes = await requestJson(`${baseUrl}/api/attendance/payroll-templates/${encodeURIComponent(payrollTemplateId)}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(payrollGetRes.status).toBe(200)
+    expect(((payrollGetRes.body as { data?: { id?: string; name?: string } } | undefined)?.data?.id)).toBe(payrollTemplateId)
+    expect(((payrollGetRes.body as { data?: { id?: string; name?: string } } | undefined)?.data?.name)).toBe(payrollName)
   })
 
   it('supports import commit idempotencyKey retries (without requiring a new commitToken)', async () => {
