@@ -189,6 +189,35 @@ describe('Comments API', () => {
     const listResolvedJson = await listResolvedRes.json()
     expect(listResolvedJson.ok).toBe(true)
     expect(listResolvedJson.data?.items?.some((item: any) => item.id === comment.id)).toBe(true)
+
+    const patchRes = await fetch(`${baseUrl}/api/comments/${comment.id}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ content: 'Hello @[user_1](u1) updated' }),
+    })
+    expect(patchRes.status).toBe(200)
+    const patchJson = await patchRes.json()
+    expect(patchJson.ok).toBe(true)
+    expect(patchJson.data?.comment?.content).toBe('Hello @[user_1](u1) updated')
+    expect(patchJson.data?.comment?.mentions?.includes('user_1')).toBe(true)
+
+    const deleteRes = await fetch(`${baseUrl}/api/comments/${comment.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    expect(deleteRes.status).toBe(204)
+
+    const listDeletedRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    expect(listDeletedRes.status).toBe(200)
+    const listDeletedJson = await listDeletedRes.json()
+    expect(listDeletedJson.ok).toBe(true)
+    expect(listDeletedJson.data?.items?.some((item: any) => item.id === comment.id)).toBe(false)
+    createdCommentIds = createdCommentIds.filter((id) => id !== comment.id)
   })
 
   it('creates and lists polymorphic meta_record comments', async () => {

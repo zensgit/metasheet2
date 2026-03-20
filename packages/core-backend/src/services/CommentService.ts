@@ -134,6 +134,64 @@ export class CommentService {
     }
   }
 
+  async updateComment(commentId: string, data: { content?: string; resolved?: boolean }): Promise<Comment | null> {
+    const updatePayload: Record<string, unknown> = {
+      updated_at: new Date(),
+    }
+
+    if (typeof data.content === 'string') {
+      updatePayload.content = data.content
+      updatePayload.mentions = JSON.stringify(this.parseMentions(data.content)) as any
+    }
+
+    if (typeof data.resolved === 'boolean') {
+      updatePayload.resolved = data.resolved
+    }
+
+    const result = await db
+      .updateTable('meta_comments')
+      .set(updatePayload)
+      .where('id', '=', commentId)
+      .returningAll()
+      .executeTakeFirst()
+
+    if (!result) return null
+
+    const comment = this.mapRowToComment(result)
+    this.collabService.broadcast('comment:updated', {
+      spreadsheetId: result.spreadsheet_id,
+      containerId: result.container_id,
+      targetId: result.target_id,
+      comment,
+    })
+
+    return comment
+  }
+
+  async deleteComment(commentId: string): Promise<boolean> {
+    const existing = await db
+      .selectFrom('meta_comments')
+      .selectAll()
+      .where('id', '=', commentId)
+      .executeTakeFirst()
+
+    if (!existing) return false
+
+    await db
+      .deleteFrom('meta_comments')
+      .where('id', '=', commentId)
+      .execute()
+
+    this.collabService.broadcast('comment:deleted', {
+      spreadsheetId: existing.spreadsheet_id,
+      containerId: existing.container_id,
+      targetId: existing.target_id,
+      commentId,
+    })
+
+    return true
+  }
+
   private async getComment(id: string): Promise<Comment | undefined> {
     const row = await db.selectFrom('meta_comments').selectAll().where('id', '=', id).executeTakeFirst();
     return row ? this.mapRowToComment(row) : undefined;

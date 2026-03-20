@@ -105,6 +105,8 @@ export interface CommentCreateInput {
 export interface ICommentService {
     createComment(data: CommentCreateInput): Promise<any>;
     getComments(scope: CommentListScope, options?: CommentQueryOptions): Promise<{ items: any[]; total: number }>;
+    updateComment(commentId: string, data: { content?: string; resolved?: boolean }): Promise<any | null>;
+    deleteComment(commentId: string): Promise<boolean>;
     resolveComment(commentId: string): Promise<void>;
 }
 

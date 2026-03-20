@@ -175,5 +175,52 @@ export function commentsRouter(injector?: Injector): Router {
     }
   })
 
+  router.patch('/api/comments/:commentId', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
+    const commentId = req.params.commentId
+    if (!commentId || commentId.trim().length === 0) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'commentId required' } })
+    }
+
+    const parsed = z.object({
+      content: z.string().min(1).optional(),
+      resolved: z.boolean().optional(),
+    }).refine((value) => value.content !== undefined || value.resolved !== undefined, {
+      message: 'content or resolved is required',
+    }).safeParse(req.body)
+
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const comment = await commentService.updateComment(commentId, parsed.data)
+      if (!comment) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Comment not found' } })
+      }
+      return res.json({ ok: true, data: { comment } })
+    } catch (error) {
+      logger.error('Failed to update comment', error as Error)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update comment' } })
+    }
+  })
+
+  router.delete('/api/comments/:commentId', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
+    const commentId = req.params.commentId
+    if (!commentId || commentId.trim().length === 0) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'commentId required' } })
+    }
+
+    try {
+      const deleted = await commentService.deleteComment(commentId)
+      if (!deleted) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Comment not found' } })
+      }
+      return res.status(204).end()
+    } catch (error) {
+      logger.error('Failed to delete comment', error as Error)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete comment' } })
+    }
+  })
+
   return router
 }
