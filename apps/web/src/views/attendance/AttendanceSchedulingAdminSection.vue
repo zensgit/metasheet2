@@ -75,6 +75,26 @@
           type="text"
           :placeholder="tr('shiftId1, shiftId2', '班次ID1, 班次ID2')"
         />
+        <small class="attendance__field-hint">
+          {{ tr('Separate shift IDs with commas. Use the quick append buttons below to build the sequence in order, and repeat a shift if the cycle needs duplicates.', '请用英文逗号分隔班次 ID。可用下方快捷按钮按顺序拼接，如需重复班次可重复点击。') }}
+        </small>
+        <div v-if="shifts.length > 0" class="attendance__sequence-builder">
+          <span class="attendance__field-hint">{{ tr('Quick append from existing shifts', '从已有班次快捷拼接') }}</span>
+          <div class="attendance__sequence-builder-actions">
+            <button
+              v-for="shift in shifts"
+              :key="shift.id"
+              class="attendance__btn attendance__btn--inline"
+              type="button"
+              @click="appendShiftToRotationSequence(shift.id)"
+            >
+              {{ shift.name }} · {{ shift.id }}
+            </button>
+          </div>
+        </div>
+        <small v-if="rotationSequencePreviewText" class="attendance__field-hint">
+          {{ tr('Current sequence', '当前序列') }}: {{ rotationSequencePreviewText }}
+        </small>
       </label>
       <label class="attendance__field attendance__field--checkbox" for="attendance-rotation-rule-active">
         <span>{{ tr('Active', '启用') }}</span>
@@ -446,7 +466,7 @@
 </template>
 
 <script setup lang="ts">
-import type { Ref } from 'vue'
+import { computed, type Ref } from 'vue'
 import type {
   AttendanceAssignmentItem,
   AttendanceRotationAssignmentItem,
@@ -600,6 +620,27 @@ const editAssignment = (item: AttendanceAssignmentItem) => props.scheduling.edit
 const loadAssignments = () => props.scheduling.loadAssignments()
 const saveAssignment = () => props.scheduling.saveAssignment()
 const deleteAssignment = (id: string) => props.scheduling.deleteAssignment(id)
+
+function parseShiftSequence(value: string): string[] {
+  return value
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function appendShiftToRotationSequence(shiftId: string) {
+  const current = parseShiftSequence(rotationRuleForm.shiftSequence)
+  rotationRuleForm.shiftSequence = [...current, shiftId].join(', ')
+}
+
+const rotationSequencePreviewText = computed(() => {
+  const sequence = parseShiftSequence(rotationRuleForm.shiftSequence)
+  if (sequence.length === 0) return ''
+  return sequence.map((shiftId) => {
+    const shift = shifts.value.find(item => item.id === shiftId)
+    return shift ? `${shift.name} (${shiftId})` : shiftId
+  }).join(' → ')
+})
 </script>
 
 <style scoped>
@@ -635,6 +676,11 @@ const deleteAssignment = (id: string) => props.scheduling.deleteAssignment(id)
   gap: 6px;
 }
 
+.attendance__field-hint {
+  color: #666;
+  font-size: 12px;
+}
+
 .attendance__field--full {
   grid-column: 1 / -1;
 }
@@ -664,6 +710,23 @@ const deleteAssignment = (id: string) => props.scheduling.deleteAssignment(id)
 .attendance__btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.attendance__btn--inline {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.attendance__sequence-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attendance__sequence-builder-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .attendance__table-wrapper {

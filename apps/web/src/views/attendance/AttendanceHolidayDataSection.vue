@@ -2,9 +2,39 @@
   <div class="attendance__admin-section">
     <div class="attendance__admin-section-header">
       <h4>{{ tr('Holidays', '节假日') }}</h4>
-      <button class="attendance__btn" :disabled="holidayLoading" @click="loadHolidays">
-        {{ holidayLoading ? tr('Loading...', '加载中...') : tr('Reload holidays', '重载节假日') }}
-      </button>
+      <div class="attendance__admin-actions">
+        <span class="attendance__section-meta">
+          {{ tr('Showing', '当前显示') }} {{ holidayTotal }} {{ tr('holiday(s)', '个节假日') }}
+        </span>
+        <button class="attendance__btn" :disabled="holidayLoading" @click="loadHolidays">
+          {{ holidayLoading ? tr('Loading...', '加载中...') : tr('Reload holidays', '重载节假日') }}
+        </button>
+      </div>
+    </div>
+    <div class="attendance__admin-grid">
+      <label class="attendance__field" for="attendance-holiday-range-from">
+        <span>{{ tr('List from', '列表起始') }}</span>
+        <input
+          id="attendance-holiday-range-from"
+          v-model="holidayRange.from"
+          name="holidayRangeFrom"
+          type="date"
+        />
+      </label>
+      <label class="attendance__field" for="attendance-holiday-range-to">
+        <span>{{ tr('List to', '列表结束') }}</span>
+        <input
+          id="attendance-holiday-range-to"
+          v-model="holidayRange.to"
+          name="holidayRangeTo"
+          type="date"
+        />
+      </label>
+      <div class="attendance__field attendance__field--full">
+        <small class="attendance__field-hint">
+          {{ tr('The holiday list now uses its own date range, so synced holidays are not limited by the overview page range.', '节假日列表现在使用独立日期范围，不再受总览页面日期范围限制。') }}
+        </small>
+      </div>
     </div>
     <div class="attendance__admin-grid">
       <label class="attendance__field" for="attendance-holiday-date">
@@ -13,7 +43,7 @@
       </label>
       <label class="attendance__field" for="attendance-holiday-name">
         <span>{{ tr('Name', '名称') }}</span>
-        <input id="attendance-holiday-name" v-model="holidayForm.name" name="holidayName" type="text" :placeholder="tr('Optional', '可选')" />
+        <input id="attendance-holiday-name" v-model="holidayForm.name" name="holidayName" type="text" :placeholder="tr('Required holiday name', '必填节假日名称')" />
       </label>
       <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-working">
         <span>{{ tr('Working day override', '工作日覆盖') }}</span>
@@ -70,9 +100,14 @@ interface HolidayFormState {
 
 interface HolidayDataBindings {
   holidays: Ref<AttendanceHoliday[]>
+  holidayTotal: Ref<number>
   holidayLoading: Ref<boolean>
   holidaySaving: Ref<boolean>
   holidayEditingId: Ref<string | null>
+  holidayRange: {
+    from: string
+    to: string
+  }
   holidayForm: HolidayFormState
   resetHolidayForm: () => MaybePromise<void>
   editHoliday: (holiday: AttendanceHoliday) => MaybePromise<void>
@@ -90,9 +125,11 @@ const props = defineProps<{
 const tr = props.tr
 const formatDate = props.formatDate
 const holidays = props.holiday.holidays
+const holidayTotal = props.holiday.holidayTotal
 const holidayLoading = props.holiday.holidayLoading
 const holidaySaving = props.holiday.holidaySaving
 const holidayEditingId = props.holiday.holidayEditingId
+const holidayRange = props.holiday.holidayRange
 const holidayForm = props.holiday.holidayForm
 const resetHolidayForm = () => props.holiday.resetHolidayForm()
 const editHoliday = (holiday: AttendanceHoliday) => props.holiday.editHoliday(holiday)
@@ -107,7 +144,10 @@ const deleteHoliday = (id: string) => props.holiday.deleteHoliday(id)
 .attendance__admin-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
 .attendance__admin-actions, .attendance__table-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .attendance__field { display: flex; flex-direction: column; gap: 6px; }
+.attendance__field--full { grid-column: 1 / -1; }
 .attendance__field--checkbox { justify-content: flex-end; }
+.attendance__field-hint { color: #666; font-size: 12px; }
+.attendance__section-meta { color: #555; font-size: 12px; align-self: center; }
 .attendance__btn { padding: 8px 14px; border-radius: 6px; border: 1px solid #d0d0d0; background: #fff; cursor: pointer; }
 .attendance__btn--primary { background: #1976d2; border-color: #1976d2; color: #fff; }
 .attendance__btn--danger { color: #c62828; }

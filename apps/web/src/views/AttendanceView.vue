@@ -604,6 +604,8 @@ const {
   revokeProvisioningRoleBatch,
   searchProvisionUsers,
   selectProvisionUser,
+  addProvisionUserToBatch,
+  syncProvisionUserId,
 } = useAttendanceAdminProvisioning({ adminForbidden, tr })
 const {
   auditLogActionPrefix,
@@ -1014,9 +1016,11 @@ const {
   editRotationAssignment,
   editRotationRule,
   editShift,
+  holidayRange,
   holidayEditingId,
   holidayForm,
   holidayLoading,
+  holidayTotal,
   holidays,
   holidaySaving,
   loadAssignments,
@@ -1085,6 +1089,7 @@ const {
   importPreviewTask,
   importProfileId,
   importScalabilityHint,
+  importTemplateGuide,
   importUserMapCount,
   importUserMapError,
   importUserMapFileName,
@@ -1096,6 +1101,7 @@ const {
   resumeImportAsyncJobPolling,
   runImport,
   selectedImportProfile,
+  selectedImportProfileGuide,
 } = useAttendanceAdminImportWorkflow({
   adminForbidden,
   apiFetch,
@@ -1134,6 +1140,7 @@ const importWorkflowSectionBindings = {
   importPreviewTask,
   importProfileId,
   importScalabilityHint,
+  importTemplateGuide,
   importUserMapCount,
   importUserMapError,
   importUserMapFileName,
@@ -1145,6 +1152,7 @@ const importWorkflowSectionBindings = {
   resumeImportAsyncJobPolling,
   runImport,
   selectedImportProfile,
+  selectedImportProfileGuide,
 }
 const importBatchesSectionBindings = {
   exportImportBatchItemsCsv,
@@ -1351,8 +1359,10 @@ const provisioningSectionBindings = {
   provisionUserProfile,
   revokeProvisioningRole,
   revokeProvisioningRoleBatch,
+  addProvisionUserToBatch,
   searchProvisionUsers,
   selectProvisionUser,
+  syncProvisionUserId,
 }
 const auditLogsSectionBindings = {
   auditLogActionPrefix,
@@ -1402,6 +1412,8 @@ const holidayDataSectionBindings = {
   holidayEditingId,
   holidayForm,
   holidayLoading,
+  holidayRange,
+  holidayTotal,
   holidays,
   holidaySaving,
   loadHolidays,

@@ -77,6 +77,37 @@ export interface AttendanceImportMappingProfile {
   payloadExample?: Record<string, any>
 }
 
+export interface AttendanceImportFieldGuide {
+  field: string
+  meaningEn: string
+  meaningZh: string
+}
+
+export interface AttendanceImportProfileMappingGuide {
+  targetField: string
+  sourceField: string
+  meaningEn: string
+  meaningZh: string
+}
+
+export interface AttendanceImportTemplateGuide {
+  source: string
+  mode: AttendanceImportMode
+  columns: string[]
+  requiredFields: string[]
+  sampleHeader: string
+  fieldGuides: AttendanceImportFieldGuide[]
+}
+
+export interface AttendanceImportProfileGuide {
+  name: string
+  description?: string
+  requiredFields: string[]
+  mappingEntries: AttendanceImportProfileMappingGuide[]
+  userMapKeyField?: string
+  userMapSourceFields?: string[]
+}
+
 export interface AttendanceImportJob {
   id: string
   orgId?: string
@@ -448,6 +479,304 @@ function buildImportPerfSuffix(input: {
   }
 }
 
+const ATTENDANCE_IMPORT_FIELD_MEANINGS: Record<string, { en: string; zh: string }> = {
+  source: {
+    en: 'Import source that selects the parser and mapping path.',
+    zh: '导入来源，用于选择解析器和映射路径。',
+  },
+  mode: {
+    en: 'Import behavior. override replaces matching user/date rows; merge keeps existing values when new fields are missing.',
+    zh: '导入行为。override 会覆盖同用户同日期记录；merge 在缺少新字段时保留已有值。',
+  },
+  columns: {
+    en: 'Source column names or column definitions used by the template.',
+    zh: '模板使用的源列名或列定义。',
+  },
+  mapping: {
+    en: 'Source-to-attendance field mapping used when parsing each row.',
+    zh: '解析每一行时使用的源字段到考勤字段映射。',
+  },
+  data: {
+    en: 'Structured row data keyed by the source columns.',
+    zh: '按源列组织的结构化行数据。',
+  },
+  rows: {
+    en: 'Inline rows included directly in the payload.',
+    zh: '直接写入载荷的行数据。',
+  },
+  entries: {
+    en: 'Alternate inline row array used by some import sources.',
+    zh: '某些导入来源使用的另一种行数组。',
+  },
+  userId: {
+    en: 'Target attendance user ID.',
+    zh: '考勤目标用户 ID。',
+  },
+  workDate: {
+    en: 'Attendance date for the imported record.',
+    zh: '导入记录对应的考勤日期。',
+  },
+  firstInAt: {
+    en: 'First clock-in timestamp for the day.',
+    zh: '当天第一次打卡时间。',
+  },
+  lastOutAt: {
+    en: 'Last clock-out timestamp for the day.',
+    zh: '当天最后一次打卡时间。',
+  },
+  workMinutes: {
+    en: 'Total worked minutes after the import rules are applied.',
+    zh: '套用导入规则后得到的工作分钟数。',
+  },
+  lateMinutes: {
+    en: 'Minutes counted as late arrival.',
+    zh: '计为迟到的分钟数。',
+  },
+  earlyLeaveMinutes: {
+    en: 'Minutes counted as early leave.',
+    zh: '计为早退的分钟数。',
+  },
+  leaveMinutes: {
+    en: 'Minutes counted as leave time.',
+    zh: '计为请假时间的分钟数。',
+  },
+  overtimeMinutes: {
+    en: 'Minutes counted as overtime.',
+    zh: '计为加班的分钟数。',
+  },
+  status: {
+    en: 'Attendance status produced by the import engine.',
+    zh: '导入引擎生成的考勤状态。',
+  },
+  isWorkday: {
+    en: 'Whether the imported date is treated as a workday.',
+    zh: '导入日期是否被视为工作日。',
+  },
+  warnings: {
+    en: 'Warning messages generated while importing the row.',
+    zh: '导入该行时生成的警告信息。',
+  },
+  appliedPolicies: {
+    en: 'Policies that were applied to compute the result.',
+    zh: '用于计算结果的规则。',
+  },
+  userGroups: {
+    en: 'User groups associated with the imported record.',
+    zh: '与导入记录关联的用户分组。',
+  },
+  orgId: {
+    en: 'Organization that owns the import.',
+    zh: '导入所属的组织。',
+  },
+  timezone: {
+    en: 'Timezone used to interpret dates and clock-in or clock-out timestamps.',
+    zh: '用于解析日期和上下班打卡时间的时区。',
+  },
+  ruleSetId: {
+    en: 'Rule set applied while evaluating imported attendance data.',
+    zh: '导入考勤数据时使用的规则集。',
+  },
+  mappingProfileId: {
+    en: 'Saved mapping profile selected for this payload.',
+    zh: '此载荷选中的已保存映射配置。',
+  },
+  csvText: {
+    en: 'Raw CSV text to upload or preview.',
+    zh: '用于上传或预览的原始 CSV 文本。',
+  },
+  csvFileId: {
+    en: 'Uploaded CSV file reference returned by the server.',
+    zh: '服务端返回的已上传 CSV 文件引用。',
+  },
+  csvOptions: {
+    en: 'CSV parsing options such as header row and delimiter.',
+    zh: 'CSV 解析选项，例如表头行和分隔符。',
+  },
+  userMap: {
+    en: 'Lookup table used to resolve imported values to users.',
+    zh: '用于把导入值解析为用户的查找表。',
+  },
+  userMapKeyField: {
+    en: 'Key field in the user map, such as employee number.',
+    zh: '用户映射中的键字段，例如工号。',
+  },
+  userMapSourceFields: {
+    en: 'Source fields that can be used to match the user map key.',
+    zh: '用于匹配用户映射键的源字段。',
+  },
+  groupSync: {
+    en: 'Optional group creation and member assignment settings.',
+    zh: '可选的分组创建和成员分配设置。',
+  },
+  commitToken: {
+    en: 'Short-lived token required for preview and commit requests.',
+    zh: '预览和提交请求所需的短期令牌。',
+  },
+}
+
+const ATTENDANCE_IMPORT_FIELD_ORDER = [
+  'source',
+  'mode',
+  'columns',
+  'mapping',
+  'data',
+  'rows',
+  'entries',
+  'csvText',
+  'csvFileId',
+  'csvOptions',
+  'userId',
+  'orgId',
+  'timezone',
+  'ruleSetId',
+  'mappingProfileId',
+  'userMap',
+  'userMapKeyField',
+  'userMapSourceFields',
+  'groupSync',
+  'commitToken',
+]
+
+function humanizeAttendanceImportField(field: string): string {
+  return String(field)
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function describeAttendanceImportField(field: string): AttendanceImportFieldGuide {
+  const normalized = String(field || '').trim()
+  const known = ATTENDANCE_IMPORT_FIELD_MEANINGS[normalized]
+  if (known) {
+    return {
+      field: normalized,
+      meaningEn: known.en,
+      meaningZh: known.zh,
+    }
+  }
+  const humanized = humanizeAttendanceImportField(normalized) || normalized
+  return {
+    field: normalized,
+    meaningEn: `Field "${humanized}".`,
+    meaningZh: `字段“${humanized}”。`,
+  }
+}
+
+function extractTemplateColumns(columns: unknown): string[] {
+  if (!Array.isArray(columns)) return []
+  const values: string[] = []
+  for (const column of columns) {
+    if (typeof column === 'string') {
+      const text = column.trim()
+      if (text) values.push(text)
+      continue
+    }
+    if (!column || typeof column !== 'object') continue
+    const candidate = (
+      (column as Record<string, unknown>).header
+      ?? (column as Record<string, unknown>).sourceField
+      ?? (column as Record<string, unknown>).source
+      ?? (column as Record<string, unknown>).name
+      ?? (column as Record<string, unknown>).field
+      ?? (column as Record<string, unknown>).key
+      ?? (column as Record<string, unknown>).targetField
+      ?? (column as Record<string, unknown>).label
+    )
+    if (typeof candidate === 'string') {
+      const text = candidate.trim()
+      if (text) values.push(text)
+    }
+  }
+  return Array.from(new Set(values))
+}
+
+function extractRequiredFields(payloadExample: Record<string, any>, profile?: AttendanceImportMappingProfile | null): string[] {
+  const required = Array.isArray(payloadExample.requiredFields)
+    ? payloadExample.requiredFields
+    : []
+  const profileRequired = Array.isArray(profile?.requiredFields)
+    ? profile?.requiredFields
+    : []
+  return Array.from(new Set([
+    ...required,
+    ...profileRequired,
+  ].map(item => String(item).trim()).filter(Boolean)))
+}
+
+function extractMappingSource(value: unknown): string {
+  if (typeof value === 'string') return value.trim()
+  if (!value || typeof value !== 'object') return String(value ?? '').trim()
+
+  const node = value as Record<string, unknown>
+  const candidate = (
+    node.header
+    ?? node.sourceField
+    ?? node.source
+    ?? node.name
+    ?? node.field
+    ?? node.key
+    ?? node.label
+    ?? node.value
+  )
+  if (typeof candidate === 'string') return candidate.trim()
+  if (Array.isArray(candidate)) return candidate.map(item => String(item).trim()).filter(Boolean).join(', ')
+  return JSON.stringify(value)
+}
+
+function buildAttendanceImportTemplateGuide(
+  payloadExample: Record<string, any>,
+  profile?: AttendanceImportMappingProfile | null,
+): AttendanceImportTemplateGuide | null {
+  if (!payloadExample || typeof payloadExample !== 'object') return null
+
+  const columns = extractTemplateColumns(payloadExample.columns)
+  const requiredFields = extractRequiredFields(payloadExample, profile)
+  const sampleHeader = columns.length > 0
+    ? columns.join(',')
+    : requiredFields.join(',')
+  const fieldOrder = [
+    ...ATTENDANCE_IMPORT_FIELD_ORDER,
+    ...Object.keys(payloadExample).filter(field => !ATTENDANCE_IMPORT_FIELD_ORDER.includes(field)).sort(),
+  ]
+  const fieldGuides = Array.from(new Set(fieldOrder))
+    .filter(field => Object.prototype.hasOwnProperty.call(payloadExample, field))
+    .map(field => describeAttendanceImportField(field))
+
+  return {
+    source: typeof payloadExample.source === 'string' && payloadExample.source.trim() ? payloadExample.source.trim() : 'attendance',
+    mode: payloadExample.mode === 'merge' ? 'merge' : 'override',
+    columns,
+    requiredFields,
+    sampleHeader,
+    fieldGuides,
+  }
+}
+
+function buildAttendanceImportProfileGuide(
+  profile: AttendanceImportMappingProfile | null,
+): AttendanceImportProfileGuide | null {
+  if (!profile) return null
+  const mappingEntries = profile.mapping && typeof profile.mapping === 'object' && !Array.isArray(profile.mapping)
+    ? Object.entries(profile.mapping).map(([targetField, sourceValue]) => ({
+      targetField,
+      sourceField: extractMappingSource(sourceValue),
+      ...describeAttendanceImportField(targetField),
+    }))
+    : []
+
+  return {
+    name: profile.name,
+    description: profile.description,
+    requiredFields: Array.isArray(profile.requiredFields)
+      ? Array.from(new Set(profile.requiredFields.map(item => String(item).trim()).filter(Boolean)))
+      : [],
+    mappingEntries,
+    userMapKeyField: profile.userMapKeyField,
+    userMapSourceFields: profile.userMapSourceFields,
+  }
+}
+
 export function useAttendanceAdminImportWorkflow({
   tr,
   defaultTimezone,
@@ -527,6 +856,14 @@ export function useAttendanceAdminImportWorkflow({
     const commitAsync = importThresholds.commitAsyncThreshold.toLocaleString()
     return `Auto mode: preview >= ${previewChunk} rows may use chunked preview (${previewChunkSize}/chunk); preview >= ${previewAsync} rows queues async preview; import >= ${commitAsync} rows queues async import.`
   })
+
+  const importTemplateGuide = computed(() => {
+    const payloadExample = parseAttendanceImportJsonConfig(importForm.payload)
+    if (!payloadExample) return null
+    return buildAttendanceImportTemplateGuide(payloadExample, selectedImportProfile.value)
+  })
+
+  const selectedImportProfileGuide = computed(() => buildAttendanceImportProfileGuide(selectedImportProfile.value))
 
   const importAsyncJobTelemetryText = computed(() => {
     const job = importAsyncJob.value
@@ -1645,6 +1982,8 @@ export function useAttendanceAdminImportWorkflow({
     importMode,
     importMappingProfiles,
     selectedImportProfile,
+    importTemplateGuide,
+    selectedImportProfileGuide,
     importCsvFile,
     importCsvFileName,
     importCsvFileId,

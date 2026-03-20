@@ -315,6 +315,29 @@ export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttend
     void loadProvisioningUser()
   }
 
+  function syncProvisionUserId(userId: string) {
+    if (provisionForm.userId === userId) return
+    provisionForm.userId = userId
+    provisionHasLoaded.value = false
+    provisionStatusMessage.value = ''
+    provisionStatusKind.value = 'info'
+    provisionUserProfile.value = null
+    provisionPermissions.value = []
+    provisionRoles.value = []
+    provisionUserIsAdmin.value = false
+  }
+
+  function addProvisionUserToBatch(user: AttendanceAdminUserSearchItem) {
+    const userId = user.id.trim()
+    if (!userId) return
+
+    const { valid, invalid } = parseAttendanceAdminUserIdList(provisionBatchUserIdsText.value)
+    if (valid.includes(userId) || invalid.includes(userId)) return
+
+    const nextValue = provisionBatchUserIdsText.value.trimEnd()
+    provisionBatchUserIdsText.value = nextValue ? `${nextValue}\n${userId}` : userId
+  }
+
   async function fetchProvisioningUser(userId: string) {
     provisionRoles.value = []
     const response = await apiFetch(`/api/permissions/user/${encodeURIComponent(userId)}`)
@@ -810,5 +833,7 @@ export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttend
     revokeProvisioningRoleBatch,
     searchProvisionUsers,
     selectProvisionUser,
+    addProvisionUserToBatch,
+    syncProvisionUserId,
   }
 }

@@ -121,4 +121,64 @@ describe('useAttendanceAdminProvisioning', () => {
     expect(provisioning.provisionBatchUnchangedIds.value).toEqual([])
     expect(adminForbidden.value).toBe(false)
   })
+
+  it('clears stale single-user access state when the selected user changes', () => {
+    const adminForbidden = ref(false)
+    const provisioning = useAttendanceAdminProvisioning({ adminForbidden, tr })
+
+    provisioning.provisionForm.userId = '11111111-1111-4111-8111-111111111111'
+    provisioning.provisionPermissions.value = ['attendance:read']
+    provisioning.provisionRoles.value = ['employee']
+    provisioning.provisionUserIsAdmin.value = true
+    provisioning.provisionUserProfile.value = {
+      id: provisioning.provisionForm.userId,
+      email: 'alice@example.com',
+      name: 'Alice',
+    }
+    provisioning.provisionHasLoaded.value = true
+
+    provisioning.syncProvisionUserId('22222222-2222-4222-8222-222222222222')
+
+    expect(provisioning.provisionHasLoaded.value).toBe(false)
+    expect(provisioning.provisionUserProfile.value).toBeNull()
+    expect(provisioning.provisionPermissions.value).toEqual([])
+    expect(provisioning.provisionRoles.value).toEqual([])
+    expect(provisioning.provisionUserIsAdmin.value).toBe(false)
+    expect(adminForbidden.value).toBe(false)
+  })
+
+  it('adds searched users to the batch UUID list without duplicating ids', () => {
+    const adminForbidden = ref(false)
+    const provisioning = useAttendanceAdminProvisioning({ adminForbidden, tr })
+    const validA = '11111111-1111-4111-8111-111111111111'
+    const validB = '22222222-2222-4222-8222-222222222222'
+
+    provisioning.provisionBatchUserIdsText.value = `${validA}\nlegacy-note`
+
+    provisioning.addProvisionUserToBatch({
+      id: validA,
+      email: 'alice@example.com',
+      name: 'Alice',
+      role: 'user',
+      is_active: true,
+      is_admin: false,
+      last_login_at: null,
+      created_at: '2026-03-20T00:00:00.000Z',
+    })
+    expect(provisioning.provisionBatchUserIdsText.value).toBe(`${validA}\nlegacy-note`)
+
+    provisioning.addProvisionUserToBatch({
+      id: validB,
+      email: 'bob@example.com',
+      name: 'Bob',
+      role: 'user',
+      is_active: true,
+      is_admin: false,
+      last_login_at: null,
+      created_at: '2026-03-20T00:00:00.000Z',
+    })
+
+    expect(provisioning.provisionBatchUserIdsText.value).toBe(`${validA}\nlegacy-note\n${validB}`)
+    expect(adminForbidden.value).toBe(false)
+  })
 })

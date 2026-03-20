@@ -176,6 +176,57 @@ describe('useAttendanceAdminScheduling', () => {
     expect(scheduling.holidays.value[0]?.id).toBe('holiday-1')
   })
 
+  it('uses the holiday module range instead of the overview range once the admin changes it', async () => {
+    const adminForbidden = ref(false)
+    const apiFetch = vi.fn().mockResolvedValue(jsonResponse(200, {
+      ok: true,
+      data: {
+        items: [
+          { id: 'holiday-2', date: '2026-01-01', name: 'New Year', isWorkingDay: false },
+        ],
+        total: 12,
+      },
+    }))
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      getOrgId: () => 'org-3',
+      getDateRange: () => ({ from: '2026-03-01', to: '2026-03-31' }),
+    })
+
+    scheduling.holidayRange.from = '2026-01-01'
+    scheduling.holidayRange.to = '2026-12-31'
+
+    await scheduling.loadHolidays()
+
+    expect(apiFetch).toHaveBeenCalledWith('/api/attendance/holidays?from=2026-01-01&to=2026-12-31&orgId=org-3')
+    expect(scheduling.holidayTotal.value).toBe(12)
+    expect(scheduling.holidays.value[0]?.id).toBe('holiday-2')
+  })
+
+  it('requires a holiday name before saving', async () => {
+    const adminForbidden = ref(false)
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      setStatus,
+    })
+
+    scheduling.holidayForm.date = '2026-03-15'
+    scheduling.holidayForm.name = '   '
+
+    await scheduling.saveHoliday()
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(setStatus).toHaveBeenCalledWith('Holiday name is required', 'error')
+  })
+
   it('marks admin forbidden and shows the direct 403 message for holiday saves', async () => {
     const adminForbidden = ref(false)
     const setStatus = vi.fn()
@@ -189,6 +240,7 @@ describe('useAttendanceAdminScheduling', () => {
     })
 
     scheduling.holidayForm.date = '2026-03-15'
+    scheduling.holidayForm.name = 'Spring Festival'
 
     await scheduling.saveHoliday()
 
