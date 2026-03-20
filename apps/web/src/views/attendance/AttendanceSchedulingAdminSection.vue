@@ -137,10 +137,16 @@
       </button>
     </div>
     <div class="attendance__admin-grid">
-      <label class="attendance__field" for="attendance-rotation-user">
-        <span>{{ tr('User ID', '用户 ID') }}</span>
-        <input id="attendance-rotation-user" v-model="rotationAssignmentForm.userId" name="rotationUserId" type="text" />
-      </label>
+      <AttendanceUserPickerField
+        v-model="rotationAssignmentForm.userId"
+        :tr="tr"
+        :label="tr('User', '用户')"
+        name="rotationUserId"
+        :help-text="tr('Search by email, name, or user ID, then pick a user for this rotation.', '按邮箱、姓名或用户 ID 搜索，然后为该轮班选择用户。')"
+        :search-placeholder="tr('Search users for rotation assignment', '搜索轮班分配用户')"
+        :full-width="false"
+        input-id="attendance-rotation-user"
+      />
       <label class="attendance__field" for="attendance-rotation-rule">
         <span>{{ tr('Rotation rule', '轮班规则') }}</span>
         <select
@@ -345,10 +351,16 @@
       </button>
     </div>
     <div class="attendance__admin-grid">
-      <label class="attendance__field" for="attendance-assignment-user-id">
-        <span>{{ tr('User ID', '用户 ID') }}</span>
-        <input id="attendance-assignment-user-id" v-model="assignmentForm.userId" name="assignmentUserId" type="text" />
-      </label>
+      <AttendanceUserPickerField
+        v-model="assignmentForm.userId"
+        :tr="tr"
+        :label="tr('User', '用户')"
+        name="assignmentUserId"
+        :help-text="tr('Search by email, name, or user ID, then pick a user for this shift assignment.', '按邮箱、姓名或用户 ID 搜索，然后为该班次选择用户。')"
+        :search-placeholder="tr('Search users for shift assignment', '搜索班次分配用户')"
+        :full-width="false"
+        input-id="attendance-assignment-user-id"
+      />
       <label class="attendance__field" for="attendance-assignment-shift-id">
         <span>{{ tr('Shift', '班次') }}</span>
         <select
@@ -441,6 +453,7 @@ import type {
   AttendanceRotationRule,
   AttendanceShift,
 } from './useAttendanceAdminScheduling'
+import AttendanceUserPickerField from './AttendanceUserPickerField.vue'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>

@@ -17,6 +17,11 @@ paths:
                 occurredAt:
                   type: string
                   format: date-time
+                  description: Preferred punch timestamp in ISO 8601 format.
+                occurred_at:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for occurredAt.
                 timezone:
                   type: string
                 source:
@@ -226,18 +231,42 @@ paths:
                   type: string
                   format: date
                   description: Work date in YYYY-MM-DD format.
+                date:
+                  type: string
+                  format: date
+                  description: Compatibility alias for workDate.
                 requestType:
                   type: string
                   enum: [missed_check_in, missed_check_out, time_correction, leave, overtime]
                   description: Request type.
+                type:
+                  type: string
+                  enum: [missed_check_in, missed_check_out, time_correction, leave, overtime]
+                  description: Compatibility alias for requestType.
                 requestedInAt:
                   type: string
                   format: date-time
                   description: Required for missed_check_in. Optional for time_correction, leave, and overtime.
+                requested_in_at:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for requestedInAt.
+                clockIn:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for requestedInAt.
                 requestedOutAt:
                   type: string
                   format: date-time
                   description: Required for missed_check_out. Optional for time_correction, leave, and overtime.
+                requested_out_at:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for requestedOutAt.
+                clockOut:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for requestedOutAt.
                 reason:
                   type: string
                 leaveTypeId:
@@ -1025,6 +1054,146 @@ paths:
                       to: { type: string, format: date }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/groups:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance groups
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: orgId
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceGroup' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      summary: Create attendance group
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                code: { type: string }
+                timezone: { type: string }
+                ruleSetId: { type: string }
+                description: { type: string }
+                orgId: { type: string }
+              required: [name, timezone]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceGroup' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/attendance/groups/{id}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get attendance group by id
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceGroup' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Update attendance group
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                code: { type: string }
+                timezone: { type: string }
+                ruleSetId: { type: string }
+                description: { type: string }
+                orgId: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceGroup' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      summary: Delete attendance group
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/attendance/leave-types:
     x-plugin: plugin-attendance
     get:
@@ -1100,6 +1269,27 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/attendance/leave-types/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get leave type by id
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceLeaveType' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     put:
       summary: Update leave type
       security: [ { bearerAuth: [] } ]
@@ -2494,6 +2684,27 @@ paths:
 
   /api/attendance/payroll-templates/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get payroll template by id
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendancePayrollTemplate' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     put:
       summary: Update payroll template
       security: [ { bearerAuth: [] } ]

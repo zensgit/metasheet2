@@ -255,6 +255,9 @@
           rows="3"
           placeholder='[{"name":"Manager","approverRoleIds":["manager"]}]'
         />
+        <small class="attendance__field-hint">
+          {{ tr('Use a JSON array of approval steps. Each step can declare a name, approver roles, and optional conditions.', '使用 JSON 数组描述审批步骤。每个步骤可包含名称、审批角色和可选条件。') }}
+        </small>
       </label>
     </div>
     <div class="attendance__admin-actions">
@@ -498,6 +501,11 @@ const deleteApprovalFlow = (id: string) => props.policies.deleteApprovalFlow(id)
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.attendance__field-hint {
+  color: #666;
+  font-size: 12px;
 }
 
 .attendance__empty {
