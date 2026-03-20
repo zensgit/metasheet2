@@ -632,6 +632,19 @@ function normalizeDateOnlyStrict(value) {
   return date.toISOString().slice(0, 10) === normalized ? normalized : null
 }
 
+function normalizeUuidString(value) {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  if (!normalized) return null
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(normalized)
+    ? normalized
+    : null
+}
+
+function respondInvalidUuid(res, fieldName = 'id') {
+  res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `${fieldName} must be a UUID` } })
+}
+
 function isValidTimeZoneIdentifier(value) {
   const zone = typeof value === 'string' ? value.trim() : ''
   if (!zone) return false
@@ -9763,7 +9776,11 @@ module.exports = {
       '/api/attendance/leave-types/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const leaveTypeId = req.params.id
+        const leaveTypeId = normalizeUuidString(req.params.id)
+        if (!leaveTypeId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -9860,7 +9877,11 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const leaveTypeId = req.params.id
+        const leaveTypeId = normalizeUuidString(req.params.id)
+        if (!leaveTypeId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -9936,7 +9957,11 @@ module.exports = {
       '/api/attendance/leave-types/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const leaveTypeId = req.params.id
+        const leaveTypeId = normalizeUuidString(req.params.id)
+        if (!leaveTypeId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -10027,6 +10052,35 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/overtime-rules/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const overtimeRuleId = normalizeUuidString(req.params.id)
+        if (!overtimeRuleId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const rule = await loadOvertimeRule(db, orgId, { id: overtimeRuleId })
+          if (!rule) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Overtime rule not found' } })
+            return
+          }
+          res.json({ ok: true, data: rule })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance overtime rule lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load overtime rule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/overtime-rules',
       withPermission('attendance:admin', async (req, res) => {
@@ -10093,7 +10147,11 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const overtimeRuleId = req.params.id
+        const overtimeRuleId = normalizeUuidString(req.params.id)
+        if (!overtimeRuleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -10161,7 +10219,11 @@ module.exports = {
       '/api/attendance/overtime-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const overtimeRuleId = req.params.id
+        const overtimeRuleId = normalizeUuidString(req.params.id)
+        if (!overtimeRuleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -15025,7 +15087,11 @@ module.exports = {
       '/api/attendance/payroll-templates/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const templateId = req.params.id
+        const templateId = normalizeUuidString(req.params.id)
+        if (!templateId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -15134,7 +15200,11 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const templateId = req.params.id
+        const templateId = normalizeUuidString(req.params.id)
+        if (!templateId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -15218,7 +15288,11 @@ module.exports = {
       '/api/attendance/payroll-templates/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const templateId = req.params.id
+        const templateId = normalizeUuidString(req.params.id)
+        if (!templateId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -15855,7 +15929,11 @@ module.exports = {
       '/api/attendance/groups/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const groupId = req.params.id
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -15960,7 +16038,11 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const groupId = req.params.id
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
         const existingRows = await db.query(
           'SELECT * FROM attendance_groups WHERE id = $1 AND org_id = $2',
           [groupId, orgId]
@@ -16030,7 +16112,11 @@ module.exports = {
       '/api/attendance/groups/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const groupId = req.params.id
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
         try {
           const rows = await db.query(
             'DELETE FROM attendance_groups WHERE id = $1 AND org_id = $2 RETURNING id',
@@ -16231,6 +16317,35 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/shifts/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const shiftId = normalizeUuidString(req.params.id)
+        if (!shiftId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const shift = await loadShiftById(db, orgId, shiftId)
+          if (!shift) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
+            return
+          }
+          res.json({ ok: true, data: shift })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance shift lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load shift' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/shifts',
       withPermission('attendance:admin', async (req, res) => {
@@ -16296,7 +16411,11 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const shiftId = req.params.id
+        const shiftId = normalizeUuidString(req.params.id)
+        if (!shiftId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -16370,7 +16489,11 @@ module.exports = {
       '/api/attendance/shifts/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const shiftId = req.params.id
+        const shiftId = normalizeUuidString(req.params.id)
+        if (!shiftId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(

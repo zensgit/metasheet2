@@ -976,6 +976,110 @@ describe('Attendance Plugin Integration', () => {
     }
   })
 
+  it('supports shift and overtime rule lookup by id and rejects malformed ids with 400', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-lookup-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Lookup Shift ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        workingDays: [1, 2, 3, 4, 5],
+      }),
+    })
+    expect(shiftRes.status).toBe(201)
+    const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(shiftId).toBeTruthy()
+    if (!shiftId) return
+
+    const shiftLookupRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(shiftLookupRes.status).toBe(200)
+    const shiftLookupBody = shiftLookupRes.body as { data?: { id?: string; name?: string } } | undefined
+    expect(shiftLookupBody?.data?.id).toBe(shiftId)
+    expect(shiftLookupBody?.data?.name).toBe(`Lookup Shift ${runSuffix}`)
+
+    const overtimeRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Lookup Overtime ${runSuffix}`,
+        minMinutes: 30,
+        roundingMinutes: 15,
+        maxMinutesPerDay: 180,
+        requiresApproval: true,
+      }),
+    })
+    expect(overtimeRes.status).toBe(201)
+    const overtimeRuleId = (overtimeRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(overtimeRuleId).toBeTruthy()
+    if (!overtimeRuleId) return
+
+    const overtimeLookupRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules/${overtimeRuleId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(overtimeLookupRes.status).toBe(200)
+    const overtimeLookupBody = overtimeLookupRes.body as { data?: { id?: string; name?: string } } | undefined
+    expect(overtimeLookupBody?.data?.id).toBe(overtimeRuleId)
+    expect(overtimeLookupBody?.data?.name).toBe(`Lookup Overtime ${runSuffix}`)
+
+    const invalidEndpoints = [
+      'groups/nonexistent-id',
+      'leave-types/fake',
+      'payroll-templates/not-a-uuid',
+      'shifts/not-a-uuid',
+      'overtime-rules/not-a-uuid',
+    ]
+
+    for (const apiPath of invalidEndpoints) {
+      const invalidRes = await requestJson(`${baseUrl}/api/attendance/${apiPath}`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      expect(invalidRes.status).toBe(400)
+      const invalidBody = invalidRes.body as { error?: { code?: string } } | undefined
+      expect(invalidBody?.error?.code).toBe('VALIDATION_ERROR')
+    }
+
+    const missingShiftRes = await requestJson(`${baseUrl}/api/attendance/shifts/${randomUuidV4()}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(missingShiftRes.status).toBe(404)
+
+    const missingOvertimeRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules/${randomUuidV4()}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(missingOvertimeRes.status).toBe(404)
+  })
+
   it('keeps /api/health public for probes', async () => {
     if (!baseUrl) return
 

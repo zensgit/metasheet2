@@ -4686,6 +4686,53 @@
     },
     "/api/attendance/shifts/{id}": {
       "x-plugin": "plugin-attendance",
+      "get": {
+        "summary": "Get attendance shift",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/AttendanceShift"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
       "put": {
         "summary": "Update attendance shift",
         "security": [
@@ -6852,6 +6899,53 @@
     },
     "/api/attendance/overtime-rules/{id}": {
       "x-plugin": "plugin-attendance",
+      "get": {
+        "summary": "Get overtime rule",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/AttendanceOvertimeRule"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
       "put": {
         "summary": "Update overtime rule",
         "security": [
@@ -7108,6 +7202,30 @@
                   "name",
                   "requestType"
                 ]
+              },
+              "examples": {
+                "missedCheckIn": {
+                  "summary": "Approval flow for missed check-in requests",
+                  "value": {
+                    "name": "补卡审批",
+                    "requestType": "missed_check_in",
+                    "steps": [
+                      {
+                        "name": "直属主管",
+                        "approverUserIds": [
+                          "manager-user-001"
+                        ]
+                      },
+                      {
+                        "name": "人事复核",
+                        "approverRoleIds": [
+                          "attendance-admin"
+                        ]
+                      }
+                    ],
+                    "isActive": true
+                  }
+                }
               }
             }
           }
@@ -7391,6 +7509,21 @@
                   "name",
                   "shiftSequence"
                 ]
+              },
+              "examples": {
+                "standardCycle": {
+                  "summary": "Rotation rule with ordered shift ids",
+                  "value": {
+                    "name": "四班两倒",
+                    "timezone": "Asia/Shanghai",
+                    "shiftSequence": [
+                      "11111111-1111-4111-8111-111111111111",
+                      "22222222-2222-4222-8222-222222222222",
+                      "33333333-3333-4333-8333-333333333333"
+                    ],
+                    "isActive": true
+                  }
+                }
               }
             }
           }
@@ -7671,6 +7804,18 @@
                   "rotationRuleId",
                   "startDate"
                 ]
+              },
+              "examples": {
+                "activeAssignment": {
+                  "summary": "Assign one user to a rotation rule",
+                  "value": {
+                    "userId": "attendance-user-001",
+                    "rotationRuleId": "44444444-4444-4444-8444-444444444444",
+                    "startDate": "2026-03-20",
+                    "endDate": null,
+                    "isActive": true
+                  }
+                }
               }
             }
           }
@@ -7969,6 +8114,47 @@
                 "required": [
                   "name"
                 ]
+              },
+              "examples": {
+                "orgDefault": {
+                  "summary": "Org-wide default rule set",
+                  "value": {
+                    "name": "默认规则集",
+                    "description": "标准工作日与节假日配置",
+                    "version": 1,
+                    "scope": "org",
+                    "isDefault": true,
+                    "config": {
+                      "source": "manual",
+                      "rule": {
+                        "timezone": "Asia/Shanghai",
+                        "workStartTime": "09:00",
+                        "workEndTime": "18:00",
+                        "workingDays": [
+                          1,
+                          2,
+                          3,
+                          4,
+                          5
+                        ]
+                      },
+                      "policies": {
+                        "rules": [
+                          {
+                            "name": "holiday-no-work",
+                            "when": {
+                              "isHoliday": true
+                            },
+                            "then": {
+                              "setWorkMinutes": 0,
+                              "setStatus": "off"
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
               }
             }
           }
