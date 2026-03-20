@@ -90,6 +90,18 @@ describe('useAttendanceAdminRulesAndGroups', () => {
     expect(options.setStatus).toHaveBeenCalledWith('Rule set saved.')
   })
 
+  it('requires a rule set name before saving', async () => {
+    const options = createOptions()
+    const rules = useAttendanceAdminRulesAndGroups(options)
+    rules.ruleSetForm.name = '   '
+    rules.ruleSetForm.config = '{"source":"csv"}'
+
+    await rules.saveRuleSet()
+
+    expect(options.apiFetch).not.toHaveBeenCalled()
+    expect(options.setStatus).toHaveBeenCalledWith('Rule set name is required', 'error')
+  })
+
   it('auto-generates a group code from the name when the code is blank', async () => {
     const apiFetch = vi.fn(async (input: string, init?: RequestInit) => {
       if (input === '/api/attendance/groups' && init?.method === 'POST') {

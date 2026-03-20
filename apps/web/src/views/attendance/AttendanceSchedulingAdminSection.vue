@@ -268,7 +268,14 @@
     <div class="attendance__admin-grid">
       <label class="attendance__field" for="attendance-shift-name">
         <span>{{ tr('Name', '名称') }}</span>
-        <input id="attendance-shift-name" v-model="shiftForm.name" name="shiftName" type="text" />
+        <input
+          id="attendance-shift-name"
+          v-model="shiftForm.name"
+          name="shiftName"
+          type="text"
+          required
+          :placeholder="tr('Required shift name', '必填班次名称')"
+        />
       </label>
       <label class="attendance__field" for="attendance-shift-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>

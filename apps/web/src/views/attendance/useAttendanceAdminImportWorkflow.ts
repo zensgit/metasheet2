@@ -10,6 +10,7 @@ type LoadRecordsFn = () => MaybePromise<unknown>
 type LoadImportBatchesFn = (options?: { orgId?: string | null }) => MaybePromise<unknown>
 type ReadFileTextFn = (file: File) => Promise<string>
 type SleepFn = (ms: number) => Promise<void>
+type DownloadTextFn = (filename: string, text: string, mimeType?: string) => void
 type SetStatusFn = (
   message: string,
   kind?: ImportStatusKind,
@@ -186,6 +187,7 @@ export interface UseAttendanceAdminImportWorkflowOptions {
   readImportDebugOptions?: () => AttendanceImportDebugOptions
   readFileText?: ReadFileTextFn
   sleep?: SleepFn
+  downloadText?: DownloadTextFn
   now?: () => number
   thresholds?: Partial<AttendanceImportThresholds>
 }
@@ -441,6 +443,27 @@ async function defaultReadFileText(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error('Failed to read file'))
     reader.readAsText(file)
   })
+}
+
+function defaultDownloadText(filename: string, text: string, mimeType = 'text/plain;charset=utf-8'): void {
+  if (typeof window === 'undefined' || typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') {
+    return
+  }
+  const blob = new Blob([text], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
+function escapeCsvCell(value: string): string {
+  const text = String(value ?? '')
+  if (!/[",\r\n]/.test(text)) return text
+  return `"${text.replace(/"/g, '""')}"`
 }
 
 function buildImportPerfSuffix(input: {
@@ -729,6 +752,7 @@ function buildAttendanceImportTemplateGuide(
   profile?: AttendanceImportMappingProfile | null,
 ): AttendanceImportTemplateGuide | null {
   if (!payloadExample || typeof payloadExample !== 'object') return null
+  if (Object.keys(payloadExample).length === 0) return null
 
   const columns = extractTemplateColumns(payloadExample.columns)
   const requiredFields = extractRequiredFields(payloadExample, profile)
@@ -777,6 +801,21 @@ function buildAttendanceImportProfileGuide(
   }
 }
 
+function buildAttendanceImportTemplateCsv(guide: AttendanceImportTemplateGuide): string {
+  const columns = guide.columns.length > 0
+    ? guide.columns
+    : guide.sampleHeader
+      .split(',')
+      .map(item => item.trim())
+      .filter(Boolean)
+
+  if (columns.length === 0) return ''
+
+  const header = columns.map(escapeCsvCell).join(',')
+  const blankRow = columns.map(() => '').join(',')
+  return `${header}\n${blankRow}\n`
+}
+
 export function useAttendanceAdminImportWorkflow({
   tr,
   defaultTimezone,
@@ -793,6 +832,7 @@ export function useAttendanceAdminImportWorkflow({
   readImportDebugOptions = readAttendanceImportDebugOptions,
   readFileText = defaultReadFileText,
   sleep = defaultSleep,
+  downloadText = defaultDownloadText,
   now = () => Date.now(),
   thresholds: thresholdOverrides,
 }: UseAttendanceAdminImportWorkflowOptions) {
@@ -1169,6 +1209,31 @@ export function useAttendanceAdminImportWorkflow({
     } finally {
       importLoading.value = false
     }
+  }
+
+  async function downloadImportTemplateCsv() {
+    let guide = importTemplateGuide.value
+    if (!guide) {
+      await loadImportTemplate()
+      const payloadExample = parseAttendanceImportJsonConfig(importForm.payload)
+      guide = payloadExample
+        ? buildAttendanceImportTemplateGuide(payloadExample, selectedImportProfile.value)
+        : null
+    }
+    if (!guide) {
+      reportStatus(tr('Load the import template first.', '请先加载导入模板。'), 'error')
+      return
+    }
+
+    const csvText = buildAttendanceImportTemplateCsv(guide)
+    if (!csvText) {
+      reportStatus(tr('The current template has no CSV columns to download.', '当前模板没有可下载的 CSV 列。'), 'error')
+      return
+    }
+
+    const source = normalizeIdentifier(guide.source) ?? 'attendance'
+    downloadText(`attendance-import-template-${source}.csv`, csvText, 'text/csv;charset=utf-8')
+    reportStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
   }
 
   function applyImportProfile() {
@@ -2018,6 +2083,7 @@ export function useAttendanceAdminImportWorkflow({
     loadImportUserMapFile,
     handleImportUserMapChange,
     loadImportTemplate,
+    downloadImportTemplateCsv,
     applyImportProfile,
     applyImportCsvFile,
     ensureImportCommitToken,

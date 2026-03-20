@@ -9,7 +9,14 @@
     <div class="attendance__admin-grid">
       <label class="attendance__field" for="attendance-rule-set-name">
         <span>{{ tr('Name', '名称') }}</span>
-        <input id="attendance-rule-set-name" v-model="ruleSetForm.name" name="ruleSetName" type="text" />
+        <input
+          id="attendance-rule-set-name"
+          v-model="ruleSetForm.name"
+          name="ruleSetName"
+          type="text"
+          required
+          :placeholder="tr('Required rule set name', '必填规则集名称')"
+        />
       </label>
       <label class="attendance__field" for="attendance-rule-set-scope">
         <span>{{ tr('Scope', '范围') }}</span>
