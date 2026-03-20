@@ -226,7 +226,7 @@
       </div>
     </form>
 
-    <section class="plm-audit__team-views">
+    <section id="plm-audit-team-view-controls" class="plm-audit__team-views">
       <div class="plm-audit__saved-views-header">
         <div>
           <h2>{{ tr('Team views', '团队视图') }}</h2>
@@ -688,6 +688,7 @@ import {
   type PlmRecommendedAuditTeamView,
   type PlmRecommendedAuditTeamViewFilter,
 } from './plmAuditTeamViewCatalog'
+import { buildPlmAuditTeamViewCollaborationDraft } from './plmAuditTeamViewCollaboration'
 import {
   buildPlmAuditTeamViewBatchLogState,
   buildPlmAuditTeamViewLogState,
@@ -1362,17 +1363,20 @@ async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
   const target = findAuditTeamViewById(view.id)
   if (!target) return
 
-  auditTeamViewKey.value = target.id
+  const draft = buildPlmAuditTeamViewCollaborationDraft(target, tr, 'recommendation')
+  auditTeamViewKey.value = draft.teamViewId
+  auditTeamViewName.value = draft.teamViewName
+  auditTeamViewOwnerUserId.value = draft.teamViewOwnerUserId
   if (auditTeamViewManagementItems.value.find((item) => item.id === target.id)?.selectable) {
     auditTeamViewSelection.value = [target.id]
   }
   focusedAuditTeamViewId.value = target.id
   await nextTick()
-  document.getElementById(`plm-audit-team-view-${target.id}`)?.scrollIntoView({
+  document.getElementById(draft.focusTargetId)?.scrollIntoView({
     behavior: 'smooth',
     block: 'center',
   })
-  setStatus(tr('Focused the lifecycle controls for this audit team view.', '已定位到该审计团队视图的生命周期管理区。'))
+  setStatus(draft.statusMessage)
 }
 
 async function runRecommendedAuditTeamViewSecondaryAction(view: PlmRecommendedAuditTeamView) {
@@ -1666,11 +1670,25 @@ async function promoteSavedViewToTeam(
       isDefault: options?.isDefault,
     })
     upsertAuditTeamView(saved)
+    const collaborationDraft = buildPlmAuditTeamViewCollaborationDraft(saved, tr, 'saved-view-promotion')
+    auditTeamViewKey.value = collaborationDraft.teamViewId
+    auditTeamViewName.value = collaborationDraft.teamViewName
+    auditTeamViewOwnerUserId.value = collaborationDraft.teamViewOwnerUserId
+    focusedAuditTeamViewId.value = saved.id
+    if (auditTeamViewManagementItems.value.find((item) => item.id === saved.id)?.selectable) {
+      auditTeamViewSelection.value = [saved.id]
+    }
+    await nextTick()
+    document.getElementById(collaborationDraft.focusTargetId)?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'center',
+    })
     setStatus(
       [
         options?.isDefault
           ? tr('Saved view promoted as the default audit team view.', '已将保存视图提升为默认审计团队视图。')
           : tr('Saved view promoted to the audit team views.', '已将保存视图提升到审计团队视图。'),
+        collaborationDraft.statusMessage,
         draft.localContextNote,
       ].filter(Boolean).join(' '),
     )
