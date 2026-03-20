@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPlmAuditTeamViewCollaborationActionStatus,
   buildPlmAuditTeamViewCollaborationDraft,
+  buildPlmAuditTeamViewCollaborationFollowupNotice,
   buildPlmAuditTeamViewCollaborationNotice,
 } from '../src/views/plmAuditTeamViewCollaboration'
 
@@ -109,5 +110,69 @@ describe('plmAuditTeamViewCollaboration', () => {
     expect(buildPlmAuditTeamViewCollaborationActionStatus('saved-view-promotion', 'set-default', tr)).toBe(
       'Promoted audit team view set as default. Showing matching audit logs.|已将提升后的审计团队视图设为默认，并切换到对应审计日志。',
     )
+  })
+
+  it('builds share follow-up actions after collaboration copy', () => {
+    expect(buildPlmAuditTeamViewCollaborationFollowupNotice({
+      id: 'audit-view-4',
+      isDefault: false,
+      isArchived: false,
+    }, {
+      teamViewId: 'audit-view-4',
+      source: 'recommendation',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+    }, {
+      canSetDefault: true,
+    }, tr)).toEqual({
+      sourceLabel: 'Recommended team view|推荐团队视图',
+      title: 'Share link copied.|分享链接已复制。',
+      description:
+        'The recommended team view is ready to share across the audit workflow. You can still promote it to the default audit entry.|推荐团队视图已经可以在审计协作流程中分享，你仍可继续将其设为默认审计入口。',
+      actions: [
+        {
+          kind: 'set-default',
+          label: 'Set as default|设为默认',
+          emphasis: 'primary',
+        },
+        {
+          kind: 'dismiss',
+          label: 'Done|完成',
+          emphasis: 'secondary',
+        },
+      ],
+    })
+  })
+
+  it('builds default-change log review follow-up after default promotion', () => {
+    expect(buildPlmAuditTeamViewCollaborationFollowupNotice({
+      id: 'audit-view-5',
+      isDefault: true,
+      isArchived: false,
+    }, {
+      teamViewId: 'audit-view-5',
+      source: 'saved-view-promotion',
+      action: 'set-default',
+      logsAnchorId: 'plm-audit-log-results',
+    }, {
+      canSetDefault: false,
+    }, tr)).toEqual({
+      sourceLabel: 'Saved view promotion|保存视图提升',
+      title: 'Default audit entry updated.|默认审计入口已更新。',
+      description:
+        'Matching default-change audit logs are ready below. Review them now or dismiss this follow-up.|对应的默认变更审计日志已在下方就绪。你可以立即查看，或关闭这条后续提示。',
+      actions: [
+        {
+          kind: 'view-logs',
+          label: 'Review audit logs|查看审计日志',
+          emphasis: 'primary',
+        },
+        {
+          kind: 'dismiss',
+          label: 'Done|完成',
+          emphasis: 'secondary',
+        },
+      ],
+    })
   })
 })

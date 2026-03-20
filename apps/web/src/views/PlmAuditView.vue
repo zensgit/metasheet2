@@ -293,6 +293,27 @@
         </div>
       </div>
 
+      <div v-if="auditTeamViewCollaborationFollowupNotice" class="plm-audit__team-view-followup">
+        <div class="plm-audit__team-view-collaboration-meta">
+          <small class="plm-audit__summary-source">{{ auditTeamViewCollaborationFollowupNotice.sourceLabel }}</small>
+          <strong>{{ auditTeamViewCollaborationFollowupNotice.title }}</strong>
+          <span class="plm-audit__muted">{{ auditTeamViewCollaborationFollowupNotice.description }}</span>
+        </div>
+        <div class="plm-audit__team-view-collaboration-actions">
+          <button
+            v-for="actionItem in auditTeamViewCollaborationFollowupNotice.actions"
+            :key="`team-view-collaboration-followup-${actionItem.kind}`"
+            class="plm-audit__button"
+            :class="{ 'plm-audit__button--primary': actionItem.emphasis === 'primary' }"
+            type="button"
+            :disabled="auditTeamViewsLoading || logsLoading"
+            @click="runAuditTeamViewCollaborationFollowupAction(actionItem.kind)"
+          >
+            {{ actionItem.label }}
+          </button>
+        </div>
+      </div>
+
       <div
         v-if="auditTeamViewContextNote"
         class="plm-audit__team-view-context"
@@ -601,7 +622,7 @@
       {{ statusMessage }}
     </p>
 
-    <div class="plm-audit__table-wrapper">
+    <div id="plm-audit-log-results" class="plm-audit__table-wrapper">
       <table v-if="logs.length" class="plm-audit__table">
         <thead>
           <tr>
@@ -712,9 +733,12 @@ import {
 import {
   buildPlmAuditTeamViewCollaborationActionStatus,
   buildPlmAuditTeamViewCollaborationDraft,
+  buildPlmAuditTeamViewCollaborationFollowupNotice,
   buildPlmAuditTeamViewCollaborationNotice,
   type PlmAuditTeamViewCollaborationActionKind,
   type PlmAuditTeamViewCollaborationDraft,
+  type PlmAuditTeamViewCollaborationFollowup,
+  type PlmAuditTeamViewCollaborationFollowupActionKind,
 } from './plmAuditTeamViewCollaboration'
 import {
   buildPlmAuditTeamViewBatchLogState,
@@ -768,6 +792,7 @@ const auditTeamViewKey = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.teamViewId)
 const auditTeamViewName = ref('')
 const auditTeamViewOwnerUserId = ref('')
 const auditTeamViewCollaborationDraft = ref<PlmAuditTeamViewCollaborationDraft | null>(null)
+const auditTeamViewCollaborationFollowup = ref<PlmAuditTeamViewCollaborationFollowup | null>(null)
 const auditTeamViews = ref<PlmWorkbenchTeamView<'audit'>[]>([])
 const auditTeamViewSelection = ref<string[]>([])
 const focusedAuditTeamViewId = ref('')
@@ -879,11 +904,24 @@ const {
 const auditTeamViewCollaborationNotice = computed(() => {
   const view = selectedAuditTeamView.value
   if (!view) return null
+  if (auditTeamViewCollaborationFollowup.value?.teamViewId === view.id) return null
   return buildPlmAuditTeamViewCollaborationNotice(
     view,
     auditTeamViewCollaborationDraft.value,
     {
       canShare: canShareAuditTeamView.value,
+      canSetDefault: canSetAuditTeamViewDefault.value,
+    },
+    tr,
+  )
+})
+const auditTeamViewCollaborationFollowupNotice = computed(() => {
+  const view = selectedAuditTeamView.value
+  if (!view) return null
+  return buildPlmAuditTeamViewCollaborationFollowupNotice(
+    view,
+    auditTeamViewCollaborationFollowup.value,
+    {
       canSetDefault: canSetAuditTeamViewDefault.value,
     },
     tr,
@@ -981,6 +1019,10 @@ function setStatus(message: string, kindValue: 'info' | 'error' = 'info') {
 
 function clearAuditTeamViewCollaborationDraft() {
   auditTeamViewCollaborationDraft.value = null
+}
+
+function clearAuditTeamViewCollaborationFollowup() {
+  auditTeamViewCollaborationFollowup.value = null
 }
 
 function actionLabel(value: string): string {
@@ -1361,6 +1403,7 @@ async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
   applyAuditTeamViewState(view)
   auditTeamViewKey.value = view.id
   clearAuditTeamViewCollaborationDraft()
+  clearAuditTeamViewCollaborationFollowup()
   await syncRouteState(buildPlmAuditRouteStateFromTeamView(view.id, view.state))
   setStatus(tr('Audit team view applied.', '审计团队视图已应用。'))
 }
@@ -1379,6 +1422,14 @@ async function shareAuditTeamViewEntry(
       ? buildPlmAuditTeamViewCollaborationActionStatus(source, 'share', tr)
       : tr('Audit team view link copied.', '审计团队视图链接已复制。'),
   )
+  if (source) {
+    auditTeamViewCollaborationFollowup.value = {
+      teamViewId: view.id,
+      source,
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+    }
+  }
   return true
 }
 
@@ -1404,6 +1455,21 @@ async function setAuditTeamViewDefaultEntry(
         ? buildPlmAuditTeamViewCollaborationActionStatus(source, 'set-default', tr)
         : tr('Audit team view set as default. Showing matching audit logs.', '审计团队视图已设为默认，已切换到对应审计日志。'),
     )
+    if (source) {
+      auditTeamViewCollaborationFollowup.value = {
+        teamViewId: saved.id,
+        source,
+        action: 'set-default',
+        logsAnchorId: 'plm-audit-log-results',
+      }
+    }
+    await nextTick()
+    if (source) {
+      document.getElementById('plm-audit-log-results')?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      })
+    }
     return true
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
@@ -1428,6 +1494,7 @@ async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
 
   const draft = buildPlmAuditTeamViewCollaborationDraft(target, tr, 'recommendation')
   auditTeamViewCollaborationDraft.value = draft
+  clearAuditTeamViewCollaborationFollowup()
   auditTeamViewKey.value = draft.teamViewId
   auditTeamViewName.value = draft.teamViewName
   auditTeamViewOwnerUserId.value = draft.teamViewOwnerUserId
@@ -1448,11 +1515,11 @@ async function runRecommendedAuditTeamViewSecondaryAction(view: PlmRecommendedAu
   if (!target || target.isArchived) return
 
   if (view.secondaryActionKind === 'set-default') {
-    await setAuditTeamViewDefaultEntry(target)
+    await setAuditTeamViewDefaultEntry(target, 'recommendation')
     return
   }
 
-  await shareAuditTeamViewEntry(target)
+  await shareAuditTeamViewEntry(target, 'recommendation')
 }
 
 async function clearAuditTeamViewDefault() {
@@ -1495,6 +1562,30 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
 
   const ok = await setAuditTeamViewDefaultEntry(view, source)
   if (ok) clearAuditTeamViewCollaborationDraft()
+}
+
+async function runAuditTeamViewCollaborationFollowupAction(
+  actionKind: PlmAuditTeamViewCollaborationFollowupActionKind,
+) {
+  const followup = auditTeamViewCollaborationFollowup.value
+  if (!followup) return
+
+  if (actionKind === 'dismiss') {
+    clearAuditTeamViewCollaborationFollowup()
+    return
+  }
+
+  if (actionKind === 'view-logs') {
+    document.getElementById(followup.logsAnchorId)?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    })
+    return
+  }
+
+  const view = findAuditTeamViewById(followup.teamViewId)
+  if (!view) return
+  await setAuditTeamViewDefaultEntry(view, followup.source)
 }
 
 async function archiveAuditTeamView() {
@@ -1755,6 +1846,7 @@ async function promoteSavedViewToTeam(
     upsertAuditTeamView(saved)
     const collaborationDraft = buildPlmAuditTeamViewCollaborationDraft(saved, tr, 'saved-view-promotion')
     auditTeamViewCollaborationDraft.value = collaborationDraft
+    clearAuditTeamViewCollaborationFollowup()
     auditTeamViewKey.value = collaborationDraft.teamViewId
     auditTeamViewName.value = collaborationDraft.teamViewName
     auditTeamViewOwnerUserId.value = collaborationDraft.teamViewOwnerUserId
@@ -1789,6 +1881,9 @@ async function promoteSavedViewToTeam(
 watch(auditTeamViewKey, (value) => {
   if (auditTeamViewCollaborationDraft.value && value !== auditTeamViewCollaborationDraft.value.teamViewId) {
     clearAuditTeamViewCollaborationDraft()
+  }
+  if (auditTeamViewCollaborationFollowup.value && value !== auditTeamViewCollaborationFollowup.value.teamViewId) {
+    clearAuditTeamViewCollaborationFollowup()
   }
 })
 
@@ -2200,6 +2295,18 @@ watch(
   border: 1px solid #fde68a;
   border-radius: 12px;
   background: #fffbeb;
+}
+
+.plm-audit__team-view-followup {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: #eff6ff;
 }
 
 .plm-audit__team-view-collaboration-meta {

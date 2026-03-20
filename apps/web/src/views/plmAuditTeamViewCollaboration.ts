@@ -2,6 +2,7 @@ import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
 
 export type PlmAuditTeamViewCollaborationSource = 'recommendation' | 'saved-view-promotion'
 export type PlmAuditTeamViewCollaborationActionKind = 'share' | 'set-default' | 'dismiss'
+export type PlmAuditTeamViewCollaborationFollowupActionKind = 'set-default' | 'view-logs' | 'dismiss'
 
 export type PlmAuditTeamViewCollaborationDraft = {
   teamViewId: string
@@ -18,6 +19,24 @@ export type PlmAuditTeamViewCollaborationNotice = {
   description: string
   actions: Array<{
     kind: PlmAuditTeamViewCollaborationActionKind
+    label: string
+    emphasis: 'primary' | 'secondary'
+  }>
+}
+
+export type PlmAuditTeamViewCollaborationFollowup = {
+  teamViewId: string
+  source: PlmAuditTeamViewCollaborationSource
+  action: 'share' | 'set-default'
+  logsAnchorId: string
+}
+
+export type PlmAuditTeamViewCollaborationFollowupNotice = {
+  sourceLabel: string
+  title: string
+  description: string
+  actions: Array<{
+    kind: PlmAuditTeamViewCollaborationFollowupActionKind
     label: string
     emphasis: 'primary' | 'secondary'
   }>
@@ -49,6 +68,73 @@ export function buildPlmAuditTeamViewCollaborationActionStatus(
         'Recommended audit team view set as default. Showing matching audit logs.',
         '已将推荐审计团队视图设为默认，并切换到对应审计日志。',
       )
+}
+
+export function buildPlmAuditTeamViewCollaborationFollowupNotice(
+  view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'isDefault' | 'isArchived'>,
+  followup: PlmAuditTeamViewCollaborationFollowup | null,
+  options: {
+    canSetDefault: boolean
+  },
+  tr: (en: string, zh: string) => string,
+): PlmAuditTeamViewCollaborationFollowupNotice | null {
+  if (!followup || followup.teamViewId !== view.id) return null
+
+  if (followup.action === 'share') {
+    const actions: PlmAuditTeamViewCollaborationFollowupNotice['actions'] = []
+    if (options.canSetDefault && !view.isArchived && !view.isDefault) {
+      actions.push({
+        kind: 'set-default',
+        label: tr('Set as default', '设为默认'),
+        emphasis: 'primary',
+      })
+    }
+    actions.push({
+      kind: 'dismiss',
+      label: tr('Done', '完成'),
+      emphasis: 'secondary',
+    })
+
+    return {
+      sourceLabel: followup.source === 'saved-view-promotion'
+        ? tr('Saved view promotion', '保存视图提升')
+        : tr('Recommended team view', '推荐团队视图'),
+      title: tr('Share link copied.', '分享链接已复制。'),
+      description: followup.source === 'saved-view-promotion'
+        ? tr(
+            'The promoted team view is ready to share across the audit workflow. You can still promote it to the default audit entry.',
+            '提升后的团队视图已经可以在审计协作流程中分享，你仍可继续将其设为默认审计入口。',
+          )
+        : tr(
+            'The recommended team view is ready to share across the audit workflow. You can still promote it to the default audit entry.',
+            '推荐团队视图已经可以在审计协作流程中分享，你仍可继续将其设为默认审计入口。',
+          ),
+      actions,
+    }
+  }
+
+  return {
+    sourceLabel: followup.source === 'saved-view-promotion'
+      ? tr('Saved view promotion', '保存视图提升')
+      : tr('Recommended team view', '推荐团队视图'),
+    title: tr('Default audit entry updated.', '默认审计入口已更新。'),
+    description: tr(
+      'Matching default-change audit logs are ready below. Review them now or dismiss this follow-up.',
+      '对应的默认变更审计日志已在下方就绪。你可以立即查看，或关闭这条后续提示。',
+    ),
+    actions: [
+      {
+        kind: 'view-logs',
+        label: tr('Review audit logs', '查看审计日志'),
+        emphasis: 'primary',
+      },
+      {
+        kind: 'dismiss',
+        label: tr('Done', '完成'),
+        emphasis: 'secondary',
+      },
+    ],
+  }
 }
 
 export function buildPlmAuditTeamViewCollaborationDraft(
