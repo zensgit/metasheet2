@@ -15,8 +15,15 @@ Local build on the release machine:
 ```bash
 cd /Users/huazhou/Downloads/Github/metasheet2-multitable
 chmod +x scripts/ops/multitable-onprem-package-build.sh scripts/ops/multitable-onprem-package-verify.sh
+PACKAGE_VERSION=2.5.1 \
+PACKAGE_TAG=pilot-r2 \
+INSTALL_DEPS=1 \
+BUILD_WEB=1 \
+BUILD_BACKEND=1 \
 scripts/ops/multitable-onprem-package-build.sh
 ```
+
+For a corrective reroll, do not run the build script bare. The defaults only repackage existing `dist/` content and do not force a fresh dependency install or rebuild.
 
 Artifacts:
 

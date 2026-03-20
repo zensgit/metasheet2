@@ -7,8 +7,15 @@ Goal: deliver a full-app `multitable/platform` package without requiring `git pu
 ```bash
 cd /Users/huazhou/Downloads/Github/metasheet2-multitable
 chmod +x scripts/ops/multitable-onprem-package-build.sh scripts/ops/multitable-onprem-package-verify.sh
+PACKAGE_VERSION=2.5.1 \
+PACKAGE_TAG=pilot-r2 \
+INSTALL_DEPS=1 \
+BUILD_WEB=1 \
+BUILD_BACKEND=1 \
 scripts/ops/multitable-onprem-package-build.sh
 ```
+
+For a corrective reroll, do not run the build script bare. Its defaults are `INSTALL_DEPS=0`, `BUILD_WEB=0`, and `BUILD_BACKEND=0`, which only repackage whatever `dist/` is already on disk.
 
 Output directory:
 
@@ -34,6 +41,11 @@ The workflow builds:
 - metadata json
 
 The workflow already supports GitHub Release publishing through `publish_release=true`.
+
+For a corrective reroll such as `v2.5.1`, set:
+
+- `package_version=2.5.1`
+- `package_tag=<your-reroll-tag>`
 
 ## Verify before delivery
 

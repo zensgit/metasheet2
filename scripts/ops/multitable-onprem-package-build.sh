@@ -104,6 +104,21 @@ function copy_path() {
   fi
 }
 
+function stamp_packaged_version() {
+  local rel="$1"
+  local file="${PACKAGE_ROOT}/${rel}"
+  [[ -f "$file" ]] || return 0
+  node - "$file" "$PACKAGE_VERSION" <<'EOF'
+const fs = require('fs')
+
+const [, , file, version] = process.argv
+const raw = fs.readFileSync(file, 'utf8')
+const json = JSON.parse(raw)
+json.version = version
+fs.writeFileSync(file, `${JSON.stringify(json, null, 2)}\n`, 'utf8')
+EOF
+}
+
 if [[ "$INSTALL_DEPS" == "1" ]]; then
   run pnpm install --frozen-lockfile
 fi
@@ -128,6 +143,9 @@ command -v zip >/dev/null 2>&1 || die "zip command is required to build Windows 
 for rel in "${REQUIRED_PATHS[@]}"; do
   copy_path "$rel"
 done
+
+stamp_packaged_version "package.json"
+stamp_packaged_version "packages/core-backend/package.json"
 
 cat > "${PACKAGE_ROOT}/INSTALL.txt" <<EOF
 MetaSheet Multitable On-Prem Package

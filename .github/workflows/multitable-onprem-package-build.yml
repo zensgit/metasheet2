@@ -3,6 +3,10 @@ name: Multitable On-Prem Package Build
 on:
   workflow_dispatch:
     inputs:
+      package_version:
+        description: 'Optional package version override (for example: 2.5.1)'
+        required: false
+        default: ''
       package_tag:
         description: 'Optional package tag suffix (default: run number)'
         required: false
@@ -52,6 +56,7 @@ jobs:
 
       - name: Build on-prem package
         env:
+          PACKAGE_VERSION: ${{ inputs.package_version }}
           PACKAGE_TAG: ${{ inputs.package_tag != '' && inputs.package_tag || format('run{0}', github.run_number) }}
         run: |
           chmod +x scripts/ops/multitable-onprem-package-build.sh scripts/ops/multitable-onprem-package-verify.sh
@@ -113,6 +118,9 @@ jobs:
           {
             echo "## Multitable On-Prem Package Build"
             echo ""
+            if [[ -n "${{ inputs.package_version }}" ]]; then
+              echo "- Package version override: \`${{ inputs.package_version }}\`"
+            fi
             echo "- Package (.tgz): \`${PACKAGE_FILE}\`"
             echo "- Package (.zip): \`${PACKAGE_FILE_ZIP}\`"
             echo "- Artifact: \`multitable-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}\`"
