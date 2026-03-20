@@ -302,6 +302,9 @@ export function useAttendanceAdminRulesAndGroups({
   async function saveRuleSet() {
     ruleSetSaving.value = true
     try {
+      if (!ruleSetForm.name.trim()) {
+        throw new Error(tr('Rule set name is required', '规则集名称为必填项'))
+      }
       const config = parseJsonConfig(ruleSetForm.config)
       if (!config) {
         throw new Error(tr('Rule set config must be valid JSON', '规则集配置必须是合法 JSON'))

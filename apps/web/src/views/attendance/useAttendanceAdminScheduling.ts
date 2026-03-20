@@ -489,9 +489,12 @@ export function useAttendanceAdminScheduling({
     shiftSaving.value = true
     const isEditing = Boolean(shiftEditingId.value)
     try {
+      if (!shiftForm.name.trim()) {
+        throw new Error(tr('Shift name is required', '班次名称为必填项'))
+      }
       const payload = {
-        name: shiftForm.name,
-        timezone: shiftForm.timezone,
+        name: shiftForm.name.trim(),
+        timezone: shiftForm.timezone.trim(),
         workStartTime: shiftForm.workStartTime,
         workEndTime: shiftForm.workEndTime,
         lateGraceMinutes: Number(shiftForm.lateGraceMinutes) || 0,

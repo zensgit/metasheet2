@@ -17,6 +17,7 @@ function createWorkflow(overrides: Parameters<typeof useAttendanceAdminImportWor
   const setStatusFromError = overrides.setStatusFromError ?? vi.fn()
   const loadRecords = overrides.loadRecords ?? vi.fn(async () => undefined)
   const loadImportBatches = overrides.loadImportBatches ?? vi.fn(async () => undefined)
+  const downloadText = overrides.downloadText ?? vi.fn()
   const apiFetch = overrides.apiFetch ?? vi.fn(async () => {
     throw new Error('Unexpected request')
   })
@@ -36,6 +37,7 @@ function createWorkflow(overrides: Parameters<typeof useAttendanceAdminImportWor
     apiFetch,
     setStatus,
     setStatusFromError,
+    downloadText,
     loadRecords,
     loadImportBatches,
     ...overrides,
@@ -44,6 +46,7 @@ function createWorkflow(overrides: Parameters<typeof useAttendanceAdminImportWor
   return {
     workflow,
     apiFetch,
+    downloadText,
     loadImportBatches,
     loadRecords,
     setStatus,
@@ -107,6 +110,31 @@ describe('useAttendanceAdminImportWorkflow', () => {
     })
     expect(workflow.importMappingProfiles.value.map((item) => item.id)).toEqual(['profile-a'])
     expect(setStatus).toHaveBeenCalledWith('Import template loaded.', 'info', undefined)
+  })
+
+  it('downloads a CSV template using the loaded template guide', async () => {
+    const { workflow, downloadText, setStatus } = createWorkflow({
+      apiFetch: vi.fn(async () => jsonResponse(200, {
+        ok: true,
+        data: {
+          payloadExample: {
+            source: 'dingtalk_csv',
+            mode: 'merge',
+            columns: ['userId', 'workDate', 'firstInAt'],
+          },
+          mappingProfiles: [],
+        },
+      })),
+    })
+
+    await workflow.downloadImportTemplateCsv()
+
+    expect(downloadText).toHaveBeenCalledWith(
+      'attendance-import-template-dingtalk_csv.csv',
+      'userId,workDate,firstInAt\n,,\n',
+      'text/csv;charset=utf-8',
+    )
+    expect(setStatus).toHaveBeenLastCalledWith('CSV template downloaded.', 'info', undefined)
   })
 
   it('builds a selected profile guide with readable field meanings', async () => {

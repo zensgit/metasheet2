@@ -123,6 +123,18 @@ describe('useAttendanceAdminPayroll', () => {
     expect(options.setStatus).toHaveBeenCalledWith('Payroll template saved.')
   })
 
+  it('requires a payroll template name before saving', async () => {
+    const options = createOptions()
+    const payroll = useAttendanceAdminPayroll(options)
+    payroll.payrollTemplateForm.name = '   '
+    payroll.payrollTemplateForm.config = '{"region":"CN"}'
+
+    await payroll.savePayrollTemplate()
+
+    expect(options.apiFetch).not.toHaveBeenCalled()
+    expect(options.setStatus).toHaveBeenCalledWith('Payroll template name is required', 'error')
+  })
+
   it('generates payroll cycles, records created/skipped counts, and reloads cycles', async () => {
     const apiFetch = vi.fn(async (input: string, init?: RequestInit) => {
       if (input === '/api/attendance/payroll-cycles/generate' && init?.method === 'POST') {

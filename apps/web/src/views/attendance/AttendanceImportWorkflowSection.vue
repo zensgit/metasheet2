@@ -2,9 +2,14 @@
   <div class="attendance__admin-section">
     <div class="attendance__admin-section-header">
       <h4>{{ tr('Import (DingTalk / Manual)', '导入（钉钉 / 手工）') }}</h4>
-      <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
-        {{ importLoading ? tr('Loading...', '加载中...') : tr('Load template', '加载模板') }}
-      </button>
+      <div class="attendance__admin-actions">
+        <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
+          {{ importLoading ? tr('Loading...', '加载中...') : tr('Load template', '加载模板') }}
+        </button>
+        <button class="attendance__btn" :disabled="importLoading" @click="downloadImportTemplateCsv">
+          {{ tr('Download CSV template', '下载 CSV 模板') }}
+        </button>
+      </div>
     </div>
     <div v-if="importTemplateGuide" class="attendance__template-guide">
       <div class="attendance__template-guide-header">
@@ -465,6 +470,7 @@ interface ImportWorkflowBindings {
   importCsvWarnings: Ref<string[]>
   importPreview: Ref<AttendanceImportPreviewItem[]>
   loadImportTemplate: () => MaybePromise<void>
+  downloadImportTemplateCsv: () => MaybePromise<void>
   applyImportCsvFile: () => MaybePromise<void>
   applyImportProfile: () => void
   previewImport: () => MaybePromise<void>
@@ -524,6 +530,7 @@ const importCsvWarnings = props.workflow.importCsvWarnings
 const importPreview = props.workflow.importPreview
 
 const loadImportTemplate = () => props.workflow.loadImportTemplate()
+const downloadImportTemplateCsv = () => props.workflow.downloadImportTemplateCsv()
 const applyImportCsvFile = () => props.workflow.applyImportCsvFile()
 const applyImportProfile = () => props.workflow.applyImportProfile()
 const previewImport = () => props.workflow.previewImport()

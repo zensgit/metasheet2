@@ -279,6 +279,9 @@ export function useAttendanceAdminPayroll({
   async function savePayrollTemplate() {
     payrollTemplateSaving.value = true
     try {
+      if (!payrollTemplateForm.name.trim()) {
+        throw new Error(tr('Payroll template name is required', '计薪模板名称为必填项'))
+      }
       const config = parseJsonConfig(payrollTemplateForm.config)
       if (!config) {
         throw new Error(tr('Payroll template config must be valid JSON', '计薪模板配置必须是合法 JSON'))

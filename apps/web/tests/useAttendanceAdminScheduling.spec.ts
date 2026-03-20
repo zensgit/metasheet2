@@ -106,6 +106,29 @@ describe('useAttendanceAdminScheduling', () => {
     expect(setStatus).toHaveBeenCalledWith('Shift created.')
   })
 
+  it('requires a shift name before saving', async () => {
+    const adminForbidden = ref(false)
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      setStatus,
+    })
+
+    scheduling.shiftForm.name = '   '
+    scheduling.shiftForm.timezone = 'Asia/Shanghai'
+    scheduling.shiftForm.workStartTime = '08:30'
+    scheduling.shiftForm.workEndTime = '17:30'
+
+    await scheduling.saveShift()
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(setStatus).toHaveBeenCalledWith('Shift name is required', 'error')
+  })
+
   it('deletes a rotation rule and reloads both rules and assignments', async () => {
     const adminForbidden = ref(false)
     const confirm = vi.fn().mockReturnValue(true)

@@ -14,6 +14,8 @@
           v-model="payrollTemplateForm.name"
           name="payrollTemplateName"
           type="text"
+          required
+          :placeholder="tr('Required payroll template name', '必填计薪模板名称')"
         />
       </label>
       <label class="attendance__field" for="attendance-payroll-template-timezone">
