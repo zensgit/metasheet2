@@ -41,6 +41,9 @@ const sampleState: PlmAuditRouteState = {
   to: '',
   windowMinutes: 180,
   teamViewId: '',
+  sceneId: '',
+  sceneName: '',
+  sceneOwnerUserId: '',
 }
 
 describe('plmAuditSavedViews', () => {
@@ -85,4 +88,39 @@ describe('plmAuditSavedViews', () => {
     const next = deletePlmAuditSavedView(saved[0]!.id, storage)
     expect(next).toEqual([])
   })
+
+  it('keeps default-scene audit filters when saving and reading views', () => {
+    const storage = createMemoryStorage()
+
+    savePlmAuditSavedView('Workbench Defaults', {
+      ...sampleState,
+      kind: 'workbench',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+    }, storage)
+
+    expect(readPlmAuditSavedViews(storage)[0]?.state).toMatchObject({
+      kind: 'workbench',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+    })
+  })
+
+  it('keeps scene context when saving and reading views', () => {
+    const storage = createMemoryStorage()
+
+    savePlmAuditSavedView('Scene Context', {
+      ...sampleState,
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+    }, storage)
+
+    expect(readPlmAuditSavedViews(storage)[0]?.state).toMatchObject({
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+    })
+  })
+
 })

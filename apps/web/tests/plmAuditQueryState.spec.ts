@@ -21,6 +21,9 @@ describe('plmAuditQueryState', () => {
       auditFrom: '2026-03-11T15:00',
       auditTo: '2026-03-11T16:00',
       auditWindow: '720',
+      auditSceneId: 'scene-1',
+      auditSceneName: '采购团队场景',
+      auditSceneOwner: 'owner-a',
     })).toEqual({
       page: 3,
       q: 'documents',
@@ -32,6 +35,21 @@ describe('plmAuditQueryState', () => {
       to: '2026-03-11T16:00',
       windowMinutes: 720,
       teamViewId: '',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+    })
+  })
+
+  it('accepts default-scene audit action and resource filters', () => {
+    expect(parsePlmAuditRouteState({
+      auditAction: 'set-default',
+      auditType: 'plm-team-view-default',
+      auditKind: 'workbench',
+    })).toMatchObject({
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+      kind: 'workbench',
     })
   })
 
@@ -45,12 +63,18 @@ describe('plmAuditQueryState', () => {
       action: 'delete',
       windowMinutes: 60,
       teamViewId: 'audit-view-1',
+      sceneId: 'scene-2',
+      sceneName: 'BOM 巡检场景',
+      sceneOwnerUserId: 'owner-b',
     })).toEqual({
       auditPage: '2',
       auditQ: 'bom',
       auditAction: 'delete',
       auditWindow: '60',
       auditTeamView: 'audit-view-1',
+      auditSceneId: 'scene-2',
+      auditSceneName: 'BOM 巡检场景',
+      auditSceneOwner: 'owner-b',
     })
   })
 
@@ -78,6 +102,9 @@ describe('plmAuditQueryState', () => {
       to: '2026-03-11T16:00',
       windowMinutes: 720,
       teamViewId: 'audit-view-1',
+      sceneId: '',
+      sceneName: '',
+      sceneOwnerUserId: '',
     })
     expect(buildPlmAuditTeamViewState(state)).toEqual({
       page: 2,
@@ -97,6 +124,12 @@ describe('plmAuditQueryState', () => {
     expect(hasExplicitPlmAuditFilters({
       ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
       teamViewId: 'audit-view-1',
+    })).toBe(false)
+    expect(hasExplicitPlmAuditFilters({
+      ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
     })).toBe(false)
     expect(hasExplicitPlmAuditFilters({
       ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
