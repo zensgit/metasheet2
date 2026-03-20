@@ -9,19 +9,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 describe('server-side search — debounce', () => {
   beforeEach(() => { vi.useFakeTimers() })
 
-  it('should debounce search input by 300ms', () => {
+  it('should debounce search input by 150ms', () => {
     let callCount = 0
     let timer: ReturnType<typeof setTimeout> | null = null
 
     function setSearchQuery(_q: string) {
       if (timer) clearTimeout(timer)
-      timer = setTimeout(() => { callCount++ }, 300)
+      timer = setTimeout(() => { callCount++ }, 150)
     }
 
     setSearchQuery('hel')
     setSearchQuery('hell')
     setSearchQuery('hello')
-    vi.advanceTimersByTime(300)
+    vi.advanceTimersByTime(150)
     expect(callCount).toBe(1) // Only one API call after debounce
     vi.useRealTimers()
   })
@@ -32,13 +32,13 @@ describe('server-side search — debounce', () => {
 
     function setSearchQuery(_q: string) {
       if (timer) clearTimeout(timer)
-      timer = setTimeout(() => { called = true }, 300)
+      timer = setTimeout(() => { called = true }, 150)
     }
 
     setSearchQuery('test')
-    vi.advanceTimersByTime(200) // Only 200ms
+    vi.advanceTimersByTime(100) // Only 100ms
     expect(called).toBe(false)
-    vi.advanceTimersByTime(100) // Now 300ms
+    vi.advanceTimersByTime(50) // Now 150ms
     expect(called).toBe(true)
     vi.useRealTimers()
   })

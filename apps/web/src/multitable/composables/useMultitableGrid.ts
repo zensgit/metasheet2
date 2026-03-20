@@ -116,6 +116,7 @@ export const FILTER_OPERATORS_BY_TYPE: Record<string, Array<{ value: string; lab
 // --- Main composable ---
 
 const DEFAULT_PAGE_SIZE = 50
+const SEARCH_DEBOUNCE_MS = 150
 
 export function useMultitableGrid(opts: {
   sheetId: Ref<string>
@@ -132,6 +133,7 @@ export function useMultitableGrid(opts: {
   const linkSummaries = ref<Record<string, Record<string, LinkedRecordSummary[]>>>({})
   const loading = ref(false)
   const error = ref<string | null>(null)
+  let latestLoadRequestId = 0
 
   // Pagination
   const page = ref<MetaPage>({ offset: 0, limit: pageSize, total: 0, hasMore: false })
@@ -163,12 +165,13 @@ export function useMultitableGrid(opts: {
   let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
   function setSearchQuery(q: string) {
+    if (q === searchQuery.value) return
     searchQuery.value = q
     if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
     searchDebounceTimer = setTimeout(() => {
       page.value = { ...page.value, offset: 0 }
       loadViewData(0)
-    }, 300)
+    }, SEARCH_DEBOUNCE_MS)
   }
 
   // Column widths (with localStorage persistence)
@@ -193,6 +196,7 @@ export function useMultitableGrid(opts: {
     const sid = opts.sheetId.value
     const vid = opts.viewId.value
     if (!sid) return
+    const requestId = ++latestLoadRequestId
     loading.value = true
     error.value = null
     try {
@@ -208,15 +212,26 @@ export function useMultitableGrid(opts: {
         includeLinkSummaries: true,
         search: searchQuery.value || undefined,
       })
+      if (requestId !== latestLoadRequestId) return
+      const serverPage = data.page
+      const serverRows = data.rows ?? []
+      if (serverPage && !serverRows.length && offset > 0 && offset >= serverPage.total) {
+        const fallbackOffset = Math.max(0, Math.floor(Math.max(serverPage.total - 1, 0) / pageSize) * pageSize)
+        if (fallbackOffset !== offset) {
+          await loadViewData(fallbackOffset)
+          return
+        }
+      }
       fields.value = data.fields ?? []
-      rows.value = data.rows ?? []
+      rows.value = serverRows
       linkSummaries.value = data.linkSummaries ?? {}
-      if (data.page) page.value = data.page
+      if (serverPage) page.value = serverPage
       if (data.view) syncFromView(data.view)
     } catch (e: any) {
+      if (requestId !== latestLoadRequestId) return
       error.value = e.message ?? 'Failed to load view data'
     } finally {
-      loading.value = false
+      if (requestId === latestLoadRequestId) loading.value = false
     }
   }
 
@@ -264,7 +279,9 @@ export function useMultitableGrid(opts: {
   // --- Pagination ---
 
   function goToPage(p: number) {
-    const offset = Math.max(0, (p - 1) * pageSize)
+    const safePage = Math.min(Math.max(1, p), totalPages.value)
+    const offset = Math.max(0, (safePage - 1) * pageSize)
+    if (offset === page.value.offset) return
     loadViewData(offset)
   }
 
