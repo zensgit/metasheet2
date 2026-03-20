@@ -392,7 +392,10 @@
             v-for="view in recommendedAuditTeamViews"
             :key="view.id"
             class="plm-audit__recommended-card"
-            :class="{ 'plm-audit__recommended-card--default': view.isDefault }"
+            :class="{
+              'plm-audit__recommended-card--default': view.isDefault,
+              'plm-audit__recommended-card--focused': focusedRecommendedAuditTeamViewId === view.id,
+            }"
           >
             <div class="plm-audit__recommended-meta">
               <strong>{{ view.name }}</strong>
@@ -777,6 +780,7 @@ import {
   buildAuditTeamViewSummaryChips,
   buildAuditTeamViewSummaryHint,
   buildRecommendedAuditTeamViews,
+  resolveAuditTeamViewRecommendationFilter,
   type PlmRecommendedAuditTeamView,
   type PlmRecommendedAuditTeamViewFilter,
 } from './plmAuditTeamViewCatalog'
@@ -855,6 +859,7 @@ const auditTeamViewCollaborationFollowup = ref<PlmAuditTeamViewCollaborationFoll
 const auditTeamViews = ref<PlmWorkbenchTeamView<'audit'>[]>([])
 const auditTeamViewSelection = ref<string[]>([])
 const focusedAuditTeamViewId = ref('')
+const focusedRecommendedAuditTeamViewId = ref('')
 const auditTeamViewsLoading = ref(false)
 const auditTeamViewsError = ref('')
 const auditTeamViewRecommendationFilter = ref<PlmRecommendedAuditTeamViewFilter>('')
@@ -1210,6 +1215,9 @@ function trimAuditTeamViewSelection() {
   auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => existingIds.has(id))
   if (focusedAuditTeamViewId.value && !existingIds.has(focusedAuditTeamViewId.value)) {
     focusedAuditTeamViewId.value = ''
+  }
+  if (focusedRecommendedAuditTeamViewId.value && !existingIds.has(focusedRecommendedAuditTeamViewId.value)) {
+    focusedRecommendedAuditTeamViewId.value = ''
   }
 }
 
@@ -1612,6 +1620,16 @@ async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
   setStatus(draft.statusMessage)
 }
 
+async function focusRecommendedAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
+  auditTeamViewRecommendationFilter.value = resolveAuditTeamViewRecommendationFilter(view)
+  focusedRecommendedAuditTeamViewId.value = view.id
+  await nextTick()
+  document.getElementById('plm-audit-recommended-team-views')?.scrollIntoView({
+    behavior: 'smooth',
+    block: 'start',
+  })
+}
+
 async function runRecommendedAuditTeamViewSecondaryAction(view: PlmRecommendedAuditTeamView) {
   const target = findAuditTeamViewById(view.id)
   if (!target || target.isArchived) return
@@ -2009,6 +2027,7 @@ async function promoteSavedViewToTeam(
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
   try {
+    const shouldFocusRecommendation = auditSavedViewShareFollowup.value?.savedViewId === view.id
     const draft = buildPlmAuditSavedViewTeamPromotionDraft(view, tr)
     const saved = await savePlmWorkbenchTeamView('audit', draft.name, draft.state, {
       isDefault: options?.isDefault,
@@ -2028,15 +2047,22 @@ async function promoteSavedViewToTeam(
       auditTeamViewSelection.value = [saved.id]
     }
     await nextTick()
-    document.getElementById(collaborationDraft.focusTargetId)?.scrollIntoView({
-      behavior: 'smooth',
-      block: 'center',
-    })
+    if (shouldFocusRecommendation) {
+      await focusRecommendedAuditTeamView(saved)
+    } else {
+      document.getElementById(collaborationDraft.focusTargetId)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      })
+    }
     setStatus(
       [
         options?.isDefault
           ? tr('Saved view promoted as the default audit team view.', '已将保存视图提升为默认审计团队视图。')
           : tr('Saved view promoted to the audit team views.', '已将保存视图提升到审计团队视图。'),
+        shouldFocusRecommendation
+          ? tr('The new team view is highlighted in recommendations.', '新的团队视图已在推荐区高亮显示。')
+          : '',
         collaborationDraft.statusMessage,
         draft.localContextNote,
       ].filter(Boolean).join(' '),
@@ -2306,6 +2332,11 @@ watch(
 .plm-audit__recommended-card--default {
   border-color: #93c5fd;
   box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.12);
+}
+
+.plm-audit__recommended-card--focused {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
 }
 
 .plm-audit__recommended-meta,

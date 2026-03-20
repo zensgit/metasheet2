@@ -57,6 +57,12 @@ function getRecommendationReason(
   return 'recent-update'
 }
 
+export function resolveAuditTeamViewRecommendationFilter(
+  view: Pick<PlmWorkbenchTeamView<'audit'>, 'isDefault' | 'lastDefaultSetAt'>,
+): PlmRecommendedAuditTeamViewFilter {
+  return getRecommendationReason(view as PlmWorkbenchTeamView<'audit'>)
+}
+
 function getRecommendationSource(
   view: PlmWorkbenchTeamView<'audit'>,
   recommendationReason: PlmRecommendedAuditTeamViewReason,

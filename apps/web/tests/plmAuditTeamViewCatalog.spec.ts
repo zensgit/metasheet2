@@ -3,6 +3,7 @@ import {
   buildAuditTeamViewSummaryChips,
   buildAuditTeamViewSummaryHint,
   buildRecommendedAuditTeamViews,
+  resolveAuditTeamViewRecommendationFilter,
 } from '../src/views/plmAuditTeamViewCatalog'
 import type { PlmWorkbenchTeamView } from '../src/views/plm/plmPanelModels'
 
@@ -152,5 +153,16 @@ describe('plmAuditTeamViewCatalog', () => {
       count: 1,
       description: '只看近期被设为默认的审计团队视图，适合追踪默认切换历史。',
     })
+  })
+
+  it('resolves the recommended filter bucket for a team view', () => {
+    expect(resolveAuditTeamViewRecommendationFilter(createAuditTeamView({
+      isDefault: true,
+      lastDefaultSetAt: '2026-03-19T16:00:00.000Z',
+    }))).toBe('default')
+    expect(resolveAuditTeamViewRecommendationFilter(createAuditTeamView({
+      lastDefaultSetAt: '2026-03-19T15:00:00.000Z',
+    }))).toBe('recent-default')
+    expect(resolveAuditTeamViewRecommendationFilter(createAuditTeamView())).toBe('recent-update')
   })
 })
