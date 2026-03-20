@@ -1,0 +1,189 @@
+# Multitable Internal Pilot Runbook
+
+Date: 2026-03-19  
+Scope: Feishu-style multitable internal pilot  
+Repo root: `<REPO_ROOT>`
+
+## Goal
+
+Use the existing pilot smoke, grid profile, and threshold summary as the release gate for the first internal multitable pilot.
+
+This runbook does not add new product functionality. It standardizes how to decide whether a branch is safe to hand to pilot users.
+
+## Readiness Commands
+
+### Local one-shot readiness
+
+```bash
+cd <REPO_ROOT>
+ENSURE_PLAYWRIGHT=false pnpm verify:multitable-pilot:ready:local
+```
+
+This runs, in order:
+
+1. `pnpm verify:multitable-pilot:local`
+2. `pnpm profile:multitable-grid:local`
+3. `pnpm verify:multitable-grid-profile:summary`
+4. `pnpm verify:multitable-pilot:readiness`
+
+Artifacts are written under:
+
+```text
+output/playwright/multitable-pilot-ready-local/<timestamp>/
+```
+
+Key outputs:
+
+- `smoke/report.json`
+- `profile/report.json`
+- `profile/summary.md`
+- `readiness.md`
+- `readiness.json`
+
+### Pilot handoff bundle
+
+```bash
+cd <REPO_ROOT>
+pnpm prepare:multitable-pilot:handoff
+```
+
+This copies the latest readiness run plus pilot docs into:
+
+```text
+output/playwright/multitable-pilot-handoff/<timestamp>/
+```
+
+Key outputs:
+
+- `handoff.md`
+- `handoff.json`
+- `readiness.md`
+- `readiness.json`
+- `smoke/grid-import.png`
+- `smoke/grid-hydrated.png`
+- `smoke/form-comments.png`
+- `docs/multitable-internal-pilot-runbook-20260319.md`
+- `docs/multitable-pilot-quickstart-20260319.md`
+- `docs/multitable-pilot-feedback-template-20260319.md`
+
+### CI readiness
+
+GitHub Actions workflow:
+
+```text
+.github/workflows/multitable-pilot-e2e.yml
+```
+
+It runs:
+
+1. pilot smoke
+2. 2000-row grid profile
+3. profile threshold summary
+4. pilot readiness summary
+
+Uploaded artifact root:
+
+```text
+output/playwright/multitable-pilot-local
+output/playwright/multitable-grid-profile-local
+```
+
+Readiness outputs in CI:
+
+- `output/playwright/multitable-grid-profile-local/ci/readiness.md`
+- `output/playwright/multitable-grid-profile-local/ci/readiness.json`
+
+## Local Environment
+
+Default local endpoints:
+
+- backend: `http://127.0.0.1:7778`
+- frontend: `http://127.0.0.1:8899`
+
+When using the local dev-token flow, backend must allow trusted RBAC token claims:
+
+```bash
+RBAC_TOKEN_TRUST=true pnpm --filter @metasheet/core-backend dev
+```
+
+If you use a real admin token, `RBAC_TOKEN_TRUST=true` is not required.
+
+## Current Acceptance Bar
+
+Smoke must pass all of these:
+
+- `ui.grid.import`
+- `ui.person.assign`
+- `ui.form.upload-comments`
+- `ui.grid.search-hydration`
+- `ui.conflict.retry`
+
+Grid profile thresholds:
+
+- `ui.grid.open <= 350ms`
+- `ui.grid.search-hit <= 300ms`
+- `api.grid.initial-load <= 25ms`
+- `api.grid.search-hit <= 25ms`
+
+## Pilot Entry Checklist
+
+Use this checklist before handing the branch to a real team:
+
+1. Prepare two direct URLs for the pilot owner:
+
+```text
+/multitable/<sheetId>/<viewId>?baseId=<baseId>
+/multitable/<sheetId>/<viewId>?baseId=<baseId>&mode=form&recordId=<recordId>
+```
+
+Do not ask the pilot team to assemble these URLs manually.
+
+2. Run `pnpm verify:multitable-pilot:ready:local`
+3. Confirm `readiness.md` says `Overall: PASS`
+4. Confirm profile was run at `ROW_COUNT=2000`
+5. Confirm smoke report includes attachment, person preset, comments, and conflict retry
+6. Confirm no local-only flags are required for the target environment, except the documented dev-token `RBAC_TOKEN_TRUST=true` case
+7. Give the pilot team the feedback template:
+
+```text
+docs/deployment/multitable-pilot-feedback-template-20260319.md
+```
+8. If the team uses GitHub issues for pilot tracking, open:
+
+```text
+.github/ISSUE_TEMPLATE/multitable-pilot-feedback.yml
+```
+9. Start the team with:
+
+```text
+docs/deployment/multitable-pilot-quickstart-20260319.md
+```
+
+Use the runbook for operators and gate owners, not as the first document for business users.
+
+10. Use these pilot operation templates during the week:
+
+```text
+docs/deployment/multitable-pilot-team-checklist-20260319.md
+docs/deployment/multitable-pilot-daily-triage-template-20260319.md
+docs/deployment/multitable-pilot-go-no-go-template-20260319.md
+```
+
+## Current Pilot Recommendation
+
+The branch is suitable for a first internal pilot when the readiness gate is green.
+
+Do not expand feature scope before pilot feedback. The highest-value next step is to collect real user behavior against the existing gate:
+
+- import
+- linked person assignment
+- attachment upload
+- form submit
+- search
+- conflict recovery
+
+## Known Limits
+
+- Large JS chunks still produce a build warning, but current build passes.
+- Local disk pressure can cause transient artifact write failures when free disk space is very low.
+- The readiness gate is designed for internal pilot, not public beta or market-complete launch.
