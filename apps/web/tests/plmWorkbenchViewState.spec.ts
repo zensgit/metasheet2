@@ -196,7 +196,7 @@ describe('plmWorkbenchViewState', () => {
         'https://example.test',
       ),
     ).toBe(
-      'https://example.test/plm/audit?auditPage=2&auditQ=documents&auditActor=dev-user&auditKind=documents&auditAction=archive&auditType=plm-team-view-batch&auditFrom=2026-03-11T15%3A00%3A00.000Z&auditTo=2026-03-11T16%3A00%3A00.000Z&auditWindow=720&auditTeamView=audit-view-1',
+      'https://example.test/plm/audit?auditEntry=share&auditPage=2&auditQ=documents&auditActor=dev-user&auditKind=documents&auditAction=archive&auditType=plm-team-view-batch&auditFrom=2026-03-11T15%3A00%3A00.000Z&auditTo=2026-03-11T16%3A00%3A00.000Z&auditWindow=720&auditTeamView=audit-view-1',
     )
   })
 })

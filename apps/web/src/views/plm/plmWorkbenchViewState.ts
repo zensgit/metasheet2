@@ -180,6 +180,7 @@ export function buildPlmWorkbenchTeamViewShareUrl<Kind extends PlmWorkbenchTeamV
     const query = buildPlmAuditRouteQuery(
       buildPlmAuditRouteStateFromTeamView(view.id, auditView.state),
     )
+    params.set('auditEntry', 'share')
     for (const [key, value] of Object.entries(query)) {
       appendIfPresent(params, key, value)
     }
