@@ -1,0 +1,48 @@
+import { describe, expect, it } from 'vitest'
+import { buildPlmAuditSavedViewShareFollowupNotice } from '../src/views/plmAuditSavedViewShareFollowup'
+
+function tr(en: string, zh: string) {
+  return `${en}|${zh}`
+}
+
+describe('plmAuditSavedViewShareFollowup', () => {
+  it('builds local-save follow-up actions for the matching saved view', () => {
+    expect(buildPlmAuditSavedViewShareFollowupNotice({
+      id: 'saved-1',
+      name: 'Shared supplier audit · Local view',
+    }, {
+      savedViewId: 'saved-1',
+    }, tr)).toEqual({
+      sourceLabel: 'Shared team view link|团队视图分享链接',
+      title: 'Shared audit setup saved locally.|分享的审计配置已保存到本地。',
+      description:
+        'You can keep "Shared supplier audit · Local view" as a personal saved view, or immediately promote it into the audit team views.|你可以将“Shared supplier audit · Local view”继续保留为个人已保存视图，或立即将其提升到审计团队视图。',
+      actions: [
+        {
+          kind: 'promote-team',
+          label: 'Save to team|保存到团队',
+          emphasis: 'primary',
+        },
+        {
+          kind: 'promote-default',
+          label: 'Save as default team view|保存为团队默认视图',
+          emphasis: 'secondary',
+        },
+        {
+          kind: 'dismiss',
+          label: 'Done|完成',
+          emphasis: 'secondary',
+        },
+      ],
+    })
+  })
+
+  it('returns null when the follow-up targets another saved view', () => {
+    expect(buildPlmAuditSavedViewShareFollowupNotice({
+      id: 'saved-1',
+      name: 'Shared supplier audit · Local view',
+    }, {
+      savedViewId: 'saved-2',
+    }, tr)).toBeNull()
+  })
+})

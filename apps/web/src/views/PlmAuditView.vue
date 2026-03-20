@@ -577,12 +577,36 @@
         </div>
       </div>
 
+      <div v-if="auditSavedViewShareFollowupNotice" class="plm-audit__team-view-followup">
+        <div class="plm-audit__team-view-collaboration-meta">
+          <small class="plm-audit__summary-source">{{ auditSavedViewShareFollowupNotice.sourceLabel }}</small>
+          <strong>{{ auditSavedViewShareFollowupNotice.title }}</strong>
+          <span class="plm-audit__muted">{{ auditSavedViewShareFollowupNotice.description }}</span>
+        </div>
+        <div class="plm-audit__team-view-collaboration-actions">
+          <button
+            v-for="actionItem in auditSavedViewShareFollowupNotice.actions"
+            :key="`saved-view-share-followup-${actionItem.kind}`"
+            class="plm-audit__button"
+            :class="{ 'plm-audit__button--primary': actionItem.emphasis === 'primary' }"
+            type="button"
+            :disabled="auditTeamViewsLoading"
+            @click="runAuditSavedViewShareFollowupAction(actionItem.kind)"
+          >
+            {{ actionItem.label }}
+          </button>
+        </div>
+      </div>
+
       <div v-if="savedViews.length" class="plm-audit__saved-view-list">
         <article
           v-for="view in savedViews"
           :key="view.id"
           class="plm-audit__saved-view-card"
-          :class="{ 'plm-audit__saved-view-card--active': isSavedViewActive(view) }"
+          :class="{
+            'plm-audit__saved-view-card--active': isSavedViewActive(view),
+            'plm-audit__saved-view-card--focused': auditSavedViewShareFollowup?.savedViewId === view.id,
+          }"
         >
           <div class="plm-audit__saved-view-meta">
             <strong>{{ view.name }}</strong>
@@ -739,6 +763,11 @@ import {
   savePlmAuditSavedView,
   type PlmAuditSavedView,
 } from './plmAuditSavedViews'
+import {
+  buildPlmAuditSavedViewShareFollowupNotice,
+  type PlmAuditSavedViewShareFollowup,
+  type PlmAuditSavedViewShareFollowupActionKind,
+} from './plmAuditSavedViewShareFollowup'
 import { buildPlmAuditSavedViewTeamPromotionDraft } from './plmAuditSavedViewPromotion'
 import {
   buildPlmAuditSavedViewContextBadge,
@@ -816,6 +845,7 @@ const statusKind = ref<'info' | 'error'>('info')
 const routeReady = ref(false)
 const savedViewName = ref('')
 const savedViews = ref<PlmAuditSavedView[]>(readPlmAuditSavedViews())
+const auditSavedViewShareFollowup = ref<PlmAuditSavedViewShareFollowup | null>(null)
 const auditTeamViewKey = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.teamViewId)
 const auditTeamViewName = ref('')
 const auditTeamViewOwnerUserId = ref('')
@@ -970,6 +1000,13 @@ const auditTeamViewCollaborationFollowupNotice = computed(() => {
     tr,
   )
 })
+const auditSavedViewShareFollowupNotice = computed(() => {
+  const followup = auditSavedViewShareFollowup.value
+  if (!followup) return null
+  const view = savedViews.value.find((entry) => entry.id === followup.savedViewId)
+  if (!view) return null
+  return buildPlmAuditSavedViewShareFollowupNotice(view, followup, tr)
+})
 
 function readCurrentRouteState(): PlmAuditRouteState {
   return {
@@ -1070,6 +1107,10 @@ function clearAuditTeamViewShareEntry() {
 
 function clearAuditTeamViewCollaborationFollowup() {
   auditTeamViewCollaborationFollowup.value = null
+}
+
+function clearAuditSavedViewShareFollowup() {
+  auditSavedViewShareFollowup.value = null
 }
 
 function actionLabel(value: string): string {
@@ -1671,6 +1712,10 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
       buildPlmAuditSharedEntrySavedViewName(view, tr),
       readCurrentRouteState(),
     )
+    const savedEntry = savedViews.value[0]
+    auditSavedViewShareFollowup.value = savedEntry
+      ? { savedViewId: savedEntry.id }
+      : null
     savedViewName.value = ''
     clearAuditTeamViewShareEntry()
     setStatus(tr('Shared audit team view saved locally.', '已将分享的审计团队视图保存为本地视图。'))
@@ -1689,6 +1734,24 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
 
   const ok = await setAuditTeamViewDefaultEntry(view)
   if (ok) clearAuditTeamViewShareEntry()
+}
+
+async function runAuditSavedViewShareFollowupAction(actionKind: PlmAuditSavedViewShareFollowupActionKind) {
+  const followup = auditSavedViewShareFollowup.value
+  if (!followup) return
+
+  if (actionKind === 'dismiss') {
+    clearAuditSavedViewShareFollowup()
+    return
+  }
+
+  const view = savedViews.value.find((entry) => entry.id === followup.savedViewId)
+  if (!view) {
+    clearAuditSavedViewShareFollowup()
+    return
+  }
+
+  await promoteSavedViewToTeam(view, actionKind === 'promote-default' ? { isDefault: true } : undefined)
 }
 
 async function archiveAuditTeamView() {
@@ -1920,6 +1983,7 @@ function saveCurrentView() {
   }
 
   savedViews.value = savePlmAuditSavedView(trimmedName, readCurrentRouteState())
+  clearAuditSavedViewShareFollowup()
   savedViewName.value = ''
   setStatus(tr('Audit saved view stored.', '审计已保存视图已保存。'))
 }
@@ -1930,6 +1994,9 @@ function applySavedView(view: PlmAuditSavedView) {
 
 function deleteSavedViewEntry(id: string) {
   savedViews.value = deletePlmAuditSavedView(id)
+  if (auditSavedViewShareFollowup.value?.savedViewId === id) {
+    clearAuditSavedViewShareFollowup()
+  }
   setStatus(tr('Audit saved view deleted.', '审计已保存视图已删除。'))
 }
 
@@ -1947,6 +2014,9 @@ async function promoteSavedViewToTeam(
       isDefault: options?.isDefault,
     })
     upsertAuditTeamView(saved)
+    if (auditSavedViewShareFollowup.value?.savedViewId === view.id) {
+      clearAuditSavedViewShareFollowup()
+    }
     const collaborationDraft = buildPlmAuditTeamViewCollaborationDraft(saved, tr, 'saved-view-promotion')
     auditTeamViewCollaborationDraft.value = collaborationDraft
     clearAuditTeamViewCollaborationFollowup()
@@ -2491,6 +2561,11 @@ watch(
 .plm-audit__saved-view-card--active {
   border-color: #2563eb;
   box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.18);
+}
+
+.plm-audit__saved-view-card--focused {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.16);
 }
 
 .plm-audit__saved-view-meta {

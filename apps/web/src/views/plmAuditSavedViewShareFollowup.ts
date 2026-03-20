@@ -1,0 +1,52 @@
+import type { PlmAuditSavedView } from './plmAuditSavedViews'
+
+export type PlmAuditSavedViewShareFollowupActionKind = 'promote-team' | 'promote-default' | 'dismiss'
+
+export type PlmAuditSavedViewShareFollowup = {
+  savedViewId: string
+}
+
+export type PlmAuditSavedViewShareFollowupNotice = {
+  sourceLabel: string
+  title: string
+  description: string
+  actions: Array<{
+    kind: PlmAuditSavedViewShareFollowupActionKind
+    label: string
+    emphasis: 'primary' | 'secondary'
+  }>
+}
+
+export function buildPlmAuditSavedViewShareFollowupNotice(
+  view: Pick<PlmAuditSavedView, 'id' | 'name'>,
+  followup: PlmAuditSavedViewShareFollowup | null,
+  tr: (en: string, zh: string) => string,
+): PlmAuditSavedViewShareFollowupNotice | null {
+  if (!followup || followup.savedViewId !== view.id) return null
+
+  return {
+    sourceLabel: tr('Shared team view link', '团队视图分享链接'),
+    title: tr('Shared audit setup saved locally.', '分享的审计配置已保存到本地。'),
+    description: tr(
+      `You can keep "${view.name}" as a personal saved view, or immediately promote it into the audit team views.`,
+      `你可以将“${view.name}”继续保留为个人已保存视图，或立即将其提升到审计团队视图。`,
+    ),
+    actions: [
+      {
+        kind: 'promote-team',
+        label: tr('Save to team', '保存到团队'),
+        emphasis: 'primary',
+      },
+      {
+        kind: 'promote-default',
+        label: tr('Save as default team view', '保存为团队默认视图'),
+        emphasis: 'secondary',
+      },
+      {
+        kind: 'dismiss',
+        label: tr('Done', '完成'),
+        emphasis: 'secondary',
+      },
+    ],
+  }
+}
