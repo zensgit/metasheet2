@@ -1030,6 +1030,12 @@ components:
           nullable: true
         isWorkingDay:
           type: boolean
+        type:
+          type: string
+          enum: [holiday, working_day_override]
+        holidayType:
+          type: string
+          enum: [holiday, working_day_override]
     AttendanceSettings:
       type: object
       properties:

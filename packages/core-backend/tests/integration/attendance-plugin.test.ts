@@ -1177,6 +1177,319 @@ describe('Attendance Plugin Integration', () => {
     }
   })
 
+  it('exports attendance JSON when format=json is requested', async () => {
+    if (!baseUrl) return
+
+    const tokenUserId = `attendance-export-json-${Date.now().toString(36)}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(tokenUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    expect(dbUrl).toBeTruthy()
+    if (!dbUrl) return
+
+    const workDate = '2029-03-14'
+    const firstInAt = new Date(`${workDate}T00:00:00.000Z`)
+    const recordId = randomUuidV4()
+    const sourceBatchId = randomUuidV4()
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      await pool.query(
+        `INSERT INTO attendance_records
+         (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, $10, $11, $12::jsonb, $13, now(), now())`,
+        [
+          recordId,
+          tokenUserId,
+          'default',
+          workDate,
+          'Asia/Tokyo',
+          firstInAt,
+          480,
+          0,
+          0,
+          'normal',
+          true,
+          JSON.stringify({ source: 'integration-export-json' }),
+          sourceBatchId,
+        ]
+      )
+
+      const exportRes = await requestJson(
+        `${baseUrl}/api/attendance/export?from=${encodeURIComponent(workDate)}&to=${encodeURIComponent(workDate)}&format=json`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      )
+      expect(exportRes.status).toBe(200)
+      const body = (exportRes.body as {
+        ok?: boolean
+        success?: boolean
+        data?: { format?: string; total?: number; items?: Array<Record<string, unknown>> }
+      } | undefined) ?? {}
+      expect(body.ok).toBe(true)
+      expect(body.success).toBe(true)
+      expect(body.data?.format).toBe('json')
+      expect(body.data?.total).toBeGreaterThanOrEqual(1)
+      expect(Array.isArray(body.data?.items)).toBe(true)
+      const row = body.data?.items?.find(item => item.user_id === tokenUserId)
+      expect(row?.work_date).toBe(workDate)
+      expect(row?.first_in_at).toBe(`${workDate}T09:00:00+09:00`)
+    } finally {
+      await pool.query('DELETE FROM attendance_records WHERE id = $1', [recordId]).catch(() => undefined)
+      await pool.end()
+    }
+  })
+
+  it('rejects HTML group names and returns 409 for duplicate attendance group names', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-group-guard-${Date.now().toString(36)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const unsafeRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: '<script>alert(1)</script>',
+        timezone: 'UTC',
+      }),
+    })
+    expect(unsafeRes.status).toBe(400)
+    const unsafeBody = (unsafeRes.body as { error?: { code?: string; message?: string } } | undefined) ?? {}
+    expect(unsafeBody.error?.code).toBe('VALIDATION_ERROR')
+    expect(unsafeBody.error?.message).toContain('HTML')
+
+    const groupName = `Run15 Duplicate Group ${Date.now().toString(36)}`
+    const firstRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: groupName,
+        timezone: 'UTC',
+      }),
+    })
+    expect(firstRes.status).toBe(200)
+
+    const secondRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: groupName,
+        timezone: 'UTC',
+      }),
+    })
+    expect(secondRes.status).toBe(409)
+    const secondBody = (secondRes.body as { error?: { code?: string } } | undefined) ?? {}
+    expect(secondBody.error?.code).toBe('ALREADY_EXISTS')
+  })
+
+  it('rejects invalid timezones for attendance groups and payroll templates', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-tz-guard-${Date.now().toString(36)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const invalidGroupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Invalid TZ Group ${Date.now().toString(36)}`,
+        timezone: 'Mars/Olympus',
+      }),
+    })
+    expect(invalidGroupRes.status).toBe(400)
+
+    const invalidTemplateRes = await requestJson(`${baseUrl}/api/attendance/payroll-templates`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Invalid TZ Payroll ${Date.now().toString(36)}`,
+        timezone: 'Mars/Olympus',
+        startDay: 1,
+        endDay: 30,
+      }),
+    })
+    expect(invalidTemplateRes.status).toBe(400)
+    const invalidTemplateBody = (invalidTemplateRes.body as { error?: { code?: string; message?: string } } | undefined) ?? {}
+    expect(invalidTemplateBody.error?.code).toBe('VALIDATION_ERROR')
+    expect(invalidTemplateBody.error?.message).toContain('IANA')
+  })
+
+  it('rejects future punches and still allows immediate check-out after check-in when min interval is enabled', async () => {
+    if (!baseUrl) return
+
+    const tokenUserId = `attendance-punch-guard-${Date.now().toString(36)}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(tokenUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(settingsRes.status).toBe(200)
+    const originalSettings = ((settingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
+
+    try {
+      const saveSettingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...originalSettings,
+          minPunchIntervalMinutes: 60,
+        }),
+      })
+      expect(saveSettingsRes.status).toBe(200)
+
+      const futurePunchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          eventType: 'check_in',
+          occurredAt: '2027-03-19T09:00:00.000Z',
+        }),
+      })
+      expect(futurePunchRes.status).toBe(400)
+      const futureBody = (futurePunchRes.body as { error?: { code?: string } } | undefined) ?? {}
+      expect(futureBody.error?.code).toBe('FUTURE_PUNCH_NOT_ALLOWED')
+
+      const now = new Date().toISOString()
+      const checkInRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          eventType: 'check_in',
+          occurredAt: now,
+        }),
+      })
+      expect(checkInRes.status).toBe(200)
+
+      const checkOutRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          eventType: 'check_out',
+          occurredAt: now,
+        }),
+      })
+      expect(checkOutRes.status).toBe(200)
+    } finally {
+      await requestJson(`${baseUrl}/api/attendance/settings`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(originalSettings),
+      }).catch(() => undefined)
+    }
+  })
+
+  it('rejects negative leave type daily_minutes aliases and exposes holiday type fields', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-leave-guard-${Date.now().toString(36)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const invalidLeaveTypeRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Negative Leave ${Date.now().toString(36)}`,
+        daily_minutes: -100,
+      }),
+    })
+    expect(invalidLeaveTypeRes.status).toBe(400)
+
+    const holidayDate = '2029-03-15'
+    const holidayCreateRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        date: holidayDate,
+        name: 'Holiday Type Check',
+        isWorkingDay: false,
+      }),
+    })
+    expect([201, 409]).toContain(holidayCreateRes.status)
+    const createdHoliday =
+      ((holidayCreateRes.body as { data?: Record<string, unknown> } | undefined)?.data) ?? null
+
+    const holidayListRes = await requestJson(
+      `${baseUrl}/api/attendance/holidays?from=${holidayDate}&to=${holidayDate}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    )
+    expect(holidayListRes.status).toBe(200)
+    const items = ((holidayListRes.body as { data?: { items?: Array<Record<string, unknown>> } } | undefined)?.data?.items) ?? []
+    const holiday =
+      items.find(item => item.id === createdHoliday?.id)
+      ?? items.find(item => String(item.date ?? '').startsWith(holidayDate))
+      ?? createdHoliday
+    expect(holiday).toBeTruthy()
+    expect(holiday?.type).toBe('holiday')
+    expect(holiday?.holidayType).toBe('holiday')
+  })
+
   it('supports import commit idempotencyKey retries (without requiring a new commitToken)', async () => {
     if (!baseUrl) return
 

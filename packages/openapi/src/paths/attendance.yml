@@ -225,27 +225,36 @@ paths:
                 workDate:
                   type: string
                   format: date
+                  description: Work date in YYYY-MM-DD format.
                 requestType:
                   type: string
                   enum: [missed_check_in, missed_check_out, time_correction, leave, overtime]
+                  description: Request type.
                 requestedInAt:
                   type: string
                   format: date-time
+                  description: Required for missed_check_in. Optional for time_correction, leave, and overtime.
                 requestedOutAt:
                   type: string
                   format: date-time
+                  description: Required for missed_check_out. Optional for time_correction, leave, and overtime.
                 reason:
                   type: string
                 leaveTypeId:
                   type: string
+                  description: Required for leave requests unless leaveTypeCode is provided.
                 leaveTypeCode:
                   type: string
+                  description: Required for leave requests unless leaveTypeId is provided.
                 overtimeRuleId:
                   type: string
+                  description: Required for overtime requests unless overtimeRuleName is provided.
                 overtimeRuleName:
                   type: string
+                  description: Required for overtime requests unless overtimeRuleId is provided.
                 minutes:
                   type: integer
+                  description: Required for overtime unless derived from requestedInAt/requestedOutAt.
                 attachmentUrl:
                   type: string
                 approvalFlowId:
@@ -917,7 +926,7 @@ paths:
   /api/attendance/export:
     x-plugin: plugin-attendance
     get:
-      summary: Export attendance records as CSV
+      summary: Export attendance records as CSV or JSON
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: query
@@ -935,13 +944,48 @@ paths:
         - in: query
           name: limit
           schema: { type: integer, default: 1000, maximum: 5000 }
+        - in: query
+          name: format
+          schema:
+            type: string
+            enum: [csv, json]
+            default: csv
       responses:
         '200':
-          description: CSV export
+          description: Export result
           content:
             text/csv:
               schema:
                 type: string
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            user_id: { type: string }
+                            org_id: { type: string }
+                            work_date: { type: string, format: date }
+                            timezone: { type: string }
+                            first_in_at: { type: string }
+                            last_out_at: { type: string }
+                            work_minutes: { type: integer }
+                            late_minutes: { type: integer }
+                            early_leave_minutes: { type: integer }
+                            status: { type: string }
+                            is_workday: { type: boolean }
+                      total: { type: integer }
+                      from: { type: string, format: date }
+                      to: { type: string, format: date }
+                      format: { type: string, enum: [json] }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/attendance/reports/requests:
@@ -1035,6 +1079,9 @@ paths:
                 requiresApproval: { type: boolean }
                 requiresAttachment: { type: boolean }
                 defaultMinutesPerDay: { type: integer }
+                daily_minutes:
+                  type: integer
+                  description: Compatibility alias for defaultMinutesPerDay.
                 isActive: { type: boolean }
                 orgId: { type: string }
               required: [name]
@@ -1074,6 +1121,9 @@ paths:
                 requiresApproval: { type: boolean }
                 requiresAttachment: { type: boolean }
                 defaultMinutesPerDay: { type: integer }
+                daily_minutes:
+                  type: integer
+                  description: Compatibility alias for defaultMinutesPerDay.
                 isActive: { type: boolean }
                 orgId: { type: string }
       responses:

@@ -2,8 +2,22 @@
   <section class="login-page">
     <div class="login-card">
       <header class="login-header">
-        <h1>{{ text.title }}</h1>
-        <p>{{ text.subtitle }}</p>
+        <div class="login-header__content">
+          <h1>{{ text.title }}</h1>
+          <p>{{ text.subtitle }}</p>
+        </div>
+        <label class="login-locale">
+          <span class="login-locale__label">{{ text.language }}</span>
+          <select
+            class="login-locale__select"
+            data-testid="locale-switcher"
+            :value="locale"
+            @change="onLocaleChange"
+          >
+            <option value="en">English</option>
+            <option value="zh-CN">中文</option>
+          </select>
+        </label>
       </header>
 
       <form class="login-form" @submit.prevent="onSubmit">
@@ -63,7 +77,7 @@ interface AuthFeaturePayload {
 
 const router = useRouter()
 const route = useRoute()
-const { isZh } = useLocale()
+const { locale, isZh, setLocale } = useLocale()
 const { loadProductFeatures, resolveHomePath } = useFeatureFlags()
 
 const email = ref('')
@@ -78,6 +92,7 @@ const text = computed(() => {
       subtitle: '输入账号密码后进入系统。',
       email: '邮箱',
       password: '密码',
+      language: '语言',
       emailPlaceholder: 'admin@metasheet.app',
       passwordPlaceholder: '请输入密码',
       submit: '登录',
@@ -91,6 +106,7 @@ const text = computed(() => {
     subtitle: 'Use your account credentials to continue.',
     email: 'Email',
     password: 'Password',
+    language: 'Language',
     emailPlaceholder: 'admin@metasheet.app',
     passwordPlaceholder: 'Enter password',
     submit: 'Sign in',
@@ -143,13 +159,10 @@ function persistAuthContext(user: AuthUserPayload | null, features: AuthFeatureP
   }
 }
 
-async function hydrateAuthContext(): Promise<void> {
-  const response = await apiFetch('/api/auth/me')
-  if (!response.ok) return
-  const payload = await response.json().catch(() => null)
-  const user = (payload?.data?.user ?? null) as AuthUserPayload | null
-  const features = (payload?.data?.features ?? null) as AuthFeaturePayload | null
-  persistAuthContext(user, features)
+function onLocaleChange(event: Event): void {
+  const target = event.target as HTMLSelectElement | null
+  if (!target) return
+  setLocale(target.value)
 }
 
 async function onSubmit(): Promise<void> {
@@ -181,8 +194,11 @@ async function onSubmit(): Promise<void> {
       localStorage.setItem('auth_token', token)
     }
 
-    await hydrateAuthContext()
-    await loadProductFeatures(true)
+    persistAuthContext(
+      (payload?.data?.user ?? null) as AuthUserPayload | null,
+      (payload?.data?.features ?? null) as AuthFeaturePayload | null,
+    )
+    await loadProductFeatures(true, { skipSessionProbe: true })
 
     const redirect = normalizePostLoginRedirect(route.query.redirect)
     await router.replace(redirect || resolveHomePath())
@@ -216,8 +232,17 @@ async function onSubmit(): Promise<void> {
 }
 
 .login-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.login-header__content {
   display: grid;
   gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .login-header h1 {
@@ -229,6 +254,34 @@ async function onSubmit(): Promise<void> {
 .login-header p {
   font-size: 14px;
   color: #5f7088;
+}
+
+.login-locale {
+  display: inline-grid;
+  gap: 4px;
+  justify-items: end;
+  flex: 0 0 auto;
+}
+
+.login-locale__label {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.login-locale__select {
+  min-width: 120px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 13px;
+  color: #334155;
+  background: #fff;
+}
+
+.login-locale__select:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.16);
 }
 
 .login-form {
