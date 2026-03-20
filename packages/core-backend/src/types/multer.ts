@@ -3,6 +3,7 @@
  * Shared types for optional multer dependency
  */
 
+import { createRequire } from 'module'
 import type { Request, Response, RequestHandler } from 'express'
 
 /**
@@ -58,13 +59,14 @@ export type MulterConstructor = {
   memoryStorage: () => unknown
 }
 
+const requireCompat = createRequire(`${process.cwd()}/package.json`)
+
 /**
  * Load multer or return null if not installed
  */
 export function loadMulter(): MulterConstructor | null {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-    return require('multer') as MulterConstructor
+    return requireCompat('multer') as MulterConstructor
   } catch {
     // multer not installed
     return null

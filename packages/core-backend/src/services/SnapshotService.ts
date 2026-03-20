@@ -249,6 +249,34 @@ export class SnapshotService {
       // Table might not exist, skip
     }
 
+    // Capture spreadsheet sheet and cells when the snapshot target is a sheet id.
+    try {
+      const sheet = await db
+        .selectFrom('sheets')
+        .selectAll()
+        .where('id', '=', viewId)
+        .executeTakeFirst()
+
+      if (sheet) {
+        await this.saveSnapshotItem(snapshotId, 'sheet', sheet.id, sheet)
+        itemsCreated++
+
+        const cells = await db
+          .selectFrom('cells')
+          .selectAll()
+          .where('sheet_id', '=', viewId)
+          .limit(10000)
+          .execute()
+
+        for (const cell of cells) {
+          await this.saveSnapshotItem(snapshotId, 'cell', cell.id, cell)
+          itemsCreated++
+        }
+      }
+    } catch {
+      // Spreadsheet tables might not exist, skip
+    }
+
     return itemsCreated
   }
 
@@ -453,9 +481,9 @@ export class SnapshotService {
     switch (itemType) {
       case 'view':
         await db
-          .updateTable('views')
-          .set(insertData)
-          .where('id', '=', itemId)
+          .insertInto('views')
+          .values(insertData)
+          .onConflict((oc: OnConflictBuilder<Database, 'views'>) => oc.column('id').doUpdateSet(insertData))
           .execute()
         break
 
@@ -472,6 +500,22 @@ export class SnapshotService {
           .insertInto('table_rows')
           .values(insertData)
           .onConflict((oc: OnConflictBuilder<Database, 'table_rows'>) => oc.column('id').doUpdateSet(insertData))
+          .execute()
+        break
+
+      case 'sheet':
+        await db
+          .insertInto('sheets')
+          .values(insertData)
+          .onConflict((oc: OnConflictBuilder<Database, 'sheets'>) => oc.column('id').doUpdateSet(insertData))
+          .execute()
+        break
+
+      case 'cell':
+        await db
+          .insertInto('cells')
+          .values(insertData)
+          .onConflict((oc: OnConflictBuilder<Database, 'cells'>) => oc.column('id').doUpdateSet(insertData))
           .execute()
         break
 

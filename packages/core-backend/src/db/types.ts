@@ -787,6 +787,7 @@ export interface CellsTable {
   data_type: string | null
   formula: string | null
   computed_value: JsonObjectColumn | null
+  version: number
   created_at: CreatedAt
   updated_at: UpdatedAt
 }

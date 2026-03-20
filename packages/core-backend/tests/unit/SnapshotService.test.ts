@@ -7,11 +7,15 @@ vi.mock('../../src/db/db', () => ({
   db: {
     selectFrom: vi.fn().mockReturnThis(),
     selectAll: vi.fn().mockReturnThis(),
+    select: vi.fn().mockReturnThis(),
     where: vi.fn().mockReturnThis(),
+    orderBy: vi.fn().mockReturnThis(),
+    limit: vi.fn().mockReturnThis(),
     executeTakeFirst: vi.fn(),
     execute: vi.fn(),
     insertInto: vi.fn().mockReturnThis(),
     values: vi.fn().mockReturnThis(),
+    onConflict: vi.fn().mockReturnThis(),
     returningAll: vi.fn().mockReturnThis(),
     executeTakeFirstOrThrow: vi.fn(),
     updateTable: vi.fn().mockReturnThis(),
@@ -118,5 +122,222 @@ describe('SnapshotService - Protection Integration', () => {
 
     await expect(service.restoreSnapshot({ snapshotId: 'snap-1', restoredBy: 'user-1' }))
       .rejects.toThrow('Snapshot restore blocked by rule: Block Restore')
+  })
+
+  it('should capture sheet and cell items when the snapshot target is a sheet', async () => {
+    const saveSnapshotItemSpy = vi.spyOn(service as never, 'saveSnapshotItem' as never).mockResolvedValue(undefined)
+
+    dbMock.selectFrom.mockImplementation((table: string) => {
+      if (table === 'views') {
+        return {
+          selectAll: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              executeTakeFirst: vi.fn().mockResolvedValue(null)
+            })
+          })
+        }
+      }
+
+      if (table === 'view_states') {
+        return {
+          selectAll: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              execute: vi.fn().mockResolvedValue([])
+            })
+          })
+        }
+      }
+
+      if (table === 'table_rows') {
+        return {
+          selectAll: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              limit: vi.fn().mockReturnValue({
+                execute: vi.fn().mockResolvedValue([])
+              })
+            })
+          })
+        }
+      }
+
+      if (table === 'sheets') {
+        return {
+          selectAll: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              executeTakeFirst: vi.fn().mockResolvedValue({
+                id: 'sheet-1',
+                spreadsheet_id: 'spreadsheet-1',
+                name: 'Sheet 1',
+                order_index: 0,
+                row_count: 100,
+                column_count: 10,
+                created_at: new Date('2026-03-20T00:00:00Z'),
+                updated_at: new Date('2026-03-20T00:00:00Z')
+              })
+            })
+          })
+        }
+      }
+
+      if (table === 'cells') {
+        return {
+          selectAll: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              limit: vi.fn().mockReturnValue({
+                execute: vi.fn().mockResolvedValue([{
+                  id: 'cell-1',
+                  sheet_id: 'sheet-1',
+                  row_index: 0,
+                  column_index: 0,
+                  value: { value: 'Hello' },
+                  data_type: 'text',
+                  formula: null,
+                  computed_value: null,
+                  version: 2,
+                  created_at: new Date('2026-03-20T00:00:00Z'),
+                  updated_at: new Date('2026-03-20T00:00:00Z')
+                }])
+              })
+            })
+          })
+        }
+      }
+
+      throw new Error(`Unexpected table: ${table}`)
+    })
+
+    const itemsCreated = await (service as unknown as {
+      captureViewState: (snapshotId: string, viewId: string) => Promise<number>
+    }).captureViewState('snap-1', 'sheet-1')
+
+    expect(itemsCreated).toBe(2)
+    expect(saveSnapshotItemSpy).toHaveBeenNthCalledWith(
+      1,
+      'snap-1',
+      'sheet',
+      'sheet-1',
+      expect.objectContaining({ id: 'sheet-1', name: 'Sheet 1' })
+    )
+    expect(saveSnapshotItemSpy).toHaveBeenNthCalledWith(
+      2,
+      'snap-1',
+      'cell',
+      'cell-1',
+      expect.objectContaining({ id: 'cell-1', sheet_id: 'sheet-1', version: 2 })
+    )
+  })
+
+  it('should restore sheet and cell snapshot items', async () => {
+    vi.mocked(protectionRuleService.evaluateRules).mockResolvedValue({
+      matched: false,
+      execution_time_ms: 10
+    })
+
+    const insertTargets: string[] = []
+
+    dbMock.selectFrom.mockImplementation((table: string) => {
+      if (table === 'snapshots') {
+        return {
+          selectAll: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              executeTakeFirst: vi.fn().mockResolvedValue({
+                id: 'snap-1',
+                view_id: 'sheet-1',
+                is_locked: false,
+                tags: [],
+                protection_level: 'normal',
+                release_channel: null
+              })
+            })
+          })
+        }
+      }
+
+      if (table === 'snapshot_items') {
+        const builder = {
+          where: vi.fn().mockReturnThis(),
+          execute: vi.fn().mockResolvedValue([
+            {
+              id: 'item-1',
+              snapshot_id: 'snap-1',
+              item_type: 'sheet',
+              item_id: 'sheet-1',
+              data: JSON.stringify({
+                id: 'sheet-1',
+                spreadsheet_id: 'spreadsheet-1',
+                name: 'Sheet 1',
+                order_index: 0,
+                row_count: 100,
+                column_count: 10,
+                created_at: '2026-03-20T00:00:00.000Z',
+                updated_at: '2026-03-20T00:00:00.000Z'
+              }),
+              created_at: new Date('2026-03-20T00:00:00Z')
+            },
+            {
+              id: 'item-2',
+              snapshot_id: 'snap-1',
+              item_type: 'cell',
+              item_id: 'cell-1',
+              data: JSON.stringify({
+                id: 'cell-1',
+                sheet_id: 'sheet-1',
+                row_index: 0,
+                column_index: 0,
+                value: { value: 'Hello' },
+                data_type: 'text',
+                formula: null,
+                computed_value: null,
+                version: 2,
+                created_at: '2026-03-20T00:00:00.000Z',
+                updated_at: '2026-03-20T00:00:00.000Z'
+              }),
+              created_at: new Date('2026-03-20T00:00:00Z')
+            }
+          ])
+        }
+
+        return {
+          selectAll: vi.fn().mockReturnValue({
+            where: vi.fn().mockImplementation(() => builder)
+          })
+        }
+      }
+
+      throw new Error(`Unexpected table: ${table}`)
+    })
+
+    dbMock.insertInto.mockImplementation((table: string) => {
+      insertTargets.push(table)
+      const conflictBuilder = {
+        doUpdateSet: vi.fn().mockReturnValue({
+          execute: vi.fn().mockResolvedValue(undefined)
+        })
+      }
+      const builder = {
+        values: vi.fn().mockReturnValue({
+          onConflict: vi.fn().mockImplementation((callback: (oc: { column: (name: string) => typeof conflictBuilder }) => unknown) => {
+            callback({ column: vi.fn().mockReturnValue(conflictBuilder) })
+            return {
+              execute: vi.fn().mockResolvedValue(undefined)
+            }
+          }),
+          execute: vi.fn().mockResolvedValue(undefined)
+        })
+      }
+      return builder
+    })
+
+    const result = await service.restoreSnapshot({
+      snapshotId: 'snap-1',
+      restoredBy: 'user-1',
+      itemTypes: ['sheet', 'cell']
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.itemsRestored).toBe(2)
+    expect(insertTargets).toContain('sheets')
+    expect(insertTargets).toContain('cells')
+    expect(insertTargets).toContain('snapshot_restore_log')
   })
 })

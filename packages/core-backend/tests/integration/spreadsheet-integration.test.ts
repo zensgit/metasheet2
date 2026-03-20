@@ -567,7 +567,10 @@ describe('Spreadsheet Integration Tests', () => {
   describe('Version History Integration', () => {
     test('should create version history on cell updates', async () => {
       // Mock existing cell
-      const existingCell = TEST_CELLS.TEXT_CELL
+      const existingCell = {
+        ...TEST_CELLS.TEXT_CELL,
+        version: 3
+      }
 
       const transactionMock = {
         execute: vi.fn().mockImplementation(async (fn) => {
@@ -603,7 +606,8 @@ describe('Spreadsheet Integration Tests', () => {
           cells: [{
             row: 0,
             col: 0,
-            value: 'Updated Value'
+            value: 'Updated Value',
+            expectedVersion: 3
           }]
         })
         .expect(200)
@@ -612,6 +616,51 @@ describe('Spreadsheet Integration Tests', () => {
 
       // Verify version history was created (through transaction)
       expect(transactionMock.execute).toHaveBeenCalled()
+    })
+
+    test('should reject stale cell updates with a version conflict', async () => {
+      const existingCell = {
+        ...TEST_CELLS.TEXT_CELL,
+        version: 3
+      }
+
+      const updateTable = vi.fn()
+      const insertInto = vi.fn()
+
+      const transactionMock = {
+        execute: vi.fn().mockImplementation(async (fn) => {
+          const trx = {
+            selectFrom: vi.fn().mockReturnValue({
+              selectAll: vi.fn().mockReturnThis(),
+              where: vi.fn().mockReturnThis(),
+              executeTakeFirst: vi.fn().mockResolvedValue(existingCell)
+            }),
+            updateTable,
+            insertInto
+          }
+          return await fn(trx)
+        })
+      }
+
+      mockDb.transaction.mockReturnValue(transactionMock)
+
+      const response = await request(app)
+        .put(`/api/spreadsheets/${TEST_IDS.SPREADSHEET_1}/sheets/${TEST_IDS.SHEET_1}/cells`)
+        .send({
+          cells: [{
+            row: 0,
+            col: 0,
+            value: 'Updated Value',
+            expectedVersion: 2
+          }]
+        })
+        .expect(409)
+
+      expect(response).toHaveErrorResponse('VERSION_CONFLICT')
+      expect(response.body.error.details.currentVersion).toBe(3)
+      expect(response.body.error.details.expectedVersion).toBe(2)
+      expect(updateTable).not.toHaveBeenCalled()
+      expect(insertInto).not.toHaveBeenCalled()
     })
 
     test('should retrieve cell version history', async () => {
