@@ -1050,15 +1050,40 @@ export function useAttendanceAdminImportWorkflow({
 
   function resolveImportUserMapKeyField(): string {
     return importUserMapKeyField.value.trim()
-      || selectedImportProfile.value?.userMapKeyField
-      || ''
   }
 
   function resolveImportUserMapSourceFields(): string[] {
-    if (importUserMapSourceFields.value.trim()) {
-      return splitListInput(importUserMapSourceFields.value)
-    }
-    return selectedImportProfile.value?.userMapSourceFields ?? []
+    return splitListInput(importUserMapSourceFields.value)
+  }
+
+  function buildImportGroupSyncPayload(): Record<string, unknown> | null {
+    const groupSync: Record<string, unknown> = {}
+    if (importGroupAutoCreate.value) groupSync.autoCreate = true
+    if (importGroupAutoAssign.value) groupSync.autoAssignMembers = true
+
+    const ruleSetId = importGroupRuleSetId.value.trim()
+    if (ruleSetId) groupSync.ruleSetId = ruleSetId
+
+    const timezone = importGroupTimezone.value.trim()
+    if (timezone) groupSync.timezone = timezone
+
+    return Object.keys(groupSync).length > 0 ? groupSync : null
+  }
+
+  function syncImportControlsFromPayload(payload: Record<string, any>) {
+    importMode.value = payload.mode === 'merge' ? 'merge' : 'override'
+    importUserMap.value = payload.userMap && typeof payload.userMap === 'object' && !Array.isArray(payload.userMap)
+      ? payload.userMap as Record<string, any>
+      : null
+    importUserMapError.value = ''
+    importUserMapKeyField.value = normalizeIdentifier(payload.userMapKeyField) ?? ''
+    importUserMapSourceFields.value = normalizeStringList(payload.userMapSourceFields).join(', ')
+
+    const groupSync = normalizeImportGroupSyncConfig(payload.groupSync)
+    importGroupAutoCreate.value = groupSync?.autoCreate ?? false
+    importGroupAutoAssign.value = groupSync?.autoAssignMembers ?? false
+    importGroupRuleSetId.value = groupSync?.ruleSetId ?? ''
+    importGroupTimezone.value = groupSync?.timezone ?? ''
   }
 
   function buildImportPayload(): Record<string, any> | null {
@@ -1079,16 +1104,26 @@ export function useAttendanceAdminImportWorkflow({
     if (importForm.timezone && !payload.timezone) payload.timezone = importForm.timezone
     const userMapKeyField = resolveImportUserMapKeyField()
     const userMapSourceFields = resolveImportUserMapSourceFields()
-    if (importUserMap.value) payload.userMap = importUserMap.value
-    if (userMapKeyField) payload.userMapKeyField = userMapKeyField
-    if (userMapSourceFields.length) payload.userMapSourceFields = userMapSourceFields
-    if (!payload.groupSync && (importGroupAutoCreate.value || importGroupAutoAssign.value)) {
-      payload.groupSync = {
-        autoCreate: importGroupAutoCreate.value,
-        autoAssignMembers: importGroupAutoAssign.value,
-        ruleSetId: importGroupRuleSetId.value || undefined,
-        timezone: importGroupTimezone.value || undefined,
-      }
+    if (importUserMap.value) {
+      payload.userMap = importUserMap.value
+    } else {
+      delete payload.userMap
+    }
+    if (userMapKeyField) {
+      payload.userMapKeyField = userMapKeyField
+    } else {
+      delete payload.userMapKeyField
+    }
+    if (userMapSourceFields.length) {
+      payload.userMapSourceFields = userMapSourceFields
+    } else {
+      delete payload.userMapSourceFields
+    }
+    const groupSync = buildImportGroupSyncPayload()
+    if (groupSync) {
+      payload.groupSync = groupSync
+    } else {
+      delete payload.groupSync
     }
     payload.mode = importMode.value || payload.mode || 'override'
     if (payload.mappingProfileId === '') delete payload.mappingProfileId
@@ -1286,6 +1321,7 @@ export function useAttendanceAdminImportWorkflow({
       const payloadExample = (data.data?.payloadExample ?? {}) as Record<string, any>
       importMode.value = payloadExample?.mode === 'merge' ? 'merge' : 'override'
       importForm.payload = JSON.stringify(payloadExample, null, 2)
+      syncImportControlsFromPayload(payloadExample)
       importMappingProfiles.value = Array.isArray(data.data?.mappingProfiles) ? data.data.mappingProfiles : []
       reportStatus(tr('Import template loaded.', '导入模板已加载。'))
     } catch (error) {
@@ -1344,6 +1380,7 @@ export function useAttendanceAdminImportWorkflow({
     next.mappingProfileId = profile.id
     next.mode = importMode.value || next.mode || 'override'
     importForm.payload = JSON.stringify(next, null, 2)
+    syncImportControlsFromPayload(next)
     reportStatus(tr(`Applied mapping profile: ${profile.name}`, `已应用映射配置：${profile.name}`))
   }
 
@@ -1441,6 +1478,7 @@ export function useAttendanceAdminImportWorkflow({
 
       next.mode = importMode.value || next.mode || 'override'
       importForm.payload = JSON.stringify(next, null, 2)
+      syncImportControlsFromPayload(next)
     } catch (error) {
       reportError(error, tr('Failed to load CSV', '加载 CSV 失败'), 'import-preview')
     }
@@ -2121,6 +2159,16 @@ export function useAttendanceAdminImportWorkflow({
   watch(importMode, () => {
     syncImportModeToPayload()
   })
+
+  watch(
+    () => importForm.payload,
+    (value) => {
+      const payload = parseAttendanceImportJsonConfig(value)
+      if (!payload) return
+      syncImportControlsFromPayload(payload)
+    },
+    { immediate: true },
+  )
 
   return {
     adminForbidden: adminForbiddenRef,
