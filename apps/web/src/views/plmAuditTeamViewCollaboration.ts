@@ -1,4 +1,5 @@
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
+import type { PlmAuditSavedViewShareFollowupSource } from './plmAuditSavedViewShareFollowup'
 
 export type PlmAuditTeamViewCollaborationSource = 'recommendation' | 'saved-view-promotion' | 'scene-context'
 export type PlmAuditTeamViewCollaborationActionKind = 'share' | 'set-default' | 'dismiss'
@@ -41,6 +42,26 @@ export type PlmAuditTeamViewCollaborationFollowupNotice = {
     label: string
     emphasis: 'primary' | 'secondary'
   }>
+}
+
+export function buildPlmAuditSavedViewPromotionCollaborationDraft(
+  view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'name'>,
+  followupSource: PlmAuditSavedViewShareFollowupSource | null | undefined,
+  tr: (en: string, zh: string) => string,
+) {
+  return buildPlmAuditTeamViewCollaborationDraft(
+    view,
+    tr,
+    followupSource === 'scene-context' ? 'scene-context' : 'saved-view-promotion',
+  )
+}
+
+export function findPlmAuditTeamViewCollaborationFollowupView<T extends { id: string }>(
+  views: readonly T[],
+  followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'teamViewId'> | null,
+): T | null {
+  if (!followup) return null
+  return views.find((view) => view.id === followup.teamViewId) || null
 }
 
 export function buildPlmAuditTeamViewCollaborationActionStatus(

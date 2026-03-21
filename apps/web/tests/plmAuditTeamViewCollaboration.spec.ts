@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildPlmAuditSavedViewPromotionCollaborationDraft,
   buildPlmAuditTeamViewCollaborationActionStatus,
   buildPlmAuditTeamViewCollaborationDraft,
   buildPlmAuditTeamViewCollaborationFollowupNotice,
   buildPlmAuditTeamViewCollaborationNotice,
+  findPlmAuditTeamViewCollaborationFollowupView,
 } from '../src/views/plmAuditTeamViewCollaboration'
 
 function tr(en: string, zh: string) {
@@ -38,6 +40,21 @@ describe('plmAuditTeamViewCollaboration', () => {
       source: 'saved-view-promotion',
       statusMessage:
         'Saved view promoted and collaboration controls are ready.|保存视图已提升为团队视图，并已准备好协作操作。',
+    })
+  })
+
+  it('preserves scene-context provenance when a scene save follow-up promotes into a team view', () => {
+    expect(buildPlmAuditSavedViewPromotionCollaborationDraft({
+      id: 'audit-view-2',
+      name: '新提升视图',
+    }, 'scene-context', tr)).toEqual({
+      teamViewId: 'audit-view-2',
+      teamViewName: '新提升视图',
+      teamViewOwnerUserId: '',
+      focusTargetId: 'plm-audit-team-view-controls',
+      source: 'scene-context',
+      statusMessage:
+        'Scene audit saved to team views and collaboration controls are ready.|场景审计已保存到团队视图，并已准备好协作操作。',
     })
   })
 
@@ -269,6 +286,18 @@ describe('plmAuditTeamViewCollaboration', () => {
           emphasis: 'secondary',
         },
       ],
+    })
+  })
+
+  it('finds the follow-up target by id even after route selection is cleared', () => {
+    expect(findPlmAuditTeamViewCollaborationFollowupView([
+      { id: 'audit-view-1', isDefault: false },
+      { id: 'audit-view-2', isDefault: true },
+    ], {
+      teamViewId: 'audit-view-2',
+    })).toEqual({
+      id: 'audit-view-2',
+      isDefault: true,
     })
   })
 })

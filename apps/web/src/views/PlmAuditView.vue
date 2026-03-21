@@ -774,7 +774,6 @@ import {
   type PlmCollaborativeAuditSummaryRow,
 } from '../services/plm/plmWorkbenchClient'
 import {
-  buildPlmAuditRouteStateFromTeamView,
   buildPlmAuditTeamViewState,
   buildPlmAuditRouteQuery,
   DEFAULT_PLM_AUDIT_ROUTE_STATE,
@@ -808,10 +807,12 @@ import {
   type PlmRecommendedAuditTeamViewFilter,
 } from './plmAuditTeamViewCatalog'
 import {
+  buildPlmAuditSavedViewPromotionCollaborationDraft,
   buildPlmAuditTeamViewCollaborationActionStatus,
   buildPlmAuditTeamViewCollaborationDraft,
   buildPlmAuditTeamViewCollaborationFollowupNotice,
   buildPlmAuditTeamViewCollaborationNotice,
+  findPlmAuditTeamViewCollaborationFollowupView,
   type PlmAuditTeamViewCollaborationActionKind,
   type PlmAuditTeamViewCollaborationDraft,
   type PlmAuditTeamViewCollaborationFollowup,
@@ -853,6 +854,11 @@ import {
   type PlmAuditSceneTokenActionKind,
 } from './plmAuditSceneToken'
 import { buildPlmAuditTeamViewContextNote } from './plmAuditTeamViewContext'
+import {
+  buildPlmAuditPersistedTeamViewRouteState,
+  buildPlmAuditSelectedTeamViewRouteState,
+  resolvePlmAuditRequestedTeamViewRouteState,
+} from './plmAuditTeamViewRouteState'
 import { copyTextToClipboard } from './plm/plmClipboard'
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
 import { usePlmCollaborativePermissions } from './plm/usePlmCollaborativePermissions'
@@ -1030,7 +1036,10 @@ const auditTeamViewShareEntryNotice = computed(() => {
   )
 })
 const auditTeamViewCollaborationFollowupNotice = computed(() => {
-  const view = selectedAuditTeamView.value
+  const view = findPlmAuditTeamViewCollaborationFollowupView(
+    auditTeamViews.value,
+    auditTeamViewCollaborationFollowup.value,
+  )
   if (!view) return null
   return buildPlmAuditTeamViewCollaborationFollowupNotice(
     view,
@@ -1245,11 +1254,18 @@ async function persistAuditTeamView(
     const saved = await savePlmWorkbenchTeamView('audit', trimmedName, buildCurrentAuditTeamViewState(), {
       isDefault: options?.isDefault,
     })
+    const savedState = buildPlmAuditPersistedTeamViewRouteState(
+      saved,
+      readCurrentRouteState(),
+      {
+        isDefault: options?.isDefault,
+      },
+    )
     upsertAuditTeamView(saved)
     applyAuditTeamViewState(saved)
     auditTeamViewName.value = ''
     focusedAuditTeamViewId.value = saved.id
-    await syncRouteState(buildPlmAuditRouteStateFromTeamView(saved.id, saved.state))
+    await syncRouteState(savedState)
     setStatus(successMessage || tr('Audit team view saved.', '审计团队视图已保存。'))
     return saved
   } catch (error: unknown) {
@@ -1412,17 +1428,8 @@ function buildCurrentAuditTeamViewState() {
   return buildPlmAuditTeamViewState(readCurrentRouteState())
 }
 
-function applyAuditTeamViewState(view: PlmWorkbenchTeamView<'audit'>) {
-  auditTeamViewKey.value = view.id
-  page.value = view.state.page
-  query.value = view.state.q
-  actorId.value = view.state.actorId
-  kind.value = view.state.kind
-  action.value = view.state.action
-  resourceType.value = view.state.resourceType
-  from.value = view.state.from
-  to.value = view.state.to
-  windowMinutes.value = view.state.windowMinutes
+function applyAuditTeamViewState(view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'state'>) {
+  applyRouteState(buildPlmAuditSelectedTeamViewRouteState(view))
 }
 
 function buildAuditTeamViewShareUrl(view: PlmWorkbenchTeamView<'audit'>) {
@@ -1480,46 +1487,31 @@ async function refreshAuditTeamViews() {
     auditTeamViews.value = sortAuditTeamViews(result.items)
 
     const requestedState = parsePlmAuditRouteState(route.query)
-    const requestedViewId = requestedState.teamViewId.trim()
-    const requestedView = requestedViewId
-      ? auditTeamViews.value.find((view) => view.id === requestedViewId && !view.isArchived) || null
-      : null
+    const resolution = resolvePlmAuditRequestedTeamViewRouteState(
+      requestedState,
+      auditTeamViews.value,
+      defaultAuditTeamView.value,
+    )
 
-    if (requestedView) {
-      if (requestedSharedEntry) {
+    if (resolution.kind === 'apply-view') {
+      if (requestedSharedEntry && requestedState.teamViewId.trim()) {
         auditTeamViewShareEntry.value = {
-          teamViewId: requestedView.id,
+          teamViewId: resolution.viewId,
         }
       }
-      const nextState = buildPlmAuditRouteStateFromTeamView(requestedView.id, requestedView.state)
-      applyAuditTeamViewState(requestedView)
-      if (!isPlmAuditRouteStateEqual(nextState, requestedState)) {
-        await syncRouteState(nextState, true)
+      applyRouteState(resolution.nextState)
+      if (!isPlmAuditRouteStateEqual(resolution.nextState, requestedState)) {
+        await syncRouteState(resolution.nextState, true)
       }
       return
     }
 
-    if (requestedViewId) {
-      auditTeamViewKey.value = ''
-      const nextState = {
-        ...requestedState,
-        teamViewId: '',
-      }
-      if (!isPlmAuditRouteStateEqual(nextState, requestedState)) {
-        await syncRouteState(nextState, true)
+    if (resolution.kind === 'clear-selection') {
+      applyRouteState(resolution.nextState)
+      if (!isPlmAuditRouteStateEqual(resolution.nextState, requestedState)) {
+        await syncRouteState(resolution.nextState, true)
       }
       return
-    }
-
-    if (!hasExplicitPlmAuditFilters(requestedState)) {
-      const defaultView = defaultAuditTeamView.value
-      if (defaultView) {
-        const nextState = buildPlmAuditRouteStateFromTeamView(defaultView.id, defaultView.state)
-        applyAuditTeamViewState(defaultView)
-        if (!isPlmAuditRouteStateEqual(nextState, requestedState)) {
-          await syncRouteState(nextState, true)
-        }
-      }
     }
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
@@ -1564,13 +1556,13 @@ async function duplicateAuditTeamView() {
       view.id,
       auditTeamViewName.value.trim() || undefined,
     )
+    const duplicatedState = buildPlmAuditSelectedTeamViewRouteState(duplicated)
     upsertAuditTeamView(duplicated)
-    applyAuditTeamViewState(duplicated)
-    auditTeamViewKey.value = duplicated.id
+    applyRouteState(duplicatedState)
     clearAuditTeamViewShareEntry()
     auditTeamViewName.value = ''
     focusedAuditTeamViewId.value = duplicated.id
-    await syncRouteState(buildPlmAuditRouteStateFromTeamView(duplicated.id, duplicated.state))
+    await syncRouteState(duplicatedState)
     setStatus(tr('Audit team view duplicated.', '审计团队视图已复制。'))
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
@@ -1646,12 +1638,12 @@ async function transferAuditTeamView() {
 }
 
 async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
-  applyAuditTeamViewState(view)
-  auditTeamViewKey.value = view.id
+  const nextState = buildPlmAuditSelectedTeamViewRouteState(view)
+  applyRouteState(nextState)
   clearAuditTeamViewCollaborationDraft()
   clearAuditTeamViewShareEntry()
   clearAuditTeamViewCollaborationFollowup()
-  await syncRouteState(buildPlmAuditRouteStateFromTeamView(view.id, view.state))
+  await syncRouteState(nextState)
   setStatus(tr('Audit team view applied.', '审计团队视图已应用。'))
 }
 
@@ -2165,7 +2157,10 @@ async function promoteSavedViewToTeam(
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
   try {
-    const shouldFocusRecommendation = auditSavedViewShareFollowup.value?.savedViewId === view.id
+    const followupSource = auditSavedViewShareFollowup.value?.savedViewId === view.id
+      ? auditSavedViewShareFollowup.value.source
+      : null
+    const shouldFocusRecommendation = Boolean(followupSource)
     const draft = buildPlmAuditSavedViewTeamPromotionDraft(view, tr)
     const saved = await savePlmWorkbenchTeamView('audit', draft.name, draft.state, {
       isDefault: options?.isDefault,
@@ -2174,7 +2169,7 @@ async function promoteSavedViewToTeam(
     if (auditSavedViewShareFollowup.value?.savedViewId === view.id) {
       clearAuditSavedViewShareFollowup()
     }
-    const collaborationDraft = buildPlmAuditTeamViewCollaborationDraft(saved, tr, 'saved-view-promotion')
+    const collaborationDraft = buildPlmAuditSavedViewPromotionCollaborationDraft(saved, followupSource, tr)
     auditTeamViewCollaborationDraft.value = collaborationDraft
     clearAuditTeamViewCollaborationFollowup()
     auditTeamViewKey.value = collaborationDraft.teamViewId
