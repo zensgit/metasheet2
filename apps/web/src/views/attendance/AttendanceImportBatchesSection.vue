@@ -6,6 +6,11 @@
         {{ importBatchLoading ? tr('Loading...', '加载中...') : tr('Reload batches', '重载批次') }}
       </button>
     </div>
+    <div class="attendance__section-meta">
+      {{ tr('Batches loaded', '已加载批次') }}: {{ importBatches.length }}
+      <span v-if="batchRowCountTotal"> · {{ tr('Rows total', '总行数') }}: {{ batchRowCountTotal }}</span>
+      <span v-if="importBatchItems.length"> · {{ tr('Current items', '当前条目') }}: {{ importBatchItems.length }}</span>
+    </div>
     <div v-if="importBatches.length === 0" class="attendance__empty">{{ tr('No import batches.', '暂无导入批次。') }}</div>
     <div v-else class="attendance__table-wrapper">
       <table class="attendance__table">
@@ -50,6 +55,9 @@
     <div v-if="importBatchItems.length > 0" class="attendance__table-wrapper">
       <div class="attendance__subheading-row">
         <h5 class="attendance__subheading">{{ tr('Batch items', '批次条目') }}</h5>
+        <div class="attendance__section-meta">
+          {{ tr('Loaded items', '已加载条目') }}: {{ importBatchItems.length }}
+        </div>
         <div class="attendance__table-actions">
           <button class="attendance__btn" :disabled="importBatchLoading" @click="exportImportBatchItemsCsv(false)">
             {{ tr('Export items CSV', '导出条目 CSV') }}
@@ -87,7 +95,7 @@
 </template>
 
 <script setup lang="ts">
-import type { Ref } from 'vue'
+import { computed, type Ref } from 'vue'
 import {
   resolveImportBatchChunkLabel,
   resolveImportBatchEngine,
@@ -133,6 +141,10 @@ const resolveRuleSetName = props.resolveRuleSetName
 const formatStatus = props.formatStatus
 const formatDateTime = props.formatDateTime
 const formatJson = props.formatJson
+
+const batchRowCountTotal = computed(() => {
+  return importBatches.value.reduce((total, batch) => total + (Number(batch.rowCount) || 0), 0)
+})
 </script>
 
 <style scoped>
@@ -206,6 +218,11 @@ const formatJson = props.formatJson
   color: #888;
   font-size: 13px;
   margin-top: 8px;
+}
+
+.attendance__section-meta {
+  color: #666;
+  font-size: 12px;
 }
 
 .attendance__code {
