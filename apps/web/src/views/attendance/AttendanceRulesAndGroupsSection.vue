@@ -1,9 +1,9 @@
 <template>
-  <div class="attendance__admin-section">
-    <div class="attendance__admin-section-header">
-      <h4>{{ tr('Rule Sets', '规则集') }}</h4>
-      <button class="attendance__btn" :disabled="ruleSetLoading" @click="loadRuleSets">
-        {{ ruleSetLoading ? tr('Loading...', '加载中...') : tr('Reload rule sets', '重载规则集') }}
+    <div class="attendance__admin-section">
+      <div class="attendance__admin-section-header">
+        <h4>{{ tr('Rule Sets', '规则集') }}</h4>
+        <button class="attendance__btn" :disabled="ruleSetLoading" @click="loadRuleSets">
+          {{ ruleSetLoading ? tr('Loading...', '加载中...') : tr('Reload rule sets', '重载规则集') }}
       </button>
     </div>
     <div class="attendance__admin-grid">
@@ -47,27 +47,210 @@
           type="checkbox"
         />
       </label>
-      <label class="attendance__field attendance__field--full" for="attendance-rule-set-description">
-        <span>{{ tr('Description', '描述') }}</span>
-        <input
-          id="attendance-rule-set-description"
-          v-model="ruleSetForm.description"
-          name="ruleSetDescription"
-          type="text"
-          :placeholder="tr('Optional', '可选')"
-        />
-      </label>
+        <label class="attendance__field attendance__field--full" for="attendance-rule-set-description">
+          <span>{{ tr('Description', '描述') }}</span>
+          <input
+            id="attendance-rule-set-description"
+            v-model="ruleSetForm.description"
+            name="ruleSetDescription"
+            type="text"
+            :placeholder="tr('Optional', '可选')"
+          />
+        </label>
+      </div>
+      <div class="attendance__rule-builder">
+        <div class="attendance__admin-section-header">
+          <div>
+            <h5 class="attendance__subheading">{{ tr('Structured rule builder', '结构化规则构建器') }}</h5>
+            <p class="attendance__field-hint">
+              {{ tr('The builder keeps the JSON config in sync and preserves any advanced fields already stored in the rule draft.', '构建器会同步 JSON 配置，并保留规则草稿中已有的高级字段。') }}
+            </p>
+          </div>
+          <div class="attendance__rule-builder-summary">
+            <span>{{ tr('Source', '来源') }}: <strong>{{ ruleBuilderSource || '--' }}</strong></span>
+            <span>{{ tr('Timezone', '时区') }}: <strong>{{ ruleBuilderTimezone || '--' }}</strong></span>
+            <span>{{ tr('Working days', '工作日') }}: <strong>{{ formatWorkingDays(ruleBuilderWorkingDays) }}</strong></span>
+          </div>
+        </div>
+
+        <div class="attendance__admin-grid">
+          <label class="attendance__field" for="attendance-rule-builder-source">
+            <span>{{ tr('Source', '来源') }}</span>
+            <input
+              id="attendance-rule-builder-source"
+              v-model="ruleBuilderSource"
+              type="text"
+              :placeholder="tr('dingtalk / manual / csv', 'dingtalk / manual / csv')"
+            />
+          </label>
+          <label class="attendance__field" for="attendance-rule-builder-timezone">
+            <span>{{ tr('Timezone', '时区') }}</span>
+            <input
+              id="attendance-rule-builder-timezone"
+              v-model="ruleBuilderTimezone"
+              type="text"
+              :placeholder="tr('Asia/Shanghai', 'Asia/Shanghai')"
+            />
+          </label>
+          <label class="attendance__field" for="attendance-rule-builder-start">
+            <span>{{ tr('Work start time', '上班时间') }}</span>
+            <input
+              id="attendance-rule-builder-start"
+              v-model="ruleBuilderWorkStartTime"
+              type="time"
+            />
+          </label>
+          <label class="attendance__field" for="attendance-rule-builder-end">
+            <span>{{ tr('Work end time', '下班时间') }}</span>
+            <input
+              id="attendance-rule-builder-end"
+              v-model="ruleBuilderWorkEndTime"
+              type="time"
+            />
+          </label>
+          <label class="attendance__field" for="attendance-rule-builder-late-grace">
+            <span>{{ tr('Late grace minutes', '迟到宽限分钟') }}</span>
+            <input
+              id="attendance-rule-builder-late-grace"
+              v-model.number="ruleBuilderLateGraceMinutes"
+              type="number"
+              min="0"
+            />
+          </label>
+          <label class="attendance__field" for="attendance-rule-builder-early-grace">
+            <span>{{ tr('Early grace minutes', '早退宽限分钟') }}</span>
+            <input
+              id="attendance-rule-builder-early-grace"
+              v-model.number="ruleBuilderEarlyGraceMinutes"
+              type="number"
+              min="0"
+            />
+          </label>
+        </div>
+
+        <div class="attendance__rule-builder-days">
+          <span class="attendance__field-label">{{ tr('Working days', '工作日') }}</span>
+          <div class="attendance__rule-builder-day-grid">
+            <label
+              v-for="day in ruleBuilderDayOptions"
+              :key="day.value"
+              class="attendance__rule-builder-day"
+            >
+              <input v-model="ruleBuilderWorkingDays" type="checkbox" :value="day.value" />
+              <span>{{ tr(day.labelEn, day.labelZh) }}</span>
+            </label>
+          </div>
+          <small class="attendance__field-hint">
+            {{ tr('Use the same weekday numbers as the scheduling module. Monday is 1 and Sunday is 0.', '使用与排班模块一致的星期编号。周一是 1，周日是 0。') }}
+          </small>
+        </div>
+
+        <div class="attendance__rule-builder-preview">
+          <div class="attendance__admin-section-header">
+            <div>
+              <h6 class="attendance__subheading">{{ tr('Draft preview', '草稿预览') }}</h6>
+              <p class="attendance__field-hint">
+                {{ tr('This preview reflects the current builder state before saving.', '该预览展示的是当前构建器状态，尚未保存。') }}
+              </p>
+            </div>
+            <div class="attendance__admin-actions">
+              <button
+                v-if="previewRuleSet"
+                class="attendance__btn attendance__btn--primary"
+                type="button"
+                :disabled="ruleSetPreviewLoading || ruleSetSaving"
+                @click="previewRuleSet"
+              >
+                {{ ruleSetPreviewLoading ? tr('Previewing...', '预览中...') : tr('Preview rule set', '预览规则集') }}
+              </button>
+              <button
+                v-if="resetRuleBuilder"
+                class="attendance__btn"
+                type="button"
+                :disabled="ruleSetPreviewLoading || ruleSetSaving"
+                @click="resetRuleBuilder"
+              >
+                {{ tr('Reset builder', '重置构建器') }}
+              </button>
+            </div>
+          </div>
+
+          <label class="attendance__field attendance__field--full" for="attendance-rule-preview-events">
+            <span>{{ tr('Preview events (JSON)', '预览事件（JSON）') }}</span>
+            <textarea
+              id="attendance-rule-preview-events"
+              v-model="ruleSetPreviewEventsText"
+              rows="6"
+              placeholder='[{"eventType":"check_in","occurredAt":"2026-03-21T09:02:00+08:00","workDate":"2026-03-21","userId":"user-1"},{"eventType":"check_out","occurredAt":"2026-03-21T18:08:00+08:00","workDate":"2026-03-21","userId":"user-1"}]'
+            />
+            <small class="attendance__field-hint">
+              {{ tr('Use check_in/check_out events. You can keep workDate fixed and adjust occurredAt to simulate late arrivals or early leaves.', '使用 check_in/check_out 事件。可固定 workDate，再通过调整 occurredAt 模拟迟到或早退。') }}
+            </small>
+          </label>
+
+          <div v-if="ruleSetPreviewLoading" class="attendance__preview-state">
+            {{ tr('Preview is running against the current draft...', '预览正在基于当前草稿运行...') }}
+          </div>
+          <div v-else-if="ruleSetPreviewError" class="attendance__empty attendance__empty--error">
+            {{ ruleSetPreviewError }}
+          </div>
+          <template v-else>
+            <div class="attendance__preview-summary">
+              <span>{{ tr('Rule source', '规则来源') }}: <strong>{{ ruleBuilderSource || '--' }}</strong></span>
+              <span>{{ tr('Work window', '工作时间窗') }}: <strong>{{ ruleBuilderWorkStartTime || '--' }} - {{ ruleBuilderWorkEndTime || '--' }}</strong></span>
+              <span>{{ tr('Grace', '宽限') }}: <strong>{{ ruleBuilderLateGraceMinutes }} / {{ ruleBuilderEarlyGraceMinutes }} min</strong></span>
+            </div>
+            <pre class="attendance__code attendance__code--builder">{{ formatJson(ruleBuilderPreviewConfig) }}</pre>
+          </template>
+
+          <div v-if="ruleSetPreviewResult" class="attendance__preview-result">
+            <div class="attendance__preview-result-meta">
+              <span>{{ tr('Events', '事件') }}: {{ ruleSetPreviewResult.totalEvents ?? ruleSetPreviewRows.length }}</span>
+              <span v-if="ruleSetPreviewResult.ruleSetId">{{ tr('Rule set id', '规则集 ID') }}: <code>{{ ruleSetPreviewResult.ruleSetId }}</code></span>
+            </div>
+            <div v-if="ruleSetPreviewNotes.length" class="attendance__field-hint">
+              {{ tr('Notes', '说明') }}: {{ ruleSetPreviewNotes.join(' · ') }}
+            </div>
+            <div v-if="ruleSetPreviewRows.length" class="attendance__table-wrapper">
+              <table class="attendance__table">
+                <thead>
+                  <tr>
+                    <th>{{ tr('Work date', '工作日期') }}</th>
+                    <th>{{ tr('User ID', '用户 ID') }}</th>
+                    <th>{{ tr('Work minutes', '工时分钟') }}</th>
+                    <th>{{ tr('Late', '迟到') }}</th>
+                    <th>{{ tr('Early leave', '早退') }}</th>
+                    <th>{{ tr('Status', '状态') }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in ruleSetPreviewRows" :key="`${row.userId}-${row.workDate}`">
+                    <td>{{ row.workDate }}</td>
+                    <td>{{ row.userId }}</td>
+                    <td>{{ row.workMinutes ?? '--' }}</td>
+                    <td>{{ row.lateMinutes ?? '--' }}</td>
+                    <td>{{ row.earlyLeaveMinutes ?? '--' }}</td>
+                    <td>{{ row.status ?? '--' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       <label class="attendance__field attendance__field--full" for="attendance-rule-set-config">
         <span>{{ tr('Config (JSON)', '配置（JSON）') }}</span>
         <textarea
           id="attendance-rule-set-config"
           v-model="ruleSetForm.config"
           name="ruleSetConfig"
-          rows="5"
-          placeholder='{"source":"dingtalk","mappings":{"columns":[{"sourceField":"1_on_duty_user_check_time","targetField":"firstInAt"}]}}'
+          rows="7"
+          placeholder='{"source":"dingtalk","rule":{"timezone":"Asia/Shanghai","workStartTime":"09:00","workEndTime":"18:00","lateGraceMinutes":10,"earlyGraceMinutes":10,"workingDays":[1,2,3,4,5]}}'
         />
         <small class="attendance__field-hint">
-          {{ tr('Paste a JSON object for source mappings, filters, or rule-specific settings. The template loader can seed a starter example.', '填写一个 JSON 对象，用于来源映射、过滤条件或规则专属设置。可先用模板加载器生成示例。') }}
+          {{ tr('Advanced edits stay here. The builder above keeps this JSON synchronized with the structured fields.', '高级编辑仍在这里完成。上方构建器会与这些结构化字段保持同步。') }}
+        </small>
+        <small v-if="ruleBuilderConfigError" class="attendance__field-hint attendance__field-hint--error">
+          {{ ruleBuilderConfigError }}
         </small>
       </label>
     </div>
@@ -394,7 +577,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, type Ref } from 'vue'
+import { computed, ref, watch, type Ref } from 'vue'
 import type {
   AttendanceGroup,
   AttendanceGroupMember,
@@ -422,6 +605,28 @@ interface AttendanceGroupFormState {
   timezone: string
   ruleSetId: string
   description: string
+}
+
+interface RuleSetPreviewRow {
+  userId: string
+  workDate: string
+  firstInAt?: string | null
+  lastOutAt?: string | null
+  workMinutes?: number
+  lateMinutes?: number
+  earlyLeaveMinutes?: number
+  status?: string
+  isWorkingDay?: boolean
+  source?: string
+}
+
+interface RuleSetPreviewResult {
+  ruleSetId?: string | null
+  totalEvents?: number
+  preview?: RuleSetPreviewRow[]
+  rows?: RuleSetPreviewRow[]
+  config?: Record<string, unknown> | null
+  notes?: string[]
 }
 
 interface RulesAndGroupsBindings {
@@ -466,6 +671,19 @@ interface RulesAndGroupsBindings {
   ruleTemplateSaving: Ref<boolean>
   ruleTemplateSystemText: Ref<string>
   ruleTemplateVersions: Ref<AttendanceRuleTemplateVersion[]>
+  ruleBuilderSource?: Ref<string>
+  ruleBuilderTimezone?: Ref<string>
+  ruleBuilderWorkStartTime?: Ref<string>
+  ruleBuilderWorkEndTime?: Ref<string>
+  ruleBuilderLateGraceMinutes?: Ref<number>
+  ruleBuilderEarlyGraceMinutes?: Ref<number>
+  ruleBuilderWorkingDays?: Ref<string>
+  ruleSetPreviewLoading?: Ref<boolean>
+  ruleSetPreviewError?: Ref<string>
+  ruleSetPreviewEventsText?: Ref<string>
+  ruleSetPreviewResult?: Ref<RuleSetPreviewResult | null>
+  previewRuleSet?: () => MaybePromise<void>
+  resetRuleBuilder?: () => MaybePromise<void>
   saveAttendanceGroup: () => MaybePromise<void>
   saveRuleSet: () => MaybePromise<void>
   saveRuleTemplates: () => MaybePromise<void>
@@ -522,9 +740,225 @@ const ruleTemplateSaving = props.rules.ruleTemplateSaving
 const ruleTemplateSystemText = props.rules.ruleTemplateSystemText
 const ruleTemplateVersionLoading = props.rules.ruleTemplateVersionLoading
 const ruleTemplateVersions = props.rules.ruleTemplateVersions
+const localRuleBuilderSource = ref('')
+const localRuleBuilderTimezone = ref('')
+const localRuleBuilderWorkStartTime = ref('09:00')
+const localRuleBuilderWorkEndTime = ref('18:00')
+const localRuleBuilderLateGraceMinutes = ref(10)
+const localRuleBuilderEarlyGraceMinutes = ref(10)
+const localRuleBuilderWorkingDays = ref('1, 2, 3, 4, 5')
+const localRuleSetPreviewLoading = ref(false)
+const localRuleSetPreviewError = ref('')
+const localRuleSetPreviewEventsText = ref('[]')
+const localRuleSetPreviewResult = ref<RuleSetPreviewResult | null>(null)
+const ruleBuilderSource = props.rules.ruleBuilderSource ?? localRuleBuilderSource
+const ruleBuilderTimezone = props.rules.ruleBuilderTimezone ?? localRuleBuilderTimezone
+const ruleBuilderWorkStartTime = props.rules.ruleBuilderWorkStartTime ?? localRuleBuilderWorkStartTime
+const ruleBuilderWorkEndTime = props.rules.ruleBuilderWorkEndTime ?? localRuleBuilderWorkEndTime
+const ruleBuilderLateGraceMinutes = props.rules.ruleBuilderLateGraceMinutes ?? localRuleBuilderLateGraceMinutes
+const ruleBuilderEarlyGraceMinutes = props.rules.ruleBuilderEarlyGraceMinutes ?? localRuleBuilderEarlyGraceMinutes
+const ruleBuilderWorkingDaysText = props.rules.ruleBuilderWorkingDays ?? localRuleBuilderWorkingDays
+const ruleSetPreviewLoading = props.rules.ruleSetPreviewLoading ?? localRuleSetPreviewLoading
+const ruleSetPreviewError = props.rules.ruleSetPreviewError ?? localRuleSetPreviewError
+const ruleSetPreviewEventsText = props.rules.ruleSetPreviewEventsText ?? localRuleSetPreviewEventsText
+const ruleSetPreviewResult = props.rules.ruleSetPreviewResult ?? localRuleSetPreviewResult
+const previewRuleSet = props.rules.previewRuleSet
+const resetRuleBuilder = props.rules.resetRuleBuilder
 const saveAttendanceGroup = () => props.rules.saveAttendanceGroup()
 const saveRuleSet = () => props.rules.saveRuleSet()
 const saveRuleTemplates = () => props.rules.saveRuleTemplates()
+
+const weekdayLabels = computed(() => [
+  tr('Sun', '周日'),
+  tr('Mon', '周一'),
+  tr('Tue', '周二'),
+  tr('Wed', '周三'),
+  tr('Thu', '周四'),
+  tr('Fri', '周五'),
+  tr('Sat', '周六'),
+])
+
+const ruleBuilderDayOptions = computed(() => [
+  { value: 0, labelEn: 'Sun', labelZh: '周日' },
+  { value: 1, labelEn: 'Mon', labelZh: '周一' },
+  { value: 2, labelEn: 'Tue', labelZh: '周二' },
+  { value: 3, labelEn: 'Wed', labelZh: '周三' },
+  { value: 4, labelEn: 'Thu', labelZh: '周四' },
+  { value: 5, labelEn: 'Fri', labelZh: '周五' },
+  { value: 6, labelEn: 'Sat', labelZh: '周六' },
+])
+
+const ruleBuilderHydrated = ref(false)
+const ruleBuilderSyncing = ref(false)
+const ruleBuilderConfigError = ref('')
+
+function asPlainObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+
+function parseRuleSetConfig(value: string): Record<string, unknown> | null {
+  const trimmed = value.trim()
+  if (!trimmed) return {}
+  try {
+    const parsed = JSON.parse(trimmed)
+    return asPlainObject(parsed)
+  } catch {
+    return null
+  }
+}
+
+function normalizeInteger(value: unknown, fallback: number): number {
+  const normalized = Number(value)
+  return Number.isFinite(normalized) && normalized >= 0 ? Math.floor(normalized) : fallback
+}
+
+function normalizeWorkingDays(value: unknown): number[] {
+  const source = Array.isArray(value)
+    ? value
+    : String(value ?? '')
+      .split(/[\n,，\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  return Array.from(new Set(
+    source
+      .map((item) => Number(item))
+      .filter((item) => Number.isInteger(item) && item >= 0 && item <= 6),
+  )).sort((left, right) => left - right)
+}
+
+function formatWorkingDaysInput(value: unknown): string {
+  return normalizeWorkingDays(value).join(', ')
+}
+
+function formatWorkingDays(days: number[] | null | undefined): string {
+  const normalized = normalizeWorkingDays(days)
+  if (normalized.length === 0) return tr('Not set', '未设置')
+  return normalized
+    .map((day) => weekdayLabels.value[day] ?? String(day))
+    .join(', ')
+}
+
+const ruleBuilderWorkingDays = computed<number[]>({
+  get: () => normalizeWorkingDays(ruleBuilderWorkingDaysText.value),
+  set: (days) => {
+    ruleBuilderWorkingDaysText.value = formatWorkingDaysInput(days)
+  },
+})
+
+function buildRuleSetPreviewConfig(): Record<string, unknown> {
+  const parsed = parseRuleSetConfig(ruleSetForm.config) ?? {}
+  const next = { ...parsed }
+  const source = ruleBuilderSource.value.trim()
+  if (source) next.source = source
+  else delete next.source
+
+  const rule = asPlainObject(next.rule) ? { ...next.rule } : {}
+  const timezone = ruleBuilderTimezone.value.trim()
+  if (timezone) rule.timezone = timezone
+  else delete rule.timezone
+
+  const workStartTime = ruleBuilderWorkStartTime.value.trim()
+  if (workStartTime) rule.workStartTime = workStartTime
+  else delete rule.workStartTime
+
+  const workEndTime = ruleBuilderWorkEndTime.value.trim()
+  if (workEndTime) rule.workEndTime = workEndTime
+  else delete rule.workEndTime
+
+  const lateGraceMinutes = normalizeInteger(ruleBuilderLateGraceMinutes.value, 10)
+  rule.lateGraceMinutes = lateGraceMinutes
+
+  const earlyGraceMinutes = normalizeInteger(ruleBuilderEarlyGraceMinutes.value, 10)
+  rule.earlyGraceMinutes = earlyGraceMinutes
+
+  const workingDays = normalizeWorkingDays(ruleBuilderWorkingDaysText.value)
+  if (workingDays.length > 0) {
+    rule.workingDays = workingDays
+  } else {
+    delete rule.workingDays
+  }
+
+  if (Object.keys(rule).length > 0) {
+    next.rule = rule
+  } else {
+    delete next.rule
+  }
+
+  return next
+}
+
+function syncRuleBuilderFromConfig(value: string) {
+  const parsed = parseRuleSetConfig(value)
+  if (parsed === null) {
+    ruleBuilderConfigError.value = tr('Rule set config must be valid JSON.', '规则集配置必须是合法 JSON。')
+    return
+  }
+
+  ruleBuilderConfigError.value = ''
+  const rule = asPlainObject(parsed.rule)
+  ruleBuilderSource.value = typeof parsed.source === 'string' ? parsed.source : ''
+  ruleBuilderTimezone.value = typeof rule?.timezone === 'string' ? rule.timezone : ''
+  ruleBuilderWorkStartTime.value = typeof rule?.workStartTime === 'string' ? rule.workStartTime : '09:00'
+  ruleBuilderWorkEndTime.value = typeof rule?.workEndTime === 'string' ? rule.workEndTime : '18:00'
+  ruleBuilderLateGraceMinutes.value = normalizeInteger(rule?.lateGraceMinutes, 10)
+  ruleBuilderEarlyGraceMinutes.value = normalizeInteger(rule?.earlyGraceMinutes, 10)
+  ruleBuilderWorkingDaysText.value = formatWorkingDaysInput(rule?.workingDays)
+}
+
+function syncRuleSetConfigFromBuilder() {
+  if (!ruleBuilderHydrated.value || ruleBuilderSyncing.value) return
+  ruleBuilderSyncing.value = true
+  try {
+    const nextConfig = JSON.stringify(buildRuleSetPreviewConfig(), null, 2)
+    if (nextConfig !== ruleSetForm.config) {
+      ruleSetForm.config = nextConfig
+    }
+  } finally {
+    ruleBuilderSyncing.value = false
+    ruleBuilderConfigError.value = ''
+  }
+}
+
+function resolveRuleSetPreviewRows(result: RuleSetPreviewResult | null | undefined): RuleSetPreviewRow[] {
+  if (!result) return []
+  if (Array.isArray(result.preview)) return result.preview
+  if (Array.isArray(result.rows)) return result.rows
+  return []
+}
+
+const ruleBuilderPreviewConfig = computed(() => buildRuleSetPreviewConfig())
+const ruleSetPreviewRows = computed(() => resolveRuleSetPreviewRows(ruleSetPreviewResult.value))
+const ruleSetPreviewNotes = computed(() => ruleSetPreviewResult.value?.notes ?? [])
+
+watch(
+  () => ruleSetForm.config,
+  (value) => {
+    ruleBuilderSyncing.value = true
+    try {
+      syncRuleBuilderFromConfig(value)
+      ruleBuilderHydrated.value = true
+    } finally {
+      ruleBuilderSyncing.value = false
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  [
+    ruleBuilderSource,
+    ruleBuilderTimezone,
+    ruleBuilderWorkStartTime,
+    ruleBuilderWorkEndTime,
+    ruleBuilderLateGraceMinutes,
+    ruleBuilderEarlyGraceMinutes,
+    ruleBuilderWorkingDaysText,
+  ],
+  () => {
+    syncRuleSetConfigFromBuilder()
+  },
+  { deep: true },
+)
 
 function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2)
@@ -576,6 +1010,101 @@ function appendAttendanceGroupMemberSelectedUser() {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.attendance__rule-builder {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid #dbe7f5;
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(244, 249, 255, 0.95), rgba(255, 255, 255, 1)),
+    radial-gradient(circle at top right, rgba(31, 111, 235, 0.08), transparent 32%);
+}
+
+.attendance__subheading {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #17324d;
+}
+
+.attendance__rule-builder-summary,
+.attendance__preview-summary,
+.attendance__preview-result-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  font-size: 13px;
+  color: #44546a;
+}
+
+.attendance__rule-builder-summary strong,
+.attendance__preview-summary strong,
+.attendance__preview-result-meta strong {
+  color: #11243d;
+}
+
+.attendance__rule-builder-days {
+  display: grid;
+  gap: 10px;
+}
+
+.attendance__field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #17324d;
+}
+
+.attendance__rule-builder-day-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 8px;
+}
+
+.attendance__rule-builder-day {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #dbe3ee;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+}
+
+.attendance__rule-builder-preview {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #d9e3f1;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.attendance__preview-state {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #eff6ff;
+  color: #284b7a;
+  font-size: 13px;
+}
+
+.attendance__preview-result {
+  display: grid;
+  gap: 12px;
+}
+
+.attendance__code--builder {
+  min-height: 180px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.attendance__empty--error,
+.attendance__field-hint--error {
+  color: #b42318;
 }
 
 .attendance__field {

@@ -141,6 +141,136 @@ describe('useAttendanceAdminRulesAndGroups', () => {
     expect(options.setStatus).toHaveBeenCalledWith(expect.stringContaining('Template schema errors:'), 'error')
   })
 
+  it('syncs builder fields from rule set config and writes them back into JSON', () => {
+    const rules = useAttendanceAdminRulesAndGroups(createOptions())
+    rules.ruleSetForm.config = JSON.stringify({
+      source: 'csv',
+      rule: {
+        timezone: 'Asia/Shanghai',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        workingDays: [1, 2, 3, 4, 5],
+        policy: 'keep',
+      },
+      custom: { keep: true },
+    })
+
+    const synced = rules.syncRuleBuilderFromRuleSetConfig()
+    expect(synced).toBe(true)
+    expect(rules.ruleBuilderSource.value).toBe('csv')
+    expect(rules.ruleBuilderTimezone.value).toBe('Asia/Shanghai')
+    expect(rules.ruleBuilderWorkStartTime.value).toBe('09:00')
+    expect(rules.ruleBuilderWorkEndTime.value).toBe('18:00')
+    expect(rules.ruleBuilderWorkingDays.value).toBe('1, 2, 3, 4, 5')
+
+    rules.ruleBuilderSource.value = 'api'
+    rules.ruleBuilderTimezone.value = 'UTC'
+    rules.ruleBuilderWorkStartTime.value = '08:30'
+    rules.ruleBuilderWorkEndTime.value = '17:30'
+    rules.ruleBuilderWorkingDays.value = '1, 3, 5'
+
+    const next = rules.applyRuleBuilderToRuleSetConfig()
+    expect(next).toMatchObject({
+      source: 'api',
+      custom: { keep: true },
+      rule: {
+        timezone: 'UTC',
+        workStartTime: '08:30',
+        workEndTime: '17:30',
+        workingDays: [1, 3, 5],
+        policy: 'keep',
+      },
+    })
+    expect(JSON.parse(rules.ruleSetForm.config)).toMatchObject(next)
+  })
+
+  it('previews a rule set and normalizes the response payload', async () => {
+    const apiFetch = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input === '/api/attendance/rule-sets/preview' && init?.method === 'POST') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            ruleSetId: 'rs-1',
+            totalEvents: 1,
+            preview: [
+              {
+                userId: 'user-1',
+                workDate: '2026-03-20',
+                firstInAt: '2026-03-20T01:00:00.000Z',
+                lastOutAt: null,
+                workMinutes: '480',
+                lateMinutes: '3',
+                earlyLeaveMinutes: 0,
+                status: 'normal',
+                isWorkingDay: true,
+                source: { mode: 'basic' },
+              },
+            ],
+            config: {
+              source: 'csv',
+              rule: { timezone: 'Asia/Shanghai' },
+            },
+            notes: ['Preview ready', 42],
+          },
+        })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+    const options = createOptions({ apiFetch })
+    const rules = useAttendanceAdminRulesAndGroups(options)
+    rules.ruleSetEditingId.value = 'rs-1'
+    rules.ruleSetForm.config = JSON.stringify({
+      source: 'csv',
+      rule: { timezone: 'Asia/Shanghai' },
+    })
+    rules.ruleSetPreviewEventsText.value = JSON.stringify([
+      {
+        eventType: 'check_in',
+        occurredAt: '2026-03-20T01:00:00.000Z',
+        userId: 'user-1',
+      },
+    ])
+
+    const result = await rules.previewRuleSet()
+
+    expect(apiFetch).toHaveBeenCalledTimes(1)
+    const [, init] = apiFetch.mock.calls[0]!
+    expect(JSON.parse(String(init?.body || '{}'))).toMatchObject({
+      ruleSetId: 'rs-1',
+      config: {
+        source: 'csv',
+        rule: { timezone: 'Asia/Shanghai' },
+      },
+      events: [
+        {
+          eventType: 'check_in',
+          occurredAt: '2026-03-20T01:00:00.000Z',
+          userId: 'user-1',
+        },
+      ],
+    })
+    expect(result).toEqual(
+      expect.objectContaining({
+        ruleSetId: 'rs-1',
+        totalEvents: 1,
+        notes: ['Preview ready', '42'],
+      }),
+    )
+    expect(result?.preview[0]).toEqual(
+      expect.objectContaining({
+        userId: 'user-1',
+        workDate: '2026-03-20',
+        workMinutes: 480,
+        lateMinutes: 3,
+        earlyLeaveMinutes: 0,
+        status: 'normal',
+        isWorkingDay: true,
+      }),
+    )
+    expect(options.setStatus).toHaveBeenCalledWith('Rule set preview loaded.')
+    expect(rules.ruleSetPreviewResult.value).toEqual(result)
+  })
+
   it('loads template version details when opening a stored version', async () => {
     const apiFetch = vi.fn(async (input: string) => {
       if (input === '/api/attendance/rule-templates') {
