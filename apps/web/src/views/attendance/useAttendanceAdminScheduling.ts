@@ -141,6 +141,56 @@ function extractErrorMessage(error: unknown, fallbackMessage: string): string {
   return error instanceof Error && error.message ? error.message : fallbackMessage
 }
 
+function requireNonEmptyText(value: string, message: string): string {
+  const normalized = value.trim()
+  if (!normalized) throw new Error(message)
+  return normalized
+}
+
+function requireNonNegativeInteger(value: unknown, message: string): number {
+  const numeric = Number(value)
+  if (!Number.isInteger(numeric) || numeric < 0) {
+    throw new Error(message)
+  }
+  return numeric
+}
+
+function validateWorkingDaysInput(value: string, tr: Translate): number[] {
+  const workingDays = parseWorkingDaysInput(value)
+  if (workingDays.length === 0) {
+    throw new Error(tr('At least one working day is required', '至少需要一个工作日'))
+  }
+  return workingDays
+}
+
+function validateDateRangeInput(
+  startDate: string,
+  endDate: string,
+  labels: {
+    startEn: string
+    startZh: string
+    endEn: string
+    endZh: string
+  },
+  tr: Translate,
+): { startDate: string; endDate: string | null } {
+  const normalizedStartDate = requireNonEmptyText(
+    startDate,
+    tr(`${labels.startEn} is required`, `${labels.startZh}为必填项`),
+  )
+  const normalizedEndDate = endDate.trim()
+  if (normalizedEndDate && normalizedEndDate < normalizedStartDate) {
+    throw new Error(tr(
+      `${labels.endEn} cannot be earlier than ${labels.startEn.toLowerCase()}`,
+      `${labels.endZh}不能早于${labels.startZh}`,
+    ))
+  }
+  return {
+    startDate: normalizedStartDate,
+    endDate: normalizedEndDate.length > 0 ? normalizedEndDate : null,
+  }
+}
+
 export function useAttendanceAdminScheduling({
   adminForbidden,
   apiFetch = defaultApiFetch,
@@ -265,15 +315,13 @@ export function useAttendanceAdminScheduling({
     rotationRuleSaving.value = true
     const isEditing = Boolean(rotationRuleEditingId.value)
     try {
-      if (!rotationRuleForm.name.trim()) {
-        throw new Error(tr('Name is required', '名称为必填项'))
-      }
+      const name = requireNonEmptyText(rotationRuleForm.name, tr('Name is required', '名称为必填项'))
       const shiftSequence = parseShiftSequenceInput(rotationRuleForm.shiftSequence)
       if (shiftSequence.length === 0) {
         throw new Error(tr('Shift sequence required', '班次序列为必填项'))
       }
       const payload = {
-        name: rotationRuleForm.name.trim(),
+        name,
         timezone: rotationRuleForm.timezone.trim() || defaultTimezone,
         shiftSequence,
         isActive: rotationRuleForm.isActive,
@@ -374,18 +422,21 @@ export function useAttendanceAdminScheduling({
     rotationAssignmentSaving.value = true
     const isEditing = Boolean(rotationAssignmentEditingId.value)
     try {
-      if (!rotationAssignmentForm.userId.trim()) {
-        throw new Error(tr('User ID is required', '用户 ID 为必填项'))
-      }
+      const userId = requireNonEmptyText(rotationAssignmentForm.userId, tr('User ID is required', '用户 ID 为必填项'))
       if (!rotationAssignmentForm.rotationRuleId) {
         throw new Error(tr('Rotation rule is required', '轮班规则为必填项'))
       }
-      const endDate = rotationAssignmentForm.endDate.trim()
+      const { startDate, endDate } = validateDateRangeInput(
+        rotationAssignmentForm.startDate,
+        rotationAssignmentForm.endDate,
+        { startEn: 'Start date', startZh: '开始日期', endEn: 'End date', endZh: '结束日期' },
+        tr,
+      )
       const payload = {
-        userId: rotationAssignmentForm.userId.trim(),
+        userId,
         rotationRuleId: rotationAssignmentForm.rotationRuleId,
-        startDate: rotationAssignmentForm.startDate,
-        endDate: endDate.length > 0 ? endDate : null,
+        startDate,
+        endDate,
         isActive: rotationAssignmentForm.isActive,
         orgId: getOrgId(),
       }
@@ -492,18 +543,30 @@ export function useAttendanceAdminScheduling({
     shiftSaving.value = true
     const isEditing = Boolean(shiftEditingId.value)
     try {
-      if (!shiftForm.name.trim()) {
-        throw new Error(tr('Shift name is required', '班次名称为必填项'))
+      const name = requireNonEmptyText(shiftForm.name, tr('Shift name is required', '班次名称为必填项'))
+      const workStartTime = requireNonEmptyText(shiftForm.workStartTime, tr('Work start time is required', '上班时间为必填项'))
+      const workEndTime = requireNonEmptyText(shiftForm.workEndTime, tr('Work end time is required', '下班时间为必填项'))
+      if (workStartTime === workEndTime) {
+        throw new Error(tr('Shift start and end times cannot be the same', '上下班时间不能相同'))
       }
       const payload = {
-        name: shiftForm.name.trim(),
+        name,
         timezone: shiftForm.timezone.trim(),
-        workStartTime: shiftForm.workStartTime,
-        workEndTime: shiftForm.workEndTime,
-        lateGraceMinutes: Number(shiftForm.lateGraceMinutes) || 0,
-        earlyGraceMinutes: Number(shiftForm.earlyGraceMinutes) || 0,
-        roundingMinutes: Number(shiftForm.roundingMinutes) || 0,
-        workingDays: parseWorkingDaysInput(shiftForm.workingDays),
+        workStartTime,
+        workEndTime,
+        lateGraceMinutes: requireNonNegativeInteger(
+          shiftForm.lateGraceMinutes,
+          tr('Late grace must be a non-negative integer', '迟到宽限必须是非负整数'),
+        ),
+        earlyGraceMinutes: requireNonNegativeInteger(
+          shiftForm.earlyGraceMinutes,
+          tr('Early grace must be a non-negative integer', '早退宽限必须是非负整数'),
+        ),
+        roundingMinutes: requireNonNegativeInteger(
+          shiftForm.roundingMinutes,
+          tr('Rounding minutes must be a non-negative integer', '取整分钟必须是非负整数'),
+        ),
+        workingDays: validateWorkingDaysInput(shiftForm.workingDays, tr),
         orgId: getOrgId(),
       }
       const endpoint = isEditing
@@ -597,18 +660,21 @@ export function useAttendanceAdminScheduling({
     assignmentSaving.value = true
     const isEditing = Boolean(assignmentEditingId.value)
     try {
-      if (!assignmentForm.userId.trim()) {
-        throw new Error(tr('User ID is required', '用户 ID 为必填项'))
-      }
+      const userId = requireNonEmptyText(assignmentForm.userId, tr('User ID is required', '用户 ID 为必填项'))
       if (!assignmentForm.shiftId) {
         throw new Error(tr('Shift selection is required', '班次为必选项'))
       }
-      const endDate = assignmentForm.endDate.trim()
+      const { startDate, endDate } = validateDateRangeInput(
+        assignmentForm.startDate,
+        assignmentForm.endDate,
+        { startEn: 'Start date', startZh: '开始日期', endEn: 'End date', endZh: '结束日期' },
+        tr,
+      )
       const payload = {
-        userId: assignmentForm.userId.trim(),
+        userId,
         shiftId: assignmentForm.shiftId,
-        startDate: assignmentForm.startDate,
-        endDate: endDate.length > 0 ? endDate : null,
+        startDate,
+        endDate,
         isActive: assignmentForm.isActive,
         orgId: getOrgId(),
       }

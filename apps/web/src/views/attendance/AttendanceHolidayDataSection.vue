@@ -6,7 +6,10 @@
         <button type="button" class="attendance__btn" :disabled="holidayLoading" @click="goPrevMonth">
           {{ tr('Previous month', '上个月') }}
         </button>
-        <span class="attendance__section-meta">{{ calendarLabel }}</span>
+        <span class="attendance__section-meta" aria-live="polite">
+          {{ calendarLabel }}
+          <span v-if="holidayLoading" class="attendance__field-hint"> · {{ tr('Loading month...', '月份加载中...') }}</span>
+        </span>
         <button type="button" class="attendance__btn" :disabled="holidayLoading" @click="goCurrentMonth">
           {{ tr('Current month', '本月') }}
         </button>
@@ -25,7 +28,7 @@
         </small>
       </div>
     </div>
-    <div class="attendance__holiday-layout">
+    <div class="attendance__holiday-layout" :aria-busy="holidayLoading ? 'true' : 'false'">
       <div class="attendance__holiday-calendar">
         <div class="attendance__holiday-weekdays">
           <span v-for="weekday in weekdayLabels" :key="weekday">{{ weekday }}</span>
@@ -42,6 +45,7 @@
               'attendance__holiday-cell--selected': day.date === selectedDate,
               'attendance__holiday-cell--holiday': day.holidays.length > 0,
             }"
+            :disabled="holidayLoading"
             @click="selectDate(day.date)"
           >
             <span class="attendance__holiday-cell-day">{{ day.dayNumber }}</span>

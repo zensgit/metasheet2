@@ -330,6 +330,15 @@
         {{ tr('Preview lane', '预览路径') }}: <strong>{{ formatImportLane(importPreviewLane) }}</strong>
         · {{ tr('Import lane', '导入路径') }}: <strong>{{ formatImportLane(importCommitLane) }}</strong>
       </div>
+      <div>
+        {{ tr('Mapping profile', '映射配置') }}: <strong>{{ importProfileSummary }}</strong>
+      </div>
+      <div>
+        {{ tr('User map', '用户映射') }}: <strong>{{ importUserMapSummary }}</strong>
+      </div>
+      <div>
+        {{ tr('Group sync', '分组同步') }}: <strong>{{ importGroupSyncSummary }}</strong>
+      </div>
     </div>
     <div
       v-if="importPreviewTask"
@@ -588,6 +597,75 @@ const formatDateTime = props.formatDateTime
 const formatStatus = props.formatStatus
 const formatList = props.formatList
 const formatPolicyList = props.formatPolicyList
+
+const selectedGroupRuleSetName = computed(() => {
+  const ruleSetId = importGroupRuleSetId.value.trim()
+  if (!ruleSetId) return ''
+  return ruleSets.value.find(item => item.id === ruleSetId)?.name ?? ruleSetId
+})
+
+const importProfileSummary = computed(() => {
+  if (!selectedImportProfile.value) {
+    return tr('manual payload only', '仅使用手工 payload')
+  }
+  const requiredCount = selectedImportProfile.value.requiredFields?.length ?? 0
+  if (requiredCount > 0) {
+    return tr(
+      `${selectedImportProfile.value.name} (${requiredCount} required fields)`,
+      `${selectedImportProfile.value.name}（${requiredCount} 个必填字段）`,
+    )
+  }
+  return selectedImportProfile.value.name
+})
+
+const importUserMapSummary = computed(() => {
+  if (importUserMapError.value) {
+    return tr('file parse error', '文件解析错误')
+  }
+
+  const segments: string[] = []
+  if (importUserMapCount.value > 0) {
+    segments.push(tr(
+      `${importUserMapCount.value} entries ready`,
+      `已准备 ${importUserMapCount.value} 条映射`,
+    ))
+  }
+
+  const keyField = importUserMapKeyField.value.trim()
+  if (keyField) {
+    segments.push(tr(`key ${keyField}`, `键 ${keyField}`))
+  }
+
+  const sourceFields = importUserMapSourceFields.value.trim()
+  if (sourceFields) {
+    segments.push(tr(`source ${sourceFields}`, `来源 ${sourceFields}`))
+  }
+
+  return segments.length > 0
+    ? segments.join(' · ')
+    : tr('not configured', '未配置')
+})
+
+const importGroupSyncSummary = computed(() => {
+  const segments: string[] = []
+  if (importGroupAutoCreate.value) {
+    segments.push(tr('auto-create groups', '自动创建分组'))
+  }
+  if (importGroupAutoAssign.value) {
+    segments.push(tr('auto-assign members', '自动分配成员'))
+  }
+  if (selectedGroupRuleSetName.value) {
+    segments.push(tr(`rule set ${selectedGroupRuleSetName.value}`, `规则集 ${selectedGroupRuleSetName.value}`))
+  }
+  const timezone = importGroupTimezone.value.trim()
+  if (timezone) {
+    segments.push(tr(`timezone ${timezone}`, `时区 ${timezone}`))
+  }
+
+  return segments.length > 0
+    ? segments.join(' · ')
+    : tr('disabled', '未启用')
+})
 
 function formatImportLane(value: AttendanceImportPreviewLane | AttendanceImportCommitLane): string {
   if (value === 'async') return tr('async queue', '异步队列')

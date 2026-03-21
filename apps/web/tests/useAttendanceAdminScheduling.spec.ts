@@ -129,6 +129,99 @@ describe('useAttendanceAdminScheduling', () => {
     expect(setStatus).toHaveBeenCalledWith('Shift name is required', 'error')
   })
 
+  it('requires at least one working day before saving a shift', async () => {
+    const adminForbidden = ref(false)
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      setStatus,
+    })
+
+    scheduling.shiftForm.name = 'Ops Shift'
+    scheduling.shiftForm.workStartTime = '08:30'
+    scheduling.shiftForm.workEndTime = '17:30'
+    scheduling.shiftForm.workingDays = '7,8'
+
+    await scheduling.saveShift()
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(setStatus).toHaveBeenCalledWith('At least one working day is required', 'error')
+  })
+
+  it('requires shift start and end times before saving', async () => {
+    const adminForbidden = ref(false)
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      setStatus,
+    })
+
+    scheduling.shiftForm.name = 'Ops Shift'
+    scheduling.shiftForm.workStartTime = '   '
+    scheduling.shiftForm.workEndTime = '17:30'
+    scheduling.shiftForm.workingDays = '1,2,3'
+
+    await scheduling.saveShift()
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(setStatus).toHaveBeenCalledWith('Work start time is required', 'error')
+  })
+
+  it('rejects identical shift start and end times', async () => {
+    const adminForbidden = ref(false)
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      setStatus,
+    })
+
+    scheduling.shiftForm.name = 'Ops Shift'
+    scheduling.shiftForm.workStartTime = '09:00'
+    scheduling.shiftForm.workEndTime = '09:00'
+    scheduling.shiftForm.workingDays = '1,2,3'
+
+    await scheduling.saveShift()
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(setStatus).toHaveBeenCalledWith('Shift start and end times cannot be the same', 'error')
+  })
+
+  it('requires non-negative integer shift grace values before saving', async () => {
+    const adminForbidden = ref(false)
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      setStatus,
+    })
+
+    scheduling.shiftForm.name = 'Ops Shift'
+    scheduling.shiftForm.workStartTime = '08:30'
+    scheduling.shiftForm.workEndTime = '17:30'
+    scheduling.shiftForm.workingDays = '1,2,3'
+    scheduling.shiftForm.lateGraceMinutes = -1
+
+    await scheduling.saveShift()
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(setStatus).toHaveBeenCalledWith('Late grace must be a non-negative integer', 'error')
+  })
+
   it('deletes a rotation rule and reloads both rules and assignments', async () => {
     const adminForbidden = ref(false)
     const confirm = vi.fn().mockReturnValue(true)
@@ -172,6 +265,96 @@ describe('useAttendanceAdminScheduling', () => {
 
     expect(apiFetch).not.toHaveBeenCalled()
     expect(setStatus).toHaveBeenCalledWith('User ID is required', 'error')
+  })
+
+  it('rejects assignments when the end date is earlier than the start date', async () => {
+    const adminForbidden = ref(false)
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      setStatus,
+    })
+
+    scheduling.assignmentForm.userId = 'user-1'
+    scheduling.assignmentForm.shiftId = 'shift-1'
+    scheduling.assignmentForm.startDate = '2026-04-10'
+    scheduling.assignmentForm.endDate = '2026-04-09'
+
+    await scheduling.saveAssignment()
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(setStatus).toHaveBeenCalledWith('End date cannot be earlier than start date', 'error')
+  })
+
+  it('requires assignment start dates before calling the API', async () => {
+    const adminForbidden = ref(false)
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      setStatus,
+    })
+
+    scheduling.assignmentForm.userId = 'user-1'
+    scheduling.assignmentForm.shiftId = 'shift-1'
+    scheduling.assignmentForm.startDate = '   '
+
+    await scheduling.saveAssignment()
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(setStatus).toHaveBeenCalledWith('Start date is required', 'error')
+  })
+
+  it('rejects rotation assignments when the end date is earlier than the start date', async () => {
+    const adminForbidden = ref(false)
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      setStatus,
+    })
+
+    scheduling.rotationAssignmentForm.userId = 'user-1'
+    scheduling.rotationAssignmentForm.rotationRuleId = 'rot-1'
+    scheduling.rotationAssignmentForm.startDate = '2026-04-10'
+    scheduling.rotationAssignmentForm.endDate = '2026-04-09'
+
+    await scheduling.saveRotationAssignment()
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(setStatus).toHaveBeenCalledWith('End date cannot be earlier than start date', 'error')
+  })
+
+  it('requires rotation assignment start dates before calling the API', async () => {
+    const adminForbidden = ref(false)
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      setStatus,
+    })
+
+    scheduling.rotationAssignmentForm.userId = 'user-1'
+    scheduling.rotationAssignmentForm.rotationRuleId = 'rot-1'
+    scheduling.rotationAssignmentForm.startDate = '   '
+
+    await scheduling.saveRotationAssignment()
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(setStatus).toHaveBeenCalledWith('Start date is required', 'error')
   })
 
   it('loads holidays with the injected date range and org id', async () => {

@@ -46,6 +46,12 @@ function findButton(container: HTMLElement, label: string): HTMLButtonElement {
   return button as HTMLButtonElement
 }
 
+function findCalendarDayButton(container: HTMLElement): HTMLButtonElement {
+  const button = container.querySelector('.attendance__holiday-cell')
+  expect(button, 'expected at least one calendar day button').toBeTruthy()
+  return button as HTMLButtonElement
+}
+
 describe('AttendanceHolidayDataSection', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -130,5 +136,56 @@ describe('AttendanceHolidayDataSection', () => {
     expect(container!.textContent).toContain(`formatted:${today}`)
     expect(container!.textContent).toContain('2026-04')
     expect(loadHolidays).toHaveBeenCalled()
+  })
+
+  it('shows loading feedback for the visible month and disables calendar day buttons while loading', async () => {
+    const holidayBindings: HolidayBindings = {
+      holidays: ref([]),
+      holidayTotal: ref(0),
+      holidayLoading: ref(true),
+      holidaySaving: ref(false),
+      holidayEditingId: ref(null),
+      holidayRange: reactive({
+        from: '2026-03-01',
+        to: '2026-03-31',
+      }),
+      holidayForm: reactive({
+        date: '2026-03-15',
+        name: '',
+        isWorkingDay: false,
+      }),
+      resetHolidayForm: vi.fn(),
+      editHoliday: vi.fn(),
+      loadHolidays: vi.fn(),
+      saveHoliday: vi.fn(),
+      deleteHoliday: vi.fn(),
+    }
+
+    app = createApp(AttendanceHolidayDataSection, {
+      holiday: holidayBindings,
+      formatDate,
+      tr,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.textContent).toContain('Loading month...')
+    expect(container!.querySelector('.attendance__holiday-layout')?.getAttribute('aria-busy')).toBe('true')
+    expect(findButton(container!, 'Previous month').disabled).toBe(true)
+    expect(findButton(container!, 'Current month').disabled).toBe(true)
+    expect(findButton(container!, 'Next month').disabled).toBe(true)
+    expect(findButton(container!, 'Loading...').disabled).toBe(true)
+    expect(findCalendarDayButton(container!).disabled).toBe(true)
+
+    holidayBindings.holidayLoading.value = false
+    await flushUi()
+
+    expect(container!.textContent).not.toContain('Loading month...')
+    expect(container!.querySelector('.attendance__holiday-layout')?.getAttribute('aria-busy')).toBe('false')
+    expect(findButton(container!, 'Previous month').disabled).toBe(false)
+    expect(findButton(container!, 'Current month').disabled).toBe(false)
+    expect(findButton(container!, 'Next month').disabled).toBe(false)
+    expect(findButton(container!, 'Reload holidays').disabled).toBe(false)
+    expect(findCalendarDayButton(container!).disabled).toBe(false)
   })
 })
