@@ -24,6 +24,9 @@ const sampleView: PlmAuditSavedView = {
     sceneId: 'scene-1',
     sceneName: '采购团队场景',
     sceneOwnerUserId: 'owner-a',
+    sceneRecommendationReason: 'default',
+    sceneRecommendationSourceLabel: '当前团队默认场景',
+    returnToPlmPath: '/plm?sceneFocus=scene-1',
   },
 }
 

@@ -44,6 +44,9 @@ const sampleState: PlmAuditRouteState = {
   sceneId: '',
   sceneName: '',
   sceneOwnerUserId: '',
+  sceneRecommendationReason: '',
+  sceneRecommendationSourceLabel: '',
+  returnToPlmPath: '',
 }
 
 describe('plmAuditSavedViews', () => {
@@ -114,12 +117,52 @@ describe('plmAuditSavedViews', () => {
       sceneId: 'scene-1',
       sceneName: '采购团队场景',
       sceneOwnerUserId: 'owner-a',
+      sceneRecommendationReason: 'recent-update',
+      sceneRecommendationSourceLabel: '近期更新的团队场景',
+      returnToPlmPath: '/plm?sceneFocus=scene-1',
     }, storage)
 
     expect(readPlmAuditSavedViews(storage)[0]?.state).toMatchObject({
       sceneId: 'scene-1',
       sceneName: '采购团队场景',
       sceneOwnerUserId: 'owner-a',
+      sceneRecommendationReason: 'recent-update',
+      sceneRecommendationSourceLabel: '近期更新的团队场景',
+      returnToPlmPath: '/plm?sceneFocus=scene-1',
+    })
+  })
+
+  it('backfills new scene audit fields when reading legacy saved views', () => {
+    const storage = createMemoryStorage()
+    storage.setItem('metasheet_plm_audit_saved_views', JSON.stringify([
+      {
+        id: 'saved-legacy',
+        name: 'Legacy Scene Context',
+        updatedAt: '2026-03-21T00:00:00.000Z',
+        state: {
+          page: 1,
+          q: 'scene-legacy',
+          actorId: '',
+          kind: 'workbench',
+          action: '',
+          resourceType: '',
+          from: '',
+          to: '',
+          windowMinutes: 180,
+          sceneId: 'scene-legacy',
+          sceneName: '旧版场景',
+          sceneOwnerUserId: 'owner-legacy',
+        },
+      },
+    ]))
+
+    expect(readPlmAuditSavedViews(storage)[0]?.state).toMatchObject({
+      sceneId: 'scene-legacy',
+      sceneName: '旧版场景',
+      sceneOwnerUserId: 'owner-legacy',
+      sceneRecommendationReason: '',
+      sceneRecommendationSourceLabel: '',
+      returnToPlmPath: '',
     })
   })
 

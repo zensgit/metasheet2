@@ -841,6 +841,7 @@ import {
   buildPlmAuditSceneQueryValue,
   isPlmAuditSceneOwnerContextActive,
   isPlmAuditSceneQueryContextActive,
+  withoutPlmAuditSceneContext,
   withPlmAuditSceneOwnerContext,
   withPlmAuditSceneQueryContext,
 } from './plmAuditSceneContext'
@@ -1100,12 +1101,7 @@ async function syncRouteState(nextState: PlmAuditRouteState, replace = false) {
 }
 
 async function clearAuditSceneContext() {
-  await syncRouteState({
-    ...readCurrentRouteState(),
-    sceneId: '',
-    sceneName: '',
-    sceneOwnerUserId: '',
-  })
+  await syncRouteState(withoutPlmAuditSceneContext(readCurrentRouteState()))
 }
 
 async function applyAuditSceneOwnerContext() {

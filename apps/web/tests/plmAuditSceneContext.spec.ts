@@ -4,6 +4,7 @@ import {
   buildPlmAuditSceneQueryValue,
   isPlmAuditSceneQueryContextActive,
   isPlmAuditSceneOwnerContextActive,
+  withoutPlmAuditSceneContext,
   withPlmAuditSceneOwnerContext,
   withPlmAuditSceneQueryContext,
 } from '../src/views/plmAuditSceneContext'
@@ -51,6 +52,27 @@ describe('plmAuditSceneContext', () => {
       q: 'scene-1',
       sceneId: 'scene-1',
       sceneName: '采购团队场景',
+    })
+  })
+
+  it('clears recommendation and return metadata together with the scene context', () => {
+    expect(withoutPlmAuditSceneContext({
+      ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      q: 'scene-1',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+      sceneRecommendationReason: 'recent-update',
+      sceneRecommendationSourceLabel: '近期更新的团队场景',
+      returnToPlmPath: '/plm?sceneFocus=scene-1',
+    })).toMatchObject({
+      q: 'scene-1',
+      sceneId: '',
+      sceneName: '',
+      sceneOwnerUserId: '',
+      sceneRecommendationReason: '',
+      sceneRecommendationSourceLabel: '',
+      returnToPlmPath: '',
     })
   })
 

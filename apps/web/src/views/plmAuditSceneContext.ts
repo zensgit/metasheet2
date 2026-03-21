@@ -37,3 +37,15 @@ export function withPlmAuditSceneQueryContext(state: PlmAuditRouteState): PlmAud
     q: nextQuery,
   }
 }
+
+export function withoutPlmAuditSceneContext(state: PlmAuditRouteState): PlmAuditRouteState {
+  return {
+    ...state,
+    sceneId: '',
+    sceneName: '',
+    sceneOwnerUserId: '',
+    sceneRecommendationReason: '',
+    sceneRecommendationSourceLabel: '',
+    returnToPlmPath: '',
+  }
+}

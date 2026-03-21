@@ -43,6 +43,9 @@ function isPlmAuditRouteState(value: unknown): value is PlmAuditRouteState {
     && (record.sceneId === undefined || typeof record.sceneId === 'string')
     && (record.sceneName === undefined || typeof record.sceneName === 'string')
     && (record.sceneOwnerUserId === undefined || typeof record.sceneOwnerUserId === 'string')
+    && (record.sceneRecommendationReason === undefined || typeof record.sceneRecommendationReason === 'string')
+    && (record.sceneRecommendationSourceLabel === undefined || typeof record.sceneRecommendationSourceLabel === 'string')
+    && (record.returnToPlmPath === undefined || typeof record.returnToPlmPath === 'string')
 }
 
 function normalizePlmAuditRouteState(state: PlmAuditRouteState): PlmAuditRouteState {
@@ -52,6 +55,9 @@ function normalizePlmAuditRouteState(state: PlmAuditRouteState): PlmAuditRouteSt
     sceneId: state.sceneId || '',
     sceneName: state.sceneName || '',
     sceneOwnerUserId: state.sceneOwnerUserId || '',
+    sceneRecommendationReason: state.sceneRecommendationReason || '',
+    sceneRecommendationSourceLabel: state.sceneRecommendationSourceLabel || '',
+    returnToPlmPath: state.returnToPlmPath || '',
   }
 }
 
