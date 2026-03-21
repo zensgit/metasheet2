@@ -931,7 +931,8 @@ function buildRuleSetPreviewConfig(): Record<string, unknown> {
   if (source) next.source = source
   else delete next.source
 
-  const rule = asPlainObject(next.rule) ? { ...next.rule } : {}
+  const ruleConfig = asPlainObject(next.rule)
+  const rule = ruleConfig ? { ...(ruleConfig as Record<string, unknown>) } : {}
   const timezone = ruleBuilderTimezone.value.trim()
   if (timezone) rule.timezone = timezone
   else delete rule.timezone
