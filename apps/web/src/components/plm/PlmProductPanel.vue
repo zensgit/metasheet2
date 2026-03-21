@@ -447,6 +447,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from 'vue'
 import PlmTeamViewsBlock from './PlmTeamViewsBlock.vue'
+import { resolvePlmSceneCatalogAutoFocus } from './plmSceneCatalogAutoFocus'
 import type {
   PlmProductPanelModel,
   PlmRecommendedWorkbenchScene,
@@ -528,14 +529,24 @@ watch(
   () => [
     props.panel.sceneCatalogAutoFocusSceneId.value,
     props.panel.recommendedWorkbenchScenes.value.map((scene) => scene.id).join(','),
+    props.panel.workbenchTeamViews.value.map((view) => view.id).join(','),
   ],
   async ([sceneId]) => {
-    if (!sceneId) return
-    const targetScene = props.panel.recommendedWorkbenchScenes.value.find((scene) => scene.id === sceneId)
-    if (!targetScene) return
+    const resolution = resolvePlmSceneCatalogAutoFocus(
+      sceneId,
+      props.panel.recommendedWorkbenchScenes.value.map((scene) => scene.id),
+      props.panel.workbenchTeamViews.value.map((view) => view.id),
+    )
+    if (!resolution.targetSceneId) {
+      if (resolution.shouldClear) {
+        clearSceneCatalogHighlight()
+        props.panel.clearSceneCatalogAutoFocusSceneId()
+      }
+      return
+    }
     await nextTick()
-    highlightScene(targetScene.id)
-    const element = sceneCatalogItemRefs.get(targetScene.id)
+    highlightScene(resolution.targetSceneId)
+    const element = sceneCatalogItemRefs.get(resolution.targetSceneId)
     element?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
     element?.focus?.({ preventScroll: true })
     props.panel.clearSceneCatalogAutoFocusSceneId()
