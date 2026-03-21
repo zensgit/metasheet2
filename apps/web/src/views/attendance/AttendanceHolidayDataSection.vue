@@ -271,23 +271,27 @@ async function syncMonthRange(date: Date) {
   await loadHolidays()
 }
 
-async function setCalendarMonth(date: Date) {
-  calendarMonth.value = firstDayOfMonth(date)
-  await syncMonthRange(calendarMonth.value)
+async function setCalendarMonth(date: Date, selectedDateOverride: Date = date) {
+  const nextMonth = firstDayOfMonth(date)
+  const nextSelectedDate = toDateInput(selectedDateOverride)
+  calendarMonth.value = nextMonth
+  selectedDate.value = nextSelectedDate
+  holidayForm.date = nextSelectedDate
+  await syncMonthRange(nextMonth)
 }
 
 async function goPrevMonth() {
-  await setCalendarMonth(new Date(calendarMonth.value.getFullYear(), calendarMonth.value.getMonth() - 1, 1))
+  const previousMonth = new Date(calendarMonth.value.getFullYear(), calendarMonth.value.getMonth() - 1, 1)
+  await setCalendarMonth(previousMonth, previousMonth)
 }
 
 async function goNextMonth() {
-  await setCalendarMonth(new Date(calendarMonth.value.getFullYear(), calendarMonth.value.getMonth() + 1, 1))
+  const nextMonth = new Date(calendarMonth.value.getFullYear(), calendarMonth.value.getMonth() + 1, 1)
+  await setCalendarMonth(nextMonth, nextMonth)
 }
 
 async function goCurrentMonth() {
-  await setCalendarMonth(today)
-  selectedDate.value = toDateInput(today)
-  holidayForm.date = selectedDate.value
+  await setCalendarMonth(today, today)
 }
 
 function selectDate(date: string) {
