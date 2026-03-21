@@ -52,6 +52,10 @@
         {{ rotationRuleLoading ? tr('Loading...', '加载中...') : tr('Reload rotation rules', '重载轮班规则') }}
       </button>
     </div>
+    <div class="attendance__section-meta">
+      {{ tr('Rotation rules', '轮班规则') }}: {{ rotationRules.length }}
+      <span v-if="rotationRuleEditingId"> · {{ rotationRuleEditingLabel }}</span>
+    </div>
     <div class="attendance__admin-grid">
       <label class="attendance__field" for="attendance-rotation-name">
         <span>{{ tr('Name', '名称') }}</span>
@@ -155,6 +159,10 @@
       <button class="attendance__btn" :disabled="rotationAssignmentLoading" @click="loadRotationAssignments">
         {{ rotationAssignmentLoading ? tr('Loading...', '加载中...') : tr('Reload rotations', '重载轮班分配') }}
       </button>
+    </div>
+    <div class="attendance__section-meta">
+      {{ tr('Rotation assignments', '轮班分配') }}: {{ rotationAssignments.length }}
+      <span v-if="rotationAssignmentEditingId"> · {{ rotationAssignmentEditingLabel }}</span>
     </div>
     <div class="attendance__admin-grid">
       <AttendanceUserPickerField
@@ -264,6 +272,10 @@
       <button class="attendance__btn" :disabled="shiftLoading" @click="loadShifts">
         {{ shiftLoading ? tr('Loading...', '加载中...') : tr('Reload shifts', '重载班次') }}
       </button>
+    </div>
+    <div class="attendance__section-meta">
+      {{ tr('Shifts', '班次') }}: {{ shifts.length }}
+      <span v-if="shiftEditingId"> · {{ shiftEditingLabel }}</span>
     </div>
     <div class="attendance__admin-grid">
       <label class="attendance__field" for="attendance-shift-name">
@@ -376,6 +388,10 @@
       <button class="attendance__btn" :disabled="assignmentLoading" @click="loadAssignments">
         {{ assignmentLoading ? tr('Loading...', '加载中...') : tr('Reload assignments', '重载分配') }}
       </button>
+    </div>
+    <div class="attendance__section-meta">
+      {{ tr('Shift assignments', '排班分配') }}: {{ assignments.length }}
+      <span v-if="assignmentEditingId"> · {{ assignmentEditingLabel }}</span>
     </div>
     <div class="attendance__admin-grid">
       <AttendanceUserPickerField
@@ -648,6 +664,40 @@ const rotationSequencePreviewText = computed(() => {
     return shift ? `${shift.name} (${shiftId})` : shiftId
   }).join(' → ')
 })
+
+const rotationRuleEditingLabel = computed(() => {
+  const name = rotationRuleForm.name.trim()
+  return tr(
+    `Editing rotation rule: ${name || rotationRuleEditingId.value}`,
+    `正在编辑轮班规则：${name || rotationRuleEditingId.value}`,
+  )
+})
+
+const rotationAssignmentEditingLabel = computed(() => {
+  const userId = rotationAssignmentForm.userId.trim()
+  const ruleId = rotationAssignmentForm.rotationRuleId.trim()
+  return tr(
+    `Editing rotation assignment: ${userId || rotationAssignmentEditingId.value} → ${ruleId || tr('no rotation selected', '未选择轮班')}`,
+    `正在编辑轮班分配：${userId || rotationAssignmentEditingId.value} → ${ruleId || tr('未选择轮班', '未选择轮班')}`,
+  )
+})
+
+const shiftEditingLabel = computed(() => {
+  const name = shiftForm.name.trim()
+  return tr(
+    `Editing shift: ${name || shiftEditingId.value}`,
+    `正在编辑班次：${name || shiftEditingId.value}`,
+  )
+})
+
+const assignmentEditingLabel = computed(() => {
+  const userId = assignmentForm.userId.trim()
+  const shiftId = assignmentForm.shiftId.trim()
+  return tr(
+    `Editing shift assignment: ${userId || assignmentEditingId.value} → ${shiftId || tr('no shift selected', '未选择班次')}`,
+    `正在编辑排班分配：${userId || assignmentEditingId.value} → ${shiftId || tr('未选择班次', '未选择班次')}`,
+  )
+})
 </script>
 
 <style scoped>
@@ -684,6 +734,11 @@ const rotationSequencePreviewText = computed(() => {
 }
 
 .attendance__field-hint {
+  color: #666;
+  font-size: 12px;
+}
+
+.attendance__section-meta {
   color: #666;
   font-size: 12px;
 }
