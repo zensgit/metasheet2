@@ -102,6 +102,10 @@ import {
   buildWorkbenchAuditQuery,
 } from './plm/plmWorkbenchSceneAudit'
 import {
+  buildWorkbenchSceneFocusQuery,
+  readWorkbenchSceneFocus,
+} from './plm/plmWorkbenchSceneFocus'
+import {
   applyFilterPreset,
   buildFilterPresetShareUrl,
   buildTeamFilterPresetShareUrl,
@@ -4330,7 +4334,7 @@ async function openRecommendedWorkbenchSceneAudit(scene: PlmRecommendedWorkbench
       scene,
       router.resolve({
         path: route.path,
-        query: { ...route.query, sceneFocus: scene.id },
+        query: buildWorkbenchSceneFocusQuery(route.query, scene.id),
         hash: route.hash,
       }).fullPath,
     ),
@@ -4752,9 +4756,9 @@ async function applyQueryState() {
   if (workbenchTeamViewParam !== undefined) {
     workbenchTeamViewQuery.value = workbenchTeamViewParam
   }
-  const sceneFocusParam = readQueryParam('sceneFocus')
-  if (sceneFocusParam !== undefined) {
-    sceneCatalogAutoFocusSceneId.value = sceneFocusParam
+  const sceneFocus = readWorkbenchSceneFocus(route.query)
+  if (sceneFocus) {
+    sceneCatalogAutoFocusSceneId.value = sceneFocus
   }
   const documentTeamViewParam = readQueryParam('documentTeamView')
   if (documentTeamViewParam !== undefined) {
