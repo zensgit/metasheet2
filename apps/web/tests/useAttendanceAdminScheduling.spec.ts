@@ -250,6 +250,74 @@ describe('useAttendanceAdminScheduling', () => {
     expect(setStatus).toHaveBeenCalledWith('Holiday name is required', 'error')
   })
 
+  it('keeps the selected holiday date when the form is reset after month-calendar edits', () => {
+    const adminForbidden = ref(false)
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch: vi.fn(),
+      defaultTimezone: 'UTC',
+    })
+
+    scheduling.holidayForm.date = '2026-04-03'
+    scheduling.holidayForm.name = 'Qingming'
+    scheduling.holidayForm.isWorkingDay = true
+    scheduling.holidayEditingId.value = 'holiday-3'
+
+    scheduling.resetHolidayForm()
+
+    expect(scheduling.holidayEditingId.value).toBeNull()
+    expect(scheduling.holidayForm.date).toBe('2026-04-03')
+    expect(scheduling.holidayForm.name).toBe('')
+    expect(scheduling.holidayForm.isWorkingDay).toBe(false)
+  })
+
+  it('keeps the saved holiday date instead of jumping back to today after save', async () => {
+    const adminForbidden = ref(false)
+    const setStatus = vi.fn()
+    const currentYear = new Date().getFullYear()
+    const apiFetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [
+            { id: 'holiday-9', date: '2026-04-03', name: 'Qingming', isWorkingDay: false },
+          ],
+        },
+      }))
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      getOrgId: () => 'org-calendar',
+      setStatus,
+    })
+
+    scheduling.holidayForm.date = '2026-04-03'
+    scheduling.holidayForm.name = 'Qingming'
+
+    await scheduling.saveHoliday()
+
+    expect(apiFetch).toHaveBeenNthCalledWith(1, '/api/attendance/holidays', {
+      method: 'POST',
+      body: JSON.stringify({
+        date: '2026-04-03',
+        name: 'Qingming',
+        isWorkingDay: false,
+        orgId: 'org-calendar',
+      }),
+    })
+    expect(apiFetch).toHaveBeenNthCalledWith(
+      2,
+      `/api/attendance/holidays?from=${currentYear}-01-01&to=${currentYear}-12-31&orgId=org-calendar`
+    )
+    expect(scheduling.holidayForm.date).toBe('2026-04-03')
+    expect(scheduling.holidayForm.name).toBe('')
+    expect(setStatus).toHaveBeenCalledWith('Holiday created.')
+  })
+
   it('marks admin forbidden and shows the direct 403 message for holiday saves', async () => {
     const adminForbidden = ref(false)
     const setStatus = vi.fn()

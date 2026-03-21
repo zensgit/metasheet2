@@ -257,7 +257,7 @@ export class MetaSheetServer {
                 }
                 return client.query(queryConfig.text, queryConfig.values)
               },
-              __rawClient: client,
+              __rawClient: (client as { __rawClient?: unknown }).__rawClient ?? client,
               commit: async () => {
                 // Commit is handled by the pool manager
               },

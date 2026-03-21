@@ -3,10 +3,10 @@
     <div class="attendance__admin-section-header">
       <h4>{{ tr('Import (DingTalk / Manual)', '导入（钉钉 / 手工）') }}</h4>
       <div class="attendance__admin-actions">
-        <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
+        <button type="button" class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
           {{ importLoading ? tr('Loading...', '加载中...') : tr('Load template', '加载模板') }}
         </button>
-        <button class="attendance__btn" :disabled="importLoading" @click="downloadImportTemplateCsv">
+        <button type="button" class="attendance__btn" :disabled="importLoading" @click="downloadImportTemplateCsv">
           {{ tr('Download CSV template', '下载 CSV 模板') }}
         </button>
       </div>

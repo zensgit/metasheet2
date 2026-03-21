@@ -408,8 +408,18 @@ components:
           type: array
           items:
             type: string
+        approver_user_ids:
+          type: array
+          deprecated: true
+          items:
+            type: string
         approverRoleIds:
           type: array
+          items:
+            type: string
+        approver_role_ids:
+          type: array
+          deprecated: true
           items:
             type: string
     AttendanceApprovalFlow:
@@ -453,19 +463,40 @@ components:
           type: string
         orgId:
           type: string
+        org_id:
+          type: string
+          deprecated: true
         userId:
           type: string
+        user_id:
+          type: string
+          deprecated: true
         rotationRuleId:
           type: string
+        rotation_rule_id:
+          type: string
+          deprecated: true
         startDate:
           type: string
           format: date
+        start_date:
+          type: string
+          format: date
+          deprecated: true
         endDate:
           type: string
           format: date
           nullable: true
+        end_date:
+          type: string
+          format: date
+          nullable: true
+          deprecated: true
         isActive:
           type: boolean
+        is_active:
+          type: boolean
+          deprecated: true
     AttendanceRotationAssignmentItem:
       type: object
       properties:
@@ -586,6 +617,21 @@ components:
           format: date-time
           nullable: true
         updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+    AttendanceGroupMember:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        groupId:
+          type: string
+        userId:
+          type: string
+        createdAt:
           type: string
           format: date-time
           nullable: true

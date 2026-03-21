@@ -1655,6 +1655,66 @@ async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows,
   })
 }
 
+const IMPORT_HEADER_DATE_KEYS = new Set(['日期', 'date', 'workdate'])
+const IMPORT_HEADER_CONTEXT_KEYS = new Set([
+  'userid',
+  '用户id',
+  'name',
+  '姓名',
+  '工号',
+  'empno',
+  'firstinat',
+  'lastoutat',
+  'status',
+  'attendancegroup',
+  'attendanceclass',
+  'shiftname',
+  '上班1打卡时间',
+  '下班1打卡时间',
+  '考勤结果',
+  '考勤组',
+  '班次',
+])
+
+function normalizeImportHeaderLookupKey(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '')
+}
+
+async function readImportCsvHeaderFromFile(csvPath, delimiter = ',') {
+  let header = []
+  const csvStream = fs.createReadStream(csvPath, { encoding: 'utf8' })
+  await iterateCsvRowsStreamAsync(csvStream, delimiter, async (rawRow) => {
+    const normalized = rawRow.map(normalizeCsvHeaderValue)
+    if (normalized.some((cell) => cell && String(cell).trim().length > 0)) {
+      header = normalized
+      return false
+    }
+    return true
+  })
+  return header
+}
+
+async function validateImportUploadCsvOrThrow({ csvPath, csvOptions }) {
+  const delimiter = csvOptions?.delimiter || ','
+  const header = await readImportCsvHeaderFromFile(csvPath, delimiter)
+  if (!header.length || header.every((value) => !value)) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'CSV header row not found')
+  }
+  const normalized = header.map(normalizeImportHeaderLookupKey).filter(Boolean)
+  const hasDateColumn = normalized.some((key) => IMPORT_HEADER_DATE_KEYS.has(key))
+  const hasContextColumn = normalized.some((key) => IMPORT_HEADER_CONTEXT_KEYS.has(key))
+  if (!hasDateColumn || !hasContextColumn) {
+    throw new HttpError(
+      400,
+      'VALIDATION_ERROR',
+      'CSV header must include a work date column and at least one user or attendance column'
+    )
+  }
+}
+
 function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
   const rows = []
   const result = iterateImportRowsFromCsv({
@@ -2528,6 +2588,86 @@ function normalizeMetadata(value) {
     }
   }
   return typeof value === 'object' ? value : {}
+}
+
+function normalizeObjectPayload(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+}
+
+function firstDefinedValue(...values) {
+  for (const value of values) {
+    if (value !== undefined) return value
+  }
+  return undefined
+}
+
+function normalizeGroupMembersPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    userId: firstDefinedValue(payload.userId, payload.user_id),
+    userIds: firstDefinedValue(payload.userIds, payload.user_ids),
+  }
+}
+
+function normalizeAssignmentPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    userId: firstDefinedValue(payload.userId, payload.user_id),
+    shiftId: firstDefinedValue(payload.shiftId, payload.shift_id),
+    startDate: firstDefinedValue(payload.startDate, payload.start_date),
+    endDate: firstDefinedValue(payload.endDate, payload.end_date),
+    isActive: firstDefinedValue(payload.isActive, payload.is_active),
+  }
+}
+
+function normalizeApprovalStepPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    approverUserIds: firstDefinedValue(payload.approverUserIds, payload.approver_user_ids),
+    approverRoleIds: firstDefinedValue(payload.approverRoleIds, payload.approver_role_ids),
+  }
+}
+
+function normalizeApprovalFlowPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    requestType: firstDefinedValue(payload.requestType, payload.request_type),
+    steps: Array.isArray(payload.steps) ? payload.steps.map(normalizeApprovalStepPayload) : payload.steps,
+    isActive: firstDefinedValue(payload.isActive, payload.is_active),
+  }
+}
+
+function normalizeRotationRulePayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    shiftSequence: firstDefinedValue(payload.shiftSequence, payload.shift_sequence),
+    isActive: firstDefinedValue(payload.isActive, payload.is_active),
+  }
+}
+
+function normalizeRotationAssignmentPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    userId: firstDefinedValue(payload.userId, payload.user_id),
+    rotationRuleId: firstDefinedValue(payload.rotationRuleId, payload.rotation_rule_id),
+    startDate: firstDefinedValue(payload.startDate, payload.start_date),
+    endDate: firstDefinedValue(payload.endDate, payload.end_date),
+    isActive: firstDefinedValue(payload.isActive, payload.is_active),
+  }
+}
+
+function normalizeRuleSetPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    isDefault: firstDefinedValue(payload.isDefault, payload.is_default),
+  }
 }
 
 function mapLeaveTypeRow(row) {
@@ -5079,7 +5219,7 @@ function shouldUseAttendanceImportCopyStdin({ client, totalRows }) {
 
 function encodeAttendanceImportCsvValue(value) {
   if (value === null || value === undefined) return '\\N'
-  const text = String(value)
+  const text = value instanceof Date ? value.toISOString() : String(value)
   if (text === '\\N') return '"\\N"'
   if (text.includes('"') || text.includes(',') || text.includes('\n') || text.includes('\r')) {
     return `"${text.replace(/"/g, '""')}"`
@@ -5246,9 +5386,17 @@ async function batchUpsertAttendanceRecordsStaging(client, rows, options = {}) {
   let stagedByCopy = false
   if (allowCopyStdin) {
     try {
+      await queryImportHeavy(client, 'SAVEPOINT attendance_import_records_stage_copy', [])
       stagedByCopy = await copyAttendanceImportRowsToStage(client, rows)
+      await queryImportHeavy(client, 'RELEASE SAVEPOINT attendance_import_records_stage_copy', [])
     } catch (error) {
       const message = error && error.message ? error.message : String(error)
+      try {
+        await queryImportHeavy(client, 'ROLLBACK TO SAVEPOINT attendance_import_records_stage_copy', [])
+        await queryImportHeavy(client, 'RELEASE SAVEPOINT attendance_import_records_stage_copy', [])
+      } catch (_rollbackError) {
+        // Ignore savepoint cleanup failures and let the outer transaction handler deal with them.
+      }
       console.warn(`[attendance-import] COPY FROM STDIN stage load failed, fallback to unnest: ${message}`)
       await queryImportHeavy(client, 'TRUNCATE attendance_import_records_stage', [])
       stagedByCopy = false
@@ -5446,9 +5594,17 @@ async function batchInsertAttendanceImportItemsStaging(client, { batchId, orgId,
   let stagedByCopy = false
   if (allowCopyStdin) {
     try {
+      await queryImportHeavy(client, 'SAVEPOINT attendance_import_items_stage_copy', [])
       stagedByCopy = await copyAttendanceImportItemsToStage(client, { batchId, orgId, items })
+      await queryImportHeavy(client, 'RELEASE SAVEPOINT attendance_import_items_stage_copy', [])
     } catch (error) {
       const message = error && error.message ? error.message : String(error)
+      try {
+        await queryImportHeavy(client, 'ROLLBACK TO SAVEPOINT attendance_import_items_stage_copy', [])
+        await queryImportHeavy(client, 'RELEASE SAVEPOINT attendance_import_items_stage_copy', [])
+      } catch (_rollbackError) {
+        // Ignore savepoint cleanup failures and let the outer transaction handler deal with them.
+      }
       console.warn(`[attendance-import] COPY FROM STDIN items stage load failed, fallback to unnest: ${message}`)
       await queryImportHeavy(client, 'TRUNCATE attendance_import_items_stage', [])
       stagedByCopy = false
@@ -10336,7 +10492,7 @@ module.exports = {
       'POST',
       '/api/attendance/approval-flows',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = approvalFlowCreateSchema.safeParse(req.body)
+        const parsed = approvalFlowCreateSchema.safeParse(normalizeApprovalFlowPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -10389,14 +10545,18 @@ module.exports = {
       'PUT',
       '/api/attendance/approval-flows/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = approvalFlowUpdateSchema.safeParse(req.body ?? {})
+        const parsed = approvalFlowUpdateSchema.safeParse(normalizeApprovalFlowPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
-        const flowId = req.params.id
+        const flowId = normalizeUuidString(req.params.id)
+        if (!flowId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -10459,7 +10619,11 @@ module.exports = {
       '/api/attendance/approval-flows/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const flowId = req.params.id
+        const flowId = normalizeUuidString(req.params.id)
+        if (!flowId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -10553,7 +10717,7 @@ module.exports = {
       'POST',
       '/api/attendance/rotation-rules',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = rotationRuleCreateSchema.safeParse(req.body)
+        const parsed = rotationRuleCreateSchema.safeParse(normalizeRotationRulePayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -10606,14 +10770,18 @@ module.exports = {
       'PUT',
       '/api/attendance/rotation-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = rotationRuleUpdateSchema.safeParse(req.body ?? {})
+        const parsed = rotationRuleUpdateSchema.safeParse(normalizeRotationRulePayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
-        const ruleId = req.params.id
+        const ruleId = normalizeUuidString(req.params.id)
+        if (!ruleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -10678,7 +10846,11 @@ module.exports = {
       '/api/attendance/rotation-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const ruleId = req.params.id
+        const ruleId = normalizeUuidString(req.params.id)
+        if (!ruleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -10772,16 +10944,21 @@ module.exports = {
       'POST',
       '/api/attendance/rotation-assignments',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = rotationAssignmentCreateSchema.safeParse(req.body)
+        const parsed = rotationAssignmentCreateSchema.safeParse(normalizeRotationAssignmentPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
+        const rotationRuleId = normalizeUuidString(parsed.data.rotationRuleId)
+        if (!rotationRuleId) {
+          respondInvalidUuid(res, 'rotationRuleId')
+          return
+        }
         const payload = {
           userId: parsed.data.userId,
-          rotationRuleId: parsed.data.rotationRuleId,
+          rotationRuleId,
           startDate: parsed.data.startDate,
           endDate: parsed.data.endDate ?? null,
           isActive: parsed.data.isActive ?? true,
@@ -10832,14 +11009,18 @@ module.exports = {
       'PUT',
       '/api/attendance/rotation-assignments/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = rotationAssignmentUpdateSchema.safeParse(req.body ?? {})
+        const parsed = rotationAssignmentUpdateSchema.safeParse(normalizeRotationAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
-        const assignmentId = req.params.id
+        const assignmentId = normalizeUuidString(req.params.id)
+        if (!assignmentId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -10852,9 +11033,16 @@ module.exports = {
           }
 
           const existing = existingRows[0]
+          const nextRotationRuleId = parsed.data.rotationRuleId !== undefined
+            ? normalizeUuidString(parsed.data.rotationRuleId)
+            : existing.rotation_rule_id
+          if (!nextRotationRuleId) {
+            respondInvalidUuid(res, 'rotationRuleId')
+            return
+          }
           const payload = {
             userId: parsed.data.userId ?? existing.user_id,
-            rotationRuleId: parsed.data.rotationRuleId ?? existing.rotation_rule_id,
+            rotationRuleId: nextRotationRuleId,
             startDate: parsed.data.startDate ?? existing.start_date,
             endDate: parsed.data.endDate ?? existing.end_date,
             isActive: parsed.data.isActive ?? existing.is_active,
@@ -10910,7 +11098,11 @@ module.exports = {
       '/api/attendance/rotation-assignments/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const assignmentId = req.params.id
+        const assignmentId = normalizeUuidString(req.params.id)
+        if (!assignmentId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -11304,7 +11496,7 @@ module.exports = {
       'POST',
       '/api/attendance/rule-sets',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = ruleSetCreateSchema.safeParse(req.body)
+        const parsed = ruleSetCreateSchema.safeParse(normalizeRuleSetPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -11382,14 +11574,18 @@ module.exports = {
       'PUT',
       '/api/attendance/rule-sets/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = ruleSetUpdateSchema.safeParse(req.body ?? {})
+        const parsed = ruleSetUpdateSchema.safeParse(normalizeRuleSetPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
-        const ruleSetId = req.params.id
+        const ruleSetId = normalizeUuidString(req.params.id)
+        if (!ruleSetId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -11474,7 +11670,11 @@ module.exports = {
       '/api/attendance/rule-sets/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const ruleSetId = req.params.id
+        const ruleSetId = normalizeUuidString(req.params.id)
+        if (!ruleSetId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -11684,6 +11884,8 @@ module.exports = {
 	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'CSV must include at least 1 data row' } })
 	            return
 	          }
+
+	          await validateImportUploadCsvOrThrow({ csvPath: paths.csvPath })
 
 	          const meta = {
 	            fileId,
@@ -16156,7 +16358,11 @@ module.exports = {
       '/api/attendance/groups/:id/members',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const groupId = req.params.id
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
@@ -16201,14 +16407,18 @@ module.exports = {
           userIds: z.array(z.string()).optional(),
         })
 
-        const parsed = schema.safeParse(req.body ?? {})
+        const parsed = schema.safeParse(normalizeGroupMembersPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
-        const groupId = req.params.id
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
         const list = Array.isArray(parsed.data.userIds) ? parsed.data.userIds : []
         const userIds = [
           ...list,
@@ -16251,7 +16461,11 @@ module.exports = {
       '/api/attendance/groups/:id/members/:userId',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const groupId = req.params.id
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
         const userId = req.params.userId
         try {
           const rows = await db.query(
@@ -16541,7 +16755,9 @@ module.exports = {
 
         const parsed = schema.safeParse({
           orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
-          userId: typeof req.query.userId === 'string' ? req.query.userId : undefined,
+          userId: typeof req.query.userId === 'string'
+            ? req.query.userId
+            : (typeof req.query.user_id === 'string' ? req.query.user_id : undefined),
         })
 
         if (!parsed.success) {
@@ -16610,20 +16826,25 @@ module.exports = {
       'POST',
       '/api/attendance/assignments',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = assignmentCreateSchema.safeParse(req.body)
+        const parsed = assignmentCreateSchema.safeParse(normalizeAssignmentPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
+        const shiftId = normalizeUuidString(parsed.data.shiftId)
+        if (!shiftId) {
+          respondInvalidUuid(res, 'shiftId')
+          return
+        }
         const normalizedEndDate = typeof parsed.data.endDate === 'string' && parsed.data.endDate.trim().length > 0
           ? parsed.data.endDate
           : null
 
         const payload = {
           userId: parsed.data.userId,
-          shiftId: parsed.data.shiftId,
+          shiftId,
           startDate: parsed.data.startDate,
           endDate: normalizedEndDate,
           isActive: parsed.data.isActive ?? true,
@@ -16679,14 +16900,18 @@ module.exports = {
       'PUT',
       '/api/attendance/assignments/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = assignmentUpdateSchema.safeParse(req.body ?? {})
+        const parsed = assignmentUpdateSchema.safeParse(normalizeAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
-        const assignmentId = req.params.id
+        const assignmentId = normalizeUuidString(req.params.id)
+        if (!assignmentId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -16699,13 +16924,20 @@ module.exports = {
           }
 
           const existing = existingRows[0]
+          const nextShiftId = parsed.data.shiftId !== undefined
+            ? normalizeUuidString(parsed.data.shiftId)
+            : existing.shift_id
+          if (!nextShiftId) {
+            respondInvalidUuid(res, 'shiftId')
+            return
+          }
           const normalizedEndDate = typeof parsed.data.endDate === 'string'
             ? (parsed.data.endDate.trim().length > 0 ? parsed.data.endDate : null)
             : parsed.data.endDate
 
           const payload = {
             userId: parsed.data.userId ?? existing.user_id,
-            shiftId: parsed.data.shiftId ?? existing.shift_id,
+            shiftId: nextShiftId,
             startDate: parsed.data.startDate ?? existing.start_date,
             endDate: normalizedEndDate ?? existing.end_date,
             isActive: parsed.data.isActive ?? existing.is_active,
@@ -16766,7 +16998,11 @@ module.exports = {
       '/api/attendance/assignments/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const assignmentId = req.params.id
+        const assignmentId = normalizeUuidString(req.params.id)
+        if (!assignmentId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(

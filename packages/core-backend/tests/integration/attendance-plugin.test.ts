@@ -97,6 +97,56 @@ function expectChunkConfigMatchesEngine(engine: unknown, chunkConfig: any) {
   }
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+async function waitForImportJobCompletion(
+  baseUrl: string,
+  token: string,
+  jobId: string,
+  {
+    attempts = 240,
+    intervalMs = 50,
+    failureMessage = 'async import job failed',
+  }: {
+    attempts?: number
+    intervalMs?: number
+    failureMessage?: string
+  } = {}
+): Promise<any> {
+  let lastJobData: any = null
+
+  for (let index = 0; index < attempts; index += 1) {
+    const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${jobId}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    })
+    expect(jobRes.status).toBe(200)
+
+    lastJobData = (jobRes.body as { data?: any } | undefined)?.data
+    const status = String(lastJobData?.status || '')
+    if (status === 'completed') {
+      return lastJobData
+    }
+    if (status === 'failed') {
+      throw new Error(String(lastJobData?.error || failureMessage))
+    }
+
+    // eslint-disable-next-line no-await-in-loop
+    await delay(intervalMs)
+  }
+
+  throw new Error(
+    `Import job ${jobId} did not complete within ${(attempts * intervalMs) / 1000}s (last status: ${String(lastJobData?.status || 'unknown')})`
+  )
+}
+
 describe('Attendance Plugin Integration', () => {
   let server: MetaSheetServer | undefined
   let baseUrl: string | undefined
@@ -1161,6 +1211,193 @@ describe('Attendance Plugin Integration', () => {
     expect(assignmentRow?.assignment?.shift_id).toBe(shiftId)
     expect(assignmentRow?.shift?.workStartTime).toBe('08:30:00')
     expect(assignmentRow?.shift?.work_start_time).toBe('08:30:00')
+  })
+
+  it('accepts legacy snake_case payload aliases for attendance admin create routes and rejects malformed ids with 400', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-snake-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Snake Shift ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        workingDays: [1, 2, 3, 4, 5],
+      }),
+    })
+    expect(shiftRes.status).toBe(201)
+    const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(shiftId).toBeTruthy()
+    if (!shiftId) return
+
+    const groupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Snake Group ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+      }),
+    })
+    expect(groupRes.status).toBe(200)
+    const groupId = (groupRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(groupId).toBeTruthy()
+    if (!groupId) return
+
+    const groupMemberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ user_id: testUserId }),
+    })
+    expect(groupMemberRes.status).toBe(200)
+
+    const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        user_id: testUserId,
+        shift_id: shiftId,
+        start_date: '2026-03-20',
+        end_date: null,
+        is_active: true,
+      }),
+    })
+    expect(assignmentRes.status).toBe(201)
+    const assignmentId = (assignmentRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+    expect(assignmentId).toBeTruthy()
+
+    const approvalFlowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Snake Approval ${runSuffix}`,
+        request_type: 'missed_check_in',
+        steps: [
+          {
+            name: '直属主管',
+            approver_user_ids: [testUserId],
+          },
+        ],
+        is_active: true,
+      }),
+    })
+    expect(approvalFlowRes.status).toBe(201)
+
+    const rotationRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Snake Rotation ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        shift_sequence: [shiftId],
+        is_active: true,
+      }),
+    })
+    expect(rotationRuleRes.status).toBe(201)
+    const rotationRuleId = (rotationRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(rotationRuleId).toBeTruthy()
+    if (!rotationRuleId) return
+
+    const rotationAssignmentRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        user_id: testUserId,
+        rotation_rule_id: rotationRuleId,
+        start_date: '2026-03-20',
+        end_date: null,
+        is_active: true,
+      }),
+    })
+    expect(rotationAssignmentRes.status).toBe(201)
+
+    const ruleSetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Snake Rule Set ${runSuffix}`,
+        scope: 'org',
+        version: 1,
+        is_default: false,
+        config: { source: 'manual' },
+      }),
+    })
+    expect(ruleSetRes.status).toBe(201)
+
+    const invalidGroupMembersRes = await requestJson(`${baseUrl}/api/attendance/groups/not-a-uuid/members`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(invalidGroupMembersRes.status).toBe(400)
+    const invalidAssignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments/not-a-uuid`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(invalidAssignmentRes.status).toBe(400)
+  })
+
+  it('rejects invalid CSV upload payloads with 400 before creating upload handles', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-invalid-csv&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const invalidCsv = 'foo,bar\\n1,2\\n'
+    const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=default&filename=invalid.csv`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/csv',
+      },
+      body: invalidCsv,
+    })
+
+    expect(uploadRes.status).toBe(400)
+    const body = (uploadRes.body as { ok?: boolean; error?: { code?: string; message?: string } } | undefined) ?? {}
+    expect(body.ok).toBe(false)
+    expect(body.error?.code).toBe('VALIDATION_ERROR')
+    expect(String(body.error?.message ?? '')).toMatch(/header|data row/i)
   })
 
   it('keeps /api/health public for probes', async () => {
@@ -2286,7 +2523,7 @@ describe('Attendance Plugin Integration', () => {
     expect(String(rowAfterRollback?.id ?? '')).toBe(recordIdBeforeUpdate)
   })
 
-  it('auto-switches to staging upsert strategy for bulk imports when copy threshold is reached', async () => {
+  it('auto-switches to staging upsert strategy for bulk async imports when copy threshold is reached', async () => {
     if (!baseUrl) return
 
     const userId = `attendance-staging-${Date.now().toString(36)}`
@@ -2323,7 +2560,7 @@ describe('Attendance Plugin Integration', () => {
       }
     })
 
-    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit-async`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -2339,18 +2576,24 @@ describe('Attendance Plugin Integration', () => {
       }),
     })
     expect(commitRes.status).toBe(200)
-    const commitData = (commitRes.body as { data?: any } | undefined)?.data
-    expect(commitData?.batchId).toBeTruthy()
-    expect(commitData?.engine).toBe('bulk')
-    expect(Number(commitData?.processedRows ?? 0)).toBeGreaterThanOrEqual(rows.length)
-    expect(Number(commitData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
-    expect(Number(commitData?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
-    expect(commitData?.recordUpsertStrategy).toBe('staging')
-    expect(commitData?.meta?.recordUpsertStrategy).toBe('staging')
-    expect(commitData?.meta?.itemsInsertStrategy).toBe('staging')
+    const initialJob = (commitRes.body as { data?: { job?: any } } | undefined)?.data?.job
+    const jobId = String(initialJob?.id || '')
+    expect(jobId).toBeTruthy()
+
+    const completedJob = await waitForImportJobCompletion(baseUrl, token, jobId, {
+      failureMessage: 'async staging job failed',
+    })
+    const batchId = String(completedJob?.batchId || '')
+    expect(batchId).toBeTruthy()
+    expect(completedJob?.engine).toBe('bulk')
+    expect(Number(completedJob?.processedRows ?? 0)).toBeGreaterThanOrEqual(rows.length)
+    expect(Number(completedJob?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+    expect(Number(completedJob?.elapsedMs ?? -1)).toBeGreaterThanOrEqual(0)
+    expect(completedJob?.recordUpsertStrategy).toBe('staging')
+    expect(completedJob?.itemsInsertStrategy).toBe('staging')
 
     const batchDetailRes = await requestJson(
-      `${baseUrl}/api/attendance/import/batches/${encodeURIComponent(String(commitData.batchId))}`,
+      `${baseUrl}/api/attendance/import/batches/${encodeURIComponent(batchId)}`,
       {
         method: 'GET',
         headers: {
@@ -2364,7 +2607,7 @@ describe('Attendance Plugin Integration', () => {
     expect(batchMeta?.itemsInsertStrategy).toBe('staging')
 
     const batchItemsRes = await requestJson(
-      `${baseUrl}/api/attendance/import/batches/${encodeURIComponent(String(commitData.batchId))}/items?pageSize=1`,
+      `${baseUrl}/api/attendance/import/batches/${encodeURIComponent(batchId)}/items?pageSize=1`,
       {
         method: 'GET',
         headers: {
@@ -2376,6 +2619,16 @@ describe('Attendance Plugin Integration', () => {
     const batchItemsData = (batchItemsRes.body as { data?: { items?: any[]; total?: number } } | undefined)?.data
     expect(Number(batchItemsData?.total ?? 0)).toBe(rows.length)
     expect(String(batchItemsData?.items?.[0]?.recordId || '')).toBeTruthy()
+
+    const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(rollbackRes.status).toBe(200)
   })
 
   it('deduplicates concurrent import commits with the same idempotencyKey', async () => {
@@ -2699,31 +2952,10 @@ describe('Attendance Plugin Integration', () => {
     const jobId = String(initialJob?.id || '')
     expect(jobId).toBeTruthy()
 
-    let batchId = ''
-    let completedJob: any = null
-    for (let i = 0; i < 100; i += 1) {
-      const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${jobId}`, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-      })
-      expect(jobRes.status).toBe(200)
-      const jobData = (jobRes.body as { data?: any } | undefined)?.data
-      const status = String(jobData?.status || '')
-      if (status === 'completed') {
-        batchId = String(jobData?.batchId || '')
-        completedJob = jobData
-        break
-      }
-      if (status === 'failed') {
-        throw new Error(String(jobData?.error || 'async duplicate job failed'))
-      }
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-
+    const completedJob = await waitForImportJobCompletion(baseUrl, token, jobId, {
+      failureMessage: 'async duplicate job failed',
+    })
+    const batchId = String(completedJob?.batchId || '')
     expect(batchId).toBeTruthy()
     expect(completedJob).toBeTruthy()
     expect(completedJob?.engine).toBe('bulk')
