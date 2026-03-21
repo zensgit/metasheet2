@@ -330,6 +330,8 @@
         {{ tr('Preview lane', '预览路径') }}: <strong>{{ formatImportLane(importPreviewLane) }}</strong>
         · {{ tr('Import lane', '导入路径') }}: <strong>{{ formatImportLane(importCommitLane) }}</strong>
       </div>
+      <div class="attendance__field-hint">{{ importPreviewLaneHint }}</div>
+      <div class="attendance__field-hint">{{ importCommitLaneHint }}</div>
       <div>
         {{ tr('Mapping profile', '映射配置') }}: <strong>{{ importProfileSummary }}</strong>
       </div>
@@ -495,6 +497,8 @@ interface ImportWorkflowBindings {
   importPayloadRowCountHint: ComputedRef<number | null>
   importPreviewLane: ComputedRef<AttendanceImportPreviewLane>
   importCommitLane: ComputedRef<AttendanceImportCommitLane>
+  importPreviewLaneHint: ComputedRef<string>
+  importCommitLaneHint: ComputedRef<string>
   importCsvHeaderRow: Ref<string>
   importCsvDelimiter: Ref<string>
   importUserMapFileName: Ref<string>
@@ -561,6 +565,8 @@ const importCsvFileExpiresAt = props.workflow.importCsvFileExpiresAt
 const importPayloadRowCountHint = props.workflow.importPayloadRowCountHint
 const importPreviewLane = props.workflow.importPreviewLane
 const importCommitLane = props.workflow.importCommitLane
+const importPreviewLaneHint = props.workflow.importPreviewLaneHint
+const importCommitLaneHint = props.workflow.importCommitLaneHint
 const importCsvHeaderRow = props.workflow.importCsvHeaderRow
 const importCsvDelimiter = props.workflow.importCsvDelimiter
 const importUserMapFileName = props.workflow.importUserMapFileName

@@ -352,6 +352,12 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(workflow.importPayloadRowCountHint.value).toBe(1)
     expect(workflow.importPreviewLane.value).toBe('sync')
     expect(workflow.importCommitLane.value).toBe('sync')
+    expect(workflow.importPreviewLaneHint.value).toBe(
+      'Preview will stay in one request because 1 rows are below the chunk threshold (10000).'
+    )
+    expect(workflow.importCommitLaneHint.value).toBe(
+      'Import will stay synchronous because 1 rows are below the async threshold (50000).'
+    )
     expect(setStatus).toHaveBeenCalledWith('CSV loaded: attendance.csv', 'info', undefined)
   })
 
@@ -394,6 +400,12 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(workflow.importPayloadRowCountHint.value).toBe(60000)
     expect(workflow.importPreviewLane.value).toBe('async')
     expect(workflow.importCommitLane.value).toBe('async')
+    expect(workflow.importPreviewLaneHint.value).toBe(
+      'Preview will queue an async job because 60000 rows meet the async threshold (50000).'
+    )
+    expect(workflow.importCommitLaneHint.value).toBe(
+      'Import will queue an async job because 60000 rows meet the async threshold (50000).'
+    )
     expect(setStatus).toHaveBeenCalledWith('CSV uploaded: attendance.csv (60000 rows).', 'info', undefined)
   })
 
@@ -418,6 +430,12 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(workflow.importPayloadRowCountHint.value).toBe(12)
     expect(workflow.importPreviewLane.value).toBe('chunked')
     expect(workflow.importCommitLane.value).toBe('sync')
+    expect(workflow.importPreviewLaneHint.value).toBe(
+      'Preview will split into about 3 chunks because 12 rows exceed the chunk threshold (10).'
+    )
+    expect(workflow.importCommitLaneHint.value).toBe(
+      'Import will stay synchronous because 12 rows are below the async threshold (100).'
+    )
   })
 
   it('clears stale preview state and reports through setStatusFromError on preview failure', async () => {

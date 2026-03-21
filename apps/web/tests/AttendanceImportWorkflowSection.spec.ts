@@ -33,6 +33,8 @@ interface ImportWorkflowBindings {
   importPayloadRowCountHint: ComputedRef<number | null>
   importPreviewLane: ComputedRef<AttendanceImportPreviewLane>
   importCommitLane: ComputedRef<AttendanceImportCommitLane>
+  importPreviewLaneHint: ComputedRef<string>
+  importCommitLaneHint: ComputedRef<string>
   importCsvHeaderRow: Ref<string>
   importCsvDelimiter: Ref<string>
   importUserMapFileName: Ref<string>
@@ -97,6 +99,8 @@ function createWorkflowBindings(overrides: Partial<ImportWorkflowBindings> = {})
     importPayloadRowCountHint: computed(() => 120),
     importPreviewLane: computed(() => 'chunked'),
     importCommitLane: computed(() => 'async'),
+    importPreviewLaneHint: computed(() => 'Preview will split into about 24 chunks because 120 rows exceed the chunk threshold (100).'),
+    importCommitLaneHint: computed(() => 'Import will stay synchronous because 120 rows are below the async threshold (1000).'),
     importCsvHeaderRow: ref(''),
     importCsvDelimiter: ref(','),
     importUserMapFileName: ref(''),
@@ -175,6 +179,8 @@ describe('AttendanceImportWorkflowSection', () => {
       importPayloadRowCountHint: computed(() => 240),
       importPreviewLane: computed(() => 'chunked'),
       importCommitLane: computed(() => 'async'),
+      importPreviewLaneHint: computed(() => 'Preview will split into about 3 chunks because 240 rows exceed the chunk threshold (100).'),
+      importCommitLaneHint: computed(() => 'Import will queue an async job because 240 rows meet the async threshold (200).'),
       importUserMapCount: computed(() => 18),
       importUserMapKeyField: ref('empNo'),
       importUserMapSourceFields: ref('工号, 姓名'),
@@ -208,6 +214,8 @@ describe('AttendanceImportWorkflowSection', () => {
     expect(container!.textContent).toContain('Estimated rows: 240')
     expect(container!.textContent).toContain('Preview lane: chunked preview')
     expect(container!.textContent).toContain('Import lane: async queue')
+    expect(container!.textContent).toContain('Preview will split into about 3 chunks because 240 rows exceed the chunk threshold (100).')
+    expect(container!.textContent).toContain('Import will queue an async job because 240 rows meet the async threshold (200).')
     expect(container!.textContent).toContain('Mapping profile: DingTalk (2 required fields)')
     expect(container!.textContent).toContain('User map: 18 entries ready · key empNo · source 工号, 姓名')
     expect(container!.textContent).toContain('Group sync: auto-create groups · rule set Ops Rules · timezone Asia/Shanghai')
@@ -218,6 +226,8 @@ describe('AttendanceImportWorkflowSection', () => {
       importPayloadRowCountHint: computed(() => 8),
       importPreviewLane: computed(() => 'sync'),
       importCommitLane: computed(() => 'sync'),
+      importPreviewLaneHint: computed(() => 'Preview will stay in one request because 8 rows are below the chunk threshold (100).'),
+      importCommitLaneHint: computed(() => 'Import will stay synchronous because 8 rows are below the async threshold (1000).'),
     })
 
     app = createApp(AttendanceImportWorkflowSection, {
@@ -242,6 +252,8 @@ describe('AttendanceImportWorkflowSection', () => {
     expect(container!.textContent).toContain('Input channel: JSON payload')
     expect(container!.textContent).toContain('Preview lane: sync request')
     expect(container!.textContent).toContain('Import lane: sync request')
+    expect(container!.textContent).toContain('Preview will stay in one request because 8 rows are below the chunk threshold (100).')
+    expect(container!.textContent).toContain('Import will stay synchronous because 8 rows are below the async threshold (1000).')
     expect(container!.textContent).toContain('Mapping profile: manual payload only')
     expect(container!.textContent).toContain('User map: not configured')
     expect(container!.textContent).toContain('Group sync: disabled')

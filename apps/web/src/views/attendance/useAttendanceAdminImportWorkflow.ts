@@ -985,6 +985,53 @@ export function useAttendanceAdminImportWorkflow({
     return resolveCommitLane(importPayloadRowCountHint.value, importThresholds)
   })
 
+  const importPreviewLaneHint = computed(() => {
+    const rows = importPayloadRowCountHint.value
+    if (rows === null) {
+      return tr(
+        'Preview lane will update after row count can be estimated.',
+        '拿到预计行数后会更新预览路径说明。',
+      )
+    }
+    if (importPreviewLane.value === 'async') {
+      return tr(
+        `Preview will queue an async job because ${rows} rows meet the async threshold (${importThresholds.previewAsyncThreshold}).`,
+        `预览会进入异步任务，因为 ${rows} 行已达到异步阈值（${importThresholds.previewAsyncThreshold}）。`,
+      )
+    }
+    if (importPreviewLane.value === 'chunked') {
+      const chunkCount = Math.max(1, Math.ceil(rows / importThresholds.previewChunkSize))
+      return tr(
+        `Preview will split into about ${chunkCount} chunks because ${rows} rows exceed the chunk threshold (${importThresholds.previewChunkThreshold}).`,
+        `预览会拆成约 ${chunkCount} 个分块，因为 ${rows} 行已超过分块阈值（${importThresholds.previewChunkThreshold}）。`,
+      )
+    }
+    return tr(
+      `Preview will stay in one request because ${rows} rows are below the chunk threshold (${importThresholds.previewChunkThreshold}).`,
+      `预览会保持单次请求，因为 ${rows} 行低于分块阈值（${importThresholds.previewChunkThreshold}）。`,
+    )
+  })
+
+  const importCommitLaneHint = computed(() => {
+    const rows = importPayloadRowCountHint.value
+    if (rows === null) {
+      return tr(
+        'Import lane will update after row count can be estimated.',
+        '拿到预计行数后会更新导入路径说明。',
+      )
+    }
+    if (importCommitLane.value === 'async') {
+      return tr(
+        `Import will queue an async job because ${rows} rows meet the async threshold (${importThresholds.commitAsyncThreshold}).`,
+        `导入会进入异步任务，因为 ${rows} 行已达到异步阈值（${importThresholds.commitAsyncThreshold}）。`,
+      )
+    }
+    return tr(
+      `Import will stay synchronous because ${rows} rows are below the async threshold (${importThresholds.commitAsyncThreshold}).`,
+      `导入会保持同步，因为 ${rows} 行低于异步阈值（${importThresholds.commitAsyncThreshold}）。`,
+    )
+  })
+
   const selectedImportProfileGuide = computed(() => buildAttendanceImportProfileGuide(selectedImportProfile.value))
 
   const importAsyncJobTelemetryText = computed(() => {
@@ -2189,6 +2236,8 @@ export function useAttendanceAdminImportWorkflow({
     importPayloadRowCountHint,
     importPreviewLane,
     importCommitLane,
+    importPreviewLaneHint,
+    importCommitLaneHint,
     importCsvHeaderRow,
     importCsvDelimiter,
     importUserMapFile,
