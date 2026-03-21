@@ -23,7 +23,7 @@ export function buildPlmAuditTeamViewLogState(
     page: 1,
     q: view.id,
     actorId: '',
-    kind: view.kind,
+    kind: view.kind || 'audit',
     action,
     resourceType: getAuditResourceType(action),
     from: '',
