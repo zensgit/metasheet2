@@ -247,7 +247,75 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(payload.source).toBe('manual')
     expect(payload.mode).toBe('override')
     expect(payload.csvFileId).toBeUndefined()
+    expect(workflow.importPayloadRowCountHint.value).toBe(1)
+    expect(workflow.importPreviewLane.value).toBe('sync')
+    expect(workflow.importCommitLane.value).toBe('sync')
     expect(setStatus).toHaveBeenCalledWith('CSV loaded: attendance.csv', 'info', undefined)
+  })
+
+  it('uploads a large CSV file and switches preview/import lanes to async', async () => {
+    const file = new File(['userId,workDate\nu-1,2026-03-12\n'], 'attendance.csv', { type: 'text/csv' })
+    const { workflow, apiFetch, setStatus } = createWorkflow({
+      readImportDebugOptions: () => ({
+        forceUploadCsv: true,
+        forceAsyncImport: false,
+        forceTimeoutOnce: false,
+        pollIntervalMs: null,
+        pollTimeoutMs: null,
+      }),
+      apiFetch: vi.fn(async (input: string) => {
+        expect(input).toContain('/api/attendance/import/upload?')
+        return jsonResponse(201, {
+          ok: true,
+          data: {
+            fileId: 'csv-file-1',
+            rowCount: 60000,
+            bytes: 1024,
+            expiresAt: '2026-03-12T10:00:00.000Z',
+          },
+        })
+      }),
+    })
+
+    workflow.importForm.payload = JSON.stringify({ source: 'manual' }, null, 2)
+    workflow.setImportCsvFile(file)
+
+    await workflow.applyImportCsvFile()
+
+    const payload = JSON.parse(workflow.importForm.payload)
+    expect(apiFetch).toHaveBeenCalledTimes(1)
+    expect(payload.csvFileId).toBe('csv-file-1')
+    expect(payload.csvText).toBeUndefined()
+    expect(workflow.importCsvFileId.value).toBe('csv-file-1')
+    expect(workflow.importCsvFileRowCountHint.value).toBe(60000)
+    expect(workflow.importCsvFileExpiresAt.value).toBe('2026-03-12T10:00:00.000Z')
+    expect(workflow.importPayloadRowCountHint.value).toBe(60000)
+    expect(workflow.importPreviewLane.value).toBe('async')
+    expect(workflow.importCommitLane.value).toBe('async')
+    expect(setStatus).toHaveBeenCalledWith('CSV uploaded: attendance.csv (60000 rows).', 'info', undefined)
+  })
+
+  it('marks large inline rows payloads as chunked preview while keeping sync commit below async threshold', () => {
+    const { workflow } = createWorkflow({
+      thresholds: {
+        previewChunkThreshold: 10,
+        previewChunkSize: 5,
+        previewAsyncThreshold: 50,
+        commitAsyncThreshold: 100,
+      },
+    })
+
+    workflow.importForm.payload = JSON.stringify({
+      source: 'manual',
+      rows: Array.from({ length: 12 }, (_, index) => ({
+        userId: `u-${index + 1}`,
+        workDate: '2026-03-12',
+      })),
+    })
+
+    expect(workflow.importPayloadRowCountHint.value).toBe(12)
+    expect(workflow.importPreviewLane.value).toBe('chunked')
+    expect(workflow.importCommitLane.value).toBe('sync')
   })
 
   it('clears stale preview state and reports through setStatusFromError on preview failure', async () => {

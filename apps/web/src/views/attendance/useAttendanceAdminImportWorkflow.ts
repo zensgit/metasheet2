@@ -29,6 +29,8 @@ type CreateApiErrorFn = (
 
 export type AttendanceImportMode = 'override' | 'merge'
 export type AttendanceImportStatusContext = 'import-preview' | 'import-run'
+export type AttendanceImportPreviewLane = 'sync' | 'chunked' | 'async'
+export type AttendanceImportCommitLane = 'sync' | 'async'
 
 export interface AttendanceImportStatusMeta {
   hint?: string
@@ -169,6 +171,40 @@ export interface AttendanceImportThresholds {
   previewChunkSize: number
   previewAsyncThreshold: number
   commitAsyncThreshold: number
+}
+
+function resolvePreviewLane(
+  payload: Record<string, any>,
+  rowCountHint: number | null,
+  thresholds: AttendanceImportThresholds,
+): AttendanceImportPreviewLane {
+  if (rowCountHint && rowCountHint >= thresholds.previewAsyncThreshold) {
+    return 'async'
+  }
+
+  const inlineRows = Array.isArray(payload.rows)
+    ? payload.rows.length
+    : Array.isArray(payload.entries)
+      ? payload.entries.length
+      : typeof payload.csvText === 'string' && payload.csvText.trim().length > 0
+        ? rowCountHint
+        : null
+
+  if (inlineRows && inlineRows >= thresholds.previewChunkThreshold) {
+    return 'chunked'
+  }
+
+  return 'sync'
+}
+
+function resolveCommitLane(
+  rowCountHint: number | null,
+  thresholds: AttendanceImportThresholds,
+): AttendanceImportCommitLane {
+  if (rowCountHint && rowCountHint >= thresholds.commitAsyncThreshold) {
+    return 'async'
+  }
+  return 'sync'
 }
 
 export interface UseAttendanceAdminImportWorkflowOptions {
@@ -333,6 +369,32 @@ function splitListInput(value: string): string[] {
     .split(',')
     .map(item => item.trim())
     .filter(Boolean)
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map(item => String(item ?? '').trim()).filter(Boolean)
+  }
+  if (typeof value === 'string') {
+    return splitListInput(value)
+  }
+  return []
+}
+
+function normalizeImportGroupSyncConfig(value: unknown): {
+  autoCreate: boolean
+  autoAssignMembers: boolean
+  ruleSetId: string
+  timezone: string
+} | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const groupSync = value as Record<string, unknown>
+  return {
+    autoCreate: groupSync.autoCreate === true,
+    autoAssignMembers: groupSync.autoAssignMembers === true,
+    ruleSetId: normalizeIdentifier(groupSync.ruleSetId) ?? '',
+    timezone: normalizeIdentifier(groupSync.timezone) ?? '',
+  }
 }
 
 export function normalizeAttendanceImportUserMapPayload(
@@ -907,6 +969,22 @@ export function useAttendanceAdminImportWorkflow({
     return buildAttendanceImportTemplateGuide(payloadExample, selectedImportProfile.value)
   })
 
+  const importPayloadRowCountHint = computed(() => {
+    const payload = buildImportPayload()
+    if (!payload) return null
+    return estimateImportRowCount(payload)
+  })
+
+  const importPreviewLane = computed<AttendanceImportPreviewLane>(() => {
+    const payload = buildImportPayload()
+    if (!payload) return 'sync'
+    return resolvePreviewLane(payload, importPayloadRowCountHint.value, importThresholds)
+  })
+
+  const importCommitLane = computed<AttendanceImportCommitLane>(() => {
+    return resolveCommitLane(importPayloadRowCountHint.value, importThresholds)
+  })
+
   const selectedImportProfileGuide = computed(() => buildAttendanceImportProfileGuide(selectedImportProfile.value))
 
   const importAsyncJobTelemetryText = computed(() => {
@@ -1039,11 +1117,13 @@ export function useAttendanceAdminImportWorkflow({
     if (Array.isArray(payload.rows)) return payload.rows.length
     if (Array.isArray(payload.entries)) return payload.entries.length
     if (typeof payload.csvText === 'string') {
-      let lines = 0
-      for (let i = 0; i < payload.csvText.length; i += 1) {
-        if (payload.csvText[i] === '\n') lines += 1
-      }
-      return Math.max(0, lines)
+      const records = splitCsvRecords(payload.csvText)
+      if (records.length === 0) return 0
+      const headerRowIndex = Number((payload.csvOptions as Record<string, unknown> | undefined)?.headerRowIndex)
+      const headerOffset = Number.isFinite(headerRowIndex) && headerRowIndex >= 0
+        ? Math.trunc(headerRowIndex) + 1
+        : 1
+      return Math.max(0, records.length - headerOffset)
     }
     return null
   }
@@ -2058,6 +2138,9 @@ export function useAttendanceAdminImportWorkflow({
     importCsvFileId,
     importCsvFileRowCountHint,
     importCsvFileExpiresAt,
+    importPayloadRowCountHint,
+    importPreviewLane,
+    importCommitLane,
     importCsvHeaderRow,
     importCsvDelimiter,
     importUserMapFile,

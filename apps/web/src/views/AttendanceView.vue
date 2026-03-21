@@ -294,6 +294,7 @@
             />
 
             <AttendanceImportWorkflowSection
+              :format-date-time="formatDateTime"
               :workflow="importWorkflowSectionBindings"
               :format-list="formatList"
               :format-policy-list="formatPolicyList"

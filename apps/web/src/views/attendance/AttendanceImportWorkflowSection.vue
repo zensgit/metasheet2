@@ -305,6 +305,33 @@
       {{ importScalabilityHint }}
     </small>
     <div
+      v-if="importCsvFileName || importCsvFileId || importPayloadRowCountHint !== null"
+      class="attendance__status"
+    >
+      <div class="attendance__requests-header">
+        <span>{{ tr('Current import plan', '当前导入计划') }}</span>
+      </div>
+      <div>
+        {{ tr('Input channel', '输入通道') }}:
+        <strong>
+          {{ importCsvFileId ? tr('uploaded CSV', '已上传 CSV') : importCsvFileName ? tr('local CSV file', '本地 CSV 文件') : tr('JSON payload', 'JSON 负载') }}
+        </strong>
+        <span v-if="importCsvFileName"> · {{ importCsvFileName }}</span>
+      </div>
+      <div v-if="importCsvFileId">
+        <code>{{ importCsvFileId }}</code>
+        <span v-if="importCsvFileRowCountHint !== null"> · {{ tr('Rows', '行数') }} {{ importCsvFileRowCountHint }}</span>
+        <span v-if="importCsvFileExpiresAt"> · {{ tr('Expires', '过期时间') }} {{ formatDateTime(importCsvFileExpiresAt) }}</span>
+      </div>
+      <div v-else-if="importPayloadRowCountHint !== null">
+        {{ tr('Estimated rows', '预计行数') }}: {{ importPayloadRowCountHint }}
+      </div>
+      <div>
+        {{ tr('Preview lane', '预览路径') }}: <strong>{{ formatImportLane(importPreviewLane) }}</strong>
+        · {{ tr('Import lane', '导入路径') }}: <strong>{{ formatImportLane(importCommitLane) }}</strong>
+      </div>
+    </div>
+    <div
       v-if="importPreviewTask"
       class="attendance__status"
       :class="{ 'attendance__status--error': importPreviewTask.status === 'failed' }"
@@ -427,10 +454,12 @@
 <script setup lang="ts">
 import { computed, type ComputedRef, type Ref } from 'vue'
 import type {
+  AttendanceImportCommitLane,
   AttendanceImportFormState,
   AttendanceImportJob,
   AttendanceImportMappingProfile,
   AttendanceImportMode,
+  AttendanceImportPreviewLane,
   AttendanceImportPreviewItem,
   AttendanceImportPreviewTask,
   AttendanceImportProfileGuide,
@@ -451,6 +480,12 @@ interface ImportWorkflowBindings {
   importTemplateGuide: ComputedRef<AttendanceImportTemplateGuide | null>
   selectedImportProfileGuide: ComputedRef<AttendanceImportProfileGuide | null>
   importCsvFileName: Ref<string>
+  importCsvFileId: Ref<string>
+  importCsvFileRowCountHint: Ref<number | null>
+  importCsvFileExpiresAt: Ref<string>
+  importPayloadRowCountHint: ComputedRef<number | null>
+  importPreviewLane: ComputedRef<AttendanceImportPreviewLane>
+  importCommitLane: ComputedRef<AttendanceImportCommitLane>
   importCsvHeaderRow: Ref<string>
   importCsvDelimiter: Ref<string>
   importUserMapFileName: Ref<string>
@@ -486,6 +521,7 @@ interface ImportWorkflowBindings {
 const props = defineProps<{
   tr: Translate
   ruleSets: AttendanceRuleSet[]
+  formatDateTime: (value: string | null | undefined) => string
   workflow: ImportWorkflowBindings
   importStatusVisible: boolean
   statusMessage: string
@@ -510,6 +546,12 @@ const selectedImportProfile = props.workflow.selectedImportProfile
 const importTemplateGuide = props.workflow.importTemplateGuide
 const selectedImportProfileGuide = props.workflow.selectedImportProfileGuide
 const importCsvFileName = props.workflow.importCsvFileName
+const importCsvFileId = props.workflow.importCsvFileId
+const importCsvFileRowCountHint = props.workflow.importCsvFileRowCountHint
+const importCsvFileExpiresAt = props.workflow.importCsvFileExpiresAt
+const importPayloadRowCountHint = props.workflow.importPayloadRowCountHint
+const importPreviewLane = props.workflow.importPreviewLane
+const importCommitLane = props.workflow.importCommitLane
 const importCsvHeaderRow = props.workflow.importCsvHeaderRow
 const importCsvDelimiter = props.workflow.importCsvDelimiter
 const importUserMapFileName = props.workflow.importUserMapFileName
@@ -542,9 +584,16 @@ const clearImportAsyncJob = () => props.workflow.clearImportAsyncJob()
 const handleImportCsvChange = (event: Event) => props.workflow.handleImportCsvChange(event)
 const handleImportUserMapChange = (event: Event) => props.workflow.handleImportUserMapChange(event)
 const runStatusAction = () => props.runStatusAction()
+const formatDateTime = props.formatDateTime
 const formatStatus = props.formatStatus
 const formatList = props.formatList
 const formatPolicyList = props.formatPolicyList
+
+function formatImportLane(value: AttendanceImportPreviewLane | AttendanceImportCommitLane): string {
+  if (value === 'async') return tr('async queue', '异步队列')
+  if (value === 'chunked') return tr('chunked preview', '分块预览')
+  return tr('sync request', '同步请求')
+}
 </script>
 
 <style scoped>
