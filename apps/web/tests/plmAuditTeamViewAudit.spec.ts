@@ -78,12 +78,23 @@ describe('plmAuditTeamViewAudit', () => {
       createAuditTeamView({ id: 'audit-view-archive' }),
       'archive',
       { windowMinutes: 60 },
-    )).toMatchObject({
+    )).toEqual({
+      page: 1,
       q: 'audit-view-archive',
+      actorId: '',
       kind: 'audit',
       action: 'archive',
       resourceType: 'plm-team-view-batch',
+      from: '',
+      to: '',
+      windowMinutes: 60,
       teamViewId: '',
+      sceneId: '',
+      sceneName: '',
+      sceneOwnerUserId: '',
+      sceneRecommendationReason: '',
+      sceneRecommendationSourceLabel: '',
+      returnToPlmPath: '',
     })
   })
 
@@ -93,12 +104,23 @@ describe('plmAuditTeamViewAudit', () => {
       createAuditTeamView({ id: 'batch-view-b' }),
     ], 'delete', {
       windowMinutes: 180,
-    })).toMatchObject({
+    })).toEqual({
+      page: 1,
       q: 'batch-view-a',
+      actorId: '',
       kind: 'audit',
       action: 'delete',
       resourceType: 'plm-team-view-batch',
+      from: '',
+      to: '',
       windowMinutes: 180,
+      teamViewId: '',
+      sceneId: '',
+      sceneName: '',
+      sceneOwnerUserId: '',
+      sceneRecommendationReason: '',
+      sceneRecommendationSourceLabel: '',
+      returnToPlmPath: '',
     })
   })
 })
