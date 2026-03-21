@@ -193,6 +193,23 @@
               </div>
             </div>
 
+            <div class="attendance__scenario-lab">
+              <div class="attendance__field-label">{{ tr('Scenario presets', '场景预设') }}</div>
+              <div class="attendance__scenario-grid">
+                <button
+                  v-for="scenario in previewScenarioPresets"
+                  :key="scenario.id"
+                  type="button"
+                  class="attendance__scenario-card"
+                  :class="{ 'attendance__scenario-card--active': activePreviewScenarioId === scenario.id }"
+                  @click="applyPreviewScenario(scenario.id)"
+                >
+                  <strong>{{ tr(scenario.labelEn, scenario.labelZh) }}</strong>
+                  <span>{{ tr(scenario.descriptionEn, scenario.descriptionZh) }}</span>
+                </button>
+              </div>
+            </div>
+
             <div v-if="previewEventDrafts.length === 0" class="attendance__empty">
               {{ tr('No sample events yet. Add one to preview rule results.', '尚无样本事件。添加一条后即可预览规则结果。') }}
             </div>
@@ -263,13 +280,75 @@
               <span>{{ tr('Work window', '工作时间窗') }}: <strong>{{ ruleBuilderWorkStartTime || '--' }} - {{ ruleBuilderWorkEndTime || '--' }}</strong></span>
               <span>{{ tr('Grace', '宽限') }}: <strong>{{ ruleBuilderLateGraceMinutes }} / {{ ruleBuilderEarlyGraceMinutes }} min</strong></span>
             </div>
-            <pre class="attendance__code attendance__code--builder">{{ formatJson(ruleBuilderPreviewConfig) }}</pre>
+            <div class="attendance__preview-config-panels">
+              <div class="attendance__template-version-panel">
+                <div class="attendance__field-label">{{ tr('Draft config', '草稿配置') }}</div>
+                <small class="attendance__field-hint">
+                  {{ tr('Builder-generated config before preview execution.', '基于当前构建器生成、尚未发送到服务端前的配置。') }}
+                </small>
+                <pre class="attendance__code attendance__code--builder">{{ formatJson(ruleBuilderPreviewConfig) }}</pre>
+              </div>
+              <div v-if="ruleSetPreviewEffectiveConfig" class="attendance__template-version-panel">
+                <div class="attendance__field-label">{{ tr('Resolved config', '生效配置') }}</div>
+                <small class="attendance__field-hint">
+                  {{ tr('Normalized by the preview API after defaults and server-side resolution.', '由预演接口在补齐默认值和服务端归一化后返回。') }}
+                </small>
+                <pre class="attendance__code attendance__code--builder">{{ formatJson(ruleSetPreviewEffectiveConfig) }}</pre>
+              </div>
+            </div>
           </template>
 
           <div v-if="ruleSetPreviewResult" class="attendance__preview-result">
             <div class="attendance__preview-result-meta">
               <span>{{ tr('Events', '事件') }}: {{ ruleSetPreviewResult.totalEvents ?? ruleSetPreviewRows.length }}</span>
               <span v-if="ruleSetPreviewResult.ruleSetId">{{ tr('Rule set id', '规则集 ID') }}: <code>{{ ruleSetPreviewResult.ruleSetId }}</code></span>
+            </div>
+            <div class="attendance__preview-scorecards">
+              <div class="attendance__preview-scorecard">
+                <span>{{ tr('Rows affected', '受影响行') }}</span>
+                <strong>{{ ruleSetPreviewSummary.flaggedRows }}</strong>
+                <small>{{ tr('Clean rows', '正常行') }}: {{ ruleSetPreviewSummary.cleanRows }}</small>
+              </div>
+              <div class="attendance__preview-scorecard">
+                <span>{{ tr('Late / early', '迟到 / 早退') }}</span>
+                <strong>{{ ruleSetPreviewSummary.lateRows }} / {{ ruleSetPreviewSummary.earlyLeaveRows }}</strong>
+                <small>{{ tr('Minutes', '分钟') }}: {{ ruleSetPreviewSummary.totalLateMinutes }} / {{ ruleSetPreviewSummary.totalEarlyLeaveMinutes }}</small>
+              </div>
+              <div class="attendance__preview-scorecard">
+                <span>{{ tr('Missing punches', '缺卡') }}</span>
+                <strong>{{ ruleSetPreviewSummary.missingCheckInRows }} / {{ ruleSetPreviewSummary.missingCheckOutRows }}</strong>
+                <small>{{ tr('In / out', '上班 / 下班') }}</small>
+              </div>
+              <div class="attendance__preview-scorecard">
+                <span>{{ tr('Non-working days', '非工作日') }}</span>
+                <strong>{{ ruleSetPreviewSummary.nonWorkingDayRows }}</strong>
+                <small>{{ tr('Abnormal status', '异常状态') }}: {{ ruleSetPreviewSummary.abnormalStatusRows }}</small>
+              </div>
+              <div class="attendance__preview-scorecard">
+                <span>{{ tr('Average work minutes', '平均工时分钟') }}</span>
+                <strong>{{ ruleSetPreviewSummary.averageWorkMinutes }}</strong>
+                <small>{{ tr('Preview rows', '预演行数') }}: {{ ruleSetPreviewSummary.totalRows }}</small>
+              </div>
+            </div>
+            <div v-if="ruleSetPreviewRecommendations.length" class="attendance__preview-recommendations">
+              <div
+                v-for="item in ruleSetPreviewRecommendations"
+                :key="item.key"
+                class="attendance__preview-recommendation"
+                :class="`attendance__preview-recommendation--${item.severity}`"
+              >
+                <div class="attendance__subheading-row">
+                  <strong>{{ formatRuleSetRecommendationTitle(item) }}</strong>
+                  <span class="attendance__severity" :class="`attendance__severity--${item.severity}`">
+                    {{ formatPreviewSeverity(item.severity) }}
+                  </span>
+                </div>
+                <span>{{ formatRuleSetRecommendationBody(item) }}</span>
+              </div>
+            </div>
+            <div v-else class="attendance__preview-recommendation attendance__preview-recommendation--info">
+              <strong>{{ tr('Current draft looks stable', '当前草稿表现稳定') }}</strong>
+              <span>{{ tr('The selected preview rows are clean under the current builder settings.', '当前构建器设置下，所选预演样本没有暴露规则问题。') }}</span>
             </div>
             <div v-if="ruleSetPreviewNotes.length" class="attendance__field-hint">
               {{ tr('Notes', '说明') }}: {{ ruleSetPreviewNotes.join(' · ') }}
@@ -280,23 +359,75 @@
                   <tr>
                     <th>{{ tr('Work date', '工作日期') }}</th>
                     <th>{{ tr('User ID', '用户 ID') }}</th>
+                    <th>{{ tr('Check in / out', '上下班') }}</th>
                     <th>{{ tr('Work minutes', '工时分钟') }}</th>
                     <th>{{ tr('Late', '迟到') }}</th>
                     <th>{{ tr('Early leave', '早退') }}</th>
+                    <th>{{ tr('Working day', '工作日') }}</th>
                     <th>{{ tr('Status', '状态') }}</th>
+                    <th>{{ tr('Actions', '操作') }}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="row in ruleSetPreviewRows" :key="`${row.userId}-${row.workDate}`">
+                  <tr
+                    v-for="row in ruleSetPreviewRows"
+                    :key="`${row.userId}-${row.workDate}`"
+                    :class="{ 'attendance__preview-row--selected': selectedRuleSetPreviewRowKey === getRuleSetPreviewRowKey(row) }"
+                  >
                     <td>{{ row.workDate }}</td>
                     <td>{{ row.userId }}</td>
+                    <td>{{ row.firstInAt ? formatDateTime(row.firstInAt) : '--' }} / {{ row.lastOutAt ? formatDateTime(row.lastOutAt) : '--' }}</td>
                     <td>{{ row.workMinutes ?? '--' }}</td>
                     <td>{{ row.lateMinutes ?? '--' }}</td>
                     <td>{{ row.earlyLeaveMinutes ?? '--' }}</td>
+                    <td>{{ row.isWorkingDay === false ? tr('No', '否') : tr('Yes', '是') }}</td>
                     <td>{{ row.status ?? '--' }}</td>
+                    <td class="attendance__table-actions">
+                      <button class="attendance__btn" type="button" @click="selectRuleSetPreviewRow(row)">
+                        {{ tr('Inspect', '诊断') }}
+                      </button>
+                    </td>
                   </tr>
                 </tbody>
               </table>
+            </div>
+            <div v-if="selectedRuleSetPreviewRow" class="attendance__template-version-panel">
+              <div class="attendance__subheading-row">
+                <h6 class="attendance__subheading">{{ tr('Selected preview diagnosis', '选中预演诊断') }}</h6>
+                <span class="attendance__severity" :class="`attendance__severity--${selectedRuleSetPreviewSeverity}`">
+                  {{ formatPreviewSeverity(selectedRuleSetPreviewSeverity) }}
+                </span>
+              </div>
+              <div class="attendance__preview-summary">
+                <span>{{ tr('User', '用户') }}: <strong>{{ selectedRuleSetPreviewRow.userId || '--' }}</strong></span>
+                <span>{{ tr('Work date', '工作日期') }}: <strong>{{ selectedRuleSetPreviewRow.workDate || '--' }}</strong></span>
+                <span>{{ tr('Status', '状态') }}: <strong>{{ selectedRuleSetPreviewRow.status || '--' }}</strong></span>
+                <span>{{ tr('Working day', '工作日') }}: <strong>{{ selectedRuleSetPreviewRow.isWorkingDay === false ? tr('No', '否') : tr('Yes', '是') }}</strong></span>
+              </div>
+              <div class="attendance__preview-scorecards">
+                <div v-for="metric in selectedRuleSetPreviewMetrics" :key="metric.key" class="attendance__preview-scorecard">
+                  <span>{{ metric.label }}</span>
+                  <strong>{{ metric.value }}</strong>
+                </div>
+              </div>
+              <div v-if="selectedRuleSetPreviewHints.length" class="attendance__preview-recommendations">
+                <div
+                  v-for="hint in selectedRuleSetPreviewHints"
+                  :key="hint"
+                  class="attendance__preview-recommendation attendance__preview-recommendation--info"
+                >
+                  <span>{{ hint }}</span>
+                </div>
+              </div>
+              <div v-if="selectedRuleSetPreviewSource" class="attendance__preview-config-panels attendance__preview-config-panels--single">
+                <div class="attendance__template-version-panel">
+                  <div class="attendance__field-label">{{ tr('Rule source payload', '规则源诊断载荷') }}</div>
+                  <small class="attendance__field-hint">
+                    {{ tr('Raw row payload returned by preview for explanation and troubleshooting.', '预演返回的原始行载荷，可用于解释命中原因和排查规则问题。') }}
+                  </small>
+                  <pre class="attendance__code attendance__code--viewer">{{ formatJson(selectedRuleSetPreviewSource) }}</pre>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -641,10 +772,18 @@
 
 <script setup lang="ts">
 import { computed, ref, watch, type Ref } from 'vue'
+import {
+  buildRuleSetPreviewRecommendations,
+  summarizeRuleSetPreviewResult,
+} from './useAttendanceAdminRulesAndGroups'
 import type {
   AttendanceGroup,
   AttendanceGroupMember,
+  AttendanceRuleBuilderState,
+  AttendanceRuleSetPreviewItem,
   AttendanceRuleSet,
+  AttendanceRuleSetPreviewRecommendation,
+  AttendanceRuleSetPreviewSummary,
   AttendanceRuleTemplateVersion,
 } from './useAttendanceAdminRulesAndGroups'
 import AttendanceUserPickerField from './AttendanceUserPickerField.vue'
@@ -680,7 +819,7 @@ interface RuleSetPreviewRow {
   earlyLeaveMinutes?: number
   status?: string
   isWorkingDay?: boolean
-  source?: string
+  source?: unknown
 }
 
 interface RuleSetPreviewResult {
@@ -690,13 +829,6 @@ interface RuleSetPreviewResult {
   rows?: RuleSetPreviewRow[]
   config?: Record<string, unknown> | null
   notes?: string[]
-}
-
-interface PreviewEventDraft {
-  eventType: 'check_in' | 'check_out'
-  occurredAt: string
-  workDate: string
-  userId: string
 }
 
 interface PreviewEventDraft {
@@ -870,6 +1002,8 @@ const ruleBuilderHydrated = ref(false)
 const ruleBuilderSyncing = ref(false)
 const ruleBuilderConfigError = ref('')
 const previewEventDrafts = ref<PreviewEventDraft[]>([])
+const activePreviewScenarioId = ref('')
+const selectedRuleSetPreviewRowKey = ref('')
 
 function asPlainObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
@@ -1109,12 +1243,387 @@ function removePreviewEvent(index: number) {
 
 function resetPreviewEvents() {
   previewEventDrafts.value = []
+  activePreviewScenarioId.value = ''
   syncPreviewEventTextFromDrafts()
+}
+
+const previewScenarioOptions = [
+  {
+    id: 'onTime',
+    labelEn: 'On-time day',
+    labelZh: '准点工作日',
+    descriptionEn: 'Baseline check-in and check-out on a scheduled workday.',
+    descriptionZh: '在工作日生成基准上下班打卡。',
+  },
+  {
+    id: 'lateArrival',
+    labelEn: 'Late arrival',
+    labelZh: '迟到场景',
+    descriptionEn: 'Starts after the configured late grace.',
+    descriptionZh: '在当前迟到宽限后再上班。',
+  },
+  {
+    id: 'earlyLeave',
+    labelEn: 'Early leave',
+    labelZh: '早退场景',
+    descriptionEn: 'Leaves before the configured early-leave grace.',
+    descriptionZh: '在当前早退宽限前提前下班。',
+  },
+  {
+    id: 'missingCheckOut',
+    labelEn: 'Missing check-out',
+    labelZh: '缺少下班卡',
+    descriptionEn: 'Keeps only the check-in event to test missing-punch handling.',
+    descriptionZh: '仅保留上班卡，测试缺卡处理。',
+  },
+  {
+    id: 'restDayOvertime',
+    labelEn: 'Rest-day overtime',
+    labelZh: '休息日加班',
+    descriptionEn: 'Simulates a full-day attendance on a non-working day.',
+    descriptionZh: '在非工作日模拟全天打卡。',
+  },
+]
+
+function padDatePart(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+function formatDateOnly(date: Date): string {
+  return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`
+}
+
+function parseTimeText(value: string, fallbackHour: number, fallbackMinute = 0): { hour: number; minute: number } {
+  const match = value.trim().match(/^(\d{1,2}):(\d{2})$/)
+  if (!match) {
+    return { hour: fallbackHour, minute: fallbackMinute }
+  }
+  return {
+    hour: Math.min(23, Math.max(0, Number(match[1]))),
+    minute: Math.min(59, Math.max(0, Number(match[2]))),
+  }
+}
+
+function formatDateTimeLocal(date: Date): string {
+  return `${formatDateOnly(date)}T${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}`
+}
+
+function withLocalTime(dateText: string, timeText: string, fallbackHour: number, fallbackMinute = 0): string {
+  const base = /^\d{4}-\d{2}-\d{2}$/.test(dateText) ? dateText : formatDateOnly(new Date())
+  const { hour, minute } = parseTimeText(timeText, fallbackHour, fallbackMinute)
+  const date = new Date(`${base}T00:00`)
+  date.setHours(hour, minute, 0, 0)
+  return formatDateTimeLocal(date)
+}
+
+function shiftDateTimeLocal(value: string, minutes: number): string {
+  const normalized = normalizePreviewEventDateTime(value)
+  const date = new Date(normalized.replace('T', ' ') || value)
+  if (Number.isNaN(date.getTime())) {
+    return normalized
+  }
+  date.setMinutes(date.getMinutes() + minutes)
+  return formatDateTimeLocal(date)
+}
+
+function isWorkingDayForDate(date: Date): boolean {
+  return ruleBuilderWorkingDays.value.includes(date.getDay())
+}
+
+function resolveScenarioDate(kind: 'working' | 'rest'): string {
+  const seed = previewEventDrafts.value[0]?.workDate
+  const fallback = /^\d{4}-\d{2}-\d{2}$/.test(seed ?? '') ? new Date(`${seed}T00:00`) : new Date()
+  for (let offset = 0; offset < 14; offset += 1) {
+    const candidate = new Date(fallback)
+    candidate.setDate(candidate.getDate() + offset)
+    if (kind === 'working' && isWorkingDayForDate(candidate)) {
+      return formatDateOnly(candidate)
+    }
+    if (kind === 'rest' && !isWorkingDayForDate(candidate)) {
+      return formatDateOnly(candidate)
+    }
+  }
+  return formatDateOnly(fallback)
+}
+
+function buildPreviewScenarioDrafts(kind: string): PreviewEventDraft[] {
+  const userId = previewEventDrafts.value[0]?.userId || 'user-1'
+  const workDate = kind === 'restDayOvertime' ? resolveScenarioDate('rest') : resolveScenarioDate('working')
+  const startAt = withLocalTime(workDate, ruleBuilderWorkStartTime.value, 9, 0)
+  const endAt = withLocalTime(workDate, ruleBuilderWorkEndTime.value, 18, 0)
+  const lateShift = normalizeInteger(ruleBuilderLateGraceMinutes.value, 10) + 5
+  const earlyShift = -1 * (normalizeInteger(ruleBuilderEarlyGraceMinutes.value, 10) + 15)
+
+  switch (kind) {
+    case 'lateArrival':
+      return [
+        createPreviewEventDraft({
+          eventType: 'check_in',
+          occurredAt: shiftDateTimeLocal(startAt, lateShift),
+          workDate,
+          userId,
+        }),
+        createPreviewEventDraft({
+          eventType: 'check_out',
+          occurredAt: endAt,
+          workDate,
+          userId,
+        }),
+      ]
+    case 'earlyLeave':
+      return [
+        createPreviewEventDraft({
+          eventType: 'check_in',
+          occurredAt: startAt,
+          workDate,
+          userId,
+        }),
+        createPreviewEventDraft({
+          eventType: 'check_out',
+          occurredAt: shiftDateTimeLocal(endAt, earlyShift),
+          workDate,
+          userId,
+        }),
+      ]
+    case 'missingCheckOut':
+      return [
+        createPreviewEventDraft({
+          eventType: 'check_in',
+          occurredAt: startAt,
+          workDate,
+          userId,
+        }),
+      ]
+    case 'restDayOvertime':
+      return [
+        createPreviewEventDraft({
+          eventType: 'check_in',
+          occurredAt: withLocalTime(workDate, '10:00', 10, 0),
+          workDate,
+          userId,
+        }),
+        createPreviewEventDraft({
+          eventType: 'check_out',
+          occurredAt: withLocalTime(workDate, '18:30', 18, 30),
+          workDate,
+          userId,
+        }),
+      ]
+    default:
+      return [
+        createPreviewEventDraft({
+          eventType: 'check_in',
+          occurredAt: startAt,
+          workDate,
+          userId,
+        }),
+        createPreviewEventDraft({
+          eventType: 'check_out',
+          occurredAt: endAt,
+          workDate,
+          userId,
+        }),
+      ]
+  }
+}
+
+function applyPreviewScenario(kind: string) {
+  activePreviewScenarioId.value = kind
+  previewEventDrafts.value = buildPreviewScenarioDrafts(kind)
 }
 
 const ruleBuilderPreviewConfig = computed(() => buildRuleSetPreviewConfig())
 const ruleSetPreviewRows = computed(() => resolveRuleSetPreviewRows(ruleSetPreviewResult.value))
+const normalizedRuleSetPreviewRows = computed<AttendanceRuleSetPreviewItem[]>(() => (
+  ruleSetPreviewRows.value.map((row) => ({
+    userId: row.userId || 'unknown',
+    workDate: row.workDate || '',
+    firstInAt: row.firstInAt ?? null,
+    lastOutAt: row.lastOutAt ?? null,
+    workMinutes: normalizeInteger(row.workMinutes, 0),
+    lateMinutes: normalizeInteger(row.lateMinutes, 0),
+    earlyLeaveMinutes: normalizeInteger(row.earlyLeaveMinutes, 0),
+    status: String(row.status ?? 'unknown'),
+    isWorkingDay: row.isWorkingDay,
+    source: row.source,
+  }))
+))
 const ruleSetPreviewNotes = computed(() => ruleSetPreviewResult.value?.notes ?? [])
+const previewScenarioPresets = computed(() => previewScenarioOptions)
+const ruleSetPreviewSummary = computed<AttendanceRuleSetPreviewSummary>(() => summarizeRuleSetPreviewResult({
+  ruleSetId: ruleSetPreviewResult.value?.ruleSetId ?? null,
+  totalEvents: ruleSetPreviewResult.value?.totalEvents ?? previewEventDrafts.value.length,
+  preview: normalizedRuleSetPreviewRows.value,
+  config: ruleBuilderPreviewConfig.value,
+  notes: ruleSetPreviewNotes.value,
+}))
+const ruleBuilderState = computed<AttendanceRuleBuilderState>(() => ({
+  source: ruleBuilderSource.value,
+  timezone: ruleBuilderTimezone.value,
+  workStartTime: ruleBuilderWorkStartTime.value,
+  workEndTime: ruleBuilderWorkEndTime.value,
+  lateGraceMinutes: normalizeInteger(ruleBuilderLateGraceMinutes.value, 10),
+  earlyGraceMinutes: normalizeInteger(ruleBuilderEarlyGraceMinutes.value, 10),
+  workingDays: ruleBuilderWorkingDaysText.value,
+}))
+const rulePreviewRecommendations = computed<AttendanceRuleSetPreviewRecommendation[]>(() => buildRuleSetPreviewRecommendations({
+  ruleSetId: ruleSetPreviewResult.value?.ruleSetId ?? null,
+  totalEvents: ruleSetPreviewResult.value?.totalEvents ?? previewEventDrafts.value.length,
+  preview: normalizedRuleSetPreviewRows.value,
+  config: ruleBuilderPreviewConfig.value,
+  notes: ruleSetPreviewNotes.value,
+}, ruleBuilderState.value))
+const ruleSetPreviewRecommendations = computed(() => rulePreviewRecommendations.value)
+const ruleSetPreviewEffectiveConfig = computed<Record<string, unknown> | null>(() => {
+  const config = asPlainObject(ruleSetPreviewResult.value?.config)
+  return config && Object.keys(config).length > 0 ? config : null
+})
+const selectedRuleSetPreviewRow = computed(() => {
+  const rows = ruleSetPreviewRows.value
+  const selected = rows.find((row) => getRuleSetPreviewRowKey(row) === selectedRuleSetPreviewRowKey.value)
+  return selected ?? rows.find((row) => isRuleSetPreviewRowFlagged(row)) ?? rows[0] ?? null
+})
+const selectedRuleSetPreviewSeverity = computed<AttendanceRuleSetPreviewRecommendation['severity']>(() => {
+  const row = selectedRuleSetPreviewRow.value
+  if (!row) return 'info'
+  if (!row.firstInAt || !row.lastOutAt) return 'critical'
+  if (row.isWorkingDay === false) return 'warning'
+  if (normalizeInteger(row.lateMinutes, 0) > 0 || normalizeInteger(row.earlyLeaveMinutes, 0) > 0) return 'warning'
+  if (!isPreviewStatusNormal(row.status)) return 'warning'
+  return 'info'
+})
+const selectedRuleSetPreviewMetrics = computed(() => {
+  const row = selectedRuleSetPreviewRow.value
+  if (!row) return []
+  return [
+    { key: 'workMinutes', label: tr('Work minutes', '工时分钟'), value: row.workMinutes ?? '--' },
+    { key: 'lateMinutes', label: tr('Late', '迟到'), value: row.lateMinutes ?? 0 },
+    { key: 'earlyLeaveMinutes', label: tr('Early leave', '早退'), value: row.earlyLeaveMinutes ?? 0 },
+    { key: 'checkIn', label: tr('Check in', '上班打卡'), value: row.firstInAt ? formatDateTime(row.firstInAt) : '--' },
+    { key: 'checkOut', label: tr('Check out', '下班打卡'), value: row.lastOutAt ? formatDateTime(row.lastOutAt) : '--' },
+  ]
+})
+const selectedRuleSetPreviewHints = computed(() => {
+  const row = selectedRuleSetPreviewRow.value
+  if (!row) return []
+
+  const hints: string[] = []
+  if (!row.firstInAt || !row.lastOutAt) {
+    hints.push(tr('This row is missing a punch event. Use it to verify missing-punch policy, exception flow, and whether the import source guarantees paired events.', '该行缺少打卡事件。请用它核对缺卡策略、异常流程，以及导入源是否保证上下班成对事件。'))
+  }
+  if (normalizeInteger(row.lateMinutes, 0) > 0) {
+    hints.push(tr(`This row still arrives ${row.lateMinutes} minutes late after the current rule. Review shift start time or increase total grace.`, `该行在当前规则下仍迟到 ${row.lateMinutes} 分钟。请复核上班时间或提高总宽限。`))
+  }
+  if (normalizeInteger(row.earlyLeaveMinutes, 0) > 0) {
+    hints.push(tr(`This row still leaves ${row.earlyLeaveMinutes} minutes early after the current rule. Review shift end time or increase total grace.`, `该行在当前规则下仍早退 ${row.earlyLeaveMinutes} 分钟。请复核下班时间或提高总宽限。`))
+  }
+  if (row.isWorkingDay === false) {
+    hints.push(tr('This row lands on a non-working day. Confirm whether it should be treated as overtime, a temporary working-day override, or an out-of-policy record.', '该行落在非工作日。请确认它应被视为加班、临时调班，还是越界记录。'))
+  }
+  if (!isPreviewStatusNormal(row.status)) {
+    hints.push(tr(`Preview returned status "${row.status || 'unknown'}". Use the source payload below to understand which rule branch produced it.`, `预演返回状态 "${row.status || 'unknown'}"。请结合下方源载荷判断是哪条规则分支命中了它。`))
+  }
+  if (hints.length === 0) {
+    hints.push(tr('This row looks clean under the current draft. Keep it as a baseline sample when tuning edge cases.', '该行在当前草稿下表现正常，可作为调试边界场景时的基线样本。'))
+  }
+  return hints
+})
+const selectedRuleSetPreviewSource = computed<Record<string, unknown> | null>(() => {
+  const source = selectedRuleSetPreviewRow.value?.source
+  return asPlainObject(source)
+})
+
+function formatPreviewRecommendationTitle(recommendation: AttendanceRuleSetPreviewRecommendation): string {
+  switch (recommendation.key) {
+    case 'raiseLateGrace':
+      return tr('Raise late grace', '提高迟到宽限')
+    case 'raiseEarlyGrace':
+      return tr('Raise early-leave grace', '提高早退宽限')
+    case 'reviewWorkingDays':
+      return tr('Review working-day calendar', '复核工作日历')
+    case 'reviewMissingPunches':
+      return tr('Review missing punches', '复核缺卡')
+    case 'reviewAbnormalStatuses':
+      return tr('Review abnormal statuses', '复核异常状态')
+    default:
+      return tr('Review preview output', '复核预演输出')
+  }
+}
+
+function formatPreviewRecommendationDetail(recommendation: AttendanceRuleSetPreviewRecommendation): string {
+  switch (recommendation.key) {
+    case 'raiseLateGrace':
+      return tr(
+        `${recommendation.affectedRows} row(s) still land late after the current rule. Preview suggests raising total late grace to about ${recommendation.suggestedMinutes} min.`,
+        `${recommendation.affectedRows} 条记录在当前规则下仍然迟到。预演建议把总迟到宽限提高到约 ${recommendation.suggestedMinutes} 分钟。`,
+      )
+    case 'raiseEarlyGrace':
+      return tr(
+        `${recommendation.affectedRows} row(s) still leave early after the current rule. Preview suggests raising total early-leave grace to about ${recommendation.suggestedMinutes} min.`,
+        `${recommendation.affectedRows} 条记录在当前规则下仍然早退。预演建议把总早退宽限提高到约 ${recommendation.suggestedMinutes} 分钟。`,
+      )
+    case 'reviewWorkingDays':
+      return tr(
+        `${recommendation.affectedRows} row(s) landed on non-working days. Confirm weekend/overtime policy or working-day overrides.`,
+        `${recommendation.affectedRows} 条记录落在非工作日。请确认周末加班策略或调班工作日覆盖。`,
+      )
+    case 'reviewMissingPunches':
+      return tr(
+        `${recommendation.affectedRows} row(s) are missing check-in or check-out events.`,
+        `${recommendation.affectedRows} 条记录缺少上班卡或下班卡。`,
+      )
+    case 'reviewAbnormalStatuses':
+      return tr(
+        `${recommendation.affectedRows} row(s) still return non-normal statuses after preview.`,
+        `${recommendation.affectedRows} 条记录在预演后仍返回非正常状态。`,
+      )
+    default:
+      return tr('Review the generated rows before saving this rule set.', '保存规则集前请先复核生成结果。')
+  }
+}
+
+function formatRuleSetRecommendationTitle(recommendation: AttendanceRuleSetPreviewRecommendation): string {
+  return formatPreviewRecommendationTitle(recommendation)
+}
+
+function formatRuleSetRecommendationBody(recommendation: AttendanceRuleSetPreviewRecommendation): string {
+  return formatPreviewRecommendationDetail(recommendation)
+}
+
+function getRuleSetPreviewRowKey(row: RuleSetPreviewRow): string {
+  return `${row.userId || 'unknown'}:${row.workDate || 'unknown'}`
+}
+
+function isPreviewStatusNormal(status: string | undefined): boolean {
+  const normalized = String(status ?? '').trim().toLowerCase()
+  return normalized.length === 0 || normalized === 'normal' || normalized === 'ok' || normalized === 'adjusted' || normalized === 'off'
+}
+
+function isRuleSetPreviewRowFlagged(row: RuleSetPreviewRow): boolean {
+  return (
+    !row.firstInAt
+    || !row.lastOutAt
+    || row.isWorkingDay === false
+    || normalizeInteger(row.lateMinutes, 0) > 0
+    || normalizeInteger(row.earlyLeaveMinutes, 0) > 0
+    || !isPreviewStatusNormal(row.status)
+  )
+}
+
+function selectRuleSetPreviewRow(row: RuleSetPreviewRow) {
+  selectedRuleSetPreviewRowKey.value = getRuleSetPreviewRowKey(row)
+}
+
+function formatPreviewSeverity(severity: AttendanceRuleSetPreviewRecommendation['severity']): string {
+  switch (severity) {
+    case 'critical':
+      return tr('Critical', '严重')
+    case 'warning':
+      return tr('Warning', '警告')
+    default:
+      return tr('Info', '提示')
+  }
+}
 
 watch(
   () => ruleSetForm.config,
@@ -1148,6 +1657,21 @@ watch(
     syncPreviewEventTextFromDrafts()
   },
   { deep: true },
+)
+
+watch(
+  ruleSetPreviewRows,
+  (rows) => {
+    if (rows.length === 0) {
+      selectedRuleSetPreviewRowKey.value = ''
+      return
+    }
+    const selected = rows.find((row) => getRuleSetPreviewRowKey(row) === selectedRuleSetPreviewRowKey.value)
+    if (selected) return
+    const fallback = rows.find((row) => isRuleSetPreviewRowFlagged(row)) ?? rows[0]
+    selectedRuleSetPreviewRowKey.value = fallback ? getRuleSetPreviewRowKey(fallback) : ''
+  },
+  { immediate: true },
 )
 
 watch(
@@ -1289,6 +1813,20 @@ function appendAttendanceGroupMemberSelectedUser() {
   background: rgba(255, 255, 255, 0.92);
 }
 
+.attendance__preview-builder,
+.attendance__preview-config-panels {
+  display: grid;
+  gap: 12px;
+}
+
+.attendance__preview-config-panels {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.attendance__preview-config-panels--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .attendance__preview-state {
   padding: 10px 12px;
   border-radius: 10px;
@@ -1300,6 +1838,138 @@ function appendAttendanceGroupMemberSelectedUser() {
 .attendance__preview-result {
   display: grid;
   gap: 12px;
+}
+
+.attendance__scenario-lab {
+  display: grid;
+  gap: 10px;
+}
+
+.attendance__scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.attendance__scenario-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid #d8e2ef;
+  border-radius: 12px;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attendance__scenario-card strong {
+  color: #17324d;
+}
+
+.attendance__scenario-card span {
+  color: #516074;
+  font-size: 12px;
+}
+
+.attendance__scenario-card--active {
+  border-color: #2563eb;
+  background: #eef5ff;
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.12);
+}
+
+.attendance__preview-scorecards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.attendance__preview-scorecard {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid #dce4ef;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f5f8fc 100%);
+}
+
+.attendance__preview-scorecard span,
+.attendance__preview-scorecard small {
+  color: #516074;
+  font-size: 12px;
+}
+
+.attendance__preview-scorecard strong {
+  color: #11243d;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.attendance__preview-recommendations {
+  display: grid;
+  gap: 10px;
+}
+
+.attendance__preview-recommendation {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #dbe4ef;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.attendance__preview-recommendation strong {
+  color: #17324d;
+}
+
+.attendance__preview-recommendation span {
+  color: #4b5565;
+  font-size: 13px;
+}
+
+.attendance__preview-recommendation--critical {
+  border-color: #fecaca;
+  background: #fff5f5;
+}
+
+.attendance__preview-recommendation--warning {
+  border-color: #fcd34d;
+  background: #fff9db;
+}
+
+.attendance__preview-recommendation--info {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+
+.attendance__preview-row--selected {
+  background: rgba(239, 246, 255, 0.7);
+}
+
+.attendance__severity {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 70px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.attendance__severity--critical {
+  background: #fee2e2;
+  color: #b42318;
+}
+
+.attendance__severity--warning {
+  background: #fef3c7;
+  color: #9a6700;
+}
+
+.attendance__severity--info {
+  background: #dbeafe;
+  color: #1d4ed8;
 }
 
 .attendance__code--builder {

@@ -86,11 +86,8 @@
           <span v-if="batchItemSummary.anomalyItems"> · {{ tr('Anomalies', '异常') }}: {{ batchItemSummary.anomalyItems }}</span>
         </div>
         <div class="attendance__table-actions">
-          <button class="attendance__btn" :disabled="importBatchLoading" @click="showAllItems">
-            {{ tr('All items', '全部条目') }}
-          </button>
-          <button class="attendance__btn" :disabled="importBatchLoading" @click="showAnomaliesOnly">
-            {{ tr('Anomalies only', '仅异常') }}
+          <button class="attendance__btn" :disabled="importBatchLoading" @click="setIssueFilter('all')">
+            {{ tr('Reset view', '重置视图') }}
           </button>
           <button class="attendance__btn" :disabled="importBatchLoading" @click="exportImportBatchItemsCsv(false)">
             {{ tr('Export items CSV', '导出条目 CSV') }}
@@ -100,12 +97,89 @@
           </button>
         </div>
       </div>
+
+      <div v-if="selectedBatch" class="attendance__batch-meta">
+        <div class="attendance__impact-card">
+          <span>{{ tr('Selected batch', '当前批次') }}</span>
+          <strong>{{ selectedBatch.id.slice(0, 8) }}</strong>
+        </div>
+        <div class="attendance__impact-card">
+          <span>{{ tr('Batch status', '批次状态') }}</span>
+          <strong>{{ formatStatus(selectedBatch.status) }}</strong>
+        </div>
+        <div class="attendance__impact-card">
+          <span>{{ tr('Rule set', '规则集') }}</span>
+          <strong>{{ resolveRuleSetName(selectedBatch.ruleSetId) }}</strong>
+        </div>
+        <div class="attendance__impact-card">
+          <span>{{ tr('Source', '来源') }}</span>
+          <strong>{{ selectedBatch.source || '--' }}</strong>
+        </div>
+      </div>
+
+      <div v-if="selectedBatchOperatorNotes.length" class="attendance__field-hint">
+        {{ tr('Operator notes', '运营提示') }}: {{ selectedBatchOperatorNotes.join(' · ') }}
+      </div>
+
+      <div v-if="selectedBatchMappingEntries.length" class="attendance__mapping-panel">
+        <div class="attendance__subheading-row">
+          <h6 class="attendance__subheading">{{ tr('Mapping viewer', '映射预览') }}</h6>
+          <span class="attendance__section-meta">
+            {{ tr('Fields', '字段数') }}: {{ selectedBatchMappingEntries.length }}
+          </span>
+        </div>
+        <div class="attendance__mapping-grid">
+          <div v-for="entry in selectedBatchMappingEntries" :key="entry.key" class="attendance__mapping-card">
+            <span>{{ entry.label }}</span>
+            <strong>{{ entry.value }}</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="attendance__admin-grid">
+        <label class="attendance__field" for="attendance-import-batch-search">
+          <span>{{ tr('Search items', '搜索条目') }}</span>
+          <input
+            id="attendance-import-batch-search"
+            v-model="searchText"
+            type="search"
+            :placeholder="tr('Search by user, date, record, warning, or snapshot', '按用户、日期、记录、警告或快照搜索')"
+          />
+        </label>
+      </div>
+
+      <div v-if="issueClusters.length" class="attendance__filter-chip-row">
+        <button
+          class="attendance__chip"
+          :class="{ 'attendance__chip--active': isIssueFilterActive('all') }"
+          type="button"
+          @click="setIssueFilter('all')"
+        >
+          {{ tr('All items', '全部条目') }} · {{ importBatchItems.length }}
+        </button>
+        <button
+          v-for="cluster in issueClusters"
+          :key="cluster.key"
+          class="attendance__chip"
+          :class="[
+            `attendance__chip--${cluster.severity}`,
+            { 'attendance__chip--active': isIssueFilterActive(cluster.key) },
+          ]"
+          type="button"
+          @click="setIssueFilter(cluster.key)"
+        >
+          {{ formatIssueFilterLabel(cluster.key) }} · {{ cluster.count }}
+        </button>
+      </div>
+
       <div class="attendance__section-meta">
         {{ tr('View mode', '视图模式') }}:
-        <strong>{{ showOnlyAnomalies ? tr('Anomalies only', '仅异常') : tr('All items', '全部条目') }}</strong>
+        <strong>{{ formatIssueFilterLabel(issueFilter) }}</strong>
+        <span v-if="searchQuery"> · {{ tr('Search', '搜索') }}: <strong>{{ searchText }}</strong></span>
       </div>
+
       <div v-if="visibleImportBatchRows.length === 0" class="attendance__empty">
-        {{ showOnlyAnomalies ? tr('No anomalies in the loaded batch.', '当前加载的批次没有异常。') : tr('No batch items.', '暂无批次条目。') }}
+        {{ tr('No items match the current batch triage filters.', '当前批次分诊筛选下没有匹配条目。') }}
       </div>
       <table v-else class="attendance__table">
         <thead>
@@ -113,25 +187,104 @@
             <th>{{ tr('Work date', '工作日期') }}</th>
             <th>{{ tr('User ID', '用户 ID') }}</th>
             <th>{{ tr('Record', '记录') }}</th>
+            <th>{{ tr('Severity', '严重度') }}</th>
             <th>{{ tr('Flags', '标记') }}</th>
-            <th>{{ tr('Snapshot', '快照') }}</th>
+            <th>{{ tr('Actions', '操作') }}</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in visibleImportBatchRows" :key="row.item.id">
+          <tr
+            v-for="row in visibleImportBatchRows"
+            :key="row.item.id"
+            :class="{ 'attendance__row--selected': selectedImportBatchRow?.item.id === row.item.id }"
+          >
             <td>{{ row.item.workDate }}</td>
             <td>{{ row.item.userId }}</td>
             <td>{{ row.item.recordId || '--' }}</td>
-            <td>{{ formatImportBatchFlags(row.analysis) }}</td>
             <td>
-              <button class="attendance__btn" @click="toggleImportBatchSnapshot(row.item)">
-                {{ importBatchSnapshot === row.item.previewSnapshot ? tr('Hide', '隐藏') : tr('View', '查看') }}
+              <span class="attendance__severity" :class="`attendance__severity--${resolveImportBatchSeverity(row.analysis)}`">
+                {{ formatSeverity(resolveImportBatchSeverity(row.analysis)) }}
+              </span>
+            </td>
+            <td>{{ formatImportBatchFlags(row.analysis) }}</td>
+            <td class="attendance__table-actions">
+              <button class="attendance__btn" type="button" @click="selectImportBatchRow(row.item)">
+                {{ tr('Details', '详情') }}
+              </button>
+              <button class="attendance__btn" type="button" @click="toggleImportBatchSnapshot(row.item)">
+                {{ importBatchSnapshot === row.item.previewSnapshot ? tr('Hide snapshot', '隐藏快照') : tr('View snapshot', '查看快照') }}
               </button>
             </td>
           </tr>
         </tbody>
       </table>
-      <pre v-if="importBatchSnapshot" class="attendance__code">{{ formatJson(importBatchSnapshot) }}</pre>
+
+      <div v-if="selectedImportBatchRow" class="attendance__detail-panel">
+        <div class="attendance__subheading-row">
+          <h6 class="attendance__subheading">{{ tr('Selected item detail', '选中条目详情') }}</h6>
+          <span class="attendance__severity" :class="`attendance__severity--${selectedImportBatchSeverity}`">
+            {{ formatSeverity(selectedImportBatchSeverity) }}
+          </span>
+        </div>
+        <div class="attendance__preview-summary">
+          <span>{{ tr('User', '用户') }}: <strong>{{ selectedImportBatchRow.item.userId || '--' }}</strong></span>
+          <span>{{ tr('Work date', '工作日期') }}: <strong>{{ selectedImportBatchRow.item.workDate || '--' }}</strong></span>
+          <span>{{ tr('Record ID', '记录 ID') }}: <strong>{{ selectedImportBatchRow.item.recordId || '--' }}</strong></span>
+          <span>{{ tr('Created', '创建时间') }}: <strong>{{ formatDateTime(selectedImportBatchRow.item.createdAt ?? null) }}</strong></span>
+        </div>
+        <div class="attendance__impact-summary">
+          <div v-for="metric in selectedImportBatchMetrics" :key="metric.key" class="attendance__impact-card">
+            <span>{{ metric.label }}</span>
+            <strong>{{ metric.value }}</strong>
+          </div>
+        </div>
+        <div v-if="selectedImportBatchWarnings.length" class="attendance__warning-list">
+          <span
+            v-for="warning in selectedImportBatchWarnings"
+            :key="warning"
+            class="attendance__warning-chip"
+          >
+            {{ warning }}
+          </span>
+        </div>
+        <div v-if="selectedImportBatchActionHints.length" class="attendance__detail-hints">
+          <span class="attendance__detail-hints-title">{{ tr('Recommended next steps', '建议下一步') }}</span>
+          <ul class="attendance__detail-hints-list">
+            <li v-for="hint in selectedImportBatchActionHints" :key="hint">{{ hint }}</li>
+          </ul>
+        </div>
+        <div v-if="selectedImportBatchSnapshotSections.length" class="attendance__snapshot-sections">
+          <div
+            v-for="section in selectedImportBatchSnapshotSections"
+            :key="section.key"
+            class="attendance__snapshot-card"
+          >
+            <div class="attendance__subheading-row">
+              <span class="attendance__detail-hints-title">{{ section.title }}</span>
+              <span class="attendance__section-meta">{{ section.rows.length }}</span>
+            </div>
+            <div class="attendance__snapshot-grid">
+              <div v-for="detail in section.rows" :key="`${section.key}-${detail.label}`" class="attendance__snapshot-item">
+                <span>{{ detail.label }}</span>
+                <strong>{{ detail.value }}</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div v-if="selectedImportBatchSnapshot" class="attendance__detail-hints">
+          <span class="attendance__detail-hints-title">{{ tr('Snapshot actions', '快照操作') }}</span>
+          <div class="attendance__table-actions">
+            <button class="attendance__btn" type="button" @click="copySelectedImportBatchSnapshot">
+              {{ tr('Copy snapshot JSON', '复制快照 JSON') }}
+            </button>
+            <button class="attendance__btn" type="button" @click="toggleImportBatchSnapshot(selectedImportBatchRow.item)">
+              {{ selectedImportBatchSnapshotVisible ? tr('Hide raw snapshot', '隐藏原始快照') : tr('View raw snapshot', '查看原始快照') }}
+            </button>
+          </div>
+          <span v-if="snapshotActionMessage" class="attendance__field-hint">{{ snapshotActionMessage }}</span>
+        </div>
+        <pre v-if="selectedImportBatchSnapshotVisible" class="attendance__code">{{ formatJson(importBatchSnapshot) }}</pre>
+      </div>
     </div>
   </div>
 </template>
@@ -139,12 +292,20 @@
 <script setup lang="ts">
 import { computed, ref, type Ref } from 'vue'
 import {
+  buildImportBatchActionHints,
+  buildImportBatchSearchIndex,
   classifyImportBatchItem,
+  matchesImportBatchIssueFilter,
   resolveImportBatchChunkLabel,
   resolveImportBatchEngine,
+  resolveImportBatchSeverity,
+  summarizeImportBatchIssueClusters,
   summarizeImportBatchItems,
   type AttendanceImportBatch,
   type AttendanceImportBatchImpactSummary,
+  type AttendanceImportBatchIssueCluster,
+  type AttendanceImportBatchIssueFilter,
+  type AttendanceImportBatchSeverity,
   type AttendanceImportItem,
   type AttendanceImportBatchItemAnalysis,
 } from './useAttendanceAdminImportBatches'
@@ -156,6 +317,7 @@ interface ImportBatchesBindings {
   importBatchLoading: Ref<boolean>
   importBatches: Ref<AttendanceImportBatch[]>
   importBatchItems: Ref<AttendanceImportItem[]>
+  importBatchSelectedId: Ref<string>
   importBatchSnapshot: Ref<Record<string, any> | null>
   reloadImportBatches: () => MaybePromise<void>
   loadImportBatchItems: (batchId: string) => MaybePromise<void>
@@ -177,6 +339,7 @@ const tr = props.tr
 const importBatchLoading = props.workflow.importBatchLoading
 const importBatches = props.workflow.importBatches
 const importBatchItems = props.workflow.importBatchItems
+const importBatchSelectedId = props.workflow.importBatchSelectedId
 const importBatchSnapshot = props.workflow.importBatchSnapshot
 const reloadImportBatches = () => props.workflow.reloadImportBatches()
 const loadImportBatchItems = (batchId: string) => props.workflow.loadImportBatchItems(batchId)
@@ -187,18 +350,171 @@ const resolveRuleSetName = props.resolveRuleSetName
 const formatStatus = props.formatStatus
 const formatDateTime = props.formatDateTime
 const formatJson = props.formatJson
-const showOnlyAnomalies = ref(false)
+const issueFilter = ref<AttendanceImportBatchIssueFilter>('all')
+const searchText = ref('')
+const selectedImportBatchItemId = ref('')
+const snapshotActionMessage = ref('')
 
 const batchItemRows = computed(() => importBatchItems.value.map((item) => ({
   item,
   analysis: classifyImportBatchItem(item),
 })))
+const selectedBatch = computed(() => importBatches.value.find((batch) => batch.id === importBatchSelectedId.value) ?? null)
+const issueClusters = computed<AttendanceImportBatchIssueCluster[]>(() => summarizeImportBatchIssueClusters(importBatchItems.value))
+const searchQuery = computed(() => searchText.value.trim().toLowerCase())
 const visibleImportBatchRows = computed(() => (
-  showOnlyAnomalies.value
-    ? batchItemRows.value.filter((row) => row.analysis.isAnomaly)
-    : batchItemRows.value
+  batchItemRows.value.filter((row) => {
+    if (!matchesImportBatchIssueFilter(row.analysis, issueFilter.value)) {
+      return false
+    }
+    const query = searchQuery.value
+    if (!query) {
+      return true
+    }
+    return buildImportBatchSearchIndex(row.item, row.analysis).includes(query)
+  })
 ))
 const batchItemSummary = computed<AttendanceImportBatchImpactSummary>(() => summarizeImportBatchItems(importBatchItems.value))
+const selectedImportBatchRow = computed(() => {
+  const rows = visibleImportBatchRows.value
+  const selected = rows.find((row) => row.item.id === selectedImportBatchItemId.value)
+  return selected ?? rows[0] ?? null
+})
+const selectedImportBatchSeverity = computed<AttendanceImportBatchSeverity>(() => (
+  selectedImportBatchRow.value ? resolveImportBatchSeverity(selectedImportBatchRow.value.analysis) : 'clean'
+))
+const selectedImportBatchWarnings = computed(() => selectedImportBatchRow.value?.analysis.warnings ?? [])
+const selectedImportBatchSnapshot = computed<Record<string, any> | null>(() => (
+  selectedImportBatchRow.value?.item.previewSnapshot ?? null
+))
+const selectedImportBatchSnapshotVisible = computed(() => (
+  Boolean(selectedImportBatchSnapshot.value) && importBatchSnapshot.value === selectedImportBatchSnapshot.value
+))
+const selectedImportBatchMetrics = computed(() => {
+  const analysis = selectedImportBatchRow.value?.analysis
+  if (!analysis) return []
+  return [
+    { key: 'workMinutes', label: tr('Work minutes', '工时分钟'), value: analysis.workMinutes },
+    { key: 'lateMinutes', label: tr('Late', '迟到'), value: analysis.lateMinutes },
+    { key: 'earlyLeaveMinutes', label: tr('Early leave', '早退'), value: analysis.earlyLeaveMinutes },
+    { key: 'leaveMinutes', label: tr('Leave', '请假'), value: analysis.leaveMinutes },
+    { key: 'overtimeMinutes', label: tr('Overtime', '加班'), value: analysis.overtimeMinutes },
+  ]
+})
+const selectedImportBatchActionHints = computed(() => {
+  const row = selectedImportBatchRow.value
+  if (!row) return []
+
+  const { analysis } = row
+  const hints: string[] = []
+  if (!analysis.hasRecord) {
+    hints.push(tr('Verify row mapping and identity merge before rollback; this row does not have a committed attendance record yet.', '先核对行映射和身份归并，再考虑回滚；该行目前没有已提交的考勤记录。'))
+  }
+  if (analysis.warnings.length > 0) {
+    hints.push(tr('Warnings were emitted during preview. Export anomalies CSV and review the warning payload before any rollback decision.', '预演阶段产生了警告。请先导出异常 CSV 并核对警告内容，再决定是否回滚。'))
+  }
+  if (analysis.lateMinutes > 0 || analysis.earlyLeaveMinutes > 0) {
+    hints.push(tr(`Check shift windows and grace settings for this row (${analysis.lateMinutes} late / ${analysis.earlyLeaveMinutes} early leave).`, `检查该行对应班次窗口和宽限设置（迟到 ${analysis.lateMinutes} / 早退 ${analysis.earlyLeaveMinutes}）。`))
+  }
+  if (analysis.leaveMinutes > 0 || analysis.overtimeMinutes > 0) {
+    hints.push(tr('Keep leave and overtime rows aligned with downstream approval and payroll reconciliation before editing source imports.', '请先对齐请假、加班与后续审批/薪资对账，再修改源导入数据。'))
+  }
+  if (hints.length === 0) {
+    hints.push(tr('This row looks clean. Keep it as a baseline sample while triaging the anomalous rows around it.', '该行看起来正常，可作为周边异常条目的基线样本。'))
+  }
+  return hints
+})
+const selectedBatchOperatorNotes = computed(() => {
+  const batch = selectedBatch.value
+  const notes = buildImportBatchActionHints(batchItemSummary.value, tr)
+  if (!batch) return notes
+  const mappingKeys = batch.mapping && typeof batch.mapping === 'object' ? Object.keys(batch.mapping).length : 0
+  if (mappingKeys > 0) {
+    notes.push(tr(`Mapping fields: ${mappingKeys}`, `映射字段：${mappingKeys}`))
+  }
+  const engine = resolveImportBatchEngine(batch)
+  if (engine !== '--') {
+    notes.push(tr(`Engine: ${engine}`, `引擎：${engine}`))
+  }
+  const chunkLabel = resolveImportBatchChunkLabel(batch)
+  if (chunkLabel !== '--') {
+    notes.push(tr(`Chunk ${chunkLabel}`, `分块 ${chunkLabel}`))
+  }
+  if (batch.createdBy) {
+    notes.push(tr(`Created by ${batch.createdBy}`, `创建人 ${batch.createdBy}`))
+  }
+  if (batch.updatedAt) {
+    notes.push(tr(`Updated ${formatDateTime(batch.updatedAt)}`, `更新时间 ${formatDateTime(batch.updatedAt)}`))
+  }
+  if (batchItemSummary.value.missingRecordItems > 0) {
+    notes.push(tr('Missing records usually point to row mapping or identity merge mismatches.', '缺少记录通常意味着行映射或身份归并不匹配。'))
+  }
+  if (batchItemSummary.value.warningItems > 0) {
+    notes.push(tr('Warnings should be reviewed before a rollback decision.', '警告需要先复核，再决定是否回滚。'))
+  }
+  return notes
+})
+const selectedBatchMappingEntries = computed(() => {
+  const mapping = selectedBatch.value?.mapping
+  if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) return []
+  return Object.entries(mapping)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => ({
+      key,
+      label: key,
+      value: typeof value === 'string' ? value : JSON.stringify(value),
+    }))
+})
+const selectedImportBatchSnapshotSections = computed(() => {
+  const snapshot = selectedImportBatchSnapshot.value
+  if (!snapshot || typeof snapshot !== 'object') return []
+
+  const sections: Array<{ key: string; title: string; rows: Array<{ label: string; value: string }> }> = []
+  const metrics = snapshot.metrics && typeof snapshot.metrics === 'object' && !Array.isArray(snapshot.metrics)
+    ? snapshot.metrics as Record<string, unknown>
+    : null
+  const policy = snapshot.policy && typeof snapshot.policy === 'object' && !Array.isArray(snapshot.policy)
+    ? snapshot.policy as Record<string, unknown>
+    : null
+  const engine = snapshot.engine && typeof snapshot.engine === 'object' && !Array.isArray(snapshot.engine)
+    ? snapshot.engine as Record<string, unknown>
+    : null
+
+  if (metrics) {
+    sections.push({
+      key: 'metrics',
+      title: tr('Metrics', '指标'),
+      rows: Object.entries(metrics)
+        .filter(([key]) => key !== 'warnings')
+        .map(([key, value]) => ({
+          label: key,
+          value: typeof value === 'string' ? value : JSON.stringify(value),
+        })),
+    })
+  }
+  if (policy) {
+    sections.push({
+      key: 'policy',
+      title: tr('Policy diagnostics', '规则诊断'),
+      rows: Object.entries(policy).map(([key, value]) => ({
+        label: key,
+        value: typeof value === 'string' ? value : JSON.stringify(value),
+      })),
+    })
+  }
+  if (engine) {
+    sections.push({
+      key: 'engine',
+      title: tr('Engine diagnostics', '引擎诊断'),
+      rows: Object.entries(engine).map(([key, value]) => ({
+        label: key,
+        value: typeof value === 'string' ? value : JSON.stringify(value),
+      })),
+    })
+  }
+
+  return sections.filter((section) => section.rows.length > 0)
+})
 
 const batchRowCountTotal = computed(() => {
   return importBatches.value.reduce((total, batch) => total + (Number(batch.rowCount) || 0), 0)
@@ -216,12 +532,73 @@ function formatImportBatchFlags(analysis: AttendanceImportBatchItemAnalysis): st
   return flags.length > 0 ? flags.join(' · ') : tr('clean', '正常')
 }
 
-function showAllItems() {
-  showOnlyAnomalies.value = false
+function formatIssueFilterLabel(filter: AttendanceImportBatchIssueFilter): string {
+  switch (filter) {
+    case 'all':
+      return tr('All items', '全部条目')
+    case 'anomalies':
+      return tr('Anomalies', '异常')
+    case 'missingRecord':
+      return tr('Missing record', '缺少记录')
+    case 'warnings':
+      return tr('Warnings', '警告')
+    case 'late':
+      return tr('Late', '迟到')
+    case 'earlyLeave':
+      return tr('Early leave', '早退')
+    case 'leave':
+      return tr('Leave', '请假')
+    case 'overtime':
+      return tr('Overtime', '加班')
+    case 'clean':
+      return tr('Clean', '正常')
+    default:
+      return tr('All items', '全部条目')
+  }
 }
 
-function showAnomaliesOnly() {
-  showOnlyAnomalies.value = true
+function formatSeverity(severity: AttendanceImportBatchSeverity): string {
+  switch (severity) {
+    case 'critical':
+      return tr('Critical', '严重')
+    case 'warning':
+      return tr('Warning', '警告')
+    case 'review':
+      return tr('Needs review', '待复核')
+    default:
+      return tr('Clean', '正常')
+  }
+}
+
+function setIssueFilter(filter: AttendanceImportBatchIssueFilter) {
+  issueFilter.value = filter
+}
+
+function isIssueFilterActive(filter: AttendanceImportBatchIssueFilter): boolean {
+  return issueFilter.value === filter
+}
+
+function selectImportBatchRow(item: AttendanceImportItem) {
+  selectedImportBatchItemId.value = item.id
+}
+
+async function copySelectedImportBatchSnapshot() {
+  if (!selectedImportBatchSnapshot.value) return
+  const payload = JSON.stringify(selectedImportBatchSnapshot.value, null, 2)
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(payload)
+      snapshotActionMessage.value = tr('Snapshot JSON copied.', '快照 JSON 已复制。')
+      return
+    }
+    throw new Error('clipboard-unavailable')
+  } catch {
+    snapshotActionMessage.value = tr('Clipboard is unavailable in this browser. Open the raw snapshot and copy it manually.', '当前浏览器无法直接写入剪贴板，请展开原始快照后手动复制。')
+  } finally {
+    globalThis.setTimeout(() => {
+      snapshotActionMessage.value = ''
+    }, 3000)
+  }
 }
 </script>
 
@@ -310,6 +687,20 @@ function showAnomaliesOnly() {
   margin-top: 10px;
 }
 
+.attendance__batch-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.attendance__mapping-panel,
+.attendance__snapshot-sections {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
 .attendance__impact-card {
   display: flex;
   flex-direction: column;
@@ -329,6 +720,187 @@ function showAnomaliesOnly() {
   color: #162235;
   font-size: 18px;
   font-weight: 700;
+}
+
+.attendance__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attendance__field input {
+  padding: 8px 10px;
+  border: 1px solid #d7dfe9;
+  border-radius: 8px;
+}
+
+.attendance__filter-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attendance__chip {
+  border: 1px solid #d0d7e4;
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #fff;
+  color: #334155;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.attendance__chip--active {
+  border-color: #2563eb;
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+
+.attendance__chip--critical {
+  border-color: #fecaca;
+  color: #b42318;
+  background: #fff5f5;
+}
+
+.attendance__chip--warning {
+  border-color: #fcd34d;
+  color: #9a6700;
+  background: #fff8db;
+}
+
+.attendance__chip--review {
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+  background: #eff6ff;
+}
+
+.attendance__chip--clean {
+  border-color: #bbf7d0;
+  color: #166534;
+  background: #f0fdf4;
+}
+
+.attendance__row--selected {
+  background: #f8fbff;
+}
+
+.attendance__severity {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 84px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.attendance__severity--critical {
+  background: #fee2e2;
+  color: #b42318;
+}
+
+.attendance__severity--warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.attendance__severity--review {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.attendance__severity--clean {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.attendance__detail-panel {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid #dbe4f0;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f6f9fd 100%);
+  display: grid;
+  gap: 12px;
+}
+
+.attendance__preview-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  font-size: 13px;
+  color: #44546a;
+}
+
+.attendance__preview-summary strong {
+  color: #162235;
+}
+
+.attendance__warning-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attendance__detail-hints {
+  display: grid;
+  gap: 8px;
+}
+
+.attendance__detail-hints-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #4b5563;
+}
+
+.attendance__detail-hints-list {
+  margin: 0;
+  padding-left: 18px;
+  color: #44546a;
+  font-size: 13px;
+}
+
+.attendance__mapping-grid,
+.attendance__snapshot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+
+.attendance__mapping-card,
+.attendance__snapshot-card,
+.attendance__snapshot-item {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #dde4ef;
+  border-radius: 10px;
+  background: #fbfcfe;
+}
+
+.attendance__mapping-card span,
+.attendance__snapshot-item span {
+  color: #5d6b82;
+  font-size: 12px;
+}
+
+.attendance__mapping-card strong,
+.attendance__snapshot-item strong {
+  color: #162235;
+  font-size: 14px;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.attendance__warning-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #fff1f2;
+  color: #be123c;
+  font-size: 12px;
 }
 
 .attendance__code {

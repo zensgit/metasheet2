@@ -66,6 +66,28 @@ export interface AttendanceRuleSetPreviewResult {
   notes: string[]
 }
 
+export interface AttendanceRuleSetPreviewSummary {
+  totalRows: number
+  cleanRows: number
+  flaggedRows: number
+  lateRows: number
+  earlyLeaveRows: number
+  missingCheckInRows: number
+  missingCheckOutRows: number
+  nonWorkingDayRows: number
+  abnormalStatusRows: number
+  totalLateMinutes: number
+  totalEarlyLeaveMinutes: number
+  averageWorkMinutes: number
+}
+
+export interface AttendanceRuleSetPreviewRecommendation {
+  key: 'raiseLateGrace' | 'raiseEarlyGrace' | 'reviewWorkingDays' | 'reviewMissingPunches' | 'reviewAbnormalStatuses'
+  severity: 'info' | 'warning' | 'critical'
+  affectedRows: number
+  suggestedMinutes?: number
+}
+
 export interface AttendanceGroup {
   id: string
   orgId?: string
@@ -203,7 +225,7 @@ function parseRuleBuilderWorkingDays(value: string): number[] {
   return Array.from(new Set(
     normalizeStringList(value)
       .map((item) => Number.parseInt(item, 10))
-      .filter((item) => Number.isInteger(item) && item >= 1 && item <= 7),
+      .filter((item) => Number.isInteger(item) && item >= 0 && item <= 6),
   ))
 }
 
@@ -282,6 +304,104 @@ function normalizeRuleSetPreviewResult(value: unknown): AttendanceRuleSetPreview
     config,
     notes: normalizeStringList(item.notes),
   }
+}
+
+function isNormalPreviewStatus(status: string): boolean {
+  const normalized = normalizeText(status).toLowerCase()
+  return normalized.length === 0 || normalized === 'normal' || normalized === 'ok' || normalized === 'off' || normalized === 'adjusted'
+}
+
+export function summarizeRuleSetPreviewResult(value: AttendanceRuleSetPreviewResult | null | undefined): AttendanceRuleSetPreviewSummary {
+  const rows = Array.isArray(value?.preview) ? value.preview : []
+  const totalWorkMinutes = rows.reduce((total, row) => total + Math.max(0, normalizeFiniteNumber(row.workMinutes, 0)), 0)
+  const totalLateMinutes = rows.reduce((total, row) => total + Math.max(0, normalizeFiniteNumber(row.lateMinutes, 0)), 0)
+  const totalEarlyLeaveMinutes = rows.reduce((total, row) => total + Math.max(0, normalizeFiniteNumber(row.earlyLeaveMinutes, 0)), 0)
+  const missingCheckInRows = rows.filter((row) => !normalizeNullableText(row.firstInAt)).length
+  const missingCheckOutRows = rows.filter((row) => !normalizeNullableText(row.lastOutAt)).length
+  const lateRows = rows.filter((row) => normalizeFiniteNumber(row.lateMinutes, 0) > 0).length
+  const earlyLeaveRows = rows.filter((row) => normalizeFiniteNumber(row.earlyLeaveMinutes, 0) > 0).length
+  const nonWorkingDayRows = rows.filter((row) => row.isWorkingDay === false).length
+  const abnormalStatusRows = rows.filter((row) => !isNormalPreviewStatus(row.status)).length
+  const flaggedRows = rows.filter((row) => (
+    normalizeFiniteNumber(row.lateMinutes, 0) > 0
+    || normalizeFiniteNumber(row.earlyLeaveMinutes, 0) > 0
+    || !normalizeNullableText(row.firstInAt)
+    || !normalizeNullableText(row.lastOutAt)
+    || row.isWorkingDay === false
+    || !isNormalPreviewStatus(row.status)
+  )).length
+  return {
+    totalRows: rows.length,
+    cleanRows: Math.max(0, rows.length - flaggedRows),
+    flaggedRows,
+    lateRows,
+    earlyLeaveRows,
+    missingCheckInRows,
+    missingCheckOutRows,
+    nonWorkingDayRows,
+    abnormalStatusRows,
+    totalLateMinutes,
+    totalEarlyLeaveMinutes,
+    averageWorkMinutes: rows.length > 0 ? Math.round(totalWorkMinutes / rows.length) : 0,
+  }
+}
+
+export function buildRuleSetPreviewRecommendations(
+  value: AttendanceRuleSetPreviewResult | null | undefined,
+  builderState: AttendanceRuleBuilderState,
+): AttendanceRuleSetPreviewRecommendation[] {
+  const rows = Array.isArray(value?.preview) ? value.preview : []
+  const summary = summarizeRuleSetPreviewResult(value)
+  const recommendations: AttendanceRuleSetPreviewRecommendation[] = []
+  const maxLateMinutes = rows.reduce((max, row) => Math.max(max, normalizeFiniteNumber(row.lateMinutes, 0)), 0)
+  const maxEarlyLeaveMinutes = rows.reduce((max, row) => Math.max(max, normalizeFiniteNumber(row.earlyLeaveMinutes, 0)), 0)
+  const currentLateGrace = Math.max(0, normalizeFiniteNumber(builderState.lateGraceMinutes, 0))
+  const currentEarlyGrace = Math.max(0, normalizeFiniteNumber(builderState.earlyGraceMinutes, 0))
+
+  if (summary.lateRows > 0 && maxLateMinutes > 0) {
+    recommendations.push({
+      key: 'raiseLateGrace',
+      severity: maxLateMinutes >= 15 ? 'critical' : 'warning',
+      affectedRows: summary.lateRows,
+      suggestedMinutes: currentLateGrace + maxLateMinutes,
+    })
+  }
+
+  if (summary.earlyLeaveRows > 0 && maxEarlyLeaveMinutes > 0) {
+    recommendations.push({
+      key: 'raiseEarlyGrace',
+      severity: maxEarlyLeaveMinutes >= 15 ? 'critical' : 'warning',
+      affectedRows: summary.earlyLeaveRows,
+      suggestedMinutes: currentEarlyGrace + maxEarlyLeaveMinutes,
+    })
+  }
+
+  if (summary.nonWorkingDayRows > 0) {
+    recommendations.push({
+      key: 'reviewWorkingDays',
+      severity: 'warning',
+      affectedRows: summary.nonWorkingDayRows,
+    })
+  }
+
+  const missingPunchRows = summary.missingCheckInRows + summary.missingCheckOutRows
+  if (missingPunchRows > 0) {
+    recommendations.push({
+      key: 'reviewMissingPunches',
+      severity: summary.missingCheckOutRows > 0 ? 'critical' : 'warning',
+      affectedRows: missingPunchRows,
+    })
+  }
+
+  if (summary.abnormalStatusRows > 0) {
+    recommendations.push({
+      key: 'reviewAbnormalStatuses',
+      severity: summary.abnormalStatusRows === rows.length ? 'critical' : 'info',
+      affectedRows: summary.abnormalStatusRows,
+    })
+  }
+
+  return recommendations
 }
 
 function parseTemplateLibrary(value: string): any[] | null {

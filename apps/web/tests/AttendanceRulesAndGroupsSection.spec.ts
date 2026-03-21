@@ -231,6 +231,7 @@ describe('AttendanceRulesAndGroupsSection', () => {
     expect(container!.textContent).toContain('Working days: Mon, Tue, Wed, Thu, Fri')
     expect(container!.textContent).toContain('"extraFlag": true')
     expect(container!.textContent).toContain('Sample event builder')
+    expect(container!.textContent).toContain('Scenario presets')
 
     const builder = container!.querySelector('.attendance__preview-builder')
     expect(builder).toBeTruthy()
@@ -338,6 +339,23 @@ describe('AttendanceRulesAndGroupsSection', () => {
         userId: 'user-2',
       },
     ])
+
+    const missingCheckoutButton = Array.from(builder!.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('Missing check-out'))
+    expect(missingCheckoutButton).toBeTruthy()
+    missingCheckoutButton!.click()
+    await flushUi()
+    expect(builderRows()).toHaveLength(1)
+    expect(builder!.querySelector('.attendance__scenario-card--active')).toBeTruthy()
+
+    missingCheckoutButton!.click()
+    await flushUi()
+    expect(JSON.parse(rules.ruleSetPreviewEventsText!.value)).toEqual([
+      expect.objectContaining({
+        eventType: 'check_in',
+        userId: 'user-2',
+      }),
+    ])
   })
 
   it('renders preview results and calls the preview action', async () => {
@@ -375,6 +393,10 @@ describe('AttendanceRulesAndGroupsSection', () => {
     expect(previewEvents?.value).toContain('"eventType":"check_in"')
     expect(container!.textContent).toContain('Preview rule set')
     expect(container!.textContent).toContain('Events: 2')
+    expect(container!.textContent).toContain('Rows affected')
+    expect(container!.textContent).toContain('Average work minutes')
+    expect(container!.textContent).toContain('Raise late grace')
+    expect(container!.textContent).toContain('Selected preview diagnosis')
     expect(container!.textContent).toContain('Uses the current builder draft.')
     expect(container!.textContent).toContain('2026-03-20')
     expect(container!.textContent).toContain('user-1')

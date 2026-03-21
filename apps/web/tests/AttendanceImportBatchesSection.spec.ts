@@ -12,6 +12,7 @@ interface ImportBatchesBindings {
   importBatchLoading: Ref<boolean>
   importBatches: Ref<AttendanceImportBatch[]>
   importBatchItems: Ref<AttendanceImportItem[]>
+  importBatchSelectedId: Ref<string>
   importBatchSnapshot: Ref<Record<string, any> | null>
   reloadImportBatches: () => MaybePromise<void>
   loadImportBatchItems: (batchId: string) => MaybePromise<void>
@@ -78,8 +79,16 @@ describe('AttendanceImportBatchesSection', () => {
       importBatchLoading: ref(false),
       importBatches: ref([
         createBatch({ id: 'batch-a', rowCount: 3 }),
-        createBatch({ id: 'batch-b', rowCount: 7 }),
+        createBatch({
+          id: 'batch-b',
+          rowCount: 7,
+          mapping: {
+            employeeNo: 'userId',
+            checkInTime: 'occurredAt',
+          },
+        }),
       ]),
+      importBatchSelectedId: ref('batch-b'),
       importBatchItems: ref([
         createItem({ id: 'item-a', batchId: 'batch-b' }),
         createItem({
@@ -125,12 +134,17 @@ describe('AttendanceImportBatchesSection', () => {
     expect(container!.textContent).toContain('Loaded items: 2')
     expect(container!.textContent).toContain('Flags')
     expect(container!.textContent).toContain('late 15')
+    expect(container!.textContent).toContain('Selected batch')
+    expect(container!.textContent).toContain('Operator notes')
+    expect(container!.textContent).toContain('Mapping viewer')
+    expect(container!.textContent).toContain('employeeNo')
   })
 
-  it('filters the loaded batch down to anomalies only', async () => {
+  it('filters and inspects the loaded batch in triage mode', async () => {
     const workflow: ImportBatchesBindings = {
       importBatchLoading: ref(false),
       importBatches: ref([createBatch({ id: 'batch-a', rowCount: 2 })]),
+      importBatchSelectedId: ref('batch-a'),
       importBatchItems: ref([
         createItem({
           id: 'item-a',
@@ -153,6 +167,14 @@ describe('AttendanceImportBatchesSection', () => {
               status: 'late',
               workMinutes: 480,
               lateMinutes: 12,
+            },
+            policy: {
+              warnings: ['missing window'],
+              ruleSetId: 'rule-set-1',
+            },
+            engine: {
+              mode: 'bulk',
+              warnings: ['chunk retry'],
             },
             warnings: ['late arrival'],
           },
@@ -177,19 +199,35 @@ describe('AttendanceImportBatchesSection', () => {
     app.mount(container!)
     await flushUi()
 
-    expect(container!.textContent).toContain('View mode: All items')
-    expect(getLoadedBatchRowCount()).toBe(2)
+      expect(container!.textContent).toContain('View mode: All items')
+      expect(getLoadedBatchRowCount()).toBe(2)
 
     const anomalyButton = Array.from(container!.querySelectorAll('button')).find(
-      (button) => button.textContent?.includes('Anomalies only'),
+      (button) => button.textContent?.includes('Anomalies'),
     ) as HTMLButtonElement | undefined
     expect(anomalyButton).toBeTruthy()
     anomalyButton!.click()
     await flushUi()
 
-    expect(container!.textContent).toContain('View mode: Anomalies only')
+    expect(container!.textContent).toContain('View mode: Anomalies')
     expect(getLoadedBatchRowCount()).toBe(1)
     expect(container!.textContent).toContain('missing record')
+
+    const detailButton = Array.from(container!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Details'),
+    ) as HTMLButtonElement | undefined
+    expect(detailButton).toBeTruthy()
+    detailButton!.click()
+    await flushUi()
+
+    expect(container!.textContent).toContain('Selected item detail')
+    expect(container!.textContent).toContain('Critical')
+    expect(container!.textContent).toContain('Warnings were emitted during preview')
+    expect(container!.textContent).toContain('Recommended next steps')
+    expect(container!.textContent).toContain('Policy diagnostics')
+    expect(container!.textContent).toContain('Engine diagnostics')
+    expect(container!.textContent).toContain('Snapshot actions')
+    expect(container!.textContent).toContain('Copy snapshot JSON')
   })
 
   it('keeps the summary visible even when no batches are loaded', async () => {
@@ -197,6 +235,7 @@ describe('AttendanceImportBatchesSection', () => {
       importBatchLoading: ref(false),
       importBatches: ref([]),
       importBatchItems: ref([]),
+      importBatchSelectedId: ref(''),
       importBatchSnapshot: ref(null),
       reloadImportBatches: vi.fn(),
       loadImportBatchItems: vi.fn(),

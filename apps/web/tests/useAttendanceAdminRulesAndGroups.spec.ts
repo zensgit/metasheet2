@@ -1,6 +1,10 @@
 import { ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
-import { useAttendanceAdminRulesAndGroups } from '../src/views/attendance/useAttendanceAdminRulesAndGroups'
+import {
+  buildRuleSetPreviewRecommendations,
+  summarizeRuleSetPreviewResult,
+  useAttendanceAdminRulesAndGroups,
+} from '../src/views/attendance/useAttendanceAdminRulesAndGroups'
 
 const tr = (en: string, _zh: string) => en
 
@@ -29,6 +33,71 @@ function createOptions(overrides: Partial<Parameters<typeof useAttendanceAdminRu
 }
 
 describe('useAttendanceAdminRulesAndGroups', () => {
+  it('summarizes preview rows and generates productized recommendations', () => {
+    const result = {
+      ruleSetId: 'rs-1',
+      totalEvents: 2,
+      config: {},
+      notes: [],
+      preview: [
+        {
+          userId: 'user-1',
+          workDate: '2026-03-20',
+          firstInAt: '2026-03-20T09:05:00.000Z',
+          lastOutAt: null,
+          workMinutes: 475,
+          lateMinutes: 5,
+          earlyLeaveMinutes: 0,
+          status: 'late',
+          isWorkingDay: true,
+        },
+        {
+          userId: 'user-2',
+          workDate: '2026-03-22',
+          firstInAt: '2026-03-22T09:00:00.000Z',
+          lastOutAt: '2026-03-22T17:53:00.000Z',
+          workMinutes: 470,
+          lateMinutes: 0,
+          earlyLeaveMinutes: 7,
+          status: 'early_leave',
+          isWorkingDay: false,
+        },
+      ],
+    }
+
+    const summary = summarizeRuleSetPreviewResult(result)
+    expect(summary).toMatchObject({
+      totalRows: 2,
+      cleanRows: 0,
+      flaggedRows: 2,
+      lateRows: 1,
+      earlyLeaveRows: 1,
+      missingCheckOutRows: 1,
+      nonWorkingDayRows: 1,
+      abnormalStatusRows: 2,
+      totalLateMinutes: 5,
+      totalEarlyLeaveMinutes: 7,
+      averageWorkMinutes: 473,
+    })
+
+    const recommendations = buildRuleSetPreviewRecommendations(result, {
+      source: 'csv',
+      timezone: 'Asia/Shanghai',
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+      lateGraceMinutes: 10,
+      earlyGraceMinutes: 10,
+      workingDays: '1, 2, 3, 4, 5',
+    })
+    expect(recommendations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'raiseLateGrace', suggestedMinutes: 15, affectedRows: 1 }),
+      expect.objectContaining({ key: 'raiseEarlyGrace', suggestedMinutes: 17, affectedRows: 1 }),
+      expect.objectContaining({ key: 'reviewWorkingDays', affectedRows: 1 }),
+      expect.objectContaining({ key: 'reviewMissingPunches', affectedRows: 1 }),
+      expect.objectContaining({ key: 'reviewAbnormalStatuses', affectedRows: 2 }),
+    ]))
+  })
+
   it('loads rule sets and resolves display names', async () => {
     const apiFetch = vi.fn(async (input: string) => {
       if (input === '/api/attendance/rule-sets?orgId=org-1') {
@@ -269,6 +338,73 @@ describe('useAttendanceAdminRulesAndGroups', () => {
     )
     expect(options.setStatus).toHaveBeenCalledWith('Rule set preview loaded.')
     expect(rules.ruleSetPreviewResult.value).toEqual(result)
+  })
+
+  it('summarizes preview output and builds actionable recommendations', () => {
+    const previewResult = {
+      ruleSetId: 'rs-ops',
+      totalEvents: 4,
+      preview: [
+        {
+          userId: 'user-1',
+          workDate: '2026-03-21',
+          firstInAt: '2026-03-21T01:20:00.000Z',
+          lastOutAt: '2026-03-21T10:00:00.000Z',
+          workMinutes: 460,
+          lateMinutes: 20,
+          earlyLeaveMinutes: 0,
+          status: 'late',
+          isWorkingDay: true,
+        },
+        {
+          userId: 'user-2',
+          workDate: '2026-03-22',
+          firstInAt: '2026-03-22T01:00:00.000Z',
+          lastOutAt: null,
+          workMinutes: 240,
+          lateMinutes: 0,
+          earlyLeaveMinutes: 30,
+          status: 'partial',
+          isWorkingDay: false,
+        },
+      ],
+      config: {},
+      notes: [],
+    }
+
+    const summary = summarizeRuleSetPreviewResult(previewResult)
+    expect(summary).toEqual({
+      totalRows: 2,
+      cleanRows: 0,
+      flaggedRows: 2,
+      lateRows: 1,
+      earlyLeaveRows: 1,
+      missingCheckInRows: 0,
+      missingCheckOutRows: 1,
+      nonWorkingDayRows: 1,
+      abnormalStatusRows: 2,
+      totalLateMinutes: 20,
+      totalEarlyLeaveMinutes: 30,
+      averageWorkMinutes: 350,
+    })
+
+    const recommendations = buildRuleSetPreviewRecommendations(previewResult, {
+      source: 'csv',
+      timezone: 'Asia/Shanghai',
+      workStartTime: '09:00',
+      workEndTime: '18:00',
+      lateGraceMinutes: 10,
+      earlyGraceMinutes: 10,
+      workingDays: '1, 2, 3, 4, 5',
+    })
+
+    expect(recommendations).toEqual([
+      expect.objectContaining({ key: 'raiseLateGrace', affectedRows: 1, suggestedMinutes: 30 }),
+      expect.objectContaining({ key: 'raiseEarlyGrace', affectedRows: 1, suggestedMinutes: 40 }),
+      expect.objectContaining({ key: 'reviewWorkingDays', affectedRows: 1 }),
+      expect.objectContaining({ key: 'reviewMissingPunches', affectedRows: 1, severity: 'critical' }),
+      expect.objectContaining({ key: 'reviewAbnormalStatuses', affectedRows: 2 }),
+    ])
   })
 
   it('loads template version details when opening a stored version', async () => {

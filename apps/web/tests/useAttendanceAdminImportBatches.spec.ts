@@ -1,7 +1,12 @@
 import { ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  buildImportBatchActionHints,
   classifyImportBatchItem,
+  matchesImportBatchIssueFilter,
+  resolveImportBatchSeverity,
+  summarizeImportBatchIssueBuckets,
+  summarizeImportBatchIssueClusters,
   type AttendanceImportBatch,
   summarizeImportBatchItems,
   type AttendanceImportItem,
@@ -93,6 +98,65 @@ describe('useAttendanceAdminImportBatches', () => {
     })
     expect(classifyImportBatchItem(items[1]!).isAnomaly).toBe(true)
     expect(classifyImportBatchItem(items[0]!).isAnomaly).toBe(false)
+  })
+
+  it('builds issue clusters, filters, and operator hints from batch items', () => {
+    const items = [
+      createItem({
+        id: 'item-1',
+        recordId: 'record-1',
+        previewSnapshot: {
+          metrics: {
+            status: 'normal',
+            workMinutes: 480,
+          },
+        },
+      }),
+      createItem({
+        id: 'item-2',
+        userId: 'user-2',
+        recordId: null,
+        previewSnapshot: {
+          metrics: {
+            status: 'late',
+            workMinutes: 480,
+            lateMinutes: 12,
+          },
+          warnings: ['late arrival'],
+        },
+      }),
+    ]
+
+    const warningAnalysis = classifyImportBatchItem(items[1]!)
+    expect(resolveImportBatchSeverity(warningAnalysis)).toBe('critical')
+    expect(matchesImportBatchIssueFilter(warningAnalysis, 'missingRecord')).toBe(true)
+    expect(matchesImportBatchIssueFilter(warningAnalysis, 'warnings')).toBe(true)
+    expect(matchesImportBatchIssueFilter(warningAnalysis, 'late')).toBe(true)
+    expect(matchesImportBatchIssueFilter(warningAnalysis, 'clean')).toBe(false)
+
+    expect(summarizeImportBatchIssueBuckets(items)).toEqual(
+      expect.arrayContaining([
+        { filter: 'all', count: 2 },
+        { filter: 'anomalies', count: 1 },
+        { filter: 'missingRecord', count: 1 },
+        { filter: 'warnings', count: 1 },
+        { filter: 'late', count: 1 },
+        { filter: 'clean', count: 1 },
+      ]),
+    )
+    expect(summarizeImportBatchIssueClusters(items)).toEqual(
+      expect.arrayContaining([
+        { key: 'missingRecord', count: 1, severity: 'critical' },
+        { key: 'warnings', count: 1, severity: 'warning' },
+        { key: 'late', count: 1, severity: 'review' },
+      ]),
+    )
+    expect(buildImportBatchActionHints(summarizeImportBatchItems(items), tr)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('missing-record rows first'),
+        expect.stringContaining('Export warnings'),
+      ]),
+    )
   })
 
   it('loads batches and items', async () => {

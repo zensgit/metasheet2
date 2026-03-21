@@ -659,6 +659,7 @@ const {
 const {
   exportImportBatchItemsCsv,
   importBatchItems,
+  importBatchSelectedId,
   importBatchSnapshot,
   importBatches,
   importLoading: importBatchLoading,
@@ -1259,6 +1260,7 @@ const importBatchesSectionBindings = {
   exportImportBatchItemsCsv,
   importBatchItems,
   importBatchLoading,
+  importBatchSelectedId,
   importBatchSnapshot,
   importBatches,
   loadImportBatchItems,

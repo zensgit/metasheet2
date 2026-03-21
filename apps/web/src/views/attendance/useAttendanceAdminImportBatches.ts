@@ -74,6 +74,41 @@ export interface AttendanceImportBatchImpactSummary {
   normalItems: number
 }
 
+export type AttendanceImportBatchIssueFilter =
+  | 'all'
+  | 'anomalies'
+  | 'missingRecord'
+  | 'warnings'
+  | 'late'
+  | 'earlyLeave'
+  | 'leave'
+  | 'overtime'
+  | 'clean'
+
+export type AttendanceImportBatchSeverity = 'critical' | 'warning' | 'review' | 'clean'
+
+export interface AttendanceImportBatchIssueCluster {
+  key: Exclude<AttendanceImportBatchIssueFilter, 'all'>
+  count: number
+  severity: AttendanceImportBatchSeverity
+}
+
+export interface AttendanceImportBatchIssueBucket {
+  filter: AttendanceImportBatchIssueFilter
+  count: number
+}
+
+export interface AttendanceImportBatchActionHintMetrics {
+  totalItems: number
+  anomalyItems: number
+  missingRecordItems: number
+  warningItems: number
+  lateItems: number
+  earlyLeaveItems: number
+  leaveItems: number
+  overtimeItems: number
+}
+
 export interface UseAttendanceAdminImportBatchesOptions {
   tr: Translate
   adminForbidden?: Ref<boolean>
@@ -229,6 +264,178 @@ export function summarizeImportBatchItems(items: AttendanceImportItem[]): Attend
   }
 
   return summary
+}
+
+export function summarizeImportBatchIssueBuckets(items: AttendanceImportItem[]): AttendanceImportBatchIssueBucket[] {
+  const summary = summarizeImportBatchItems(items)
+  return [
+    { filter: 'all', count: summary.totalItems },
+    { filter: 'anomalies', count: summary.anomalyItems },
+    { filter: 'missingRecord', count: summary.missingRecordItems },
+    { filter: 'warnings', count: summary.warningItems },
+    { filter: 'late', count: summary.lateItems },
+    { filter: 'earlyLeave', count: summary.earlyLeaveItems },
+    { filter: 'leave', count: summary.leaveItems },
+    { filter: 'overtime', count: summary.overtimeItems },
+    { filter: 'clean', count: summary.normalItems },
+  ]
+}
+
+export function buildImportBatchActionHints(
+  metrics: AttendanceImportBatchActionHintMetrics,
+  tr: Translate = (en) => en,
+): string[] {
+  if (metrics.totalItems <= 0) return []
+
+  const hints: string[] = []
+  if (metrics.missingRecordItems > 0) {
+    hints.push(
+      tr(
+        `Check missing-record rows first (${metrics.missingRecordItems}). These usually point to mapping, commit, or rollback gaps before policy tuning.`,
+        `优先检查缺少记录的 ${metrics.missingRecordItems} 行。这通常意味着映射、提交或回滚链路存在缺口，而不是规则本身的问题。`,
+      ),
+    )
+  }
+  if (metrics.warningItems > 0) {
+    hints.push(
+      tr(
+        `Export warnings for focused cleanup (${metrics.warningItems} row(s)) before deciding whether the whole batch needs a rollback.`,
+        `先导出包含警告的 ${metrics.warningItems} 行做定向清理，再决定整批是否需要回滚。`,
+      ),
+    )
+  }
+  if (metrics.lateItems > 0 || metrics.earlyLeaveItems > 0) {
+    hints.push(
+      tr(
+        `Review shift windows and rule-set grace settings before rollback; ${metrics.lateItems} late and ${metrics.earlyLeaveItems} early-leave row(s) are policy-sensitive.`,
+        `回滚前先复核班次窗口和规则宽限；当前有 ${metrics.lateItems} 行迟到、${metrics.earlyLeaveItems} 行早退，属于规则敏感项。`,
+      ),
+    )
+  }
+  if (metrics.leaveItems > 0 || metrics.overtimeItems > 0) {
+    hints.push(
+      tr(
+        `Keep leave/overtime rows for downstream approval reconciliation (${metrics.leaveItems}/${metrics.overtimeItems}) instead of treating them as plain import noise.`,
+        `请保留请假/加班行用于后续审批与对账（${metrics.leaveItems}/${metrics.overtimeItems}），不要把它们当成普通导入噪音直接清掉。`,
+      ),
+    )
+  }
+  if (hints.length === 0 && metrics.anomalyItems === 0) {
+    hints.push(
+      tr(
+        'This batch looks clean. Keep it as the baseline and export only if finance or audit needs an archive.',
+        '这一批次看起来干净，可作为基线样本；仅在财务或审计需要留档时再导出。',
+      ),
+    )
+  }
+  if (hints.length === 0) {
+    hints.push(
+      tr(
+        `This batch has ${metrics.anomalyItems} flagged row(s). Triage anomalies first, then decide whether a rollback is lower risk than targeted correction.`,
+        `当前批次有 ${metrics.anomalyItems} 行被标记。先完成异常分诊，再判断整批回滚是否比定向修正风险更低。`,
+      ),
+    )
+  }
+  return hints
+}
+
+export function resolveImportBatchSeverity(analysis: AttendanceImportBatchItemAnalysis): AttendanceImportBatchSeverity {
+  if (!analysis.hasRecord) return 'critical'
+  if (analysis.warnings.length > 0) return 'warning'
+  if (
+    analysis.lateMinutes > 0
+    || analysis.earlyLeaveMinutes > 0
+    || analysis.leaveMinutes > 0
+    || analysis.overtimeMinutes > 0
+    || (analysis.status && analysis.status !== 'normal')
+  ) {
+    return 'review'
+  }
+  return 'clean'
+}
+
+export function matchesImportBatchIssueFilter(
+  analysis: AttendanceImportBatchItemAnalysis,
+  filter: AttendanceImportBatchIssueFilter,
+): boolean {
+  switch (filter) {
+    case 'all':
+      return true
+    case 'anomalies':
+      return analysis.isAnomaly
+    case 'missingRecord':
+      return !analysis.hasRecord
+    case 'warnings':
+      return analysis.warnings.length > 0
+    case 'late':
+      return analysis.lateMinutes > 0
+    case 'earlyLeave':
+      return analysis.earlyLeaveMinutes > 0
+    case 'leave':
+      return analysis.leaveMinutes > 0
+    case 'overtime':
+      return analysis.overtimeMinutes > 0
+    case 'clean':
+      return !analysis.isAnomaly
+    default:
+      return true
+  }
+}
+
+export function summarizeImportBatchIssueClusters(items: AttendanceImportItem[]): AttendanceImportBatchIssueCluster[] {
+  const counts: Record<Exclude<AttendanceImportBatchIssueFilter, 'all'>, number> = {
+    anomalies: 0,
+    missingRecord: 0,
+    warnings: 0,
+    late: 0,
+    earlyLeave: 0,
+    leave: 0,
+    overtime: 0,
+    clean: 0,
+  }
+
+  for (const item of items) {
+    const analysis = classifyImportBatchItem(item)
+    if (analysis.isAnomaly) counts.anomalies += 1
+    if (!analysis.hasRecord) counts.missingRecord += 1
+    if (analysis.warnings.length > 0) counts.warnings += 1
+    if (analysis.lateMinutes > 0) counts.late += 1
+    if (analysis.earlyLeaveMinutes > 0) counts.earlyLeave += 1
+    if (analysis.leaveMinutes > 0) counts.leave += 1
+    if (analysis.overtimeMinutes > 0) counts.overtime += 1
+    if (!analysis.isAnomaly) counts.clean += 1
+  }
+
+  const clusters: AttendanceImportBatchIssueCluster[] = [
+    { key: 'missingRecord', count: counts.missingRecord, severity: 'critical' },
+    { key: 'warnings', count: counts.warnings, severity: 'warning' },
+    { key: 'late', count: counts.late, severity: 'review' },
+    { key: 'earlyLeave', count: counts.earlyLeave, severity: 'review' },
+    { key: 'leave', count: counts.leave, severity: 'review' },
+    { key: 'overtime', count: counts.overtime, severity: 'review' },
+    { key: 'anomalies', count: counts.anomalies, severity: 'warning' },
+    { key: 'clean', count: counts.clean, severity: 'clean' },
+  ]
+
+  return clusters.filter((item) => item.count > 0)
+}
+
+export function buildImportBatchSearchIndex(item: AttendanceImportItem, analysis: AttendanceImportBatchItemAnalysis): string {
+  const snapshot = item.previewSnapshot
+  const chunks = [
+    item.id,
+    item.batchId,
+    item.userId,
+    item.workDate,
+    item.recordId,
+    analysis.status,
+    analysis.warnings.join(' '),
+    snapshot ? JSON.stringify(snapshot) : '',
+  ]
+  return chunks
+    .map((value) => String(value ?? '').trim().toLowerCase())
+    .filter(Boolean)
+    .join(' ')
 }
 
 export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImportBatchesOptions) {
