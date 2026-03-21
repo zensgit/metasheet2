@@ -175,8 +175,71 @@
             </div>
           </div>
 
+          <div class="attendance__preview-builder">
+            <div class="attendance__admin-section-header">
+              <div>
+                <h6 class="attendance__subheading">{{ tr('Sample event builder', '样本事件构建器') }}</h6>
+                <p class="attendance__field-hint">
+                  {{ tr('Build preview events row by row. The JSON textarea below remains the advanced mode.', '按行构建预览事件。下方 JSON 文本框仍保留为高级模式。') }}
+                </p>
+              </div>
+              <div class="attendance__admin-actions">
+                <button class="attendance__btn" type="button" @click="addPreviewEvent">
+                  {{ tr('Add event', '新增事件') }}
+                </button>
+                <button class="attendance__btn" type="button" @click="resetPreviewEvents">
+                  {{ tr('Reset events', '重置事件') }}
+                </button>
+              </div>
+            </div>
+
+            <div v-if="previewEventDrafts.length === 0" class="attendance__empty">
+              {{ tr('No sample events yet. Add one to preview rule results.', '尚无样本事件。添加一条后即可预览规则结果。') }}
+            </div>
+            <div v-else class="attendance__table-wrapper">
+              <table class="attendance__table">
+                <thead>
+                  <tr>
+                    <th>{{ tr('Type', '类型') }}</th>
+                    <th>{{ tr('Occurred at', '发生时间') }}</th>
+                    <th>{{ tr('Work date', '工作日期') }}</th>
+                    <th>{{ tr('User ID', '用户 ID') }}</th>
+                    <th>{{ tr('Actions', '操作') }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(event, index) in previewEventDrafts" :key="event.id">
+                    <td>
+                      <select v-model="event.eventType">
+                        <option value="check_in">{{ tr('Check in', '上班打卡') }}</option>
+                        <option value="check_out">{{ tr('Check out', '下班打卡') }}</option>
+                      </select>
+                    </td>
+                    <td>
+                      <input v-model="event.occurredAt" type="datetime-local" />
+                    </td>
+                    <td>
+                      <input v-model="event.workDate" type="date" />
+                    </td>
+                    <td>
+                      <input v-model="event.userId" type="text" :placeholder="tr('user-1', 'user-1')" />
+                    </td>
+                    <td class="attendance__table-actions">
+                      <button class="attendance__btn" type="button" @click="duplicatePreviewEvent(index)">
+                        {{ tr('Duplicate', '复制') }}
+                      </button>
+                      <button class="attendance__btn attendance__btn--danger" type="button" @click="removePreviewEvent(index)">
+                        {{ tr('Remove', '移除') }}
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
           <label class="attendance__field attendance__field--full" for="attendance-rule-preview-events">
-            <span>{{ tr('Preview events (JSON)', '预览事件（JSON）') }}</span>
+            <span>{{ tr('Preview events (JSON advanced mode)', '预览事件（JSON 高级模式）') }}</span>
             <textarea
               id="attendance-rule-preview-events"
               v-model="ruleSetPreviewEventsText"
@@ -629,6 +692,21 @@ interface RuleSetPreviewResult {
   notes?: string[]
 }
 
+interface PreviewEventDraft {
+  eventType: 'check_in' | 'check_out'
+  occurredAt: string
+  workDate: string
+  userId: string
+}
+
+interface PreviewEventDraft {
+  id: string
+  eventType: 'check_in' | 'check_out'
+  occurredAt: string
+  workDate: string
+  userId: string
+}
+
 interface RulesAndGroupsBindings {
   attendanceGroupEditingId: Ref<string | null>
   attendanceGroupForm: AttendanceGroupFormState
@@ -791,6 +869,7 @@ const ruleBuilderDayOptions = computed(() => [
 const ruleBuilderHydrated = ref(false)
 const ruleBuilderSyncing = ref(false)
 const ruleBuilderConfigError = ref('')
+const previewEventDrafts = ref<PreviewEventDraft[]>([])
 
 function asPlainObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
@@ -926,6 +1005,112 @@ function resolveRuleSetPreviewRows(result: RuleSetPreviewResult | null | undefin
   return []
 }
 
+function createPreviewEventDraft(overrides: Partial<PreviewEventDraft> = {}): PreviewEventDraft {
+  const now = new Date()
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const localIso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`
+  return {
+    id: `${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
+    eventType: 'check_in',
+    occurredAt: localIso,
+    workDate: localIso.slice(0, 10),
+    userId: '',
+    ...overrides,
+  }
+}
+
+function normalizePreviewEventDateTime(value: unknown): string {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (!text) return ''
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(text)) {
+    return text
+  }
+  const parsed = new Date(text.replace(' ', 'T'))
+  if (Number.isNaN(parsed.getTime())) {
+    return text
+  }
+  const pad = (input: number) => String(input).padStart(2, '0')
+  return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}T${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
+}
+
+function normalizePreviewEventDraft(value: unknown): PreviewEventDraft | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const item = value as Record<string, unknown>
+  const eventType = item.eventType === 'check_out' ? 'check_out' : 'check_in'
+  const occurredAt = normalizePreviewEventDateTime(item.occurredAt)
+  if (!occurredAt) return null
+  return {
+    id: typeof item.id === 'string' && item.id.trim() ? item.id : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    eventType,
+    occurredAt,
+    workDate: typeof item.workDate === 'string' && item.workDate.trim() ? item.workDate.trim() : occurredAt.slice(0, 10),
+    userId: typeof item.userId === 'string' ? item.userId.trim() : '',
+  }
+}
+
+function parsePreviewEventDrafts(value: string): PreviewEventDraft[] | null {
+  const trimmed = value.trim()
+  if (!trimmed) return []
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (!Array.isArray(parsed)) return null
+    const drafts = parsed.map((item) => normalizePreviewEventDraft(item))
+    if (drafts.some((item) => item === null)) return null
+    return drafts.filter((item): item is PreviewEventDraft => item !== null)
+  } catch {
+    return null
+  }
+}
+
+function serializePreviewEventDrafts(items: PreviewEventDraft[]): string {
+  return JSON.stringify(
+    items.map((item) => ({
+      eventType: item.eventType,
+      occurredAt: item.occurredAt,
+      workDate: item.workDate,
+      userId: item.userId,
+    })),
+    null,
+    2,
+  )
+}
+
+function syncPreviewEventTextFromDrafts() {
+  const serialized = serializePreviewEventDrafts(previewEventDrafts.value)
+  if (serialized !== ruleSetPreviewEventsText.value) {
+    ruleSetPreviewEventsText.value = serialized
+  }
+}
+
+function addPreviewEvent() {
+  previewEventDrafts.value = [...previewEventDrafts.value, createPreviewEventDraft()]
+}
+
+function duplicatePreviewEvent(index: number) {
+  const source = previewEventDrafts.value[index]
+  if (!source) return
+  const next = createPreviewEventDraft({
+    eventType: source.eventType,
+    occurredAt: source.occurredAt,
+    workDate: source.workDate,
+    userId: source.userId,
+  })
+  previewEventDrafts.value = [
+    ...previewEventDrafts.value.slice(0, index + 1),
+    next,
+    ...previewEventDrafts.value.slice(index + 1),
+  ]
+}
+
+function removePreviewEvent(index: number) {
+  previewEventDrafts.value = previewEventDrafts.value.filter((_, itemIndex) => itemIndex !== index)
+}
+
+function resetPreviewEvents() {
+  previewEventDrafts.value = []
+  syncPreviewEventTextFromDrafts()
+}
+
 const ruleBuilderPreviewConfig = computed(() => buildRuleSetPreviewConfig())
 const ruleSetPreviewRows = computed(() => resolveRuleSetPreviewRows(ruleSetPreviewResult.value))
 const ruleSetPreviewNotes = computed(() => ruleSetPreviewResult.value?.notes ?? [])
@@ -942,6 +1127,26 @@ watch(
     }
   },
   { immediate: true },
+)
+
+watch(
+  () => ruleSetPreviewEventsText.value,
+  (value) => {
+    const drafts = parsePreviewEventDrafts(value)
+    if (drafts === null) {
+      return
+    }
+    previewEventDrafts.value = drafts
+  },
+  { immediate: true },
+)
+
+watch(
+  previewEventDrafts,
+  () => {
+    syncPreviewEventTextFromDrafts()
+  },
+  { deep: true },
 )
 
 watch(

@@ -56,6 +56,10 @@ describe('AttendanceImportBatchesSection', () => {
   const formatDateTime = (value: string | null | undefined) => value ?? '--'
   const formatJson = (value: unknown) => JSON.stringify(value, null, 2)
 
+  function getLoadedBatchRowCount(): number {
+    return container!.querySelectorAll('.attendance__table-wrapper')[1]?.querySelectorAll('tbody tr').length ?? 0
+  }
+
   beforeEach(() => {
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -78,6 +82,20 @@ describe('AttendanceImportBatchesSection', () => {
       ]),
       importBatchItems: ref([
         createItem({ id: 'item-a', batchId: 'batch-b' }),
+        createItem({
+          id: 'item-b',
+          batchId: 'batch-b',
+          userId: 'user-2',
+          recordId: null,
+          previewSnapshot: {
+            metrics: {
+              status: 'late',
+              workMinutes: 480,
+              lateMinutes: 15,
+            },
+            warnings: ['late arrival'],
+          },
+        }),
       ]),
       importBatchSnapshot: ref(null),
       reloadImportBatches: vi.fn(),
@@ -100,8 +118,78 @@ describe('AttendanceImportBatchesSection', () => {
 
     expect(container!.textContent).toContain('Batches loaded: 2')
     expect(container!.textContent).toContain('Rows total: 10')
-    expect(container!.textContent).toContain('Current items: 1')
-    expect(container!.textContent).toContain('Loaded items: 1')
+    expect(container!.textContent).toContain('Current items: 2')
+    expect(container!.textContent).toContain('Loaded rows2')
+    expect(container!.textContent).toContain('Anomalies1')
+    expect(container!.textContent).toContain('Warnings1')
+    expect(container!.textContent).toContain('Loaded items: 2')
+    expect(container!.textContent).toContain('Flags')
+    expect(container!.textContent).toContain('late 15')
+  })
+
+  it('filters the loaded batch down to anomalies only', async () => {
+    const workflow: ImportBatchesBindings = {
+      importBatchLoading: ref(false),
+      importBatches: ref([createBatch({ id: 'batch-a', rowCount: 2 })]),
+      importBatchItems: ref([
+        createItem({
+          id: 'item-a',
+          batchId: 'batch-a',
+          recordId: 'record-1',
+          previewSnapshot: {
+            metrics: {
+              status: 'normal',
+              workMinutes: 480,
+            },
+          },
+        }),
+        createItem({
+          id: 'item-b',
+          batchId: 'batch-a',
+          userId: 'user-2',
+          recordId: null,
+          previewSnapshot: {
+            metrics: {
+              status: 'late',
+              workMinutes: 480,
+              lateMinutes: 12,
+            },
+            warnings: ['late arrival'],
+          },
+        }),
+      ]),
+      importBatchSnapshot: ref(null),
+      reloadImportBatches: vi.fn(),
+      loadImportBatchItems: vi.fn(),
+      rollbackImportBatch: vi.fn(),
+      exportImportBatchItemsCsv: vi.fn(),
+      toggleImportBatchSnapshot: vi.fn(),
+    }
+
+    app = createApp(AttendanceImportBatchesSection, {
+      tr,
+      workflow,
+      resolveRuleSetName,
+      formatStatus,
+      formatDateTime,
+      formatJson,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.textContent).toContain('View mode: All items')
+    expect(getLoadedBatchRowCount()).toBe(2)
+
+    const anomalyButton = Array.from(container!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Anomalies only'),
+    ) as HTMLButtonElement | undefined
+    expect(anomalyButton).toBeTruthy()
+    anomalyButton!.click()
+    await flushUi()
+
+    expect(container!.textContent).toContain('View mode: Anomalies only')
+    expect(getLoadedBatchRowCount()).toBe(1)
+    expect(container!.textContent).toContain('missing record')
   })
 
   it('keeps the summary visible even when no batches are loaded', async () => {

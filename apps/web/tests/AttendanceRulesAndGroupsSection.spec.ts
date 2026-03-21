@@ -208,6 +208,14 @@ describe('AttendanceRulesAndGroupsSection', () => {
 
   it('keeps the structured builder in sync with the JSON draft', async () => {
     const rules = createBindings()
+    rules.ruleSetPreviewEventsText = ref(JSON.stringify([
+      {
+        eventType: 'check_in',
+        occurredAt: '2026-03-21T09:05',
+        workDate: '2026-03-21',
+        userId: 'user-1',
+      },
+    ], null, 2))
 
     app = createApp(AttendanceRulesAndGroupsSection, {
       tr,
@@ -222,6 +230,46 @@ describe('AttendanceRulesAndGroupsSection', () => {
     expect(container!.textContent).toContain('Timezone: Asia/Shanghai')
     expect(container!.textContent).toContain('Working days: Mon, Tue, Wed, Thu, Fri')
     expect(container!.textContent).toContain('"extraFlag": true')
+    expect(container!.textContent).toContain('Sample event builder')
+
+    const builder = container!.querySelector('.attendance__preview-builder')
+    expect(builder).toBeTruthy()
+    const builderRows = () => builder!.querySelectorAll<HTMLTableRowElement>('tbody tr')
+    expect(builderRows()).toHaveLength(1)
+
+    const firstRow = builderRows()[0]
+    const firstType = firstRow.querySelector<HTMLSelectElement>('select')
+    const firstOccurredAt = firstRow.querySelectorAll<HTMLInputElement>('input')[0]
+    const firstWorkDate = firstRow.querySelectorAll<HTMLInputElement>('input')[1]
+    const firstUserId = firstRow.querySelectorAll<HTMLInputElement>('input')[2]
+    expect(firstType).toBeTruthy()
+    expect(firstOccurredAt).toBeTruthy()
+    expect(firstWorkDate).toBeTruthy()
+    expect(firstUserId).toBeTruthy()
+
+    firstType!.value = 'check_out'
+    firstType!.dispatchEvent(new Event('change', { bubbles: true }))
+    firstOccurredAt!.value = '2026-03-21T18:08'
+    firstOccurredAt!.dispatchEvent(new Event('input', { bubbles: true }))
+    firstWorkDate!.value = '2026-03-21'
+    firstWorkDate!.dispatchEvent(new Event('input', { bubbles: true }))
+    firstUserId!.value = 'user-2'
+    firstUserId!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const addButton = Array.from(builder!.querySelectorAll<HTMLButtonElement>('button'))
+      .find((button) => button.textContent?.includes('Add event'))
+    expect(addButton).toBeTruthy()
+    addButton!.click()
+    await flushUi()
+    expect(builderRows()).toHaveLength(2)
+
+    const removeButtons = Array.from(builder!.querySelectorAll<HTMLButtonElement>('button'))
+      .filter((button) => button.textContent?.includes('Remove'))
+    expect(removeButtons).toHaveLength(2)
+    removeButtons[1]!.click()
+    await flushUi()
+    expect(builderRows()).toHaveLength(1)
 
     const sourceInput = container!.querySelector<HTMLInputElement>('#attendance-rule-builder-source')
     const timezoneInput = container!.querySelector<HTMLInputElement>('#attendance-rule-builder-timezone')
@@ -281,6 +329,15 @@ describe('AttendanceRulesAndGroupsSection', () => {
         workingDays: [1, 2, 3, 4, 5, 6],
       },
     })
+
+    expect(JSON.parse(rules.ruleSetPreviewEventsText!.value)).toEqual([
+      {
+        eventType: 'check_out',
+        occurredAt: '2026-03-21T18:08',
+        workDate: '2026-03-21',
+        userId: 'user-2',
+      },
+    ])
   })
 
   it('renders preview results and calls the preview action', async () => {

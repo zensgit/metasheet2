@@ -1,7 +1,9 @@
 import { ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  classifyImportBatchItem,
   type AttendanceImportBatch,
+  summarizeImportBatchItems,
   type AttendanceImportItem,
   useAttendanceAdminImportBatches,
 } from '../src/views/attendance/useAttendanceAdminImportBatches'
@@ -51,6 +53,48 @@ function createItem(overrides: Partial<AttendanceImportItem> = {}): AttendanceIm
 }
 
 describe('useAttendanceAdminImportBatches', () => {
+  it('classifies batch items and summarizes anomaly impact', () => {
+    const items = [
+      createItem({
+        id: 'item-1',
+        batchId: 'batch-a',
+        recordId: 'record-1',
+        previewSnapshot: {
+          metrics: {
+            status: 'normal',
+            workMinutes: 480,
+          },
+        },
+      }),
+      createItem({
+        id: 'item-2',
+        batchId: 'batch-a',
+        userId: 'user-2',
+        recordId: null,
+        previewSnapshot: {
+          metrics: {
+            status: 'late',
+            workMinutes: 480,
+            lateMinutes: 12,
+          },
+          warnings: ['late arrival'],
+        },
+      }),
+    ]
+
+    const summary = summarizeImportBatchItems(items)
+    expect(summary).toMatchObject({
+      totalItems: 2,
+      anomalyItems: 1,
+      warningItems: 1,
+      missingRecordItems: 1,
+      lateItems: 1,
+      normalItems: 1,
+    })
+    expect(classifyImportBatchItem(items[1]!).isAnomaly).toBe(true)
+    expect(classifyImportBatchItem(items[0]!).isAnomaly).toBe(false)
+  })
+
   it('loads batches and items', async () => {
     const apiFetch = vi.fn(async (input: string) => {
       if (input === '/api/attendance/import/batches?orgId=org-1') {

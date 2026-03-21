@@ -50,6 +50,30 @@ export interface AttendanceImportItem {
   createdAt?: string
 }
 
+export interface AttendanceImportBatchItemAnalysis {
+  status: string
+  workMinutes: number
+  lateMinutes: number
+  earlyLeaveMinutes: number
+  leaveMinutes: number
+  overtimeMinutes: number
+  warnings: string[]
+  hasRecord: boolean
+  isAnomaly: boolean
+}
+
+export interface AttendanceImportBatchImpactSummary {
+  totalItems: number
+  anomalyItems: number
+  warningItems: number
+  missingRecordItems: number
+  lateItems: number
+  earlyLeaveItems: number
+  leaveItems: number
+  overtimeItems: number
+  normalItems: number
+}
+
 export interface UseAttendanceAdminImportBatchesOptions {
   tr: Translate
   adminForbidden?: Ref<boolean>
@@ -142,6 +166,69 @@ export function extractImportSnapshotWarnings(snapshot?: Record<string, any> | n
   const engineWarnings = snapshot.engine?.warnings
   if (Array.isArray(engineWarnings)) warnings.push(...engineWarnings.map((value) => String(value)))
   return Array.from(new Set(warnings))
+}
+
+export function classifyImportBatchItem(item: AttendanceImportItem): AttendanceImportBatchItemAnalysis {
+  const snapshot = item.previewSnapshot
+  const metrics = extractImportSnapshotMetrics(snapshot)
+  const warnings = extractImportSnapshotWarnings(snapshot)
+  const status = String(metrics.status ?? '')
+  const workMinutes = Number(metrics.workMinutes ?? 0)
+  const lateMinutes = Number(metrics.lateMinutes ?? 0)
+  const earlyLeaveMinutes = Number(metrics.earlyLeaveMinutes ?? 0)
+  const leaveMinutes = Number(metrics.leaveMinutes ?? 0)
+  const overtimeMinutes = Number(metrics.overtimeMinutes ?? 0)
+  const hasRecord = (item.recordId ?? null) !== null
+  const isAnomaly = Boolean(
+    warnings.length
+    || !hasRecord
+    || (status && status !== 'normal')
+    || lateMinutes > 0
+    || earlyLeaveMinutes > 0
+    || leaveMinutes > 0
+    || overtimeMinutes > 0,
+  )
+
+  return {
+    status,
+    workMinutes,
+    lateMinutes,
+    earlyLeaveMinutes,
+    leaveMinutes,
+    overtimeMinutes,
+    warnings,
+    hasRecord,
+    isAnomaly,
+  }
+}
+
+export function summarizeImportBatchItems(items: AttendanceImportItem[]): AttendanceImportBatchImpactSummary {
+  const summary: AttendanceImportBatchImpactSummary = {
+    totalItems: 0,
+    anomalyItems: 0,
+    warningItems: 0,
+    missingRecordItems: 0,
+    lateItems: 0,
+    earlyLeaveItems: 0,
+    leaveItems: 0,
+    overtimeItems: 0,
+    normalItems: 0,
+  }
+
+  for (const item of items) {
+    const analysis = classifyImportBatchItem(item)
+    summary.totalItems += 1
+    if (analysis.isAnomaly) summary.anomalyItems += 1
+    if (analysis.warnings.length > 0) summary.warningItems += 1
+    if (!analysis.hasRecord) summary.missingRecordItems += 1
+    if (analysis.lateMinutes > 0) summary.lateItems += 1
+    if (analysis.earlyLeaveMinutes > 0) summary.earlyLeaveItems += 1
+    if (analysis.leaveMinutes > 0) summary.leaveItems += 1
+    if (analysis.overtimeMinutes > 0) summary.overtimeItems += 1
+    if (analysis.status === 'normal' && !analysis.isAnomaly) summary.normalItems += 1
+  }
+
+  return summary
 }
 
 export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImportBatchesOptions) {
@@ -365,37 +452,11 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
 
       const rows = allItems
         .map((item) => {
-          const snapshot = item.previewSnapshot
-          const metrics = extractImportSnapshotMetrics(snapshot)
-          const warnings = extractImportSnapshotWarnings(snapshot)
-
-          const status = String(metrics.status ?? '')
-          const workMinutes = Number(metrics.workMinutes ?? 0)
-          const lateMinutes = Number(metrics.lateMinutes ?? 0)
-          const earlyLeaveMinutes = Number(metrics.earlyLeaveMinutes ?? 0)
-          const leaveMinutes = Number(metrics.leaveMinutes ?? 0)
-          const overtimeMinutes = Number(metrics.overtimeMinutes ?? 0)
-
-          const isAnomaly = Boolean(
-            warnings.length
-            || (item.recordId ?? null) === null
-            || (status && status !== 'normal')
-            || lateMinutes > 0
-            || earlyLeaveMinutes > 0
-            || leaveMinutes > 0
-            || overtimeMinutes > 0,
-          )
+          const analysis = classifyImportBatchItem(item)
 
           return {
             item,
-            status,
-            workMinutes,
-            lateMinutes,
-            earlyLeaveMinutes,
-            leaveMinutes,
-            overtimeMinutes,
-            warnings,
-            isAnomaly,
+            ...analysis,
           }
         })
         .filter((row) => (onlyAnomalies ? row.isAnomaly : true))
