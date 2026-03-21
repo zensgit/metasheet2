@@ -27,6 +27,9 @@ export interface PlmAuditRouteState {
   sceneId: string
   sceneName: string
   sceneOwnerUserId: string
+  sceneRecommendationReason: string
+  sceneRecommendationSourceLabel: string
+  returnToPlmPath: string
 }
 
 export const DEFAULT_PLM_AUDIT_ROUTE_STATE: PlmAuditRouteState = {
@@ -43,6 +46,9 @@ export const DEFAULT_PLM_AUDIT_ROUTE_STATE: PlmAuditRouteState = {
   sceneId: '',
   sceneName: '',
   sceneOwnerUserId: '',
+  sceneRecommendationReason: '',
+  sceneRecommendationSourceLabel: '',
+  returnToPlmPath: '',
 }
 
 function readString(value: unknown) {
@@ -92,6 +98,9 @@ export function parsePlmAuditRouteState(query: LocationQuery): PlmAuditRouteStat
     sceneId: readString(query.auditSceneId),
     sceneName: readString(query.auditSceneName),
     sceneOwnerUserId: readString(query.auditSceneOwner),
+    sceneRecommendationReason: readString(query.auditSceneReason),
+    sceneRecommendationSourceLabel: readString(query.auditSceneSource),
+    returnToPlmPath: readString(query.auditReturnTo),
   }
 }
 
@@ -113,6 +122,11 @@ export function buildPlmAuditRouteQuery(state: PlmAuditRouteState): LocationQuer
   if (state.sceneId) query.auditSceneId = state.sceneId
   if (state.sceneName) query.auditSceneName = state.sceneName
   if (state.sceneOwnerUserId) query.auditSceneOwner = state.sceneOwnerUserId
+  if (state.sceneRecommendationReason) query.auditSceneReason = state.sceneRecommendationReason
+  if (state.sceneRecommendationSourceLabel) {
+    query.auditSceneSource = state.sceneRecommendationSourceLabel
+  }
+  if (state.returnToPlmPath) query.auditReturnTo = state.returnToPlmPath
 
   return query
 }
@@ -168,4 +182,7 @@ export function isPlmAuditRouteStateEqual(left: PlmAuditRouteState, right: PlmAu
     && left.sceneId === right.sceneId
     && left.sceneName === right.sceneName
     && left.sceneOwnerUserId === right.sceneOwnerUserId
+    && left.sceneRecommendationReason === right.sceneRecommendationReason
+    && left.sceneRecommendationSourceLabel === right.sceneRecommendationSourceLabel
+    && left.returnToPlmPath === right.returnToPlmPath
 }

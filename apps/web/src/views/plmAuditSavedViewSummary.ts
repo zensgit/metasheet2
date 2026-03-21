@@ -5,7 +5,11 @@ import {
   withPlmAuditSceneOwnerContext,
   withPlmAuditSceneQueryContext,
 } from './plmAuditSceneContext'
-import { buildPlmAuditSceneActionHint, buildPlmAuditSceneSourceCopy } from './plmAuditSceneCopy'
+import {
+  buildPlmAuditSceneActionHint,
+  buildPlmAuditSceneActionLabel,
+  buildPlmAuditSceneSourceCopy,
+} from './plmAuditSceneCopy'
 import type { PlmAuditRouteState } from './plmAuditQueryState'
 import { buildPlmAuditSceneToken } from './plmAuditSceneToken'
 import type { PlmAuditSceneTokenActionKind } from './plmAuditSceneToken'
@@ -39,8 +43,9 @@ export function buildPlmAuditSavedViewContextBadge(
   tr: (en: string, zh: string) => string,
   currentState?: Pick<PlmAuditRouteState, 'q' | 'sceneId' | 'sceneName' | 'sceneOwnerUserId'>,
 ): PlmAuditSavedViewContextBadge | null {
+  const sceneValue = buildPlmAuditSceneQueryValue(state)
   const token = buildPlmAuditSceneToken({
-    sceneValue: buildPlmAuditSceneQueryValue(state),
+    sceneValue,
     ownerValue: state.sceneOwnerUserId,
     ownerContextActive: isPlmAuditSceneOwnerContextActive(state),
     sceneQueryContextActive: isPlmAuditSceneQueryContextActive(state),
@@ -51,18 +56,30 @@ export function buildPlmAuditSavedViewContextBadge(
   const primaryAction = token.actions.find((item) => item.emphasis === 'primary' && item.kind !== 'clear') ?? null
   const ownerTarget = withPlmAuditSceneOwnerContext(state)
   const sceneTarget = withPlmAuditSceneQueryContext(state)
-  const quickAction = primaryAction && primaryAction.kind !== 'clear'
+  const shouldExposeSceneReapply = Boolean(sceneValue) && (
+    token.kind === 'scene'
+    || isPlmAuditSceneOwnerContextActive(state)
+    || isPlmAuditSceneQueryContextActive(state)
+  )
+  const quickAction = shouldExposeSceneReapply
     ? {
-      kind: primaryAction.kind,
-      label: primaryAction.label,
-      disabled:
-        primaryAction.kind === 'owner'
-          ? Boolean(currentState && isSameSceneContextTarget(currentState, ownerTarget))
-          : Boolean(currentState && isSameSceneContextTarget(currentState, sceneTarget)),
-      hint:
-        buildPlmAuditSceneActionHint(primaryAction.kind, tr),
+      kind: 'reapply-scene' as const,
+      label: buildPlmAuditSceneActionLabel('reapply-scene', tr),
+      disabled: Boolean(currentState && isSameSceneContextTarget(currentState, sceneTarget)),
+      hint: buildPlmAuditSceneActionHint('reapply-scene', tr),
     }
-    : null
+    : (primaryAction && primaryAction.kind !== 'clear'
+      ? {
+        kind: primaryAction.kind,
+        label: primaryAction.label,
+        disabled:
+          primaryAction.kind === 'owner'
+            ? Boolean(currentState && isSameSceneContextTarget(currentState, ownerTarget))
+            : Boolean(currentState && isSameSceneContextTarget(currentState, sceneTarget)),
+        hint:
+          buildPlmAuditSceneActionHint(primaryAction.kind, tr),
+      }
+      : null)
 
   return {
     kind: token.kind,

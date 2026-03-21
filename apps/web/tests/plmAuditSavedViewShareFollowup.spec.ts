@@ -12,6 +12,7 @@ describe('plmAuditSavedViewShareFollowup', () => {
       name: 'Shared supplier audit · Local view',
     }, {
       savedViewId: 'saved-1',
+      source: 'shared-entry',
     }, tr)).toEqual({
       sourceLabel: 'Shared team view link|团队视图分享链接',
       title: 'Shared audit setup saved locally.|分享的审计配置已保存到本地。',
@@ -43,6 +44,39 @@ describe('plmAuditSavedViewShareFollowup', () => {
       name: 'Shared supplier audit · Local view',
     }, {
       savedViewId: 'saved-2',
+      source: 'shared-entry',
     }, tr)).toBeNull()
+  })
+
+  it('builds scene-save follow-up copy for locally saved scene audits', () => {
+    expect(buildPlmAuditSavedViewShareFollowupNotice({
+      id: 'saved-2',
+      name: '采购团队场景 · audit scene',
+    }, {
+      savedViewId: 'saved-2',
+      source: 'scene-context',
+    }, tr)).toEqual({
+      sourceLabel: 'Scene save shortcut|场景快捷保存',
+      title: 'Scene audit saved locally.|场景审计已保存到本地。',
+      description:
+        'You can keep "采购团队场景 · audit scene" as a personal saved view, or immediately promote this scene-focused audit into the audit team views.|你可以将“采购团队场景 · audit scene”继续保留为个人已保存视图，或立即将这个场景审计提升到审计团队视图。',
+      actions: [
+        {
+          kind: 'promote-team',
+          label: 'Save to team|保存到团队',
+          emphasis: 'primary',
+        },
+        {
+          kind: 'promote-default',
+          label: 'Save as default team view|保存为团队默认视图',
+          emphasis: 'secondary',
+        },
+        {
+          kind: 'dismiss',
+          label: 'Done|完成',
+          emphasis: 'secondary',
+        },
+      ],
+    })
   })
 })

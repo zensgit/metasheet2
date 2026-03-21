@@ -19,8 +19,8 @@ describe('plmAuditSceneSummary', () => {
       label: 'Owner context|Owner 上下文',
       value: 'owner-a',
       description: 'Audit is currently focused on owner-related activity for this scene.|当前审计正在聚焦这个场景的 owner 相关活动。',
-      action: 'scene',
-      actionLabel: 'Restore scene query|恢复场景查询',
+      action: 'reapply-scene',
+      actionLabel: 'Reapply scene filter|重新应用场景过滤',
       active: true,
     })
   })
@@ -38,8 +38,8 @@ describe('plmAuditSceneSummary', () => {
       label: 'Scene query|场景查询',
       value: 'scene-1',
       description: 'Audit is currently focused on the selected scene context.|当前审计正在聚焦所选场景上下文。',
-      action: 'owner',
-      actionLabel: 'Filter by owner|按 owner 筛选',
+      action: 'reapply-scene',
+      actionLabel: 'Reapply scene filter|重新应用场景过滤',
       active: true,
     })
   })
@@ -76,9 +76,28 @@ describe('plmAuditSceneSummary', () => {
       label: 'Scene query|场景查询',
       value: '采购团队场景',
       description: 'Audit is currently focused on the selected scene context.|当前审计正在聚焦所选场景上下文。',
-      action: null,
-      actionLabel: '',
+      action: 'reapply-scene',
+      actionLabel: 'Reapply scene filter|重新应用场景过滤',
       active: true,
+    })
+  })
+
+  it('offers scene reapply when only inactive scene context is available', () => {
+    expect(buildPlmAuditSceneSummaryCard({
+      sceneId: 'scene-2',
+      sceneName: '最近更新场景',
+      sceneOwnerUserId: '',
+      ownerContextActive: false,
+      sceneQueryContextActive: false,
+    }, tr)).toEqual({
+      kind: 'scene',
+      sourceLabel: 'Local context|本地上下文',
+      label: 'Scene query|场景查询',
+      value: 'scene-2',
+      description: 'Keep this audit view linked to the selected scene context.|让当前审计视图继续关联到所选场景上下文。',
+      action: 'reapply-scene',
+      actionLabel: 'Reapply scene filter|重新应用场景过滤',
+      active: false,
     })
   })
 

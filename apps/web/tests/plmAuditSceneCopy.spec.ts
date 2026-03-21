@@ -50,9 +50,13 @@ describe('plmAuditSceneCopy', () => {
 
   it('builds action labels and hints from the same contract', () => {
     expect(buildPlmAuditSceneActionLabel('scene', tr)).toBe('Restore scene query|恢复场景查询')
+    expect(buildPlmAuditSceneActionLabel('reapply-scene', tr)).toBe('Reapply scene filter|重新应用场景过滤')
     expect(buildPlmAuditSceneActionLabel('clear', tr)).toBe('Clear context|清除上下文')
     expect(buildPlmAuditSceneActionHint('owner', tr)).toBe(
       'Current audit is already filtered by this scene owner.|当前审计已按这个场景的 owner 过滤。',
+    )
+    expect(buildPlmAuditSceneActionHint('reapply-scene', tr)).toBe(
+      'Current audit is already using this scene query.|当前审计已使用这个场景查询。',
     )
   })
 
@@ -70,16 +74,38 @@ describe('plmAuditSceneCopy', () => {
       sceneId: 'scene-1',
       sceneName: '采购团队场景',
       sceneOwnerUserId: 'owner-a',
+      recommendationReason: 'recent-default',
+      recommendationSourceLabel: '近期被设为团队默认场景',
       action: 'set-default',
       resourceType: 'plm-team-view-default',
       semantic: 'owner-context',
     }, tr)).toEqual({
       title: 'Scene context|场景上下文',
-      sourceLabel: 'Local context|本地上下文',
+      sourceLabel: '近期被设为团队默认场景',
       description: 'Opened from a recommended default-scene card.|来自推荐团队默认场景卡片。',
       sceneId: 'scene-1',
       sceneName: '采购团队场景',
       sceneOwnerUserId: 'owner-a',
+    })
+  })
+
+  it('prefers recommendation-specific context copy for recent updates', () => {
+    expect(buildPlmAuditSceneContextBanner({
+      sceneId: 'scene-2',
+      sceneName: 'BOM 巡检场景',
+      sceneOwnerUserId: 'owner-b',
+      recommendationReason: 'recent-update',
+      recommendationSourceLabel: '近期更新的团队场景',
+      action: '',
+      resourceType: '',
+      semantic: 'scene-query',
+    }, tr)).toEqual({
+      title: 'Scene context|场景上下文',
+      sourceLabel: '近期更新的团队场景',
+      description: 'Opened from a recently updated team scene recommendation.|来自最近更新的团队场景推荐。',
+      sceneId: 'scene-2',
+      sceneName: 'BOM 巡检场景',
+      sceneOwnerUserId: 'owner-b',
     })
   })
 

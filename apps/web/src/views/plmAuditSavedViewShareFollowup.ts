@@ -1,9 +1,11 @@
 import type { PlmAuditSavedView } from './plmAuditSavedViews'
 
 export type PlmAuditSavedViewShareFollowupActionKind = 'promote-team' | 'promote-default' | 'dismiss'
+export type PlmAuditSavedViewShareFollowupSource = 'shared-entry' | 'scene-context'
 
 export type PlmAuditSavedViewShareFollowup = {
   savedViewId: string
+  source: PlmAuditSavedViewShareFollowupSource
 }
 
 export type PlmAuditSavedViewShareFollowupNotice = {
@@ -24,13 +26,24 @@ export function buildPlmAuditSavedViewShareFollowupNotice(
 ): PlmAuditSavedViewShareFollowupNotice | null {
   if (!followup || followup.savedViewId !== view.id) return null
 
+  const fromSharedEntry = followup.source === 'shared-entry'
+
   return {
-    sourceLabel: tr('Shared team view link', '团队视图分享链接'),
-    title: tr('Shared audit setup saved locally.', '分享的审计配置已保存到本地。'),
-    description: tr(
-      `You can keep "${view.name}" as a personal saved view, or immediately promote it into the audit team views.`,
-      `你可以将“${view.name}”继续保留为个人已保存视图，或立即将其提升到审计团队视图。`,
-    ),
+    sourceLabel: fromSharedEntry
+      ? tr('Shared team view link', '团队视图分享链接')
+      : tr('Scene save shortcut', '场景快捷保存'),
+    title: fromSharedEntry
+      ? tr('Shared audit setup saved locally.', '分享的审计配置已保存到本地。')
+      : tr('Scene audit saved locally.', '场景审计已保存到本地。'),
+    description: fromSharedEntry
+      ? tr(
+          `You can keep "${view.name}" as a personal saved view, or immediately promote it into the audit team views.`,
+          `你可以将“${view.name}”继续保留为个人已保存视图，或立即将其提升到审计团队视图。`,
+        )
+      : tr(
+          `You can keep "${view.name}" as a personal saved view, or immediately promote this scene-focused audit into the audit team views.`,
+          `你可以将“${view.name}”继续保留为个人已保存视图，或立即将这个场景审计提升到审计团队视图。`,
+        ),
     actions: [
       {
         kind: 'promote-team',

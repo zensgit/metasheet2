@@ -1,6 +1,6 @@
 export type PlmAuditSceneSurface = 'summary' | 'saved-view' | 'team-view'
 export type PlmAuditSceneKind = 'owner' | 'scene'
-export type PlmAuditSceneActionKind = 'owner' | 'scene' | 'clear'
+export type PlmAuditSceneActionKind = 'owner' | 'scene' | 'reapply-scene' | 'clear'
 export type PlmAuditSceneSemantic = 'owner-context' | 'scene-context' | 'scene-owner' | 'scene-query'
 
 export type PlmAuditSceneSemanticInput = {
@@ -29,6 +29,8 @@ export type PlmAuditSceneContextBannerInput = {
   action: string
   resourceType: string
   semantic: PlmAuditSceneSemantic | null
+  recommendationReason: string
+  recommendationSourceLabel: string
 }
 
 export type PlmAuditSceneContextBanner = {
@@ -127,6 +129,8 @@ export function buildPlmAuditSceneActionLabel(
       return tr('Filter by owner', '按 owner 筛选')
     case 'scene':
       return tr('Restore scene query', '恢复场景查询')
+    case 'reapply-scene':
+      return tr('Reapply scene filter', '重新应用场景过滤')
     case 'clear':
       return tr('Clear context', '清除上下文')
   }
@@ -136,9 +140,10 @@ export function buildPlmAuditSceneActionHint(
   action: Exclude<PlmAuditSceneActionKind, 'clear'>,
   tr: (en: string, zh: string) => string,
 ) {
-  return action === 'owner'
-    ? tr('Current audit is already filtered by this scene owner.', '当前审计已按这个场景的 owner 过滤。')
-    : tr('Current audit is already using this scene query.', '当前审计已使用这个场景查询。')
+  if (action === 'owner') {
+    return tr('Current audit is already filtered by this scene owner.', '当前审计已按这个场景的 owner 过滤。')
+  }
+  return tr('Current audit is already using this scene query.', '当前审计已使用这个场景查询。')
 }
 
 export function buildPlmAuditSceneInputDescription(
@@ -209,15 +214,28 @@ export function buildPlmAuditSceneContextBanner(
   if (!input.sceneId && !input.sceneName && !input.sceneOwnerUserId) return null
 
   let description = tr('Opened from a recommended team scene card.', '来自推荐团队场景卡片。')
-  if (input.action === 'set-default' && input.resourceType === 'plm-team-view-default') {
+  if (
+    input.recommendationReason === 'default'
+    || (input.action === 'set-default' && input.resourceType === 'plm-team-view-default')
+  ) {
     description = tr('Opened from a recommended default-scene card.', '来自推荐团队默认场景卡片。')
+  } else if (input.recommendationReason === 'recent-default') {
+    description = tr(
+      'Opened from a recently defaulted team scene recommendation.',
+      '来自最近被设为团队默认的场景推荐。',
+    )
+  } else if (input.recommendationReason === 'recent-update') {
+    description = tr(
+      'Opened from a recently updated team scene recommendation.',
+      '来自最近更新的团队场景推荐。',
+    )
   } else if (input.semantic === 'owner-context') {
     description = tr('Showing owner-related audit context for this scene.', '当前正在查看这个场景的 owner 相关审计上下文。')
   }
 
   return {
     title: tr('Scene context', '场景上下文'),
-    sourceLabel: buildPlmAuditSceneSourceCopy('summary', tr).label,
+    sourceLabel: input.recommendationSourceLabel || buildPlmAuditSceneSourceCopy('summary', tr).label,
     description,
     sceneId: input.sceneId,
     sceneName: input.sceneName,

@@ -95,6 +95,8 @@ type UsePlmProductPanelOptions = {
   sceneCatalogRecommendationOptions: FilterFieldOption[]
   sceneCatalogSummaryChips: ComputedRef<PlmWorkbenchSceneSummaryChip[]>
   sceneCatalogSummaryHint: ComputedRef<PlmWorkbenchSceneSummaryHint>
+  sceneCatalogAutoFocusSceneId: Ref<string>
+  clearSceneCatalogAutoFocusSceneId: () => void
   setSceneCatalogRecommendationFilter: (value: PlmWorkbenchSceneRecommendationFilter) => void
   recommendedWorkbenchScenes: ComputedRef<PlmRecommendedWorkbenchScene[]>
   selectAllWorkbenchTeamViews: () => void
@@ -271,6 +273,8 @@ export function usePlmProductPanel(options: UsePlmProductPanelOptions) {
     sceneCatalogRecommendationOptions: options.sceneCatalogRecommendationOptions,
     sceneCatalogSummaryChips: options.sceneCatalogSummaryChips,
     sceneCatalogSummaryHint: options.sceneCatalogSummaryHint,
+    sceneCatalogAutoFocusSceneId: options.sceneCatalogAutoFocusSceneId,
+    clearSceneCatalogAutoFocusSceneId: options.clearSceneCatalogAutoFocusSceneId,
     setSceneCatalogRecommendationFilter: options.setSceneCatalogRecommendationFilter,
     recommendedWorkbenchScenes: options.recommendedWorkbenchScenes,
     selectAllWorkbenchTeamViews: options.selectAllWorkbenchTeamViews,

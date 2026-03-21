@@ -46,6 +46,7 @@ describe('usePlmProductPanel', () => {
     const openRecommendedWorkbenchSceneAudit = vi.fn().mockResolvedValue(undefined)
     const openWorkbenchSceneAudit = vi.fn().mockResolvedValue(undefined)
     const setSceneCatalogRecommendationFilter = vi.fn()
+    const clearSceneCatalogAutoFocusSceneId = vi.fn()
 
     const panel = usePlmProductPanel({
       authState: ref('expiring'),
@@ -137,6 +138,8 @@ describe('usePlmProductPanel', () => {
         count: 6,
         description: '综合展示当前默认、近期默认和近期更新的团队场景，适合快速进入工作台。',
       })),
+      sceneCatalogAutoFocusSceneId: ref('scene-1'),
+      clearSceneCatalogAutoFocusSceneId,
       setSceneCatalogRecommendationFilter,
       recommendedWorkbenchScenes: computed(() => [
         {
@@ -227,6 +230,7 @@ describe('usePlmProductPanel', () => {
       openRecommendedWorkbenchSceneAudit,
       openWorkbenchSceneAudit,
       setSceneCatalogRecommendationFilter,
+      clearSceneCatalogAutoFocusSceneId,
     }
   }
 
@@ -290,6 +294,7 @@ describe('usePlmProductPanel', () => {
       count: 6,
       description: '综合展示当前默认、近期默认和近期更新的团队场景，适合快速进入工作台。',
     })
+    expect(panel.productPanel.sceneCatalogAutoFocusSceneId.value).toBe('scene-1')
     expect(panel.productPanel.recommendedWorkbenchScenes.value).toHaveLength(1)
     expect(panel.productPanel.recommendedWorkbenchScenes.value[0]).toMatchObject({
       recommendationSourceLabel: '当前团队默认场景',
@@ -314,5 +319,7 @@ describe('usePlmProductPanel', () => {
     expect(panel.openRecommendedWorkbenchSceneAudit).toHaveBeenCalledWith(scene)
     expect(panel.copyRecommendedWorkbenchSceneLink).toHaveBeenCalledWith('scene-1')
     expect(panel.openWorkbenchSceneAudit).toHaveBeenCalledTimes(1)
+    panel.productPanel.clearSceneCatalogAutoFocusSceneId()
+    expect(panel.clearSceneCatalogAutoFocusSceneId).toHaveBeenCalledTimes(1)
   })
 })

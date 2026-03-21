@@ -787,6 +787,8 @@ export type PlmProductPanelModel = {
   sceneCatalogRecommendationOptions: FilterFieldOption[]
   sceneCatalogSummaryChips: ComputedRef<PlmWorkbenchSceneSummaryChip[]>
   sceneCatalogSummaryHint: ComputedRef<PlmWorkbenchSceneSummaryHint>
+  sceneCatalogAutoFocusSceneId: Ref<string>
+  clearSceneCatalogAutoFocusSceneId: () => void
   setSceneCatalogRecommendationFilter: (value: PlmWorkbenchSceneRecommendationFilter) => void
   recommendedWorkbenchScenes: ComputedRef<PlmRecommendedWorkbenchScene[]>
   selectAllWorkbenchTeamViews: () => void

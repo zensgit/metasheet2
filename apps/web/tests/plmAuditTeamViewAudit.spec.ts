@@ -67,6 +67,9 @@ describe('plmAuditTeamViewAudit', () => {
       sceneId: '',
       sceneName: '',
       sceneOwnerUserId: '',
+      sceneRecommendationReason: '',
+      sceneRecommendationSourceLabel: '',
+      returnToPlmPath: '',
     })
   })
 

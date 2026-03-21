@@ -97,7 +97,10 @@ import {
   normalizePlmWorkbenchQuerySnapshot,
   PLM_WORKBENCH_QUERY_KEYS,
 } from './plm/plmWorkbenchViewState'
-import { buildRecommendedWorkbenchSceneAuditQuery } from './plm/plmWorkbenchSceneAudit'
+import {
+  buildRecommendedWorkbenchSceneAuditQuery,
+  buildWorkbenchAuditQuery,
+} from './plm/plmWorkbenchSceneAudit'
 import {
   applyFilterPreset,
   buildFilterPresetShareUrl,
@@ -4198,6 +4201,7 @@ async function applyWorkbenchTeamViewState(state: PlmWorkbenchViewQueryState) {
 
 const workbenchTeamViewQuery = ref('')
 const sceneCatalogOwnerFilter = ref('')
+const sceneCatalogAutoFocusSceneId = ref('')
 const sceneCatalogRecommendationFilter = ref<''
 | 'default'
 | 'recent-default'
@@ -4287,6 +4291,12 @@ const sceneCatalogSummaryHint = computed(() =>
   buildWorkbenchSceneSummaryHint(sceneCatalogSummaryChips.value),
 )
 
+function clearSceneCatalogAutoFocusSceneId() {
+  if (!sceneCatalogAutoFocusSceneId.value) return
+  sceneCatalogAutoFocusSceneId.value = ''
+  syncQueryParams({ sceneFocus: undefined })
+}
+
 function setSceneCatalogRecommendationFilter(value: '' | 'default' | 'recent-default' | 'recent-update') {
   sceneCatalogRecommendationFilter.value = value
 }
@@ -4316,17 +4326,21 @@ async function copyRecommendedWorkbenchSceneLink(viewId: string) {
 async function openRecommendedWorkbenchSceneAudit(scene: PlmRecommendedWorkbenchScene) {
   await router.push({
     name: 'plm-audit',
-    query: buildRecommendedWorkbenchSceneAuditQuery(scene),
+    query: buildRecommendedWorkbenchSceneAuditQuery(
+      scene,
+      router.resolve({
+        path: route.path,
+        query: { ...route.query, sceneFocus: scene.id },
+        hash: route.hash,
+      }).fullPath,
+    ),
   })
 }
 
 async function openWorkbenchSceneAudit() {
   await router.push({
     name: 'plm-audit',
-    query: {
-      auditType: 'plm-team-view-default',
-      auditKind: 'workbench',
-    },
+    query: buildWorkbenchAuditQuery(route.fullPath),
   })
 }
 
@@ -4737,6 +4751,10 @@ async function applyQueryState() {
   const workbenchTeamViewParam = readQueryParam('workbenchTeamView')
   if (workbenchTeamViewParam !== undefined) {
     workbenchTeamViewQuery.value = workbenchTeamViewParam
+  }
+  const sceneFocusParam = readQueryParam('sceneFocus')
+  if (sceneFocusParam !== undefined) {
+    sceneCatalogAutoFocusSceneId.value = sceneFocusParam
   }
   const documentTeamViewParam = readQueryParam('documentTeamView')
   if (documentTeamViewParam !== undefined) {
@@ -5402,6 +5420,8 @@ const { productPanel } = usePlmProductPanel({
   sceneCatalogRecommendationOptions,
   sceneCatalogSummaryChips,
   sceneCatalogSummaryHint,
+  sceneCatalogAutoFocusSceneId,
+  clearSceneCatalogAutoFocusSceneId,
   setSceneCatalogRecommendationFilter,
   recommendedWorkbenchScenes,
   selectAllWorkbenchTeamViews,

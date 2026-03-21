@@ -33,6 +33,9 @@ export function buildPlmAuditTeamViewLogState(
     sceneId: '',
     sceneName: '',
     sceneOwnerUserId: '',
+    sceneRecommendationReason: '',
+    sceneRecommendationSourceLabel: '',
+    returnToPlmPath: '',
   }
 }
 
@@ -56,5 +59,8 @@ export function buildPlmAuditTeamViewBatchLogState(
     sceneId: '',
     sceneName: '',
     sceneOwnerUserId: '',
+    sceneRecommendationReason: '',
+    sceneRecommendationSourceLabel: '',
+    returnToPlmPath: '',
   }
 }

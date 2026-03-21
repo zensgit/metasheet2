@@ -8,7 +8,7 @@ export type PlmAuditSceneSummaryCard = {
   label: string
   value: string
   description: string
-  action: 'owner' | 'scene' | null
+  action: 'owner' | 'scene' | 'reapply-scene' | null
   actionLabel: string
   active: boolean
 }
@@ -25,8 +25,9 @@ export function buildPlmAuditSceneSummaryCard(
   input: PlmAuditSceneSummaryInput,
   tr: (en: string, zh: string) => string,
 ): PlmAuditSceneSummaryCard | null {
+  const sceneValue = buildPlmAuditSceneQueryValue(input)
   const token = buildPlmAuditSceneToken({
-    sceneValue: buildPlmAuditSceneQueryValue(input),
+    sceneValue,
     ownerValue: input.sceneOwnerUserId,
     ownerContextActive: input.ownerContextActive,
     sceneQueryContextActive: input.sceneQueryContextActive,
@@ -35,6 +36,11 @@ export function buildPlmAuditSceneSummaryCard(
   if (!token) return null
 
   const primaryAction = token.actions.find((item) => item.emphasis === 'primary') ?? null
+  const shouldExposeSceneReapply = Boolean(sceneValue) && (
+    token.kind === 'scene'
+    || input.ownerContextActive
+    || input.sceneQueryContextActive
+  )
 
   return {
     kind: token.kind,
@@ -42,8 +48,12 @@ export function buildPlmAuditSceneSummaryCard(
     label: token.label,
     value: token.value,
     description: token.description,
-    action: primaryAction?.kind === 'clear' ? null : (primaryAction?.kind ?? null),
-    actionLabel: primaryAction?.label ?? '',
+    action: shouldExposeSceneReapply
+      ? 'reapply-scene'
+      : (primaryAction?.kind === 'clear' ? null : (primaryAction?.kind ?? null)),
+    actionLabel: shouldExposeSceneReapply
+      ? tr('Reapply scene filter', '重新应用场景过滤')
+      : (primaryAction?.label ?? ''),
     active: token.active,
   }
 }

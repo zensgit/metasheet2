@@ -445,7 +445,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, type ComponentPublicInstance } from 'vue'
+import { nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from 'vue'
 import PlmTeamViewsBlock from './PlmTeamViewsBlock.vue'
 import type {
   PlmProductPanelModel,
@@ -523,6 +523,25 @@ async function handleSceneSecondaryAction(scene: PlmRecommendedWorkbenchScene) {
 
   await props.panel.openRecommendedWorkbenchSceneAudit(scene)
 }
+
+watch(
+  () => [
+    props.panel.sceneCatalogAutoFocusSceneId.value,
+    props.panel.recommendedWorkbenchScenes.value.map((scene) => scene.id).join(','),
+  ],
+  async ([sceneId]) => {
+    if (!sceneId) return
+    const targetScene = props.panel.recommendedWorkbenchScenes.value.find((scene) => scene.id === sceneId)
+    if (!targetScene) return
+    await nextTick()
+    highlightScene(targetScene.id)
+    const element = sceneCatalogItemRefs.get(targetScene.id)
+    element?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
+    element?.focus?.({ preventScroll: true })
+    props.panel.clearSceneCatalogAutoFocusSceneId()
+  },
+  { flush: 'post' },
+)
 </script>
 
 <style scoped src="./PlmPanelShared.css"></style>

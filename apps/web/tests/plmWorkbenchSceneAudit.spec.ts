@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildWorkbenchAuditQuery,
   buildRecommendedWorkbenchSceneAuditQuery,
   buildRecommendedWorkbenchSceneAuditState,
 } from '../src/views/plm/plmWorkbenchSceneAudit'
@@ -29,9 +30,10 @@ describe('plmWorkbenchSceneAudit', () => {
   it('builds default-scene audit state for current defaults', () => {
     const state = buildRecommendedWorkbenchSceneAuditState(createScene({
       recommendationReason: 'default',
+      recommendationSourceLabel: '当前团队默认场景',
       isDefault: true,
       lastDefaultSetAt: '2026-03-19T10:00:00.000Z',
-    }))
+    }), '/plm?scene=default')
 
     expect(state).toEqual({
       page: 1,
@@ -47,6 +49,9 @@ describe('plmWorkbenchSceneAudit', () => {
       sceneId: 'scene-1',
       sceneName: '采购团队场景',
       sceneOwnerUserId: 'owner-a',
+      sceneRecommendationReason: 'default',
+      sceneRecommendationSourceLabel: '当前团队默认场景',
+      returnToPlmPath: '/plm?scene=default',
     })
   })
 
@@ -57,7 +62,7 @@ describe('plmWorkbenchSceneAudit', () => {
       recommendationSourceLabel: '近期被设为团队默认场景',
       secondaryActionKind: 'open-audit',
       lastDefaultSetAt: '2026-03-19T09:00:00.000Z',
-    }))).toEqual({
+    }), '/plm?scene=recent-default')).toEqual({
       auditQ: 'scene-1',
       auditKind: 'workbench',
       auditAction: 'set-default',
@@ -65,18 +70,32 @@ describe('plmWorkbenchSceneAudit', () => {
       auditSceneId: 'scene-1',
       auditSceneName: '采购团队场景',
       auditSceneOwner: 'owner-a',
+      auditSceneReason: 'recent-default',
+      auditSceneSource: '近期被设为团队默认场景',
+      auditReturnTo: '/plm?scene=recent-default',
     })
   })
 
   it('builds generic workbench audit query for recent updates', () => {
     expect(buildRecommendedWorkbenchSceneAuditQuery(createScene({
       recommendationReason: 'recent-update',
-    }))).toEqual({
+    }), '/plm?scene=recent-update')).toEqual({
       auditQ: 'scene-1',
       auditKind: 'workbench',
       auditSceneId: 'scene-1',
       auditSceneName: '采购团队场景',
       auditSceneOwner: 'owner-a',
+      auditSceneReason: 'recent-update',
+      auditSceneSource: '近期更新的团队场景',
+      auditReturnTo: '/plm?scene=recent-update',
+    })
+  })
+
+  it('builds generic workbench audit queries with return paths', () => {
+    expect(buildWorkbenchAuditQuery('/plm?scene=audit')).toEqual({
+      auditKind: 'workbench',
+      auditType: 'plm-team-view-default',
+      auditReturnTo: '/plm?scene=audit',
     })
   })
 })

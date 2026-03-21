@@ -24,6 +24,9 @@ describe('plmAuditQueryState', () => {
       auditSceneId: 'scene-1',
       auditSceneName: '采购团队场景',
       auditSceneOwner: 'owner-a',
+      auditSceneReason: 'recent-update',
+      auditSceneSource: '近期更新的团队场景',
+      auditReturnTo: '/plm?scene=recent-update',
     })).toEqual({
       page: 3,
       q: 'documents',
@@ -38,6 +41,9 @@ describe('plmAuditQueryState', () => {
       sceneId: 'scene-1',
       sceneName: '采购团队场景',
       sceneOwnerUserId: 'owner-a',
+      sceneRecommendationReason: 'recent-update',
+      sceneRecommendationSourceLabel: '近期更新的团队场景',
+      returnToPlmPath: '/plm?scene=recent-update',
     })
   })
 
@@ -66,6 +72,9 @@ describe('plmAuditQueryState', () => {
       sceneId: 'scene-2',
       sceneName: 'BOM 巡检场景',
       sceneOwnerUserId: 'owner-b',
+      sceneRecommendationReason: 'recent-default',
+      sceneRecommendationSourceLabel: '近期被设为团队默认场景',
+      returnToPlmPath: '/plm?scene=recent-default',
     })).toEqual({
       auditPage: '2',
       auditQ: 'bom',
@@ -75,6 +84,9 @@ describe('plmAuditQueryState', () => {
       auditSceneId: 'scene-2',
       auditSceneName: 'BOM 巡检场景',
       auditSceneOwner: 'owner-b',
+      auditSceneReason: 'recent-default',
+      auditSceneSource: '近期被设为团队默认场景',
+      auditReturnTo: '/plm?scene=recent-default',
     })
   })
 
@@ -105,6 +117,9 @@ describe('plmAuditQueryState', () => {
       sceneId: '',
       sceneName: '',
       sceneOwnerUserId: '',
+      sceneRecommendationReason: '',
+      sceneRecommendationSourceLabel: '',
+      returnToPlmPath: '',
     })
     expect(buildPlmAuditTeamViewState(state)).toEqual({
       page: 2,

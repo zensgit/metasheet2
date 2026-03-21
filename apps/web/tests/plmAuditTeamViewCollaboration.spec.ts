@@ -41,6 +41,21 @@ describe('plmAuditTeamViewCollaboration', () => {
     })
   })
 
+  it('builds a scene-context collaboration draft', () => {
+    expect(buildPlmAuditTeamViewCollaborationDraft({
+      id: 'audit-view-7',
+      name: '场景团队视图',
+    }, tr, 'scene-context')).toEqual({
+      teamViewId: 'audit-view-7',
+      teamViewName: '场景团队视图',
+      teamViewOwnerUserId: '',
+      focusTargetId: 'plm-audit-team-view-controls',
+      source: 'scene-context',
+      statusMessage:
+        'Scene audit saved to team views and collaboration controls are ready.|场景审计已保存到团队视图，并已准备好协作操作。',
+    })
+  })
+
   it('builds collaboration notice actions for a promoted active team view', () => {
     const draft = buildPlmAuditTeamViewCollaborationDraft({
       id: 'audit-view-2',
@@ -109,6 +124,9 @@ describe('plmAuditTeamViewCollaboration', () => {
     )
     expect(buildPlmAuditTeamViewCollaborationActionStatus('saved-view-promotion', 'set-default', tr)).toBe(
       'Promoted audit team view set as default. Showing matching audit logs.|已将提升后的审计团队视图设为默认，并切换到对应审计日志。',
+    )
+    expect(buildPlmAuditTeamViewCollaborationActionStatus('scene-context', 'share', tr)).toBe(
+      'Share link copied for the scene-driven audit team view.|已复制场景驱动审计团队视图的分享链接。',
     )
   })
 
@@ -205,6 +223,44 @@ describe('plmAuditTeamViewCollaboration', () => {
         {
           kind: 'focus-source',
           label: 'Back to saved views|回到保存视图',
+          emphasis: 'secondary',
+        },
+        {
+          kind: 'dismiss',
+          label: 'Done|完成',
+          emphasis: 'secondary',
+        },
+      ],
+    })
+  })
+
+  it('builds scene-context share follow-up with a return-to-context action', () => {
+    expect(buildPlmAuditTeamViewCollaborationFollowupNotice({
+      id: 'audit-view-8',
+      isDefault: false,
+      isArchived: false,
+    }, {
+      teamViewId: 'audit-view-8',
+      source: 'scene-context',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-scene-context',
+    }, {
+      canSetDefault: true,
+    }, tr)).toEqual({
+      sourceLabel: 'Scene save shortcut|场景快捷保存',
+      title: 'Share link copied.|分享链接已复制。',
+      description:
+        'This share link came from the scene quick-save flow. You can jump back to the scene context or continue by promoting this team view to the default audit entry.|这条分享链接来自场景快捷保存流程。你可以返回场景上下文，或继续将该团队视图提升为默认审计入口。',
+      actions: [
+        {
+          kind: 'set-default',
+          label: 'Set as default|设为默认',
+          emphasis: 'primary',
+        },
+        {
+          kind: 'focus-source',
+          label: 'Back to scene context|回到场景上下文',
           emphasis: 'secondary',
         },
         {
