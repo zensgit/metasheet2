@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { reactive, ref } from 'vue'
+import { nextTick, reactive, ref } from 'vue'
 import { useAttendanceAdminLeavePolicies } from '../src/views/attendance/useAttendanceAdminLeavePolicies'
 
 function jsonResponse(status: number, payload: unknown): Response {
@@ -8,6 +8,11 @@ function jsonResponse(status: number, payload: unknown): Response {
     status,
     json: async () => payload,
   } as Response
+}
+
+async function flushUi(): Promise<void> {
+  await nextTick()
+  await nextTick()
 }
 
 describe('useAttendanceAdminLeavePolicies', () => {
@@ -252,5 +257,99 @@ describe('useAttendanceAdminLeavePolicies', () => {
 
     expect(adminForbidden.value).toBe(true)
     expect(setStatus).toHaveBeenCalledWith('Admin permissions required', 'error')
+  })
+
+  it('keeps the visual approval builder and JSON fallback in sync', async () => {
+    const adminForbidden = ref(false)
+    const requestForm = reactive({ leaveTypeId: '', overtimeRuleId: '' })
+    const apiFetch = vi.fn()
+
+    const policies = useAttendanceAdminLeavePolicies({
+      adminForbidden,
+      requestForm,
+      apiFetch,
+    })
+
+    expect(policies.approvalFlowBuilderSteps.value).toHaveLength(0)
+
+    policies.addApprovalFlowBuilderStep()
+    await flushUi()
+    expect(policies.approvalFlowBuilderSteps.value).toHaveLength(1)
+
+    policies.approvalFlowBuilderSteps.value[0]!.name = 'Manager review'
+    policies.approvalFlowBuilderSteps.value[0]!.approverRoleIdsText = 'manager, hr'
+    policies.approvalFlowBuilderSteps.value[0]!.approverUserIdsText = 'user-1'
+    await flushUi()
+
+    expect(JSON.parse(policies.approvalFlowForm.steps)).toEqual([
+      {
+        name: 'Manager review',
+        approverRoleIds: ['manager', 'hr'],
+        approverUserIds: ['user-1'],
+      },
+    ])
+
+    policies.approvalFlowForm.steps = JSON.stringify([
+      {
+        name: 'HR review',
+        approver_user_ids: ['user-2'],
+        approverRoleIds: ['hr'],
+      },
+    ], null, 2)
+    await flushUi()
+
+    expect(policies.approvalFlowBuilderError.value).toBe('')
+    expect(policies.approvalFlowBuilderSteps.value).toHaveLength(1)
+    expect(policies.approvalFlowBuilderSteps.value[0]).toMatchObject({
+      name: 'HR review',
+      approverUserIdsText: 'user-2',
+      approverRoleIdsText: 'hr',
+    })
+  })
+
+  it('applies request-type approval templates and reports invalid JSON fallback state', async () => {
+    const adminForbidden = ref(false)
+    const requestForm = reactive({ leaveTypeId: '', overtimeRuleId: '' })
+    const apiFetch = vi.fn()
+
+    const policies = useAttendanceAdminLeavePolicies({
+      adminForbidden,
+      requestForm,
+      apiFetch,
+    })
+
+    policies.approvalFlowForm.requestType = 'overtime'
+    await flushUi()
+
+    expect(policies.approvalFlowTemplates.value.map((template) => template.id)).toEqual([
+      'manager-only',
+      'manager-payroll',
+      'manager-ops-payroll',
+    ])
+
+    policies.applyApprovalFlowTemplate('manager-payroll')
+    await flushUi()
+
+    expect(JSON.parse(policies.approvalFlowForm.steps)).toEqual([
+      {
+        name: 'Manager review',
+        approverRoleIds: ['manager'],
+      },
+      {
+        name: 'Payroll review',
+        approverRoleIds: ['payroll'],
+      },
+    ])
+    expect(policies.approvalFlowBuilderSummary.value).toMatchObject({
+      stepCount: 2,
+      roleAssignmentCount: 2,
+      directUserCount: 0,
+    })
+
+    policies.approvalFlowForm.steps = '{bad-json}'
+    await flushUi()
+
+    expect(policies.approvalFlowBuilderError.value).toContain('Fix the JSON fallback')
+    expect(policies.approvalFlowBuilderSteps.value).toHaveLength(2)
   })
 })

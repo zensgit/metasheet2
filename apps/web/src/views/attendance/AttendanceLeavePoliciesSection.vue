@@ -246,17 +246,97 @@
           type="checkbox"
         />
       </label>
+      <div class="attendance__field attendance__field--full">
+        <div class="attendance__builder-header">
+          <div class="attendance__builder-header-copy">
+            <span class="attendance__builder-title">{{ tr('Visual approval builder', '可视化审批构建器') }}</span>
+            <small class="attendance__field-hint">
+              {{ tr('Build approval gates step by step. The JSON editor below stays synced for fallback edits.', '按步骤配置审批关卡，下方 JSON 编辑器会保持同步，作为高级兜底编辑入口。') }}
+            </small>
+          </div>
+          <div class="attendance__builder-summary">
+            <span class="attendance__builder-chip">{{ tr('Steps', '步骤') }}: {{ approvalFlowBuilderSummary.stepCount }}</span>
+            <span class="attendance__builder-chip">{{ tr('Role gates', '角色关卡') }}: {{ approvalFlowBuilderSummary.roleAssignmentCount }}</span>
+            <span class="attendance__builder-chip">{{ tr('Direct users', '指定用户') }}: {{ approvalFlowBuilderSummary.directUserCount }}</span>
+          </div>
+        </div>
+        <div class="attendance__builder-templates">
+          <button
+            v-for="template in approvalFlowTemplates"
+            :key="template.id"
+            class="attendance__btn attendance__builder-template"
+            type="button"
+            @click="applyApprovalFlowTemplate(template.id)"
+          >
+            <strong>{{ template.label }}</strong>
+            <small>{{ template.description }}</small>
+          </button>
+        </div>
+        <div v-if="approvalFlowBuilderSteps.length === 0" class="attendance__empty">
+          {{ tr('No approval steps yet. Start from a template or add a custom step.', '暂未配置审批步骤。可先套用模板，或手动添加自定义步骤。') }}
+        </div>
+        <div v-else class="attendance__builder-list">
+          <div v-for="(step, index) in approvalFlowBuilderSteps" :key="step.id" class="attendance__builder-card">
+            <div class="attendance__builder-card-header">
+              <strong>{{ tr('Step', '步骤') }} {{ index + 1 }}</strong>
+              <button class="attendance__btn" type="button" @click="removeApprovalFlowBuilderStep(index)">
+                {{ tr('Remove', '移除') }}
+              </button>
+            </div>
+            <div class="attendance__admin-grid">
+              <label class="attendance__field" :for="`attendance-approval-step-name-${step.id}`">
+                <span>{{ tr('Step name', '步骤名称') }}</span>
+                <input
+                  :id="`attendance-approval-step-name-${step.id}`"
+                  v-model="step.name"
+                  type="text"
+                  :placeholder="tr('Manager review', '直属主管审批')"
+                />
+              </label>
+              <label class="attendance__field" :for="`attendance-approval-step-roles-${step.id}`">
+                <span>{{ tr('Approver role IDs', '审批角色 ID') }}</span>
+                <input
+                  :id="`attendance-approval-step-roles-${step.id}`"
+                  v-model="step.approverRoleIdsText"
+                  type="text"
+                  :placeholder="tr('manager, hr', 'manager, hr')"
+                />
+              </label>
+              <label class="attendance__field" :for="`attendance-approval-step-users-${step.id}`">
+                <span>{{ tr('Approver user IDs', '审批用户 ID') }}</span>
+                <input
+                  :id="`attendance-approval-step-users-${step.id}`"
+                  v-model="step.approverUserIdsText"
+                  type="text"
+                  :placeholder="tr('user-1, user-2', 'user-1, user-2')"
+                />
+              </label>
+            </div>
+            <small class="attendance__field-hint">
+              {{ summarizeBuilderStep(step) }}
+            </small>
+          </div>
+        </div>
+        <div class="attendance__admin-actions">
+          <button class="attendance__btn" type="button" @click="addApprovalFlowBuilderStep()">
+            {{ tr('Add step', '添加步骤') }}
+          </button>
+        </div>
+      </div>
       <label class="attendance__field attendance__field--full" for="attendance-approval-steps">
-        <span>{{ tr('Steps (JSON)', '步骤（JSON）') }}</span>
+        <span>{{ tr('Advanced JSON fallback', '高级 JSON 兜底') }}</span>
         <textarea
           id="attendance-approval-steps"
           v-model="approvalFlowForm.steps"
           name="approvalSteps"
-          rows="3"
+          rows="8"
           placeholder='[{"name":"Manager","approverRoleIds":["manager"]}]'
         />
         <small class="attendance__field-hint">
-          {{ tr('Use a JSON array of approval steps. Each step can declare a name, approver roles, and optional conditions.', '使用 JSON 数组描述审批步骤。每个步骤可包含名称、审批角色和可选条件。') }}
+          {{ tr('Use JSON only for bulk edits or compatibility checks. Supported step fields are name, approverUserIds, and approverRoleIds.', '建议仅在批量编辑或兼容性检查时使用 JSON。当前支持的步骤字段为 name、approverUserIds 和 approverRoleIds。') }}
+        </small>
+        <small v-if="approvalFlowBuilderError" class="attendance__field-hint attendance__field-hint--danger">
+          {{ approvalFlowBuilderError }}
         </small>
       </label>
     </div>
@@ -289,7 +369,10 @@
           <tr v-for="flow in approvalFlows" :key="flow.id">
             <td>{{ flow.name }}</td>
             <td>{{ formatRequestType(flow.requestType) }}</td>
-            <td>{{ flow.steps.length }}</td>
+            <td>
+              <div>{{ flow.steps.length }}</div>
+              <small class="attendance__field-hint">{{ summarizeFlowSteps(flow.steps) }}</small>
+            </td>
             <td>{{ flow.isActive ? tr('Yes', '是') : tr('No', '否') }}</td>
             <td class="attendance__table-actions">
               <button class="attendance__btn" @click="editApprovalFlow(flow)">{{ tr('Edit', '编辑') }}</button>
@@ -307,7 +390,10 @@
 <script setup lang="ts">
 import type { Ref } from 'vue'
 import type {
+  AttendanceApprovalBuilderStep,
   AttendanceApprovalFlow,
+  AttendanceApprovalFlowTemplateChoice,
+  AttendanceApprovalStep,
   AttendanceLeaveType,
   AttendanceOvertimeRule,
 } from './useAttendanceAdminLeavePolicies'
@@ -367,6 +453,18 @@ interface LeavePoliciesBindings {
   approvalFlowSaving: Ref<boolean>
   approvalFlowEditingId: Ref<string | null>
   approvalFlowForm: ApprovalFlowFormState
+  approvalFlowBuilderSteps: Ref<AttendanceApprovalBuilderStep[]>
+  approvalFlowBuilderError: Ref<string>
+  approvalFlowBuilderSummary: Ref<{
+    stepCount: number
+    roleAssignmentCount: number
+    directUserCount: number
+    placeholderCount: number
+  }>
+  approvalFlowTemplates: Ref<AttendanceApprovalFlowTemplateChoice[]>
+  addApprovalFlowBuilderStep: () => MaybePromise<void>
+  removeApprovalFlowBuilderStep: (index: number) => MaybePromise<void>
+  applyApprovalFlowTemplate: (templateId: string) => MaybePromise<void>
   resetApprovalFlowForm: () => MaybePromise<void>
   editApprovalFlow: (item: AttendanceApprovalFlow) => MaybePromise<void>
   loadApprovalFlows: () => MaybePromise<void>
@@ -407,11 +505,48 @@ const approvalFlowLoading = props.policies.approvalFlowLoading
 const approvalFlowSaving = props.policies.approvalFlowSaving
 const approvalFlowEditingId = props.policies.approvalFlowEditingId
 const approvalFlowForm = props.policies.approvalFlowForm
+const approvalFlowBuilderSteps = props.policies.approvalFlowBuilderSteps
+const approvalFlowBuilderError = props.policies.approvalFlowBuilderError
+const approvalFlowBuilderSummary = props.policies.approvalFlowBuilderSummary
+const approvalFlowTemplates = props.policies.approvalFlowTemplates
+const addApprovalFlowBuilderStep = () => props.policies.addApprovalFlowBuilderStep()
+const removeApprovalFlowBuilderStep = (index: number) => props.policies.removeApprovalFlowBuilderStep(index)
+const applyApprovalFlowTemplate = (templateId: string) => props.policies.applyApprovalFlowTemplate(templateId)
 const resetApprovalFlowForm = () => props.policies.resetApprovalFlowForm()
 const editApprovalFlow = (item: AttendanceApprovalFlow) => props.policies.editApprovalFlow(item)
 const loadApprovalFlows = () => props.policies.loadApprovalFlows()
 const saveApprovalFlow = () => props.policies.saveApprovalFlow()
 const deleteApprovalFlow = (id: string) => props.policies.deleteApprovalFlow(id)
+
+function parseList(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function summarizeBuilderStep(step: AttendanceApprovalBuilderStep): string {
+  const name = step.name.trim() || `${tr('Step', '步骤')}`
+  const roleIds = parseList(step.approverRoleIdsText)
+  const userIds = parseList(step.approverUserIdsText)
+  const roleSummary = roleIds.length > 0 ? roleIds.join(', ') : tr('Any role', '任意角色')
+  const userSummary = userIds.length > 0 ? userIds.join(', ') : tr('No direct users', '未指定用户')
+  return `${name} | ${tr('Roles', '角色')}: ${roleSummary} | ${tr('Users', '用户')}: ${userSummary}`
+}
+
+function summarizeFlowSteps(steps: AttendanceApprovalStep[]): string {
+  if (!Array.isArray(steps) || steps.length === 0) {
+    return tr('No steps configured', '尚未配置步骤')
+  }
+  return steps
+    .map((step, index) => {
+      const name = typeof step.name === 'string' && step.name.trim()
+        ? step.name.trim()
+        : `${tr('Step', '步骤')} ${index + 1}`
+      return name
+    })
+    .join(' -> ')
+}
 </script>
 
 <style scoped>
@@ -508,9 +643,86 @@ const deleteApprovalFlow = (id: string) => props.policies.deleteApprovalFlow(id)
   font-size: 12px;
 }
 
+.attendance__field-hint--danger {
+  color: #c62828;
+}
+
 .attendance__empty {
   color: #888;
   font-size: 13px;
   margin-top: 8px;
+}
+
+.attendance__builder-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.attendance__builder-header-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attendance__builder-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.attendance__builder-summary {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.attendance__builder-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #f3f6fb;
+  color: #315ea8;
+  font-size: 12px;
+}
+
+.attendance__builder-templates {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.attendance__builder-template {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  max-width: 260px;
+  text-align: left;
+}
+
+.attendance__builder-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.attendance__builder-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #e0e6ef;
+  border-radius: 8px;
+  background: #fafcff;
+}
+
+.attendance__builder-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
 }
 </style>

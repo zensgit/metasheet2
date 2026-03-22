@@ -1,4 +1,4 @@
-import { reactive, ref, watch, type Ref } from 'vue'
+import { computed, reactive, ref, watch, type Ref } from 'vue'
 import { apiFetch as defaultApiFetch } from '../../utils/api'
 import { generateAttendanceCode } from './attendanceCode'
 
@@ -37,6 +37,20 @@ export interface AttendanceApprovalStep {
   name?: string
   approverUserIds?: string[]
   approverRoleIds?: string[]
+}
+
+export interface AttendanceApprovalBuilderStep {
+  id: string
+  name: string
+  approverUserIdsText: string
+  approverRoleIdsText: string
+}
+
+export interface AttendanceApprovalFlowTemplateChoice {
+  id: string
+  label: string
+  description: string
+  steps: AttendanceApprovalStep[]
 }
 
 export interface AttendanceApprovalFlow {
@@ -128,15 +142,134 @@ function formatApprovalSteps(steps: AttendanceApprovalStep[]): string {
   return JSON.stringify(Array.isArray(steps) ? steps : [], null, 2)
 }
 
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => String(item).trim())
+    .filter(Boolean)
+}
+
+function normalizeApprovalStepInput(value: unknown): AttendanceApprovalStep | null {
+  if (!value || typeof value !== 'object') return null
+  const rawValue = value as Record<string, unknown>
+  const rawName = typeof rawValue.name === 'string' ? rawValue.name.trim() : ''
+  const approverUserIds = normalizeStringArray(rawValue.approverUserIds ?? rawValue.approver_user_ids)
+  const approverRoleIds = normalizeStringArray(rawValue.approverRoleIds ?? rawValue.approver_role_ids)
+  return {
+    ...(rawName ? { name: rawName } : {}),
+    ...(approverUserIds.length > 0 ? { approverUserIds } : {}),
+    ...(approverRoleIds.length > 0 ? { approverRoleIds } : {}),
+  }
+}
+
 function parseApprovalStepsInput(value: string): AttendanceApprovalStep[] | null {
   if (!value.trim()) return []
   try {
     const parsed = JSON.parse(value)
     if (!Array.isArray(parsed)) return null
-    return parsed.filter(item => item && typeof item === 'object') as AttendanceApprovalStep[]
+    return parsed
+      .map((item) => normalizeApprovalStepInput(item))
+      .filter((item): item is AttendanceApprovalStep => item !== null)
   } catch {
     return null
   }
+}
+
+function formatApprovalStepList(value: string[] | undefined): string {
+  return Array.isArray(value) && value.length > 0 ? value.join(', ') : ''
+}
+
+function parseApprovalStepList(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function buildApprovalFlowTemplateChoices(requestType: string, tr: Translate): AttendanceApprovalFlowTemplateChoice[] {
+  const managerStep = {
+    name: tr('Manager review', '直属主管审批'),
+    approverRoleIds: ['manager'],
+  }
+  const hrStep = {
+    name: tr('HR review', 'HR 审批'),
+    approverRoleIds: ['hr'],
+  }
+  const payrollStep = {
+    name: tr('Payroll review', '薪资审批'),
+    approverRoleIds: ['payroll'],
+  }
+  const opsStep = {
+    name: tr('Attendance ops review', '考勤运营审批'),
+    approverRoleIds: ['attendance_admin'],
+  }
+
+  if (requestType === 'overtime') {
+    return [
+      {
+        id: 'manager-only',
+        label: tr('Manager only', '仅主管'),
+        description: tr('One-step approval for standard overtime submissions.', '适用于标准加班申请的一步主管审批。'),
+        steps: [managerStep],
+      },
+      {
+        id: 'manager-payroll',
+        label: tr('Manager -> Payroll', '主管 -> 薪资'),
+        description: tr('Escalate approved overtime into payroll review before settlement.', '先主管审批，再进入薪资确认结算。'),
+        steps: [managerStep, payrollStep],
+      },
+      {
+        id: 'manager-ops-payroll',
+        label: tr('Manager -> Ops -> Payroll', '主管 -> 运营 -> 薪资'),
+        description: tr('Use when overtime affects attendance exceptions and final payroll payout.', '适用于同时影响考勤异常和薪资发放的加班流程。'),
+        steps: [managerStep, opsStep, payrollStep],
+      },
+    ]
+  }
+
+  if (requestType === 'leave') {
+    return [
+      {
+        id: 'manager-only',
+        label: tr('Manager only', '仅主管'),
+        description: tr('One-step approval for routine leave requests.', '适用于常规请假申请的一步主管审批。'),
+        steps: [managerStep],
+      },
+      {
+        id: 'manager-hr',
+        label: tr('Manager -> HR', '主管 -> HR'),
+        description: tr('Common path for annual, sick, and compensated leave.', '适用于年假、病假和调休等常见请假场景。'),
+        steps: [managerStep, hrStep],
+      },
+      {
+        id: 'manager-hr-ops',
+        label: tr('Manager -> HR -> Ops', '主管 -> HR -> 运营'),
+        description: tr('Add attendance operations when leave impacts roster corrections.', '适用于需要同步排班或考勤纠偏的请假场景。'),
+        steps: [managerStep, hrStep, opsStep],
+      },
+    ]
+  }
+
+  return [
+    {
+      id: 'manager-only',
+      label: tr('Manager only', '仅主管'),
+      description: tr('Single approval gate for low-risk attendance requests.', '适用于低风险考勤申请的一步审批。'),
+      steps: [managerStep],
+    },
+    {
+      id: 'manager-ops',
+      label: tr('Manager -> Ops', '主管 -> 运营'),
+      description: tr('Use when attendance admins must validate the correction before closing the request.', '适用于需要考勤管理员二次校验的更正场景。'),
+      steps: [managerStep, opsStep],
+    },
+    {
+      id: 'manager-hr-ops',
+      label: tr('Manager -> HR -> Ops', '主管 -> HR -> 运营'),
+      description: tr('Escalate through HR before attendance operations for sensitive policy exceptions.', '适用于需要 HR 先行判断的敏感考勤例外场景。'),
+      steps: [managerStep, hrStep, opsStep],
+    },
+  ]
 }
 
 export function useAttendanceAdminLeavePolicies({
@@ -149,6 +282,8 @@ export function useAttendanceAdminLeavePolicies({
   setStatusFromError,
   tr = defaultTranslate,
 }: UseAttendanceAdminLeavePoliciesOptions) {
+  let nextApprovalStepId = 0
+
   const leaveTypes = ref<AttendanceLeaveType[]>([])
   const leaveTypeLoading = ref(false)
   const leaveTypeSaving = ref(false)
@@ -186,6 +321,100 @@ export function useAttendanceAdminLeavePolicies({
     steps: '',
     isActive: true,
   })
+  const approvalFlowBuilderSteps = ref<AttendanceApprovalBuilderStep[]>([])
+  const approvalFlowBuilderError = ref('')
+  const approvalFlowBuilderSummary = computed(() => {
+    const normalizedSteps = approvalFlowBuilderSteps.value
+      .map((step) => buildApprovalStepFromBuilder(step))
+      .filter((step): step is AttendanceApprovalStep => step !== null)
+    const roleAssignmentCount = normalizedSteps.reduce(
+      (sum, step) => sum + (step.approverRoleIds?.length ?? 0),
+      0,
+    )
+    const directUserCount = normalizedSteps.reduce(
+      (sum, step) => sum + (step.approverUserIds?.length ?? 0),
+      0,
+    )
+    return {
+      stepCount: normalizedSteps.length,
+      roleAssignmentCount,
+      directUserCount,
+      placeholderCount: Math.max(approvalFlowBuilderSteps.value.length - normalizedSteps.length, 0),
+    }
+  })
+  const approvalFlowTemplates = computed(() => buildApprovalFlowTemplateChoices(approvalFlowForm.requestType, tr))
+  let syncingApprovalFlowBuilder = false
+
+  function releaseApprovalFlowBuilderSyncLock() {
+    Promise.resolve().then(() => {
+      syncingApprovalFlowBuilder = false
+    })
+  }
+
+  function createApprovalBuilderStep(step?: AttendanceApprovalStep): AttendanceApprovalBuilderStep {
+    nextApprovalStepId += 1
+    return {
+      id: `approval-step-${nextApprovalStepId}`,
+      name: step?.name ?? '',
+      approverUserIdsText: formatApprovalStepList(step?.approverUserIds),
+      approverRoleIdsText: formatApprovalStepList(step?.approverRoleIds),
+    }
+  }
+
+  function buildApprovalStepFromBuilder(step: AttendanceApprovalBuilderStep): AttendanceApprovalStep | null {
+    const name = step.name.trim()
+    const approverUserIds = parseApprovalStepList(step.approverUserIdsText)
+    const approverRoleIds = parseApprovalStepList(step.approverRoleIdsText)
+    if (!name && approverUserIds.length === 0 && approverRoleIds.length === 0) return null
+    return {
+      ...(name ? { name } : {}),
+      ...(approverUserIds.length > 0 ? { approverUserIds } : {}),
+      ...(approverRoleIds.length > 0 ? { approverRoleIds } : {}),
+    }
+  }
+
+  function syncApprovalFlowBuilderFromJson(value: string) {
+    const parsed = parseApprovalStepsInput(value)
+    if (parsed === null) {
+      approvalFlowBuilderError.value = tr(
+        'Fix the JSON fallback before editing with the visual builder.',
+        '请先修复 JSON 兜底内容，再继续使用可视化审批构建器。',
+      )
+      return
+    }
+    syncingApprovalFlowBuilder = true
+    approvalFlowBuilderSteps.value = parsed.map((step) => createApprovalBuilderStep(step))
+    approvalFlowBuilderError.value = ''
+    releaseApprovalFlowBuilderSyncLock()
+  }
+
+  function syncApprovalFlowJsonFromBuilder() {
+    if (syncingApprovalFlowBuilder) return
+    syncingApprovalFlowBuilder = true
+    const steps = approvalFlowBuilderSteps.value
+      .map((step) => buildApprovalStepFromBuilder(step))
+      .filter((step): step is AttendanceApprovalStep => step !== null)
+    approvalFlowForm.steps = formatApprovalSteps(steps)
+    approvalFlowBuilderError.value = ''
+    releaseApprovalFlowBuilderSyncLock()
+  }
+
+  function addApprovalFlowBuilderStep(step?: AttendanceApprovalStep) {
+    approvalFlowBuilderSteps.value = [
+      ...approvalFlowBuilderSteps.value,
+      createApprovalBuilderStep(step),
+    ]
+  }
+
+  function removeApprovalFlowBuilderStep(index: number) {
+    approvalFlowBuilderSteps.value = approvalFlowBuilderSteps.value.filter((_, currentIndex) => currentIndex !== index)
+  }
+
+  function applyApprovalFlowTemplate(templateId: string) {
+    const template = approvalFlowTemplates.value.find((item) => item.id === templateId)
+    if (!template) return
+    approvalFlowBuilderSteps.value = template.steps.map((step) => createApprovalBuilderStep(step))
+  }
 
   function forwardAdminError(error: unknown, fallbackMessage: string) {
     if (setStatusFromError) {
@@ -204,6 +433,23 @@ export function useAttendanceAdminLeavePolicies({
       leaveTypeForm.code = generateAttendanceCode(trimmedName, 'leave')
     },
     { immediate: true },
+  )
+
+  watch(
+    () => approvalFlowForm.steps,
+    (value) => {
+      if (syncingApprovalFlowBuilder) return
+      syncApprovalFlowBuilderFromJson(value)
+    },
+    { immediate: true },
+  )
+
+  watch(
+    approvalFlowBuilderSteps,
+    () => {
+      syncApprovalFlowJsonFromBuilder()
+    },
+    { deep: true },
   )
 
   function resetLeaveTypeForm() {
@@ -572,6 +818,13 @@ export function useAttendanceAdminLeavePolicies({
     approvalFlowSaving,
     approvalFlowEditingId,
     approvalFlowForm,
+    approvalFlowBuilderSteps,
+    approvalFlowBuilderError,
+    approvalFlowBuilderSummary,
+    approvalFlowTemplates,
+    addApprovalFlowBuilderStep,
+    removeApprovalFlowBuilderStep,
+    applyApprovalFlowTemplate,
     resetApprovalFlowForm,
     editApprovalFlow,
     loadApprovalFlows,
