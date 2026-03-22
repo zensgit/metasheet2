@@ -1,6 +1,9 @@
 import { computed, ref } from 'vue'
 import { describe, expect, it } from 'vitest'
-import { usePlmCollaborativePermissions } from '../src/views/plm/usePlmCollaborativePermissions'
+import {
+  canSetDefaultPlmCollaborativeEntry,
+  usePlmCollaborativePermissions,
+} from '../src/views/plm/usePlmCollaborativePermissions'
 
 describe('usePlmCollaborativePermissions', () => {
   it('prefers explicit entry permissions over fallback flags', () => {
@@ -93,5 +96,30 @@ describe('usePlmCollaborativePermissions', () => {
     expect(model.canTransfer.value).toBe(false)
     expect(model.canArchive.value).toBe(false)
     expect(model.canRestore.value).toBe(true)
+  })
+
+  it('can resolve set-default eligibility for a follow-up target without a current selection', () => {
+    expect(canSetDefaultPlmCollaborativeEntry({
+      canManage: true,
+      isArchived: false,
+      isDefault: false,
+      permissions: {},
+    })).toBe(true)
+
+    expect(canSetDefaultPlmCollaborativeEntry({
+      canManage: false,
+      isArchived: false,
+      isDefault: false,
+      permissions: {
+        canSetDefault: true,
+      },
+    })).toBe(true)
+
+    expect(canSetDefaultPlmCollaborativeEntry({
+      canManage: true,
+      isArchived: true,
+      isDefault: false,
+      permissions: {},
+    })).toBe(false)
   })
 })

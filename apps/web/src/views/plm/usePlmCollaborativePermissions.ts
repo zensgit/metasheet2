@@ -20,6 +20,24 @@ type CollaborativeEntry = {
   }
 } | null
 
+export type PlmCollaborativePermissionEntry = CollaborativeEntry
+
+function resolveCanManage(entry: CollaborativeEntry) {
+  if (!entry) return false
+  if (typeof entry.permissions?.canManage === 'boolean') {
+    return entry.permissions.canManage
+  }
+  return Boolean(entry.canManage)
+}
+
+export function canSetDefaultPlmCollaborativeEntry(entry: CollaborativeEntry) {
+  if (!entry) return false
+  if (typeof entry.permissions?.canSetDefault === 'boolean') {
+    return entry.permissions.canSetDefault
+  }
+  return resolveCanManage(entry) && !entry.isArchived && !entry.isDefault
+}
+
 type UsePlmCollaborativePermissionsOptions<TEntry extends CollaborativeEntry> = {
   selectedEntry: ComputedRef<TEntry>
   nameRef: Ref<string>
@@ -29,14 +47,6 @@ type UsePlmCollaborativePermissionsOptions<TEntry extends CollaborativeEntry> = 
 export function usePlmCollaborativePermissions<TEntry extends CollaborativeEntry>(
   options: UsePlmCollaborativePermissionsOptions<TEntry>,
 ) {
-  function resolveCanManage(entry: TEntry) {
-    if (!entry) return false
-    if (typeof entry.permissions?.canManage === 'boolean') {
-      return entry.permissions.canManage
-    }
-    return Boolean(entry.canManage)
-  }
-
   const canManageSelectedEntry = computed(() => {
     const entry = options.selectedEntry.value
     return resolveCanManage(entry)
@@ -117,11 +127,7 @@ export function usePlmCollaborativePermissions<TEntry extends CollaborativeEntry
   })
   const canSetDefault = computed(() => {
     const entry = options.selectedEntry.value
-    if (!entry) return false
-    if (typeof entry.permissions?.canSetDefault === 'boolean') {
-      return entry.permissions.canSetDefault
-    }
-    return canManageSelectedEntry.value && !entry.isArchived && !entry.isDefault
+    return canSetDefaultPlmCollaborativeEntry(entry)
   })
   const canClearDefault = computed(() => {
     const entry = options.selectedEntry.value

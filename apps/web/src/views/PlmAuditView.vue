@@ -867,7 +867,10 @@ import {
 } from './plmAuditTeamViewRouteState'
 import { copyTextToClipboard } from './plm/plmClipboard'
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
-import { usePlmCollaborativePermissions } from './plm/usePlmCollaborativePermissions'
+import {
+  canSetDefaultPlmCollaborativeEntry,
+  usePlmCollaborativePermissions,
+} from './plm/usePlmCollaborativePermissions'
 import { buildPlmWorkbenchTeamViewShareUrl } from './plm/plmWorkbenchViewState'
 
 const route = useRoute()
@@ -1051,7 +1054,7 @@ const auditTeamViewCollaborationFollowupNotice = computed(() => {
     view,
     auditTeamViewCollaborationFollowup.value,
     {
-      canSetDefault: canSetAuditTeamViewDefault.value,
+      canSetDefault: canSetDefaultPlmCollaborativeEntry(view),
     },
     tr,
   )
