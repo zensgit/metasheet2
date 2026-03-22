@@ -1682,6 +1682,8 @@ async function duplicateAuditTeamView() {
     )
     const duplicatedState = buildPlmAuditSelectedTeamViewRouteState(duplicated, readCurrentRouteState())
     upsertAuditTeamView(duplicated)
+    clearAuditSourceFocus()
+    applySavedViewAttentionAction({ kind: 'apply' })
     applyRouteState(duplicatedState)
     clearAuditTeamViewShareEntry()
     auditTeamViewName.value = ''
@@ -1764,6 +1766,7 @@ async function transferAuditTeamView() {
 async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
   const nextState = buildPlmAuditSelectedTeamViewRouteState(view, readCurrentRouteState())
   clearAuditSourceFocus()
+  applySavedViewAttentionAction({ kind: 'apply' })
   applyRouteState(nextState)
   clearAuditTeamViewCollaborationDraft()
   clearAuditTeamViewShareEntry()
