@@ -814,6 +814,7 @@ import {
   buildAuditTeamViewSummaryChips,
   buildAuditTeamViewSummaryHint,
   buildRecommendedAuditTeamViews,
+  consumeStaleRecommendedAuditTeamViewFocusId,
   resolveAuditTeamViewRecommendationFilter,
   type PlmRecommendedAuditTeamView,
   type PlmRecommendedAuditTeamViewFilter,
@@ -1313,6 +1314,11 @@ function clearAuditSavedViewShareFollowup() {
   auditSavedViewShareFollowup.value = null
 }
 
+function clearAuditSourceFocus() {
+  focusedRecommendedAuditTeamViewId.value = ''
+  focusedSavedViewId.value = ''
+}
+
 function applySavedViewAttentionAction(action: PlmAuditSavedViewAttentionAction) {
   const nextState = reducePlmAuditSavedViewAttentionState(
     {
@@ -1510,6 +1516,7 @@ function runSavedViewContextAction(
 ) {
   const badge = savedViewContextBadge(view)
   if (badge?.quickAction?.disabled) return
+  clearAuditSourceFocus()
   applySavedViewAttentionAction({ kind: 'context-action' })
   void syncRouteState(buildSavedViewContextState(view, actionKind))
 }
@@ -1684,6 +1691,7 @@ async function transferAuditTeamView() {
 
 async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
   const nextState = buildPlmAuditSelectedTeamViewRouteState(view, readCurrentRouteState())
+  clearAuditSourceFocus()
   applyRouteState(nextState)
   clearAuditTeamViewCollaborationDraft()
   clearAuditTeamViewShareEntry()
@@ -2195,6 +2203,7 @@ function saveCurrentView() {
 }
 
 function applySavedView(view: PlmAuditSavedView) {
+  clearAuditSourceFocus()
   applySavedViewAttentionAction({ kind: 'apply' })
   clearAuditTeamViewCollaborationFollowup()
   void syncRouteState(restorePlmAuditSavedViewState(view.state))
@@ -2313,6 +2322,7 @@ watch(auditTeamViewKey, (value) => {
 })
 
 function applyFilters() {
+  clearAuditSourceFocus()
   void syncRouteState({
     ...readCurrentRouteState(),
     page: 1,
@@ -2320,6 +2330,7 @@ function applyFilters() {
 }
 
 function resetFilters() {
+  clearAuditSourceFocus()
   applySavedViewAttentionAction({ kind: 'reset-filters' })
   clearAuditTeamViewCollaborationFollowup()
   void syncRouteState(resetPlmAuditRouteFilters(readCurrentRouteState()))
@@ -2330,6 +2341,7 @@ function reloadLogs() {
 }
 
 function goToPage(nextPage: number) {
+  clearAuditSourceFocus()
   void syncRouteState({
     ...readCurrentRouteState(),
     page: nextPage,
@@ -2338,6 +2350,13 @@ function goToPage(nextPage: number) {
 
 watch(auditTeamViews, () => {
   trimAuditTeamViewSelection()
+})
+
+watch(recommendedAuditTeamViews, (views) => {
+  focusedRecommendedAuditTeamViewId.value = consumeStaleRecommendedAuditTeamViewFocusId(
+    views,
+    focusedRecommendedAuditTeamViewId.value,
+  )
 })
 
 watch(

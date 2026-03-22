@@ -3,6 +3,7 @@ import {
   buildAuditTeamViewSummaryChips,
   buildAuditTeamViewSummaryHint,
   buildRecommendedAuditTeamViews,
+  consumeStaleRecommendedAuditTeamViewFocusId,
   resolveAuditTeamViewRecommendationFilter,
 } from '../src/views/plmAuditTeamViewCatalog'
 import type { PlmWorkbenchTeamView } from '../src/views/plm/plmPanelModels'
@@ -164,5 +165,18 @@ describe('plmAuditTeamViewCatalog', () => {
       lastDefaultSetAt: '2026-03-19T15:00:00.000Z',
     }))).toBe('recent-default')
     expect(resolveAuditTeamViewRecommendationFilter(createAuditTeamView())).toBe('recent-update')
+  })
+
+  it('consumes focused recommendation ids that are no longer visible in the current catalog', () => {
+    const visibleViews = buildRecommendedAuditTeamViews([
+      createAuditTeamView({ id: 'default', isDefault: true }),
+      createAuditTeamView({ id: 'recent-default', lastDefaultSetAt: '2026-03-19T15:00:00.000Z' }),
+    ], {
+      recommendationFilter: 'default',
+    })
+
+    expect(consumeStaleRecommendedAuditTeamViewFocusId(visibleViews, 'default')).toBe('default')
+    expect(consumeStaleRecommendedAuditTeamViewFocusId(visibleViews, 'recent-default')).toBe('')
+    expect(consumeStaleRecommendedAuditTeamViewFocusId(visibleViews, '')).toBe('')
   })
 })

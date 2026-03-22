@@ -36,6 +36,14 @@ export type PlmAuditTeamViewSummaryHint = {
   description: string
 }
 
+export function consumeStaleRecommendedAuditTeamViewFocusId(
+  visibleViews: readonly Pick<PlmRecommendedAuditTeamView, 'id'>[],
+  focusedViewId: string,
+) {
+  if (!focusedViewId) return ''
+  return visibleViews.some((view) => view.id === focusedViewId) ? focusedViewId : ''
+}
+
 const AUDIT_TEAM_VIEW_RECOMMENDATION_DESCRIPTIONS: Record<string, string> = {
   '': '综合展示当前默认、近期默认和近期更新的审计团队视图，适合快速进入协作审计入口。',
   default: '只看当前默认审计团队视图，适合作为团队标准审计入口。',
