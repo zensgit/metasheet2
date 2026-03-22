@@ -3,6 +3,7 @@
 Date: 2026-03-22
 Branch: `codex/attendance-run20-followup-20260320`
 PR: `#536`
+Merged main commit: `796be28e7de27bd07efed118e79e1fe25e09953e`
 Runtime verification baseline head: `2edb62ab42f994f51b979caa8bacbd1ed2ea9d8e`
 
 ## 1. Release Candidate Overview
@@ -185,22 +186,31 @@ GitHub checks for runtime baseline head `2edb62ab42f994f51b979caa8bacbd1ed2ea9d8
 
 `Strict E2E with Enhanced Gates` was skipped, not failed.
 
-## 6. Release Gate
+## 6. Release And Publication Outcome
 
-As of 2026-03-22, the remaining release blocker is no longer code or CI.
+As of 2026-03-22, this branch has already crossed the release gate and been published through the repository's auto-deploy path.
 
-Observed PR state:
+Observed final state:
 
-- `state = open`
-- `mergeable = true`
-- `mergeStateStatus = BLOCKED`
-- `reviewDecision = REVIEW_REQUIRED`
+- `PR #536` merged into `main` at `2026-03-22T10:51:09Z`
+- merge commit: `796be28e7de27bd07efed118e79e1fe25e09953e`
+- publication workflow:
+  - `Build and Push Docker Images`
+  - run: `#23401465080`
+  - result: `success`
+  - deploy completed at `2026-03-22T10:54:34Z`
+- companion workflow on the same push:
+  - `Deploy to Production`
+  - run: `#23401465079`
+  - result: `success`
+  - `build-and-push` and `deploy` jobs were skipped, so this was not the live deploy path
 
 This means:
 
-1. The branch is technically ready as a release candidate.
-2. The remaining blocker is review/approval and merge, not implementation quality gates.
-3. The version can be updated and published once the PR receives approval, merges into `main`, and the release/deploy action is triggered on the merged head.
+1. The branch cleared the PR-level release candidate gate.
+2. The merged `main` commit has already been built, pushed, and remotely deployed.
+3. The release is live through the repository's standard main-branch deployment path.
+4. No new semver tag was minted during this flow; the root package version remains `2.5.0`.
 
 ## 7. Out Of Scope For This Release
 
@@ -213,17 +223,18 @@ The following items are intentionally left for the next phase:
 
 ## 8. Recommendation
 
-Do not expand feature scope further on this RC branch.
+Do not continue feature expansion on this already-published line without opening a new follow-up branch.
 
 The correct next action is:
 
-1. obtain PR approval
-2. merge `#536`
-3. update and publish the version from `main`
+1. treat `796be28e7de27bd07efed118e79e1fe25e09953e` as the released mainline state
+2. open a new follow-up branch only for post-release fixes or next-scope enhancements
+3. cut a semantic tag only if release bookkeeping requires a named artifact beyond the successful main deployment
 
-This branch is now strong enough to release on the basis of:
+This release is justified on the basis of:
 
 - explainable rule simulation
 - operator-grade import triage
 - safer rollback and retry flows
 - validated frontend and backend guardrails
+- successful main-branch deployment
