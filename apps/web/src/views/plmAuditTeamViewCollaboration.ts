@@ -44,6 +44,12 @@ export type PlmAuditTeamViewCollaborationFollowupNotice = {
   }>
 }
 
+export type PlmAuditTeamViewCollaborationActionOutcome = {
+  statusMessage: string
+  followup: PlmAuditTeamViewCollaborationFollowup | null
+  scrollTargetId: string | null
+}
+
 const PLM_AUDIT_TEAM_VIEW_COLLABORATION_LOGS_ANCHOR_ID = 'plm-audit-log-results'
 const PLM_AUDIT_TEAM_VIEW_CONTROLS_ANCHOR_ID = 'plm-audit-team-view-controls'
 
@@ -143,6 +149,42 @@ export function buildPlmAuditTeamViewCollaborationActionStatus(
         'Recommended audit team view set as default. Showing matching audit logs.',
         '已将推荐审计团队视图设为默认，并切换到对应审计日志。',
       )
+}
+
+export function buildPlmAuditTeamViewCollaborationActionOutcome(
+  viewId: string,
+  source: PlmAuditTeamViewCollaborationSource | null | undefined,
+  action: Exclude<PlmAuditTeamViewCollaborationActionKind, 'dismiss'>,
+  tr: (en: string, zh: string) => string,
+  options?: {
+    sceneContextAvailable?: boolean
+  },
+): PlmAuditTeamViewCollaborationActionOutcome {
+  if (!source) {
+    return {
+      statusMessage: action === 'share'
+        ? tr('Audit team view link copied.', '审计团队视图链接已复制。')
+        : tr(
+            'Audit team view set as default. Showing matching audit logs.',
+            '审计团队视图已设为默认，已切换到对应审计日志。',
+          ),
+      followup: null,
+      scrollTargetId: null,
+    }
+  }
+
+  const followup = buildPlmAuditTeamViewCollaborationFollowup(
+    viewId,
+    source,
+    action,
+    options,
+  )
+
+  return {
+    statusMessage: buildPlmAuditTeamViewCollaborationActionStatus(source, action, tr),
+    followup,
+    scrollTargetId: action === 'set-default' ? followup.logsAnchorId : null,
+  }
 }
 
 export function buildPlmAuditTeamViewCollaborationFollowupNotice(

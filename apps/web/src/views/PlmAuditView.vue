@@ -810,6 +810,7 @@ import {
   type PlmRecommendedAuditTeamViewFilter,
 } from './plmAuditTeamViewCatalog'
 import {
+  buildPlmAuditTeamViewCollaborationActionOutcome,
   buildPlmAuditTeamViewCollaborationFollowup,
   buildPlmAuditSavedViewPromotionCollaborationDraft,
   buildPlmAuditTeamViewCollaborationActionStatus,
@@ -821,6 +822,7 @@ import {
   type PlmAuditTeamViewCollaborationDraft,
   type PlmAuditTeamViewCollaborationFollowup,
   type PlmAuditTeamViewCollaborationFollowupActionKind,
+  type PlmAuditTeamViewCollaborationSource,
 } from './plmAuditTeamViewCollaboration'
 import {
   buildPlmAuditSharedEntrySavedViewName,
@@ -1654,34 +1656,30 @@ async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
 
 async function shareAuditTeamViewEntry(
   view: PlmWorkbenchTeamView<'audit'>,
-  source?: 'recommendation' | 'saved-view-promotion' | 'scene-context',
+  source?: PlmAuditTeamViewCollaborationSource,
 ) {
   const ok = await copyTextToClipboard(buildAuditTeamViewShareUrl(view))
   if (!ok) {
     setStatus(tr('Failed to copy team view link.', '复制团队视图链接失败。'), 'error')
     return false
   }
-  setStatus(
-    source
-      ? buildPlmAuditTeamViewCollaborationActionStatus(source, 'share', tr)
-      : tr('Audit team view link copied.', '审计团队视图链接已复制。'),
+  const outcome = buildPlmAuditTeamViewCollaborationActionOutcome(
+    view.id,
+    source,
+    'share',
+    tr,
+    {
+      sceneContextAvailable: Boolean(auditSceneContext.value),
+    },
   )
-    if (source) {
-      auditTeamViewCollaborationFollowup.value = buildPlmAuditTeamViewCollaborationFollowup(
-        view.id,
-        source,
-        'share',
-        {
-          sceneContextAvailable: Boolean(auditSceneContext.value),
-        },
-      )
-    }
+  setStatus(outcome.statusMessage)
+  auditTeamViewCollaborationFollowup.value = outcome.followup
   return true
 }
 
 async function setAuditTeamViewDefaultEntry(
   view: PlmWorkbenchTeamView<'audit'>,
-  source?: 'recommendation' | 'saved-view-promotion' | 'scene-context',
+  source?: PlmAuditTeamViewCollaborationSource,
 ) {
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
@@ -1696,24 +1694,20 @@ async function setAuditTeamViewDefaultEntry(
     applyAuditTeamViewState(saved)
     focusedAuditTeamViewId.value = saved.id
     await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'set-default', readCurrentRouteState()))
-    setStatus(
-      source
-        ? buildPlmAuditTeamViewCollaborationActionStatus(source, 'set-default', tr)
-        : tr('Audit team view set as default. Showing matching audit logs.', '审计团队视图已设为默认，已切换到对应审计日志。'),
+    const outcome = buildPlmAuditTeamViewCollaborationActionOutcome(
+      saved.id,
+      source,
+      'set-default',
+      tr,
+      {
+        sceneContextAvailable: Boolean(auditSceneContext.value),
+      },
     )
-    if (source) {
-      auditTeamViewCollaborationFollowup.value = buildPlmAuditTeamViewCollaborationFollowup(
-        saved.id,
-        source,
-        'set-default',
-        {
-          sceneContextAvailable: Boolean(auditSceneContext.value),
-        },
-      )
-    }
+    setStatus(outcome.statusMessage)
+    auditTeamViewCollaborationFollowup.value = outcome.followup
     await nextTick()
-    if (source) {
-      document.getElementById('plm-audit-log-results')?.scrollIntoView({
+    if (outcome.scrollTargetId) {
+      document.getElementById(outcome.scrollTargetId)?.scrollIntoView({
         behavior: 'smooth',
         block: 'start',
       })

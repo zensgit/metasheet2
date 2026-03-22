@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildPlmAuditTeamViewCollaborationActionOutcome,
   buildPlmAuditTeamViewCollaborationFollowup,
   buildPlmAuditSavedViewPromotionCollaborationDraft,
   buildPlmAuditTeamViewCollaborationActionStatus,
@@ -147,6 +148,72 @@ describe('plmAuditTeamViewCollaboration', () => {
     expect(buildPlmAuditTeamViewCollaborationActionStatus('scene-context', 'share', tr)).toBe(
       'Share link copied for the scene-driven audit team view.|已复制场景驱动审计团队视图的分享链接。',
     )
+  })
+
+  it('builds a source-aware collaboration outcome for share and default actions', () => {
+    expect(buildPlmAuditTeamViewCollaborationActionOutcome(
+      'audit-view-4',
+      'recommendation',
+      'share',
+      tr,
+    )).toEqual({
+      statusMessage:
+        'Share link copied for the recommended audit team view.|已复制推荐审计团队视图的分享链接。',
+      followup: {
+        teamViewId: 'audit-view-4',
+        source: 'recommendation',
+        action: 'share',
+        logsAnchorId: 'plm-audit-log-results',
+        sourceAnchorId: 'plm-audit-recommended-team-views',
+      },
+      scrollTargetId: null,
+    })
+
+    expect(buildPlmAuditTeamViewCollaborationActionOutcome(
+      'audit-view-8',
+      'scene-context',
+      'set-default',
+      tr,
+      {
+        sceneContextAvailable: false,
+      },
+    )).toEqual({
+      statusMessage:
+        'Scene-driven audit team view set as default. Showing matching audit logs.|场景驱动审计团队视图已设为默认，并切换到对应审计日志。',
+      followup: {
+        teamViewId: 'audit-view-8',
+        source: 'scene-context',
+        action: 'set-default',
+        logsAnchorId: 'plm-audit-log-results',
+        sourceAnchorId: 'plm-audit-team-view-controls',
+      },
+      scrollTargetId: 'plm-audit-log-results',
+    })
+  })
+
+  it('falls back to generic collaboration outcomes when no provenance is available', () => {
+    expect(buildPlmAuditTeamViewCollaborationActionOutcome(
+      'audit-view-6',
+      null,
+      'share',
+      tr,
+    )).toEqual({
+      statusMessage: 'Audit team view link copied.|审计团队视图链接已复制。',
+      followup: null,
+      scrollTargetId: null,
+    })
+
+    expect(buildPlmAuditTeamViewCollaborationActionOutcome(
+      'audit-view-6',
+      null,
+      'set-default',
+      tr,
+    )).toEqual({
+      statusMessage:
+        'Audit team view set as default. Showing matching audit logs.|审计团队视图已设为默认，已切换到对应审计日志。',
+      followup: null,
+      scrollTargetId: null,
+    })
   })
 
   it('builds share follow-up actions after collaboration copy', () => {
