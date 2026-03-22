@@ -17,7 +17,7 @@ export type PlmAuditAttentionFocusState = {
 }
 
 export type PlmAuditSavedViewAttentionAction =
-  | { kind: 'apply' | 'context-action' | 'promotion-handoff' | 'reset-filters' }
+  | { kind: 'apply' | 'context-action' | 'filter-navigation' | 'promotion-handoff' | 'reset-filters' }
   | { kind: 'delete'; savedViewId: string }
 
 export type PlmAuditAttentionFocusAction =

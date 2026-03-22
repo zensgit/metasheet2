@@ -2349,6 +2349,7 @@ watch(auditTeamViewKey, (value) => {
 
 function applyFilters() {
   clearAuditAttentionFocus()
+  applySavedViewAttentionAction({ kind: 'filter-navigation' })
   void syncRouteState({
     ...readCurrentRouteState(),
     page: 1,
@@ -2368,6 +2369,7 @@ function reloadLogs() {
 
 function goToPage(nextPage: number) {
   clearAuditAttentionFocus()
+  applySavedViewAttentionAction({ kind: 'filter-navigation' })
   void syncRouteState({
     ...readCurrentRouteState(),
     page: nextPage,
