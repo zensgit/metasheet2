@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildPlmAuditTeamViewCollaborationFollowup,
   buildPlmAuditSavedViewPromotionCollaborationDraft,
   buildPlmAuditTeamViewCollaborationActionStatus,
   buildPlmAuditTeamViewCollaborationDraft,
   buildPlmAuditTeamViewCollaborationFollowupNotice,
   buildPlmAuditTeamViewCollaborationNotice,
   findPlmAuditTeamViewCollaborationFollowupView,
+  resolvePlmAuditTeamViewCollaborationSourceAnchorId,
 } from '../src/views/plmAuditTeamViewCollaboration'
 
 function tr(en: string, zh: string) {
@@ -182,6 +184,44 @@ describe('plmAuditTeamViewCollaboration', () => {
           emphasis: 'secondary',
         },
       ],
+    })
+  })
+
+  it('maps collaboration sources to the expected source anchors', () => {
+    expect(resolvePlmAuditTeamViewCollaborationSourceAnchorId('recommendation')).toBe(
+      'plm-audit-recommended-team-views',
+    )
+    expect(resolvePlmAuditTeamViewCollaborationSourceAnchorId('saved-view-promotion')).toBe(
+      'plm-audit-saved-views',
+    )
+    expect(resolvePlmAuditTeamViewCollaborationSourceAnchorId('scene-context')).toBe(
+      'plm-audit-scene-context',
+    )
+  })
+
+  it('builds share and default follow-up state from the shared provenance contract', () => {
+    expect(buildPlmAuditTeamViewCollaborationFollowup(
+      'audit-view-4',
+      'recommendation',
+      'share',
+    )).toEqual({
+      teamViewId: 'audit-view-4',
+      source: 'recommendation',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-recommended-team-views',
+    })
+
+    expect(buildPlmAuditTeamViewCollaborationFollowup(
+      'audit-view-8',
+      'scene-context',
+      'set-default',
+    )).toEqual({
+      teamViewId: 'audit-view-8',
+      source: 'scene-context',
+      action: 'set-default',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-scene-context',
     })
   })
 

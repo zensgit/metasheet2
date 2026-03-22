@@ -807,6 +807,7 @@ import {
   type PlmRecommendedAuditTeamViewFilter,
 } from './plmAuditTeamViewCatalog'
 import {
+  buildPlmAuditTeamViewCollaborationFollowup,
   buildPlmAuditSavedViewPromotionCollaborationDraft,
   buildPlmAuditTeamViewCollaborationActionStatus,
   buildPlmAuditTeamViewCollaborationDraft,
@@ -1662,17 +1663,11 @@ async function shareAuditTeamViewEntry(
       : tr('Audit team view link copied.', '审计团队视图链接已复制。'),
   )
     if (source) {
-      auditTeamViewCollaborationFollowup.value = {
-        teamViewId: view.id,
+      auditTeamViewCollaborationFollowup.value = buildPlmAuditTeamViewCollaborationFollowup(
+        view.id,
         source,
-        action: 'share',
-        logsAnchorId: 'plm-audit-log-results',
-        sourceAnchorId: source === 'saved-view-promotion'
-          ? 'plm-audit-saved-views'
-          : source === 'scene-context'
-            ? 'plm-audit-scene-context'
-            : 'plm-audit-recommended-team-views',
-      }
+        'share',
+      )
     }
   return true
 }
@@ -1700,17 +1695,11 @@ async function setAuditTeamViewDefaultEntry(
         : tr('Audit team view set as default. Showing matching audit logs.', '审计团队视图已设为默认，已切换到对应审计日志。'),
     )
     if (source) {
-      auditTeamViewCollaborationFollowup.value = {
-        teamViewId: saved.id,
+      auditTeamViewCollaborationFollowup.value = buildPlmAuditTeamViewCollaborationFollowup(
+        saved.id,
         source,
-        action: 'set-default',
-        logsAnchorId: 'plm-audit-log-results',
-        sourceAnchorId: source === 'saved-view-promotion'
-          ? 'plm-audit-saved-views'
-          : source === 'scene-context'
-            ? 'plm-audit-scene-context'
-            : 'plm-audit-recommended-team-views',
-      }
+        'set-default',
+      )
     }
     await nextTick()
     if (source) {

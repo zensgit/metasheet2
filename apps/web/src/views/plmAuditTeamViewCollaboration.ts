@@ -44,6 +44,8 @@ export type PlmAuditTeamViewCollaborationFollowupNotice = {
   }>
 }
 
+const PLM_AUDIT_TEAM_VIEW_COLLABORATION_LOGS_ANCHOR_ID = 'plm-audit-log-results'
+
 export function buildPlmAuditSavedViewPromotionCollaborationDraft(
   view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'name'>,
   followupSource: PlmAuditSavedViewShareFollowupSource | null | undefined,
@@ -54,6 +56,28 @@ export function buildPlmAuditSavedViewPromotionCollaborationDraft(
     tr,
     followupSource === 'scene-context' ? 'scene-context' : 'saved-view-promotion',
   )
+}
+
+export function resolvePlmAuditTeamViewCollaborationSourceAnchorId(
+  source: PlmAuditTeamViewCollaborationSource,
+) {
+  if (source === 'saved-view-promotion') return 'plm-audit-saved-views'
+  if (source === 'scene-context') return 'plm-audit-scene-context'
+  return 'plm-audit-recommended-team-views'
+}
+
+export function buildPlmAuditTeamViewCollaborationFollowup(
+  viewId: string,
+  source: PlmAuditTeamViewCollaborationSource,
+  action: PlmAuditTeamViewCollaborationFollowup['action'],
+): PlmAuditTeamViewCollaborationFollowup {
+  return {
+    teamViewId: viewId,
+    source,
+    action,
+    logsAnchorId: PLM_AUDIT_TEAM_VIEW_COLLABORATION_LOGS_ANCHOR_ID,
+    sourceAnchorId: resolvePlmAuditTeamViewCollaborationSourceAnchorId(source),
+  }
 }
 
 export function findPlmAuditTeamViewCollaborationFollowupView<T extends { id: string }>(
