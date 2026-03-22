@@ -631,7 +631,10 @@
           class="plm-audit__saved-view-card"
           :class="{
             'plm-audit__saved-view-card--active': isSavedViewActive(view),
-            'plm-audit__saved-view-card--focused': auditSavedViewShareFollowup?.savedViewId === view.id,
+            'plm-audit__saved-view-card--focused': (
+              auditSavedViewShareFollowup?.savedViewId === view.id
+              || focusedSavedViewId === view.id
+            ),
           }"
         >
           <div class="plm-audit__saved-view-meta">
@@ -892,6 +895,7 @@ const routeReady = ref(false)
 const savedViewName = ref('')
 const savedViews = ref<PlmAuditSavedView[]>(readPlmAuditSavedViews())
 const auditSavedViewShareFollowup = ref<PlmAuditSavedViewShareFollowup | null>(null)
+const focusedSavedViewId = ref('')
 const auditTeamViewKey = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.teamViewId)
 const auditTeamViewName = ref('')
 const auditTeamViewOwnerUserId = ref('')
@@ -1670,6 +1674,7 @@ async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
 async function shareAuditTeamViewEntry(
   view: PlmWorkbenchTeamView<'audit'>,
   source?: PlmAuditTeamViewCollaborationSource,
+  sourceSavedViewId?: string | null,
 ) {
   const ok = await copyTextToClipboard(buildAuditTeamViewShareUrl(view))
   if (!ok) {
@@ -1683,6 +1688,7 @@ async function shareAuditTeamViewEntry(
     tr,
     {
       sceneContextAvailable: Boolean(auditSceneContext.value),
+      sourceSavedViewId,
     },
   )
   setStatus(outcome.statusMessage)
@@ -1693,6 +1699,7 @@ async function shareAuditTeamViewEntry(
 async function setAuditTeamViewDefaultEntry(
   view: PlmWorkbenchTeamView<'audit'>,
   source?: PlmAuditTeamViewCollaborationSource,
+  sourceSavedViewId?: string | null,
 ) {
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
@@ -1714,6 +1721,7 @@ async function setAuditTeamViewDefaultEntry(
       tr,
       {
         sceneContextAvailable: Boolean(auditSceneContext.value),
+        sourceSavedViewId,
       },
     )
     setStatus(outcome.statusMessage)
@@ -1768,6 +1776,7 @@ async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
 async function focusRecommendedAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
   auditTeamViewRecommendationFilter.value = resolveAuditTeamViewRecommendationFilter(view)
   focusedRecommendedAuditTeamViewId.value = view.id
+  focusedSavedViewId.value = ''
   await nextTick()
   document.getElementById('plm-audit-recommended-team-views')?.scrollIntoView({
     behavior: 'smooth',
@@ -1814,6 +1823,7 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
   const view = selectedAuditTeamView.value
   if (!view) return
   const source = auditTeamViewCollaborationDraft.value?.source
+  const sourceSavedViewId = auditTeamViewCollaborationDraft.value?.sourceSavedViewId
 
   if (actionKind === 'dismiss') {
     clearAuditTeamViewCollaborationDraft()
@@ -1821,7 +1831,7 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
   }
 
   if (actionKind === 'share') {
-    const ok = await shareAuditTeamViewEntry(view, source)
+    const ok = await shareAuditTeamViewEntry(view, source, sourceSavedViewId)
     if (ok && shouldClearPlmAuditTeamViewCollaborationDraft(
       auditTeamViewCollaborationDraft.value,
       view.id,
@@ -1831,7 +1841,7 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
     return
   }
 
-  const ok = await setAuditTeamViewDefaultEntry(view, source)
+  const ok = await setAuditTeamViewDefaultEntry(view, source, sourceSavedViewId)
   if (ok) clearAuditTeamViewCollaborationDraft()
 }
 
@@ -1863,8 +1873,11 @@ async function runAuditTeamViewCollaborationFollowupAction(
     if (sourceFocusIntent.recommendationFilter !== null) {
       auditTeamViewRecommendationFilter.value = sourceFocusIntent.recommendationFilter
     }
+    focusedSavedViewId.value = sourceFocusIntent.focusedSavedViewId || ''
     if (sourceFocusIntent.focusedRecommendationTeamViewId) {
       focusedRecommendedAuditTeamViewId.value = sourceFocusIntent.focusedRecommendationTeamViewId
+    } else if (sourceFocusIntent.focusedSavedViewId) {
+      focusedRecommendedAuditTeamViewId.value = ''
     }
     await nextTick()
     document.getElementById(sourceFocusIntent.anchorId)?.scrollIntoView({
@@ -2169,6 +2182,9 @@ function deleteSavedViewEntry(id: string) {
   if (auditSavedViewShareFollowup.value?.savedViewId === id) {
     clearAuditSavedViewShareFollowup()
   }
+  if (focusedSavedViewId.value === id) {
+    focusedSavedViewId.value = ''
+  }
   setStatus(tr('Audit saved view deleted.', '审计已保存视图已删除。'))
 }
 
@@ -2209,6 +2225,7 @@ async function promoteSavedViewToTeam(
         selectable: Boolean(auditTeamViewManagementItems.value.find((item) => item.id === saved.id)?.selectable),
         sceneContextAvailable: Boolean(auditSceneContext.value),
         statusSuffix: draft.localContextNote,
+        sourceSavedViewId: promotionBehavior.collaborationSource === 'saved-view-promotion' ? view.id : null,
       },
       tr,
     )

@@ -29,6 +29,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       teamViewOwnerUserId: '',
       focusTargetId: 'plm-audit-team-view-controls',
       source: 'recommendation',
+      sourceSavedViewId: null,
       statusMessage:
         'Prepared collaboration controls for this audit team view.|已为该审计团队视图准备好协作操作。',
     })
@@ -44,6 +45,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       teamViewOwnerUserId: '',
       focusTargetId: 'plm-audit-team-view-controls',
       source: 'saved-view-promotion',
+      sourceSavedViewId: null,
       statusMessage:
         'Saved view promoted and collaboration controls are ready.|保存视图已提升为团队视图，并已准备好协作操作。',
     })
@@ -59,6 +61,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       teamViewOwnerUserId: '',
       focusTargetId: 'plm-audit-team-view-controls',
       source: 'scene-context',
+      sourceSavedViewId: null,
       statusMessage:
         'Scene audit saved to team views and collaboration controls are ready.|场景审计已保存到团队视图，并已准备好协作操作。',
     })
@@ -74,6 +77,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       teamViewOwnerUserId: '',
       focusTargetId: 'plm-audit-team-view-controls',
       source: 'scene-context',
+      sourceSavedViewId: null,
       statusMessage:
         'Scene audit saved to team views and collaboration controls are ready.|场景审计已保存到团队视图，并已准备好协作操作。',
     })
@@ -168,6 +172,7 @@ describe('plmAuditTeamViewCollaboration', () => {
         action: 'share',
         logsAnchorId: 'plm-audit-log-results',
         sourceAnchorId: 'plm-audit-recommended-team-views',
+        sourceSavedViewId: null,
       },
       scrollTargetId: null,
     })
@@ -189,6 +194,7 @@ describe('plmAuditTeamViewCollaboration', () => {
         action: 'set-default',
         logsAnchorId: 'plm-audit-log-results',
         sourceAnchorId: 'plm-audit-team-view-controls',
+        sourceSavedViewId: null,
       },
       scrollTargetId: 'plm-audit-log-results',
     })
@@ -243,6 +249,7 @@ describe('plmAuditTeamViewCollaboration', () => {
         teamViewOwnerUserId: '',
         focusTargetId: 'plm-audit-team-view-controls',
         source: 'recommendation',
+        sourceSavedViewId: null,
         statusMessage:
           'Prepared collaboration controls for this audit team view.|已为该审计团队视图准备好协作操作。',
       },
@@ -276,6 +283,7 @@ describe('plmAuditTeamViewCollaboration', () => {
         teamViewOwnerUserId: '',
         focusTargetId: 'plm-audit-team-view-controls',
         source: 'saved-view-promotion',
+        sourceSavedViewId: null,
         statusMessage:
           'Saved view promoted and collaboration controls are ready.|保存视图已提升为团队视图，并已准备好协作操作。',
       },
@@ -313,6 +321,7 @@ describe('plmAuditTeamViewCollaboration', () => {
         action: 'set-default',
         logsAnchorId: 'plm-audit-log-results',
         sourceAnchorId: 'plm-audit-team-view-controls',
+        sourceSavedViewId: null,
       },
       scrollTargetId: 'plm-audit-log-results',
       statusMessage:
@@ -384,6 +393,7 @@ describe('plmAuditTeamViewCollaboration', () => {
     })).toEqual({
       anchorId: 'plm-audit-recommended-team-views',
       focusedRecommendationTeamViewId: 'audit-view-4',
+      focusedSavedViewId: null,
       recommendationFilter: 'recent-default',
     })
   })
@@ -392,6 +402,7 @@ describe('plmAuditTeamViewCollaboration', () => {
     expect(buildPlmAuditTeamViewCollaborationSourceFocusIntent({
       source: 'saved-view-promotion',
       sourceAnchorId: 'plm-audit-saved-views',
+      sourceSavedViewId: null,
     }, {
       id: 'audit-view-6',
       isDefault: false,
@@ -399,6 +410,20 @@ describe('plmAuditTeamViewCollaboration', () => {
     })).toEqual({
       anchorId: 'plm-audit-saved-views',
       focusedRecommendationTeamViewId: null,
+      focusedSavedViewId: null,
+      recommendationFilter: null,
+    })
+  })
+
+  it('restores the originating saved view card when a promotion follow-up goes back to source', () => {
+    expect(buildPlmAuditTeamViewCollaborationSourceFocusIntent({
+      source: 'saved-view-promotion',
+      sourceAnchorId: 'plm-audit-saved-views',
+      sourceSavedViewId: 'saved-view-7',
+    })).toEqual({
+      anchorId: 'plm-audit-saved-views',
+      focusedRecommendationTeamViewId: null,
+      focusedSavedViewId: 'saved-view-7',
       recommendationFilter: null,
     })
   })
@@ -414,6 +439,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       action: 'share',
       logsAnchorId: 'plm-audit-log-results',
       sourceAnchorId: 'plm-audit-recommended-team-views',
+      sourceSavedViewId: null,
     })
 
     expect(buildPlmAuditTeamViewCollaborationFollowup(
@@ -426,6 +452,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       action: 'set-default',
       logsAnchorId: 'plm-audit-log-results',
       sourceAnchorId: 'plm-audit-scene-context',
+      sourceSavedViewId: null,
     })
 
     expect(buildPlmAuditTeamViewCollaborationFollowup(
@@ -441,6 +468,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       action: 'share',
       logsAnchorId: 'plm-audit-log-results',
       sourceAnchorId: 'plm-audit-team-view-controls',
+      sourceSavedViewId: null,
     })
   })
 

@@ -16,6 +16,7 @@ export type PlmAuditTeamViewCollaborationDraft = {
   focusTargetId: string
   statusMessage: string
   source: PlmAuditTeamViewCollaborationSource
+  sourceSavedViewId: string | null
 }
 
 export type PlmAuditTeamViewCollaborationNotice = {
@@ -35,6 +36,7 @@ export type PlmAuditTeamViewCollaborationFollowup = {
   action: 'share' | 'set-default'
   logsAnchorId: string
   sourceAnchorId: string
+  sourceSavedViewId: string | null
 }
 
 export type PlmAuditTeamViewCollaborationFollowupNotice = {
@@ -69,6 +71,7 @@ export type PlmAuditTeamViewCollaborationHandoff = {
 export type PlmAuditTeamViewCollaborationSourceFocusIntent = {
   anchorId: string
   focusedRecommendationTeamViewId: string | null
+  focusedSavedViewId: string | null
   recommendationFilter: PlmRecommendedAuditTeamViewFilter | null
 }
 
@@ -84,6 +87,9 @@ export function buildPlmAuditSavedViewPromotionCollaborationDraft(
     view,
     tr,
     followupSource === 'scene-context' ? 'scene-context' : 'saved-view-promotion',
+    {
+      sourceSavedViewId: view.id,
+    },
   )
 }
 
@@ -108,6 +114,7 @@ export function buildPlmAuditTeamViewCollaborationFollowup(
   action: PlmAuditTeamViewCollaborationFollowup['action'],
   options?: {
     sceneContextAvailable?: boolean
+    sourceSavedViewId?: string | null
   },
 ): PlmAuditTeamViewCollaborationFollowup {
   return {
@@ -116,6 +123,7 @@ export function buildPlmAuditTeamViewCollaborationFollowup(
     action,
     logsAnchorId: PLM_AUDIT_TEAM_VIEW_COLLABORATION_LOGS_ANCHOR_ID,
     sourceAnchorId: resolvePlmAuditTeamViewCollaborationSourceAnchorId(source, options),
+    sourceSavedViewId: source === 'saved-view-promotion' ? options?.sourceSavedViewId || null : null,
   }
 }
 
@@ -133,13 +141,14 @@ export function findPlmAuditTeamViewCollaborationFollowupView<T extends { id: st
 }
 
 export function buildPlmAuditTeamViewCollaborationSourceFocusIntent(
-  followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'source' | 'sourceAnchorId'>,
+  followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'source' | 'sourceAnchorId' | 'sourceSavedViewId'>,
   view?: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'isDefault' | 'lastDefaultSetAt'> | null,
 ): PlmAuditTeamViewCollaborationSourceFocusIntent {
   if (followup.source === 'recommendation' && view) {
     return {
       anchorId: followup.sourceAnchorId,
       focusedRecommendationTeamViewId: view.id,
+      focusedSavedViewId: null,
       recommendationFilter: resolveAuditTeamViewRecommendationFilter(view),
     }
   }
@@ -147,6 +156,9 @@ export function buildPlmAuditTeamViewCollaborationSourceFocusIntent(
   return {
     anchorId: followup.sourceAnchorId,
     focusedRecommendationTeamViewId: null,
+    focusedSavedViewId: followup.source === 'saved-view-promotion'
+      ? followup.sourceSavedViewId || null
+      : null,
     recommendationFilter: null,
   }
 }
@@ -199,6 +211,7 @@ export function buildPlmAuditTeamViewCollaborationActionOutcome(
   tr: (en: string, zh: string) => string,
   options?: {
     sceneContextAvailable?: boolean
+    sourceSavedViewId?: string | null
   },
 ): PlmAuditTeamViewCollaborationActionOutcome {
   if (!source) {
@@ -243,11 +256,14 @@ export function buildPlmAuditTeamViewCollaborationHandoff(
     selectable: boolean
     sceneContextAvailable?: boolean
     statusSuffix?: string
+    sourceSavedViewId?: string | null
   },
   tr: (en: string, zh: string) => string,
 ): PlmAuditTeamViewCollaborationHandoff {
   if (options.mode === 'draft') {
-    const draft = buildPlmAuditTeamViewCollaborationDraft(view, tr, options.source)
+    const draft = buildPlmAuditTeamViewCollaborationDraft(view, tr, options.source, {
+      sourceSavedViewId: options.sourceSavedViewId,
+    })
     return {
       selectedTeamViewId: draft.teamViewId,
       teamViewName: draft.teamViewName,
@@ -267,6 +283,7 @@ export function buildPlmAuditTeamViewCollaborationHandoff(
     'set-default',
     {
       sceneContextAvailable: options.sceneContextAvailable,
+      sourceSavedViewId: options.sourceSavedViewId,
     },
   )
 
@@ -382,6 +399,9 @@ export function buildPlmAuditTeamViewCollaborationDraft(
   view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'name'>,
   tr: (en: string, zh: string) => string,
   source: PlmAuditTeamViewCollaborationSource = 'recommendation',
+  options?: {
+    sourceSavedViewId?: string | null
+  },
 ): PlmAuditTeamViewCollaborationDraft {
   return {
     teamViewId: view.id,
@@ -389,6 +409,7 @@ export function buildPlmAuditTeamViewCollaborationDraft(
     teamViewOwnerUserId: '',
     focusTargetId: 'plm-audit-team-view-controls',
     source,
+    sourceSavedViewId: source === 'saved-view-promotion' ? options?.sourceSavedViewId || null : null,
     statusMessage: source === 'saved-view-promotion'
       ? tr(
           'Saved view promoted and collaboration controls are ready.',
