@@ -431,6 +431,19 @@ describe('plmAuditTeamViewCollaboration', () => {
     })
   })
 
+  it('keeps scene-context source focus anchor-only so stale saved/recommendation focus can be cleared', () => {
+    expect(buildPlmAuditTeamViewCollaborationSourceFocusIntent({
+      source: 'scene-context',
+      sourceAnchorId: 'plm-audit-scene-context',
+      sourceSavedViewId: null,
+    })).toEqual({
+      anchorId: 'plm-audit-scene-context',
+      focusedRecommendationTeamViewId: null,
+      focusedSavedViewId: null,
+      recommendationFilter: null,
+    })
+  })
+
   it('builds share and default follow-up state from the shared provenance contract', () => {
     expect(buildPlmAuditTeamViewCollaborationFollowup(
       'audit-view-4',

@@ -787,6 +787,7 @@ import {
   type PlmAuditRouteState,
 } from './plmAuditQueryState'
 import {
+  applyPlmAuditSourceFocusState,
   reducePlmAuditAttentionFocusState,
   reducePlmAuditSavedViewAttentionState,
   type PlmAuditAttentionFocusAction,
@@ -1336,10 +1337,6 @@ function clearAuditSourceFocus() {
 
 function clearAuditAttentionFocus() {
   applyAuditAttentionFocusAction({ kind: 'clear-all' })
-}
-
-function clearAuditTeamViewManagementFocus() {
-  applyAuditAttentionFocusAction({ kind: 'clear-management' })
 }
 
 function applySavedViewAttentionAction(action: PlmAuditSavedViewAttentionAction) {
@@ -1922,15 +1919,22 @@ async function runAuditTeamViewCollaborationFollowupAction(
       followup,
       sourceView,
     )
-    clearAuditTeamViewManagementFocus()
+    const nextFocusState = applyPlmAuditSourceFocusState(
+      {
+        focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+        focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+        focusedSavedViewId: focusedSavedViewId.value,
+      },
+      {
+        focusedRecommendedAuditTeamViewId: sourceFocusIntent.focusedRecommendationTeamViewId || '',
+        focusedSavedViewId: sourceFocusIntent.focusedSavedViewId || '',
+      },
+    )
+    focusedAuditTeamViewId.value = nextFocusState.focusedAuditTeamViewId
+    focusedRecommendedAuditTeamViewId.value = nextFocusState.focusedRecommendedAuditTeamViewId
+    focusedSavedViewId.value = nextFocusState.focusedSavedViewId
     if (sourceFocusIntent.recommendationFilter !== null) {
       auditTeamViewRecommendationFilter.value = sourceFocusIntent.recommendationFilter
-    }
-    focusedSavedViewId.value = sourceFocusIntent.focusedSavedViewId || ''
-    if (sourceFocusIntent.focusedRecommendationTeamViewId) {
-      focusedRecommendedAuditTeamViewId.value = sourceFocusIntent.focusedRecommendationTeamViewId
-    } else if (sourceFocusIntent.focusedSavedViewId) {
-      focusedRecommendedAuditTeamViewId.value = ''
     }
     await nextTick()
     document.getElementById(sourceFocusIntent.anchorId)?.scrollIntoView({
