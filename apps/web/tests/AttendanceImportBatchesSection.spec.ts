@@ -61,6 +61,10 @@ describe('AttendanceImportBatchesSection', () => {
     return container!.querySelectorAll('.attendance__table-wrapper')[1]?.querySelectorAll('tbody tr').length ?? 0
   }
 
+  function getBatchRowCount(): number {
+    return container!.querySelectorAll('.attendance__table-wrapper')[0]?.querySelectorAll('tbody tr').length ?? 0
+  }
+
   beforeEach(() => {
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -138,6 +142,8 @@ describe('AttendanceImportBatchesSection', () => {
     expect(container!.textContent).toContain('Operator notes')
     expect(container!.textContent).toContain('Mapping viewer')
     expect(container!.textContent).toContain('employeeNo')
+    expect(container!.textContent).toContain('View mode: Batch inbox')
+    expect(container!.textContent).toContain('Active filters: All batches')
   })
 
   it('filters and inspects the loaded batch in triage mode', async () => {
@@ -228,6 +234,101 @@ describe('AttendanceImportBatchesSection', () => {
     expect(container!.textContent).toContain('Engine diagnostics')
     expect(container!.textContent).toContain('Snapshot actions')
     expect(container!.textContent).toContain('Copy snapshot JSON')
+  })
+
+  it('filters the batch inbox by search, status, engine, and source', async () => {
+    const workflow: ImportBatchesBindings = {
+      importBatchLoading: ref(false),
+      importBatches: ref([
+        createBatch({
+          id: 'batch-alpha',
+          rowCount: 3,
+          status: 'completed',
+          source: 'csv',
+          createdBy: 'ops-1',
+          meta: {
+            engine: 'bulk',
+          },
+        }),
+        createBatch({
+          id: 'batch-beta',
+          rowCount: 4,
+          status: 'rolled_back',
+          source: 'api',
+          createdBy: 'ops-2',
+          meta: {
+            engine: 'standard',
+          },
+        }),
+      ]),
+      importBatchSelectedId: ref('batch-alpha'),
+      importBatchItems: ref([]),
+      importBatchSnapshot: ref(null),
+      reloadImportBatches: vi.fn(),
+      loadImportBatchItems: vi.fn(),
+      rollbackImportBatch: vi.fn(),
+      exportImportBatchItemsCsv: vi.fn(),
+      toggleImportBatchSnapshot: vi.fn(),
+    }
+
+    app = createApp(AttendanceImportBatchesSection, {
+      tr,
+      workflow,
+      resolveRuleSetName,
+      formatStatus,
+      formatDateTime,
+      formatJson,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    expect(getBatchRowCount()).toBe(2)
+    expect(container!.textContent).toContain('Active filters: All batches')
+
+    const searchInput = container!.querySelector('#attendance-import-batch-inbox-search') as HTMLInputElement | null
+    expect(searchInput).toBeTruthy()
+    searchInput!.value = 'ops-2'
+    searchInput!.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    expect(getBatchRowCount()).toBe(1)
+    expect(container!.textContent).toContain('Search: ops-2')
+
+    const statusFilter = container!.querySelector('#attendance-import-batch-status-filter') as HTMLSelectElement | null
+    expect(statusFilter).toBeTruthy()
+    statusFilter!.value = 'rolled_back'
+    statusFilter!.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(container!.textContent).toContain('Active filters: status rolled_back')
+
+    const engineFilter = container!.querySelector('#attendance-import-batch-engine-filter') as HTMLSelectElement | null
+    expect(engineFilter).toBeTruthy()
+    engineFilter!.value = 'standard'
+    engineFilter!.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(container!.textContent).toContain('engine standard')
+
+    const sourceFilter = container!.querySelector('#attendance-import-batch-source-filter') as HTMLSelectElement | null
+    expect(sourceFilter).toBeTruthy()
+    sourceFilter!.value = 'api'
+    sourceFilter!.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(container!.textContent).toContain('source api')
+    expect(container!.textContent).toContain('Visible batches: 1')
+    expect(container!.textContent).toContain('Visible rows: 4')
+
+    const resetButton = Array.from(container!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Reset batch filters'),
+    ) as HTMLButtonElement | undefined
+    expect(resetButton).toBeTruthy()
+    resetButton!.click()
+    await flushUi()
+
+    expect(getBatchRowCount()).toBe(2)
+    expect(container!.textContent).toContain('Active filters: All batches')
   })
 
   it('keeps the summary visible even when no batches are loaded', async () => {

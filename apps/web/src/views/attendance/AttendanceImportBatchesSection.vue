@@ -9,6 +9,8 @@
     <div class="attendance__section-meta">
       {{ tr('Batches loaded', '已加载批次') }}: {{ importBatches.length }}
       <span v-if="batchRowCountTotal"> · {{ tr('Rows total', '总行数') }}: {{ batchRowCountTotal }}</span>
+      <span v-if="visibleImportBatches.length !== importBatches.length"> · {{ tr('Visible batches', '当前可见批次') }}: {{ visibleImportBatches.length }}</span>
+      <span v-if="visibleBatchRowCountTotal !== batchRowCountTotal"> · {{ tr('Visible rows', '当前可见行数') }}: {{ visibleBatchRowCountTotal }}</span>
       <span v-if="importBatchItems.length"> · {{ tr('Current items', '当前条目') }}: {{ importBatchItems.length }}</span>
     </div>
     <div v-if="batchItemSummary.totalItems > 0" class="attendance__impact-summary">
@@ -39,6 +41,53 @@
     </div>
     <div v-if="importBatches.length === 0" class="attendance__empty">{{ tr('No import batches.', '暂无导入批次。') }}</div>
     <div v-else class="attendance__table-wrapper">
+      <div class="attendance__inbox-toolbar">
+        <div class="attendance__admin-grid attendance__admin-grid--wide">
+          <label class="attendance__field" for="attendance-import-batch-inbox-search">
+            <span>{{ tr('Search batches', '搜索批次') }}</span>
+            <input
+              id="attendance-import-batch-inbox-search"
+              v-model="batchSearchText"
+              type="search"
+              :placeholder="tr('Search by batch, source, creator, rule set, or chunk', '按批次、来源、创建人、规则集或分块搜索')"
+            />
+          </label>
+          <label class="attendance__field" for="attendance-import-batch-status-filter">
+            <span>{{ tr('Status filter', '状态筛选') }}</span>
+            <select id="attendance-import-batch-status-filter" v-model="batchStatusFilter">
+              <option value="all">{{ tr('All statuses', '全部状态') }}</option>
+              <option v-for="option in batchStatusOptions" :key="option" :value="option">{{ formatBatchOptionLabel(option) }}</option>
+            </select>
+          </label>
+          <label class="attendance__field" for="attendance-import-batch-engine-filter">
+            <span>{{ tr('Engine filter', '引擎筛选') }}</span>
+            <select id="attendance-import-batch-engine-filter" v-model="batchEngineFilter">
+              <option value="all">{{ tr('All engines', '全部引擎') }}</option>
+              <option v-for="option in batchEngineOptions" :key="option" :value="option">{{ formatBatchOptionLabel(option) }}</option>
+            </select>
+          </label>
+          <label class="attendance__field" for="attendance-import-batch-source-filter">
+            <span>{{ tr('Source filter', '来源筛选') }}</span>
+            <select id="attendance-import-batch-source-filter" v-model="batchSourceFilter">
+              <option value="all">{{ tr('All sources', '全部来源') }}</option>
+              <option v-for="option in batchSourceOptions" :key="option" :value="option">{{ formatBatchOptionLabel(option) }}</option>
+            </select>
+          </label>
+        </div>
+        <div class="attendance__subheading-row">
+          <div class="attendance__section-meta">
+            {{ tr('View mode', '视图模式') }}:
+            <strong>{{ tr('Batch inbox', '批次收件箱') }}</strong>
+            <span> · {{ tr('Active filters', '当前筛选') }}: <strong>{{ batchFilterSummary }}</strong></span>
+            <span v-if="batchSearchQuery"> · {{ tr('Search', '搜索') }}: <strong>{{ batchSearchText }}</strong></span>
+          </div>
+          <div class="attendance__table-actions">
+            <button class="attendance__btn" type="button" @click="resetBatchFilters">
+              {{ tr('Reset batch filters', '重置批次筛选') }}
+            </button>
+          </div>
+        </div>
+      </div>
       <table class="attendance__table">
         <thead>
           <tr>
@@ -54,7 +103,7 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="batch in importBatches" :key="batch.id">
+          <tr v-for="batch in visibleImportBatches" :key="batch.id">
             <td>{{ batch.id.slice(0, 8) }}</td>
             <td>{{ formatStatus(batch.status) }}</td>
             <td>{{ batch.rowCount }}</td>
@@ -76,6 +125,9 @@
           </tr>
         </tbody>
       </table>
+      <div v-if="visibleImportBatches.length === 0" class="attendance__empty">
+        {{ tr('No batches match the current inbox filters.', '当前批次收件箱筛选下没有匹配批次。') }}
+      </div>
     </div>
 
     <div v-if="importBatchItems.length > 0" class="attendance__table-wrapper">
@@ -352,8 +404,31 @@ const formatDateTime = props.formatDateTime
 const formatJson = props.formatJson
 const issueFilter = ref<AttendanceImportBatchIssueFilter>('all')
 const searchText = ref('')
+const batchSearchText = ref('')
+const batchStatusFilter = ref('all')
+const batchEngineFilter = ref('all')
+const batchSourceFilter = ref('all')
 const selectedImportBatchItemId = ref('')
 const snapshotActionMessage = ref('')
+
+const batchSearchQuery = computed(() => batchSearchText.value.trim().toLowerCase())
+const batchStatusOptions = computed(() => collectBatchFilterOptions((batch) => batch.status))
+const batchEngineOptions = computed(() => collectBatchFilterOptions((batch) => resolveImportBatchEngine(batch)))
+const batchSourceOptions = computed(() => collectBatchFilterOptions((batch) => batch.source))
+const visibleImportBatches = computed(() => importBatches.value.filter((batch) => {
+  if (batchStatusFilter.value !== 'all' && batch.status !== batchStatusFilter.value) {
+    return false
+  }
+  if (batchEngineFilter.value !== 'all' && resolveImportBatchEngine(batch) !== batchEngineFilter.value) {
+    return false
+  }
+  if (batchSourceFilter.value !== 'all' && (batch.source || '--') !== batchSourceFilter.value) {
+    return false
+  }
+  const query = batchSearchQuery.value
+  if (!query) return true
+  return buildBatchInboxSearchIndex(batch).includes(query)
+}))
 
 const batchItemRows = computed(() => importBatchItems.value.map((item) => ({
   item,
@@ -519,6 +594,52 @@ const selectedImportBatchSnapshotSections = computed(() => {
 const batchRowCountTotal = computed(() => {
   return importBatches.value.reduce((total, batch) => total + (Number(batch.rowCount) || 0), 0)
 })
+const visibleBatchRowCountTotal = computed(() => {
+  return visibleImportBatches.value.reduce((total, batch) => total + (Number(batch.rowCount) || 0), 0)
+})
+const batchFilterSummary = computed(() => {
+  const parts: string[] = []
+  if (batchStatusFilter.value !== 'all') {
+    parts.push(tr(`status ${formatBatchOptionLabel(batchStatusFilter.value)}`, `状态 ${formatBatchOptionLabel(batchStatusFilter.value)}`))
+  }
+  if (batchEngineFilter.value !== 'all') {
+    parts.push(tr(`engine ${formatBatchOptionLabel(batchEngineFilter.value)}`, `引擎 ${formatBatchOptionLabel(batchEngineFilter.value)}`))
+  }
+  if (batchSourceFilter.value !== 'all') {
+    parts.push(tr(`source ${formatBatchOptionLabel(batchSourceFilter.value)}`, `来源 ${formatBatchOptionLabel(batchSourceFilter.value)}`))
+  }
+  return parts.length > 0 ? parts.join(' · ') : tr('All batches', '全部批次')
+})
+
+function collectBatchFilterOptions(resolver: (batch: AttendanceImportBatch) => unknown): string[] {
+  return Array.from(new Set(
+    importBatches.value
+      .map((batch) => normalizeBatchFilterValue(resolver(batch)))
+      .filter((value) => value !== '--'),
+  )).sort((left, right) => left.localeCompare(right))
+}
+
+function normalizeBatchFilterValue(value: unknown): string {
+  const text = String(value ?? '').trim()
+  return text ? text : '--'
+}
+
+function buildBatchInboxSearchIndex(batch: AttendanceImportBatch): string {
+  return [
+    batch.id,
+    batch.status,
+    resolveImportBatchEngine(batch),
+    resolveImportBatchChunkLabel(batch),
+    batch.source,
+    batch.createdBy,
+    batch.ruleSetId,
+    batch.createdAt,
+    batch.updatedAt,
+  ]
+    .map((value) => String(value ?? '').trim().toLowerCase())
+    .filter(Boolean)
+    .join(' ')
+}
 
 function formatImportBatchFlags(analysis: AttendanceImportBatchItemAnalysis): string {
   const flags: string[] = []
@@ -568,6 +689,17 @@ function formatSeverity(severity: AttendanceImportBatchSeverity): string {
     default:
       return tr('Clean', '正常')
   }
+}
+
+function formatBatchOptionLabel(value: string): string {
+  return value === '--' ? tr('Unknown', '未知') : value
+}
+
+function resetBatchFilters() {
+  batchSearchText.value = ''
+  batchStatusFilter.value = 'all'
+  batchEngineFilter.value = 'all'
+  batchSourceFilter.value = 'all'
 }
 
 function setIssueFilter(filter: AttendanceImportBatchIssueFilter) {

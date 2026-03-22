@@ -281,6 +281,62 @@
               <span>{{ tr('Grace', '宽限') }}: <strong>{{ ruleBuilderLateGraceMinutes }} / {{ ruleBuilderEarlyGraceMinutes }} min</strong></span>
             </div>
             <div class="attendance__preview-config-panels">
+              <div v-if="ruleSetPreviewConfigDiff" class="attendance__template-version-panel attendance__template-version-panel--full">
+                <div class="attendance__subheading-row">
+                  <div>
+                    <div class="attendance__field-label">{{ tr('Config change summary', '配置变化摘要') }}</div>
+                    <small class="attendance__field-hint">
+                      {{ tr('Highlights how the preview API resolved or normalized the draft before evaluating events.', '展示预演接口在评估事件前，如何补齐默认值或归一化当前草稿。') }}
+                    </small>
+                  </div>
+                  <span class="attendance__field-hint">
+                    {{ tr('Compared against the current draft config.', '与当前草稿配置对比。') }}
+                  </span>
+                </div>
+                <div class="attendance__preview-scorecards">
+                  <div class="attendance__preview-scorecard">
+                    <span>{{ tr('Changed fields', '变更字段') }}</span>
+                    <strong>{{ ruleSetPreviewConfigDiff.changedCount }}</strong>
+                    <small>{{ tr('Value rewritten during resolution', '服务端归一化后改写的值') }}</small>
+                  </div>
+                  <div class="attendance__preview-scorecard">
+                    <span>{{ tr('Added defaults', '新增默认值') }}</span>
+                    <strong>{{ ruleSetPreviewConfigDiff.addedCount }}</strong>
+                    <small>{{ tr('Fields returned only by resolved config', '仅在生效配置中返回的字段') }}</small>
+                  </div>
+                  <div class="attendance__preview-scorecard">
+                    <span>{{ tr('Removed fields', '移除字段') }}</span>
+                    <strong>{{ ruleSetPreviewConfigDiff.removedCount }}</strong>
+                    <small>{{ tr('Draft keys not kept by resolved config', '草稿里有但生效配置未保留的字段') }}</small>
+                  </div>
+                  <div class="attendance__preview-scorecard">
+                    <span>{{ tr('Touched paths', '涉及路径') }}</span>
+                    <strong>{{ ruleSetPreviewConfigDiff.totalChanges }}</strong>
+                    <small>{{ tr('Leaf-level config differences', '叶子级配置差异数') }}</small>
+                  </div>
+                </div>
+                <div v-if="ruleSetPreviewConfigDiff.items.length" class="attendance__preview-recommendations">
+                  <div
+                    v-for="item in ruleSetPreviewConfigDiff.items"
+                    :key="item.path"
+                    class="attendance__preview-recommendation"
+                    :class="`attendance__preview-recommendation--${item.severity}`"
+                  >
+                    <div class="attendance__subheading-row">
+                      <strong>{{ item.label }}</strong>
+                      <span class="attendance__severity" :class="`attendance__severity--${item.severity}`">
+                        {{ formatPreviewSeverity(item.severity) }}
+                      </span>
+                    </div>
+                    <span>{{ item.summary }}</span>
+                    <code class="attendance__inline-code">{{ item.path }}</code>
+                  </div>
+                </div>
+                <div v-else class="attendance__preview-recommendation attendance__preview-recommendation--info">
+                  <strong>{{ tr('Resolved config matches the draft', '生效配置与草稿一致') }}</strong>
+                  <span>{{ tr('Preview did not need to add defaults or rewrite any leaf-level config values.', '预演没有补齐默认值，也没有改写任何叶子级配置值。') }}</span>
+                </div>
+              </div>
               <div class="attendance__template-version-panel">
                 <div class="attendance__field-label">{{ tr('Draft config', '草稿配置') }}</div>
                 <small class="attendance__field-hint">
@@ -839,6 +895,28 @@ interface PreviewEventDraft {
   userId: string
 }
 
+interface PreviewConfigDiffLeaf {
+  kind: 'added' | 'removed' | 'changed'
+  path: string
+  draftValue?: unknown
+  resolvedValue?: unknown
+}
+
+interface PreviewConfigDiffItem {
+  path: string
+  label: string
+  summary: string
+  severity: 'info' | 'warning'
+}
+
+interface PreviewConfigDiffSummary {
+  addedCount: number
+  removedCount: number
+  changedCount: number
+  totalChanges: number
+  items: PreviewConfigDiffItem[]
+}
+
 interface RulesAndGroupsBindings {
   attendanceGroupEditingId: Ref<string | null>
   attendanceGroupForm: AttendanceGroupFormState
@@ -1009,6 +1087,10 @@ function asPlainObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
 function parseRuleSetConfig(value: string): Record<string, unknown> | null {
   const trimmed = value.trim()
   if (!trimmed) return {}
@@ -1023,6 +1105,112 @@ function parseRuleSetConfig(value: string): Record<string, unknown> | null {
 function normalizeInteger(value: unknown, fallback: number): number {
   const normalized = Number(value)
   return Number.isFinite(normalized) && normalized >= 0 ? Math.floor(normalized) : fallback
+}
+
+function flattenConfigEntries(value: unknown, basePath = ''): Array<{ path: string; value: unknown }> {
+  if (Array.isArray(value) || !isPlainObject(value)) {
+    return basePath ? [{ path: basePath, value }] : []
+  }
+
+  const keys = Object.keys(value).sort()
+  if (keys.length === 0) {
+    return basePath ? [{ path: basePath, value: {} }] : []
+  }
+
+  return keys.flatMap((key) => {
+    const nextPath = basePath ? `${basePath}.${key}` : key
+    const nextValue = value[key]
+    if (Array.isArray(nextValue) || !isPlainObject(nextValue)) {
+      return [{ path: nextPath, value: nextValue }]
+    }
+    return flattenConfigEntries(nextValue, nextPath)
+  })
+}
+
+function formatDiffValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (value === null) return 'null'
+  if (value === undefined) return '--'
+  return JSON.stringify(value)
+}
+
+function formatDiffLabel(path: string): string {
+  const parts = path.split('.').filter(Boolean)
+  return parts[parts.length - 1] ?? path
+}
+
+function buildPreviewConfigDiffSummary(
+  draftConfig: Record<string, unknown>,
+  resolvedConfig: Record<string, unknown> | null,
+): PreviewConfigDiffSummary | null {
+  if (!resolvedConfig) return null
+
+  const draftEntries = new Map(flattenConfigEntries(draftConfig).map((entry) => [entry.path, entry.value]))
+  const resolvedEntries = new Map(flattenConfigEntries(resolvedConfig).map((entry) => [entry.path, entry.value]))
+  const allPaths = Array.from(new Set([...draftEntries.keys(), ...resolvedEntries.keys()])).sort()
+
+  const leaves: PreviewConfigDiffLeaf[] = []
+  for (const path of allPaths) {
+    const hasDraft = draftEntries.has(path)
+    const hasResolved = resolvedEntries.has(path)
+    if (!hasDraft && hasResolved) {
+      leaves.push({ kind: 'added', path, resolvedValue: resolvedEntries.get(path) })
+      continue
+    }
+    if (hasDraft && !hasResolved) {
+      leaves.push({ kind: 'removed', path, draftValue: draftEntries.get(path) })
+      continue
+    }
+
+    const draftValue = draftEntries.get(path)
+    const resolvedValue = resolvedEntries.get(path)
+    if (JSON.stringify(draftValue) !== JSON.stringify(resolvedValue)) {
+      leaves.push({ kind: 'changed', path, draftValue, resolvedValue })
+    }
+  }
+
+  const items = leaves.map((item) => {
+    if (item.kind === 'added') {
+      return {
+        path: item.path,
+        label: tr('Added default', '新增默认值'),
+        summary: tr(
+          `Resolved config added ${formatDiffLabel(item.path)} = ${formatDiffValue(item.resolvedValue)}.`,
+          `生效配置新增了 ${formatDiffLabel(item.path)} = ${formatDiffValue(item.resolvedValue)}。`,
+        ),
+        severity: 'info' as const,
+      }
+    }
+    if (item.kind === 'removed') {
+      return {
+        path: item.path,
+        label: tr('Removed during normalization', '归一化后移除'),
+        summary: tr(
+          `Draft value ${formatDiffLabel(item.path)} = ${formatDiffValue(item.draftValue)} was not kept in resolved config.`,
+          `草稿中的 ${formatDiffLabel(item.path)} = ${formatDiffValue(item.draftValue)} 未保留在生效配置中。`,
+        ),
+        severity: 'warning' as const,
+      }
+    }
+    return {
+      path: item.path,
+      label: tr('Resolved value changed', '生效值被改写'),
+      summary: tr(
+        `${formatDiffLabel(item.path)} changed from ${formatDiffValue(item.draftValue)} to ${formatDiffValue(item.resolvedValue)}.`,
+        `${formatDiffLabel(item.path)} 从 ${formatDiffValue(item.draftValue)} 变为 ${formatDiffValue(item.resolvedValue)}。`,
+      ),
+      severity: 'warning' as const,
+    }
+  })
+
+  return {
+    addedCount: leaves.filter((item) => item.kind === 'added').length,
+    removedCount: leaves.filter((item) => item.kind === 'removed').length,
+    changedCount: leaves.filter((item) => item.kind === 'changed').length,
+    totalChanges: leaves.length,
+    items,
+  }
 }
 
 function normalizeWorkingDays(value: unknown): number[] {
@@ -1478,6 +1666,9 @@ const ruleSetPreviewEffectiveConfig = computed<Record<string, unknown> | null>((
   const config = asPlainObject(ruleSetPreviewResult.value?.config)
   return config && Object.keys(config).length > 0 ? config : null
 })
+const ruleSetPreviewConfigDiff = computed<PreviewConfigDiffSummary | null>(() => (
+  buildPreviewConfigDiffSummary(ruleBuilderPreviewConfig.value, ruleSetPreviewEffectiveConfig.value)
+))
 const selectedRuleSetPreviewRow = computed(() => {
   const rows = ruleSetPreviewRows.value
   const selected = rows.find((row) => getRuleSetPreviewRowKey(row) === selectedRuleSetPreviewRowKey.value)
@@ -1925,6 +2116,16 @@ function appendAttendanceGroupMemberSelectedUser() {
 .attendance__preview-recommendation span {
   color: #4b5565;
   font-size: 13px;
+}
+
+.attendance__inline-code {
+  display: inline-flex;
+  width: fit-content;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.06);
+  color: #17324d;
+  font-size: 12px;
 }
 
 .attendance__preview-recommendation--critical {

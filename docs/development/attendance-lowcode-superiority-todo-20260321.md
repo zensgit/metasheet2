@@ -12,7 +12,9 @@ Scope: Phase 1 release candidate on `codex/attendance-run20-followup-20260320`
 - [x] Add preview scorecards for flagged rows, punches, workday status, and work minutes.
 - [x] Generate rule preview recommendations from builder state and preview result.
 - [x] Expose resolved preview config returned by the preview API.
+- [x] Add resolved-config change summary for changed, added, and removed leaf fields.
 - [x] Add row-level rule preview diagnosis with severity, metrics, hints, and source payload.
+- [x] Add batch inbox search and filters for status, engine, and source.
 - [x] Add batch issue chips and search-based triage.
 - [x] Add batch-level operator notes derived from anomaly summary.
 - [x] Expose batch mapping payload in a dedicated mapping viewer.
@@ -30,7 +32,7 @@ Scope: Phase 1 release candidate on `codex/attendance-run20-followup-20260320`
 
 ## Next Phase Candidates
 
-- [ ] Add batch-list inbox filters for status, creator, engine, and time range.
+- [ ] Add batch-list inbox filters for creator and time range.
 - [ ] Add rollback impact estimation and targeted retry guidance.
 - [ ] Convert leave policies from JSON editing to visual builder flows.
 - [ ] Convert payroll templates from JSON editing to visual builder flows.

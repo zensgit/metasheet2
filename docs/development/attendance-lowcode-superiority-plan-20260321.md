@@ -11,6 +11,7 @@ Turn the attendance admin surface from a collection of CRUD sections into a conf
 1. Rule design: not just JSON editing, but explainable simulation.
 2. Import operations: not just batch browsing, but anomaly triage and diagnosis.
 3. Admin confidence: not just actions, but clear diagnostics, guidance, and verification.
+4. Batch discovery: not just a table, but an inbox with explicit scope and filter state.
 
 This plan intentionally defines a release-candidate scope that can be fully landed on the current branch without waiting for new backend APIs.
 
@@ -75,6 +76,10 @@ Delivered:
 Delivered:
 
 - Resolved config panel showing the normalized config returned by preview API.
+- Config change summary between draft and resolved config:
+  - changed leaf fields
+  - added defaults
+  - removed draft-only values
 - Row-level preview diagnosis:
   - selectable preview row
   - severity badge
@@ -88,6 +93,7 @@ This changes rule preview from a passive result table into a usable simulation/d
 
 Delivered:
 
+- Batch inbox filter bar for search, status, engine, and source.
 - Issue chips and search-based batch item triage.
 - Selected batch meta summary.
 - Operator notes generated from batch-level anomaly summary.
@@ -127,7 +133,7 @@ pnpm --filter @metasheet/web build
 
 These are intentionally left for the next round, not for this release candidate:
 
-1. Batch inbox filters at batch-list level by status, creator, engine, and time window.
+1. Batch inbox filters at batch-list level by creator and time window.
 2. Retry and rollback assistant with impact estimation.
 3. Visual builders for leave policies and payroll templates to remove more JSON editing.
 4. Attendance-native workflow nodes for exception handling,补卡, leave, and escalation.

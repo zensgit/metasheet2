@@ -367,6 +367,18 @@ describe('AttendanceRulesAndGroupsSection', () => {
         ruleSetId: 'rule-set-1',
         totalEvents: 2,
         notes: ['Uses the current builder draft.'],
+        config: {
+          source: 'manual',
+          rule: {
+            timezone: 'UTC',
+            workStartTime: '09:00',
+            workEndTime: '18:00',
+            lateGraceMinutes: 15,
+            earlyGraceMinutes: 8,
+            workingDays: [1, 2, 3, 4, 5],
+            roundingMode: 'half_up',
+          },
+        },
         preview: [
           {
             userId: 'user-1',
@@ -393,6 +405,14 @@ describe('AttendanceRulesAndGroupsSection', () => {
     expect(previewEvents?.value).toContain('"eventType":"check_in"')
     expect(container!.textContent).toContain('Preview rule set')
     expect(container!.textContent).toContain('Events: 2')
+    expect(container!.textContent).toContain('Config change summary')
+    expect(container!.textContent).toContain('Changed fields')
+    expect(container!.textContent).toContain('Added defaults')
+    expect(container!.textContent).toContain('Removed fields')
+    expect(container!.textContent).toContain('source changed from dingtalk to manual.')
+    expect(container!.textContent).toContain('timezone changed from Asia/Shanghai to UTC.')
+    expect(container!.textContent).toContain('Resolved config added roundingMode = half_up.')
+    expect(container!.textContent).toContain('Draft value extraFlag = true was not kept in resolved config.')
     expect(container!.textContent).toContain('Rows affected')
     expect(container!.textContent).toContain('Average work minutes')
     expect(container!.textContent).toContain('Raise late grace')
