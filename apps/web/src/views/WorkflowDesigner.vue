@@ -185,6 +185,7 @@ import WorkflowPropertyPanel from '../components/workflow/WorkflowPropertyPanel.
 import WorkflowDesignerToolbar from '../components/workflow/WorkflowDesignerToolbar.vue'
 import WorkflowPalette from '../components/workflow/WorkflowPalette.vue'
 import WorkflowCanvasShell from '../components/workflow/WorkflowCanvasShell.vue'
+import { readAttendanceWorkflowHandoff } from './attendance/attendanceWorkflowHandoff'
 
 // Types
 interface PaletteItem {
@@ -338,6 +339,7 @@ function getElementTypeLabel(type: string): string {
 // Lifecycle
 onMounted(async () => {
   await initModeler()
+  const workflowHandoff = readAttendanceWorkflowHandoff(route.query as Record<string, unknown>)
 
   // Load workflow if ID provided
   const id = route.params.id as string
@@ -345,11 +347,17 @@ onMounted(async () => {
     workflowId.value = id
     await loadWorkflow(id)
   } else if (typeof route.query.templateId === 'string' && route.query.templateId) {
-    await createNewWorkflow()
+    await createNewWorkflow({
+      name: workflowHandoff?.workflowName,
+      description: workflowHandoff?.workflowDescription,
+    })
     await applyTemplate(route.query.templateId, { skipConfirm: true })
   } else {
     // Create new workflow with default diagram
-    await createNewWorkflow()
+    await createNewWorkflow({
+      name: workflowHandoff?.workflowName,
+      description: workflowHandoff?.workflowDescription,
+    })
   }
 })
 
@@ -519,9 +527,12 @@ function onDrop(event: DragEvent) {
 }
 
 // Create new workflow
-async function createNewWorkflow() {
+async function createNewWorkflow(seed: { name?: string; description?: string } = {}) {
   try {
     workflowId.value = null
+    workflowName.value = seed.name?.trim() || ''
+    workflowDescription.value = seed.description?.trim() || ''
+    workflowVersion.value = '1.0.0'
     await modeler?.importXML(DEFAULT_WORKFLOW_XML)
     await nextTick()
     fitViewport()

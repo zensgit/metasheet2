@@ -108,4 +108,20 @@ describe('AttendanceExperienceView zh desktop tabs', () => {
     expect(tabText).not.toContain('Admin Center')
     expect(tabText).not.toContain('Workflow Designer')
   })
+
+  it('lands on the workflow tab when attendance handoff query requests workflow mode', async () => {
+    await router!.push({
+      path: '/attendance',
+      query: {
+        tab: 'workflow',
+        wfSource: 'attendance',
+        wfHandoff: 'approval-flow',
+        attendanceRequestType: 'leave',
+      },
+    })
+    await flushUi(6)
+
+    expect(container?.querySelector('[data-testid="attendance-workflow-designer"]')).not.toBeNull()
+    expect(container?.querySelector('[data-testid="attendance-overview"]')).toBeNull()
+  })
 })

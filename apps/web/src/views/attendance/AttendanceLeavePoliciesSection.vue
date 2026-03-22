@@ -323,6 +323,33 @@
           </button>
         </div>
       </div>
+      <div class="attendance__field attendance__field--full attendance__builder-handoff">
+        <div class="attendance__builder-header">
+          <div class="attendance__builder-header-copy">
+            <span class="attendance__builder-title">{{ tr('Workflow designer handoff', '流程设计器接力') }}</span>
+            <small class="attendance__field-hint">
+              {{ tr('Send the current approval draft into the attendance workflow tab as a starter brief. This does not replace the live attendance approval engine.', '把当前审批草稿作为起步说明带入考勤流程设计页。它不会替换当前生效的考勤审批执行引擎。') }}
+            </small>
+          </div>
+          <div class="attendance__builder-summary">
+            <span class="attendance__builder-chip">{{ tr('Starter', '推荐起步模板') }}: {{ workflowStarterLabel }}</span>
+            <span class="attendance__builder-chip">{{ tr('Flow name', '流程名称') }}: {{ workflowHandoffFlowName }}</span>
+          </div>
+        </div>
+        <div class="attendance__admin-actions">
+          <button
+            class="attendance__btn attendance__btn--primary"
+            type="button"
+            :disabled="!canOpenWorkflowDesigner"
+            @click="openWorkflowDesignerFromApprovalFlow"
+          >
+            {{ canOpenWorkflowDesigner ? tr('Open in workflow designer', '在流程设计器中打开') : tr('Workflow capability required', '需要流程能力') }}
+          </button>
+        </div>
+        <small class="attendance__field-hint">
+          {{ tr('The workflow tab will receive request type, flow name, step count, and step summary as context.', '流程页会接收申请类型、流程名称、步骤数量和步骤摘要作为上下文。') }}
+        </small>
+      </div>
       <label class="attendance__field attendance__field--full" for="attendance-approval-steps">
         <span>{{ tr('Advanced JSON fallback', '高级 JSON 兜底') }}</span>
         <textarea
@@ -388,7 +415,8 @@
 </template>
 
 <script setup lang="ts">
-import type { Ref } from 'vue'
+import { computed, type Ref } from 'vue'
+import { useRouter } from 'vue-router'
 import type {
   AttendanceApprovalBuilderStep,
   AttendanceApprovalFlow,
@@ -397,6 +425,11 @@ import type {
   AttendanceLeaveType,
   AttendanceOvertimeRule,
 } from './useAttendanceAdminLeavePolicies'
+import { useFeatureFlags } from '../../stores/featureFlags'
+import {
+  buildAttendanceWorkflowHandoffQuery,
+  resolveAttendanceWorkflowStarterId,
+} from './attendanceWorkflowHandoff'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -479,6 +512,8 @@ const props = defineProps<{
 }>()
 
 const tr = props.tr
+const router = useRouter()
+const { hasFeature } = useFeatureFlags()
 const formatRequestType = props.formatRequestType
 const leaveTypes = props.policies.leaveTypes
 const leaveTypeLoading = props.policies.leaveTypeLoading
@@ -517,6 +552,23 @@ const editApprovalFlow = (item: AttendanceApprovalFlow) => props.policies.editAp
 const loadApprovalFlows = () => props.policies.loadApprovalFlows()
 const saveApprovalFlow = () => props.policies.saveApprovalFlow()
 const deleteApprovalFlow = (id: string) => props.policies.deleteApprovalFlow(id)
+const canOpenWorkflowDesigner = computed(() => hasFeature('workflow'))
+
+const workflowStarterLabel = computed(() => {
+  const starterId = resolveAttendanceWorkflowStarterId(
+    approvalFlowForm.requestType,
+    approvalFlowBuilderSummary.value.stepCount,
+  )
+  return starterId === 'parallel-review'
+    ? tr('Parallel review starter', '并行评审起步模板')
+    : tr('Simple approval starter', '简单审批起步模板')
+})
+
+const workflowHandoffFlowName = computed(() => {
+  const name = approvalFlowForm.name.trim()
+  if (name) return name
+  return formatRequestType(approvalFlowForm.requestType)
+})
 
 function parseList(value: string): string[] {
   return value
@@ -546,6 +598,19 @@ function summarizeFlowSteps(steps: AttendanceApprovalStep[]): string {
       return name
     })
     .join(' -> ')
+}
+
+async function openWorkflowDesignerFromApprovalFlow(): Promise<void> {
+  if (!canOpenWorkflowDesigner.value) return
+  await router.push({
+    name: 'attendance',
+    query: buildAttendanceWorkflowHandoffQuery({
+      requestType: approvalFlowForm.requestType,
+      approvalFlowId: approvalFlowEditingId.value,
+      approvalFlowName: approvalFlowForm.name,
+      steps: approvalFlowBuilderSteps.value,
+    }),
+  })
 }
 </script>
 
@@ -724,5 +789,12 @@ function summarizeFlowSteps(steps: AttendanceApprovalStep[]): string {
   justify-content: space-between;
   align-items: center;
   gap: 8px;
+}
+
+.attendance__builder-handoff {
+  border: 1px solid #d8e3f4;
+  border-radius: 10px;
+  padding: 12px;
+  background: #f7fbff;
 }
 </style>

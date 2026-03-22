@@ -3,6 +3,18 @@ import { createApp, nextTick, type App } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
 import AttendanceWorkflowDesigner from '../src/views/attendance/AttendanceWorkflowDesigner.vue'
 
+const replaceSpy = vi.fn()
+const routeState: { query: Record<string, unknown> } = {
+  query: {},
+}
+
+vi.mock('vue-router', () => ({
+  useRoute: () => routeState,
+  useRouter: () => ({
+    replace: replaceSpy,
+  }),
+}))
+
 vi.mock('../src/views/WorkflowDesigner.vue', () => ({
   default: {
     name: 'WorkflowDesignerStub',
@@ -31,6 +43,8 @@ describe('AttendanceWorkflowDesigner zh', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks()
+    replaceSpy.mockReset()
+    routeState.query = {}
     window.localStorage.setItem('metasheet_locale', 'zh-CN')
     useLocale().setLocale('zh-CN')
   })
@@ -56,5 +70,42 @@ describe('AttendanceWorkflowDesigner zh', () => {
     await mount(true)
     expect(container?.querySelector('[data-testid="workflow-designer-runtime"]')).not.toBeNull()
     expect(container?.textContent || '').not.toContain('当前租户未启用流程能力。')
+  })
+
+  it('renders attendance handoff context and exposes admin/navigation actions', async () => {
+    routeState.query = {
+      wfSource: 'attendance',
+      wfHandoff: 'approval-flow',
+      attendanceRequestType: 'leave',
+      approvalFlowName: '请假审批流',
+      approvalStepCount: '2',
+      approvalStepSummary: '直属主管审批 -> HR 审批',
+      workflowStarterId: 'parallel-review',
+      workflowDescription: 'Attendance leave starter from approval builder',
+    }
+
+    await mount(true)
+
+    const text = container?.textContent || ''
+    expect(text).toContain('考勤审批流程接力')
+    expect(text).toContain('请假')
+    expect(text).toContain('请假审批流')
+    expect(text).toContain('2')
+    expect(text).toContain('并行评审起步模板')
+    expect(text).toContain('直属主管审批 -> HR 审批')
+
+    const buttons = Array.from(container?.querySelectorAll('button') ?? [])
+    const backButton = buttons.find((button) => button.textContent?.includes('返回管理中心'))
+    const clearButton = buttons.find((button) => button.textContent?.includes('清除接力信息'))
+
+    expect(backButton).toBeTruthy()
+    expect(clearButton).toBeTruthy()
+
+    backButton!.click()
+    clearButton!.click()
+    await flushUi()
+
+    expect(replaceSpy).toHaveBeenNthCalledWith(1, { query: { tab: 'admin' } })
+    expect(replaceSpy).toHaveBeenNthCalledWith(2, { query: { tab: 'workflow' } })
   })
 })

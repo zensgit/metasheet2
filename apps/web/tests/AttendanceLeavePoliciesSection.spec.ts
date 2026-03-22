@@ -9,6 +9,20 @@ import type {
   AttendanceOvertimeRule,
 } from '../src/views/attendance/useAttendanceAdminLeavePolicies'
 
+const pushSpy = vi.fn()
+
+vi.mock('vue-router', () => ({
+  useRouter: () => ({
+    push: pushSpy,
+  }),
+}))
+
+vi.mock('../src/stores/featureFlags', () => ({
+  useFeatureFlags: () => ({
+    hasFeature: (feature: string) => feature === 'workflow',
+  }),
+}))
+
 type MaybePromise<T> = T | Promise<T>
 
 interface LeavePoliciesBindings {
@@ -131,7 +145,7 @@ function createBindings(overrides: Partial<LeavePoliciesBindings> = {}): LeavePo
     ]),
     approvalFlowLoading: ref(false),
     approvalFlowSaving: ref(false),
-    approvalFlowEditingId: ref<string | null>(null),
+    approvalFlowEditingId: ref<string | null>('flow-1'),
     approvalFlowForm: reactive({
       name: 'Leave manager to HR',
       requestType: 'leave',
@@ -208,6 +222,7 @@ describe('AttendanceLeavePoliciesSection', () => {
     if (container) container.remove()
     app = null
     container = null
+    pushSpy.mockReset()
     vi.clearAllMocks()
   })
 
@@ -223,10 +238,12 @@ describe('AttendanceLeavePoliciesSection', () => {
     await flushUi()
 
     expect(container!.textContent).toContain('Visual approval builder')
+    expect(container!.textContent).toContain('Workflow designer handoff')
     expect(container!.textContent).toContain('Steps: 2')
     expect(container!.textContent).toContain('Role gates: 2')
     expect(container!.textContent).toContain('Direct users: 1')
     expect(container!.textContent).toContain('Manager -> HR')
+    expect(container!.textContent).toContain('Parallel review starter')
     expect(container!.textContent).toContain('Advanced JSON fallback')
     expect(container!.textContent).toContain('Manager review -> HR review')
 
@@ -236,20 +253,36 @@ describe('AttendanceLeavePoliciesSection', () => {
     const buttons = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
     const templateButton = buttons.find((button) => button.textContent?.includes('Manager -> HR'))
     const addStepButton = buttons.find((button) => button.textContent?.includes('Add step'))
+    const workflowButton = buttons.find((button) => button.textContent?.includes('Open in workflow designer'))
     const removeButtons = buttons.filter((button) => button.textContent?.includes('Remove'))
 
     expect(templateButton).toBeTruthy()
     expect(addStepButton).toBeTruthy()
+    expect(workflowButton).toBeTruthy()
     expect(removeButtons).toHaveLength(2)
 
     templateButton!.click()
     addStepButton!.click()
     removeButtons[0]!.click()
+    workflowButton!.click()
     await flushUi()
 
     expect(policies.applyApprovalFlowTemplate).toHaveBeenCalledWith('manager-hr')
     expect(policies.addApprovalFlowBuilderStep).toHaveBeenCalledTimes(1)
     expect(policies.removeApprovalFlowBuilderStep).toHaveBeenCalledWith(0)
+    expect(pushSpy).toHaveBeenCalledWith({
+      name: 'attendance',
+      query: expect.objectContaining({
+        tab: 'workflow',
+        wfSource: 'attendance',
+        wfHandoff: 'approval-flow',
+        attendanceRequestType: 'leave',
+        approvalFlowId: 'flow-1',
+        approvalFlowName: 'Leave manager to HR',
+        approvalStepCount: '2',
+        workflowStarterId: 'parallel-review',
+      }),
+    })
   })
 
   it('shows builder sync errors from the JSON fallback', async () => {
