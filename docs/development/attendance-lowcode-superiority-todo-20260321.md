@@ -17,10 +17,12 @@ Scope: Phase 1 release candidate on `codex/attendance-run20-followup-20260320`
 - [x] Add batch inbox search and filters for status, engine, and source.
 - [x] Add batch-list inbox filters for creator and time range.
 - [x] Add batch-list time slicing presets in addition to raw date range inputs.
+- [x] Add selected-batch visibility cues and reveal action when inbox filters hide the active batch.
 - [x] Add batch issue chips and search-based triage.
 - [x] Add batch-level operator notes derived from anomaly summary.
 - [x] Add loaded-item rollback impact estimation and guidance.
 - [x] Add exact full-batch impact refresh and targeted retry guidance.
+- [x] Add rollback confirmation flows that embed loaded or exact full-batch impact into the destructive action.
 - [x] Expose batch mapping payload in a dedicated mapping viewer.
 - [x] Add structured snapshot diagnostics for metrics, policy, and engine sections.
 - [x] Add snapshot copy/raw-view actions.
@@ -36,7 +38,6 @@ Scope: Phase 1 release candidate on `codex/attendance-run20-followup-20260320`
 
 ## Next Phase Candidates
 
-- [ ] Add rollback confirmation flows that embed exact full-batch impact directly into the destructive action.
 - [ ] Add saved inbox views and reusable filter presets for operations teams.
 - [ ] Convert leave policies from JSON editing to visual builder flows.
 - [ ] Convert payroll templates from JSON editing to visual builder flows.

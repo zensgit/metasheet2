@@ -20,7 +20,7 @@ interface ImportBatchesBindings {
   loadFullImportBatchImpact: (batchId: string) => MaybePromise<void>
   reloadImportBatches: () => MaybePromise<void>
   loadImportBatchItems: (batchId: string) => MaybePromise<void>
-  rollbackImportBatch: (batchId: string) => MaybePromise<void>
+  rollbackImportBatch: (batchId: string, confirmMessage?: string) => MaybePromise<void>
   exportImportBatchItemsCsv: (onlyAnomalies: boolean) => MaybePromise<void>
   toggleImportBatchSnapshot: (item: AttendanceImportItem) => void
 }
@@ -150,6 +150,7 @@ describe('AttendanceImportBatchesSection', () => {
     expect(container!.textContent).toContain('Coverage: 2 / 7')
     expect(container!.textContent).toContain('Source: Loaded items')
     expect(container!.textContent).toContain('Load exact impact')
+    expect(container!.textContent).toContain('Rollback with loaded estimate')
     expect(container!.textContent).toContain('Est. committed rows')
     expect(container!.textContent).toContain('Rollback notes')
     expect(container!.textContent).toContain('Estimate is based on 2 of 7 row(s)')
@@ -161,6 +162,7 @@ describe('AttendanceImportBatchesSection', () => {
     expect(container!.textContent).toContain('employeeNo')
     expect(container!.textContent).toContain('View mode: Batch inbox')
     expect(container!.textContent).toContain('Active filters: All batches')
+    expect(container!.querySelectorAll('.attendance__table-row--selected')).toHaveLength(1)
   })
 
   it('filters and inspects the loaded batch in triage mode', async () => {
@@ -294,6 +296,7 @@ describe('AttendanceImportBatchesSection', () => {
         ],
       }
     })
+    const rollbackImportBatch = vi.fn()
     const workflow: ImportBatchesBindings = {
       importBatchLoading: ref(false),
       importBatches: ref([
@@ -330,7 +333,7 @@ describe('AttendanceImportBatchesSection', () => {
       loadFullImportBatchImpact,
       reloadImportBatches: vi.fn(),
       loadImportBatchItems: vi.fn(),
-      rollbackImportBatch: vi.fn(),
+      rollbackImportBatch,
       exportImportBatchItemsCsv: vi.fn(),
       toggleImportBatchSnapshot: vi.fn(),
     }
@@ -357,8 +360,25 @@ describe('AttendanceImportBatchesSection', () => {
     expect(container!.textContent).toContain('Source: Full batch')
     expect(container!.textContent).toContain('Coverage: 4 / 4')
     expect(container!.textContent).toContain('Refresh exact impact')
+    expect(container!.textContent).toContain('Rollback with exact impact')
     expect(container!.textContent).toContain('Fix upstream payload')
     expect(container!.textContent).toContain('Patch the upstream API producer before retry')
+
+    const rollbackButton = Array.from(container!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Rollback with exact impact'),
+    ) as HTMLButtonElement | undefined
+    expect(rollbackButton).toBeTruthy()
+    rollbackButton!.click()
+    await flushUi()
+
+    expect(rollbackImportBatch).toHaveBeenCalledWith(
+      'batch-api',
+      expect.stringContaining('Impact basis: Full batch'),
+    )
+    expect(rollbackImportBatch).toHaveBeenCalledWith(
+      'batch-api',
+      expect.stringContaining('Coverage: 4 / 4 (100%)'),
+    )
   })
 
   it('filters the batch inbox by search, status, engine, and source', async () => {
@@ -509,6 +529,88 @@ describe('AttendanceImportBatchesSection', () => {
 
     expect(getBatchRowCount()).toBe(3)
     expect(container!.textContent).toContain('Active filters: All batches')
+  })
+
+  it('reveals the selected batch when inbox filters hide it', async () => {
+    const workflow: ImportBatchesBindings = {
+      importBatchLoading: ref(false),
+      importBatches: ref([
+        createBatch({
+          id: 'batch-a',
+          rowCount: 2,
+          status: 'completed',
+          source: 'csv',
+          createdBy: 'ops-1',
+        }),
+        createBatch({
+          id: 'batch-b',
+          rowCount: 4,
+          status: 'rolled_back',
+          source: 'api',
+          createdBy: 'ops-2',
+        }),
+      ]),
+      importBatchImpactLoading: ref(false),
+      importBatchImpactReport: ref(null),
+      importBatchSelectedId: ref('batch-b'),
+      importBatchItems: ref([
+        createItem({
+          id: 'item-b',
+          batchId: 'batch-b',
+          userId: 'user-2',
+          recordId: null,
+          previewSnapshot: {
+            metrics: {
+              status: 'late',
+              workMinutes: 450,
+              lateMinutes: 10,
+            },
+            warnings: ['missing identity'],
+          },
+        }),
+      ]),
+      importBatchSnapshot: ref(null),
+      loadFullImportBatchImpact: vi.fn(),
+      reloadImportBatches: vi.fn(),
+      loadImportBatchItems: vi.fn(),
+      rollbackImportBatch: vi.fn(),
+      exportImportBatchItemsCsv: vi.fn(),
+      toggleImportBatchSnapshot: vi.fn(),
+    }
+
+    app = createApp(AttendanceImportBatchesSection, {
+      tr,
+      workflow,
+      resolveRuleSetName,
+      formatStatus,
+      formatDateTime,
+      formatJson,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.querySelectorAll('.attendance__table-row--selected')).toHaveLength(1)
+    expect(container!.textContent).toContain('Selected')
+
+    const statusFilter = container!.querySelector('#attendance-import-batch-status-filter') as HTMLSelectElement | null
+    expect(statusFilter).toBeTruthy()
+    statusFilter!.value = 'completed'
+    statusFilter!.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(container!.textContent).toContain('Selected batch is hidden by current inbox filters.')
+    expect(container!.querySelectorAll('.attendance__table-row--selected')).toHaveLength(0)
+
+    const revealButton = Array.from(container!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Reveal selected batch'),
+    ) as HTMLButtonElement | undefined
+    expect(revealButton).toBeTruthy()
+    revealButton!.click()
+    await flushUi()
+
+    expect(container!.textContent).not.toContain('Selected batch is hidden by current inbox filters.')
+    expect(container!.querySelectorAll('.attendance__table-row--selected')).toHaveLength(1)
+    expect(getBatchRowCount()).toBe(2)
   })
 
   it('keeps the summary visible even when no batches are loaded', async () => {

@@ -2,6 +2,7 @@ import { ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import {
   buildImportBatchRollbackNotes,
+  buildImportBatchRollbackConfirmationMessage,
   buildImportBatchRetryGuidance,
   buildImportBatchActionHints,
   classifyImportBatchItem,
@@ -215,6 +216,34 @@ describe('useAttendanceAdminImportBatches', () => {
     )
   })
 
+  it('builds rollback confirmation details from an impact estimate', () => {
+    const batch = createBatch({ id: 'batch-a', rowCount: 5 })
+    const message = buildImportBatchRollbackConfirmationMessage(
+      batch,
+      {
+        loadedItems: 5,
+        totalBatchRows: 5,
+        estimatedCommittedRows: 4,
+        previewOnlyRows: 1,
+        flaggedRows: 2,
+        warningRows: 1,
+        policyReviewRows: 1,
+        coveragePercent: 100,
+        isPartial: false,
+      },
+      'full',
+      tr,
+    )
+
+    expect(message).toContain('Rollback batch batch-a?')
+    expect(message).toContain('Impact basis: Full batch')
+    expect(message).toContain('Coverage: 5 / 5 (100%)')
+    expect(message).toContain('Estimated committed rows: 4')
+    expect(message).toContain('Preview-only rows: 1')
+    expect(message).toContain('This confirmation is based on exact full-batch impact.')
+    expect(message).toContain('Continue rollback?')
+  })
+
   it('builds targeted retry guidance from batch source, warnings, and policy-sensitive rows', () => {
     const batch = createBatch({
       id: 'batch-a',
@@ -424,9 +453,9 @@ describe('useAttendanceAdminImportBatches', () => {
     await batches.loadImportBatchItems('batch-a')
     batches.toggleImportBatchSnapshot(batches.importBatchItems.value[0]!)
 
-    await batches.rollbackImportBatch('batch-a')
+    await batches.rollbackImportBatch('batch-a', { confirmMessage: 'Rollback batch-a with exact impact?' })
 
-    expect(confirm).toHaveBeenCalledWith('Rollback this import batch?')
+    expect(confirm).toHaveBeenCalledWith('Rollback batch-a with exact impact?')
     expect(batches.importBatchSelectedId.value).toBe('')
     expect(batches.importBatchItems.value).toEqual([])
     expect(batches.importBatchSnapshot.value).toBeNull()

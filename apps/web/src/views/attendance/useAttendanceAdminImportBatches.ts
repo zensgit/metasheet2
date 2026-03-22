@@ -154,6 +154,11 @@ export interface LoadImportBatchesOptions {
   orgId?: string | null
 }
 
+export interface RollbackImportBatchOptions {
+  orgId?: string | null
+  confirmMessage?: string
+}
+
 const IMPORT_STATUS_TIMEOUT_MS = 6000
 
 function defaultDownloadCsv(filename: string, csvText: string) {
@@ -519,6 +524,33 @@ export function buildImportBatchRetryGuidance(
   return steps.slice(0, 5)
 }
 
+export function buildImportBatchRollbackConfirmationMessage(
+  batch: AttendanceImportBatch | null | undefined,
+  estimate: AttendanceImportBatchRollbackEstimate | null | undefined,
+  mode: 'loaded' | 'full',
+  tr: Translate = (en) => en,
+): string {
+  if (!estimate || estimate.loadedItems <= 0) {
+    return tr('Rollback this import batch?', '确认回滚该导入批次吗？')
+  }
+
+  const batchLabel = batch?.id ? batch.id.slice(0, 8) : tr('selected batch', '当前批次')
+  const basis = mode === 'full'
+    ? tr('Full batch', '整批')
+    : tr('Loaded items', '已加载条目')
+  const coverageLine = estimate.coveragePercent !== null
+    ? `${estimate.loadedItems} / ${estimate.totalBatchRows} (${estimate.coveragePercent}%)`
+    : `${estimate.loadedItems} / ${estimate.totalBatchRows}`
+  const note = mode === 'full'
+    ? tr('This confirmation is based on exact full-batch impact.', '本次确认基于精确整批影响面。')
+    : tr('This confirmation is based on loaded items only. Load exact impact first if you need a precise rollback decision.', '本次确认仅基于已加载条目。如需精确回滚决策，请先加载精确影响面。')
+
+  return tr(
+    `Rollback batch ${batchLabel}?\nImpact basis: ${basis}\nCoverage: ${coverageLine}\nEstimated committed rows: ${estimate.estimatedCommittedRows}\nPreview-only rows: ${estimate.previewOnlyRows}\nFlagged rows: ${estimate.flaggedRows}\nWarning rows: ${estimate.warningRows}\nPolicy-sensitive rows: ${estimate.policyReviewRows}\n\n${note}\n\nContinue rollback?`,
+    `确认回滚批次 ${batchLabel} 吗？\n影响依据：${basis}\n覆盖范围：${coverageLine}\n预计受影响记录：${estimate.estimatedCommittedRows}\n仅预演行：${estimate.previewOnlyRows}\n已标记行：${estimate.flaggedRows}\n警告行：${estimate.warningRows}\n规则敏感行：${estimate.policyReviewRows}\n\n${note}\n\n是否继续回滚？`,
+  )
+}
+
 export function buildImportBatchActionHints(
   metrics: AttendanceImportBatchActionHintMetrics,
   tr: Translate = (en) => en,
@@ -777,8 +809,9 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
     importBatchSnapshot.value = item.previewSnapshot
   }
 
-  async function rollbackImportBatch(batchId: string, loadOptions: LoadImportBatchesOptions = {}) {
-    if (!batchId || !confirm(tr('Rollback this import batch?', '确认回滚该导入批次吗？'))) return
+  async function rollbackImportBatch(batchId: string, rollbackOptions: RollbackImportBatchOptions = {}) {
+    const confirmMessage = rollbackOptions.confirmMessage ?? tr('Rollback this import batch?', '确认回滚该导入批次吗？')
+    if (!batchId || !confirm(confirmMessage)) return
 
     importLoading.value = true
     try {
@@ -793,7 +826,7 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
         throw new Error(String(data?.error?.message || tr('Failed to rollback import batch', '回滚导入批次失败')))
       }
 
-      await loadImportBatches({ orgId: loadOptions.orgId ?? lastLoadedOrgId.value })
+      await loadImportBatches({ orgId: rollbackOptions.orgId ?? lastLoadedOrgId.value })
       if (importBatchImpactReport.value?.batchId === batchId) {
         importBatchImpactReport.value = null
       }

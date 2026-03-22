@@ -135,8 +135,17 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="batch in visibleImportBatches" :key="batch.id">
-            <td>{{ batch.id.slice(0, 8) }}</td>
+          <tr
+            v-for="batch in visibleImportBatches"
+            :key="batch.id"
+            :class="{ 'attendance__table-row--selected': batch.id === importBatchSelectedId }"
+          >
+            <td>
+              {{ batch.id.slice(0, 8) }}
+              <span v-if="batch.id === importBatchSelectedId" class="attendance__chip attendance__chip--active">
+                {{ tr('Selected', '当前批次') }}
+              </span>
+            </td>
             <td>{{ formatStatus(batch.status) }}</td>
             <td>{{ batch.rowCount }}</td>
             <td>{{ resolveImportBatchEngine(batch) }}</td>
@@ -150,7 +159,7 @@
               <button
                 class="attendance__btn attendance__btn--danger"
                 :disabled="importBatchLoading"
-                @click="rollbackImportBatch(batch.id)"
+                @click="requestRollbackImportBatch(batch)"
               >
                 {{ tr('Rollback', '回滚') }}
               </button>
@@ -179,6 +188,18 @@
           </button>
           <button class="attendance__btn" :disabled="importBatchLoading" @click="exportImportBatchItemsCsv(true)">
             {{ tr('Export anomalies CSV', '导出异常 CSV') }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="selectedBatch && !selectedBatchVisibleInInbox" class="attendance__detail-hints">
+        <span class="attendance__detail-hints-title">{{ tr('Selected batch hidden', '当前批次已隐藏') }}</span>
+        <div class="attendance__field-hint">
+          {{ tr('Selected batch is hidden by current inbox filters. Reveal it before reviewing rollback impact or retry guidance.', '当前批次已被收件箱筛选隐藏。建议先显示该批次，再继续查看回滚影响或重试指引。') }}
+        </div>
+        <div class="attendance__table-actions">
+          <button class="attendance__btn" type="button" @click="revealSelectedBatch">
+            {{ tr('Reveal selected batch', '显示当前批次') }}
           </button>
         </div>
       </div>
@@ -226,6 +247,14 @@
                     ? tr('Refresh exact impact', '刷新精确影响')
                     : tr('Load exact impact', '加载精确影响')
               }}
+            </button>
+            <button
+              class="attendance__btn attendance__btn--danger"
+              type="button"
+              :disabled="!selectedBatch || importBatchLoading || importBatchImpactLoading"
+              @click="requestRollbackImportBatch(selectedBatch)"
+            >
+              {{ selectedBatchRollbackActionLabel }}
             </button>
           </div>
         </div>
@@ -457,6 +486,7 @@
 <script setup lang="ts">
 import { computed, ref, type Ref } from 'vue'
 import {
+  buildImportBatchRollbackConfirmationMessage,
   buildImportBatchRollbackNotes,
   buildImportBatchRetryGuidance,
   buildImportBatchActionHints,
@@ -471,6 +501,7 @@ import {
   summarizeImportBatchItems,
   type AttendanceImportBatch,
   type AttendanceImportBatchImpactReport,
+  type AttendanceImportBatchRollbackEstimate,
   type AttendanceImportBatchImpactSummary,
   type AttendanceImportBatchIssueCluster,
   type AttendanceImportBatchIssueFilter,
@@ -499,7 +530,7 @@ interface ImportBatchesBindings {
   loadFullImportBatchImpact: (batchId: string) => MaybePromise<void>
   reloadImportBatches: () => MaybePromise<void>
   loadImportBatchItems: (batchId: string) => MaybePromise<void>
-  rollbackImportBatch: (batchId: string) => MaybePromise<void>
+  rollbackImportBatch: (batchId: string, confirmMessage?: string) => MaybePromise<void>
   exportImportBatchItemsCsv: (onlyAnomalies: boolean) => MaybePromise<void>
   toggleImportBatchSnapshot: (item: AttendanceImportItem) => void
 }
@@ -525,7 +556,7 @@ const importBatchSnapshot = props.workflow.importBatchSnapshot
 const loadFullImportBatchImpact = (batchId: string) => props.workflow.loadFullImportBatchImpact(batchId)
 const reloadImportBatches = () => props.workflow.reloadImportBatches()
 const loadImportBatchItems = (batchId: string) => props.workflow.loadImportBatchItems(batchId)
-const rollbackImportBatch = (batchId: string) => props.workflow.rollbackImportBatch(batchId)
+const rollbackImportBatch = (batchId: string, confirmMessage?: string) => props.workflow.rollbackImportBatch(batchId, confirmMessage)
 const exportImportBatchItemsCsv = (onlyAnomalies: boolean) => props.workflow.exportImportBatchItemsCsv(onlyAnomalies)
 const toggleImportBatchSnapshot = (item: AttendanceImportItem) => props.workflow.toggleImportBatchSnapshot(item)
 const resolveRuleSetName = props.resolveRuleSetName
@@ -588,6 +619,9 @@ const batchItemRows = computed(() => importBatchItems.value.map((item) => ({
   analysis: classifyImportBatchItem(item),
 })))
 const selectedBatch = computed(() => importBatches.value.find((batch) => batch.id === importBatchSelectedId.value) ?? null)
+const selectedBatchVisibleInInbox = computed(() => (
+  !selectedBatch.value || visibleImportBatches.value.some((batch) => batch.id === selectedBatch.value?.id)
+))
 const issueClusters = computed<AttendanceImportBatchIssueCluster[]>(() => summarizeImportBatchIssueClusters(importBatchItems.value))
 const searchQuery = computed(() => searchText.value.trim().toLowerCase())
 const visibleImportBatchRows = computed(() => (
@@ -710,6 +744,11 @@ const selectedBatchOperatorNotes = computed(() => {
   return notes
 })
 const selectedBatchRollbackNotes = computed(() => buildImportBatchRollbackNotes(selectedBatchRollbackEstimate.value, tr))
+const selectedBatchRollbackActionLabel = computed(() => (
+  selectedBatchImpactMode.value === 'full'
+    ? tr('Rollback with exact impact', '按精确影响回滚')
+    : tr('Rollback with loaded estimate', '按已加载估算回滚')
+))
 const selectedBatchMappingEntries = computed(() => {
   const mapping = selectedBatch.value?.mapping
   if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) return []
@@ -842,6 +881,38 @@ function collectBatchFilterOptions(resolver: (batch: AttendanceImportBatch) => u
 function normalizeBatchFilterValue(value: unknown): string {
   const text = String(value ?? '').trim()
   return text ? text : '--'
+}
+
+function resolveRollbackEstimateForBatch(
+  batch: AttendanceImportBatch | null,
+): { estimate: AttendanceImportBatchRollbackEstimate | null, mode: 'loaded' | 'full' } {
+  if (!batch) {
+    return { estimate: null, mode: 'loaded' }
+  }
+  const exactImpactReport = importBatchImpactReport.value
+  if (exactImpactReport?.batchId === batch.id) {
+    return {
+      estimate: exactImpactReport.estimate,
+      mode: 'full',
+    }
+  }
+  if (batch.id === importBatchSelectedId.value && importBatchItems.value.length > 0) {
+    return {
+      estimate: estimateImportBatchRollbackImpact(batch, importBatchItems.value),
+      mode: 'loaded',
+    }
+  }
+  return {
+    estimate: null,
+    mode: 'loaded',
+  }
+}
+
+function requestRollbackImportBatch(batch: AttendanceImportBatch | null) {
+  if (!batch) return
+  const { estimate, mode } = resolveRollbackEstimateForBatch(batch)
+  const confirmMessage = buildImportBatchRollbackConfirmationMessage(batch, estimate, mode, tr)
+  return rollbackImportBatch(batch.id, confirmMessage)
 }
 
 function resolveBatchCreatedDate(value: unknown): string {
@@ -977,6 +1048,10 @@ function resetBatchFilters() {
   batchCreatedFrom.value = ''
   batchCreatedTo.value = ''
   batchTimeSlicePreset.value = 'all'
+}
+
+function revealSelectedBatch() {
+  resetBatchFilters()
 }
 
 function setIssueFilter(filter: AttendanceImportBatchIssueFilter) {

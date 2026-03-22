@@ -1271,7 +1271,7 @@ const importBatchesSectionBindings = {
   loadFullImportBatchImpact,
   loadImportBatchItems,
   reloadImportBatches: () => loadImportBatches({ orgId: normalizedOrgId() }),
-  rollbackImportBatch: (batchId: string) => rollbackImportBatch(batchId, { orgId: normalizedOrgId() }),
+  rollbackImportBatch: (batchId: string, confirmMessage?: string) => rollbackImportBatch(batchId, { orgId: normalizedOrgId(), confirmMessage }),
   toggleImportBatchSnapshot,
 }
 const payrollSectionBindings = {

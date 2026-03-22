@@ -95,10 +95,12 @@ Delivered:
 
 - Batch inbox filter bar for search, status, engine, source, creator, and created-date window.
 - Batch-list time slicing presets on top of manual date-window filters.
+- Selected-batch visibility cues with reveal action when inbox filters hide the active batch.
 - Issue chips and search-based batch item triage.
 - Selected batch meta summary.
 - Rollback impact estimate based on loaded batch items, with coverage, committed-row estimate, and risk notes.
 - Exact full-batch impact refresh that pages through the whole batch before rollback decisions.
+- Rollback confirmation actions that embed loaded or exact full-batch impact directly into the destructive action.
 - Targeted retry guidance derived from mapping gaps, warnings, policy-sensitive rows, source type, and engine profile.
 - Operator notes generated from batch-level anomaly summary.
 - Mapping viewer that exposes batch mapping payload instead of only counting fields.
@@ -141,11 +143,10 @@ pnpm --filter @metasheet/web build
 
 These are intentionally left for the next round, not for this release candidate:
 
-1. Rollback confirmation flows that embed exact full-batch impact directly into the destructive action.
-2. Saved inbox views and reusable filter presets for operations teams.
-3. Visual builders for leave policies and payroll templates to remove more JSON editing.
-4. Attendance-native workflow nodes for exception handling,补卡, leave, and escalation.
-5. Data-scope and field-scope permission controls beyond current role templates.
+1. Saved inbox views and reusable filter presets for operations teams.
+2. Visual builders for leave policies and payroll templates to remove more JSON editing.
+3. Attendance-native workflow nodes for exception handling,补卡, leave, and escalation.
+4. Data-scope and field-scope permission controls beyond current role templates.
 
 ## Release Recommendation
 
