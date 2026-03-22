@@ -169,6 +169,25 @@ export function resetPlmAuditRouteFilters(state: PlmAuditRouteState): PlmAuditRo
   }
 }
 
+export function hasPlmAuditSceneContext(
+  state: Pick<
+    PlmAuditRouteState,
+    | 'sceneId'
+    | 'sceneName'
+    | 'sceneOwnerUserId'
+    | 'sceneRecommendationReason'
+    | 'sceneRecommendationSourceLabel'
+  >,
+) {
+  return Boolean(
+    state.sceneId
+    || state.sceneName
+    || state.sceneOwnerUserId
+    || state.sceneRecommendationReason
+    || state.sceneRecommendationSourceLabel,
+  )
+}
+
 export function hasExplicitPlmAuditFilters(state: PlmAuditRouteState) {
   return state.page !== DEFAULT_PLM_AUDIT_ROUTE_STATE.page
     || state.q !== DEFAULT_PLM_AUDIT_ROUTE_STATE.q

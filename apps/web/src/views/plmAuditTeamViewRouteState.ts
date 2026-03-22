@@ -2,6 +2,7 @@ import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
 import {
   buildPlmAuditRouteStateFromTeamView,
   hasExplicitPlmAuditFilters,
+  hasPlmAuditSceneContext,
   type PlmAuditRouteState,
 } from './plmAuditQueryState'
 import { buildPlmAuditTeamViewLogState } from './plmAuditTeamViewAudit'
@@ -74,7 +75,12 @@ export function resolvePlmAuditRequestedTeamViewRouteState(
     }
   }
 
-  if (defaultView && !defaultView.isArchived && !hasExplicitPlmAuditFilters(requestedState)) {
+  if (
+    defaultView
+    && !defaultView.isArchived
+    && !hasExplicitPlmAuditFilters(requestedState)
+    && !hasPlmAuditSceneContext(requestedState)
+  ) {
     return {
       kind: 'apply-view',
       viewId: defaultView.id,

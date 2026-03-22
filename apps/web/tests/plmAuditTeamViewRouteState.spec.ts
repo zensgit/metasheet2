@@ -173,6 +173,28 @@ describe('plmAuditTeamViewRouteState', () => {
     })
   })
 
+  it('does not auto-apply the default team view while scene context is still present', () => {
+    expect(resolvePlmAuditRequestedTeamViewRouteState(
+      {
+        ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+        sceneId: 'scene-1',
+        sceneName: '采购团队场景',
+        sceneOwnerUserId: 'owner-a',
+        sceneRecommendationReason: 'recent-update',
+        sceneRecommendationSourceLabel: '近期更新的团队场景',
+        returnToPlmPath: '/plm?sceneFocus=scene-1',
+      },
+      [createView('audit-view-1')],
+      createView('audit-default', {
+        kind: 'workbench',
+        action: 'set-default',
+        resourceType: 'plm-team-view-default',
+      }),
+    )).toEqual({
+      kind: 'noop',
+    })
+  })
+
   it('keeps the current state when explicit filters are already active', () => {
     expect(resolvePlmAuditRequestedTeamViewRouteState(
       {

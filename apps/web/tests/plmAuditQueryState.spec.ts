@@ -4,6 +4,7 @@ import {
   buildPlmAuditTeamViewState,
   buildPlmAuditRouteQuery,
   DEFAULT_PLM_AUDIT_ROUTE_STATE,
+  hasPlmAuditSceneContext,
   hasExplicitPlmAuditFilters,
   isPlmAuditRouteStateEqual,
   parsePlmAuditRouteState,
@@ -150,6 +151,18 @@ describe('plmAuditQueryState', () => {
     expect(hasExplicitPlmAuditFilters({
       ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
       q: 'documents',
+    })).toBe(true)
+  })
+
+  it('tracks scene recovery metadata separately from explicit audit filters', () => {
+    expect(hasPlmAuditSceneContext(DEFAULT_PLM_AUDIT_ROUTE_STATE)).toBe(false)
+    expect(hasPlmAuditSceneContext({
+      ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+      sceneRecommendationReason: 'recent-update',
+      sceneRecommendationSourceLabel: '近期更新的团队场景',
     })).toBe(true)
   })
 
