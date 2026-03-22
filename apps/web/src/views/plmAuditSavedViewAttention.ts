@@ -10,12 +10,49 @@ export type PlmAuditSourceFocusState = {
   focusedSavedViewId: string
 }
 
+export type PlmAuditAttentionFocusState = {
+  focusedAuditTeamViewId: string
+  focusedRecommendedAuditTeamViewId: string
+  focusedSavedViewId: string
+}
+
 export type PlmAuditSavedViewAttentionAction =
   | { kind: 'apply' | 'context-action' | 'reset-filters' }
   | { kind: 'delete'; savedViewId: string }
 
+export type PlmAuditAttentionFocusAction =
+  | { kind: 'clear-source' }
+  | { kind: 'clear-management' }
+  | { kind: 'clear-all' }
+
 export function clearPlmAuditSourceFocusState(): PlmAuditSourceFocusState {
   return {
+    focusedRecommendedAuditTeamViewId: '',
+    focusedSavedViewId: '',
+  }
+}
+
+export function reducePlmAuditAttentionFocusState(
+  state: PlmAuditAttentionFocusState,
+  action: PlmAuditAttentionFocusAction,
+): PlmAuditAttentionFocusState {
+  if (action.kind === 'clear-source') {
+    return {
+      ...state,
+      focusedRecommendedAuditTeamViewId: '',
+      focusedSavedViewId: '',
+    }
+  }
+
+  if (action.kind === 'clear-management') {
+    return {
+      ...state,
+      focusedAuditTeamViewId: '',
+    }
+  }
+
+  return {
+    focusedAuditTeamViewId: '',
     focusedRecommendedAuditTeamViewId: '',
     focusedSavedViewId: '',
   }

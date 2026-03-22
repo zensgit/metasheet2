@@ -1,12 +1,51 @@
 import { describe, expect, it } from 'vitest'
 import {
   clearPlmAuditSourceFocusState,
+  reducePlmAuditAttentionFocusState,
   reducePlmAuditSavedViewAttentionState,
 } from '../src/views/plmAuditSavedViewAttention'
 
 describe('plmAuditSavedViewAttention', () => {
   it('clears transient recommendation and saved-view source focus together', () => {
     expect(clearPlmAuditSourceFocusState()).toEqual({
+      focusedRecommendedAuditTeamViewId: '',
+      focusedSavedViewId: '',
+    })
+  })
+
+  it('clears source, management, or all transient attention explicitly', () => {
+    expect(reducePlmAuditAttentionFocusState({
+      focusedAuditTeamViewId: 'team-view-1',
+      focusedRecommendedAuditTeamViewId: 'recommended-1',
+      focusedSavedViewId: 'saved-view-1',
+    }, {
+      kind: 'clear-source',
+    })).toEqual({
+      focusedAuditTeamViewId: 'team-view-1',
+      focusedRecommendedAuditTeamViewId: '',
+      focusedSavedViewId: '',
+    })
+
+    expect(reducePlmAuditAttentionFocusState({
+      focusedAuditTeamViewId: 'team-view-2',
+      focusedRecommendedAuditTeamViewId: 'recommended-2',
+      focusedSavedViewId: 'saved-view-2',
+    }, {
+      kind: 'clear-management',
+    })).toEqual({
+      focusedAuditTeamViewId: '',
+      focusedRecommendedAuditTeamViewId: 'recommended-2',
+      focusedSavedViewId: 'saved-view-2',
+    })
+
+    expect(reducePlmAuditAttentionFocusState({
+      focusedAuditTeamViewId: 'team-view-3',
+      focusedRecommendedAuditTeamViewId: 'recommended-3',
+      focusedSavedViewId: 'saved-view-3',
+    }, {
+      kind: 'clear-all',
+    })).toEqual({
+      focusedAuditTeamViewId: '',
       focusedRecommendedAuditTeamViewId: '',
       focusedSavedViewId: '',
     })

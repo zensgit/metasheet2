@@ -787,8 +787,9 @@ import {
   type PlmAuditRouteState,
 } from './plmAuditQueryState'
 import {
-  clearPlmAuditSourceFocusState,
+  reducePlmAuditAttentionFocusState,
   reducePlmAuditSavedViewAttentionState,
+  type PlmAuditAttentionFocusAction,
   type PlmAuditSavedViewAttentionAction,
 } from './plmAuditSavedViewAttention'
 import {
@@ -1315,10 +1316,30 @@ function clearAuditSavedViewShareFollowup() {
   auditSavedViewShareFollowup.value = null
 }
 
-function clearAuditSourceFocus() {
-  const nextState = clearPlmAuditSourceFocusState()
+function applyAuditAttentionFocusAction(action: PlmAuditAttentionFocusAction) {
+  const nextState = reducePlmAuditAttentionFocusState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    action,
+  )
+  focusedAuditTeamViewId.value = nextState.focusedAuditTeamViewId
   focusedRecommendedAuditTeamViewId.value = nextState.focusedRecommendedAuditTeamViewId
   focusedSavedViewId.value = nextState.focusedSavedViewId
+}
+
+function clearAuditSourceFocus() {
+  applyAuditAttentionFocusAction({ kind: 'clear-source' })
+}
+
+function clearAuditAttentionFocus() {
+  applyAuditAttentionFocusAction({ kind: 'clear-all' })
+}
+
+function clearAuditTeamViewManagementFocus() {
+  applyAuditAttentionFocusAction({ kind: 'clear-management' })
 }
 
 function applySavedViewAttentionAction(action: PlmAuditSavedViewAttentionAction) {
@@ -1518,7 +1539,7 @@ function runSavedViewContextAction(
 ) {
   const badge = savedViewContextBadge(view)
   if (badge?.quickAction?.disabled) return
-  clearAuditSourceFocus()
+  clearAuditAttentionFocus()
   applySavedViewAttentionAction({ kind: 'context-action' })
   void syncRouteState(buildSavedViewContextState(view, actionKind))
 }
@@ -1901,6 +1922,7 @@ async function runAuditTeamViewCollaborationFollowupAction(
       followup,
       sourceView,
     )
+    clearAuditTeamViewManagementFocus()
     if (sourceFocusIntent.recommendationFilter !== null) {
       auditTeamViewRecommendationFilter.value = sourceFocusIntent.recommendationFilter
     }
@@ -2205,7 +2227,7 @@ function saveCurrentView() {
 }
 
 function applySavedView(view: PlmAuditSavedView) {
-  clearAuditSourceFocus()
+  clearAuditAttentionFocus()
   applySavedViewAttentionAction({ kind: 'apply' })
   clearAuditTeamViewCollaborationFollowup()
   void syncRouteState(restorePlmAuditSavedViewState(view.state))
@@ -2324,7 +2346,7 @@ watch(auditTeamViewKey, (value) => {
 })
 
 function applyFilters() {
-  clearAuditSourceFocus()
+  clearAuditAttentionFocus()
   void syncRouteState({
     ...readCurrentRouteState(),
     page: 1,
@@ -2332,7 +2354,7 @@ function applyFilters() {
 }
 
 function resetFilters() {
-  clearAuditSourceFocus()
+  clearAuditAttentionFocus()
   applySavedViewAttentionAction({ kind: 'reset-filters' })
   clearAuditTeamViewCollaborationFollowup()
   void syncRouteState(resetPlmAuditRouteFilters(readCurrentRouteState()))
@@ -2343,7 +2365,7 @@ function reloadLogs() {
 }
 
 function goToPage(nextPage: number) {
-  clearAuditSourceFocus()
+  clearAuditAttentionFocus()
   void syncRouteState({
     ...readCurrentRouteState(),
     page: nextPage,
