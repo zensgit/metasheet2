@@ -793,7 +793,10 @@ import {
   type PlmAuditSavedViewShareFollowup,
   type PlmAuditSavedViewShareFollowupActionKind,
 } from './plmAuditSavedViewShareFollowup'
-import { buildPlmAuditSavedViewTeamPromotionDraft } from './plmAuditSavedViewPromotion'
+import {
+  buildPlmAuditSavedViewTeamPromotionDraft,
+  shouldFocusPlmAuditSavedViewPromotionRecommendation,
+} from './plmAuditSavedViewPromotion'
 import {
   buildPlmAuditSavedViewContextBadge,
   buildPlmAuditSavedViewSummary,
@@ -2156,7 +2159,7 @@ async function promoteSavedViewToTeam(
     const followupSource = auditSavedViewShareFollowup.value?.savedViewId === view.id
       ? auditSavedViewShareFollowup.value.source
       : null
-    const shouldFocusRecommendation = Boolean(followupSource)
+    const shouldFocusRecommendation = shouldFocusPlmAuditSavedViewPromotionRecommendation(followupSource)
     const draft = buildPlmAuditSavedViewTeamPromotionDraft(view, tr)
     const saved = await savePlmWorkbenchTeamView('audit', draft.name, draft.state, {
       isDefault: options?.isDefault,

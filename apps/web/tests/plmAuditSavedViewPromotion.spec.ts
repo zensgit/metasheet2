@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { buildPlmAuditSavedViewTeamPromotionDraft } from '../src/views/plmAuditSavedViewPromotion'
+import {
+  buildPlmAuditSavedViewTeamPromotionDraft,
+  shouldFocusPlmAuditSavedViewPromotionRecommendation,
+} from '../src/views/plmAuditSavedViewPromotion'
 import type { PlmAuditSavedView } from '../src/views/plmAuditSavedViews'
 
 function tr(en: string, zh: string) {
@@ -60,5 +63,11 @@ describe('plmAuditSavedViewPromotion', () => {
         sceneOwnerUserId: '',
       },
     }, tr).localContextNote).toBe('')
+  })
+
+  it('only hands off saved-view promotion into recommendations for shared-link follow-ups', () => {
+    expect(shouldFocusPlmAuditSavedViewPromotionRecommendation('shared-entry')).toBe(true)
+    expect(shouldFocusPlmAuditSavedViewPromotionRecommendation('scene-context')).toBe(false)
+    expect(shouldFocusPlmAuditSavedViewPromotionRecommendation(null)).toBe(false)
   })
 })

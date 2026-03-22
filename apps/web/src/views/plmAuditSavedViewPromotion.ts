@@ -4,6 +4,7 @@ import {
   type PlmAuditRouteState,
   type PlmAuditTeamViewState,
 } from './plmAuditQueryState'
+import type { PlmAuditSavedViewShareFollowupSource } from './plmAuditSavedViewShareFollowup'
 import type { PlmAuditSavedView } from './plmAuditSavedViews'
 
 export type PlmAuditSavedViewTeamPromotionDraft = {
@@ -27,4 +28,10 @@ export function buildPlmAuditSavedViewTeamPromotionDraft(
       ? buildPlmAuditSceneSourceCopy('team-view', tr).description
       : '',
   }
+}
+
+export function shouldFocusPlmAuditSavedViewPromotionRecommendation(
+  source: PlmAuditSavedViewShareFollowupSource | null | undefined,
+) {
+  return source === 'shared-entry'
 }
