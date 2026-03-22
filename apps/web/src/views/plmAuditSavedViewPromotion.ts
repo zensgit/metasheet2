@@ -5,12 +5,19 @@ import {
   type PlmAuditTeamViewState,
 } from './plmAuditQueryState'
 import type { PlmAuditSavedViewShareFollowupSource } from './plmAuditSavedViewShareFollowup'
+import type { PlmAuditTeamViewCollaborationSource } from './plmAuditTeamViewCollaboration'
 import type { PlmAuditSavedView } from './plmAuditSavedViews'
 
 export type PlmAuditSavedViewTeamPromotionDraft = {
   name: string
   state: PlmAuditTeamViewState
   localContextNote: string
+}
+
+export type PlmAuditSavedViewPromotionBehavior = {
+  collaborationSource: PlmAuditTeamViewCollaborationSource
+  shouldFocusRecommendation: boolean
+  shouldShowDefaultFollowup: boolean
 }
 
 function hasLocalSceneContext(state: Pick<PlmAuditRouteState, 'sceneId' | 'sceneName' | 'sceneOwnerUserId'>) {
@@ -30,8 +37,21 @@ export function buildPlmAuditSavedViewTeamPromotionDraft(
   }
 }
 
+export function resolvePlmAuditSavedViewPromotionBehavior(
+  source: PlmAuditSavedViewShareFollowupSource | null | undefined,
+  options?: {
+    isDefault?: boolean
+  },
+): PlmAuditSavedViewPromotionBehavior {
+  return {
+    collaborationSource: source === 'scene-context' ? 'scene-context' : 'saved-view-promotion',
+    shouldFocusRecommendation: !options?.isDefault && source === 'shared-entry',
+    shouldShowDefaultFollowup: Boolean(options?.isDefault),
+  }
+}
+
 export function shouldFocusPlmAuditSavedViewPromotionRecommendation(
   source: PlmAuditSavedViewShareFollowupSource | null | undefined,
 ) {
-  return source === 'shared-entry'
+  return resolvePlmAuditSavedViewPromotionBehavior(source).shouldFocusRecommendation
 }

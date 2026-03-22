@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildPlmAuditSavedViewTeamPromotionDraft,
+  resolvePlmAuditSavedViewPromotionBehavior,
   shouldFocusPlmAuditSavedViewPromotionRecommendation,
 } from '../src/views/plmAuditSavedViewPromotion'
 import type { PlmAuditSavedView } from '../src/views/plmAuditSavedViews'
@@ -69,5 +70,45 @@ describe('plmAuditSavedViewPromotion', () => {
     expect(shouldFocusPlmAuditSavedViewPromotionRecommendation('shared-entry')).toBe(true)
     expect(shouldFocusPlmAuditSavedViewPromotionRecommendation('scene-context')).toBe(false)
     expect(shouldFocusPlmAuditSavedViewPromotionRecommendation(null)).toBe(false)
+  })
+
+  it('routes default team-view promotions into the default follow-up flow', () => {
+    expect(resolvePlmAuditSavedViewPromotionBehavior('shared-entry', {
+      isDefault: true,
+    })).toEqual({
+      collaborationSource: 'saved-view-promotion',
+      shouldFocusRecommendation: false,
+      shouldShowDefaultFollowup: true,
+    })
+
+    expect(resolvePlmAuditSavedViewPromotionBehavior('scene-context', {
+      isDefault: true,
+    })).toEqual({
+      collaborationSource: 'scene-context',
+      shouldFocusRecommendation: false,
+      shouldShowDefaultFollowup: true,
+    })
+
+    expect(resolvePlmAuditSavedViewPromotionBehavior(null, {
+      isDefault: true,
+    })).toEqual({
+      collaborationSource: 'saved-view-promotion',
+      shouldFocusRecommendation: false,
+      shouldShowDefaultFollowup: true,
+    })
+  })
+
+  it('keeps non-default promotions on the recommendation or collaboration path', () => {
+    expect(resolvePlmAuditSavedViewPromotionBehavior('shared-entry')).toEqual({
+      collaborationSource: 'saved-view-promotion',
+      shouldFocusRecommendation: true,
+      shouldShowDefaultFollowup: false,
+    })
+
+    expect(resolvePlmAuditSavedViewPromotionBehavior(null)).toEqual({
+      collaborationSource: 'saved-view-promotion',
+      shouldFocusRecommendation: false,
+      shouldShowDefaultFollowup: false,
+    })
   })
 })
