@@ -6,6 +6,9 @@ export type PlmAuditTeamViewShareEntry = {
   teamViewId: string
 }
 
+export type PlmAuditTeamViewShareEntryAction =
+  | { kind: 'filter-navigation' }
+
 export type PlmAuditTeamViewShareEntryNotice = {
   sourceLabel: string
   title: string
@@ -76,4 +79,17 @@ export function buildPlmAuditSharedEntrySavedViewName(
   tr: (en: string, zh: string) => string,
 ) {
   return `${view.name} · ${tr('Local view', '本地视图')}`
+}
+
+export function reducePlmAuditTeamViewShareEntry(
+  entry: PlmAuditTeamViewShareEntry | null,
+  action: PlmAuditTeamViewShareEntryAction,
+): PlmAuditTeamViewShareEntry | null {
+  if (!entry) return null
+
+  if (action.kind === 'filter-navigation') {
+    return null
+  }
+
+  return entry
 }

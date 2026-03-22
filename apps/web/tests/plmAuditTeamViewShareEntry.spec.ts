@@ -3,6 +3,7 @@ import {
   buildPlmAuditSharedEntrySavedViewName,
   buildPlmAuditTeamViewShareEntryNotice,
   isPlmAuditSharedLinkEntry,
+  reducePlmAuditTeamViewShareEntry,
 } from '../src/views/plmAuditTeamViewShareEntry'
 
 function tr(en: string, zh: string) {
@@ -79,5 +80,17 @@ describe('plmAuditTeamViewShareEntry', () => {
     expect(buildPlmAuditSharedEntrySavedViewName({
       name: 'Supplier audit baseline',
     }, tr)).toBe('Supplier audit baseline · Local view|本地视图')
+  })
+
+  it('clears shared-link entry notices when filter navigation takes over', () => {
+    expect(reducePlmAuditTeamViewShareEntry({
+      teamViewId: 'audit-view-1',
+    }, {
+      kind: 'filter-navigation',
+    })).toBeNull()
+
+    expect(reducePlmAuditTeamViewShareEntry(null, {
+      kind: 'filter-navigation',
+    })).toBeNull()
   })
 })

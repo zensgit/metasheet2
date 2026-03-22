@@ -844,6 +844,7 @@ import {
   buildPlmAuditSharedEntrySavedViewName,
   buildPlmAuditTeamViewShareEntryNotice,
   isPlmAuditSharedLinkEntry,
+  reducePlmAuditTeamViewShareEntry,
   type PlmAuditTeamViewShareEntry,
   type PlmAuditTeamViewShareEntryActionKind,
 } from './plmAuditTeamViewShareEntry'
@@ -1306,6 +1307,17 @@ function clearAuditTeamViewCollaborationDraft() {
 
 function clearAuditTeamViewShareEntry() {
   auditTeamViewShareEntry.value = null
+}
+
+function applyAuditTeamViewShareEntryAction(
+  action: {
+    kind: 'filter-navigation'
+  },
+) {
+  auditTeamViewShareEntry.value = reducePlmAuditTeamViewShareEntry(
+    auditTeamViewShareEntry.value,
+    action,
+  )
 }
 
 function clearAuditTeamViewCollaborationFollowup() {
@@ -2349,6 +2361,7 @@ watch(auditTeamViewKey, (value) => {
 
 function applyFilters() {
   clearAuditAttentionFocus()
+  applyAuditTeamViewShareEntryAction({ kind: 'filter-navigation' })
   applySavedViewAttentionAction({ kind: 'filter-navigation' })
   void syncRouteState({
     ...readCurrentRouteState(),
@@ -2358,6 +2371,7 @@ function applyFilters() {
 
 function resetFilters() {
   clearAuditAttentionFocus()
+  applyAuditTeamViewShareEntryAction({ kind: 'filter-navigation' })
   applySavedViewAttentionAction({ kind: 'reset-filters' })
   clearAuditTeamViewCollaborationFollowup()
   void syncRouteState(resetPlmAuditRouteFilters(readCurrentRouteState()))
@@ -2369,6 +2383,7 @@ function reloadLogs() {
 
 function goToPage(nextPage: number) {
   clearAuditAttentionFocus()
+  applyAuditTeamViewShareEntryAction({ kind: 'filter-navigation' })
   applySavedViewAttentionAction({ kind: 'filter-navigation' })
   void syncRouteState({
     ...readCurrentRouteState(),
