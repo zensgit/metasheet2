@@ -788,6 +788,7 @@ import {
 } from './plmAuditQueryState'
 import {
   applyPlmAuditSourceFocusState,
+  buildPlmAuditTeamViewHandoffAttentionState,
   reducePlmAuditAttentionFocusState,
   reducePlmAuditSavedViewAttentionState,
   type PlmAuditAttentionFocusAction,
@@ -1228,6 +1229,7 @@ async function runAuditSceneSaveAction(actionKind: 'saved-view' | 'team-view' | 
       : tr('Scene audit saved to team views.', '场景审计已保存到团队视图。'),
   )
   if (!saved) return
+  applyAuditTeamViewHandoffAttention()
   const collaborationHandoff = buildPlmAuditTeamViewCollaborationHandoff(
     saved,
     {
@@ -1393,6 +1395,24 @@ function applySavedViewAttentionAction(action: PlmAuditSavedViewAttentionAction)
   )
   auditSavedViewShareFollowup.value = nextState.shareFollowup
   focusedSavedViewId.value = nextState.focusedSavedViewId
+}
+
+function applyAuditTeamViewHandoffAttention() {
+  const nextState = buildPlmAuditTeamViewHandoffAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
 }
 
 function actionLabel(value: string): string {
@@ -2344,7 +2364,7 @@ async function promoteSavedViewToTeam(
       },
     )
     upsertAuditTeamView(saved)
-    applySavedViewAttentionAction({ kind: 'promotion-handoff' })
+    applyAuditTeamViewHandoffAttention()
     applyAuditTeamViewState(saved)
     const collaborationHandoff = buildPlmAuditTeamViewCollaborationHandoff(
       saved,

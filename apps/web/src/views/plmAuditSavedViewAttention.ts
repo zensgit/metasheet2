@@ -16,6 +16,11 @@ export type PlmAuditAttentionFocusState = {
   focusedSavedViewId: string
 }
 
+export type PlmAuditTeamViewHandoffAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+  savedViewAttention: PlmAuditSavedViewAttentionState
+}
+
 export type PlmAuditSavedViewAttentionAction =
   | { kind: 'install-followup'; shareFollowup: PlmAuditSavedViewShareFollowup }
   | { kind: 'apply' | 'context-action' | 'filter-navigation' | 'promotion-handoff' | 'reset-filters' | 'share-entry-takeover' }
@@ -68,6 +73,16 @@ export function reducePlmAuditAttentionFocusState(
     focusedAuditTeamViewId: '',
     focusedRecommendedAuditTeamViewId: '',
     focusedSavedViewId: '',
+  }
+}
+
+export function buildPlmAuditTeamViewHandoffAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+  savedViewAttention: PlmAuditSavedViewAttentionState,
+): PlmAuditTeamViewHandoffAttentionState {
+  return {
+    attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-source' }),
+    savedViewAttention: reducePlmAuditSavedViewAttentionState(savedViewAttention, { kind: 'promotion-handoff' }),
   }
 }
 
