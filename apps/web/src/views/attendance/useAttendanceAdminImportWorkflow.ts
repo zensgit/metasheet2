@@ -29,6 +29,8 @@ type CreateApiErrorFn = (
 
 export type AttendanceImportMode = 'override' | 'merge'
 export type AttendanceImportStatusContext = 'import-preview' | 'import-run'
+export type AttendanceImportPreviewLane = 'sync' | 'chunked' | 'async'
+export type AttendanceImportCommitLane = 'sync' | 'async'
 
 export interface AttendanceImportStatusMeta {
   hint?: string
@@ -169,6 +171,40 @@ export interface AttendanceImportThresholds {
   previewChunkSize: number
   previewAsyncThreshold: number
   commitAsyncThreshold: number
+}
+
+function resolvePreviewLane(
+  payload: Record<string, any>,
+  rowCountHint: number | null,
+  thresholds: AttendanceImportThresholds,
+): AttendanceImportPreviewLane {
+  if (rowCountHint && rowCountHint >= thresholds.previewAsyncThreshold) {
+    return 'async'
+  }
+
+  const inlineRows = Array.isArray(payload.rows)
+    ? payload.rows.length
+    : Array.isArray(payload.entries)
+      ? payload.entries.length
+      : typeof payload.csvText === 'string' && payload.csvText.trim().length > 0
+        ? rowCountHint
+        : null
+
+  if (inlineRows && inlineRows >= thresholds.previewChunkThreshold) {
+    return 'chunked'
+  }
+
+  return 'sync'
+}
+
+function resolveCommitLane(
+  rowCountHint: number | null,
+  thresholds: AttendanceImportThresholds,
+): AttendanceImportCommitLane {
+  if (rowCountHint && rowCountHint >= thresholds.commitAsyncThreshold) {
+    return 'async'
+  }
+  return 'sync'
 }
 
 export interface UseAttendanceAdminImportWorkflowOptions {
@@ -335,6 +371,32 @@ function splitListInput(value: string): string[] {
     .filter(Boolean)
 }
 
+function normalizeStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map(item => String(item ?? '').trim()).filter(Boolean)
+  }
+  if (typeof value === 'string') {
+    return splitListInput(value)
+  }
+  return []
+}
+
+function normalizeImportGroupSyncConfig(value: unknown): {
+  autoCreate: boolean
+  autoAssignMembers: boolean
+  ruleSetId: string
+  timezone: string
+} | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const groupSync = value as Record<string, unknown>
+  return {
+    autoCreate: groupSync.autoCreate === true,
+    autoAssignMembers: groupSync.autoAssignMembers === true,
+    ruleSetId: normalizeIdentifier(groupSync.ruleSetId) ?? '',
+    timezone: normalizeIdentifier(groupSync.timezone) ?? '',
+  }
+}
+
 export function normalizeAttendanceImportUserMapPayload(
   payload: unknown,
   keyField: string,
@@ -454,10 +516,14 @@ function defaultDownloadText(filename: string, text: string, mimeType = 'text/pl
   const link = document.createElement('a')
   link.href = url
   link.download = filename
+  link.rel = 'noopener'
+  link.style.display = 'none'
   document.body.appendChild(link)
   link.click()
   link.remove()
-  URL.revokeObjectURL(url)
+  window.setTimeout(() => {
+    URL.revokeObjectURL(url)
+  }, 1000)
 }
 
 function escapeCsvCell(value: string): string {
@@ -903,6 +969,69 @@ export function useAttendanceAdminImportWorkflow({
     return buildAttendanceImportTemplateGuide(payloadExample, selectedImportProfile.value)
   })
 
+  const importPayloadRowCountHint = computed(() => {
+    const payload = buildImportPayload()
+    if (!payload) return null
+    return estimateImportRowCount(payload)
+  })
+
+  const importPreviewLane = computed<AttendanceImportPreviewLane>(() => {
+    const payload = buildImportPayload()
+    if (!payload) return 'sync'
+    return resolvePreviewLane(payload, importPayloadRowCountHint.value, importThresholds)
+  })
+
+  const importCommitLane = computed<AttendanceImportCommitLane>(() => {
+    return resolveCommitLane(importPayloadRowCountHint.value, importThresholds)
+  })
+
+  const importPreviewLaneHint = computed(() => {
+    const rows = importPayloadRowCountHint.value
+    if (rows === null) {
+      return tr(
+        'Preview lane will update after row count can be estimated.',
+        '拿到预计行数后会更新预览路径说明。',
+      )
+    }
+    if (importPreviewLane.value === 'async') {
+      return tr(
+        `Preview will queue an async job because ${rows} rows meet the async threshold (${importThresholds.previewAsyncThreshold}).`,
+        `预览会进入异步任务，因为 ${rows} 行已达到异步阈值（${importThresholds.previewAsyncThreshold}）。`,
+      )
+    }
+    if (importPreviewLane.value === 'chunked') {
+      const chunkCount = Math.max(1, Math.ceil(rows / importThresholds.previewChunkSize))
+      return tr(
+        `Preview will split into about ${chunkCount} chunks because ${rows} rows exceed the chunk threshold (${importThresholds.previewChunkThreshold}).`,
+        `预览会拆成约 ${chunkCount} 个分块，因为 ${rows} 行已超过分块阈值（${importThresholds.previewChunkThreshold}）。`,
+      )
+    }
+    return tr(
+      `Preview will stay in one request because ${rows} rows are below the chunk threshold (${importThresholds.previewChunkThreshold}).`,
+      `预览会保持单次请求，因为 ${rows} 行低于分块阈值（${importThresholds.previewChunkThreshold}）。`,
+    )
+  })
+
+  const importCommitLaneHint = computed(() => {
+    const rows = importPayloadRowCountHint.value
+    if (rows === null) {
+      return tr(
+        'Import lane will update after row count can be estimated.',
+        '拿到预计行数后会更新导入路径说明。',
+      )
+    }
+    if (importCommitLane.value === 'async') {
+      return tr(
+        `Import will queue an async job because ${rows} rows meet the async threshold (${importThresholds.commitAsyncThreshold}).`,
+        `导入会进入异步任务，因为 ${rows} 行已达到异步阈值（${importThresholds.commitAsyncThreshold}）。`,
+      )
+    }
+    return tr(
+      `Import will stay synchronous because ${rows} rows are below the async threshold (${importThresholds.commitAsyncThreshold}).`,
+      `导入会保持同步，因为 ${rows} 行低于异步阈值（${importThresholds.commitAsyncThreshold}）。`,
+    )
+  })
+
   const selectedImportProfileGuide = computed(() => buildAttendanceImportProfileGuide(selectedImportProfile.value))
 
   const importAsyncJobTelemetryText = computed(() => {
@@ -968,15 +1097,40 @@ export function useAttendanceAdminImportWorkflow({
 
   function resolveImportUserMapKeyField(): string {
     return importUserMapKeyField.value.trim()
-      || selectedImportProfile.value?.userMapKeyField
-      || ''
   }
 
   function resolveImportUserMapSourceFields(): string[] {
-    if (importUserMapSourceFields.value.trim()) {
-      return splitListInput(importUserMapSourceFields.value)
-    }
-    return selectedImportProfile.value?.userMapSourceFields ?? []
+    return splitListInput(importUserMapSourceFields.value)
+  }
+
+  function buildImportGroupSyncPayload(): Record<string, unknown> | null {
+    const groupSync: Record<string, unknown> = {}
+    if (importGroupAutoCreate.value) groupSync.autoCreate = true
+    if (importGroupAutoAssign.value) groupSync.autoAssignMembers = true
+
+    const ruleSetId = importGroupRuleSetId.value.trim()
+    if (ruleSetId) groupSync.ruleSetId = ruleSetId
+
+    const timezone = importGroupTimezone.value.trim()
+    if (timezone) groupSync.timezone = timezone
+
+    return Object.keys(groupSync).length > 0 ? groupSync : null
+  }
+
+  function syncImportControlsFromPayload(payload: Record<string, any>) {
+    importMode.value = payload.mode === 'merge' ? 'merge' : 'override'
+    importUserMap.value = payload.userMap && typeof payload.userMap === 'object' && !Array.isArray(payload.userMap)
+      ? payload.userMap as Record<string, any>
+      : null
+    importUserMapError.value = ''
+    importUserMapKeyField.value = normalizeIdentifier(payload.userMapKeyField) ?? ''
+    importUserMapSourceFields.value = normalizeStringList(payload.userMapSourceFields).join(', ')
+
+    const groupSync = normalizeImportGroupSyncConfig(payload.groupSync)
+    importGroupAutoCreate.value = groupSync?.autoCreate ?? false
+    importGroupAutoAssign.value = groupSync?.autoAssignMembers ?? false
+    importGroupRuleSetId.value = groupSync?.ruleSetId ?? ''
+    importGroupTimezone.value = groupSync?.timezone ?? ''
   }
 
   function buildImportPayload(): Record<string, any> | null {
@@ -997,16 +1151,26 @@ export function useAttendanceAdminImportWorkflow({
     if (importForm.timezone && !payload.timezone) payload.timezone = importForm.timezone
     const userMapKeyField = resolveImportUserMapKeyField()
     const userMapSourceFields = resolveImportUserMapSourceFields()
-    if (importUserMap.value) payload.userMap = importUserMap.value
-    if (userMapKeyField) payload.userMapKeyField = userMapKeyField
-    if (userMapSourceFields.length) payload.userMapSourceFields = userMapSourceFields
-    if (!payload.groupSync && (importGroupAutoCreate.value || importGroupAutoAssign.value)) {
-      payload.groupSync = {
-        autoCreate: importGroupAutoCreate.value,
-        autoAssignMembers: importGroupAutoAssign.value,
-        ruleSetId: importGroupRuleSetId.value || undefined,
-        timezone: importGroupTimezone.value || undefined,
-      }
+    if (importUserMap.value) {
+      payload.userMap = importUserMap.value
+    } else {
+      delete payload.userMap
+    }
+    if (userMapKeyField) {
+      payload.userMapKeyField = userMapKeyField
+    } else {
+      delete payload.userMapKeyField
+    }
+    if (userMapSourceFields.length) {
+      payload.userMapSourceFields = userMapSourceFields
+    } else {
+      delete payload.userMapSourceFields
+    }
+    const groupSync = buildImportGroupSyncPayload()
+    if (groupSync) {
+      payload.groupSync = groupSync
+    } else {
+      delete payload.groupSync
     }
     payload.mode = importMode.value || payload.mode || 'override'
     if (payload.mappingProfileId === '') delete payload.mappingProfileId
@@ -1035,11 +1199,13 @@ export function useAttendanceAdminImportWorkflow({
     if (Array.isArray(payload.rows)) return payload.rows.length
     if (Array.isArray(payload.entries)) return payload.entries.length
     if (typeof payload.csvText === 'string') {
-      let lines = 0
-      for (let i = 0; i < payload.csvText.length; i += 1) {
-        if (payload.csvText[i] === '\n') lines += 1
-      }
-      return Math.max(0, lines)
+      const records = splitCsvRecords(payload.csvText)
+      if (records.length === 0) return 0
+      const headerRowIndex = Number((payload.csvOptions as Record<string, unknown> | undefined)?.headerRowIndex)
+      const headerOffset = Number.isFinite(headerRowIndex) && headerRowIndex >= 0
+        ? Math.trunc(headerRowIndex) + 1
+        : 1
+      return Math.max(0, records.length - headerOffset)
     }
     return null
   }
@@ -1202,6 +1368,7 @@ export function useAttendanceAdminImportWorkflow({
       const payloadExample = (data.data?.payloadExample ?? {}) as Record<string, any>
       importMode.value = payloadExample?.mode === 'merge' ? 'merge' : 'override'
       importForm.payload = JSON.stringify(payloadExample, null, 2)
+      syncImportControlsFromPayload(payloadExample)
       importMappingProfiles.value = Array.isArray(data.data?.mappingProfiles) ? data.data.mappingProfiles : []
       reportStatus(tr('Import template loaded.', '导入模板已加载。'))
     } catch (error) {
@@ -1260,6 +1427,7 @@ export function useAttendanceAdminImportWorkflow({
     next.mappingProfileId = profile.id
     next.mode = importMode.value || next.mode || 'override'
     importForm.payload = JSON.stringify(next, null, 2)
+    syncImportControlsFromPayload(next)
     reportStatus(tr(`Applied mapping profile: ${profile.name}`, `已应用映射配置：${profile.name}`))
   }
 
@@ -1357,6 +1525,7 @@ export function useAttendanceAdminImportWorkflow({
 
       next.mode = importMode.value || next.mode || 'override'
       importForm.payload = JSON.stringify(next, null, 2)
+      syncImportControlsFromPayload(next)
     } catch (error) {
       reportError(error, tr('Failed to load CSV', '加载 CSV 失败'), 'import-preview')
     }
@@ -2038,6 +2207,16 @@ export function useAttendanceAdminImportWorkflow({
     syncImportModeToPayload()
   })
 
+  watch(
+    () => importForm.payload,
+    (value) => {
+      const payload = parseAttendanceImportJsonConfig(value)
+      if (!payload) return
+      syncImportControlsFromPayload(payload)
+    },
+    { immediate: true },
+  )
+
   return {
     adminForbidden: adminForbiddenRef,
     importLoading,
@@ -2054,6 +2233,11 @@ export function useAttendanceAdminImportWorkflow({
     importCsvFileId,
     importCsvFileRowCountHint,
     importCsvFileExpiresAt,
+    importPayloadRowCountHint,
+    importPreviewLane,
+    importCommitLane,
+    importPreviewLaneHint,
+    importCommitLaneHint,
     importCsvHeaderRow,
     importCsvDelimiter,
     importUserMapFile,

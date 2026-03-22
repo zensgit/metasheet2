@@ -28,6 +28,66 @@ export interface AttendanceRuleTemplateVersion {
   templates?: unknown[] | null
 }
 
+export interface AttendanceRuleBuilderState {
+  source: string
+  timezone: string
+  workStartTime: string
+  workEndTime: string
+  lateGraceMinutes: number
+  earlyGraceMinutes: number
+  workingDays: string
+}
+
+export interface AttendanceRuleSetPreviewInput {
+  eventType: 'check_in' | 'check_out'
+  occurredAt: string
+  workDate?: string
+  userId?: string
+}
+
+export interface AttendanceRuleSetPreviewItem {
+  userId: string
+  workDate: string
+  firstInAt: string | null
+  lastOutAt: string | null
+  workMinutes: number
+  lateMinutes: number
+  earlyLeaveMinutes: number
+  status: string
+  isWorkingDay?: boolean
+  source?: unknown
+}
+
+export interface AttendanceRuleSetPreviewResult {
+  ruleSetId: string | null
+  totalEvents: number
+  preview: AttendanceRuleSetPreviewItem[]
+  config: Record<string, unknown>
+  notes: string[]
+}
+
+export interface AttendanceRuleSetPreviewSummary {
+  totalRows: number
+  cleanRows: number
+  flaggedRows: number
+  lateRows: number
+  earlyLeaveRows: number
+  missingCheckInRows: number
+  missingCheckOutRows: number
+  nonWorkingDayRows: number
+  abnormalStatusRows: number
+  totalLateMinutes: number
+  totalEarlyLeaveMinutes: number
+  averageWorkMinutes: number
+}
+
+export interface AttendanceRuleSetPreviewRecommendation {
+  key: 'raiseLateGrace' | 'raiseEarlyGrace' | 'reviewWorkingDays' | 'reviewMissingPunches' | 'reviewAbnormalStatuses'
+  severity: 'info' | 'warning' | 'critical'
+  affectedRows: number
+  suggestedMinutes?: number
+}
+
 export interface AttendanceGroup {
   id: string
   orgId?: string
@@ -64,6 +124,14 @@ interface RuleTemplatesPayload {
   library?: unknown[]
   versions?: AttendanceRuleTemplateVersion[]
   templates?: unknown[]
+}
+
+interface RuleSetPreviewPayload {
+  ruleSetId?: string | null
+  totalEvents?: number
+  preview?: unknown[]
+  config?: Record<string, unknown>
+  notes?: unknown[]
 }
 
 interface AttendanceGroupsPayload {
@@ -120,6 +188,220 @@ function parseJsonConfig(value: string): Record<string, any> | null {
   } catch {
     return null
   }
+}
+
+function normalizeText(value: unknown): string {
+  if (typeof value === 'string') return value.trim()
+  if (value === null || value === undefined) return ''
+  return String(value).trim()
+}
+
+function normalizeNullableText(value: unknown): string | null {
+  const text = normalizeText(value)
+  return text.length > 0 ? text : null
+}
+
+function normalizeFiniteNumber(value: unknown, fallback = 0): number {
+  const raw = typeof value === 'string' && value.trim().length === 0 ? Number.NaN : Number(value)
+  return Number.isFinite(raw) ? raw : fallback
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => normalizeText(item))
+      .filter(Boolean)
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(/[\n,，\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  }
+  return []
+}
+
+function parseRuleBuilderWorkingDays(value: string): number[] {
+  return Array.from(new Set(
+    normalizeStringList(value)
+      .map((item) => Number.parseInt(item, 10))
+      .filter((item) => Number.isInteger(item) && item >= 0 && item <= 6),
+  ))
+}
+
+function formatRuleBuilderWorkingDays(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => normalizeText(item))
+      .filter(Boolean)
+      .join(', ')
+  }
+  return ''
+}
+
+function normalizeRuleSetPreviewInput(value: unknown): AttendanceRuleSetPreviewInput | null {
+  const item = asObject(value)
+  if (!item) return null
+  const eventType = normalizeText(item.eventType)
+  if (eventType !== 'check_in' && eventType !== 'check_out') return null
+  const occurredAt = normalizeText(item.occurredAt)
+  if (!occurredAt) return null
+  const previewItem: AttendanceRuleSetPreviewInput = {
+    eventType,
+    occurredAt,
+  }
+  const workDate = normalizeNullableText(item.workDate)
+  if (workDate) previewItem.workDate = workDate
+  const userId = normalizeNullableText(item.userId)
+  if (userId) previewItem.userId = userId
+  return previewItem
+}
+
+function parseRuleSetPreviewInputs(value: string): AttendanceRuleSetPreviewInput[] | null {
+  const trimmed = value.trim()
+  if (!trimmed) return []
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (!Array.isArray(parsed)) return null
+    const previewInputs = parsed.map((item) => normalizeRuleSetPreviewInput(item))
+    if (previewInputs.some((item) => item === null)) return null
+    return previewInputs.filter((item): item is AttendanceRuleSetPreviewInput => item !== null)
+  } catch {
+    return null
+  }
+}
+
+function normalizeRuleSetPreviewItem(value: unknown): AttendanceRuleSetPreviewItem | null {
+  const item = asObject(value)
+  if (!item) return null
+  return {
+    userId: normalizeText(item.userId) || 'unknown',
+    workDate: normalizeText(item.workDate),
+    firstInAt: normalizeNullableText(item.firstInAt),
+    lastOutAt: normalizeNullableText(item.lastOutAt),
+    workMinutes: normalizeFiniteNumber(item.workMinutes),
+    lateMinutes: normalizeFiniteNumber(item.lateMinutes),
+    earlyLeaveMinutes: normalizeFiniteNumber(item.earlyLeaveMinutes),
+    status: normalizeText(item.status) || 'unknown',
+    isWorkingDay: typeof item.isWorkingDay === 'boolean' ? item.isWorkingDay : undefined,
+    source: item.source,
+  }
+}
+
+function normalizeRuleSetPreviewResult(value: unknown): AttendanceRuleSetPreviewResult {
+  const item = asObject(value) ?? {}
+  const preview = Array.isArray(item.preview)
+    ? item.preview.map((entry) => normalizeRuleSetPreviewItem(entry)).filter(
+      (entry): entry is AttendanceRuleSetPreviewItem => entry !== null,
+    )
+    : []
+  const config = asObject(item.config) ?? {}
+  const totalEvents = normalizeFiniteNumber(item.totalEvents, preview.length)
+  return {
+    ruleSetId: normalizeNullableText(item.ruleSetId),
+    totalEvents,
+    preview,
+    config,
+    notes: normalizeStringList(item.notes),
+  }
+}
+
+function isNormalPreviewStatus(status: string): boolean {
+  const normalized = normalizeText(status).toLowerCase()
+  return normalized.length === 0 || normalized === 'normal' || normalized === 'ok' || normalized === 'off' || normalized === 'adjusted'
+}
+
+export function summarizeRuleSetPreviewResult(value: AttendanceRuleSetPreviewResult | null | undefined): AttendanceRuleSetPreviewSummary {
+  const rows = Array.isArray(value?.preview) ? value.preview : []
+  const totalWorkMinutes = rows.reduce((total, row) => total + Math.max(0, normalizeFiniteNumber(row.workMinutes, 0)), 0)
+  const totalLateMinutes = rows.reduce((total, row) => total + Math.max(0, normalizeFiniteNumber(row.lateMinutes, 0)), 0)
+  const totalEarlyLeaveMinutes = rows.reduce((total, row) => total + Math.max(0, normalizeFiniteNumber(row.earlyLeaveMinutes, 0)), 0)
+  const missingCheckInRows = rows.filter((row) => !normalizeNullableText(row.firstInAt)).length
+  const missingCheckOutRows = rows.filter((row) => !normalizeNullableText(row.lastOutAt)).length
+  const lateRows = rows.filter((row) => normalizeFiniteNumber(row.lateMinutes, 0) > 0).length
+  const earlyLeaveRows = rows.filter((row) => normalizeFiniteNumber(row.earlyLeaveMinutes, 0) > 0).length
+  const nonWorkingDayRows = rows.filter((row) => row.isWorkingDay === false).length
+  const abnormalStatusRows = rows.filter((row) => !isNormalPreviewStatus(row.status)).length
+  const flaggedRows = rows.filter((row) => (
+    normalizeFiniteNumber(row.lateMinutes, 0) > 0
+    || normalizeFiniteNumber(row.earlyLeaveMinutes, 0) > 0
+    || !normalizeNullableText(row.firstInAt)
+    || !normalizeNullableText(row.lastOutAt)
+    || row.isWorkingDay === false
+    || !isNormalPreviewStatus(row.status)
+  )).length
+  return {
+    totalRows: rows.length,
+    cleanRows: Math.max(0, rows.length - flaggedRows),
+    flaggedRows,
+    lateRows,
+    earlyLeaveRows,
+    missingCheckInRows,
+    missingCheckOutRows,
+    nonWorkingDayRows,
+    abnormalStatusRows,
+    totalLateMinutes,
+    totalEarlyLeaveMinutes,
+    averageWorkMinutes: rows.length > 0 ? Math.round(totalWorkMinutes / rows.length) : 0,
+  }
+}
+
+export function buildRuleSetPreviewRecommendations(
+  value: AttendanceRuleSetPreviewResult | null | undefined,
+  builderState: AttendanceRuleBuilderState,
+): AttendanceRuleSetPreviewRecommendation[] {
+  const rows = Array.isArray(value?.preview) ? value.preview : []
+  const summary = summarizeRuleSetPreviewResult(value)
+  const recommendations: AttendanceRuleSetPreviewRecommendation[] = []
+  const maxLateMinutes = rows.reduce((max, row) => Math.max(max, normalizeFiniteNumber(row.lateMinutes, 0)), 0)
+  const maxEarlyLeaveMinutes = rows.reduce((max, row) => Math.max(max, normalizeFiniteNumber(row.earlyLeaveMinutes, 0)), 0)
+  const currentLateGrace = Math.max(0, normalizeFiniteNumber(builderState.lateGraceMinutes, 0))
+  const currentEarlyGrace = Math.max(0, normalizeFiniteNumber(builderState.earlyGraceMinutes, 0))
+
+  if (summary.lateRows > 0 && maxLateMinutes > 0) {
+    recommendations.push({
+      key: 'raiseLateGrace',
+      severity: maxLateMinutes >= 15 ? 'critical' : 'warning',
+      affectedRows: summary.lateRows,
+      suggestedMinutes: currentLateGrace + maxLateMinutes,
+    })
+  }
+
+  if (summary.earlyLeaveRows > 0 && maxEarlyLeaveMinutes > 0) {
+    recommendations.push({
+      key: 'raiseEarlyGrace',
+      severity: maxEarlyLeaveMinutes >= 15 ? 'critical' : 'warning',
+      affectedRows: summary.earlyLeaveRows,
+      suggestedMinutes: currentEarlyGrace + maxEarlyLeaveMinutes,
+    })
+  }
+
+  if (summary.nonWorkingDayRows > 0) {
+    recommendations.push({
+      key: 'reviewWorkingDays',
+      severity: 'warning',
+      affectedRows: summary.nonWorkingDayRows,
+    })
+  }
+
+  const missingPunchRows = summary.missingCheckInRows + summary.missingCheckOutRows
+  if (missingPunchRows > 0) {
+    recommendations.push({
+      key: 'reviewMissingPunches',
+      severity: summary.missingCheckOutRows > 0 ? 'critical' : 'warning',
+      affectedRows: missingPunchRows,
+    })
+  }
+
+  if (summary.abnormalStatusRows > 0) {
+    recommendations.push({
+      key: 'reviewAbnormalStatuses',
+      severity: summary.abnormalStatusRows === rows.length ? 'critical' : 'info',
+      affectedRows: summary.abnormalStatusRows,
+    })
+  }
+
+  return recommendations
 }
 
 function parseTemplateLibrary(value: string): any[] | null {
@@ -247,6 +529,18 @@ export function useAttendanceAdminRulesAndGroups({
     () => ruleTemplateVersions.value.find((item) => item.id === selectedRuleTemplateVersionId.value) ?? null,
   )
 
+  const ruleBuilderSource = ref('')
+  const ruleBuilderTimezone = ref(defaultTimezone)
+  const ruleBuilderWorkStartTime = ref('09:00')
+  const ruleBuilderWorkEndTime = ref('18:00')
+  const ruleBuilderLateGraceMinutes = ref(10)
+  const ruleBuilderEarlyGraceMinutes = ref(10)
+  const ruleBuilderWorkingDays = ref('1, 2, 3, 4, 5')
+  const ruleSetPreviewLoading = ref(false)
+  const ruleSetPreviewError = ref('')
+  const ruleSetPreviewEventsText = ref('[]')
+  const ruleSetPreviewResult = ref<AttendanceRuleSetPreviewResult | null>(null)
+
   watch(
     () => attendanceGroupForm.name,
     (name) => {
@@ -257,6 +551,103 @@ export function useAttendanceAdminRulesAndGroups({
     { immediate: true },
   )
 
+  watch(
+    () => ruleSetForm.config,
+    (config) => {
+      syncRuleBuilderFromRuleSetConfig(config)
+    },
+    { immediate: true },
+  )
+
+  function resetRuleBuilderForm() {
+    ruleBuilderSource.value = ''
+    ruleBuilderTimezone.value = defaultTimezone
+    ruleBuilderWorkStartTime.value = '09:00'
+    ruleBuilderWorkEndTime.value = '18:00'
+    ruleBuilderLateGraceMinutes.value = 10
+    ruleBuilderEarlyGraceMinutes.value = 10
+    ruleBuilderWorkingDays.value = '1, 2, 3, 4, 5'
+  }
+
+  function syncRuleBuilderFromRuleSetConfig(configInput: string | Record<string, unknown> | null | undefined = ruleSetForm.config) {
+    const config = typeof configInput === 'string'
+      ? parseJsonConfig(configInput)
+      : (asObject(configInput) ?? {})
+    if (!config) return false
+
+    const rule = asObject(config.rule) ?? {}
+    ruleBuilderSource.value = normalizeText(config.source ?? rule.source)
+    ruleBuilderTimezone.value = normalizeText(rule.timezone) || defaultTimezone
+    ruleBuilderWorkStartTime.value = normalizeText(rule.workStartTime) || '09:00'
+    ruleBuilderWorkEndTime.value = normalizeText(rule.workEndTime) || '18:00'
+    ruleBuilderLateGraceMinutes.value = Math.max(0, Math.floor(normalizeFiniteNumber(rule.lateGraceMinutes, 10)))
+    ruleBuilderEarlyGraceMinutes.value = Math.max(0, Math.floor(normalizeFiniteNumber(rule.earlyGraceMinutes, 10)))
+    ruleBuilderWorkingDays.value = formatRuleBuilderWorkingDays(rule.workingDays) || '1, 2, 3, 4, 5'
+    return true
+  }
+
+  function buildRuleBuilderConfigDraft(baseConfig: Record<string, unknown> | null = null): Record<string, unknown> {
+    const nextConfig: Record<string, unknown> = { ...(baseConfig ?? {}) }
+    const rule = asObject(nextConfig.rule) ?? {}
+
+    const source = ruleBuilderSource.value.trim()
+    if (source.length > 0) {
+      nextConfig.source = source
+    } else {
+      delete nextConfig.source
+    }
+
+    const timezone = ruleBuilderTimezone.value.trim()
+    if (timezone.length > 0) {
+      rule.timezone = timezone
+    } else {
+      delete rule.timezone
+    }
+
+    const workStartTime = ruleBuilderWorkStartTime.value.trim()
+    if (workStartTime.length > 0) {
+      rule.workStartTime = workStartTime
+    } else {
+      delete rule.workStartTime
+    }
+
+    const workEndTime = ruleBuilderWorkEndTime.value.trim()
+    if (workEndTime.length > 0) {
+      rule.workEndTime = workEndTime
+    } else {
+      delete rule.workEndTime
+    }
+
+    rule.lateGraceMinutes = Math.max(0, Math.floor(normalizeFiniteNumber(ruleBuilderLateGraceMinutes.value, 10)))
+    rule.earlyGraceMinutes = Math.max(0, Math.floor(normalizeFiniteNumber(ruleBuilderEarlyGraceMinutes.value, 10)))
+
+    const workingDays = parseRuleBuilderWorkingDays(ruleBuilderWorkingDays.value)
+    if (workingDays.length > 0) {
+      rule.workingDays = workingDays
+    } else {
+      delete rule.workingDays
+    }
+
+    if (Object.keys(rule).length > 0) {
+      nextConfig.rule = rule
+    } else {
+      delete nextConfig.rule
+    }
+
+    return nextConfig
+  }
+
+  function applyRuleBuilderToRuleSetConfig() {
+    const config = parseJsonConfig(ruleSetForm.config)
+    if (!config) {
+      throw new Error(tr('Rule set config must be valid JSON before applying builder changes', '应用构建器变更前，规则集配置必须是合法 JSON'))
+    }
+    const nextConfig = buildRuleBuilderConfigDraft(config)
+    ruleSetForm.config = JSON.stringify(nextConfig, null, 2)
+    syncRuleBuilderFromRuleSetConfig(nextConfig)
+    return nextConfig
+  }
+
   function resetRuleSetForm() {
     ruleSetEditingId.value = null
     ruleSetForm.name = ''
@@ -265,6 +656,10 @@ export function useAttendanceAdminRulesAndGroups({
     ruleSetForm.scope = 'org'
     ruleSetForm.isDefault = false
     ruleSetForm.config = '{}'
+    ruleSetPreviewError.value = ''
+    ruleSetPreviewResult.value = null
+    ruleSetPreviewEventsText.value = '[]'
+    resetRuleBuilderForm()
   }
 
   function editRuleSet(item: AttendanceRuleSet) {
@@ -275,6 +670,8 @@ export function useAttendanceAdminRulesAndGroups({
     ruleSetForm.scope = item.scope ?? 'org'
     ruleSetForm.isDefault = item.isDefault ?? false
     ruleSetForm.config = JSON.stringify(item.config ?? {}, null, 2)
+    syncRuleBuilderFromRuleSetConfig(item.config ?? {})
+    ruleSetPreviewResult.value = null
   }
 
   async function loadRuleSets() {
@@ -379,9 +776,69 @@ export function useAttendanceAdminRulesAndGroups({
         throw new Error(String(data?.error?.message || tr('Failed to load rule set template', '加载规则集模板失败')))
       }
       ruleSetForm.config = JSON.stringify(data.data ?? {}, null, 2)
+      syncRuleBuilderFromRuleSetConfig(data.data ?? {})
       setStatus?.(tr('Rule set template loaded.', '规则集模板已加载。'))
     } catch (error: unknown) {
       setStatus?.((error as Error)?.message || tr('Failed to load rule set template', '加载规则集模板失败'), 'error')
+    }
+  }
+
+  async function previewRuleSet(options: {
+    ruleSetId?: string | null
+    config?: Record<string, unknown> | null
+    events?: AttendanceRuleSetPreviewInput[] | null
+  } = {}) {
+    ruleSetPreviewLoading.value = true
+    ruleSetPreviewError.value = ''
+    try {
+      const config = options.config ?? parseJsonConfig(ruleSetForm.config)
+      if (!config) {
+        throw new Error(tr('Rule set config must be valid JSON before previewing', '预览前，规则集配置必须是合法 JSON'))
+      }
+
+      const previewEvents = options.events ?? parseRuleSetPreviewInputs(ruleSetPreviewEventsText.value)
+      if (!previewEvents) {
+        throw new Error(tr('Preview events must be a valid JSON array', '预览事件必须是合法的 JSON 数组'))
+      }
+
+      const payload: Record<string, unknown> = { config }
+      const ruleSetId = normalizeNullableText(options.ruleSetId ?? ruleSetEditingId.value)
+      if (ruleSetId) {
+        payload.ruleSetId = ruleSetId
+      }
+      if (previewEvents.length > 0) {
+        payload.events = previewEvents
+      }
+
+      const response = await apiFetch('/api/attendance/rule-sets/preview', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      if (response.status === 403) {
+        adminForbiddenRef.value = true
+        throw new Error(tr('Admin permissions required', '需要管理员权限'))
+      }
+
+      const data = asObject(await response.json().catch(() => null)) as ApiEnvelope<RuleSetPreviewPayload> | null
+      if (!response.ok || !data?.ok) {
+        throw new Error(String(data?.error?.message || tr('Failed to preview rule set', '预览规则集失败')))
+      }
+
+      adminForbiddenRef.value = false
+      const normalized = normalizeRuleSetPreviewResult(data.data)
+      ruleSetPreviewResult.value = normalized
+      if (normalized.config) {
+        syncRuleBuilderFromRuleSetConfig(normalized.config)
+      }
+      setStatus?.(tr('Rule set preview loaded.', '规则集预览已加载。'))
+      return normalized
+    } catch (error: unknown) {
+      ruleSetPreviewResult.value = null
+      ruleSetPreviewError.value = (error as Error)?.message || tr('Failed to preview rule set', '预览规则集失败')
+      setStatus?.(ruleSetPreviewError.value, 'error')
+      return null
+    } finally {
+      ruleSetPreviewLoading.value = false
     }
   }
 
@@ -715,6 +1172,7 @@ export function useAttendanceAdminRulesAndGroups({
 
   return {
     addAttendanceGroupMembers,
+    applyRuleBuilderToRuleSetConfig,
     attendanceGroupEditingId,
     attendanceGroupForm,
     attendanceGroupLoading,
@@ -736,13 +1194,25 @@ export function useAttendanceAdminRulesAndGroups({
     loadRuleSets,
     loadRuleTemplates,
     removeAttendanceGroupMember,
+    resetRuleBuilderForm,
     resetAttendanceGroupForm,
     resetRuleSetForm,
     resolveRuleSetName,
     restoreRuleTemplates,
+    ruleBuilderSource,
+    ruleBuilderTimezone,
+    ruleBuilderLateGraceMinutes,
+    ruleBuilderEarlyGraceMinutes,
+    ruleBuilderWorkEndTime,
+    ruleBuilderWorkStartTime,
+    ruleBuilderWorkingDays,
     ruleSetEditingId,
     ruleSetForm,
     ruleSetLoading,
+    ruleSetPreviewError,
+    ruleSetPreviewEventsText,
+    ruleSetPreviewLoading,
+    ruleSetPreviewResult,
     ruleSetSaving,
     ruleSets,
     ruleTemplateLibraryText,
@@ -755,9 +1225,12 @@ export function useAttendanceAdminRulesAndGroups({
     saveAttendanceGroup,
     saveRuleSet,
     saveRuleTemplates,
+    previewRuleSet,
+    resetRuleBuilder: resetRuleBuilderForm,
     selectedRuleTemplateVersion,
     selectedRuleTemplateVersionId,
     closeRuleTemplateVersionView,
     openRuleTemplateVersion,
+    syncRuleBuilderFromRuleSetConfig,
   }
 }

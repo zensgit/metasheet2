@@ -1,7 +1,18 @@
 import { ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  buildImportBatchRollbackNotes,
+  buildImportBatchRollbackConfirmationMessage,
+  buildImportBatchRetryGuidance,
+  buildImportBatchActionHints,
+  classifyImportBatchItem,
+  estimateImportBatchRollbackImpact,
+  matchesImportBatchIssueFilter,
+  resolveImportBatchSeverity,
+  summarizeImportBatchIssueBuckets,
+  summarizeImportBatchIssueClusters,
   type AttendanceImportBatch,
+  summarizeImportBatchItems,
   type AttendanceImportItem,
   useAttendanceAdminImportBatches,
 } from '../src/views/attendance/useAttendanceAdminImportBatches'
@@ -51,6 +62,243 @@ function createItem(overrides: Partial<AttendanceImportItem> = {}): AttendanceIm
 }
 
 describe('useAttendanceAdminImportBatches', () => {
+  it('classifies batch items and summarizes anomaly impact', () => {
+    const items = [
+      createItem({
+        id: 'item-1',
+        batchId: 'batch-a',
+        recordId: 'record-1',
+        previewSnapshot: {
+          metrics: {
+            status: 'normal',
+            workMinutes: 480,
+          },
+        },
+      }),
+      createItem({
+        id: 'item-2',
+        batchId: 'batch-a',
+        userId: 'user-2',
+        recordId: null,
+        previewSnapshot: {
+          metrics: {
+            status: 'late',
+            workMinutes: 480,
+            lateMinutes: 12,
+          },
+          warnings: ['late arrival'],
+        },
+      }),
+    ]
+
+    const summary = summarizeImportBatchItems(items)
+    expect(summary).toMatchObject({
+      totalItems: 2,
+      anomalyItems: 1,
+      warningItems: 1,
+      missingRecordItems: 1,
+      lateItems: 1,
+      normalItems: 1,
+    })
+    expect(classifyImportBatchItem(items[1]!).isAnomaly).toBe(true)
+    expect(classifyImportBatchItem(items[0]!).isAnomaly).toBe(false)
+  })
+
+  it('builds issue clusters, filters, and operator hints from batch items', () => {
+    const items = [
+      createItem({
+        id: 'item-1',
+        recordId: 'record-1',
+        previewSnapshot: {
+          metrics: {
+            status: 'normal',
+            workMinutes: 480,
+          },
+        },
+      }),
+      createItem({
+        id: 'item-2',
+        userId: 'user-2',
+        recordId: null,
+        previewSnapshot: {
+          metrics: {
+            status: 'late',
+            workMinutes: 480,
+            lateMinutes: 12,
+          },
+          warnings: ['late arrival'],
+        },
+      }),
+    ]
+
+    const warningAnalysis = classifyImportBatchItem(items[1]!)
+    expect(resolveImportBatchSeverity(warningAnalysis)).toBe('critical')
+    expect(matchesImportBatchIssueFilter(warningAnalysis, 'missingRecord')).toBe(true)
+    expect(matchesImportBatchIssueFilter(warningAnalysis, 'warnings')).toBe(true)
+    expect(matchesImportBatchIssueFilter(warningAnalysis, 'late')).toBe(true)
+    expect(matchesImportBatchIssueFilter(warningAnalysis, 'clean')).toBe(false)
+
+    expect(summarizeImportBatchIssueBuckets(items)).toEqual(
+      expect.arrayContaining([
+        { filter: 'all', count: 2 },
+        { filter: 'anomalies', count: 1 },
+        { filter: 'missingRecord', count: 1 },
+        { filter: 'warnings', count: 1 },
+        { filter: 'late', count: 1 },
+        { filter: 'clean', count: 1 },
+      ]),
+    )
+    expect(summarizeImportBatchIssueClusters(items)).toEqual(
+      expect.arrayContaining([
+        { key: 'missingRecord', count: 1, severity: 'critical' },
+        { key: 'warnings', count: 1, severity: 'warning' },
+        { key: 'late', count: 1, severity: 'review' },
+      ]),
+    )
+    expect(buildImportBatchActionHints(summarizeImportBatchItems(items), tr)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('missing-record rows first'),
+        expect.stringContaining('Export warnings'),
+      ]),
+    )
+  })
+
+  it('estimates rollback impact from loaded batch items', () => {
+    const batch = createBatch({ id: 'batch-a', rowCount: 5 })
+    const items = [
+      createItem({
+        id: 'item-1',
+        batchId: 'batch-a',
+        recordId: 'record-1',
+        previewSnapshot: {
+          metrics: {
+            status: 'normal',
+            workMinutes: 480,
+          },
+        },
+      }),
+      createItem({
+        id: 'item-2',
+        batchId: 'batch-a',
+        userId: 'user-2',
+        recordId: null,
+        previewSnapshot: {
+          metrics: {
+            status: 'late',
+            workMinutes: 420,
+            lateMinutes: 18,
+          },
+          warnings: ['missing mapping'],
+        },
+      }),
+    ]
+
+    const estimate = estimateImportBatchRollbackImpact(batch, items)
+
+    expect(estimate).toMatchObject({
+      loadedItems: 2,
+      totalBatchRows: 5,
+      estimatedCommittedRows: 1,
+      previewOnlyRows: 1,
+      flaggedRows: 1,
+      warningRows: 1,
+      policyReviewRows: 1,
+      isPartial: true,
+      coveragePercent: 40,
+    })
+    expect(buildImportBatchRollbackNotes(estimate, tr)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('Estimate is based on 2 of 5'),
+        expect.stringContaining('do not show committed records yet'),
+        expect.stringContaining('emitted warnings during preview'),
+        expect.stringContaining('policy-sensitive'),
+      ]),
+    )
+  })
+
+  it('builds rollback confirmation details from an impact estimate', () => {
+    const batch = createBatch({ id: 'batch-a', rowCount: 5 })
+    const message = buildImportBatchRollbackConfirmationMessage(
+      batch,
+      {
+        loadedItems: 5,
+        totalBatchRows: 5,
+        estimatedCommittedRows: 4,
+        previewOnlyRows: 1,
+        flaggedRows: 2,
+        warningRows: 1,
+        policyReviewRows: 1,
+        coveragePercent: 100,
+        isPartial: false,
+      },
+      'full',
+      tr,
+    )
+
+    expect(message).toContain('Rollback batch batch-a?')
+    expect(message).toContain('Impact basis: Full batch')
+    expect(message).toContain('Coverage: 5 / 5 (100%)')
+    expect(message).toContain('Estimated committed rows: 4')
+    expect(message).toContain('Preview-only rows: 1')
+    expect(message).toContain('This confirmation is based on exact full-batch impact.')
+    expect(message).toContain('Continue rollback?')
+  })
+
+  it('builds targeted retry guidance from batch source, warnings, and policy-sensitive rows', () => {
+    const batch = createBatch({
+      id: 'batch-a',
+      source: 'api',
+      meta: {
+        engine: 'bulk',
+        chunkConfig: {
+          itemsChunkSize: 100,
+          recordsChunkSize: 50,
+        },
+      },
+    })
+    const items = [
+      createItem({
+        id: 'item-1',
+        batchId: 'batch-a',
+        recordId: null,
+        previewSnapshot: {
+          metrics: {
+            status: 'late',
+            workMinutes: 450,
+            lateMinutes: 18,
+          },
+          warnings: ['missing mapping'],
+        },
+      }),
+      createItem({
+        id: 'item-2',
+        batchId: 'batch-a',
+        recordId: 'record-2',
+        previewSnapshot: {
+          metrics: {
+            status: 'normal',
+            workMinutes: 480,
+          },
+        },
+      }),
+    ]
+
+    const summary = summarizeImportBatchItems(items)
+    const estimate = estimateImportBatchRollbackImpact(batch, items)
+    const steps = buildImportBatchRetryGuidance(batch, summary, estimate, tr)
+
+    expect(steps.map((step) => step.actionLabel)).toEqual(
+      expect.arrayContaining([
+        'Repair mapping',
+        'Retry preview',
+        'Tune policy',
+        'Fix upstream payload',
+        'Keep chunk profile',
+      ]),
+    )
+    expect(steps.some((step) => step.detail.includes('100/50'))).toBe(true)
+  })
+
   it('loads batches and items', async () => {
     const apiFetch = vi.fn(async (input: string) => {
       if (input === '/api/attendance/import/batches?orgId=org-1') {
@@ -75,6 +323,107 @@ describe('useAttendanceAdminImportBatches', () => {
     expect(batches.importBatches.value.map((item) => item.id)).toEqual(['batch-a'])
     expect(batches.importBatchSelectedId.value).toBe('batch-a')
     expect(batches.importBatchItems.value.map((item) => item.id)).toEqual(['item-a'])
+  })
+
+  it('loads exact full-batch impact through paginated item fetch', async () => {
+    const apiFetch = vi.fn(async (input: string) => {
+      const url = String(input)
+      if (url === '/api/attendance/import/batches?orgId=org-1') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              createBatch({
+                id: 'batch-a',
+                rowCount: 3,
+                source: 'csv',
+                meta: {
+                  engine: 'bulk',
+                },
+              }),
+            ],
+          },
+        })
+      }
+      if (url === '/api/attendance/import/batches/batch-a/items?page=1&pageSize=200') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              createItem({
+                id: 'item-1',
+                batchId: 'batch-a',
+                recordId: 'record-1',
+                previewSnapshot: {
+                  metrics: {
+                    status: 'normal',
+                    workMinutes: 480,
+                  },
+                },
+              }),
+              createItem({
+                id: 'item-2',
+                batchId: 'batch-a',
+                recordId: null,
+                previewSnapshot: {
+                  metrics: {
+                    status: 'late',
+                    workMinutes: 450,
+                    lateMinutes: 18,
+                  },
+                  warnings: ['late arrival'],
+                },
+              }),
+            ],
+            total: 3,
+          },
+        })
+      }
+      if (url === '/api/attendance/import/batches/batch-a/items?page=2&pageSize=200') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              createItem({
+                id: 'item-3',
+                batchId: 'batch-a',
+                recordId: 'record-3',
+                previewSnapshot: {
+                  metrics: {
+                    status: 'normal',
+                    workMinutes: 470,
+                  },
+                },
+              }),
+            ],
+            total: 3,
+          },
+        })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const batches = useAttendanceAdminImportBatches({ apiFetch, tr })
+
+    await batches.loadImportBatches({ orgId: 'org-1' })
+    await batches.loadFullImportBatchImpact('batch-a')
+
+    expect(batches.importBatchImpactReport.value).toMatchObject({
+      batchId: 'batch-a',
+      mode: 'full',
+      itemCount: 3,
+      summary: {
+        totalItems: 3,
+        anomalyItems: 1,
+        warningItems: 1,
+        missingRecordItems: 1,
+      },
+      estimate: {
+        totalBatchRows: 3,
+        coveragePercent: 100,
+        isPartial: false,
+      },
+    })
+    expect(batches.importStatusMessage.value).toBe('Full-batch impact loaded.')
   })
 
   it('clears the selected batch details after rollback when that batch is open', async () => {
@@ -104,9 +453,9 @@ describe('useAttendanceAdminImportBatches', () => {
     await batches.loadImportBatchItems('batch-a')
     batches.toggleImportBatchSnapshot(batches.importBatchItems.value[0]!)
 
-    await batches.rollbackImportBatch('batch-a')
+    await batches.rollbackImportBatch('batch-a', { confirmMessage: 'Rollback batch-a with exact impact?' })
 
-    expect(confirm).toHaveBeenCalledWith('Rollback this import batch?')
+    expect(confirm).toHaveBeenCalledWith('Rollback batch-a with exact impact?')
     expect(batches.importBatchSelectedId.value).toBe('')
     expect(batches.importBatchItems.value).toEqual([])
     expect(batches.importBatchSnapshot.value).toBeNull()

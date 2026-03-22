@@ -723,6 +723,10 @@ paths:
           name: userId
           schema: { type: string }
         - in: query
+          name: user_id
+          schema: { type: string }
+          description: Legacy snake_case alias for userId.
+        - in: query
           name: page
           schema: { type: integer, default: 1 }
         - in: query
@@ -768,7 +772,42 @@ paths:
                 endDate: { type: string, format: date, nullable: true }
                 isActive: { type: boolean }
                 orgId: { type: string }
+                user_id:
+                  type: string
+                  description: Legacy snake_case alias for userId.
+                shift_id:
+                  type: string
+                  description: Legacy snake_case alias for shiftId.
+                start_date:
+                  type: string
+                  format: date
+                  description: Legacy snake_case alias for startDate.
+                end_date:
+                  type: string
+                  format: date
+                  nullable: true
+                  description: Legacy snake_case alias for endDate.
+                is_active:
+                  type: boolean
+                  description: Legacy snake_case alias for isActive.
               required: [userId, shiftId, startDate]
+            examples:
+              camelCase:
+                summary: Create assignment with canonical camelCase fields
+                value:
+                  userId: attendance-user-001
+                  shiftId: 11111111-1111-4111-8111-111111111111
+                  startDate: '2026-03-20'
+                  endDate: null
+                  isActive: true
+              snakeCase:
+                summary: Create assignment with legacy snake_case aliases
+                value:
+                  user_id: attendance-user-001
+                  shift_id: 11111111-1111-4111-8111-111111111111
+                  start_date: '2026-03-20'
+                  end_date: null
+                  is_active: true
       responses:
         '201':
           description: Created
@@ -809,6 +848,11 @@ paths:
                 endDate: { type: string, format: date, nullable: true }
                 isActive: { type: boolean }
                 orgId: { type: string }
+                user_id: { type: string }
+                shift_id: { type: string }
+                start_date: { type: string, format: date }
+                end_date: { type: string, format: date, nullable: true }
+                is_active: { type: boolean }
       responses:
         '200':
           description: OK
@@ -1247,6 +1291,128 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/attendance/groups/{id}/members:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance group members
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceGroupMember' }
+                      total: { type: integer }
+                      page: { type: integer }
+                      pageSize: { type: integer }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      summary: Add attendance group members
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string }
+                userIds:
+                  type: array
+                  items: { type: string }
+                user_id:
+                  type: string
+                  description: Legacy snake_case alias for userId.
+                user_ids:
+                  type: array
+                  items: { type: string }
+                  description: Legacy snake_case alias for userIds.
+            examples:
+              singleMemberCamel:
+                summary: Add one member with camelCase fields
+                value:
+                  userId: admin-001
+              batchMembersSnake:
+                summary: Add multiple members with legacy snake_case aliases
+                value:
+                  user_ids:
+                    - admin-001
+                    - attendance-user-002
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceGroupMember' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/groups/{id}/members/{userId}:
+    x-plugin: plugin-attendance
+    delete:
+      summary: Remove an attendance group member
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /api/attendance/leave-types:
     x-plugin: plugin-attendance
     get:
@@ -1750,6 +1916,12 @@ paths:
                   items: { $ref: '#/components/schemas/AttendanceApprovalStep' }
                 isActive: { type: boolean }
                 orgId: { type: string }
+                request_type:
+                  type: string
+                  description: Legacy snake_case alias for requestType.
+                is_active:
+                  type: boolean
+                  description: Legacy snake_case alias for isActive.
               required: [name, requestType]
             examples:
               missedCheckIn:
@@ -1763,6 +1935,17 @@ paths:
                     - name: 人事复核
                       approverRoleIds: [attendance-admin]
                   isActive: true
+              missedCheckInSnake:
+                summary: Same payload using legacy snake_case aliases
+                value:
+                  name: 补卡审批
+                  request_type: missed_check_in
+                  steps:
+                    - name: 直属主管
+                      approver_user_ids: [manager-user-001]
+                    - name: 人事复核
+                      approver_role_ids: [attendance-admin]
+                  is_active: true
       responses:
         '201':
           description: Created
@@ -1890,6 +2073,13 @@ paths:
                   items: { type: string }
                 isActive: { type: boolean }
                 orgId: { type: string }
+                shift_sequence:
+                  type: array
+                  items: { type: string }
+                  description: Legacy snake_case alias for shiftSequence.
+                is_active:
+                  type: boolean
+                  description: Legacy snake_case alias for isActive.
               required: [name, shiftSequence]
             examples:
               standardCycle:
@@ -1902,6 +2092,16 @@ paths:
                     - 22222222-2222-4222-8222-222222222222
                     - 33333333-3333-4333-8333-333333333333
                   isActive: true
+              standardCycleSnake:
+                summary: Same payload using legacy snake_case aliases
+                value:
+                  name: 四班两倒
+                  timezone: Asia/Shanghai
+                  shift_sequence:
+                    - 11111111-1111-4111-8111-111111111111
+                    - 22222222-2222-4222-8222-222222222222
+                    - 33333333-3333-4333-8333-333333333333
+                  is_active: true
       responses:
         '201':
           description: Created
@@ -2025,6 +2225,24 @@ paths:
                 endDate: { type: string, format: date, nullable: true }
                 isActive: { type: boolean }
                 orgId: { type: string }
+                user_id:
+                  type: string
+                  description: Legacy snake_case alias for userId.
+                rotation_rule_id:
+                  type: string
+                  description: Legacy snake_case alias for rotationRuleId.
+                start_date:
+                  type: string
+                  format: date
+                  description: Legacy snake_case alias for startDate.
+                end_date:
+                  type: string
+                  format: date
+                  nullable: true
+                  description: Legacy snake_case alias for endDate.
+                is_active:
+                  type: boolean
+                  description: Legacy snake_case alias for isActive.
               required: [userId, rotationRuleId, startDate]
             examples:
               activeAssignment:
@@ -2035,6 +2253,14 @@ paths:
                   startDate: '2026-03-20'
                   endDate: null
                   isActive: true
+              activeAssignmentSnake:
+                summary: Same payload using legacy snake_case aliases
+                value:
+                  user_id: attendance-user-001
+                  rotation_rule_id: 44444444-4444-4444-8444-444444444444
+                  start_date: '2026-03-20'
+                  end_date: null
+                  is_active: true
       responses:
         '201':
           description: Created
@@ -2167,6 +2393,9 @@ paths:
                 config: { type: object }
                 isDefault: { type: boolean }
                 orgId: { type: string }
+                is_default:
+                  type: boolean
+                  description: Legacy snake_case alias for isDefault.
               required: [name]
             examples:
               orgDefault:
@@ -2192,6 +2421,21 @@ paths:
                           then:
                             setWorkMinutes: 0
                             setStatus: off
+              orgDefaultSnake:
+                summary: Same payload using legacy snake_case aliases
+                value:
+                  name: 默认规则集
+                  description: 标准工作日与节假日配置
+                  version: 1
+                  scope: org
+                  is_default: true
+                  config:
+                    source: manual
+                    rule:
+                      timezone: Asia/Shanghai
+                      workStartTime: '09:00'
+                      workEndTime: '18:00'
+                      workingDays: [1, 2, 3, 4, 5]
       responses:
         '201':
           description: Created

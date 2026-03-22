@@ -1,3 +1,4 @@
+import { nextTick } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import { useAttendanceAdminImportWorkflow } from '../src/views/attendance/useAttendanceAdminImportWorkflow'
 
@@ -228,6 +229,107 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(setStatus).toHaveBeenCalledWith('Applied mapping profile: DingTalk', 'info', undefined)
   })
 
+  it('backfills group sync and user map controls from payload changes', async () => {
+    const { workflow } = createWorkflow()
+    const groupRuleSetId = '11111111-1111-1111-1111-111111111111'
+
+    workflow.importForm.payload = JSON.stringify({
+      source: 'manual',
+      userMapKeyField: 'empNo',
+      userMapSourceFields: ['工号', '姓名'],
+      userMap: { empNo: { userId: 'u-1' } },
+      groupSync: {
+        autoCreate: true,
+        autoAssignMembers: false,
+        ruleSetId: groupRuleSetId,
+        timezone: 'Asia/Shanghai',
+      },
+    })
+
+    await nextTick()
+
+    expect(workflow.importMode.value).toBe('override')
+    expect(workflow.importUserMap.value).toEqual({ empNo: { userId: 'u-1' } })
+    expect(workflow.importUserMapKeyField.value).toBe('empNo')
+    expect(workflow.importUserMapSourceFields.value).toBe('工号, 姓名')
+    expect(workflow.importGroupAutoCreate.value).toBe(true)
+    expect(workflow.importGroupAutoAssign.value).toBe(false)
+    expect(workflow.importGroupRuleSetId.value).toBe(groupRuleSetId)
+    expect(workflow.importGroupTimezone.value).toBe('Asia/Shanghai')
+
+    workflow.importForm.payload = JSON.stringify({
+      source: 'manual',
+    })
+
+    await nextTick()
+
+    expect(workflow.importUserMap.value).toBeNull()
+    expect(workflow.importUserMapKeyField.value).toBe('')
+    expect(workflow.importUserMapSourceFields.value).toBe('')
+    expect(workflow.importGroupAutoCreate.value).toBe(false)
+    expect(workflow.importGroupAutoAssign.value).toBe(false)
+    expect(workflow.importGroupRuleSetId.value).toBe('')
+    expect(workflow.importGroupTimezone.value).toBe('')
+  })
+
+  it('builds import payloads from the current UI controls and drops stale group sync data', async () => {
+    const { workflow } = createWorkflow()
+    const groupRuleSetId = '22222222-2222-2222-2222-222222222222'
+
+    workflow.importForm.payload = JSON.stringify({
+      source: 'manual',
+      mode: 'merge',
+      userMapKeyField: 'empNo',
+      userMapSourceFields: ['工号', '姓名'],
+      userMap: { empNo: { userId: 'u-1' } },
+      groupSync: {
+        autoCreate: true,
+        autoAssignMembers: true,
+        ruleSetId: groupRuleSetId,
+        timezone: 'Asia/Shanghai',
+      },
+    })
+
+    await nextTick()
+
+    const initialPayload = workflow.buildImportPayload()
+    expect(initialPayload).toMatchObject({
+      source: 'manual',
+      mode: 'merge',
+      orgId: 'org-1',
+      userId: 'user-1',
+      userMapKeyField: 'empNo',
+      userMapSourceFields: ['工号', '姓名'],
+      userMap: { empNo: { userId: 'u-1' } },
+      groupSync: {
+        autoCreate: true,
+        autoAssignMembers: true,
+        ruleSetId: groupRuleSetId,
+        timezone: 'Asia/Shanghai',
+      },
+    })
+
+    workflow.importGroupAutoCreate.value = false
+    workflow.importGroupAutoAssign.value = false
+    workflow.importGroupRuleSetId.value = ''
+    workflow.importGroupTimezone.value = ''
+    workflow.importUserMap.value = null
+    workflow.importUserMapKeyField.value = ''
+    workflow.importUserMapSourceFields.value = ''
+
+    const updatedPayload = workflow.buildImportPayload()
+    expect(updatedPayload).toMatchObject({
+      source: 'manual',
+      mode: 'merge',
+      orgId: 'org-1',
+      userId: 'user-1',
+    })
+    expect(updatedPayload?.groupSync).toBeUndefined()
+    expect(updatedPayload?.userMap).toBeUndefined()
+    expect(updatedPayload?.userMapKeyField).toBeUndefined()
+    expect(updatedPayload?.userMapSourceFields).toBeUndefined()
+  })
+
   it('loads a small CSV via local file text and writes csvText into payload', async () => {
     const readFileText = vi.fn(async () => 'userId,workDate\nu-1,2026-03-12\n')
     const { workflow, apiFetch, setStatus } = createWorkflow({ readFileText })
@@ -247,7 +349,93 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(payload.source).toBe('manual')
     expect(payload.mode).toBe('override')
     expect(payload.csvFileId).toBeUndefined()
+    expect(workflow.importPayloadRowCountHint.value).toBe(1)
+    expect(workflow.importPreviewLane.value).toBe('sync')
+    expect(workflow.importCommitLane.value).toBe('sync')
+    expect(workflow.importPreviewLaneHint.value).toBe(
+      'Preview will stay in one request because 1 rows are below the chunk threshold (10000).'
+    )
+    expect(workflow.importCommitLaneHint.value).toBe(
+      'Import will stay synchronous because 1 rows are below the async threshold (50000).'
+    )
     expect(setStatus).toHaveBeenCalledWith('CSV loaded: attendance.csv', 'info', undefined)
+  })
+
+  it('uploads a large CSV file and switches preview/import lanes to async', async () => {
+    const file = new File(['userId,workDate\nu-1,2026-03-12\n'], 'attendance.csv', { type: 'text/csv' })
+    const { workflow, apiFetch, setStatus } = createWorkflow({
+      readImportDebugOptions: () => ({
+        forceUploadCsv: true,
+        forceAsyncImport: false,
+        forceTimeoutOnce: false,
+        pollIntervalMs: null,
+        pollTimeoutMs: null,
+      }),
+      apiFetch: vi.fn(async (input: string) => {
+        expect(input).toContain('/api/attendance/import/upload?')
+        return jsonResponse(201, {
+          ok: true,
+          data: {
+            fileId: 'csv-file-1',
+            rowCount: 60000,
+            bytes: 1024,
+            expiresAt: '2026-03-12T10:00:00.000Z',
+          },
+        })
+      }),
+    })
+
+    workflow.importForm.payload = JSON.stringify({ source: 'manual' }, null, 2)
+    workflow.setImportCsvFile(file)
+
+    await workflow.applyImportCsvFile()
+
+    const payload = JSON.parse(workflow.importForm.payload)
+    expect(apiFetch).toHaveBeenCalledTimes(1)
+    expect(payload.csvFileId).toBe('csv-file-1')
+    expect(payload.csvText).toBeUndefined()
+    expect(workflow.importCsvFileId.value).toBe('csv-file-1')
+    expect(workflow.importCsvFileRowCountHint.value).toBe(60000)
+    expect(workflow.importCsvFileExpiresAt.value).toBe('2026-03-12T10:00:00.000Z')
+    expect(workflow.importPayloadRowCountHint.value).toBe(60000)
+    expect(workflow.importPreviewLane.value).toBe('async')
+    expect(workflow.importCommitLane.value).toBe('async')
+    expect(workflow.importPreviewLaneHint.value).toBe(
+      'Preview will queue an async job because 60000 rows meet the async threshold (50000).'
+    )
+    expect(workflow.importCommitLaneHint.value).toBe(
+      'Import will queue an async job because 60000 rows meet the async threshold (50000).'
+    )
+    expect(setStatus).toHaveBeenCalledWith('CSV uploaded: attendance.csv (60000 rows).', 'info', undefined)
+  })
+
+  it('marks large inline rows payloads as chunked preview while keeping sync commit below async threshold', () => {
+    const { workflow } = createWorkflow({
+      thresholds: {
+        previewChunkThreshold: 10,
+        previewChunkSize: 5,
+        previewAsyncThreshold: 50,
+        commitAsyncThreshold: 100,
+      },
+    })
+
+    workflow.importForm.payload = JSON.stringify({
+      source: 'manual',
+      rows: Array.from({ length: 12 }, (_, index) => ({
+        userId: `u-${index + 1}`,
+        workDate: '2026-03-12',
+      })),
+    })
+
+    expect(workflow.importPayloadRowCountHint.value).toBe(12)
+    expect(workflow.importPreviewLane.value).toBe('chunked')
+    expect(workflow.importCommitLane.value).toBe('sync')
+    expect(workflow.importPreviewLaneHint.value).toBe(
+      'Preview will split into about 3 chunks because 12 rows exceed the chunk threshold (10).'
+    )
+    expect(workflow.importCommitLaneHint.value).toBe(
+      'Import will stay synchronous because 12 rows are below the async threshold (100).'
+    )
   })
 
   it('clears stale preview state and reports through setStatusFromError on preview failure', async () => {

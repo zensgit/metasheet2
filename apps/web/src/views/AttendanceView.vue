@@ -294,6 +294,7 @@
             />
 
             <AttendanceImportWorkflowSection
+              :format-date-time="formatDateTime"
               :workflow="importWorkflowSectionBindings"
               :format-list="formatList"
               :format-policy-list="formatPolicyList"
@@ -314,6 +315,7 @@
               :format-json="formatJson"
               :format-status="formatStatus"
               :resolve-rule-set-name="resolveRuleSetName"
+              :storage-key="`attendance-import-batch-inbox-views:${normalizedOrgId() || 'global'}`"
               :tr="tr"
               :workflow="importBatchesSectionBindings"
             />
@@ -657,10 +659,14 @@ const {
 })
 const {
   exportImportBatchItemsCsv,
+  importBatchImpactLoading,
+  importBatchImpactReport,
   importBatchItems,
+  importBatchSelectedId,
   importBatchSnapshot,
   importBatches,
   importLoading: importBatchLoading,
+  loadFullImportBatchImpact,
   loadImportBatchItems,
   loadImportBatches,
   rollbackImportBatch,
@@ -1157,8 +1163,13 @@ const {
   importAsyncPolling,
   importCsvDelimiter,
   importCsvFileName,
+  importCsvFileId,
+  importCsvFileRowCountHint,
+  importCsvFileExpiresAt,
   importCsvHeaderRow,
   importCsvWarnings,
+  importCommitLane,
+  importCommitLaneHint,
   importForm,
   importGroupAutoAssign,
   importGroupAutoCreate,
@@ -1167,7 +1178,10 @@ const {
   importLoading,
   importMappingProfiles,
   importMode,
+  importPayloadRowCountHint,
   importPreview,
+  importPreviewLane,
+  importPreviewLaneHint,
   importPreviewTask,
   importProfileId,
   importScalabilityHint,
@@ -1209,8 +1223,13 @@ const importWorkflowSectionBindings = {
   importAsyncPolling,
   importCsvDelimiter,
   importCsvFileName,
+  importCsvFileId,
+  importCsvFileRowCountHint,
+  importCsvFileExpiresAt,
   importCsvHeaderRow,
   importCsvWarnings,
+  importCommitLane,
+  importCommitLaneHint,
   importForm,
   importGroupAutoAssign,
   importGroupAutoCreate,
@@ -1219,7 +1238,10 @@ const importWorkflowSectionBindings = {
   importLoading,
   importMappingProfiles,
   importMode,
+  importPayloadRowCountHint,
   importPreview,
+  importPreviewLane,
+  importPreviewLaneHint,
   importPreviewTask,
   importProfileId,
   importScalabilityHint,
@@ -1240,13 +1262,17 @@ const importWorkflowSectionBindings = {
 }
 const importBatchesSectionBindings = {
   exportImportBatchItemsCsv,
+  importBatchImpactLoading,
+  importBatchImpactReport,
   importBatchItems,
   importBatchLoading,
+  importBatchSelectedId,
   importBatchSnapshot,
   importBatches,
+  loadFullImportBatchImpact,
   loadImportBatchItems,
   reloadImportBatches: () => loadImportBatches({ orgId: normalizedOrgId() }),
-  rollbackImportBatch: (batchId: string) => rollbackImportBatch(batchId, { orgId: normalizedOrgId() }),
+  rollbackImportBatch: (batchId: string, confirmMessage?: string) => rollbackImportBatch(batchId, { orgId: normalizedOrgId(), confirmMessage }),
   toggleImportBatchSnapshot,
 }
 const payrollSectionBindings = {

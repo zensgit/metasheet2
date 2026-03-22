@@ -3,10 +3,10 @@
     <div class="attendance__admin-section-header">
       <h4>{{ tr('Import (DingTalk / Manual)', '导入（钉钉 / 手工）') }}</h4>
       <div class="attendance__admin-actions">
-        <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
+        <button type="button" class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
           {{ importLoading ? tr('Loading...', '加载中...') : tr('Load template', '加载模板') }}
         </button>
-        <button class="attendance__btn" :disabled="importLoading" @click="downloadImportTemplateCsv">
+        <button type="button" class="attendance__btn" :disabled="importLoading" @click="downloadImportTemplateCsv">
           {{ tr('Download CSV template', '下载 CSV 模板') }}
         </button>
       </div>
@@ -305,6 +305,44 @@
       {{ importScalabilityHint }}
     </small>
     <div
+      v-if="importCsvFileName || importCsvFileId || importPayloadRowCountHint !== null"
+      class="attendance__status"
+    >
+      <div class="attendance__requests-header">
+        <span>{{ tr('Current import plan', '当前导入计划') }}</span>
+      </div>
+      <div>
+        {{ tr('Input channel', '输入通道') }}:
+        <strong>
+          {{ importCsvFileId ? tr('uploaded CSV', '已上传 CSV') : importCsvFileName ? tr('local CSV file', '本地 CSV 文件') : tr('JSON payload', 'JSON 负载') }}
+        </strong>
+        <span v-if="importCsvFileName"> · {{ importCsvFileName }}</span>
+      </div>
+      <div v-if="importCsvFileId">
+        <code>{{ importCsvFileId }}</code>
+        <span v-if="importCsvFileRowCountHint !== null"> · {{ tr('Rows', '行数') }} {{ importCsvFileRowCountHint }}</span>
+        <span v-if="importCsvFileExpiresAt"> · {{ tr('Expires', '过期时间') }} {{ formatDateTime(importCsvFileExpiresAt) }}</span>
+      </div>
+      <div v-else-if="importPayloadRowCountHint !== null">
+        {{ tr('Estimated rows', '预计行数') }}: {{ importPayloadRowCountHint }}
+      </div>
+      <div>
+        {{ tr('Preview lane', '预览路径') }}: <strong>{{ formatImportLane(importPreviewLane) }}</strong>
+        · {{ tr('Import lane', '导入路径') }}: <strong>{{ formatImportLane(importCommitLane) }}</strong>
+      </div>
+      <div class="attendance__field-hint">{{ importPreviewLaneHint }}</div>
+      <div class="attendance__field-hint">{{ importCommitLaneHint }}</div>
+      <div>
+        {{ tr('Mapping profile', '映射配置') }}: <strong>{{ importProfileSummary }}</strong>
+      </div>
+      <div>
+        {{ tr('User map', '用户映射') }}: <strong>{{ importUserMapSummary }}</strong>
+      </div>
+      <div>
+        {{ tr('Group sync', '分组同步') }}: <strong>{{ importGroupSyncSummary }}</strong>
+      </div>
+    </div>
+    <div
       v-if="importPreviewTask"
       class="attendance__status"
       :class="{ 'attendance__status--error': importPreviewTask.status === 'failed' }"
@@ -427,10 +465,12 @@
 <script setup lang="ts">
 import { computed, type ComputedRef, type Ref } from 'vue'
 import type {
+  AttendanceImportCommitLane,
   AttendanceImportFormState,
   AttendanceImportJob,
   AttendanceImportMappingProfile,
   AttendanceImportMode,
+  AttendanceImportPreviewLane,
   AttendanceImportPreviewItem,
   AttendanceImportPreviewTask,
   AttendanceImportProfileGuide,
@@ -451,6 +491,14 @@ interface ImportWorkflowBindings {
   importTemplateGuide: ComputedRef<AttendanceImportTemplateGuide | null>
   selectedImportProfileGuide: ComputedRef<AttendanceImportProfileGuide | null>
   importCsvFileName: Ref<string>
+  importCsvFileId: Ref<string>
+  importCsvFileRowCountHint: Ref<number | null>
+  importCsvFileExpiresAt: Ref<string>
+  importPayloadRowCountHint: ComputedRef<number | null>
+  importPreviewLane: ComputedRef<AttendanceImportPreviewLane>
+  importCommitLane: ComputedRef<AttendanceImportCommitLane>
+  importPreviewLaneHint: ComputedRef<string>
+  importCommitLaneHint: ComputedRef<string>
   importCsvHeaderRow: Ref<string>
   importCsvDelimiter: Ref<string>
   importUserMapFileName: Ref<string>
@@ -486,6 +534,7 @@ interface ImportWorkflowBindings {
 const props = defineProps<{
   tr: Translate
   ruleSets: AttendanceRuleSet[]
+  formatDateTime: (value: string | null | undefined) => string
   workflow: ImportWorkflowBindings
   importStatusVisible: boolean
   statusMessage: string
@@ -510,6 +559,14 @@ const selectedImportProfile = props.workflow.selectedImportProfile
 const importTemplateGuide = props.workflow.importTemplateGuide
 const selectedImportProfileGuide = props.workflow.selectedImportProfileGuide
 const importCsvFileName = props.workflow.importCsvFileName
+const importCsvFileId = props.workflow.importCsvFileId
+const importCsvFileRowCountHint = props.workflow.importCsvFileRowCountHint
+const importCsvFileExpiresAt = props.workflow.importCsvFileExpiresAt
+const importPayloadRowCountHint = props.workflow.importPayloadRowCountHint
+const importPreviewLane = props.workflow.importPreviewLane
+const importCommitLane = props.workflow.importCommitLane
+const importPreviewLaneHint = props.workflow.importPreviewLaneHint
+const importCommitLaneHint = props.workflow.importCommitLaneHint
 const importCsvHeaderRow = props.workflow.importCsvHeaderRow
 const importCsvDelimiter = props.workflow.importCsvDelimiter
 const importUserMapFileName = props.workflow.importUserMapFileName
@@ -542,9 +599,85 @@ const clearImportAsyncJob = () => props.workflow.clearImportAsyncJob()
 const handleImportCsvChange = (event: Event) => props.workflow.handleImportCsvChange(event)
 const handleImportUserMapChange = (event: Event) => props.workflow.handleImportUserMapChange(event)
 const runStatusAction = () => props.runStatusAction()
+const formatDateTime = props.formatDateTime
 const formatStatus = props.formatStatus
 const formatList = props.formatList
 const formatPolicyList = props.formatPolicyList
+
+const selectedGroupRuleSetName = computed(() => {
+  const ruleSetId = importGroupRuleSetId.value.trim()
+  if (!ruleSetId) return ''
+  return ruleSets.value.find(item => item.id === ruleSetId)?.name ?? ruleSetId
+})
+
+const importProfileSummary = computed(() => {
+  if (!selectedImportProfile.value) {
+    return tr('manual payload only', '仅使用手工 payload')
+  }
+  const requiredCount = selectedImportProfile.value.requiredFields?.length ?? 0
+  if (requiredCount > 0) {
+    return tr(
+      `${selectedImportProfile.value.name} (${requiredCount} required fields)`,
+      `${selectedImportProfile.value.name}（${requiredCount} 个必填字段）`,
+    )
+  }
+  return selectedImportProfile.value.name
+})
+
+const importUserMapSummary = computed(() => {
+  if (importUserMapError.value) {
+    return tr('file parse error', '文件解析错误')
+  }
+
+  const segments: string[] = []
+  if (importUserMapCount.value > 0) {
+    segments.push(tr(
+      `${importUserMapCount.value} entries ready`,
+      `已准备 ${importUserMapCount.value} 条映射`,
+    ))
+  }
+
+  const keyField = importUserMapKeyField.value.trim()
+  if (keyField) {
+    segments.push(tr(`key ${keyField}`, `键 ${keyField}`))
+  }
+
+  const sourceFields = importUserMapSourceFields.value.trim()
+  if (sourceFields) {
+    segments.push(tr(`source ${sourceFields}`, `来源 ${sourceFields}`))
+  }
+
+  return segments.length > 0
+    ? segments.join(' · ')
+    : tr('not configured', '未配置')
+})
+
+const importGroupSyncSummary = computed(() => {
+  const segments: string[] = []
+  if (importGroupAutoCreate.value) {
+    segments.push(tr('auto-create groups', '自动创建分组'))
+  }
+  if (importGroupAutoAssign.value) {
+    segments.push(tr('auto-assign members', '自动分配成员'))
+  }
+  if (selectedGroupRuleSetName.value) {
+    segments.push(tr(`rule set ${selectedGroupRuleSetName.value}`, `规则集 ${selectedGroupRuleSetName.value}`))
+  }
+  const timezone = importGroupTimezone.value.trim()
+  if (timezone) {
+    segments.push(tr(`timezone ${timezone}`, `时区 ${timezone}`))
+  }
+
+  return segments.length > 0
+    ? segments.join(' · ')
+    : tr('disabled', '未启用')
+})
+
+function formatImportLane(value: AttendanceImportPreviewLane | AttendanceImportCommitLane): string {
+  if (value === 'async') return tr('async queue', '异步队列')
+  if (value === 'chunked') return tr('chunked preview', '分块预览')
+  return tr('sync request', '同步请求')
+}
 </script>
 
 <style scoped>
