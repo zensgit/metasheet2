@@ -634,50 +634,112 @@ describe('plmAuditTeamViewCollaboration', () => {
       teamViewId: 'audit-view-6',
       action: 'share',
     }, {
+      page: 1,
       teamViewId: 'audit-view-6',
       q: '',
+      actorId: '',
       action: '',
       resourceType: '',
+      from: '',
+      to: '',
     })).toBe(true)
 
     expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
       teamViewId: 'audit-view-6',
       action: 'share',
     }, {
+      page: 1,
       teamViewId: '',
       q: '',
+      actorId: '',
       action: '',
       resourceType: '',
+      from: '',
+      to: '',
     })).toBe(false)
 
     expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
       teamViewId: 'audit-view-9',
       action: 'set-default',
     }, {
+      page: 1,
       teamViewId: '',
       q: 'audit-view-9',
+      actorId: '',
       action: 'set-default',
       resourceType: 'plm-team-view-default',
+      from: '',
+      to: '',
     })).toBe(true)
 
     expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
       teamViewId: 'audit-view-9',
       action: 'set-default',
     }, {
+      page: 1,
       teamViewId: '',
       q: '',
+      actorId: '',
       action: '',
       resourceType: '',
+      from: '',
+      to: '',
     })).toBe(false)
 
     expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
       teamViewId: 'audit-view-9',
       action: 'set-default',
     }, {
+      page: 1,
       teamViewId: '',
       q: 'other-view',
+      actorId: '',
       action: 'set-default',
       resourceType: 'plm-team-view-default',
+      from: '',
+      to: '',
+    })).toBe(false)
+
+    expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
+      teamViewId: 'audit-view-9',
+      action: 'set-default',
+    }, {
+      page: 2,
+      teamViewId: '',
+      q: 'audit-view-9',
+      actorId: '',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+      from: '',
+      to: '',
+    })).toBe(false)
+
+    expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
+      teamViewId: 'audit-view-9',
+      action: 'set-default',
+    }, {
+      page: 1,
+      teamViewId: '',
+      q: 'audit-view-9',
+      actorId: 'owner-a',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+      from: '',
+      to: '',
+    })).toBe(false)
+
+    expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
+      teamViewId: 'audit-view-9',
+      action: 'set-default',
+    }, {
+      page: 1,
+      teamViewId: '',
+      q: 'audit-view-9',
+      actorId: '',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+      from: '2026-03-22',
+      to: '',
     })).toBe(false)
   })
 

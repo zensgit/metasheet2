@@ -244,13 +244,21 @@ export function buildPlmAuditTeamViewCollaborationActionOutcome(
 
 export function shouldKeepPlmAuditTeamViewCollaborationFollowup(
   followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'action' | 'teamViewId'> | null,
-  routeState: Pick<PlmAuditRouteState, 'teamViewId' | 'q' | 'action' | 'resourceType'>,
+  routeState: Pick<
+    PlmAuditRouteState,
+    'page' | 'teamViewId' | 'q' | 'actorId' | 'action' | 'resourceType' | 'from' | 'to'
+  >,
 ) {
   if (!followup) return false
   if (followup.action === 'set-default') {
+    const onDefaultLogRoute = routeState.page === 1
+      && !routeState.actorId
+      && !routeState.from
+      && !routeState.to
     return routeState.action === 'set-default'
       && routeState.resourceType === 'plm-team-view-default'
       && routeState.q === followup.teamViewId
+      && onDefaultLogRoute
   }
   return routeState.teamViewId === followup.teamViewId
 }
