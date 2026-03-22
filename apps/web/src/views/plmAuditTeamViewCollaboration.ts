@@ -1,5 +1,9 @@
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
 import type { PlmAuditSavedViewShareFollowupSource } from './plmAuditSavedViewShareFollowup'
+import {
+  resolveAuditTeamViewRecommendationFilter,
+  type PlmRecommendedAuditTeamViewFilter,
+} from './plmAuditTeamViewCatalog'
 
 export type PlmAuditTeamViewCollaborationSource = 'recommendation' | 'saved-view-promotion' | 'scene-context'
 export type PlmAuditTeamViewCollaborationActionKind = 'share' | 'set-default' | 'dismiss'
@@ -54,12 +58,18 @@ export type PlmAuditTeamViewCollaborationHandoff = {
   selectedTeamViewId: string | null
   teamViewName: string | null
   teamViewOwnerUserId: string | null
-  selectedIds: string[] | null
+  selectedIds: string[]
   focusedTeamViewId: string
   draft: PlmAuditTeamViewCollaborationDraft | null
   followup: PlmAuditTeamViewCollaborationFollowup | null
   scrollTargetId: string
   statusMessage: string
+}
+
+export type PlmAuditTeamViewCollaborationSourceFocusIntent = {
+  anchorId: string
+  focusedRecommendationTeamViewId: string | null
+  recommendationFilter: PlmRecommendedAuditTeamViewFilter | null
 }
 
 const PLM_AUDIT_TEAM_VIEW_COLLABORATION_LOGS_ANCHOR_ID = 'plm-audit-log-results'
@@ -120,6 +130,32 @@ export function findPlmAuditTeamViewCollaborationFollowupView<T extends { id: st
 ): T | null {
   if (!followup) return null
   return views.find((view) => view.id === followup.teamViewId) || null
+}
+
+export function buildPlmAuditTeamViewCollaborationSourceFocusIntent(
+  followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'source' | 'sourceAnchorId'>,
+  view?: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'isDefault' | 'lastDefaultSetAt'> | null,
+): PlmAuditTeamViewCollaborationSourceFocusIntent {
+  if (followup.source === 'recommendation' && view) {
+    return {
+      anchorId: followup.sourceAnchorId,
+      focusedRecommendationTeamViewId: view.id,
+      recommendationFilter: resolveAuditTeamViewRecommendationFilter(view),
+    }
+  }
+
+  return {
+    anchorId: followup.sourceAnchorId,
+    focusedRecommendationTeamViewId: null,
+    recommendationFilter: null,
+  }
+}
+
+export function shouldDismissPlmAuditTeamViewCollaborationDraft(
+  draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null,
+  followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'teamViewId'> | null,
+) {
+  return Boolean(draft && followup && draft.teamViewId === followup.teamViewId)
 }
 
 export function buildPlmAuditTeamViewCollaborationActionStatus(
@@ -199,6 +235,13 @@ export function buildPlmAuditTeamViewCollaborationActionOutcome(
   }
 }
 
+export function shouldClearPlmAuditTeamViewCollaborationDraft(
+  draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null,
+  viewId: string,
+) {
+  return draft?.teamViewId === viewId
+}
+
 export function buildPlmAuditTeamViewCollaborationHandoff(
   view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'name'>,
   options: {
@@ -216,7 +259,7 @@ export function buildPlmAuditTeamViewCollaborationHandoff(
       selectedTeamViewId: draft.teamViewId,
       teamViewName: draft.teamViewName,
       teamViewOwnerUserId: draft.teamViewOwnerUserId,
-      selectedIds: options.selectable ? [view.id] : null,
+      selectedIds: options.selectable ? [view.id] : [],
       focusedTeamViewId: view.id,
       draft,
       followup: null,
@@ -235,13 +278,13 @@ export function buildPlmAuditTeamViewCollaborationHandoff(
   )
 
   return {
-    selectedTeamViewId: null,
-    teamViewName: null,
-    teamViewOwnerUserId: null,
-    selectedIds: options.selectable ? [view.id] : null,
-    focusedTeamViewId: view.id,
-    draft: null,
-    followup,
+      selectedTeamViewId: null,
+      teamViewName: null,
+      teamViewOwnerUserId: null,
+      selectedIds: options.selectable ? [view.id] : [],
+      focusedTeamViewId: view.id,
+      draft: null,
+      followup,
     scrollTargetId: followup.logsAnchorId,
     statusMessage: [
       buildPlmAuditTeamViewCollaborationActionStatus(options.source, 'set-default', tr),

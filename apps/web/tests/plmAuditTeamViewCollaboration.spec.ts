@@ -8,8 +8,10 @@ import {
   buildPlmAuditTeamViewCollaborationDraft,
   buildPlmAuditTeamViewCollaborationFollowupNotice,
   buildPlmAuditTeamViewCollaborationNotice,
+  buildPlmAuditTeamViewCollaborationSourceFocusIntent,
   findPlmAuditTeamViewCollaborationFollowupView,
   resolvePlmAuditTeamViewCollaborationSourceAnchorId,
+  shouldDismissPlmAuditTeamViewCollaborationDraft,
 } from '../src/views/plmAuditTeamViewCollaboration'
 
 function tr(en: string, zh: string) {
@@ -371,6 +373,36 @@ describe('plmAuditTeamViewCollaboration', () => {
     })).toBe('plm-audit-team-view-controls')
   })
 
+  it('builds recommendation source focus intent that restores the card filter and focus', () => {
+    expect(buildPlmAuditTeamViewCollaborationSourceFocusIntent({
+      source: 'recommendation',
+      sourceAnchorId: 'plm-audit-recommended-team-views',
+    }, {
+      id: 'audit-view-4',
+      isDefault: false,
+      lastDefaultSetAt: '2026-03-19T15:00:00.000Z',
+    })).toEqual({
+      anchorId: 'plm-audit-recommended-team-views',
+      focusedRecommendationTeamViewId: 'audit-view-4',
+      recommendationFilter: 'recent-default',
+    })
+  })
+
+  it('falls back to anchor-only source focus when the follow-up did not come from recommendations', () => {
+    expect(buildPlmAuditTeamViewCollaborationSourceFocusIntent({
+      source: 'saved-view-promotion',
+      sourceAnchorId: 'plm-audit-saved-views',
+    }, {
+      id: 'audit-view-6',
+      isDefault: false,
+      lastDefaultSetAt: '',
+    })).toEqual({
+      anchorId: 'plm-audit-saved-views',
+      focusedRecommendationTeamViewId: null,
+      recommendationFilter: null,
+    })
+  })
+
   it('builds share and default follow-up state from the shared provenance contract', () => {
     expect(buildPlmAuditTeamViewCollaborationFollowup(
       'audit-view-4',
@@ -564,5 +596,25 @@ describe('plmAuditTeamViewCollaboration', () => {
       id: 'audit-view-2',
       isDefault: true,
     })
+  })
+
+  it('dismisses the matching collaboration draft when a follow-up is closed', () => {
+    expect(shouldDismissPlmAuditTeamViewCollaborationDraft(
+      {
+        teamViewId: 'audit-view-2',
+      },
+      {
+        teamViewId: 'audit-view-2',
+      },
+    )).toBe(true)
+
+    expect(shouldDismissPlmAuditTeamViewCollaborationDraft(
+      {
+        teamViewId: 'audit-view-2',
+      },
+      {
+        teamViewId: 'audit-view-7',
+      },
+    )).toBe(false)
   })
 })
