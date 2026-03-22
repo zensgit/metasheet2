@@ -2180,6 +2180,9 @@ async function promoteSavedViewToTeam(
     if (auditTeamViewManagementItems.value.find((item) => item.id === saved.id)?.selectable) {
       auditTeamViewSelection.value = [saved.id]
     }
+    // Let the canonical route settle before creating draft/follow-up UI so watcher cleanup
+    // does not discard freshly created promotion state.
+    await syncRouteState(savedState)
     if (promotionBehavior.shouldShowDefaultFollowup) {
       auditTeamViewCollaborationDraft.value = null
       auditTeamViewCollaborationFollowup.value = buildPlmAuditTeamViewCollaborationFollowup(
@@ -2190,7 +2193,6 @@ async function promoteSavedViewToTeam(
           sceneContextAvailable: Boolean(auditSceneContext.value),
         },
       )
-      await syncRouteState(savedState)
       await nextTick()
       document.getElementById('plm-audit-log-results')?.scrollIntoView({
         behavior: 'smooth',
