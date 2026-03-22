@@ -103,6 +103,48 @@
               </button>
             </div>
           </label>
+          <div class="attendance__field attendance__field--full">
+            <span>{{ tr('Saved inbox views', '已保存收件箱视图') }}</span>
+            <div class="attendance__table-actions">
+              <input
+                id="attendance-import-batch-view-name"
+                v-model="savedBatchInboxViewName"
+                type="text"
+                :placeholder="tr('Name this inbox view', '给这个收件箱视图命名')"
+              />
+              <button
+                class="attendance__btn"
+                type="button"
+                :disabled="!canSaveCurrentBatchInboxView"
+                @click="saveCurrentBatchInboxView"
+              >
+                {{ activeSavedBatchInboxViewNameMatch ? tr('Update saved view', '更新保存视图') : tr('Save current view', '保存当前视图') }}
+              </button>
+              <button
+                v-if="activeSavedBatchInboxView"
+                class="attendance__btn attendance__btn--danger"
+                type="button"
+                @click="deleteActiveSavedBatchInboxView"
+              >
+                {{ tr('Delete active view', '删除当前视图') }}
+              </button>
+            </div>
+            <div v-if="savedBatchInboxViews.length" class="attendance__filter-chip-row">
+              <button
+                v-for="view in savedBatchInboxViews"
+                :key="view.id"
+                class="attendance__chip"
+                :class="{ 'attendance__chip--active': view.id === activeSavedBatchInboxViewId }"
+                type="button"
+                @click="applySavedBatchInboxView(view)"
+              >
+                {{ view.name }}
+              </button>
+            </div>
+            <div class="attendance__field-hint">
+              {{ tr('Saved views stay in this browser and let operations teams reapply the same inbox filters quickly.', '保存视图会保留在当前浏览器里，方便运营团队快速复用同一组收件箱筛选。') }}
+            </div>
+          </div>
         </div>
         <div class="attendance__subheading-row">
           <div class="attendance__section-meta">
@@ -111,6 +153,7 @@
             <span> · {{ tr('Time slice', '时间切片') }}: <strong>{{ batchTimeSliceLabel }}</strong></span>
             <span> · {{ tr('Active filters', '当前筛选') }}: <strong>{{ batchFilterSummary }}</strong></span>
             <span v-if="batchSearchQuery"> · {{ tr('Search', '搜索') }}: <strong>{{ batchSearchText }}</strong></span>
+            <span v-if="activeSavedBatchInboxView"> · {{ tr('Saved view', '保存视图') }}: <strong>{{ activeSavedBatchInboxView.name }}</strong></span>
           </div>
           <div class="attendance__table-actions">
             <button class="attendance__btn" type="button" @click="resetBatchFilters">
@@ -518,6 +561,21 @@ type BatchTimeSlicePresetOption = {
   key: Exclude<BatchTimeSlicePreset, 'custom'>
   label: string
 }
+type BatchInboxFilterState = {
+  searchText: string
+  status: string
+  engine: string
+  source: string
+  creator: string
+  createdFrom: string
+  createdTo: string
+  timeSlicePreset: BatchTimeSlicePreset
+}
+type SavedBatchInboxView = {
+  id: string
+  name: string
+  state: BatchInboxFilterState
+}
 
 interface ImportBatchesBindings {
   importBatchLoading: Ref<boolean>
@@ -543,6 +601,7 @@ const props = defineProps<{
   formatDateTime: (value: string | null | undefined) => string
   formatJson: (value: unknown) => string
   clock?: () => Date
+  storageKey?: string
 }>()
 
 const tr = props.tr
@@ -564,6 +623,7 @@ const formatStatus = props.formatStatus
 const formatDateTime = props.formatDateTime
 const formatJson = props.formatJson
 const clock = props.clock ?? (() => new Date())
+const batchInboxViewStorageKey = props.storageKey ?? 'attendance-import-batch-inbox-views'
 const issueFilter = ref<AttendanceImportBatchIssueFilter>('all')
 const searchText = ref('')
 const batchSearchText = ref('')
@@ -574,6 +634,8 @@ const batchCreatorFilter = ref('all')
 const batchCreatedFrom = ref('')
 const batchCreatedTo = ref('')
 const batchTimeSlicePreset = ref<BatchTimeSlicePreset>('all')
+const savedBatchInboxViewName = ref('')
+const savedBatchInboxViews = ref<SavedBatchInboxView[]>(loadSavedBatchInboxViews(batchInboxViewStorageKey))
 const selectedImportBatchItemId = ref('')
 const snapshotActionMessage = ref('')
 
@@ -613,6 +675,16 @@ const visibleImportBatches = computed(() => importBatches.value.filter((batch) =
   if (!query) return true
   return buildBatchInboxSearchIndex(batch).includes(query)
 }))
+const currentBatchInboxFilterState = computed<BatchInboxFilterState>(() => ({
+  searchText: batchSearchText.value,
+  status: batchStatusFilter.value,
+  engine: batchEngineFilter.value,
+  source: batchSourceFilter.value,
+  creator: batchCreatorFilter.value,
+  createdFrom: batchCreatedFrom.value,
+  createdTo: batchCreatedTo.value,
+  timeSlicePreset: batchTimeSlicePreset.value,
+}))
 
 const batchItemRows = computed(() => importBatchItems.value.map((item) => ({
   item,
@@ -622,6 +694,19 @@ const selectedBatch = computed(() => importBatches.value.find((batch) => batch.i
 const selectedBatchVisibleInInbox = computed(() => (
   !selectedBatch.value || visibleImportBatches.value.some((batch) => batch.id === selectedBatch.value?.id)
 ))
+const activeSavedBatchInboxViewId = computed(() => {
+  const activeStateKey = serializeBatchInboxFilterState(currentBatchInboxFilterState.value)
+  return savedBatchInboxViews.value.find((view) => serializeBatchInboxFilterState(view.state) === activeStateKey)?.id ?? ''
+})
+const activeSavedBatchInboxView = computed(() => (
+  savedBatchInboxViews.value.find((view) => view.id === activeSavedBatchInboxViewId.value) ?? null
+))
+const activeSavedBatchInboxViewNameMatch = computed(() => {
+  const name = normalizeSavedBatchInboxViewName(savedBatchInboxViewName.value)
+  if (!name) return false
+  return savedBatchInboxViews.value.some((view) => view.name.toLowerCase() === name.toLowerCase())
+})
+const canSaveCurrentBatchInboxView = computed(() => Boolean(normalizeSavedBatchInboxViewName(savedBatchInboxViewName.value)))
 const issueClusters = computed<AttendanceImportBatchIssueCluster[]>(() => summarizeImportBatchIssueClusters(importBatchItems.value))
 const searchQuery = computed(() => searchText.value.trim().toLowerCase())
 const visibleImportBatchRows = computed(() => (
@@ -881,6 +966,108 @@ function collectBatchFilterOptions(resolver: (batch: AttendanceImportBatch) => u
 function normalizeBatchFilterValue(value: unknown): string {
   const text = String(value ?? '').trim()
   return text ? text : '--'
+}
+
+function normalizeSavedBatchInboxViewName(value: string): string {
+  return value.trim().replace(/\s+/g, ' ')
+}
+
+function serializeBatchInboxFilterState(state: BatchInboxFilterState): string {
+  return JSON.stringify(state)
+}
+
+function loadSavedBatchInboxViews(storageKey: string): SavedBatchInboxView[] {
+  if (typeof window === 'undefined' || !window.localStorage) return []
+  try {
+    const raw = window.localStorage.getItem(storageKey)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return []
+      const record = entry as Record<string, unknown>
+      const id = String(record.id ?? '').trim()
+      const name = normalizeSavedBatchInboxViewName(String(record.name ?? ''))
+      const state = record.state
+      if (!id || !name || !state || typeof state !== 'object') return []
+      const stateRecord = state as Record<string, unknown>
+      const preset = String(stateRecord.timeSlicePreset ?? 'all') as BatchTimeSlicePreset
+      const normalizedState: BatchInboxFilterState = {
+        searchText: String(stateRecord.searchText ?? ''),
+        status: String(stateRecord.status ?? 'all'),
+        engine: String(stateRecord.engine ?? 'all'),
+        source: String(stateRecord.source ?? 'all'),
+        creator: String(stateRecord.creator ?? 'all'),
+        createdFrom: String(stateRecord.createdFrom ?? ''),
+        createdTo: String(stateRecord.createdTo ?? ''),
+        timeSlicePreset: (
+          preset === 'today'
+          || preset === 'last7'
+          || preset === 'last30'
+          || preset === 'thisMonth'
+          || preset === 'custom'
+        ) ? preset : 'all',
+      }
+      return [{ id, name, state: normalizedState }]
+    })
+  } catch {
+    return []
+  }
+}
+
+function persistSavedBatchInboxViews(storageKey: string, views: SavedBatchInboxView[]) {
+  if (typeof window === 'undefined' || !window.localStorage) return
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(views))
+  } catch {
+    // Ignore storage failures and keep the in-memory views usable.
+  }
+}
+
+function applyBatchInboxFilterState(state: BatchInboxFilterState) {
+  batchSearchText.value = state.searchText
+  batchStatusFilter.value = state.status
+  batchEngineFilter.value = state.engine
+  batchSourceFilter.value = state.source
+  batchCreatorFilter.value = state.creator
+  batchCreatedFrom.value = state.createdFrom
+  batchCreatedTo.value = state.createdTo
+  batchTimeSlicePreset.value = state.timeSlicePreset
+}
+
+function applySavedBatchInboxView(view: SavedBatchInboxView) {
+  applyBatchInboxFilterState(view.state)
+}
+
+function saveCurrentBatchInboxView() {
+  const name = normalizeSavedBatchInboxViewName(savedBatchInboxViewName.value)
+  if (!name) return
+  const nextState = currentBatchInboxFilterState.value
+  const nextViews = savedBatchInboxViews.value.slice()
+  const existingIndex = nextViews.findIndex((view) => view.name.toLowerCase() === name.toLowerCase())
+  if (existingIndex >= 0) {
+    nextViews.splice(existingIndex, 1, {
+      id: nextViews[existingIndex]!.id,
+      name,
+      state: nextState,
+    })
+  } else {
+    nextViews.push({
+      id: `batch-inbox-view-${Date.now()}`,
+      name,
+      state: nextState,
+    })
+  }
+  savedBatchInboxViews.value = nextViews
+  persistSavedBatchInboxViews(batchInboxViewStorageKey, nextViews)
+  savedBatchInboxViewName.value = ''
+}
+
+function deleteActiveSavedBatchInboxView() {
+  if (!activeSavedBatchInboxView.value) return
+  const nextViews = savedBatchInboxViews.value.filter((view) => view.id !== activeSavedBatchInboxView.value?.id)
+  savedBatchInboxViews.value = nextViews
+  persistSavedBatchInboxViews(batchInboxViewStorageKey, nextViews)
 }
 
 function resolveRollbackEstimateForBatch(

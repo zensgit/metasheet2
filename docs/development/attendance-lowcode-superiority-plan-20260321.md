@@ -95,6 +95,7 @@ Delivered:
 
 - Batch inbox filter bar for search, status, engine, source, creator, and created-date window.
 - Batch-list time slicing presets on top of manual date-window filters.
+- Saved inbox views with browser-local reuse for operations teams.
 - Selected-batch visibility cues with reveal action when inbox filters hide the active batch.
 - Issue chips and search-based batch item triage.
 - Selected batch meta summary.
@@ -143,10 +144,9 @@ pnpm --filter @metasheet/web build
 
 These are intentionally left for the next round, not for this release candidate:
 
-1. Saved inbox views and reusable filter presets for operations teams.
-2. Visual builders for leave policies and payroll templates to remove more JSON editing.
-3. Attendance-native workflow nodes for exception handling,补卡, leave, and escalation.
-4. Data-scope and field-scope permission controls beyond current role templates.
+1. Visual builders for leave policies and payroll templates to remove more JSON editing.
+2. Attendance-native workflow nodes for exception handling,补卡, leave, and escalation.
+3. Data-scope and field-scope permission controls beyond current role templates.
 
 ## Release Recommendation
 

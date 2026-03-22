@@ -315,6 +315,7 @@
               :format-json="formatJson"
               :format-status="formatStatus"
               :resolve-rule-set-name="resolveRuleSetName"
+              :storage-key="`attendance-import-batch-inbox-views:${normalizedOrgId() || 'global'}`"
               :tr="tr"
               :workflow="importBatchesSectionBindings"
             />

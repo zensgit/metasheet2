@@ -54,6 +54,7 @@ function createItem(overrides: Partial<AttendanceImportItem> = {}): AttendanceIm
 describe('AttendanceImportBatchesSection', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
+  const storageKey = 'attendance-import-batches-section-spec'
 
   const tr = (en: string, _zh: string) => en
   const resolveRuleSetName = (ruleSetId?: string | null) => ruleSetId || '--'
@@ -72,6 +73,7 @@ describe('AttendanceImportBatchesSection', () => {
   beforeEach(() => {
     container = document.createElement('div')
     document.body.appendChild(container)
+    window.localStorage.removeItem(storageKey)
   })
 
   afterEach(() => {
@@ -79,6 +81,7 @@ describe('AttendanceImportBatchesSection', () => {
     if (container) container.remove()
     app = null
     container = null
+    window.localStorage.removeItem(storageKey)
     vi.clearAllMocks()
   })
 
@@ -611,6 +614,130 @@ describe('AttendanceImportBatchesSection', () => {
     expect(container!.textContent).not.toContain('Selected batch is hidden by current inbox filters.')
     expect(container!.querySelectorAll('.attendance__table-row--selected')).toHaveLength(1)
     expect(getBatchRowCount()).toBe(2)
+  })
+
+  it('saves and reapplies inbox views from local storage', async () => {
+    const workflow: ImportBatchesBindings = {
+      importBatchLoading: ref(false),
+      importBatches: ref([
+        createBatch({
+          id: 'batch-a',
+          rowCount: 2,
+          status: 'completed',
+          source: 'csv',
+          createdBy: 'ops-1',
+          createdAt: '2026-03-18T09:00:00.000Z',
+        }),
+        createBatch({
+          id: 'batch-b',
+          rowCount: 4,
+          status: 'rolled_back',
+          source: 'api',
+          createdBy: 'ops-2',
+          createdAt: '2026-03-21T09:00:00.000Z',
+          meta: {
+            engine: 'standard',
+          },
+        }),
+      ]),
+      importBatchImpactLoading: ref(false),
+      importBatchImpactReport: ref(null),
+      importBatchSelectedId: ref('batch-a'),
+      importBatchItems: ref([]),
+      importBatchSnapshot: ref(null),
+      loadFullImportBatchImpact: vi.fn(),
+      reloadImportBatches: vi.fn(),
+      loadImportBatchItems: vi.fn(),
+      rollbackImportBatch: vi.fn(),
+      exportImportBatchItemsCsv: vi.fn(),
+      toggleImportBatchSnapshot: vi.fn(),
+    }
+
+    app = createApp(AttendanceImportBatchesSection, {
+      tr,
+      workflow,
+      resolveRuleSetName,
+      formatStatus,
+      formatDateTime,
+      formatJson,
+      clock: () => new Date('2026-03-21T12:00:00.000Z'),
+      storageKey,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const statusFilter = container!.querySelector('#attendance-import-batch-status-filter') as HTMLSelectElement | null
+    const viewNameInput = container!.querySelector('#attendance-import-batch-view-name') as HTMLInputElement | null
+    expect(statusFilter).toBeTruthy()
+    expect(viewNameInput).toBeTruthy()
+
+    const last7Button = Array.from(container!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Last 7 days'),
+    ) as HTMLButtonElement | undefined
+    expect(last7Button).toBeTruthy()
+    last7Button!.click()
+    await flushUi()
+
+    statusFilter!.value = 'rolled_back'
+    statusFilter!.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    viewNameInput!.value = 'Rollback queue'
+    viewNameInput!.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    const saveViewButton = Array.from(container!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Save current view'),
+    ) as HTMLButtonElement | undefined
+    expect(saveViewButton).toBeTruthy()
+    saveViewButton!.click()
+    await flushUi()
+
+    expect(container!.textContent).toContain('Saved view: Rollback queue')
+    expect(container!.textContent).toContain('Rollback queue')
+    expect(getBatchRowCount()).toBe(1)
+    expect(container!.textContent).toContain('Time slice: Last 7 days')
+
+    const resetButton = Array.from(container!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Reset batch filters'),
+    ) as HTMLButtonElement | undefined
+    expect(resetButton).toBeTruthy()
+    resetButton!.click()
+    await flushUi()
+
+    expect(getBatchRowCount()).toBe(2)
+    expect(container!.textContent).not.toContain('Saved view: Rollback queue')
+
+    const savedViewButton = Array.from(container!.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Rollback queue',
+    ) as HTMLButtonElement | undefined
+    expect(savedViewButton).toBeTruthy()
+    savedViewButton!.click()
+    await flushUi()
+
+    expect(getBatchRowCount()).toBe(1)
+    expect(container!.textContent).toContain('Saved view: Rollback queue')
+    expect(container!.textContent).toContain('Time slice: Last 7 days')
+
+    app.unmount()
+    app = null
+    container!.innerHTML = ''
+
+    app = createApp(AttendanceImportBatchesSection, {
+      tr,
+      workflow,
+      resolveRuleSetName,
+      formatStatus,
+      formatDateTime,
+      formatJson,
+      clock: () => new Date('2026-03-21T12:00:00.000Z'),
+      storageKey,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.textContent).toContain('Rollback queue')
+    expect(container!.textContent).toContain('Time slice: All time')
   })
 
   it('keeps the summary visible even when no batches are loaded', async () => {
