@@ -328,7 +328,7 @@
           <div class="attendance__builder-header-copy">
             <span class="attendance__builder-title">{{ tr('Workflow designer handoff', '流程设计器接力') }}</span>
             <small class="attendance__field-hint">
-              {{ tr('Send the current approval draft into the attendance workflow tab as a starter brief. This does not replace the live attendance approval engine.', '把当前审批草稿作为起步说明带入考勤流程设计页。它不会替换当前生效的考勤审批执行引擎。') }}
+              {{ tr('Send the current approval draft into the attendance workflow designer and auto-apply the recommended starter template. This does not replace the live attendance approval engine.', '把当前审批草稿带入考勤流程设计器，并自动套用推荐起步模板。它不会替换当前生效的考勤审批执行引擎。') }}
             </small>
           </div>
           <div class="attendance__builder-summary">
@@ -347,7 +347,7 @@
           </button>
         </div>
         <small class="attendance__field-hint">
-          {{ tr('The workflow tab will receive request type, flow name, step count, and step summary as context.', '流程页会接收申请类型、流程名称、步骤数量和步骤摘要作为上下文。') }}
+          {{ tr('The workflow designer will receive request type, flow name, step count, and step summary, then seed a starter draft with the recommended template.', '流程设计器会接收申请类型、流程名称、步骤数量和步骤摘要，并用推荐模板生成起步草稿。') }}
         </small>
       </div>
       <label class="attendance__field attendance__field--full" for="attendance-approval-steps">

@@ -149,6 +149,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'Workflows', requiresAuth: true, requiredFeature: 'workflow' }
   },
   {
+    path: '/workflows/designer/:id?',
+    name: 'workflow-designer',
+    component: () => import('./views/WorkflowDesigner.vue'),
+    meta: { title: 'Workflow Designer', requiresAuth: true, requiredFeature: 'workflow' }
+  },
+  {
     path: '/admin/plugins',
     name: 'plugin-manager',
     component: PluginManagerView,
@@ -235,13 +241,16 @@ router.beforeEach(async (to, _from, next) => {
     }
 
     if (flags.isAttendanceFocused()) {
-      const allowed = new Set<string>([
+      const allowedExact = new Set<string>([
         '/attendance',
         '/p/plugin-attendance/attendance',
         '/settings',
       ])
+      const allowedPrefixes = flags.hasFeature('workflow') ? ['/workflows'] : []
       const path = String(to.path || '')
-      if (!allowed.has(path)) {
+      const allowed = allowedExact.has(path)
+        || allowedPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
+      if (!allowed) {
         return next('/attendance')
       }
     }

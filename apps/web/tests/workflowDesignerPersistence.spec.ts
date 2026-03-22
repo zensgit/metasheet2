@@ -368,7 +368,7 @@ describe('workflowDesignerPersistence', () => {
   })
 
   it('instantiates workflow templates through the template route', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         success: true,
@@ -377,17 +377,31 @@ describe('workflowDesignerPersistence', () => {
           message: 'created',
         },
       }),
-    }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
 
     const result = await instantiateWorkflowTemplate({
       templateId: 'simple-approval',
       name: '基于模板的新流程',
+      description: '来自考勤审批流的起步草稿',
+      category: 'approval',
     })
 
     expect(result).toMatchObject({
       workflowId: 'wf-template-1',
       message: 'created',
     })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/workflow-designer/templates/simple-approval/instantiate',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          name: '基于模板的新流程',
+          description: '来自考勤审批流的起步草稿',
+          category: 'approval',
+        }),
+      }),
+    )
   })
 
   it('duplicates workflow drafts through the draft action route', async () => {

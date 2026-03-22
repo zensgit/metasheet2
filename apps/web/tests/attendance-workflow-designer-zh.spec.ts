@@ -22,7 +22,7 @@ vi.mock('../src/views/WorkflowDesigner.vue', () => ({
   },
 }))
 
-async function flushUi(cycles = 3): Promise<void> {
+async function flushUi(cycles = 6): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
     await nextTick()
@@ -81,6 +81,7 @@ describe('AttendanceWorkflowDesigner zh', () => {
       approvalStepCount: '2',
       approvalStepSummary: '直属主管审批 -> HR 审批',
       workflowStarterId: 'parallel-review',
+      templateId: 'parallel-review',
       workflowDescription: 'Attendance leave starter from approval builder',
     }
 
@@ -91,6 +92,7 @@ describe('AttendanceWorkflowDesigner zh', () => {
     expect(text).toContain('请假')
     expect(text).toContain('请假审批流')
     expect(text).toContain('2')
+    expect(text).toContain('自动套用推荐起步模板')
     expect(text).toContain('并行评审起步模板')
     expect(text).toContain('直属主管审批 -> HR 审批')
 

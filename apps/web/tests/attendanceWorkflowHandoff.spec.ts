@@ -33,6 +33,7 @@ describe('attendanceWorkflowHandoff', () => {
       approvalFlowName: 'Leave manager to HR',
       approvalStepCount: '2',
       workflowStarterId: 'parallel-review',
+      templateId: 'parallel-review',
       workflowName: 'Leave manager to HR',
     })
 
@@ -47,6 +48,7 @@ describe('attendanceWorkflowHandoff', () => {
       workflowName: 'Leave manager to HR',
       workflowDescription: 'Attendance leave starter from approval builder',
       workflowStarterId: 'parallel-review',
+      templateId: 'parallel-review',
     })
   })
 
@@ -65,6 +67,7 @@ describe('attendanceWorkflowHandoff', () => {
 
     expect(query.approvalStepCount).toBe('0')
     expect(query.workflowStarterId).toBe('simple-approval')
+    expect(query.templateId).toBe('simple-approval')
     expect(query.approvalFlowName).toBe('Missed check-in approval flow')
     expect(resolveAttendanceWorkflowStarterId('overtime', 1)).toBe('simple-approval')
     expect(resolveAttendanceWorkflowStarterId('leave', 3)).toBe('parallel-review')

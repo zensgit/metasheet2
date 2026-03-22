@@ -255,6 +255,7 @@ const templatePagination = ref<WorkflowDesignerPagination>({
 const recentTemplateItems = ref<RecentWorkflowTemplateItem[]>([])
 const selectedTemplateId = ref<string | null>(null)
 const selectedTemplate = ref<WorkflowDesignerTemplateDetail | null>(null)
+const attendanceWorkflowHandoff = computed(() => readAttendanceWorkflowHandoff(route.query as Record<string, unknown>))
 
 const selectedElement = ref<BpmnElement | null>(null)
 const elementName = ref('')
@@ -339,7 +340,7 @@ function getElementTypeLabel(type: string): string {
 // Lifecycle
 onMounted(async () => {
   await initModeler()
-  const workflowHandoff = readAttendanceWorkflowHandoff(route.query as Record<string, unknown>)
+  const workflowHandoff = attendanceWorkflowHandoff.value
 
   // Load workflow if ID provided
   const id = route.params.id as string
@@ -647,6 +648,7 @@ async function applyTemplate(templateId?: string, options: { skipConfirm?: boole
 
   applyingTemplate.value = true
   try {
+    const workflowHandoff = attendanceWorkflowHandoff.value
     const templateRecord =
       selectedTemplate.value?.id === templateId
         ? selectedTemplate.value
@@ -655,6 +657,8 @@ async function applyTemplate(templateId?: string, options: { skipConfirm?: boole
     const result = await instantiateWorkflowTemplate({
       templateId,
       name: !workflowId.value && workflowName.value.trim() ? workflowName.value.trim() : undefined,
+      description: !workflowId.value && workflowDescription.value.trim() ? workflowDescription.value.trim() : undefined,
+      category: !workflowId.value && workflowHandoff?.handoff === 'approval-flow' ? 'approval' : undefined,
     })
 
     invalidateWorkflowDraftCatalogCache()

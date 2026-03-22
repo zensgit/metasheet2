@@ -239,6 +239,7 @@ describe('AttendanceLeavePoliciesSection', () => {
 
     expect(container!.textContent).toContain('Visual approval builder')
     expect(container!.textContent).toContain('Workflow designer handoff')
+    expect(container!.textContent).toContain('auto-apply the recommended starter template')
     expect(container!.textContent).toContain('Steps: 2')
     expect(container!.textContent).toContain('Role gates: 2')
     expect(container!.textContent).toContain('Direct users: 1')
@@ -246,6 +247,7 @@ describe('AttendanceLeavePoliciesSection', () => {
     expect(container!.textContent).toContain('Parallel review starter')
     expect(container!.textContent).toContain('Advanced JSON fallback')
     expect(container!.textContent).toContain('Manager review -> HR review')
+    expect(container!.textContent).toContain('starter draft with the recommended template')
 
     const rowsTextarea = container!.querySelector<HTMLTextAreaElement>('#attendance-approval-steps')
     expect(rowsTextarea?.getAttribute('rows')).toBe('8')
@@ -281,6 +283,7 @@ describe('AttendanceLeavePoliciesSection', () => {
         approvalFlowName: 'Leave manager to HR',
         approvalStepCount: '2',
         workflowStarterId: 'parallel-review',
+        templateId: 'parallel-review',
       }),
     })
   })

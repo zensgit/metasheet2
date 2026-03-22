@@ -22,6 +22,7 @@ export interface AttendanceWorkflowHandoffState {
   workflowName: string
   workflowDescription: string
   workflowStarterId: string
+  templateId: string
 }
 
 function normalizeQueryString(value: unknown): string {
@@ -102,6 +103,7 @@ export function buildAttendanceWorkflowHandoffQuery(input: AttendanceWorkflowHan
     workflowName: approvalFlowName,
     workflowDescription: `Attendance ${formatRequestTypeLabel(input.requestType).toLowerCase()} starter from approval builder`,
     workflowStarterId,
+    templateId: workflowStarterId,
     ...(normalizeQueryString(input.approvalFlowId) ? { approvalFlowId: normalizeQueryString(input.approvalFlowId) } : {}),
   }
 }
@@ -130,5 +132,6 @@ export function readAttendanceWorkflowHandoff(query: Record<string, unknown>): A
       normalizeQueryString(query.workflowDescription)
       || `Attendance ${formatRequestTypeLabel(requestType).toLowerCase()} starter from approval builder`,
     workflowStarterId,
+    templateId: normalizeQueryString(query.templateId) || workflowStarterId,
   }
 }

@@ -9,22 +9,26 @@ Baseline docs:
 
 ## Goal
 
-Add a safe, attendance-native handoff from the leave approval builder into the existing workflow designer surface without changing the live attendance approval execution model.
+Add a safe, attendance-native handoff from the leave approval builder into the existing workflow designer surface, and make the recommended starter executable without changing the live attendance approval execution model.
 
-This slice is intentionally about navigation, context transfer, and operator guidance. It is not a workflow-engine migration.
+This slice is intentionally about navigation, context transfer, executable template seeding, and operator guidance. It is not a workflow-engine migration.
 
-## Current Constraint
+## Routing Strategy
 
-The safest handoff target is not the global `workflow-designer` route.
+The entry point still starts inside the attendance shell at `/attendance?tab=workflow`, but the handoff is no longer limited to an advisory card.
 
-Why:
+Why this shape remains intentional:
 
 - the attendance product already has a stable embedded workflow tab at `/attendance?tab=workflow`
 - `AttendanceExperienceView` already uses `route.query.tab` as the shell state contract
-- the standalone `workflow-designer` route is referenced in types and internal links, but is not currently registered in `apps/web/src/main.ts`
-- `WorkflowDesigner.vue` still contains `router.replace({ name: 'workflow-designer', ... })` after template instantiation, so using `templateId` as the primary handoff contract would depend on a route that is not safely registered
+- the attendance workflow tab provides the right operator context card before handing off into the standalone designer
+- the standalone `workflow-designer` route is now registered in `apps/web/src/main.ts`
+- attendance-focused mode now explicitly allows `/workflows` prefixes when the workflow feature is enabled, so route replacement after template instantiation no longer bounces the user back to `/attendance`
 
-Because of that, the handoff design in this slice stays inside the attendance shell.
+Because of that, the design now uses a two-step path:
+
+1. enter through the attendance workflow tab with handoff context
+2. let `WorkflowDesigner.vue` instantiate the starter and route into the standalone designer draft
 
 ## Implemented Design
 
@@ -49,6 +53,7 @@ Current query fields:
 - `workflowName`
 - `workflowDescription`
 - `workflowStarterId`
+- `templateId`
 
 This keeps the handoff serializable, bookmarkable, and testable without pushing large JSON blobs into the URL.
 
@@ -58,16 +63,16 @@ Files:
 
 - `apps/web/src/views/attendance/AttendanceLeavePoliciesSection.vue`
 
-The leave policy admin now exposes a dedicated `Workflow designer handoff` panel under the approval builder.
+The leave policy admin exposes a dedicated `Workflow designer handoff` panel under the approval builder.
 
 It provides:
 
 - the recommended starter type
 - the current flow name
 - an explicit CTA to open the workflow tab
-- a clear warning that this is a starter brief, not a replacement for the live attendance approval engine
+- a clear warning that workflow design is still a starter path, not a replacement for the live attendance approval engine
 
-The CTA does not try to instantiate a workflow template automatically. It only transfers context into the attendance workflow tab.
+The CTA still opens the attendance workflow tab first, but it now carries an executable starter contract through `templateId`.
 
 ### 3. Workflow Tab Handoff Card
 
@@ -75,7 +80,7 @@ Files:
 
 - `apps/web/src/views/attendance/AttendanceWorkflowDesigner.vue`
 
-The workflow tab wrapper now reads the handoff query and shows a dedicated context card above the system workflow designer runtime.
+The workflow tab wrapper reads the handoff query and shows a dedicated context card above the system workflow designer runtime.
 
 The card includes:
 
@@ -90,32 +95,48 @@ The card includes:
 
 This makes the designer feel like a continuation of the attendance admin flow instead of a disconnected subsystem.
 
-### 4. Workflow Draft Prefill
+### 4. Workflow Draft Prefill And Starter Execution
 
 Files:
 
 - `apps/web/src/views/WorkflowDesigner.vue`
 
-When the workflow designer opens in create mode from attendance handoff, it now seeds the new draft with:
+When the workflow designer opens in create mode from attendance handoff, it now:
 
-- `workflowName`
-- `workflowDescription`
+- seeds the new draft with `workflowName`
+- seeds the new draft with `workflowDescription`
+- reads `templateId`
+- instantiates the recommended workflow template automatically
+- forwards `description` and `category: approval` into template instantiation
 
-This avoids dropping the operator into an empty draft with no trace of the originating approval flow.
+This avoids dropping the operator into an empty draft with no trace of the originating approval flow, and turns the recommended starter into an actual draft bootstrap.
+
+### 5. Standalone Workflow Route Repair
+
+Files:
+
+- `apps/web/src/main.ts`
+
+The global designer route is now explicitly registered:
+
+- `/workflows/designer/:id?`
+- route name: `workflow-designer`
+
+Attendance-focused mode also now allows `/workflows` prefixes when workflow capability is enabled. This makes the existing `router.replace({ name: 'workflow-designer', ... })` path safe after template instantiation.
 
 ## Design Decisions
 
-### Do Not Auto-Apply Templates In This Slice
+### Enter Through Attendance, Finish In Workflow Designer
 
-The helper still computes a `workflowStarterId`, but this slice does not auto-apply it.
+The handoff still enters through the attendance shell instead of deep-linking directly to the standalone designer.
 
 Reason:
 
-- auto-instantiation currently routes through `workflow-designer`
-- that route is not safely registered in the current shell
-- auto-applying a template would make the handoff fragile for the wrong reason
+- the attendance shell is still the right place to show request-type and approval-flow context
+- the system designer should remain a continuation, not a cold entry
+- now that the standalone route is repaired, the designer can safely take over after template instantiation
 
-So the starter is currently advisory, not executable.
+The result is a safer hybrid: context first, executable starter second.
 
 ### Keep Attendance Approval Execution Unchanged
 
@@ -142,23 +163,26 @@ This handoff crosses admin and workflow tabs. Query state is the most stable con
 - `apps/web/src/views/attendance/AttendanceLeavePoliciesSection.vue`
 - `apps/web/src/views/attendance/AttendanceWorkflowDesigner.vue`
 - `apps/web/src/views/WorkflowDesigner.vue`
+- `apps/web/src/main.ts`
 - `apps/web/tests/attendanceWorkflowHandoff.spec.ts`
 - `apps/web/tests/AttendanceLeavePoliciesSection.spec.ts`
+- `apps/web/tests/WorkflowDesigner.attendanceHandoff.spec.ts`
 - `apps/web/tests/attendance-workflow-designer-zh.spec.ts`
 - `apps/web/tests/attendance-experience-zh-tabs.spec.ts`
+- `apps/web/tests/workflowDesignerPersistence.spec.ts`
 
 ## Non-Goals
 
 This slice does not yet deliver:
 
-- automatic template instantiation from attendance handoff
 - live synchronization between approval builder steps and BPMN nodes
 - workflow publication back into attendance approval flows
-- global standalone workflow-designer route repair
+- attendance-specific starter templates beyond `simple-approval` / `parallel-review`
+- a direct builder -> standalone workflow route jump that skips the attendance shell entirely
 
 ## Next Steps
 
-1. Register or repair the standalone workflow designer route.
-2. Make `workflowStarterId` executable once the standalone route is safe.
-3. Add attendance-specific starter templates instead of generic `simple-approval` / `parallel-review` suggestions.
-4. Add reverse handoff so a workflow draft can be attached back to an attendance approval flow.
+1. Add attendance-specific starter templates instead of generic `simple-approval` / `parallel-review`.
+2. Add reverse handoff so a workflow draft can be attached back to an attendance approval flow.
+3. Add end-to-end browser validation against a live workflow backend.
+4. Decide whether the leave builder should eventually support a direct standalone-designer deep link in addition to the current attendance-shell entry.
