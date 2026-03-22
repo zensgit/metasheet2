@@ -3,6 +3,12 @@
 Date: 2026-03-22
 Branch: `codex/attendance-run20-followup-20260320`
 PR: `#536`
+Merged main commit: `796be28e7de27bd07efed118e79e1fe25e09953e`
+
+Release note:
+
+- published from `main` via `Build and Push Docker Images` run `#23401465080`
+- deploy completed successfully at `2026-03-22T10:54:34Z`
 
 ## Goal
 
