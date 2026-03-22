@@ -1183,13 +1183,14 @@ async function runAuditSceneSaveAction(actionKind: 'saved-view' | 'team-view' | 
   if (!saved) return
   if (actionKind === 'team-default') {
     auditTeamViewCollaborationDraft.value = null
-    auditTeamViewCollaborationFollowup.value = {
-      teamViewId: saved.id,
-      source: 'scene-context',
-      action: 'set-default',
-      logsAnchorId: 'plm-audit-log-results',
-      sourceAnchorId: 'plm-audit-scene-context',
-    }
+    auditTeamViewCollaborationFollowup.value = buildPlmAuditTeamViewCollaborationFollowup(
+      saved.id,
+      'scene-context',
+      'set-default',
+      {
+        sceneContextAvailable: Boolean(auditSceneContext.value),
+      },
+    )
     await nextTick()
     document.getElementById('plm-audit-log-results')?.scrollIntoView({
       behavior: 'smooth',
@@ -1667,6 +1668,9 @@ async function shareAuditTeamViewEntry(
         view.id,
         source,
         'share',
+        {
+          sceneContextAvailable: Boolean(auditSceneContext.value),
+        },
       )
     }
   return true
@@ -1699,6 +1703,9 @@ async function setAuditTeamViewDefaultEntry(
         saved.id,
         source,
         'set-default',
+        {
+          sceneContextAvailable: Boolean(auditSceneContext.value),
+        },
       )
     }
     await nextTick()

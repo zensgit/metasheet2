@@ -197,6 +197,9 @@ describe('plmAuditTeamViewCollaboration', () => {
     expect(resolvePlmAuditTeamViewCollaborationSourceAnchorId('scene-context')).toBe(
       'plm-audit-scene-context',
     )
+    expect(resolvePlmAuditTeamViewCollaborationSourceAnchorId('scene-context', {
+      sceneContextAvailable: false,
+    })).toBe('plm-audit-team-view-controls')
   })
 
   it('builds share and default follow-up state from the shared provenance contract', () => {
@@ -222,6 +225,21 @@ describe('plmAuditTeamViewCollaboration', () => {
       action: 'set-default',
       logsAnchorId: 'plm-audit-log-results',
       sourceAnchorId: 'plm-audit-scene-context',
+    })
+
+    expect(buildPlmAuditTeamViewCollaborationFollowup(
+      'audit-view-9',
+      'scene-context',
+      'share',
+      {
+        sceneContextAvailable: false,
+      },
+    )).toEqual({
+      teamViewId: 'audit-view-9',
+      source: 'scene-context',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-team-view-controls',
     })
   })
 
@@ -318,6 +336,44 @@ describe('plmAuditTeamViewCollaboration', () => {
         {
           kind: 'focus-source',
           label: 'Back to scene context|回到场景上下文',
+          emphasis: 'secondary',
+        },
+        {
+          kind: 'dismiss',
+          label: 'Done|完成',
+          emphasis: 'secondary',
+        },
+      ],
+    })
+  })
+
+  it('falls back to team-view controls when scene-context provenance survives but the scene banner is gone', () => {
+    expect(buildPlmAuditTeamViewCollaborationFollowupNotice({
+      id: 'audit-view-9',
+      isDefault: false,
+      isArchived: false,
+    }, {
+      teamViewId: 'audit-view-9',
+      source: 'scene-context',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-team-view-controls',
+    }, {
+      canSetDefault: true,
+    }, tr)).toEqual({
+      sourceLabel: 'Scene save shortcut|场景快捷保存',
+      title: 'Share link copied.|分享链接已复制。',
+      description:
+        'This share link came from the scene quick-save flow. You can jump back to the team-view controls or continue by promoting this team view to the default audit entry.|这条分享链接来自场景快捷保存流程。你可以返回团队视图控制区，或继续将该团队视图提升为默认审计入口。',
+      actions: [
+        {
+          kind: 'set-default',
+          label: 'Set as default|设为默认',
+          emphasis: 'primary',
+        },
+        {
+          kind: 'focus-source',
+          label: 'Back to team view controls|回到团队视图控制区',
           emphasis: 'secondary',
         },
         {
