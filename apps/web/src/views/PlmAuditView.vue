@@ -1202,10 +1202,14 @@ async function runAuditSceneSaveAction(actionKind: 'saved-view' | 'team-view' | 
       tr('Scene audit saved view stored.', '场景审计已保存为本地视图。'),
     )
     if (!saved) return
-    auditSavedViewShareFollowup.value = {
-      savedViewId: saved.id,
-      source: 'scene-context',
-    }
+    clearAuditSourceFocus()
+    applySavedViewAttentionAction({
+      kind: 'install-followup',
+      shareFollowup: {
+        savedViewId: saved.id,
+        source: 'scene-context',
+      },
+    })
     await nextTick()
     document.getElementById('plm-audit-saved-views')?.scrollIntoView({
       behavior: 'smooth',
@@ -2021,9 +2025,15 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
       readCurrentRouteState(),
     )
     const savedEntry = savedViews.value[0]
-    auditSavedViewShareFollowup.value = savedEntry
-      ? { savedViewId: savedEntry.id, source: 'shared-entry' }
-      : null
+    clearAuditSourceFocus()
+    if (savedEntry) {
+      applySavedViewAttentionAction({
+        kind: 'install-followup',
+        shareFollowup: { savedViewId: savedEntry.id, source: 'shared-entry' },
+      })
+    } else {
+      clearAuditSavedViewShareFollowup()
+    }
     savedViewName.value = ''
     clearAuditTeamViewShareEntry()
     await consumeAuditTeamViewShareEntryQuery()

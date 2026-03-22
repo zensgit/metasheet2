@@ -173,6 +173,28 @@ describe('plmAuditSavedViewAttention', () => {
     })
   })
 
+  it('replaces older saved-view focus when a new local followup is installed', () => {
+    expect(reducePlmAuditSavedViewAttentionState({
+      shareFollowup: {
+        savedViewId: 'saved-1',
+        source: 'shared-entry',
+      },
+      focusedSavedViewId: 'saved-2',
+    }, {
+      kind: 'install-followup',
+      shareFollowup: {
+        savedViewId: 'saved-3',
+        source: 'scene-context',
+      },
+    })).toEqual({
+      shareFollowup: {
+        savedViewId: 'saved-3',
+        source: 'scene-context',
+      },
+      focusedSavedViewId: '',
+    })
+  })
+
   it('only clears the deleted saved-view attention target', () => {
     expect(reducePlmAuditSavedViewAttentionState({
       shareFollowup: {

@@ -17,6 +17,7 @@ export type PlmAuditAttentionFocusState = {
 }
 
 export type PlmAuditSavedViewAttentionAction =
+  | { kind: 'install-followup'; shareFollowup: PlmAuditSavedViewShareFollowup }
   | { kind: 'apply' | 'context-action' | 'filter-navigation' | 'promotion-handoff' | 'reset-filters' | 'share-entry-takeover' }
   | { kind: 'delete'; savedViewId: string }
 
@@ -74,6 +75,13 @@ export function reducePlmAuditSavedViewAttentionState(
   state: PlmAuditSavedViewAttentionState,
   action: PlmAuditSavedViewAttentionAction,
 ): PlmAuditSavedViewAttentionState {
+  if (action.kind === 'install-followup') {
+    return {
+      shareFollowup: action.shareFollowup,
+      focusedSavedViewId: '',
+    }
+  }
+
   if (action.kind === 'delete') {
     return {
       shareFollowup: state.shareFollowup?.savedViewId === action.savedViewId
