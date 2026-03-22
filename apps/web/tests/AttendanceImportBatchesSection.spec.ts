@@ -3,6 +3,7 @@ import { createApp, type App, type Ref, ref } from 'vue'
 import AttendanceImportBatchesSection from '../src/views/attendance/AttendanceImportBatchesSection.vue'
 import type {
   AttendanceImportBatch,
+  AttendanceImportBatchImpactReport,
   AttendanceImportItem,
 } from '../src/views/attendance/useAttendanceAdminImportBatches'
 
@@ -11,9 +12,12 @@ type MaybePromise<T> = T | Promise<T>
 interface ImportBatchesBindings {
   importBatchLoading: Ref<boolean>
   importBatches: Ref<AttendanceImportBatch[]>
+  importBatchImpactLoading: Ref<boolean>
+  importBatchImpactReport: Ref<AttendanceImportBatchImpactReport | null>
   importBatchItems: Ref<AttendanceImportItem[]>
   importBatchSelectedId: Ref<string>
   importBatchSnapshot: Ref<Record<string, any> | null>
+  loadFullImportBatchImpact: (batchId: string) => MaybePromise<void>
   reloadImportBatches: () => MaybePromise<void>
   loadImportBatchItems: (batchId: string) => MaybePromise<void>
   rollbackImportBatch: (batchId: string) => MaybePromise<void>
@@ -92,6 +96,8 @@ describe('AttendanceImportBatchesSection', () => {
           },
         }),
       ]),
+      importBatchImpactLoading: ref(false),
+      importBatchImpactReport: ref(null),
       importBatchSelectedId: ref('batch-b'),
       importBatchItems: ref([
         createItem({ id: 'item-a', batchId: 'batch-b' }),
@@ -111,6 +117,7 @@ describe('AttendanceImportBatchesSection', () => {
         }),
       ]),
       importBatchSnapshot: ref(null),
+      loadFullImportBatchImpact: vi.fn(),
       reloadImportBatches: vi.fn(),
       loadImportBatchItems: vi.fn(),
       rollbackImportBatch: vi.fn(),
@@ -141,9 +148,14 @@ describe('AttendanceImportBatchesSection', () => {
     expect(container!.textContent).toContain('Selected batch')
     expect(container!.textContent).toContain('Rollback impact estimate')
     expect(container!.textContent).toContain('Coverage: 2 / 7')
+    expect(container!.textContent).toContain('Source: Loaded items')
+    expect(container!.textContent).toContain('Load exact impact')
     expect(container!.textContent).toContain('Est. committed rows')
     expect(container!.textContent).toContain('Rollback notes')
     expect(container!.textContent).toContain('Estimate is based on 2 of 7 row(s)')
+    expect(container!.textContent).toContain('Retry guidance')
+    expect(container!.textContent).toContain('Repair mapping and identity merge first')
+    expect(container!.textContent).toContain('Prefer rollback over direct import retry')
     expect(container!.textContent).toContain('Operator notes')
     expect(container!.textContent).toContain('Mapping viewer')
     expect(container!.textContent).toContain('employeeNo')
@@ -155,6 +167,8 @@ describe('AttendanceImportBatchesSection', () => {
     const workflow: ImportBatchesBindings = {
       importBatchLoading: ref(false),
       importBatches: ref([createBatch({ id: 'batch-a', rowCount: 2 })]),
+      importBatchImpactLoading: ref(false),
+      importBatchImpactReport: ref(null),
       importBatchSelectedId: ref('batch-a'),
       importBatchItems: ref([
         createItem({
@@ -192,6 +206,7 @@ describe('AttendanceImportBatchesSection', () => {
         }),
       ]),
       importBatchSnapshot: ref(null),
+      loadFullImportBatchImpact: vi.fn(),
       reloadImportBatches: vi.fn(),
       loadImportBatchItems: vi.fn(),
       rollbackImportBatch: vi.fn(),
@@ -241,6 +256,111 @@ describe('AttendanceImportBatchesSection', () => {
     expect(container!.textContent).toContain('Copy snapshot JSON')
   })
 
+  it('loads exact batch impact and refreshes retry guidance', async () => {
+    const impactReport = ref<AttendanceImportBatchImpactReport | null>(null)
+    const loadFullImportBatchImpact = vi.fn(async (batchId: string) => {
+      impactReport.value = {
+        batchId,
+        mode: 'full',
+        itemCount: 4,
+        summary: {
+          totalItems: 4,
+          anomalyItems: 2,
+          warningItems: 1,
+          missingRecordItems: 0,
+          lateItems: 1,
+          earlyLeaveItems: 0,
+          leaveItems: 0,
+          overtimeItems: 0,
+          normalItems: 2,
+        },
+        estimate: {
+          loadedItems: 4,
+          totalBatchRows: 4,
+          estimatedCommittedRows: 4,
+          previewOnlyRows: 0,
+          flaggedRows: 2,
+          warningRows: 1,
+          policyReviewRows: 1,
+          coveragePercent: 100,
+          isPartial: false,
+        },
+        issueBuckets: [
+          { filter: 'all', count: 4 },
+          { filter: 'anomalies', count: 2 },
+          { filter: 'warnings', count: 1 },
+          { filter: 'late', count: 1 },
+          { filter: 'clean', count: 2 },
+        ],
+      }
+    })
+    const workflow: ImportBatchesBindings = {
+      importBatchLoading: ref(false),
+      importBatches: ref([
+        createBatch({
+          id: 'batch-api',
+          rowCount: 4,
+          status: 'rolled_back',
+          source: 'api',
+          createdBy: 'ops-9',
+          meta: {
+            engine: 'standard',
+          },
+        }),
+      ]),
+      importBatchImpactLoading: ref(false),
+      importBatchImpactReport: impactReport,
+      importBatchSelectedId: ref('batch-api'),
+      importBatchItems: ref([
+        createItem({
+          id: 'item-a',
+          batchId: 'batch-api',
+          recordId: null,
+          previewSnapshot: {
+            metrics: {
+              status: 'late',
+              workMinutes: 450,
+              lateMinutes: 10,
+            },
+            warnings: ['missing identity'],
+          },
+        }),
+      ]),
+      importBatchSnapshot: ref(null),
+      loadFullImportBatchImpact,
+      reloadImportBatches: vi.fn(),
+      loadImportBatchItems: vi.fn(),
+      rollbackImportBatch: vi.fn(),
+      exportImportBatchItemsCsv: vi.fn(),
+      toggleImportBatchSnapshot: vi.fn(),
+    }
+
+    app = createApp(AttendanceImportBatchesSection, {
+      tr,
+      workflow,
+      resolveRuleSetName,
+      formatStatus,
+      formatDateTime,
+      formatJson,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const exactImpactButton = Array.from(container!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Load exact impact'),
+    ) as HTMLButtonElement | undefined
+    expect(exactImpactButton).toBeTruthy()
+    exactImpactButton!.click()
+    await flushUi()
+
+    expect(loadFullImportBatchImpact).toHaveBeenCalledWith('batch-api')
+    expect(container!.textContent).toContain('Source: Full batch')
+    expect(container!.textContent).toContain('Coverage: 4 / 4')
+    expect(container!.textContent).toContain('Refresh exact impact')
+    expect(container!.textContent).toContain('Fix upstream payload')
+    expect(container!.textContent).toContain('Patch the upstream API producer before retry')
+  })
+
   it('filters the batch inbox by search, status, engine, and source', async () => {
     const workflow: ImportBatchesBindings = {
       importBatchLoading: ref(false),
@@ -279,9 +399,12 @@ describe('AttendanceImportBatchesSection', () => {
           },
         }),
       ]),
+      importBatchImpactLoading: ref(false),
+      importBatchImpactReport: ref(null),
       importBatchSelectedId: ref('batch-alpha'),
       importBatchItems: ref([]),
       importBatchSnapshot: ref(null),
+      loadFullImportBatchImpact: vi.fn(),
       reloadImportBatches: vi.fn(),
       loadImportBatchItems: vi.fn(),
       rollbackImportBatch: vi.fn(),
@@ -392,9 +515,12 @@ describe('AttendanceImportBatchesSection', () => {
     const workflow: ImportBatchesBindings = {
       importBatchLoading: ref(false),
       importBatches: ref([]),
+      importBatchImpactLoading: ref(false),
+      importBatchImpactReport: ref(null),
       importBatchItems: ref([]),
       importBatchSelectedId: ref(''),
       importBatchSnapshot: ref(null),
+      loadFullImportBatchImpact: vi.fn(),
       reloadImportBatches: vi.fn(),
       loadImportBatchItems: vi.fn(),
       rollbackImportBatch: vi.fn(),

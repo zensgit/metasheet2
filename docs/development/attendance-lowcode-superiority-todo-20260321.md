@@ -20,6 +20,7 @@ Scope: Phase 1 release candidate on `codex/attendance-run20-followup-20260320`
 - [x] Add batch issue chips and search-based triage.
 - [x] Add batch-level operator notes derived from anomaly summary.
 - [x] Add loaded-item rollback impact estimation and guidance.
+- [x] Add exact full-batch impact refresh and targeted retry guidance.
 - [x] Expose batch mapping payload in a dedicated mapping viewer.
 - [x] Add structured snapshot diagnostics for metrics, policy, and engine sections.
 - [x] Add snapshot copy/raw-view actions.
@@ -35,7 +36,8 @@ Scope: Phase 1 release candidate on `codex/attendance-run20-followup-20260320`
 
 ## Next Phase Candidates
 
-- [ ] Add targeted retry guidance and rollback confirmation flows based on exact full-batch impact.
+- [ ] Add rollback confirmation flows that embed exact full-batch impact directly into the destructive action.
+- [ ] Add saved inbox views and reusable filter presets for operations teams.
 - [ ] Convert leave policies from JSON editing to visual builder flows.
 - [ ] Convert payroll templates from JSON editing to visual builder flows.
 - [ ] Add attendance-native workflow nodes and templates.

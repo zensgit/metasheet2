@@ -98,6 +98,8 @@ Delivered:
 - Issue chips and search-based batch item triage.
 - Selected batch meta summary.
 - Rollback impact estimate based on loaded batch items, with coverage, committed-row estimate, and risk notes.
+- Exact full-batch impact refresh that pages through the whole batch before rollback decisions.
+- Targeted retry guidance derived from mapping gaps, warnings, policy-sensitive rows, source type, and engine profile.
 - Operator notes generated from batch-level anomaly summary.
 - Mapping viewer that exposes batch mapping payload instead of only counting fields.
 - Selected row detail panel with severity, metrics, warnings, and recommended next steps.
@@ -121,6 +123,8 @@ Compared with typical low-code attendance apps built on general form/workflow pl
    Generic low-code tools often stop at import success/failure; this branch exposes batch diagnostics, mapping visibility, snapshot sections, and next-step guidance in one surface.
 3. Rollback decisions are explainable.
    Generic low-code tools usually expose a destructive rollback action without showing estimated affected rows, partial coverage, or policy-sensitive records first.
+4. Repair paths are explicit.
+   Generic low-code tools rarely tell operators whether they should repair mapping, rerun preview, fix upstream API payloads, or prefer rollback; this branch now does.
 
 ## Validation Gates
 
@@ -137,7 +141,7 @@ pnpm --filter @metasheet/web build
 
 These are intentionally left for the next round, not for this release candidate:
 
-1. Targeted retry assistant and rollback confirmation flows based on exact full-batch impact.
+1. Rollback confirmation flows that embed exact full-batch impact directly into the destructive action.
 2. Saved inbox views and reusable filter presets for operations teams.
 3. Visual builders for leave policies and payroll templates to remove more JSON editing.
 4. Attendance-native workflow nodes for exception handling,补卡, leave, and escalation.

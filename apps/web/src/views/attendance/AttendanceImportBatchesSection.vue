@@ -205,11 +205,32 @@
       <div v-if="selectedBatchRollbackEstimate.loadedItems > 0" class="attendance__detail-panel">
         <div class="attendance__subheading-row">
           <h6 class="attendance__subheading">{{ tr('Rollback impact estimate', '回滚影响估算') }}</h6>
-          <span class="attendance__section-meta">
-            {{ tr('Coverage', '覆盖范围') }}:
-            <strong>{{ selectedBatchRollbackEstimate.loadedItems }} / {{ selectedBatchRollbackEstimate.totalBatchRows }}</strong>
-            <span v-if="selectedBatchRollbackEstimate.coveragePercent !== null"> ({{ selectedBatchRollbackEstimate.coveragePercent }}%)</span>
-          </span>
+          <div class="attendance__table-actions">
+            <span class="attendance__section-meta">
+              {{ tr('Source', '估算来源') }}: <strong>{{ selectedBatchImpactModeLabel }}</strong>
+              <span> · {{ tr('Coverage', '覆盖范围') }}:
+                <strong>{{ selectedBatchRollbackEstimate.loadedItems }} / {{ selectedBatchRollbackEstimate.totalBatchRows }}</strong>
+                <span v-if="selectedBatchRollbackEstimate.coveragePercent !== null"> ({{ selectedBatchRollbackEstimate.coveragePercent }}%)</span>
+              </span>
+            </span>
+            <button
+              class="attendance__btn"
+              type="button"
+              :disabled="importBatchLoading || importBatchImpactLoading"
+              @click="loadFullImportBatchImpact(selectedBatch?.id || '')"
+            >
+              {{
+                importBatchImpactLoading
+                  ? tr('Loading exact impact...', '正在加载精确影响...')
+                  : selectedBatchImpactMode === 'full'
+                    ? tr('Refresh exact impact', '刷新精确影响')
+                    : tr('Load exact impact', '加载精确影响')
+              }}
+            </button>
+          </div>
+        </div>
+        <div v-if="selectedBatchImpactMode === 'loaded'" class="attendance__field-hint">
+          {{ tr('Currently showing a loaded-item estimate. Load exact impact to page through the whole batch before rollback.', '当前显示的是已加载条目估算。回滚前请先加载精确影响，以分页拉取整批数据。') }}
         </div>
         <div class="attendance__impact-summary">
           <div class="attendance__impact-card">
@@ -242,6 +263,22 @@
           <ul class="attendance__detail-hints-list">
             <li v-for="note in selectedBatchRollbackNotes" :key="note">{{ note }}</li>
           </ul>
+        </div>
+      </div>
+
+      <div v-if="selectedBatchRetryGuidance.length" class="attendance__mapping-panel">
+        <div class="attendance__subheading-row">
+          <h6 class="attendance__subheading">{{ tr('Retry guidance', '重试指引') }}</h6>
+          <span class="attendance__section-meta">
+            {{ tr('Based on', '依据') }}: <strong>{{ selectedBatchImpactModeLabel }}</strong>
+          </span>
+        </div>
+        <div class="attendance__snapshot-grid">
+          <div v-for="step in selectedBatchRetryGuidance" :key="step.key" class="attendance__snapshot-card">
+            <span class="attendance__detail-hints-title">{{ step.actionLabel }}</span>
+            <strong>{{ step.title }}</strong>
+            <div class="attendance__field-hint">{{ step.detail }}</div>
+          </div>
         </div>
       </div>
 
@@ -421,6 +458,7 @@
 import { computed, ref, type Ref } from 'vue'
 import {
   buildImportBatchRollbackNotes,
+  buildImportBatchRetryGuidance,
   buildImportBatchActionHints,
   buildImportBatchSearchIndex,
   classifyImportBatchItem,
@@ -432,9 +470,11 @@ import {
   summarizeImportBatchIssueClusters,
   summarizeImportBatchItems,
   type AttendanceImportBatch,
+  type AttendanceImportBatchImpactReport,
   type AttendanceImportBatchImpactSummary,
   type AttendanceImportBatchIssueCluster,
   type AttendanceImportBatchIssueFilter,
+  type AttendanceImportBatchRetryGuidanceStep,
   type AttendanceImportBatchSeverity,
   type AttendanceImportItem,
   type AttendanceImportBatchItemAnalysis,
@@ -451,9 +491,12 @@ type BatchTimeSlicePresetOption = {
 interface ImportBatchesBindings {
   importBatchLoading: Ref<boolean>
   importBatches: Ref<AttendanceImportBatch[]>
+  importBatchImpactLoading: Ref<boolean>
+  importBatchImpactReport: Ref<AttendanceImportBatchImpactReport | null>
   importBatchItems: Ref<AttendanceImportItem[]>
   importBatchSelectedId: Ref<string>
   importBatchSnapshot: Ref<Record<string, any> | null>
+  loadFullImportBatchImpact: (batchId: string) => MaybePromise<void>
   reloadImportBatches: () => MaybePromise<void>
   loadImportBatchItems: (batchId: string) => MaybePromise<void>
   rollbackImportBatch: (batchId: string) => MaybePromise<void>
@@ -474,9 +517,12 @@ const props = defineProps<{
 const tr = props.tr
 const importBatchLoading = props.workflow.importBatchLoading
 const importBatches = props.workflow.importBatches
+const importBatchImpactLoading = props.workflow.importBatchImpactLoading
+const importBatchImpactReport = props.workflow.importBatchImpactReport
 const importBatchItems = props.workflow.importBatchItems
 const importBatchSelectedId = props.workflow.importBatchSelectedId
 const importBatchSnapshot = props.workflow.importBatchSnapshot
+const loadFullImportBatchImpact = (batchId: string) => props.workflow.loadFullImportBatchImpact(batchId)
 const reloadImportBatches = () => props.workflow.reloadImportBatches()
 const loadImportBatchItems = (batchId: string) => props.workflow.loadImportBatchItems(batchId)
 const rollbackImportBatch = (batchId: string) => props.workflow.rollbackImportBatch(batchId)
@@ -606,9 +652,33 @@ const selectedImportBatchActionHints = computed(() => {
   }
   return hints
 })
+const selectedBatchLoadedRollbackEstimate = computed(() => estimateImportBatchRollbackImpact(selectedBatch.value, importBatchItems.value))
+const selectedBatchImpactReport = computed<AttendanceImportBatchImpactReport | null>(() => {
+  const batch = selectedBatch.value
+  const report = importBatchImpactReport.value
+  if (!batch || !report || report.batchId !== batch.id) return null
+  return report
+})
+const selectedBatchImpactMode = computed<'loaded' | 'full'>(() => (
+  selectedBatchImpactReport.value ? 'full' : 'loaded'
+))
+const selectedBatchImpactModeLabel = computed(() => (
+  selectedBatchImpactMode.value === 'full'
+    ? tr('Full batch', '整批')
+    : tr('Loaded items', '已加载条目')
+))
+const selectedBatchImpactSummary = computed<AttendanceImportBatchImpactSummary>(() => (
+  selectedBatchImpactReport.value?.summary ?? batchItemSummary.value
+))
+const selectedBatchRollbackEstimate = computed(() => (
+  selectedBatchImpactReport.value?.estimate ?? selectedBatchLoadedRollbackEstimate.value
+))
+const selectedBatchRetryGuidance = computed<AttendanceImportBatchRetryGuidanceStep[]>(() => (
+  buildImportBatchRetryGuidance(selectedBatch.value, selectedBatchImpactSummary.value, selectedBatchRollbackEstimate.value, tr)
+))
 const selectedBatchOperatorNotes = computed(() => {
   const batch = selectedBatch.value
-  const notes = buildImportBatchActionHints(batchItemSummary.value, tr)
+  const notes = buildImportBatchActionHints(selectedBatchImpactSummary.value, tr)
   if (!batch) return notes
   const mappingKeys = batch.mapping && typeof batch.mapping === 'object' ? Object.keys(batch.mapping).length : 0
   if (mappingKeys > 0) {
@@ -628,15 +698,17 @@ const selectedBatchOperatorNotes = computed(() => {
   if (batch.updatedAt) {
     notes.push(tr(`Updated ${formatDateTime(batch.updatedAt)}`, `更新时间 ${formatDateTime(batch.updatedAt)}`))
   }
-  if (batchItemSummary.value.missingRecordItems > 0) {
+  if (selectedBatchImpactSummary.value.missingRecordItems > 0) {
     notes.push(tr('Missing records usually point to row mapping or identity merge mismatches.', '缺少记录通常意味着行映射或身份归并不匹配。'))
   }
-  if (batchItemSummary.value.warningItems > 0) {
+  if (selectedBatchImpactSummary.value.warningItems > 0) {
     notes.push(tr('Warnings should be reviewed before a rollback decision.', '警告需要先复核，再决定是否回滚。'))
+  }
+  if (selectedBatchImpactMode.value === 'full') {
+    notes.push(tr('Full-batch impact is loaded. Use it as the decision baseline before rollback or retry.', '整批影响面已加载。回滚或重试前请以此作为决策基线。'))
   }
   return notes
 })
-const selectedBatchRollbackEstimate = computed(() => estimateImportBatchRollbackImpact(selectedBatch.value, importBatchItems.value))
 const selectedBatchRollbackNotes = computed(() => buildImportBatchRollbackNotes(selectedBatchRollbackEstimate.value, tr))
 const selectedBatchMappingEntries = computed(() => {
   const mapping = selectedBatch.value?.mapping

@@ -658,11 +658,14 @@ const {
 })
 const {
   exportImportBatchItemsCsv,
+  importBatchImpactLoading,
+  importBatchImpactReport,
   importBatchItems,
   importBatchSelectedId,
   importBatchSnapshot,
   importBatches,
   importLoading: importBatchLoading,
+  loadFullImportBatchImpact,
   loadImportBatchItems,
   loadImportBatches,
   rollbackImportBatch,
@@ -1258,11 +1261,14 @@ const importWorkflowSectionBindings = {
 }
 const importBatchesSectionBindings = {
   exportImportBatchItemsCsv,
+  importBatchImpactLoading,
+  importBatchImpactReport,
   importBatchItems,
   importBatchLoading,
   importBatchSelectedId,
   importBatchSnapshot,
   importBatches,
+  loadFullImportBatchImpact,
   loadImportBatchItems,
   reloadImportBatches: () => loadImportBatches({ orgId: normalizedOrgId() }),
   rollbackImportBatch: (batchId: string) => rollbackImportBatch(batchId, { orgId: normalizedOrgId() }),

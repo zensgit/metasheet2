@@ -2,6 +2,7 @@ import { ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import {
   buildImportBatchRollbackNotes,
+  buildImportBatchRetryGuidance,
   buildImportBatchActionHints,
   classifyImportBatchItem,
   estimateImportBatchRollbackImpact,
@@ -214,6 +215,61 @@ describe('useAttendanceAdminImportBatches', () => {
     )
   })
 
+  it('builds targeted retry guidance from batch source, warnings, and policy-sensitive rows', () => {
+    const batch = createBatch({
+      id: 'batch-a',
+      source: 'api',
+      meta: {
+        engine: 'bulk',
+        chunkConfig: {
+          itemsChunkSize: 100,
+          recordsChunkSize: 50,
+        },
+      },
+    })
+    const items = [
+      createItem({
+        id: 'item-1',
+        batchId: 'batch-a',
+        recordId: null,
+        previewSnapshot: {
+          metrics: {
+            status: 'late',
+            workMinutes: 450,
+            lateMinutes: 18,
+          },
+          warnings: ['missing mapping'],
+        },
+      }),
+      createItem({
+        id: 'item-2',
+        batchId: 'batch-a',
+        recordId: 'record-2',
+        previewSnapshot: {
+          metrics: {
+            status: 'normal',
+            workMinutes: 480,
+          },
+        },
+      }),
+    ]
+
+    const summary = summarizeImportBatchItems(items)
+    const estimate = estimateImportBatchRollbackImpact(batch, items)
+    const steps = buildImportBatchRetryGuidance(batch, summary, estimate, tr)
+
+    expect(steps.map((step) => step.actionLabel)).toEqual(
+      expect.arrayContaining([
+        'Repair mapping',
+        'Retry preview',
+        'Tune policy',
+        'Fix upstream payload',
+        'Keep chunk profile',
+      ]),
+    )
+    expect(steps.some((step) => step.detail.includes('100/50'))).toBe(true)
+  })
+
   it('loads batches and items', async () => {
     const apiFetch = vi.fn(async (input: string) => {
       if (input === '/api/attendance/import/batches?orgId=org-1') {
@@ -238,6 +294,107 @@ describe('useAttendanceAdminImportBatches', () => {
     expect(batches.importBatches.value.map((item) => item.id)).toEqual(['batch-a'])
     expect(batches.importBatchSelectedId.value).toBe('batch-a')
     expect(batches.importBatchItems.value.map((item) => item.id)).toEqual(['item-a'])
+  })
+
+  it('loads exact full-batch impact through paginated item fetch', async () => {
+    const apiFetch = vi.fn(async (input: string) => {
+      const url = String(input)
+      if (url === '/api/attendance/import/batches?orgId=org-1') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              createBatch({
+                id: 'batch-a',
+                rowCount: 3,
+                source: 'csv',
+                meta: {
+                  engine: 'bulk',
+                },
+              }),
+            ],
+          },
+        })
+      }
+      if (url === '/api/attendance/import/batches/batch-a/items?page=1&pageSize=200') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              createItem({
+                id: 'item-1',
+                batchId: 'batch-a',
+                recordId: 'record-1',
+                previewSnapshot: {
+                  metrics: {
+                    status: 'normal',
+                    workMinutes: 480,
+                  },
+                },
+              }),
+              createItem({
+                id: 'item-2',
+                batchId: 'batch-a',
+                recordId: null,
+                previewSnapshot: {
+                  metrics: {
+                    status: 'late',
+                    workMinutes: 450,
+                    lateMinutes: 18,
+                  },
+                  warnings: ['late arrival'],
+                },
+              }),
+            ],
+            total: 3,
+          },
+        })
+      }
+      if (url === '/api/attendance/import/batches/batch-a/items?page=2&pageSize=200') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              createItem({
+                id: 'item-3',
+                batchId: 'batch-a',
+                recordId: 'record-3',
+                previewSnapshot: {
+                  metrics: {
+                    status: 'normal',
+                    workMinutes: 470,
+                  },
+                },
+              }),
+            ],
+            total: 3,
+          },
+        })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const batches = useAttendanceAdminImportBatches({ apiFetch, tr })
+
+    await batches.loadImportBatches({ orgId: 'org-1' })
+    await batches.loadFullImportBatchImpact('batch-a')
+
+    expect(batches.importBatchImpactReport.value).toMatchObject({
+      batchId: 'batch-a',
+      mode: 'full',
+      itemCount: 3,
+      summary: {
+        totalItems: 3,
+        anomalyItems: 1,
+        warningItems: 1,
+        missingRecordItems: 1,
+      },
+      estimate: {
+        totalBatchRows: 3,
+        coveragePercent: 100,
+        isPartial: false,
+      },
+    })
+    expect(batches.importStatusMessage.value).toBe('Full-batch impact loaded.')
   })
 
   it('clears the selected batch details after rollback when that batch is open', async () => {

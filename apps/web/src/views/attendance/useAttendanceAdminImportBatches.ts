@@ -110,6 +110,22 @@ export interface AttendanceImportBatchRollbackEstimate {
   isPartial: boolean
 }
 
+export interface AttendanceImportBatchImpactReport {
+  batchId: string
+  mode: 'full'
+  itemCount: number
+  summary: AttendanceImportBatchImpactSummary
+  estimate: AttendanceImportBatchRollbackEstimate
+  issueBuckets: AttendanceImportBatchIssueBucket[]
+}
+
+export interface AttendanceImportBatchRetryGuidanceStep {
+  key: string
+  actionLabel: string
+  title: string
+  detail: string
+}
+
 export interface AttendanceImportBatchActionHintMetrics {
   totalItems: number
   anomalyItems: number
@@ -389,6 +405,120 @@ export function buildImportBatchRollbackNotes(
   return notes
 }
 
+export function buildImportBatchRetryGuidance(
+  batch: AttendanceImportBatch | null | undefined,
+  summary: AttendanceImportBatchImpactSummary,
+  estimate: AttendanceImportBatchRollbackEstimate | null | undefined,
+  tr: Translate = (en) => en,
+): AttendanceImportBatchRetryGuidanceStep[] {
+  if (!batch || summary.totalItems <= 0) return []
+
+  const steps: AttendanceImportBatchRetryGuidanceStep[] = []
+  const engine = resolveImportBatchEngine(batch)
+  const chunkLabel = resolveImportBatchChunkLabel(batch)
+  const policyReviewRows = estimate?.policyReviewRows ?? 0
+  const previewOnlyRows = estimate?.previewOnlyRows ?? summary.missingRecordItems
+  const anomalyRatio = summary.totalItems > 0 ? summary.anomalyItems / summary.totalItems : 0
+
+  if (previewOnlyRows > 0) {
+    steps.push({
+      key: 'mapping',
+      actionLabel: tr('Repair mapping', '修复映射'),
+      title: tr('Repair mapping and identity merge first', '优先修复映射与身份归并'),
+      detail: tr(
+        `${previewOnlyRows} row(s) do not show committed records yet. Review the mapping viewer, export anomalies, and rerun preview before retrying commit.`,
+        `有 ${previewOnlyRows} 行尚未显示已提交记录。请先核对映射预览、导出异常，再重新预演后再试提交。`,
+      ),
+    })
+  }
+
+  if (summary.warningItems > 0) {
+    steps.push({
+      key: 'preview',
+      actionLabel: tr('Retry preview', '重试预演'),
+      title: tr('Retry preview before any new import commit', '再次导入前先重试预演'),
+      detail: tr(
+        `${summary.warningItems} row(s) emitted warnings. Export anomalies CSV and clear the warning payload before retrying import.`,
+        `有 ${summary.warningItems} 行产生警告。请先导出异常 CSV 并清理警告载荷，再重试导入。`,
+      ),
+    })
+  }
+
+  if (policyReviewRows > 0) {
+    steps.push({
+      key: 'policy',
+      actionLabel: tr('Tune policy', '调整规则'),
+      title: tr('Tune rule-set and shift windows before retry', '重试前先校正规则集与班次窗口'),
+      detail: tr(
+        `${policyReviewRows} row(s) are policy-sensitive. Align grace settings, leave handling, and overtime expectations before rerunning the batch.`,
+        `有 ${policyReviewRows} 行属于规则敏感项。请先对齐宽限、请假和加班规则，再重新执行批次。`,
+      ),
+    })
+  }
+
+  if (batch.source === 'api') {
+    steps.push({
+      key: 'source-api',
+      actionLabel: tr('Fix upstream payload', '修复上游载荷'),
+      title: tr('Patch the upstream API producer before retry', '重试前先修复上游 API 产出'),
+      detail: tr(
+        'This batch came from API input. Update the producer payload or field mapping upstream, then rerun preview/import with the same date scope.',
+        '该批次来自 API 输入。请先修复上游产出的字段或映射，再用相同日期范围重新预演/导入。',
+      ),
+    })
+  } else if (batch.source === 'csv') {
+    steps.push({
+      key: 'source-csv',
+      actionLabel: tr('Reuse source CSV', '复用源 CSV'),
+      title: tr('Keep the original CSV and mapping profile stable', '保持原始 CSV 与映射配置稳定'),
+      detail: tr(
+        'Retry with the same source CSV and mapping profile after cleanup so you can compare the new preview against the archived anomalies export.',
+        '清理后请使用同一份源 CSV 和映射配置重试，便于把新预演与已归档的异常导出做对比。',
+      ),
+    })
+  }
+
+  if (engine === 'bulk') {
+    steps.push({
+      key: 'engine-bulk',
+      actionLabel: tr('Keep chunk profile', '保持分块配置'),
+      title: tr('Keep the bulk chunk profile stable while retrying', '重试时保持 bulk 分块配置稳定'),
+      detail: tr(
+        chunkLabel !== '--'
+          ? `Current chunk profile is ${chunkLabel}. Retry preview first on the same chunk settings, then commit only after anomaly volume drops.`
+          : 'Retry preview on the current bulk-engine settings first, then commit only after anomaly volume drops.',
+        chunkLabel !== '--'
+          ? `当前分块配置是 ${chunkLabel}。请先在相同分块设置下重试预演，异常量下降后再提交。`
+          : '请先在当前 bulk 设置下重试预演，确认异常量下降后再提交。',
+      ),
+    })
+  }
+
+  if (anomalyRatio >= 0.5) {
+    steps.push({
+      key: 'prefer-rollback',
+      actionLabel: tr('Prefer rollback', '优先回滚'),
+      title: tr('Prefer rollback over direct import retry', '优先考虑回滚，而不是直接重试导入'),
+      detail: tr(
+        `${summary.anomalyItems} of ${summary.totalItems} row(s) are flagged. Rollback is likely lower risk than pushing another commit before cleanup.`,
+        `${summary.totalItems} 行中有 ${summary.anomalyItems} 行被标记。在完成清理前，整批回滚通常比再次提交更低风险。`,
+      ),
+    })
+  } else if (summary.anomalyItems === 0 && previewOnlyRows === 0) {
+    steps.push({
+      key: 'retry-commit',
+      actionLabel: tr('Retry commit', '重试提交'),
+      title: tr('Batch looks retry-ready after archive checks', '该批次在归档核对后已接近可重试'),
+      detail: tr(
+        'Loaded rows look committed and low-risk. Archive the current export, then retry commit if downstream reconciliation has not started.',
+        '当前条目看起来已提交且风险较低。先留存当前导出，再在下游尚未开始对账时重试提交。',
+      ),
+    })
+  }
+
+  return steps.slice(0, 5)
+}
+
 export function buildImportBatchActionHints(
   metrics: AttendanceImportBatchActionHintMetrics,
   tr: Translate = (en) => en,
@@ -568,6 +698,8 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
   const importBatchItems = ref<AttendanceImportItem[]>([])
   const importBatchSelectedId = ref('')
   const importBatchSnapshot = ref<Record<string, any> | null>(null)
+  const importBatchImpactLoading = ref(false)
+  const importBatchImpactReport = ref<AttendanceImportBatchImpactReport | null>(null)
   const lastLoadedOrgId = ref<string | null>(null)
 
   function setImportStatus(message: string, kind: ImportStatusKind = 'info') {
@@ -621,6 +753,9 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
       }
 
       importBatchSelectedId.value = batchId
+      if (importBatchImpactReport.value?.batchId && importBatchImpactReport.value.batchId !== batchId) {
+        importBatchImpactReport.value = null
+      }
       importBatchItems.value = Array.isArray(data.data?.items) ? data.data.items : []
       importBatchSnapshot.value = null
     } catch (error: unknown) {
@@ -659,6 +794,9 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
       }
 
       await loadImportBatches({ orgId: loadOptions.orgId ?? lastLoadedOrgId.value })
+      if (importBatchImpactReport.value?.batchId === batchId) {
+        importBatchImpactReport.value = null
+      }
       if (importBatchSelectedId.value === batchId) {
         importBatchItems.value = []
         importBatchSnapshot.value = null
@@ -703,6 +841,30 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
     }
 
     return items
+  }
+
+  async function loadFullImportBatchImpact(batchId: string) {
+    if (!batchId) return
+
+    importBatchImpactLoading.value = true
+    try {
+      const items = await fetchAllImportBatchItems(batchId)
+      const batch = importBatches.value.find((candidate) => candidate.id === batchId)
+      const summary = summarizeImportBatchItems(items)
+      importBatchImpactReport.value = {
+        batchId,
+        mode: 'full',
+        itemCount: items.length,
+        summary,
+        estimate: estimateImportBatchRollbackImpact(batch, items),
+        issueBuckets: summarizeImportBatchIssueBuckets(items),
+      }
+      setImportStatus(tr('Full-batch impact loaded.', '整批影响面已加载。'))
+    } catch (error: unknown) {
+      setImportStatus((error as Error)?.message || tr('Failed to load full batch impact', '加载整批影响面失败'), 'error')
+    } finally {
+      importBatchImpactLoading.value = false
+    }
   }
 
   async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
@@ -810,6 +972,8 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
 
   return {
     importBatchItems,
+    importBatchImpactLoading,
+    importBatchImpactReport,
     importBatchSelectedId,
     importBatchSnapshot,
     importBatches,
@@ -817,6 +981,7 @@ export function useAttendanceAdminImportBatches(options: UseAttendanceAdminImpor
     importStatusKind,
     importStatusMessage,
     exportImportBatchItemsCsv,
+    loadFullImportBatchImpact,
     loadImportBatchItems,
     loadImportBatches,
     rollbackImportBatch,
