@@ -159,6 +159,7 @@ export function buildPlmAuditRouteStateFromTeamView(
 export function resetPlmAuditRouteFilters(state: PlmAuditRouteState): PlmAuditRouteState {
   return {
     ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+    teamViewId: state.teamViewId,
     sceneId: state.sceneId,
     sceneName: state.sceneName,
     sceneOwnerUserId: state.sceneOwnerUserId,

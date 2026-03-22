@@ -153,7 +153,7 @@ describe('plmAuditQueryState', () => {
     })).toBe(true)
   })
 
-  it('resets explicit audit filters while preserving scene recovery metadata', () => {
+  it('resets explicit audit filters while preserving team-view and scene recovery context', () => {
     expect(resetPlmAuditRouteFilters({
       ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
       page: 3,
@@ -174,6 +174,7 @@ describe('plmAuditQueryState', () => {
       returnToPlmPath: '/plm?sceneFocus=scene-2',
     })).toEqual({
       ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      teamViewId: 'audit-view-1',
       sceneId: 'scene-2',
       sceneName: 'BOM 巡检场景',
       sceneOwnerUserId: 'owner-b',
