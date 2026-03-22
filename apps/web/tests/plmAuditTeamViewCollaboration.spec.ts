@@ -635,6 +635,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       action: 'share',
     }, {
       teamViewId: 'audit-view-6',
+      q: '',
       action: '',
       resourceType: '',
     })).toBe(true)
@@ -644,6 +645,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       action: 'share',
     }, {
       teamViewId: '',
+      q: '',
       action: '',
       resourceType: '',
     })).toBe(false)
@@ -653,6 +655,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       action: 'set-default',
     }, {
       teamViewId: '',
+      q: 'audit-view-9',
       action: 'set-default',
       resourceType: 'plm-team-view-default',
     })).toBe(true)
@@ -662,8 +665,19 @@ describe('plmAuditTeamViewCollaboration', () => {
       action: 'set-default',
     }, {
       teamViewId: '',
+      q: '',
       action: '',
       resourceType: '',
+    })).toBe(false)
+
+    expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
+      teamViewId: 'audit-view-9',
+      action: 'set-default',
+    }, {
+      teamViewId: '',
+      q: 'other-view',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
     })).toBe(false)
   })
 
