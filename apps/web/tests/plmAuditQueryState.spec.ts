@@ -7,6 +7,7 @@ import {
   hasExplicitPlmAuditFilters,
   isPlmAuditRouteStateEqual,
   parsePlmAuditRouteState,
+  resetPlmAuditRouteFilters,
 } from '../src/views/plmAuditQueryState'
 
 describe('plmAuditQueryState', () => {
@@ -150,6 +151,36 @@ describe('plmAuditQueryState', () => {
       ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
       q: 'documents',
     })).toBe(true)
+  })
+
+  it('resets explicit audit filters while preserving scene recovery metadata', () => {
+    expect(resetPlmAuditRouteFilters({
+      ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      page: 3,
+      q: 'documents',
+      actorId: 'dev-user',
+      kind: 'documents',
+      action: 'archive',
+      resourceType: 'plm-team-view-batch',
+      from: '2026-03-11T15:00',
+      to: '2026-03-11T16:00',
+      windowMinutes: 720,
+      teamViewId: 'audit-view-1',
+      sceneId: 'scene-2',
+      sceneName: 'BOM 巡检场景',
+      sceneOwnerUserId: 'owner-b',
+      sceneRecommendationReason: 'recent-default',
+      sceneRecommendationSourceLabel: '近期被设为团队默认场景',
+      returnToPlmPath: '/plm?sceneFocus=scene-2',
+    })).toEqual({
+      ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      sceneId: 'scene-2',
+      sceneName: 'BOM 巡检场景',
+      sceneOwnerUserId: 'owner-b',
+      sceneRecommendationReason: 'recent-default',
+      sceneRecommendationSourceLabel: '近期被设为团队默认场景',
+      returnToPlmPath: '/plm?sceneFocus=scene-2',
+    })
   })
 
   it('compares route state for browser history replay', () => {

@@ -156,6 +156,18 @@ export function buildPlmAuditRouteStateFromTeamView(
   }
 }
 
+export function resetPlmAuditRouteFilters(state: PlmAuditRouteState): PlmAuditRouteState {
+  return {
+    ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+    sceneId: state.sceneId,
+    sceneName: state.sceneName,
+    sceneOwnerUserId: state.sceneOwnerUserId,
+    sceneRecommendationReason: state.sceneRecommendationReason,
+    sceneRecommendationSourceLabel: state.sceneRecommendationSourceLabel,
+    returnToPlmPath: state.returnToPlmPath,
+  }
+}
+
 export function hasExplicitPlmAuditFilters(state: PlmAuditRouteState) {
   return state.page !== DEFAULT_PLM_AUDIT_ROUTE_STATE.page
     || state.q !== DEFAULT_PLM_AUDIT_ROUTE_STATE.q

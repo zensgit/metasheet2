@@ -780,6 +780,7 @@ import {
   hasExplicitPlmAuditFilters,
   isPlmAuditRouteStateEqual,
   parsePlmAuditRouteState,
+  resetPlmAuditRouteFilters,
   type PlmAuditRouteState,
 } from './plmAuditQueryState'
 import {
@@ -2276,7 +2277,7 @@ function applyFilters() {
 }
 
 function resetFilters() {
-  void syncRouteState({ ...DEFAULT_PLM_AUDIT_ROUTE_STATE })
+  void syncRouteState(resetPlmAuditRouteFilters(readCurrentRouteState()))
 }
 
 function reloadLogs() {
