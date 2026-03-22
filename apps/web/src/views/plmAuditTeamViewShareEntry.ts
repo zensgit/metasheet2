@@ -8,6 +8,7 @@ export type PlmAuditTeamViewShareEntry = {
 
 export type PlmAuditTeamViewShareEntryAction =
   | { kind: 'filter-navigation' }
+  | { kind: 'route-query'; auditEntry: unknown }
 
 export type PlmAuditTeamViewShareEntryNotice = {
   sourceLabel: string
@@ -88,6 +89,10 @@ export function reducePlmAuditTeamViewShareEntry(
   if (!entry) return null
 
   if (action.kind === 'filter-navigation') {
+    return null
+  }
+
+  if (action.kind === 'route-query' && !isPlmAuditSharedLinkEntry(action.auditEntry)) {
     return null
   }
 

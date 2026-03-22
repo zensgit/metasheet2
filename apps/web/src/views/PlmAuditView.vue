@@ -1126,11 +1126,20 @@ function applyRouteState(state: PlmAuditRouteState) {
   auditReturnToPlmPath.value = state.returnToPlmPath
 }
 
-async function syncRouteState(nextState: PlmAuditRouteState, replace = false) {
+async function syncRouteState(
+  nextState: PlmAuditRouteState,
+  replace = false,
+  options?: {
+    consumeSharedEntry?: boolean
+  },
+) {
   const nextQuery = buildPlmAuditRouteQuery(nextState)
   const currentState = parsePlmAuditRouteState(route.query)
-  if (isPlmAuditRouteStateEqual(nextState, currentState)) return
-  const method = replace ? router.replace : router.push
+  const routeStateChanged = !isPlmAuditRouteStateEqual(nextState, currentState)
+  const shouldConsumeSharedEntry = Boolean(options?.consumeSharedEntry)
+    && isPlmAuditSharedLinkEntry(route.query.auditEntry)
+  if (!routeStateChanged && !shouldConsumeSharedEntry) return
+  const method = replace || !routeStateChanged ? router.replace : router.push
   await method.call(router, {
     name: 'plm-audit',
     query: nextQuery,
@@ -1310,10 +1319,21 @@ function clearAuditTeamViewShareEntry() {
   auditTeamViewShareEntry.value = null
 }
 
+async function consumeAuditTeamViewShareEntryQuery() {
+  await syncRouteState(readCurrentRouteState(), true, {
+    consumeSharedEntry: true,
+  })
+}
+
 function applyAuditTeamViewShareEntryAction(
-  action: {
-    kind: 'filter-navigation'
-  },
+  action:
+    | {
+      kind: 'filter-navigation'
+    }
+    | {
+      kind: 'route-query'
+      auditEntry: unknown
+    },
 ) {
   auditTeamViewShareEntry.value = reducePlmAuditTeamViewShareEntry(
     auditTeamViewShareEntry.value,
@@ -1977,6 +1997,7 @@ async function runAuditTeamViewCollaborationFollowupAction(
 async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShareEntryActionKind) {
   if (actionKind === 'dismiss') {
     clearAuditTeamViewShareEntry()
+    await consumeAuditTeamViewShareEntryQuery()
     return
   }
 
@@ -1994,6 +2015,7 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
       : null
     savedViewName.value = ''
     clearAuditTeamViewShareEntry()
+    await consumeAuditTeamViewShareEntryQuery()
     setStatus(tr('Shared audit team view saved locally.', '已将分享的审计团队视图保存为本地视图。'))
     await nextTick()
     document.getElementById('plm-audit-saved-views')?.scrollIntoView({
@@ -2379,6 +2401,8 @@ function applyFilters() {
   void syncRouteState({
     ...readCurrentRouteState(),
     page: 1,
+  }, false, {
+    consumeSharedEntry: true,
   })
 }
 
@@ -2387,7 +2411,9 @@ function resetFilters() {
   applyAuditTeamViewShareEntryAction({ kind: 'filter-navigation' })
   applySavedViewAttentionAction({ kind: 'reset-filters' })
   clearAuditTeamViewCollaborationFollowup()
-  void syncRouteState(resetPlmAuditRouteFilters(readCurrentRouteState()))
+  void syncRouteState(resetPlmAuditRouteFilters(readCurrentRouteState()), false, {
+    consumeSharedEntry: true,
+  })
 }
 
 function reloadLogs() {
@@ -2401,6 +2427,8 @@ function goToPage(nextPage: number) {
   void syncRouteState({
     ...readCurrentRouteState(),
     page: nextPage,
+  }, false, {
+    consumeSharedEntry: true,
   })
 }
 
@@ -2418,6 +2446,10 @@ watch(recommendedAuditTeamViews, (views) => {
 watch(
   () => route.query,
   async (queryState) => {
+    applyAuditTeamViewShareEntryAction({
+      kind: 'route-query',
+      auditEntry: queryState.auditEntry,
+    })
     const nextState = parsePlmAuditRouteState(queryState)
     const currentState = readCurrentRouteState()
     const routeChanged = routeReady.value && !isPlmAuditRouteStateEqual(nextState, currentState)

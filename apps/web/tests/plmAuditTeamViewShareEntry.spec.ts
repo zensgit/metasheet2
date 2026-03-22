@@ -93,4 +93,22 @@ describe('plmAuditTeamViewShareEntry', () => {
       kind: 'filter-navigation',
     })).toBeNull()
   })
+
+  it('clears shared-link entry notices when the route no longer carries the share marker', () => {
+    expect(reducePlmAuditTeamViewShareEntry({
+      teamViewId: 'audit-view-1',
+    }, {
+      kind: 'route-query',
+      auditEntry: '',
+    })).toBeNull()
+
+    expect(reducePlmAuditTeamViewShareEntry({
+      teamViewId: 'audit-view-1',
+    }, {
+      kind: 'route-query',
+      auditEntry: 'share',
+    })).toEqual({
+      teamViewId: 'audit-view-1',
+    })
+  })
 })
