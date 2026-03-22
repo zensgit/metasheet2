@@ -3,7 +3,7 @@
 Date: 2026-03-22
 Branch: `codex/attendance-run20-followup-20260320`
 PR: `#536`
-Current PR head: `19157f1d1d317fb69acd9c08a4bc5322ed1137e6`
+Current PR head: `8af3a4e72a99b7ec9ecca898d10a374e5ce413e3`
 Runtime verification baseline head: `2edb62ab42f994f51b979caa8bacbd1ed2ea9d8e`
 
 ## Scope
@@ -44,7 +44,7 @@ Verified earlier on the same RC code line:
 
 ## GitHub Checks
 
-GitHub checks are green on the current PR head `19157f1d1d317fb69acd9c08a4bc5322ed1137e6` as of 2026-03-22.
+GitHub checks are green on the current PR head `8af3a4e72a99b7ec9ecca898d10a374e5ce413e3` as of 2026-03-22.
 
 Successful checks:
 
@@ -84,7 +84,7 @@ Interpretation:
 At the time this verification note was recorded:
 
 - current branch is `codex/attendance-run20-followup-20260320`
-- PR head is `ahead 20` relative to `origin/main`
+- PR head is `ahead 21` relative to `origin/main`
 - working tree is clean except untracked `node_modules` paths
 
 ## Verification Conclusion
