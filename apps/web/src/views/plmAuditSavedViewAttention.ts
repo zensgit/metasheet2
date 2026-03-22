@@ -5,9 +5,21 @@ export type PlmAuditSavedViewAttentionState = {
   focusedSavedViewId: string
 }
 
+export type PlmAuditSourceFocusState = {
+  focusedRecommendedAuditTeamViewId: string
+  focusedSavedViewId: string
+}
+
 export type PlmAuditSavedViewAttentionAction =
   | { kind: 'apply' | 'context-action' | 'reset-filters' }
   | { kind: 'delete'; savedViewId: string }
+
+export function clearPlmAuditSourceFocusState(): PlmAuditSourceFocusState {
+  return {
+    focusedRecommendedAuditTeamViewId: '',
+    focusedSavedViewId: '',
+  }
+}
 
 export function reducePlmAuditSavedViewAttentionState(
   state: PlmAuditSavedViewAttentionState,

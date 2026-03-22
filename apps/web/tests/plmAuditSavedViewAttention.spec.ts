@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { reducePlmAuditSavedViewAttentionState } from '../src/views/plmAuditSavedViewAttention'
+import {
+  clearPlmAuditSourceFocusState,
+  reducePlmAuditSavedViewAttentionState,
+} from '../src/views/plmAuditSavedViewAttention'
 
 describe('plmAuditSavedViewAttention', () => {
+  it('clears transient recommendation and saved-view source focus together', () => {
+    expect(clearPlmAuditSourceFocusState()).toEqual({
+      focusedRecommendedAuditTeamViewId: '',
+      focusedSavedViewId: '',
+    })
+  })
+
   it('clears saved-view followup and focus when saved-view navigation takes over', () => {
     expect(reducePlmAuditSavedViewAttentionState({
       shareFollowup: {

@@ -787,6 +787,7 @@ import {
   type PlmAuditRouteState,
 } from './plmAuditQueryState'
 import {
+  clearPlmAuditSourceFocusState,
   reducePlmAuditSavedViewAttentionState,
   type PlmAuditSavedViewAttentionAction,
 } from './plmAuditSavedViewAttention'
@@ -1307,7 +1308,7 @@ function clearAuditTeamViewShareEntry() {
 
 function clearAuditTeamViewCollaborationFollowup() {
   auditTeamViewCollaborationFollowup.value = null
-  focusedSavedViewId.value = ''
+  clearAuditSourceFocus()
 }
 
 function clearAuditSavedViewShareFollowup() {
@@ -1315,8 +1316,9 @@ function clearAuditSavedViewShareFollowup() {
 }
 
 function clearAuditSourceFocus() {
-  focusedRecommendedAuditTeamViewId.value = ''
-  focusedSavedViewId.value = ''
+  const nextState = clearPlmAuditSourceFocusState()
+  focusedRecommendedAuditTeamViewId.value = nextState.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.focusedSavedViewId
 }
 
 function applySavedViewAttentionAction(action: PlmAuditSavedViewAttentionAction) {
