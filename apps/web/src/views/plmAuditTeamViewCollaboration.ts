@@ -151,13 +151,6 @@ export function buildPlmAuditTeamViewCollaborationSourceFocusIntent(
   }
 }
 
-export function shouldDismissPlmAuditTeamViewCollaborationDraft(
-  draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null,
-  followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'teamViewId'> | null,
-) {
-  return Boolean(draft && followup && draft.teamViewId === followup.teamViewId)
-}
-
 export function buildPlmAuditTeamViewCollaborationActionStatus(
   source: PlmAuditTeamViewCollaborationSource,
   action: Exclude<PlmAuditTeamViewCollaborationActionKind, 'dismiss'>,
@@ -278,13 +271,13 @@ export function buildPlmAuditTeamViewCollaborationHandoff(
   )
 
   return {
-      selectedTeamViewId: null,
-      teamViewName: null,
-      teamViewOwnerUserId: null,
-      selectedIds: options.selectable ? [view.id] : [],
-      focusedTeamViewId: view.id,
-      draft: null,
-      followup,
+    selectedTeamViewId: null,
+    teamViewName: null,
+    teamViewOwnerUserId: null,
+    selectedIds: options.selectable ? [view.id] : [],
+    focusedTeamViewId: view.id,
+    draft: null,
+    followup,
     scrollTargetId: followup.logsAnchorId,
     statusMessage: [
       buildPlmAuditTeamViewCollaborationActionStatus(options.source, 'set-default', tr),

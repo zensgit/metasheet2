@@ -817,7 +817,7 @@ import {
   buildPlmAuditTeamViewCollaborationNotice,
   buildPlmAuditTeamViewCollaborationSourceFocusIntent,
   findPlmAuditTeamViewCollaborationFollowupView,
-  shouldDismissPlmAuditTeamViewCollaborationDraft,
+  shouldClearPlmAuditTeamViewCollaborationDraft,
   type PlmAuditTeamViewCollaborationActionKind,
   type PlmAuditTeamViewCollaborationDraft,
   type PlmAuditTeamViewCollaborationFollowup,
@@ -1447,9 +1447,7 @@ function applyAuditTeamViewCollaborationHandoff(handoff: PlmAuditTeamViewCollabo
   if (handoff.teamViewOwnerUserId !== null) {
     auditTeamViewOwnerUserId.value = handoff.teamViewOwnerUserId
   }
-  if (handoff.selectedIds) {
-    auditTeamViewSelection.value = handoff.selectedIds
-  }
+  auditTeamViewSelection.value = handoff.selectedIds
   focusedAuditTeamViewId.value = handoff.focusedTeamViewId
 }
 
@@ -1822,7 +1820,13 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
   }
 
   if (actionKind === 'share') {
-    await shareAuditTeamViewEntry(view, source)
+    const ok = await shareAuditTeamViewEntry(view, source)
+    if (ok && shouldClearPlmAuditTeamViewCollaborationDraft(
+      auditTeamViewCollaborationDraft.value,
+      view.id,
+    )) {
+      clearAuditTeamViewCollaborationDraft()
+    }
     return
   }
 
@@ -1837,12 +1841,6 @@ async function runAuditTeamViewCollaborationFollowupAction(
   if (!followup) return
 
   if (actionKind === 'dismiss') {
-    if (shouldDismissPlmAuditTeamViewCollaborationDraft(
-      auditTeamViewCollaborationDraft.value,
-      followup,
-    )) {
-      clearAuditTeamViewCollaborationDraft()
-    }
     clearAuditTeamViewCollaborationFollowup()
     return
   }

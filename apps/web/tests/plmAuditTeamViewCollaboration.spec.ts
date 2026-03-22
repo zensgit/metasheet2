@@ -11,7 +11,7 @@ import {
   buildPlmAuditTeamViewCollaborationSourceFocusIntent,
   findPlmAuditTeamViewCollaborationFollowupView,
   resolvePlmAuditTeamViewCollaborationSourceAnchorId,
-  shouldDismissPlmAuditTeamViewCollaborationDraft,
+  shouldClearPlmAuditTeamViewCollaborationDraft,
 } from '../src/views/plmAuditTeamViewCollaboration'
 
 function tr(en: string, zh: string) {
@@ -268,7 +268,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       selectedTeamViewId: 'audit-view-11',
       teamViewName: '提升团队视图',
       teamViewOwnerUserId: '',
-      selectedIds: null,
+      selectedIds: [],
       focusedTeamViewId: 'audit-view-11',
       draft: {
         teamViewId: 'audit-view-11',
@@ -598,23 +598,19 @@ describe('plmAuditTeamViewCollaboration', () => {
     })
   })
 
-  it('dismisses the matching collaboration draft when a follow-up is closed', () => {
-    expect(shouldDismissPlmAuditTeamViewCollaborationDraft(
+  it('clears the matching collaboration draft after share handoff takes over', () => {
+    expect(shouldClearPlmAuditTeamViewCollaborationDraft(
       {
         teamViewId: 'audit-view-2',
       },
-      {
-        teamViewId: 'audit-view-2',
-      },
+      'audit-view-2',
     )).toBe(true)
 
-    expect(shouldDismissPlmAuditTeamViewCollaborationDraft(
+    expect(shouldClearPlmAuditTeamViewCollaborationDraft(
       {
         teamViewId: 'audit-view-2',
       },
-      {
-        teamViewId: 'audit-view-7',
-      },
+      'audit-view-7',
     )).toBe(false)
   })
 })
