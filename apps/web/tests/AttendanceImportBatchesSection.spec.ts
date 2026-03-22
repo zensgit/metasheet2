@@ -246,6 +246,7 @@ describe('AttendanceImportBatchesSection', () => {
           status: 'completed',
           source: 'csv',
           createdBy: 'ops-1',
+          createdAt: '2026-03-18T09:00:00.000Z',
           meta: {
             engine: 'bulk',
           },
@@ -256,6 +257,7 @@ describe('AttendanceImportBatchesSection', () => {
           status: 'rolled_back',
           source: 'api',
           createdBy: 'ops-2',
+          createdAt: '2026-03-21T09:00:00.000Z',
           meta: {
             engine: 'standard',
           },
@@ -319,6 +321,32 @@ describe('AttendanceImportBatchesSection', () => {
     expect(container!.textContent).toContain('source api')
     expect(container!.textContent).toContain('Visible batches: 1')
     expect(container!.textContent).toContain('Visible rows: 4')
+
+    const creatorFilter = container!.querySelector('#attendance-import-batch-creator-filter') as HTMLSelectElement | null
+    expect(creatorFilter).toBeTruthy()
+    creatorFilter!.value = 'ops-2'
+    creatorFilter!.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(container!.textContent).toContain('creator ops-2')
+
+    const createdFrom = container!.querySelector('#attendance-import-batch-created-from') as HTMLInputElement | null
+    expect(createdFrom).toBeTruthy()
+    createdFrom!.value = '2026-03-20'
+    createdFrom!.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    expect(container!.textContent).toContain('created 2026-03-20 to --')
+    expect(getBatchRowCount()).toBe(1)
+
+    const createdTo = container!.querySelector('#attendance-import-batch-created-to') as HTMLInputElement | null
+    expect(createdTo).toBeTruthy()
+    createdTo!.value = '2026-03-19'
+    createdTo!.dispatchEvent(new Event('input'))
+    await flushUi()
+
+    expect(getBatchRowCount()).toBe(0)
+    expect(container!.textContent).toContain('No batches match the current inbox filters.')
 
     const resetButton = Array.from(container!.querySelectorAll('button')).find(
       (button) => button.textContent?.includes('Reset batch filters'),

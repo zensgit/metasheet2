@@ -93,7 +93,7 @@ This changes rule preview from a passive result table into a usable simulation/d
 
 Delivered:
 
-- Batch inbox filter bar for search, status, engine, and source.
+- Batch inbox filter bar for search, status, engine, source, creator, and created-date window.
 - Issue chips and search-based batch item triage.
 - Selected batch meta summary.
 - Operator notes generated from batch-level anomaly summary.
@@ -133,8 +133,8 @@ pnpm --filter @metasheet/web build
 
 These are intentionally left for the next round, not for this release candidate:
 
-1. Batch inbox filters at batch-list level by creator and time window.
-2. Retry and rollback assistant with impact estimation.
+1. Retry and rollback assistant with impact estimation.
+2. Batch-list time slicing presets in addition to raw date range inputs.
 3. Visual builders for leave policies and payroll templates to remove more JSON editing.
 4. Attendance-native workflow nodes for exception handling,补卡, leave, and escalation.
 5. Data-scope and field-scope permission controls beyond current role templates.

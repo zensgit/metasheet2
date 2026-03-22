@@ -73,6 +73,21 @@
               <option v-for="option in batchSourceOptions" :key="option" :value="option">{{ formatBatchOptionLabel(option) }}</option>
             </select>
           </label>
+          <label class="attendance__field" for="attendance-import-batch-creator-filter">
+            <span>{{ tr('Creator filter', '创建人筛选') }}</span>
+            <select id="attendance-import-batch-creator-filter" v-model="batchCreatorFilter">
+              <option value="all">{{ tr('All creators', '全部创建人') }}</option>
+              <option v-for="option in batchCreatorOptions" :key="option" :value="option">{{ formatBatchOptionLabel(option) }}</option>
+            </select>
+          </label>
+          <label class="attendance__field" for="attendance-import-batch-created-from">
+            <span>{{ tr('Created from', '创建起始') }}</span>
+            <input id="attendance-import-batch-created-from" v-model="batchCreatedFrom" type="date" />
+          </label>
+          <label class="attendance__field" for="attendance-import-batch-created-to">
+            <span>{{ tr('Created to', '创建截止') }}</span>
+            <input id="attendance-import-batch-created-to" v-model="batchCreatedTo" type="date" />
+          </label>
         </div>
         <div class="attendance__subheading-row">
           <div class="attendance__section-meta">
@@ -98,6 +113,7 @@
             <th>{{ tr('Chunk', '分块') }}</th>
             <th>{{ tr('Source', '来源') }}</th>
             <th>{{ tr('Rule set', '规则集') }}</th>
+            <th>{{ tr('Created by', '创建人') }}</th>
             <th>{{ tr('Created', '创建时间') }}</th>
             <th>{{ tr('Actions', '操作') }}</th>
           </tr>
@@ -111,6 +127,7 @@
             <td>{{ resolveImportBatchChunkLabel(batch) }}</td>
             <td>{{ batch.source || '--' }}</td>
             <td>{{ resolveRuleSetName(batch.ruleSetId) }}</td>
+            <td>{{ batch.createdBy || '--' }}</td>
             <td>{{ formatDateTime(batch.createdAt ?? null) }}</td>
             <td class="attendance__table-actions">
               <button class="attendance__btn" @click="loadImportBatchItems(batch.id)">{{ tr('View items', '查看条目') }}</button>
@@ -408,6 +425,9 @@ const batchSearchText = ref('')
 const batchStatusFilter = ref('all')
 const batchEngineFilter = ref('all')
 const batchSourceFilter = ref('all')
+const batchCreatorFilter = ref('all')
+const batchCreatedFrom = ref('')
+const batchCreatedTo = ref('')
 const selectedImportBatchItemId = ref('')
 const snapshotActionMessage = ref('')
 
@@ -415,6 +435,7 @@ const batchSearchQuery = computed(() => batchSearchText.value.trim().toLowerCase
 const batchStatusOptions = computed(() => collectBatchFilterOptions((batch) => batch.status))
 const batchEngineOptions = computed(() => collectBatchFilterOptions((batch) => resolveImportBatchEngine(batch)))
 const batchSourceOptions = computed(() => collectBatchFilterOptions((batch) => batch.source))
+const batchCreatorOptions = computed(() => collectBatchFilterOptions((batch) => batch.createdBy))
 const visibleImportBatches = computed(() => importBatches.value.filter((batch) => {
   if (batchStatusFilter.value !== 'all' && batch.status !== batchStatusFilter.value) {
     return false
@@ -423,6 +444,16 @@ const visibleImportBatches = computed(() => importBatches.value.filter((batch) =
     return false
   }
   if (batchSourceFilter.value !== 'all' && (batch.source || '--') !== batchSourceFilter.value) {
+    return false
+  }
+  if (batchCreatorFilter.value !== 'all' && normalizeBatchFilterValue(batch.createdBy) !== batchCreatorFilter.value) {
+    return false
+  }
+  const createdDate = resolveBatchCreatedDate(batch.createdAt)
+  if (batchCreatedFrom.value && (!createdDate || createdDate < batchCreatedFrom.value)) {
+    return false
+  }
+  if (batchCreatedTo.value && (!createdDate || createdDate > batchCreatedTo.value)) {
     return false
   }
   const query = batchSearchQuery.value
@@ -608,6 +639,14 @@ const batchFilterSummary = computed(() => {
   if (batchSourceFilter.value !== 'all') {
     parts.push(tr(`source ${formatBatchOptionLabel(batchSourceFilter.value)}`, `来源 ${formatBatchOptionLabel(batchSourceFilter.value)}`))
   }
+  if (batchCreatorFilter.value !== 'all') {
+    parts.push(tr(`creator ${formatBatchOptionLabel(batchCreatorFilter.value)}`, `创建人 ${formatBatchOptionLabel(batchCreatorFilter.value)}`))
+  }
+  if (batchCreatedFrom.value || batchCreatedTo.value) {
+    const from = batchCreatedFrom.value || '--'
+    const to = batchCreatedTo.value || '--'
+    parts.push(tr(`created ${from} to ${to}`, `创建时间 ${from} 到 ${to}`))
+  }
   return parts.length > 0 ? parts.join(' · ') : tr('All batches', '全部批次')
 })
 
@@ -622,6 +661,20 @@ function collectBatchFilterOptions(resolver: (batch: AttendanceImportBatch) => u
 function normalizeBatchFilterValue(value: unknown): string {
   const text = String(value ?? '').trim()
   return text ? text : '--'
+}
+
+function resolveBatchCreatedDate(value: unknown): string {
+  const text = String(value ?? '').trim()
+  if (!text) return ''
+  const matched = text.match(/^(\d{4}-\d{2}-\d{2})/)
+  if (matched?.[1]) {
+    return matched[1]
+  }
+  const parsed = new Date(text)
+  if (Number.isNaN(parsed.getTime())) return ''
+  const month = String(parsed.getMonth() + 1).padStart(2, '0')
+  const day = String(parsed.getDate()).padStart(2, '0')
+  return `${parsed.getFullYear()}-${month}-${day}`
 }
 
 function buildBatchInboxSearchIndex(batch: AttendanceImportBatch): string {
@@ -700,6 +753,9 @@ function resetBatchFilters() {
   batchStatusFilter.value = 'all'
   batchEngineFilter.value = 'all'
   batchSourceFilter.value = 'all'
+  batchCreatorFilter.value = 'all'
+  batchCreatedFrom.value = ''
+  batchCreatedTo.value = ''
 }
 
 function setIssueFilter(filter: AttendanceImportBatchIssueFilter) {
