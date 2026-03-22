@@ -846,6 +846,7 @@ import {
   buildPlmAuditTeamViewShareEntryNotice,
   isPlmAuditSharedLinkEntry,
   resolvePlmAuditSharedEntryRouteSyncDecision,
+  shouldResolvePlmAuditSharedEntryOnQueryChange,
   reducePlmAuditTeamViewShareEntry,
   type PlmAuditTeamViewShareEntry,
   type PlmAuditTeamViewShareEntryActionKind,
@@ -880,6 +881,7 @@ import {
 } from './plmAuditSceneToken'
 import { buildPlmAuditTeamViewContextNote } from './plmAuditTeamViewContext'
 import {
+  buildPlmAuditClearedTeamViewSelectionState,
   buildPlmAuditPersistedTeamViewRouteState,
   buildPlmAuditSelectedTeamViewRouteState,
   resolvePlmAuditRequestedTeamViewRouteState,
@@ -1508,14 +1510,11 @@ function removeAuditTeamViews(viewIds: string[]) {
   auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => !removed.has(id))
 }
 
-async function clearCurrentAuditTeamViewSelectionIfNeeded(viewIds: string[]) {
-  const selectedId = auditTeamViewKey.value
-  if (!selectedId || !viewIds.includes(selectedId)) return
-  auditTeamViewKey.value = ''
-  await syncRouteState({
-    ...readCurrentRouteState(),
-    teamViewId: '',
-  })
+function clearCurrentAuditTeamViewSelectionIfNeeded(viewIds: string[]) {
+  const currentState = readCurrentRouteState()
+  const nextState = buildPlmAuditClearedTeamViewSelectionState(currentState, viewIds)
+  if (nextState.teamViewId === currentState.teamViewId) return
+  applyRouteState(nextState)
 }
 
 function buildCurrentAuditTeamViewState() {
@@ -2115,7 +2114,7 @@ async function runAuditTeamViewLifecycleAction(
     if (actionKind === 'delete') {
       await deletePlmWorkbenchTeamView(view.id)
       removeAuditTeamViews([view.id])
-      await clearCurrentAuditTeamViewSelectionIfNeeded([view.id])
+      clearCurrentAuditTeamViewSelectionIfNeeded([view.id])
       focusedAuditTeamViewId.value = ''
       await syncRouteState(buildPlmAuditTeamViewLogState(view, 'delete', readCurrentRouteState()))
       setStatus(tr('Audit team view deleted. Showing matching audit logs.', '审计团队视图已删除，已切换到对应审计日志。'))
@@ -2131,7 +2130,7 @@ async function runAuditTeamViewLifecycleAction(
 
     if (actionKind === 'archive') {
       auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => id !== view.id)
-      await clearCurrentAuditTeamViewSelectionIfNeeded([view.id])
+      clearCurrentAuditTeamViewSelectionIfNeeded([view.id])
       await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'archive', readCurrentRouteState()))
       setStatus(tr('Audit team view archived. Showing matching audit logs.', '审计团队视图已归档，已切换到对应审计日志。'))
       return
@@ -2164,7 +2163,7 @@ async function runAuditTeamViewBatchAction(actionKind: PlmAuditTeamViewLifecycle
 
     if (actionKind === 'delete') {
       removeAuditTeamViews(result.processedIds)
-      await clearCurrentAuditTeamViewSelectionIfNeeded(result.processedIds)
+      clearCurrentAuditTeamViewSelectionIfNeeded(result.processedIds)
     } else {
       const updatedViews = new Map(result.items.map((item) => [item.id, item]))
       auditTeamViews.value = sortAuditTeamViews(
@@ -2176,7 +2175,7 @@ async function runAuditTeamViewBatchAction(actionKind: PlmAuditTeamViewLifecycle
         auditTeamViewSelection.value = result.skippedIds.length ? result.skippedIds : batchAction.eligibleIds
       }
       if (actionKind === 'archive') {
-        await clearCurrentAuditTeamViewSelectionIfNeeded(result.processedIds)
+        clearCurrentAuditTeamViewSelectionIfNeeded(result.processedIds)
       }
     }
 
@@ -2457,7 +2456,7 @@ watch(recommendedAuditTeamViews, (views) => {
 
 watch(
   () => route.query,
-  async (queryState) => {
+  async (queryState, previousQueryState) => {
     applyAuditTeamViewShareEntryAction({
       kind: 'route-query',
       auditEntry: queryState.auditEntry,
@@ -2465,7 +2464,18 @@ watch(
     const nextState = parsePlmAuditRouteState(queryState)
     const currentState = readCurrentRouteState()
     const routeChanged = routeReady.value && !isPlmAuditRouteStateEqual(nextState, currentState)
-    if (!routeChanged && routeReady.value) return
+    if (!routeChanged && routeReady.value) {
+      if (shouldResolvePlmAuditSharedEntryOnQueryChange({
+        routeReady: routeReady.value,
+        routeChanged,
+        teamViewId: nextState.teamViewId,
+        nextAuditEntry: queryState.auditEntry,
+        previousAuditEntry: previousQueryState?.auditEntry,
+      })) {
+        await refreshAuditTeamViews()
+      }
+      return
+    }
     if (routeChanged) {
       applySavedViewAttentionAction({ kind: 'filter-navigation' })
     }

@@ -26,6 +26,20 @@ export type PlmAuditSharedEntryRouteSyncDecision = {
   replace: boolean
 }
 
+export function shouldResolvePlmAuditSharedEntryOnQueryChange(options: {
+  routeReady: boolean
+  routeChanged: boolean
+  teamViewId: string
+  nextAuditEntry: unknown
+  previousAuditEntry: unknown
+}) {
+  return options.routeReady
+    && !options.routeChanged
+    && Boolean(options.teamViewId.trim())
+    && isPlmAuditSharedLinkEntry(options.nextAuditEntry)
+    && !isPlmAuditSharedLinkEntry(options.previousAuditEntry)
+}
+
 export function isPlmAuditSharedLinkEntry(value: unknown) {
   return value === 'share'
 }

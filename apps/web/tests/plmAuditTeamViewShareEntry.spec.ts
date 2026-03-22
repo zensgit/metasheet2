@@ -4,6 +4,7 @@ import {
   buildPlmAuditTeamViewShareEntryNotice,
   isPlmAuditSharedLinkEntry,
   resolvePlmAuditSharedEntryRouteSyncDecision,
+  shouldResolvePlmAuditSharedEntryOnQueryChange,
   reducePlmAuditTeamViewShareEntry,
 } from '../src/views/plmAuditTeamViewShareEntry'
 
@@ -143,5 +144,39 @@ describe('plmAuditTeamViewShareEntry', () => {
       shouldSync: true,
       replace: false,
     })
+  })
+
+  it('treats a marker-only transition into auditEntry=share as a shared-entry takeover', () => {
+    expect(shouldResolvePlmAuditSharedEntryOnQueryChange({
+      routeReady: true,
+      routeChanged: false,
+      teamViewId: 'audit-view-1',
+      nextAuditEntry: 'share',
+      previousAuditEntry: '',
+    })).toBe(true)
+
+    expect(shouldResolvePlmAuditSharedEntryOnQueryChange({
+      routeReady: true,
+      routeChanged: false,
+      teamViewId: '',
+      nextAuditEntry: 'share',
+      previousAuditEntry: '',
+    })).toBe(false)
+
+    expect(shouldResolvePlmAuditSharedEntryOnQueryChange({
+      routeReady: true,
+      routeChanged: true,
+      teamViewId: 'audit-view-1',
+      nextAuditEntry: 'share',
+      previousAuditEntry: '',
+    })).toBe(false)
+
+    expect(shouldResolvePlmAuditSharedEntryOnQueryChange({
+      routeReady: true,
+      routeChanged: false,
+      teamViewId: 'audit-view-1',
+      nextAuditEntry: 'share',
+      previousAuditEntry: 'share',
+    })).toBe(false)
   })
 })

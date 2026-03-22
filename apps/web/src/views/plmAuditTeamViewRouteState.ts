@@ -47,6 +47,21 @@ export function buildPlmAuditPersistedTeamViewRouteState(
   return buildPlmAuditSelectedTeamViewRouteState(view, currentState)
 }
 
+export function buildPlmAuditClearedTeamViewSelectionState(
+  currentState: PlmAuditRouteState,
+  clearedViewIds: readonly string[],
+): PlmAuditRouteState {
+  const selectedViewId = currentState.teamViewId.trim()
+  if (!selectedViewId || !clearedViewIds.includes(selectedViewId)) {
+    return currentState
+  }
+
+  return {
+    ...currentState,
+    teamViewId: '',
+  }
+}
+
 export function resolvePlmAuditRequestedTeamViewRouteState(
   requestedState: PlmAuditRouteState,
   views: readonly PlmAuditTeamViewRouteCandidate[],

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_PLM_AUDIT_ROUTE_STATE, type PlmAuditTeamViewState } from '../src/views/plmAuditQueryState'
 import {
+  buildPlmAuditClearedTeamViewSelectionState,
   buildPlmAuditPersistedTeamViewRouteState,
   buildPlmAuditSelectedTeamViewRouteState,
   resolvePlmAuditRequestedTeamViewRouteState,
@@ -109,6 +110,29 @@ describe('plmAuditTeamViewRouteState', () => {
       sceneRecommendationSourceLabel: '',
       returnToPlmPath: '/plm?sceneFocus=scene-default',
     })
+  })
+
+  it('clears the selected team-view identity in local state without changing other audit filters', () => {
+    expect(buildPlmAuditClearedTeamViewSelectionState({
+      ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      teamViewId: 'audit-view-1',
+      q: 'documents',
+      action: 'archive',
+      resourceType: 'plm-team-view-batch',
+    }, ['audit-view-1'])).toEqual({
+      ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      teamViewId: '',
+      q: 'documents',
+      action: 'archive',
+      resourceType: 'plm-team-view-batch',
+    })
+
+    const unchanged = {
+      ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      teamViewId: 'audit-view-2',
+      q: 'documents',
+    }
+    expect(buildPlmAuditClearedTeamViewSelectionState(unchanged, ['audit-view-1'])).toBe(unchanged)
   })
 
   it('resolves an explicit requested team view into the team-view route state', () => {
