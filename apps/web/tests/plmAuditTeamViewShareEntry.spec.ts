@@ -3,6 +3,7 @@ import {
   buildPlmAuditSharedEntrySavedViewName,
   buildPlmAuditTeamViewShareEntryNotice,
   isPlmAuditSharedLinkEntry,
+  resolvePlmAuditSharedEntryRouteSyncDecision,
   reducePlmAuditTeamViewShareEntry,
 } from '../src/views/plmAuditTeamViewShareEntry'
 
@@ -109,6 +110,38 @@ describe('plmAuditTeamViewShareEntry', () => {
       auditEntry: 'share',
     })).toEqual({
       teamViewId: 'audit-view-1',
+    })
+  })
+
+  it('forces a replace sync when share-entry cleanup must consume a stale route marker', () => {
+    expect(resolvePlmAuditSharedEntryRouteSyncDecision({
+      routeChanged: false,
+      replace: false,
+      consumeSharedEntry: true,
+      auditEntry: 'share',
+    })).toEqual({
+      shouldSync: true,
+      replace: true,
+    })
+
+    expect(resolvePlmAuditSharedEntryRouteSyncDecision({
+      routeChanged: false,
+      replace: false,
+      consumeSharedEntry: false,
+      auditEntry: 'share',
+    })).toEqual({
+      shouldSync: false,
+      replace: true,
+    })
+
+    expect(resolvePlmAuditSharedEntryRouteSyncDecision({
+      routeChanged: true,
+      replace: false,
+      consumeSharedEntry: false,
+      auditEntry: '',
+    })).toEqual({
+      shouldSync: true,
+      replace: false,
     })
   })
 })

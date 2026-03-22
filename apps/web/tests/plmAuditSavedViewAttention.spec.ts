@@ -93,7 +93,7 @@ describe('plmAuditSavedViewAttention', () => {
     })
   })
 
-  it('clears saved-view followup and focus when saved-view navigation, filter navigation, or promotion takes over', () => {
+  it('clears saved-view followup and focus when saved-view navigation, filter navigation, promotion, or shared-entry takeover takes over', () => {
     expect(reducePlmAuditSavedViewAttentionState({
       shareFollowup: {
         savedViewId: 'saved-1',
@@ -154,6 +154,19 @@ describe('plmAuditSavedViewAttention', () => {
       focusedSavedViewId: 'saved-7',
     }, {
       kind: 'reset-filters',
+    })).toEqual({
+      shareFollowup: null,
+      focusedSavedViewId: '',
+    })
+
+    expect(reducePlmAuditSavedViewAttentionState({
+      shareFollowup: {
+        savedViewId: 'saved-8',
+        source: 'scene-context',
+      },
+      focusedSavedViewId: 'saved-9',
+    }, {
+      kind: 'share-entry-takeover',
     })).toEqual({
       shareFollowup: null,
       focusedSavedViewId: '',

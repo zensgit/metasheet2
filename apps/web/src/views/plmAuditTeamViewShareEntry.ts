@@ -21,6 +21,11 @@ export type PlmAuditTeamViewShareEntryNotice = {
   }>
 }
 
+export type PlmAuditSharedEntryRouteSyncDecision = {
+  shouldSync: boolean
+  replace: boolean
+}
+
 export function isPlmAuditSharedLinkEntry(value: unknown) {
   return value === 'share'
 }
@@ -80,6 +85,21 @@ export function buildPlmAuditSharedEntrySavedViewName(
   tr: (en: string, zh: string) => string,
 ) {
   return `${view.name} · ${tr('Local view', '本地视图')}`
+}
+
+export function resolvePlmAuditSharedEntryRouteSyncDecision(options: {
+  routeChanged: boolean
+  replace: boolean
+  consumeSharedEntry?: boolean
+  auditEntry: unknown
+}): PlmAuditSharedEntryRouteSyncDecision {
+  const shouldConsumeSharedEntry = Boolean(options.consumeSharedEntry)
+    && isPlmAuditSharedLinkEntry(options.auditEntry)
+
+  return {
+    shouldSync: options.routeChanged || shouldConsumeSharedEntry,
+    replace: options.replace || !options.routeChanged,
+  }
 }
 
 export function reducePlmAuditTeamViewShareEntry(

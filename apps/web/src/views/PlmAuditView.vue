@@ -845,6 +845,7 @@ import {
   buildPlmAuditSharedEntrySavedViewName,
   buildPlmAuditTeamViewShareEntryNotice,
   isPlmAuditSharedLinkEntry,
+  resolvePlmAuditSharedEntryRouteSyncDecision,
   reducePlmAuditTeamViewShareEntry,
   type PlmAuditTeamViewShareEntry,
   type PlmAuditTeamViewShareEntryActionKind,
@@ -1136,10 +1137,14 @@ async function syncRouteState(
   const nextQuery = buildPlmAuditRouteQuery(nextState)
   const currentState = parsePlmAuditRouteState(route.query)
   const routeStateChanged = !isPlmAuditRouteStateEqual(nextState, currentState)
-  const shouldConsumeSharedEntry = Boolean(options?.consumeSharedEntry)
-    && isPlmAuditSharedLinkEntry(route.query.auditEntry)
-  if (!routeStateChanged && !shouldConsumeSharedEntry) return
-  const method = replace || !routeStateChanged ? router.replace : router.push
+  const routeSyncDecision = resolvePlmAuditSharedEntryRouteSyncDecision({
+    routeChanged: routeStateChanged,
+    replace,
+    consumeSharedEntry: options?.consumeSharedEntry,
+    auditEntry: route.query.auditEntry,
+  })
+  if (!routeSyncDecision.shouldSync) return
+  const method = routeSyncDecision.replace ? router.replace : router.push
   await method.call(router, {
     name: 'plm-audit',
     query: nextQuery,
@@ -1600,6 +1605,8 @@ async function refreshAuditTeamViews() {
 
     if (resolution.kind === 'apply-view') {
       if (requestedSharedEntry && requestedState.teamViewId.trim()) {
+        clearAuditAttentionFocus()
+        applySavedViewAttentionAction({ kind: 'share-entry-takeover' })
         if (shouldClearPlmAuditTeamViewCollaborationDraft(
           auditTeamViewCollaborationDraft.value,
           resolution.viewId,
@@ -1761,7 +1768,9 @@ async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
   clearAuditTeamViewCollaborationDraft()
   clearAuditTeamViewShareEntry()
   clearAuditTeamViewCollaborationFollowup()
-  await syncRouteState(nextState)
+  await syncRouteState(nextState, false, {
+    consumeSharedEntry: true,
+  })
   setStatus(tr('Audit team view applied.', '审计团队视图已应用。'))
 }
 
@@ -2454,6 +2463,9 @@ watch(
     const currentState = readCurrentRouteState()
     const routeChanged = routeReady.value && !isPlmAuditRouteStateEqual(nextState, currentState)
     if (!routeChanged && routeReady.value) return
+    if (routeChanged) {
+      applySavedViewAttentionAction({ kind: 'filter-navigation' })
+    }
     if (
       routeChanged
       && auditTeamViewCollaborationFollowup.value
