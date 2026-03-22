@@ -787,6 +787,10 @@ import {
   type PlmAuditRouteState,
 } from './plmAuditQueryState'
 import {
+  reducePlmAuditSavedViewAttentionState,
+  type PlmAuditSavedViewAttentionAction,
+} from './plmAuditSavedViewAttention'
+import {
   deletePlmAuditSavedView,
   readPlmAuditSavedViews,
   restorePlmAuditSavedViewState,
@@ -1305,6 +1309,18 @@ function clearAuditSavedViewShareFollowup() {
   auditSavedViewShareFollowup.value = null
 }
 
+function applySavedViewAttentionAction(action: PlmAuditSavedViewAttentionAction) {
+  const nextState = reducePlmAuditSavedViewAttentionState(
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    action,
+  )
+  auditSavedViewShareFollowup.value = nextState.shareFollowup
+  focusedSavedViewId.value = nextState.focusedSavedViewId
+}
+
 function actionLabel(value: string): string {
   if (value === 'archive') return tr('Archive', '归档')
   if (value === 'restore') return tr('Restore', '恢复')
@@ -1490,6 +1506,7 @@ function runSavedViewContextAction(
 ) {
   const badge = savedViewContextBadge(view)
   if (badge?.quickAction?.disabled) return
+  applySavedViewAttentionAction({ kind: 'context-action' })
   void syncRouteState(buildSavedViewContextState(view, actionKind))
 }
 
@@ -2174,17 +2191,13 @@ function saveCurrentView() {
 }
 
 function applySavedView(view: PlmAuditSavedView) {
+  applySavedViewAttentionAction({ kind: 'apply' })
   void syncRouteState(restorePlmAuditSavedViewState(view.state))
 }
 
 function deleteSavedViewEntry(id: string) {
   savedViews.value = deletePlmAuditSavedView(id)
-  if (auditSavedViewShareFollowup.value?.savedViewId === id) {
-    clearAuditSavedViewShareFollowup()
-  }
-  if (focusedSavedViewId.value === id) {
-    focusedSavedViewId.value = ''
-  }
+  applySavedViewAttentionAction({ kind: 'delete', savedViewId: id })
   setStatus(tr('Audit saved view deleted.', '审计已保存视图已删除。'))
 }
 
@@ -2294,6 +2307,7 @@ function applyFilters() {
 }
 
 function resetFilters() {
+  applySavedViewAttentionAction({ kind: 'reset-filters' })
   void syncRouteState(resetPlmAuditRouteFilters(readCurrentRouteState()))
 }
 
