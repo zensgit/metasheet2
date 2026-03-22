@@ -108,7 +108,7 @@ export function readPlmAuditSavedViews(storage?: Storage | null): PlmAuditSavedV
         .filter(isPlmAuditSavedView)
         .map((item) => ({
           ...item,
-          state: normalizePlmAuditRouteState(item.state),
+          state: restorePlmAuditSavedViewState(item.state),
         }))
         .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
       : []
@@ -130,7 +130,7 @@ export function savePlmAuditSavedView(name: string, state: PlmAuditRouteState, s
   const nextEntry: PlmAuditSavedView = {
     id: existing?.id ?? generateSavedViewId(),
     name: trimmedName,
-    state: normalizePlmAuditRouteState(state),
+    state: restorePlmAuditSavedViewState(state),
     updatedAt: now,
   }
 

@@ -133,6 +133,27 @@ describe('plmAuditSavedViews', () => {
     })
   })
 
+  it('stores and reads local saved views as snapshots without team-view links', () => {
+    const storage = createMemoryStorage()
+
+    savePlmAuditSavedView('Team Snapshot', {
+      ...sampleState,
+      teamViewId: 'audit-view-1',
+      q: 'team-snapshot',
+      kind: 'workbench',
+      action: 'archive',
+      resourceType: 'plm-team-view-batch',
+    }, storage)
+
+    expect(readPlmAuditSavedViews(storage)[0]?.state).toMatchObject({
+      teamViewId: '',
+      q: 'team-snapshot',
+      kind: 'workbench',
+      action: 'archive',
+      resourceType: 'plm-team-view-batch',
+    })
+  })
+
   it('backfills new scene audit fields when reading legacy saved views', () => {
     const storage = createMemoryStorage()
     storage.setItem('metasheet_plm_audit_saved_views', JSON.stringify([
