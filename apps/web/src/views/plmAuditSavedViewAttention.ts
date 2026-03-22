@@ -17,7 +17,7 @@ export type PlmAuditAttentionFocusState = {
 }
 
 export type PlmAuditSavedViewAttentionAction =
-  | { kind: 'apply' | 'context-action' | 'reset-filters' }
+  | { kind: 'apply' | 'context-action' | 'promotion-handoff' | 'reset-filters' }
   | { kind: 'delete'; savedViewId: string }
 
 export type PlmAuditAttentionFocusAction =
@@ -29,6 +29,18 @@ export function clearPlmAuditSourceFocusState(): PlmAuditSourceFocusState {
   return {
     focusedRecommendedAuditTeamViewId: '',
     focusedSavedViewId: '',
+  }
+}
+
+export function applyPlmAuditSourceFocusState(
+  state: PlmAuditAttentionFocusState,
+  sourceFocus: PlmAuditSourceFocusState,
+): PlmAuditAttentionFocusState {
+  const clearedState = reducePlmAuditAttentionFocusState(state, { kind: 'clear-all' })
+  return {
+    ...clearedState,
+    focusedRecommendedAuditTeamViewId: sourceFocus.focusedRecommendedAuditTeamViewId,
+    focusedSavedViewId: sourceFocus.focusedSavedViewId,
   }
 }
 

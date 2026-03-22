@@ -2272,9 +2272,7 @@ async function promoteSavedViewToTeam(
       },
     )
     upsertAuditTeamView(saved)
-    if (auditSavedViewShareFollowup.value?.savedViewId === view.id) {
-      clearAuditSavedViewShareFollowup()
-    }
+    applySavedViewAttentionAction({ kind: 'promotion-handoff' })
     applyAuditTeamViewState(saved)
     const collaborationHandoff = buildPlmAuditTeamViewCollaborationHandoff(
       saved,
