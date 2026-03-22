@@ -788,6 +788,7 @@ import {
 } from './plmAuditQueryState'
 import {
   applyPlmAuditSourceFocusState,
+  buildPlmAuditSavedViewStoreAttentionState,
   buildPlmAuditTeamViewHandoffAttentionState,
   reducePlmAuditAttentionFocusState,
   reducePlmAuditSavedViewAttentionState,
@@ -1203,7 +1204,6 @@ async function runAuditSceneSaveAction(actionKind: 'saved-view' | 'team-view' | 
       tr('Scene audit saved view stored.', '场景审计已保存为本地视图。'),
     )
     if (!saved) return
-    clearAuditSourceFocus()
     applySavedViewAttentionAction({
       kind: 'install-followup',
       shareFollowup: {
@@ -1274,7 +1274,7 @@ function storeAuditSavedView(name: string, successMessage?: string) {
   }
 
   savedViews.value = savePlmAuditSavedView(trimmedName, readCurrentRouteState())
-  clearAuditSavedViewShareFollowup()
+  applyAuditSavedViewStoreAttention()
   savedViewName.value = ''
   setStatus(successMessage || tr('Audit saved view stored.', '审计已保存视图已保存。'))
   return savedViews.value[0] || null
@@ -1399,6 +1399,24 @@ function applySavedViewAttentionAction(action: PlmAuditSavedViewAttentionAction)
 
 function applyAuditTeamViewHandoffAttention() {
   const nextState = buildPlmAuditTeamViewHandoffAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+}
+
+function applyAuditSavedViewStoreAttention() {
+  const nextState = buildPlmAuditSavedViewStoreAttentionState(
     {
       focusedAuditTeamViewId: focusedAuditTeamViewId.value,
       focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,

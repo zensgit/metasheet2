@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyPlmAuditSourceFocusState,
+  buildPlmAuditSavedViewStoreAttentionState,
   buildPlmAuditTeamViewHandoffAttentionState,
   clearPlmAuditSourceFocusState,
   reducePlmAuditAttentionFocusState,
@@ -210,6 +211,30 @@ describe('plmAuditSavedViewAttention', () => {
     })).toEqual({
       attentionFocus: {
         focusedAuditTeamViewId: 'team-view-1',
+        focusedRecommendedAuditTeamViewId: '',
+        focusedSavedViewId: '',
+      },
+      savedViewAttention: {
+        shareFollowup: null,
+        focusedSavedViewId: '',
+      },
+    })
+  })
+
+  it('clears source focus and local saved-view followup when storing the current view', () => {
+    expect(buildPlmAuditSavedViewStoreAttentionState({
+      focusedAuditTeamViewId: 'team-view-9',
+      focusedRecommendedAuditTeamViewId: 'recommended-9',
+      focusedSavedViewId: 'saved-view-9',
+    }, {
+      shareFollowup: {
+        savedViewId: 'saved-view-10',
+        source: 'shared-entry',
+      },
+      focusedSavedViewId: 'saved-view-10',
+    })).toEqual({
+      attentionFocus: {
+        focusedAuditTeamViewId: 'team-view-9',
         focusedRecommendedAuditTeamViewId: '',
         focusedSavedViewId: '',
       },
