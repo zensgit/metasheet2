@@ -24,13 +24,17 @@ export type PlmAuditRequestedTeamViewRouteResolution =
 
 export function buildPlmAuditSelectedTeamViewRouteState(
   view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'state'>,
+  currentState?: Pick<PlmAuditRouteState, 'returnToPlmPath'>,
 ): PlmAuditRouteState {
-  return buildPlmAuditRouteStateFromTeamView(view.id, view.state)
+  return {
+    ...buildPlmAuditRouteStateFromTeamView(view.id, view.state),
+    returnToPlmPath: currentState?.returnToPlmPath || '',
+  }
 }
 
 export function buildPlmAuditPersistedTeamViewRouteState(
   view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'kind' | 'state'>,
-  currentState: Pick<PlmAuditRouteState, 'windowMinutes'>,
+  currentState: Pick<PlmAuditRouteState, 'windowMinutes' | 'returnToPlmPath'>,
   options?: {
     isDefault?: boolean
   },
@@ -39,7 +43,7 @@ export function buildPlmAuditPersistedTeamViewRouteState(
     return buildPlmAuditTeamViewLogState(view, 'set-default', currentState)
   }
 
-  return buildPlmAuditSelectedTeamViewRouteState(view)
+  return buildPlmAuditSelectedTeamViewRouteState(view, currentState)
 }
 
 export function resolvePlmAuditRequestedTeamViewRouteState(
@@ -56,7 +60,7 @@ export function resolvePlmAuditRequestedTeamViewRouteState(
     return {
       kind: 'apply-view',
       viewId: requestedView.id,
-      nextState: buildPlmAuditSelectedTeamViewRouteState(requestedView),
+      nextState: buildPlmAuditSelectedTeamViewRouteState(requestedView, requestedState),
     }
   }
 
@@ -74,7 +78,7 @@ export function resolvePlmAuditRequestedTeamViewRouteState(
     return {
       kind: 'apply-view',
       viewId: defaultView.id,
-      nextState: buildPlmAuditSelectedTeamViewRouteState(defaultView),
+      nextState: buildPlmAuditSelectedTeamViewRouteState(defaultView, requestedState),
     }
   }
 

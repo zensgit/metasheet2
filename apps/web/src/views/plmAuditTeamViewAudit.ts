@@ -17,7 +17,7 @@ function getAuditResourceType(action: PlmAuditTeamViewLogActionKind) {
 export function buildPlmAuditTeamViewLogState(
   view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'kind'>,
   action: PlmAuditTeamViewLogActionKind,
-  currentState: Pick<PlmAuditRouteState, 'windowMinutes'>,
+  currentState: Pick<PlmAuditRouteState, 'windowMinutes' | 'returnToPlmPath'>,
 ): PlmAuditRouteState {
   return {
     page: 1,
@@ -35,14 +35,14 @@ export function buildPlmAuditTeamViewLogState(
     sceneOwnerUserId: '',
     sceneRecommendationReason: '',
     sceneRecommendationSourceLabel: '',
-    returnToPlmPath: '',
+    returnToPlmPath: currentState.returnToPlmPath,
   }
 }
 
 export function buildPlmAuditTeamViewBatchLogState(
   views: Array<Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'kind'>>,
   action: 'archive' | 'restore' | 'delete',
-  currentState: Pick<PlmAuditRouteState, 'windowMinutes'>,
+  currentState: Pick<PlmAuditRouteState, 'windowMinutes' | 'returnToPlmPath'>,
 ): PlmAuditRouteState {
   const firstView = views[0]
   return {
@@ -61,6 +61,6 @@ export function buildPlmAuditTeamViewBatchLogState(
     sceneOwnerUserId: '',
     sceneRecommendationReason: '',
     sceneRecommendationSourceLabel: '',
-    returnToPlmPath: '',
+    returnToPlmPath: currentState.returnToPlmPath,
   }
 }

@@ -34,8 +34,13 @@ function createView(id: string, overrides?: Partial<PlmAuditTeamViewState>): Aud
 }
 
 describe('plmAuditTeamViewRouteState', () => {
-  it('builds a selected team-view route state and drops local scene metadata', () => {
-    expect(buildPlmAuditSelectedTeamViewRouteState(createView('audit-view-1'))).toEqual({
+  it('builds a selected team-view route state, drops local scene metadata, and keeps the return path', () => {
+    expect(buildPlmAuditSelectedTeamViewRouteState(
+      createView('audit-view-1'),
+      {
+        returnToPlmPath: '/plm?sceneFocus=scene-1',
+      },
+    )).toEqual({
       page: 2,
       q: 'documents',
       actorId: '',
@@ -51,7 +56,7 @@ describe('plmAuditTeamViewRouteState', () => {
       sceneOwnerUserId: '',
       sceneRecommendationReason: '',
       sceneRecommendationSourceLabel: '',
-      returnToPlmPath: '',
+      returnToPlmPath: '/plm?sceneFocus=scene-1',
     })
   })
 
@@ -60,8 +65,14 @@ describe('plmAuditTeamViewRouteState', () => {
       createView('audit-view-keep'),
       {
         windowMinutes: 60,
+        returnToPlmPath: '/plm?sceneFocus=scene-keep',
       },
-    )).toEqual(buildPlmAuditSelectedTeamViewRouteState(createView('audit-view-keep')))
+    )).toEqual(buildPlmAuditSelectedTeamViewRouteState(
+      createView('audit-view-keep'),
+      {
+        returnToPlmPath: '/plm?sceneFocus=scene-keep',
+      },
+    ))
   })
 
   it('pivots default team-view saves into matching audit-log filters', () => {
@@ -75,6 +86,7 @@ describe('plmAuditTeamViewRouteState', () => {
       }),
       {
         windowMinutes: 720,
+        returnToPlmPath: '/plm?sceneFocus=scene-default',
       },
       {
         isDefault: true,
@@ -95,7 +107,7 @@ describe('plmAuditTeamViewRouteState', () => {
       sceneOwnerUserId: '',
       sceneRecommendationReason: '',
       sceneRecommendationSourceLabel: '',
-      returnToPlmPath: '',
+      returnToPlmPath: '/plm?sceneFocus=scene-default',
     })
   })
 
@@ -118,7 +130,7 @@ describe('plmAuditTeamViewRouteState', () => {
     )).toEqual({
       kind: 'apply-view',
       viewId: 'audit-view-2',
-      nextState: buildPlmAuditSelectedTeamViewRouteState(createView('audit-view-2')),
+      nextState: buildPlmAuditSelectedTeamViewRouteState(createView('audit-view-2'), requestedState),
     })
   })
 
@@ -157,7 +169,7 @@ describe('plmAuditTeamViewRouteState', () => {
         kind: 'workbench',
         action: 'set-default',
         resourceType: 'plm-team-view-default',
-      })),
+      }), DEFAULT_PLM_AUDIT_ROUTE_STATE),
     })
   })
 

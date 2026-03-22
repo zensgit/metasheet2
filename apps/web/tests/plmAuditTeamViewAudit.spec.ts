@@ -52,7 +52,10 @@ describe('plmAuditTeamViewAudit', () => {
     expect(buildPlmAuditTeamViewLogState(
       createAuditTeamView({ id: 'audit-view-default' }),
       'set-default',
-      { windowMinutes: 720 },
+      {
+        windowMinutes: 720,
+        returnToPlmPath: '/plm?sceneFocus=scene-1',
+      },
     )).toEqual({
       page: 1,
       q: 'audit-view-default',
@@ -69,7 +72,7 @@ describe('plmAuditTeamViewAudit', () => {
       sceneOwnerUserId: '',
       sceneRecommendationReason: '',
       sceneRecommendationSourceLabel: '',
-      returnToPlmPath: '',
+      returnToPlmPath: '/plm?sceneFocus=scene-1',
     })
   })
 
@@ -77,7 +80,10 @@ describe('plmAuditTeamViewAudit', () => {
     expect(buildPlmAuditTeamViewLogState(
       createAuditTeamView({ id: 'audit-view-archive' }),
       'archive',
-      { windowMinutes: 60 },
+      {
+        windowMinutes: 60,
+        returnToPlmPath: '/plm?sceneFocus=scene-2',
+      },
     )).toEqual({
       page: 1,
       q: 'audit-view-archive',
@@ -94,7 +100,7 @@ describe('plmAuditTeamViewAudit', () => {
       sceneOwnerUserId: '',
       sceneRecommendationReason: '',
       sceneRecommendationSourceLabel: '',
-      returnToPlmPath: '',
+      returnToPlmPath: '/plm?sceneFocus=scene-2',
     })
   })
 
@@ -104,6 +110,7 @@ describe('plmAuditTeamViewAudit', () => {
       createAuditTeamView({ id: 'batch-view-b' }),
     ], 'delete', {
       windowMinutes: 180,
+      returnToPlmPath: '/plm?sceneFocus=batch-view-a',
     })).toEqual({
       page: 1,
       q: 'batch-view-a',
@@ -120,7 +127,7 @@ describe('plmAuditTeamViewAudit', () => {
       sceneOwnerUserId: '',
       sceneRecommendationReason: '',
       sceneRecommendationSourceLabel: '',
-      returnToPlmPath: '',
+      returnToPlmPath: '/plm?sceneFocus=batch-view-a',
     })
   })
 })

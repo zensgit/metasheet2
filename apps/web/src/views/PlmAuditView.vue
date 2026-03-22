@@ -815,7 +815,9 @@ import {
   buildPlmAuditTeamViewCollaborationHandoff,
   buildPlmAuditTeamViewCollaborationFollowupNotice,
   buildPlmAuditTeamViewCollaborationNotice,
+  buildPlmAuditTeamViewCollaborationSourceFocusIntent,
   findPlmAuditTeamViewCollaborationFollowupView,
+  shouldDismissPlmAuditTeamViewCollaborationDraft,
   type PlmAuditTeamViewCollaborationActionKind,
   type PlmAuditTeamViewCollaborationDraft,
   type PlmAuditTeamViewCollaborationFollowup,
@@ -1432,7 +1434,7 @@ function buildCurrentAuditTeamViewState() {
 }
 
 function applyAuditTeamViewState(view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'state'>) {
-  applyRouteState(buildPlmAuditSelectedTeamViewRouteState(view))
+  applyRouteState(buildPlmAuditSelectedTeamViewRouteState(view, readCurrentRouteState()))
 }
 
 function applyAuditTeamViewCollaborationHandoff(handoff: PlmAuditTeamViewCollaborationHandoff) {
@@ -1575,7 +1577,7 @@ async function duplicateAuditTeamView() {
       view.id,
       auditTeamViewName.value.trim() || undefined,
     )
-    const duplicatedState = buildPlmAuditSelectedTeamViewRouteState(duplicated)
+    const duplicatedState = buildPlmAuditSelectedTeamViewRouteState(duplicated, readCurrentRouteState())
     upsertAuditTeamView(duplicated)
     applyRouteState(duplicatedState)
     clearAuditTeamViewShareEntry()
@@ -1657,7 +1659,7 @@ async function transferAuditTeamView() {
 }
 
 async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
-  const nextState = buildPlmAuditSelectedTeamViewRouteState(view)
+  const nextState = buildPlmAuditSelectedTeamViewRouteState(view, readCurrentRouteState())
   applyRouteState(nextState)
   clearAuditTeamViewCollaborationDraft()
   clearAuditTeamViewShareEntry()
@@ -1835,6 +1837,12 @@ async function runAuditTeamViewCollaborationFollowupAction(
   if (!followup) return
 
   if (actionKind === 'dismiss') {
+    if (shouldDismissPlmAuditTeamViewCollaborationDraft(
+      auditTeamViewCollaborationDraft.value,
+      followup,
+    )) {
+      clearAuditTeamViewCollaborationDraft()
+    }
     clearAuditTeamViewCollaborationFollowup()
     return
   }
@@ -1848,7 +1856,19 @@ async function runAuditTeamViewCollaborationFollowupAction(
   }
 
   if (actionKind === 'focus-source') {
-    document.getElementById(followup.sourceAnchorId)?.scrollIntoView({
+    const sourceView = findAuditTeamViewById(followup.teamViewId)
+    const sourceFocusIntent = buildPlmAuditTeamViewCollaborationSourceFocusIntent(
+      followup,
+      sourceView,
+    )
+    if (sourceFocusIntent.recommendationFilter !== null) {
+      auditTeamViewRecommendationFilter.value = sourceFocusIntent.recommendationFilter
+    }
+    if (sourceFocusIntent.focusedRecommendationTeamViewId) {
+      focusedRecommendedAuditTeamViewId.value = sourceFocusIntent.focusedRecommendationTeamViewId
+    }
+    await nextTick()
+    document.getElementById(sourceFocusIntent.anchorId)?.scrollIntoView({
       behavior: 'smooth',
       block: 'start',
     })
