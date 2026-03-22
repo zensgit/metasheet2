@@ -811,10 +811,7 @@ import {
 } from './plmAuditTeamViewCatalog'
 import {
   buildPlmAuditTeamViewCollaborationActionOutcome,
-  buildPlmAuditTeamViewCollaborationFollowup,
-  buildPlmAuditSavedViewPromotionCollaborationDraft,
-  buildPlmAuditTeamViewCollaborationActionStatus,
-  buildPlmAuditTeamViewCollaborationDraft,
+  buildPlmAuditTeamViewCollaborationHandoff,
   buildPlmAuditTeamViewCollaborationFollowupNotice,
   buildPlmAuditTeamViewCollaborationNotice,
   findPlmAuditTeamViewCollaborationFollowupView,
@@ -822,6 +819,7 @@ import {
   type PlmAuditTeamViewCollaborationDraft,
   type PlmAuditTeamViewCollaborationFollowup,
   type PlmAuditTeamViewCollaborationFollowupActionKind,
+  type PlmAuditTeamViewCollaborationHandoff,
   type PlmAuditTeamViewCollaborationSource,
 } from './plmAuditTeamViewCollaboration'
 import {
@@ -1189,34 +1187,28 @@ async function runAuditSceneSaveAction(actionKind: 'saved-view' | 'team-view' | 
       : tr('Scene audit saved to team views.', '场景审计已保存到团队视图。'),
   )
   if (!saved) return
+  const collaborationHandoff = buildPlmAuditTeamViewCollaborationHandoff(
+    saved,
+    {
+      source: 'scene-context',
+      mode: actionKind === 'team-default' ? 'set-default-followup' : 'draft',
+      selectable: Boolean(auditTeamViewManagementItems.value.find((item) => item.id === saved.id)?.selectable),
+      sceneContextAvailable: Boolean(auditSceneContext.value),
+    },
+    tr,
+  )
   if (actionKind === 'team-default') {
-    auditTeamViewCollaborationDraft.value = null
-    auditTeamViewCollaborationFollowup.value = buildPlmAuditTeamViewCollaborationFollowup(
-      saved.id,
-      'scene-context',
-      'set-default',
-      {
-        sceneContextAvailable: Boolean(auditSceneContext.value),
-      },
-    )
+    applyAuditTeamViewCollaborationHandoff(collaborationHandoff)
     await nextTick()
-    document.getElementById('plm-audit-log-results')?.scrollIntoView({
+    document.getElementById(collaborationHandoff.scrollTargetId)?.scrollIntoView({
       behavior: 'smooth',
       block: 'start',
     })
     return
   }
-  auditTeamViewCollaborationDraft.value = buildPlmAuditTeamViewCollaborationDraft(saved, tr, 'scene-context')
-  clearAuditTeamViewCollaborationFollowup()
-  auditTeamViewKey.value = saved.id
-  auditTeamViewName.value = saved.name
-  auditTeamViewOwnerUserId.value = ''
-  if (auditTeamViewManagementItems.value.find((item) => item.id === saved.id)?.selectable) {
-    auditTeamViewSelection.value = [saved.id]
-  }
-  focusedAuditTeamViewId.value = saved.id
+  applyAuditTeamViewCollaborationHandoff(collaborationHandoff)
   await nextTick()
-  document.getElementById('plm-audit-team-view-controls')?.scrollIntoView({
+  document.getElementById(collaborationHandoff.scrollTargetId)?.scrollIntoView({
     behavior: 'smooth',
     block: 'start',
   })
@@ -1440,6 +1432,22 @@ function buildCurrentAuditTeamViewState() {
 
 function applyAuditTeamViewState(view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'state'>) {
   applyRouteState(buildPlmAuditSelectedTeamViewRouteState(view))
+}
+
+function applyAuditTeamViewCollaborationHandoff(handoff: PlmAuditTeamViewCollaborationHandoff) {
+  auditTeamViewCollaborationDraft.value = handoff.draft
+  auditTeamViewCollaborationFollowup.value = handoff.followup
+  auditTeamViewKey.value = handoff.selectedTeamViewId || ''
+  if (handoff.teamViewName !== null) {
+    auditTeamViewName.value = handoff.teamViewName
+  }
+  if (handoff.teamViewOwnerUserId !== null) {
+    auditTeamViewOwnerUserId.value = handoff.teamViewOwnerUserId
+  }
+  if (handoff.selectedIds) {
+    auditTeamViewSelection.value = handoff.selectedIds
+  }
+  focusedAuditTeamViewId.value = handoff.focusedTeamViewId
 }
 
 function buildAuditTeamViewShareUrl(view: PlmWorkbenchTeamView<'audit'>) {
@@ -1737,22 +1745,22 @@ async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
   const target = findAuditTeamViewById(view.id)
   if (!target) return
 
-  const draft = buildPlmAuditTeamViewCollaborationDraft(target, tr, 'recommendation')
-  auditTeamViewCollaborationDraft.value = draft
-  clearAuditTeamViewCollaborationFollowup()
-  auditTeamViewKey.value = draft.teamViewId
-  auditTeamViewName.value = draft.teamViewName
-  auditTeamViewOwnerUserId.value = draft.teamViewOwnerUserId
-  if (auditTeamViewManagementItems.value.find((item) => item.id === target.id)?.selectable) {
-    auditTeamViewSelection.value = [target.id]
-  }
-  focusedAuditTeamViewId.value = target.id
+  const collaborationHandoff = buildPlmAuditTeamViewCollaborationHandoff(
+    target,
+    {
+      source: 'recommendation',
+      mode: 'draft',
+      selectable: Boolean(auditTeamViewManagementItems.value.find((item) => item.id === target.id)?.selectable),
+    },
+    tr,
+  )
+  applyAuditTeamViewCollaborationHandoff(collaborationHandoff)
   await nextTick()
-  document.getElementById(draft.focusTargetId)?.scrollIntoView({
+  document.getElementById(collaborationHandoff.scrollTargetId)?.scrollIntoView({
     behavior: 'smooth',
     block: 'center',
   })
-  setStatus(draft.statusMessage)
+  setStatus(collaborationHandoff.statusMessage)
 }
 
 async function focusRecommendedAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
@@ -2173,51 +2181,37 @@ async function promoteSavedViewToTeam(
       clearAuditSavedViewShareFollowup()
     }
     applyAuditTeamViewState(saved)
-    auditTeamViewKey.value = saved.id
-    auditTeamViewName.value = saved.name
-    auditTeamViewOwnerUserId.value = ''
-    focusedAuditTeamViewId.value = saved.id
-    if (auditTeamViewManagementItems.value.find((item) => item.id === saved.id)?.selectable) {
-      auditTeamViewSelection.value = [saved.id]
-    }
+    const collaborationHandoff = buildPlmAuditTeamViewCollaborationHandoff(
+      saved,
+      {
+        source: promotionBehavior.collaborationSource,
+        mode: promotionBehavior.shouldShowDefaultFollowup ? 'set-default-followup' : 'draft',
+        selectable: Boolean(auditTeamViewManagementItems.value.find((item) => item.id === saved.id)?.selectable),
+        sceneContextAvailable: Boolean(auditSceneContext.value),
+        statusSuffix: draft.localContextNote,
+      },
+      tr,
+    )
+    applyAuditTeamViewCollaborationHandoff(collaborationHandoff)
     // Let the canonical route settle before creating draft/follow-up UI so watcher cleanup
     // does not discard freshly created promotion state.
     await syncRouteState(savedState)
     if (promotionBehavior.shouldShowDefaultFollowup) {
-      auditTeamViewCollaborationDraft.value = null
-      auditTeamViewCollaborationFollowup.value = buildPlmAuditTeamViewCollaborationFollowup(
-        saved.id,
-        promotionBehavior.collaborationSource,
-        'set-default',
-        {
-          sceneContextAvailable: Boolean(auditSceneContext.value),
-        },
-      )
+      applyAuditTeamViewCollaborationHandoff(collaborationHandoff)
       await nextTick()
-      document.getElementById('plm-audit-log-results')?.scrollIntoView({
+      document.getElementById(collaborationHandoff.scrollTargetId)?.scrollIntoView({
         behavior: 'smooth',
         block: 'start',
       })
-      setStatus(
-        [
-          buildPlmAuditTeamViewCollaborationActionStatus(
-            promotionBehavior.collaborationSource,
-            'set-default',
-            tr,
-          ),
-          draft.localContextNote,
-        ].filter(Boolean).join(' '),
-      )
+      setStatus(collaborationHandoff.statusMessage)
       return
     }
-    const collaborationDraft = buildPlmAuditSavedViewPromotionCollaborationDraft(saved, followupSource, tr)
-    auditTeamViewCollaborationDraft.value = collaborationDraft
-    clearAuditTeamViewCollaborationFollowup()
+    applyAuditTeamViewCollaborationHandoff(collaborationHandoff)
     await nextTick()
     if (promotionBehavior.shouldFocusRecommendation) {
       await focusRecommendedAuditTeamView(saved)
     } else {
-      document.getElementById(collaborationDraft.focusTargetId)?.scrollIntoView({
+      document.getElementById(collaborationHandoff.scrollTargetId)?.scrollIntoView({
         behavior: 'smooth',
         block: 'center',
       })
@@ -2230,8 +2224,7 @@ async function promoteSavedViewToTeam(
         promotionBehavior.shouldFocusRecommendation
           ? tr('The new team view is highlighted in recommendations.', '新的团队视图已在推荐区高亮显示。')
           : '',
-        collaborationDraft.statusMessage,
-        draft.localContextNote,
+        collaborationHandoff.statusMessage,
       ].filter(Boolean).join(' '),
     )
   } catch (error: unknown) {

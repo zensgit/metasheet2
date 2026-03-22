@@ -50,6 +50,18 @@ export type PlmAuditTeamViewCollaborationActionOutcome = {
   scrollTargetId: string | null
 }
 
+export type PlmAuditTeamViewCollaborationHandoff = {
+  selectedTeamViewId: string | null
+  teamViewName: string | null
+  teamViewOwnerUserId: string | null
+  selectedIds: string[] | null
+  focusedTeamViewId: string
+  draft: PlmAuditTeamViewCollaborationDraft | null
+  followup: PlmAuditTeamViewCollaborationFollowup | null
+  scrollTargetId: string
+  statusMessage: string
+}
+
 const PLM_AUDIT_TEAM_VIEW_COLLABORATION_LOGS_ANCHOR_ID = 'plm-audit-log-results'
 const PLM_AUDIT_TEAM_VIEW_CONTROLS_ANCHOR_ID = 'plm-audit-team-view-controls'
 
@@ -184,6 +196,57 @@ export function buildPlmAuditTeamViewCollaborationActionOutcome(
     statusMessage: buildPlmAuditTeamViewCollaborationActionStatus(source, action, tr),
     followup,
     scrollTargetId: action === 'set-default' ? followup.logsAnchorId : null,
+  }
+}
+
+export function buildPlmAuditTeamViewCollaborationHandoff(
+  view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'name'>,
+  options: {
+    source: PlmAuditTeamViewCollaborationSource
+    mode: 'draft' | 'set-default-followup'
+    selectable: boolean
+    sceneContextAvailable?: boolean
+    statusSuffix?: string
+  },
+  tr: (en: string, zh: string) => string,
+): PlmAuditTeamViewCollaborationHandoff {
+  if (options.mode === 'draft') {
+    const draft = buildPlmAuditTeamViewCollaborationDraft(view, tr, options.source)
+    return {
+      selectedTeamViewId: draft.teamViewId,
+      teamViewName: draft.teamViewName,
+      teamViewOwnerUserId: draft.teamViewOwnerUserId,
+      selectedIds: options.selectable ? [view.id] : null,
+      focusedTeamViewId: view.id,
+      draft,
+      followup: null,
+      scrollTargetId: draft.focusTargetId,
+      statusMessage: [draft.statusMessage, options.statusSuffix || ''].filter(Boolean).join(' '),
+    }
+  }
+
+  const followup = buildPlmAuditTeamViewCollaborationFollowup(
+    view.id,
+    options.source,
+    'set-default',
+    {
+      sceneContextAvailable: options.sceneContextAvailable,
+    },
+  )
+
+  return {
+    selectedTeamViewId: null,
+    teamViewName: null,
+    teamViewOwnerUserId: null,
+    selectedIds: options.selectable ? [view.id] : null,
+    focusedTeamViewId: view.id,
+    draft: null,
+    followup,
+    scrollTargetId: followup.logsAnchorId,
+    statusMessage: [
+      buildPlmAuditTeamViewCollaborationActionStatus(options.source, 'set-default', tr),
+      options.statusSuffix || '',
+    ].filter(Boolean).join(' '),
   }
 }
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildPlmAuditTeamViewCollaborationActionOutcome,
+  buildPlmAuditTeamViewCollaborationHandoff,
   buildPlmAuditTeamViewCollaborationFollowup,
   buildPlmAuditSavedViewPromotionCollaborationDraft,
   buildPlmAuditTeamViewCollaborationActionStatus,
@@ -213,6 +214,107 @@ describe('plmAuditTeamViewCollaboration', () => {
         'Audit team view set as default. Showing matching audit logs.|审计团队视图已设为默认，已切换到对应审计日志。',
       followup: null,
       scrollTargetId: null,
+    })
+  })
+
+  it('builds a draft handoff for recommendation and promotion flows', () => {
+    expect(buildPlmAuditTeamViewCollaborationHandoff(
+      {
+        id: 'audit-view-10',
+        name: '推荐团队视图',
+      },
+      {
+        source: 'recommendation',
+        mode: 'draft',
+        selectable: true,
+      },
+      tr,
+    )).toEqual({
+      selectedTeamViewId: 'audit-view-10',
+      teamViewName: '推荐团队视图',
+      teamViewOwnerUserId: '',
+      selectedIds: ['audit-view-10'],
+      focusedTeamViewId: 'audit-view-10',
+      draft: {
+        teamViewId: 'audit-view-10',
+        teamViewName: '推荐团队视图',
+        teamViewOwnerUserId: '',
+        focusTargetId: 'plm-audit-team-view-controls',
+        source: 'recommendation',
+        statusMessage:
+          'Prepared collaboration controls for this audit team view.|已为该审计团队视图准备好协作操作。',
+      },
+      followup: null,
+      scrollTargetId: 'plm-audit-team-view-controls',
+      statusMessage:
+        'Prepared collaboration controls for this audit team view.|已为该审计团队视图准备好协作操作。',
+    })
+
+    expect(buildPlmAuditTeamViewCollaborationHandoff(
+      {
+        id: 'audit-view-11',
+        name: '提升团队视图',
+      },
+      {
+        source: 'saved-view-promotion',
+        mode: 'draft',
+        selectable: false,
+        statusSuffix: 'Local-only context note.',
+      },
+      tr,
+    )).toEqual({
+      selectedTeamViewId: 'audit-view-11',
+      teamViewName: '提升团队视图',
+      teamViewOwnerUserId: '',
+      selectedIds: null,
+      focusedTeamViewId: 'audit-view-11',
+      draft: {
+        teamViewId: 'audit-view-11',
+        teamViewName: '提升团队视图',
+        teamViewOwnerUserId: '',
+        focusTargetId: 'plm-audit-team-view-controls',
+        source: 'saved-view-promotion',
+        statusMessage:
+          'Saved view promoted and collaboration controls are ready.|保存视图已提升为团队视图，并已准备好协作操作。',
+      },
+      followup: null,
+      scrollTargetId: 'plm-audit-team-view-controls',
+      statusMessage:
+        'Saved view promoted and collaboration controls are ready.|保存视图已提升为团队视图，并已准备好协作操作。 Local-only context note.',
+    })
+  })
+
+  it('builds a default-followup handoff without exposing draft state', () => {
+    expect(buildPlmAuditTeamViewCollaborationHandoff(
+      {
+        id: 'audit-view-12',
+        name: '默认团队视图',
+      },
+      {
+        source: 'scene-context',
+        mode: 'set-default-followup',
+        selectable: true,
+        sceneContextAvailable: false,
+        statusSuffix: 'Local-only context note.',
+      },
+      tr,
+    )).toEqual({
+      selectedTeamViewId: null,
+      teamViewName: null,
+      teamViewOwnerUserId: null,
+      selectedIds: ['audit-view-12'],
+      focusedTeamViewId: 'audit-view-12',
+      draft: null,
+      followup: {
+        teamViewId: 'audit-view-12',
+        source: 'scene-context',
+        action: 'set-default',
+        logsAnchorId: 'plm-audit-log-results',
+        sourceAnchorId: 'plm-audit-team-view-controls',
+      },
+      scrollTargetId: 'plm-audit-log-results',
+      statusMessage:
+        'Scene-driven audit team view set as default. Showing matching audit logs.|场景驱动审计团队视图已设为默认，并切换到对应审计日志。 Local-only context note.',
     })
   })
 
