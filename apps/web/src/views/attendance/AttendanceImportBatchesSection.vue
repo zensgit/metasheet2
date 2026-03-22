@@ -82,17 +82,33 @@
           </label>
           <label class="attendance__field" for="attendance-import-batch-created-from">
             <span>{{ tr('Created from', '创建起始') }}</span>
-            <input id="attendance-import-batch-created-from" v-model="batchCreatedFrom" type="date" />
+            <input id="attendance-import-batch-created-from" v-model="batchCreatedFrom" type="date" @input="markBatchTimeSliceCustom" />
           </label>
           <label class="attendance__field" for="attendance-import-batch-created-to">
             <span>{{ tr('Created to', '创建截止') }}</span>
-            <input id="attendance-import-batch-created-to" v-model="batchCreatedTo" type="date" />
+            <input id="attendance-import-batch-created-to" v-model="batchCreatedTo" type="date" @input="markBatchTimeSliceCustom" />
+          </label>
+          <label class="attendance__field attendance__field--full">
+            <span>{{ tr('Time slice', '时间切片') }}</span>
+            <div class="attendance__filter-chip-row">
+              <button
+                v-for="preset in batchTimeSlicePresets"
+                :key="preset.key"
+                class="attendance__chip"
+                :class="{ 'attendance__chip--active': batchTimeSlicePreset === preset.key }"
+                type="button"
+                @click="applyBatchTimeSlicePreset(preset.key)"
+              >
+                {{ preset.label }}
+              </button>
+            </div>
           </label>
         </div>
         <div class="attendance__subheading-row">
           <div class="attendance__section-meta">
             {{ tr('View mode', '视图模式') }}:
             <strong>{{ tr('Batch inbox', '批次收件箱') }}</strong>
+            <span> · {{ tr('Time slice', '时间切片') }}: <strong>{{ batchTimeSliceLabel }}</strong></span>
             <span> · {{ tr('Active filters', '当前筛选') }}: <strong>{{ batchFilterSummary }}</strong></span>
             <span v-if="batchSearchQuery"> · {{ tr('Search', '搜索') }}: <strong>{{ batchSearchText }}</strong></span>
           </div>
@@ -183,6 +199,49 @@
         <div class="attendance__impact-card">
           <span>{{ tr('Source', '来源') }}</span>
           <strong>{{ selectedBatch.source || '--' }}</strong>
+        </div>
+      </div>
+
+      <div v-if="selectedBatchRollbackEstimate.loadedItems > 0" class="attendance__detail-panel">
+        <div class="attendance__subheading-row">
+          <h6 class="attendance__subheading">{{ tr('Rollback impact estimate', '回滚影响估算') }}</h6>
+          <span class="attendance__section-meta">
+            {{ tr('Coverage', '覆盖范围') }}:
+            <strong>{{ selectedBatchRollbackEstimate.loadedItems }} / {{ selectedBatchRollbackEstimate.totalBatchRows }}</strong>
+            <span v-if="selectedBatchRollbackEstimate.coveragePercent !== null"> ({{ selectedBatchRollbackEstimate.coveragePercent }}%)</span>
+          </span>
+        </div>
+        <div class="attendance__impact-summary">
+          <div class="attendance__impact-card">
+            <span>{{ tr('Loaded for estimate', '已纳入估算') }}</span>
+            <strong>{{ selectedBatchRollbackEstimate.loadedItems }}</strong>
+          </div>
+          <div class="attendance__impact-card">
+            <span>{{ tr('Est. committed rows', '预计受影响记录') }}</span>
+            <strong>{{ selectedBatchRollbackEstimate.estimatedCommittedRows }}</strong>
+          </div>
+          <div class="attendance__impact-card">
+            <span>{{ tr('Preview-only rows', '仅预演行') }}</span>
+            <strong>{{ selectedBatchRollbackEstimate.previewOnlyRows }}</strong>
+          </div>
+          <div class="attendance__impact-card">
+            <span>{{ tr('Flagged rows', '已标记行') }}</span>
+            <strong>{{ selectedBatchRollbackEstimate.flaggedRows }}</strong>
+          </div>
+          <div class="attendance__impact-card">
+            <span>{{ tr('Warning rows', '警告行') }}</span>
+            <strong>{{ selectedBatchRollbackEstimate.warningRows }}</strong>
+          </div>
+          <div class="attendance__impact-card">
+            <span>{{ tr('Policy-sensitive rows', '规则敏感行') }}</span>
+            <strong>{{ selectedBatchRollbackEstimate.policyReviewRows }}</strong>
+          </div>
+        </div>
+        <div v-if="selectedBatchRollbackNotes.length" class="attendance__detail-hints">
+          <span class="attendance__detail-hints-title">{{ tr('Rollback notes', '回滚提示') }}</span>
+          <ul class="attendance__detail-hints-list">
+            <li v-for="note in selectedBatchRollbackNotes" :key="note">{{ note }}</li>
+          </ul>
         </div>
       </div>
 
@@ -361,9 +420,11 @@
 <script setup lang="ts">
 import { computed, ref, type Ref } from 'vue'
 import {
+  buildImportBatchRollbackNotes,
   buildImportBatchActionHints,
   buildImportBatchSearchIndex,
   classifyImportBatchItem,
+  estimateImportBatchRollbackImpact,
   matchesImportBatchIssueFilter,
   resolveImportBatchChunkLabel,
   resolveImportBatchEngine,
@@ -381,6 +442,11 @@ import {
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
+type BatchTimeSlicePreset = 'all' | 'today' | 'last7' | 'last30' | 'thisMonth' | 'custom'
+type BatchTimeSlicePresetOption = {
+  key: Exclude<BatchTimeSlicePreset, 'custom'>
+  label: string
+}
 
 interface ImportBatchesBindings {
   importBatchLoading: Ref<boolean>
@@ -402,6 +468,7 @@ const props = defineProps<{
   formatStatus: (value: string) => string
   formatDateTime: (value: string | null | undefined) => string
   formatJson: (value: unknown) => string
+  clock?: () => Date
 }>()
 
 const tr = props.tr
@@ -419,6 +486,7 @@ const resolveRuleSetName = props.resolveRuleSetName
 const formatStatus = props.formatStatus
 const formatDateTime = props.formatDateTime
 const formatJson = props.formatJson
+const clock = props.clock ?? (() => new Date())
 const issueFilter = ref<AttendanceImportBatchIssueFilter>('all')
 const searchText = ref('')
 const batchSearchText = ref('')
@@ -428,10 +496,18 @@ const batchSourceFilter = ref('all')
 const batchCreatorFilter = ref('all')
 const batchCreatedFrom = ref('')
 const batchCreatedTo = ref('')
+const batchTimeSlicePreset = ref<BatchTimeSlicePreset>('all')
 const selectedImportBatchItemId = ref('')
 const snapshotActionMessage = ref('')
 
 const batchSearchQuery = computed(() => batchSearchText.value.trim().toLowerCase())
+const batchTimeSlicePresets = computed<BatchTimeSlicePresetOption[]>(() => ([
+  { key: 'all', label: tr('All time', '全部时间') },
+  { key: 'today', label: tr('Today', '今天') },
+  { key: 'last7', label: tr('Last 7 days', '近 7 天') },
+  { key: 'last30', label: tr('Last 30 days', '近 30 天') },
+  { key: 'thisMonth', label: tr('This month', '本月至今') },
+]))
 const batchStatusOptions = computed(() => collectBatchFilterOptions((batch) => batch.status))
 const batchEngineOptions = computed(() => collectBatchFilterOptions((batch) => resolveImportBatchEngine(batch)))
 const batchSourceOptions = computed(() => collectBatchFilterOptions((batch) => batch.source))
@@ -560,6 +636,8 @@ const selectedBatchOperatorNotes = computed(() => {
   }
   return notes
 })
+const selectedBatchRollbackEstimate = computed(() => estimateImportBatchRollbackImpact(selectedBatch.value, importBatchItems.value))
+const selectedBatchRollbackNotes = computed(() => buildImportBatchRollbackNotes(selectedBatchRollbackEstimate.value, tr))
 const selectedBatchMappingEntries = computed(() => {
   const mapping = selectedBatch.value?.mapping
   if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) return []
@@ -628,6 +706,7 @@ const batchRowCountTotal = computed(() => {
 const visibleBatchRowCountTotal = computed(() => {
   return visibleImportBatches.value.reduce((total, batch) => total + (Number(batch.rowCount) || 0), 0)
 })
+const batchTimeSliceLabel = computed(() => formatBatchTimeSliceLabel(batchTimeSlicePreset.value))
 const batchFilterSummary = computed(() => {
   const parts: string[] = []
   if (batchStatusFilter.value !== 'all') {
@@ -649,6 +728,36 @@ const batchFilterSummary = computed(() => {
   }
   return parts.length > 0 ? parts.join(' · ') : tr('All batches', '全部批次')
 })
+
+function toDateInput(date: Date): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function shiftDate(base: Date, diffDays: number): Date {
+  const next = new Date(base)
+  next.setDate(next.getDate() + diffDays)
+  return next
+}
+
+function formatBatchTimeSliceLabel(preset: BatchTimeSlicePreset): string {
+  switch (preset) {
+    case 'today':
+      return tr('Today', '今天')
+    case 'last7':
+      return tr('Last 7 days', '近 7 天')
+    case 'last30':
+      return tr('Last 30 days', '近 30 天')
+    case 'thisMonth':
+      return tr('This month', '本月至今')
+    case 'custom':
+      return tr('Custom', '自定义')
+    default:
+      return tr('All time', '全部时间')
+  }
+}
 
 function collectBatchFilterOptions(resolver: (batch: AttendanceImportBatch) => unknown): string[] {
   return Array.from(new Set(
@@ -675,6 +784,45 @@ function resolveBatchCreatedDate(value: unknown): string {
   const month = String(parsed.getMonth() + 1).padStart(2, '0')
   const day = String(parsed.getDate()).padStart(2, '0')
   return `${parsed.getFullYear()}-${month}-${day}`
+}
+
+function applyBatchTimeSlicePreset(preset: Exclude<BatchTimeSlicePreset, 'custom'>) {
+  const now = clock()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  batchTimeSlicePreset.value = preset
+
+  if (preset === 'all') {
+    batchCreatedFrom.value = ''
+    batchCreatedTo.value = ''
+    return
+  }
+
+  if (preset === 'today') {
+    const value = toDateInput(today)
+    batchCreatedFrom.value = value
+    batchCreatedTo.value = value
+    return
+  }
+
+  if (preset === 'last7') {
+    batchCreatedFrom.value = toDateInput(shiftDate(today, -6))
+    batchCreatedTo.value = toDateInput(today)
+    return
+  }
+
+  if (preset === 'last30') {
+    batchCreatedFrom.value = toDateInput(shiftDate(today, -29))
+    batchCreatedTo.value = toDateInput(today)
+    return
+  }
+
+  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
+  batchCreatedFrom.value = toDateInput(monthStart)
+  batchCreatedTo.value = toDateInput(today)
+}
+
+function markBatchTimeSliceCustom() {
+  batchTimeSlicePreset.value = batchCreatedFrom.value || batchCreatedTo.value ? 'custom' : 'all'
 }
 
 function buildBatchInboxSearchIndex(batch: AttendanceImportBatch): string {
@@ -756,6 +904,7 @@ function resetBatchFilters() {
   batchCreatorFilter.value = 'all'
   batchCreatedFrom.value = ''
   batchCreatedTo.value = ''
+  batchTimeSlicePreset.value = 'all'
 }
 
 function setIssueFilter(filter: AttendanceImportBatchIssueFilter) {
@@ -914,6 +1063,10 @@ async function copySelectedImportBatchSnapshot() {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.attendance__field--full {
+  grid-column: 1 / -1;
 }
 
 .attendance__field input {

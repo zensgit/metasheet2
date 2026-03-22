@@ -16,8 +16,10 @@ Scope: Phase 1 release candidate on `codex/attendance-run20-followup-20260320`
 - [x] Add row-level rule preview diagnosis with severity, metrics, hints, and source payload.
 - [x] Add batch inbox search and filters for status, engine, and source.
 - [x] Add batch-list inbox filters for creator and time range.
+- [x] Add batch-list time slicing presets in addition to raw date range inputs.
 - [x] Add batch issue chips and search-based triage.
 - [x] Add batch-level operator notes derived from anomaly summary.
+- [x] Add loaded-item rollback impact estimation and guidance.
 - [x] Expose batch mapping payload in a dedicated mapping viewer.
 - [x] Add structured snapshot diagnostics for metrics, policy, and engine sections.
 - [x] Add snapshot copy/raw-view actions.
@@ -33,7 +35,7 @@ Scope: Phase 1 release candidate on `codex/attendance-run20-followup-20260320`
 
 ## Next Phase Candidates
 
-- [ ] Add rollback impact estimation and targeted retry guidance.
+- [ ] Add targeted retry guidance and rollback confirmation flows based on exact full-batch impact.
 - [ ] Convert leave policies from JSON editing to visual builder flows.
 - [ ] Convert payroll templates from JSON editing to visual builder flows.
 - [ ] Add attendance-native workflow nodes and templates.

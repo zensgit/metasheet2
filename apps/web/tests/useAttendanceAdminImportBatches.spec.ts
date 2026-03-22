@@ -1,8 +1,10 @@
 import { ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  buildImportBatchRollbackNotes,
   buildImportBatchActionHints,
   classifyImportBatchItem,
+  estimateImportBatchRollbackImpact,
   matchesImportBatchIssueFilter,
   resolveImportBatchSeverity,
   summarizeImportBatchIssueBuckets,
@@ -155,6 +157,59 @@ describe('useAttendanceAdminImportBatches', () => {
       expect.arrayContaining([
         expect.stringContaining('missing-record rows first'),
         expect.stringContaining('Export warnings'),
+      ]),
+    )
+  })
+
+  it('estimates rollback impact from loaded batch items', () => {
+    const batch = createBatch({ id: 'batch-a', rowCount: 5 })
+    const items = [
+      createItem({
+        id: 'item-1',
+        batchId: 'batch-a',
+        recordId: 'record-1',
+        previewSnapshot: {
+          metrics: {
+            status: 'normal',
+            workMinutes: 480,
+          },
+        },
+      }),
+      createItem({
+        id: 'item-2',
+        batchId: 'batch-a',
+        userId: 'user-2',
+        recordId: null,
+        previewSnapshot: {
+          metrics: {
+            status: 'late',
+            workMinutes: 420,
+            lateMinutes: 18,
+          },
+          warnings: ['missing mapping'],
+        },
+      }),
+    ]
+
+    const estimate = estimateImportBatchRollbackImpact(batch, items)
+
+    expect(estimate).toMatchObject({
+      loadedItems: 2,
+      totalBatchRows: 5,
+      estimatedCommittedRows: 1,
+      previewOnlyRows: 1,
+      flaggedRows: 1,
+      warningRows: 1,
+      policyReviewRows: 1,
+      isPartial: true,
+      coveragePercent: 40,
+    })
+    expect(buildImportBatchRollbackNotes(estimate, tr)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('Estimate is based on 2 of 5'),
+        expect.stringContaining('do not show committed records yet'),
+        expect.stringContaining('emitted warnings during preview'),
+        expect.stringContaining('policy-sensitive'),
       ]),
     )
   })

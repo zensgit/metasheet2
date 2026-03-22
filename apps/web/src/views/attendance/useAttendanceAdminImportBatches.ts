@@ -98,6 +98,18 @@ export interface AttendanceImportBatchIssueBucket {
   count: number
 }
 
+export interface AttendanceImportBatchRollbackEstimate {
+  loadedItems: number
+  totalBatchRows: number
+  estimatedCommittedRows: number
+  previewOnlyRows: number
+  flaggedRows: number
+  warningRows: number
+  policyReviewRows: number
+  coveragePercent: number | null
+  isPartial: boolean
+}
+
 export interface AttendanceImportBatchActionHintMetrics {
   totalItems: number
   anomalyItems: number
@@ -279,6 +291,102 @@ export function summarizeImportBatchIssueBuckets(items: AttendanceImportItem[]):
     { filter: 'overtime', count: summary.overtimeItems },
     { filter: 'clean', count: summary.normalItems },
   ]
+}
+
+function isPolicySensitiveAnalysis(analysis: AttendanceImportBatchItemAnalysis): boolean {
+  return Boolean(
+    (analysis.status && analysis.status !== 'normal')
+    || analysis.lateMinutes > 0
+    || analysis.earlyLeaveMinutes > 0
+    || analysis.leaveMinutes > 0
+    || analysis.overtimeMinutes > 0
+  )
+}
+
+export function estimateImportBatchRollbackImpact(
+  batch: AttendanceImportBatch | null | undefined,
+  items: AttendanceImportItem[],
+): AttendanceImportBatchRollbackEstimate {
+  const summary = summarizeImportBatchItems(items)
+  const loadedItems = summary.totalItems
+  const declaredTotal = Math.max(0, Number(batch?.rowCount) || 0)
+  const totalBatchRows = Math.max(declaredTotal, loadedItems)
+  const policyReviewRows = items.reduce((count, item) => {
+    return count + (isPolicySensitiveAnalysis(classifyImportBatchItem(item)) ? 1 : 0)
+  }, 0)
+  const coveragePercent = totalBatchRows > 0
+    ? Math.round((loadedItems / totalBatchRows) * 100)
+    : (loadedItems > 0 ? 100 : null)
+
+  return {
+    loadedItems,
+    totalBatchRows,
+    estimatedCommittedRows: Math.max(0, loadedItems - summary.missingRecordItems),
+    previewOnlyRows: summary.missingRecordItems,
+    flaggedRows: summary.anomalyItems,
+    warningRows: summary.warningItems,
+    policyReviewRows,
+    coveragePercent,
+    isPartial: totalBatchRows > loadedItems,
+  }
+}
+
+export function buildImportBatchRollbackNotes(
+  estimate: AttendanceImportBatchRollbackEstimate,
+  tr: Translate = (en) => en,
+): string[] {
+  if (estimate.loadedItems <= 0) return []
+
+  const notes: string[] = []
+  if (estimate.isPartial) {
+    notes.push(
+      tr(
+        `Estimate is based on ${estimate.loadedItems} of ${estimate.totalBatchRows} row(s). Load or export the full batch before rollback if audit or payroll needs exact impact.`,
+        `当前估算仅基于 ${estimate.totalBatchRows} 行中的 ${estimate.loadedItems} 行。如果审计或薪资需要精确影响面，请先加载或导出整批数据再回滚。`,
+      ),
+    )
+  }
+  if (estimate.previewOnlyRows > 0) {
+    notes.push(
+      tr(
+        `${estimate.previewOnlyRows} loaded row(s) do not show committed records yet. Rollback may not remove those rows from downstream attendance tables.`,
+        `已加载条目中有 ${estimate.previewOnlyRows} 行尚未显示已提交记录，这些行回滚后未必会影响下游考勤表。`,
+      ),
+    )
+  }
+  if (estimate.warningRows > 0) {
+    notes.push(
+      tr(
+        `${estimate.warningRows} row(s) emitted warnings during preview. Review the warning payload before choosing batch rollback over targeted correction.`,
+        `有 ${estimate.warningRows} 行在预演阶段产生警告。请先复核警告内容，再决定是整批回滚还是定向修正。`,
+      ),
+    )
+  }
+  if (estimate.policyReviewRows > 0) {
+    notes.push(
+      tr(
+        `${estimate.policyReviewRows} row(s) are policy-sensitive (late, early leave, leave, overtime, or non-normal status). Align approval and payroll reconciliation before rollback.`,
+        `有 ${estimate.policyReviewRows} 行属于规则敏感项（迟到、早退、请假、加班或非 normal 状态）。回滚前请先对齐审批与薪资对账。`,
+      ),
+    )
+  }
+  if (notes.length === 0 && estimate.estimatedCommittedRows > 0 && !estimate.isPartial) {
+    notes.push(
+      tr(
+        'Loaded rows appear committed and low-risk. Rollback impact should be straightforward if downstream consumers have not reconciled this batch yet.',
+        '当前已加载条目看起来已提交且风险较低。如果下游尚未完成对账，回滚影响通常会比较直接。',
+      ),
+    )
+  }
+  if (notes.length === 0) {
+    notes.push(
+      tr(
+        'Load the batch items first to estimate rollback impact before using the batch-level rollback action.',
+        '请先加载批次条目，再基于估算结果使用整批回滚动作。',
+      ),
+    )
+  }
+  return notes
 }
 
 export function buildImportBatchActionHints(

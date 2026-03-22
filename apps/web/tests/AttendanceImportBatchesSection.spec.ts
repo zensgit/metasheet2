@@ -139,6 +139,11 @@ describe('AttendanceImportBatchesSection', () => {
     expect(container!.textContent).toContain('Flags')
     expect(container!.textContent).toContain('late 15')
     expect(container!.textContent).toContain('Selected batch')
+    expect(container!.textContent).toContain('Rollback impact estimate')
+    expect(container!.textContent).toContain('Coverage: 2 / 7')
+    expect(container!.textContent).toContain('Est. committed rows')
+    expect(container!.textContent).toContain('Rollback notes')
+    expect(container!.textContent).toContain('Estimate is based on 2 of 7 row(s)')
     expect(container!.textContent).toContain('Operator notes')
     expect(container!.textContent).toContain('Mapping viewer')
     expect(container!.textContent).toContain('employeeNo')
@@ -252,6 +257,17 @@ describe('AttendanceImportBatchesSection', () => {
           },
         }),
         createBatch({
+          id: 'batch-archive',
+          rowCount: 5,
+          status: 'completed',
+          source: 'csv',
+          createdBy: 'ops-0',
+          createdAt: '2026-02-10T09:00:00.000Z',
+          meta: {
+            engine: 'bulk',
+          },
+        }),
+        createBatch({
           id: 'batch-beta',
           rowCount: 4,
           status: 'rolled_back',
@@ -280,12 +296,24 @@ describe('AttendanceImportBatchesSection', () => {
       formatStatus,
       formatDateTime,
       formatJson,
+      clock: () => new Date('2026-03-21T12:00:00.000Z'),
     })
     app.mount(container!)
     await flushUi()
 
-    expect(getBatchRowCount()).toBe(2)
+    expect(getBatchRowCount()).toBe(3)
     expect(container!.textContent).toContain('Active filters: All batches')
+    expect(container!.textContent).toContain('Time slice: All time')
+
+    const last7Button = Array.from(container!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Last 7 days'),
+    ) as HTMLButtonElement | undefined
+    expect(last7Button).toBeTruthy()
+    last7Button!.click()
+    await flushUi()
+
+    expect(container!.textContent).toContain('Time slice: Last 7 days')
+    expect(getBatchRowCount()).toBe(2)
 
     const searchInput = container!.querySelector('#attendance-import-batch-inbox-search') as HTMLInputElement | null
     expect(searchInput).toBeTruthy()
@@ -336,7 +364,8 @@ describe('AttendanceImportBatchesSection', () => {
     createdFrom!.dispatchEvent(new Event('input'))
     await flushUi()
 
-    expect(container!.textContent).toContain('created 2026-03-20 to --')
+    expect(container!.textContent).toContain('Time slice: Custom')
+    expect(container!.textContent).toContain('created 2026-03-20 to 2026-03-21')
     expect(getBatchRowCount()).toBe(1)
 
     const createdTo = container!.querySelector('#attendance-import-batch-created-to') as HTMLInputElement | null
@@ -355,7 +384,7 @@ describe('AttendanceImportBatchesSection', () => {
     resetButton!.click()
     await flushUi()
 
-    expect(getBatchRowCount()).toBe(2)
+    expect(getBatchRowCount()).toBe(3)
     expect(container!.textContent).toContain('Active filters: All batches')
   })
 

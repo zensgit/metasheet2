@@ -94,8 +94,10 @@ This changes rule preview from a passive result table into a usable simulation/d
 Delivered:
 
 - Batch inbox filter bar for search, status, engine, source, creator, and created-date window.
+- Batch-list time slicing presets on top of manual date-window filters.
 - Issue chips and search-based batch item triage.
 - Selected batch meta summary.
+- Rollback impact estimate based on loaded batch items, with coverage, committed-row estimate, and risk notes.
 - Operator notes generated from batch-level anomaly summary.
 - Mapping viewer that exposes batch mapping payload instead of only counting fields.
 - Selected row detail panel with severity, metrics, warnings, and recommended next steps.
@@ -117,6 +119,8 @@ Compared with typical low-code attendance apps built on general form/workflow pl
    Generic low-code tools usually expose forms and flows, but not a scenario lab with per-row diagnostics tied to attendance metrics.
 2. Import triage is operational.
    Generic low-code tools often stop at import success/failure; this branch exposes batch diagnostics, mapping visibility, snapshot sections, and next-step guidance in one surface.
+3. Rollback decisions are explainable.
+   Generic low-code tools usually expose a destructive rollback action without showing estimated affected rows, partial coverage, or policy-sensitive records first.
 
 ## Validation Gates
 
@@ -133,8 +137,8 @@ pnpm --filter @metasheet/web build
 
 These are intentionally left for the next round, not for this release candidate:
 
-1. Retry and rollback assistant with impact estimation.
-2. Batch-list time slicing presets in addition to raw date range inputs.
+1. Targeted retry assistant and rollback confirmation flows based on exact full-batch impact.
+2. Saved inbox views and reusable filter presets for operations teams.
 3. Visual builders for leave policies and payroll templates to remove more JSON editing.
 4. Attendance-native workflow nodes for exception handling,补卡, leave, and escalation.
 5. Data-scope and field-scope permission controls beyond current role templates.
