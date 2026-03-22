@@ -1,4 +1,5 @@
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
+import type { PlmAuditRouteState } from './plmAuditQueryState'
 import type { PlmAuditSavedViewShareFollowupSource } from './plmAuditSavedViewShareFollowup'
 import {
   resolveAuditTeamViewRecommendationFilter,
@@ -238,6 +239,40 @@ export function buildPlmAuditTeamViewCollaborationActionOutcome(
     statusMessage: buildPlmAuditTeamViewCollaborationActionStatus(source, action, tr),
     followup,
     scrollTargetId: action === 'set-default' ? followup.logsAnchorId : null,
+  }
+}
+
+export function shouldKeepPlmAuditTeamViewCollaborationFollowup(
+  followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'action' | 'teamViewId'> | null,
+  routeState: Pick<PlmAuditRouteState, 'teamViewId' | 'action' | 'resourceType'>,
+) {
+  if (!followup) return false
+  if (followup.action === 'set-default') {
+    return routeState.action === 'set-default'
+      && routeState.resourceType === 'plm-team-view-default'
+  }
+  return routeState.teamViewId === followup.teamViewId
+}
+
+export function prunePlmAuditTeamViewCollaborationDraftSavedViewSource(
+  draft: PlmAuditTeamViewCollaborationDraft | null,
+  savedViewId: string,
+): PlmAuditTeamViewCollaborationDraft | null {
+  if (!draft || draft.sourceSavedViewId !== savedViewId) return draft
+  return {
+    ...draft,
+    sourceSavedViewId: null,
+  }
+}
+
+export function prunePlmAuditTeamViewCollaborationFollowupSavedViewSource(
+  followup: PlmAuditTeamViewCollaborationFollowup | null,
+  savedViewId: string,
+): PlmAuditTeamViewCollaborationFollowup | null {
+  if (!followup || followup.sourceSavedViewId !== savedViewId) return followup
+  return {
+    ...followup,
+    sourceSavedViewId: null,
   }
 }
 

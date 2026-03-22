@@ -10,7 +10,10 @@ import {
   buildPlmAuditTeamViewCollaborationNotice,
   buildPlmAuditTeamViewCollaborationSourceFocusIntent,
   findPlmAuditTeamViewCollaborationFollowupView,
+  prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
+  prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditTeamViewCollaborationSourceAnchorId,
+  shouldKeepPlmAuditTeamViewCollaborationFollowup,
   shouldClearPlmAuditTeamViewCollaborationDraft,
 } from '../src/views/plmAuditTeamViewCollaboration'
 
@@ -623,6 +626,80 @@ describe('plmAuditTeamViewCollaboration', () => {
     })).toEqual({
       id: 'audit-view-2',
       isDefault: true,
+    })
+  })
+
+  it('keeps follow-ups only while the route still matches their audit context', () => {
+    expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
+      teamViewId: 'audit-view-6',
+      action: 'share',
+    }, {
+      teamViewId: 'audit-view-6',
+      action: '',
+      resourceType: '',
+    })).toBe(true)
+
+    expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
+      teamViewId: 'audit-view-6',
+      action: 'share',
+    }, {
+      teamViewId: '',
+      action: '',
+      resourceType: '',
+    })).toBe(false)
+
+    expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
+      teamViewId: 'audit-view-9',
+      action: 'set-default',
+    }, {
+      teamViewId: '',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+    })).toBe(true)
+
+    expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
+      teamViewId: 'audit-view-9',
+      action: 'set-default',
+    }, {
+      teamViewId: '',
+      action: '',
+      resourceType: '',
+    })).toBe(false)
+  })
+
+  it('drops deleted saved-view provenance from promotion drafts and follow-ups', () => {
+    expect(prunePlmAuditTeamViewCollaborationDraftSavedViewSource({
+      teamViewId: 'audit-view-2',
+      teamViewName: '新提升视图',
+      teamViewOwnerUserId: '',
+      focusTargetId: 'plm-audit-team-view-controls',
+      source: 'saved-view-promotion',
+      sourceSavedViewId: 'saved-view-7',
+      statusMessage: 'ready',
+    }, 'saved-view-7')).toEqual({
+      teamViewId: 'audit-view-2',
+      teamViewName: '新提升视图',
+      teamViewOwnerUserId: '',
+      focusTargetId: 'plm-audit-team-view-controls',
+      source: 'saved-view-promotion',
+      sourceSavedViewId: null,
+      statusMessage: 'ready',
+    })
+
+    expect(prunePlmAuditTeamViewCollaborationFollowupSavedViewSource({
+      teamViewId: 'audit-view-3',
+      source: 'saved-view-promotion',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-saved-views',
+      sourceSavedViewId: 'saved-view-8',
+    }, 'saved-view-8')).toEqual({
+      teamViewId: 'audit-view-3',
+      source: 'saved-view-promotion',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-saved-views',
+      sourceSavedViewId: null,
     })
   })
 

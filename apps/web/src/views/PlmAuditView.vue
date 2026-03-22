@@ -825,6 +825,9 @@ import {
   buildPlmAuditTeamViewCollaborationNotice,
   buildPlmAuditTeamViewCollaborationSourceFocusIntent,
   findPlmAuditTeamViewCollaborationFollowupView,
+  prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
+  prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
+  shouldKeepPlmAuditTeamViewCollaborationFollowup,
   shouldClearPlmAuditTeamViewCollaborationDraft,
   type PlmAuditTeamViewCollaborationActionKind,
   type PlmAuditTeamViewCollaborationDraft,
@@ -1303,6 +1306,7 @@ function clearAuditTeamViewShareEntry() {
 
 function clearAuditTeamViewCollaborationFollowup() {
   auditTeamViewCollaborationFollowup.value = null
+  focusedSavedViewId.value = ''
 }
 
 function clearAuditSavedViewShareFollowup() {
@@ -2192,11 +2196,20 @@ function saveCurrentView() {
 
 function applySavedView(view: PlmAuditSavedView) {
   applySavedViewAttentionAction({ kind: 'apply' })
+  clearAuditTeamViewCollaborationFollowup()
   void syncRouteState(restorePlmAuditSavedViewState(view.state))
 }
 
 function deleteSavedViewEntry(id: string) {
   savedViews.value = deletePlmAuditSavedView(id)
+  auditTeamViewCollaborationDraft.value = prunePlmAuditTeamViewCollaborationDraftSavedViewSource(
+    auditTeamViewCollaborationDraft.value,
+    id,
+  )
+  auditTeamViewCollaborationFollowup.value = prunePlmAuditTeamViewCollaborationFollowupSavedViewSource(
+    auditTeamViewCollaborationFollowup.value,
+    id,
+  )
   applySavedViewAttentionAction({ kind: 'delete', savedViewId: id })
   setStatus(tr('Audit saved view deleted.', '审计已保存视图已删除。'))
 }
@@ -2308,6 +2321,7 @@ function applyFilters() {
 
 function resetFilters() {
   applySavedViewAttentionAction({ kind: 'reset-filters' })
+  clearAuditTeamViewCollaborationFollowup()
   void syncRouteState(resetPlmAuditRouteFilters(readCurrentRouteState()))
 }
 
@@ -2331,7 +2345,18 @@ watch(
   async (queryState) => {
     const nextState = parsePlmAuditRouteState(queryState)
     const currentState = readCurrentRouteState()
-    if (routeReady.value && isPlmAuditRouteStateEqual(nextState, currentState)) return
+    const routeChanged = routeReady.value && !isPlmAuditRouteStateEqual(nextState, currentState)
+    if (!routeChanged && routeReady.value) return
+    if (
+      routeChanged
+      && auditTeamViewCollaborationFollowup.value
+      && !shouldKeepPlmAuditTeamViewCollaborationFollowup(
+        auditTeamViewCollaborationFollowup.value,
+        nextState,
+      )
+    ) {
+      clearAuditTeamViewCollaborationFollowup()
+    }
     applyRouteState(nextState)
     routeReady.value = true
     await Promise.all([loadSummary(nextState.windowMinutes), loadLogs(nextState.page)])
