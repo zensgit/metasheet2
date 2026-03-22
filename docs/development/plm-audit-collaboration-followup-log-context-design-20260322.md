@@ -34,6 +34,7 @@ the followup could still remain visible even though the page was no longer showi
 - `page = 1`
 - `q = view.id`
 - `actorId = ''`
+- `kind = 'audit'`
 - `action = 'set-default'`
 - `resourceType = 'plm-team-view-default'`
 - `from = ''`
@@ -51,6 +52,7 @@ now keeps `set-default` followups only when the route still matches the default-
 - `page === 1`
 - `q === followup.teamViewId`
 - `actorId === ''`
+- `kind === 'audit'`
 - `action === 'set-default'`
 - `resourceType === 'plm-team-view-default'`
 - `from === ''`

@@ -246,13 +246,14 @@ export function shouldKeepPlmAuditTeamViewCollaborationFollowup(
   followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'action' | 'teamViewId'> | null,
   routeState: Pick<
     PlmAuditRouteState,
-    'page' | 'teamViewId' | 'q' | 'actorId' | 'action' | 'resourceType' | 'from' | 'to'
+    'page' | 'teamViewId' | 'q' | 'actorId' | 'kind' | 'action' | 'resourceType' | 'from' | 'to'
   >,
 ) {
   if (!followup) return false
   if (followup.action === 'set-default') {
     const onDefaultLogRoute = routeState.page === 1
       && !routeState.actorId
+      && routeState.kind === 'audit'
       && !routeState.from
       && !routeState.to
     return routeState.action === 'set-default'

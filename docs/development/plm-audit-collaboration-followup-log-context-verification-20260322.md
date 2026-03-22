@@ -22,6 +22,7 @@ Checks:
 - share followup compatibility is unchanged
 - default followups remain valid on the original default-change log route
 - default followups are cleared when pagination changes
+- default followups are cleared when log kind changes
 - default followups are cleared when actor filters change
 - default followups are cleared when date-range filters change
 
