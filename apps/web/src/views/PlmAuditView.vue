@@ -831,8 +831,9 @@ import {
   findPlmAuditTeamViewCollaborationFollowupView,
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
-  shouldKeepPlmAuditTeamViewCollaborationFollowup,
   shouldClearPlmAuditTeamViewCollaborationDraft,
+  shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry,
+  shouldKeepPlmAuditTeamViewCollaborationFollowup,
   type PlmAuditTeamViewCollaborationActionKind,
   type PlmAuditTeamViewCollaborationDraft,
   type PlmAuditTeamViewCollaborationFollowup,
@@ -1579,6 +1580,18 @@ async function refreshAuditTeamViews() {
 
     if (resolution.kind === 'apply-view') {
       if (requestedSharedEntry && requestedState.teamViewId.trim()) {
+        if (shouldClearPlmAuditTeamViewCollaborationDraft(
+          auditTeamViewCollaborationDraft.value,
+          resolution.viewId,
+        )) {
+          clearAuditTeamViewCollaborationDraft()
+        }
+        if (shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry(
+          auditTeamViewCollaborationFollowup.value,
+          resolution.viewId,
+        )) {
+          clearAuditTeamViewCollaborationFollowup()
+        }
         auditTeamViewShareEntry.value = {
           teamViewId: resolution.viewId,
         }

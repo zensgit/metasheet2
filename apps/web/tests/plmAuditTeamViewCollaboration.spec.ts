@@ -13,8 +13,9 @@ import {
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditTeamViewCollaborationSourceAnchorId,
-  shouldKeepPlmAuditTeamViewCollaborationFollowup,
   shouldClearPlmAuditTeamViewCollaborationDraft,
+  shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry,
+  shouldKeepPlmAuditTeamViewCollaborationFollowup,
 } from '../src/views/plmAuditTeamViewCollaboration'
 
 function tr(en: string, zh: string) {
@@ -828,6 +829,22 @@ describe('plmAuditTeamViewCollaboration', () => {
         teamViewId: 'audit-view-2',
       },
       'audit-view-7',
+    )).toBe(false)
+  })
+
+  it('clears the matching collaboration follow-up when shared-link entry takes over the same view', () => {
+    expect(shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry(
+      {
+        teamViewId: 'audit-view-3',
+      },
+      'audit-view-3',
+    )).toBe(true)
+
+    expect(shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry(
+      {
+        teamViewId: 'audit-view-3',
+      },
+      'audit-view-8',
     )).toBe(false)
   })
 })
