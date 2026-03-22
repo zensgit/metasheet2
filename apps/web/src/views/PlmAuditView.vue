@@ -785,6 +785,7 @@ import {
 import {
   deletePlmAuditSavedView,
   readPlmAuditSavedViews,
+  restorePlmAuditSavedViewState,
   savePlmAuditSavedView,
   type PlmAuditSavedView,
 } from './plmAuditSavedViews'
@@ -2141,7 +2142,7 @@ function saveCurrentView() {
 }
 
 function applySavedView(view: PlmAuditSavedView) {
-  void syncRouteState(view.state)
+  void syncRouteState(restorePlmAuditSavedViewState(view.state))
 }
 
 function deleteSavedViewEntry(id: string) {

@@ -61,6 +61,13 @@ function normalizePlmAuditRouteState(state: PlmAuditRouteState): PlmAuditRouteSt
   }
 }
 
+export function restorePlmAuditSavedViewState(state: PlmAuditRouteState): PlmAuditRouteState {
+  return {
+    ...normalizePlmAuditRouteState(state),
+    teamViewId: '',
+  }
+}
+
 function isPlmAuditSavedView(value: unknown): value is PlmAuditSavedView {
   if (!value || typeof value !== 'object') return false
   const record = value as Record<string, unknown>

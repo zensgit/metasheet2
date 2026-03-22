@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   deletePlmAuditSavedView,
   readPlmAuditSavedViews,
+  restorePlmAuditSavedViewState,
   savePlmAuditSavedView,
 } from '../src/views/plmAuditSavedViews'
 import type { PlmAuditRouteState } from '../src/views/plmAuditQueryState'
@@ -163,6 +164,28 @@ describe('plmAuditSavedViews', () => {
       sceneRecommendationReason: '',
       sceneRecommendationSourceLabel: '',
       returnToPlmPath: '',
+    })
+  })
+
+  it('restores saved views as local snapshots instead of live team-view links', () => {
+    expect(restorePlmAuditSavedViewState({
+      ...sampleState,
+      teamViewId: 'audit-view-1',
+      q: 'team-view-snapshot',
+      kind: 'workbench',
+      action: 'archive',
+      resourceType: 'plm-team-view-batch',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+    })).toEqual({
+      ...sampleState,
+      teamViewId: '',
+      q: 'team-view-snapshot',
+      kind: 'workbench',
+      action: 'archive',
+      resourceType: 'plm-team-view-batch',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
     })
   })
 
