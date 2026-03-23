@@ -357,6 +357,23 @@ export function shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup(
   return Boolean(draft && followup)
 }
 
+export function resolvePlmAuditTeamViewFollowupSelection(options: {
+  selectedIds: string[]
+  previousDraft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null
+  nextFollowup: Pick<PlmAuditTeamViewCollaborationFollowup, 'teamViewId' | 'action'> | null
+}) {
+  if (!options.previousDraft || !options.nextFollowup) return options.selectedIds
+  if (options.nextFollowup.action !== 'share') return options.selectedIds
+  if (
+    options.selectedIds.length === 1
+    && options.selectedIds[0] === options.previousDraft.teamViewId
+    && options.previousDraft.teamViewId === options.nextFollowup.teamViewId
+  ) {
+    return []
+  }
+  return options.selectedIds
+}
+
 export function shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry(
   draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null,
   followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'teamViewId'> | null,

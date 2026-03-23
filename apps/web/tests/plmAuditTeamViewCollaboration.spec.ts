@@ -15,6 +15,7 @@ import {
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
   prunePlmAuditTeamViewCollaborationFollowupForRemovedViews,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
+  resolvePlmAuditTeamViewFollowupSelection,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
   resolvePlmAuditTeamViewCollaborationSourceAnchorId,
@@ -284,6 +285,41 @@ describe('plmAuditTeamViewCollaboration', () => {
     expect(resolvePlmAuditTeamViewCollaborationAttentionMode(null, 'set-default')).toBe(
       'managed-team-view',
     )
+  })
+
+  it('clears draft-owned single selection when share followup replaces a collaboration draft', () => {
+    expect(resolvePlmAuditTeamViewFollowupSelection({
+      selectedIds: ['audit-view-9'],
+      previousDraft: {
+        teamViewId: 'audit-view-9',
+      },
+      nextFollowup: {
+        teamViewId: 'audit-view-9',
+        action: 'share',
+      },
+    })).toEqual([])
+
+    expect(resolvePlmAuditTeamViewFollowupSelection({
+      selectedIds: ['audit-view-9', 'audit-view-10'],
+      previousDraft: {
+        teamViewId: 'audit-view-9',
+      },
+      nextFollowup: {
+        teamViewId: 'audit-view-9',
+        action: 'share',
+      },
+    })).toEqual(['audit-view-9', 'audit-view-10'])
+
+    expect(resolvePlmAuditTeamViewFollowupSelection({
+      selectedIds: ['audit-view-9'],
+      previousDraft: {
+        teamViewId: 'audit-view-9',
+      },
+      nextFollowup: {
+        teamViewId: 'audit-view-9',
+        action: 'set-default',
+      },
+    })).toEqual(['audit-view-9'])
   })
 
   it('keeps collaboration drafts pinned to the canonical team-view route only', () => {

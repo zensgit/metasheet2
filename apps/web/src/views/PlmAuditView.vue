@@ -860,6 +860,7 @@ import {
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
+  resolvePlmAuditTeamViewFollowupSelection,
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationFollowup,
@@ -2111,6 +2112,7 @@ async function shareAuditTeamViewEntry(
       sourceSavedViewId,
     },
   )
+  const previousDraft = auditTeamViewCollaborationDraft.value
   const sharedEntryTakeover = shouldTakeOverPlmAuditSharedEntryOnSourceAction(
     auditTeamViewShareEntry.value,
     Boolean(source),
@@ -2127,6 +2129,11 @@ async function shareAuditTeamViewEntry(
     auditTeamViewCollaborationDraft.value,
     outcome.followup,
   )) {
+    auditTeamViewSelection.value = resolvePlmAuditTeamViewFollowupSelection({
+      selectedIds: auditTeamViewSelection.value,
+      previousDraft,
+      nextFollowup: outcome.followup,
+    })
     clearAuditTeamViewCollaborationDraft()
   }
   setStatus(outcome.statusMessage)
