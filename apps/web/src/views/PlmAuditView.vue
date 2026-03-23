@@ -836,6 +836,7 @@ import {
   findPlmAuditTeamViewCollaborationFollowupView,
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
+  resolvePlmAuditTeamViewCollaborationAttentionMode,
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry,
   shouldKeepPlmAuditTeamViewCollaborationFollowup,
@@ -1895,8 +1896,10 @@ async function shareAuditTeamViewEntry(
       sourceSavedViewId,
     },
   )
-  if (source) {
+  if (resolvePlmAuditTeamViewCollaborationAttentionMode(source, 'share') === 'source-share-followup') {
     applyAuditSourceShareFollowupAttention()
+  } else {
+    applyAuditTeamViewHandoffAttention()
   }
   setStatus(outcome.statusMessage)
   auditTeamViewCollaborationFollowup.value = outcome.followup
@@ -1931,7 +1934,7 @@ async function setAuditTeamViewDefaultEntry(
         sourceSavedViewId,
       },
     )
-    if (source) {
+    if (resolvePlmAuditTeamViewCollaborationAttentionMode(source, 'set-default') === 'managed-team-view') {
       applyAuditTeamViewHandoffAttention()
     }
     setStatus(outcome.statusMessage)

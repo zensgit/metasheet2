@@ -9,6 +9,7 @@ import {
 export type PlmAuditTeamViewCollaborationSource = 'recommendation' | 'saved-view-promotion' | 'scene-context'
 export type PlmAuditTeamViewCollaborationActionKind = 'share' | 'set-default' | 'dismiss'
 export type PlmAuditTeamViewCollaborationFollowupActionKind = 'set-default' | 'view-logs' | 'focus-source' | 'dismiss'
+export type PlmAuditTeamViewCollaborationAttentionMode = 'managed-team-view' | 'source-share-followup'
 
 export type PlmAuditTeamViewCollaborationDraft = {
   teamViewId: string
@@ -255,6 +256,16 @@ export function buildPlmAuditTeamViewCollaborationActionOutcome(
     followup,
     scrollTargetId: action === 'set-default' ? followup.logsAnchorId : null,
   }
+}
+
+export function resolvePlmAuditTeamViewCollaborationAttentionMode(
+  source: PlmAuditTeamViewCollaborationSource | null | undefined,
+  action: Exclude<PlmAuditTeamViewCollaborationActionKind, 'dismiss'>,
+): PlmAuditTeamViewCollaborationAttentionMode {
+  if (action === 'share' && source) {
+    return 'source-share-followup'
+  }
+  return 'managed-team-view'
 }
 
 export function shouldKeepPlmAuditTeamViewCollaborationFollowup(

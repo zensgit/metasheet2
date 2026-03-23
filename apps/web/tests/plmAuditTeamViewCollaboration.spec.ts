@@ -12,6 +12,7 @@ import {
   findPlmAuditTeamViewCollaborationFollowupView,
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
+  resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationSourceAnchorId,
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry,
@@ -228,6 +229,21 @@ describe('plmAuditTeamViewCollaboration', () => {
       followup: null,
       scrollTargetId: null,
     })
+  })
+
+  it('routes generic and default collaboration outcomes through management attention cleanup', () => {
+    expect(resolvePlmAuditTeamViewCollaborationAttentionMode('recommendation', 'share')).toBe(
+      'source-share-followup',
+    )
+    expect(resolvePlmAuditTeamViewCollaborationAttentionMode(null, 'share')).toBe(
+      'managed-team-view',
+    )
+    expect(resolvePlmAuditTeamViewCollaborationAttentionMode('saved-view-promotion', 'set-default')).toBe(
+      'managed-team-view',
+    )
+    expect(resolvePlmAuditTeamViewCollaborationAttentionMode(null, 'set-default')).toBe(
+      'managed-team-view',
+    )
   })
 
   it('builds a draft handoff for recommendation and promotion flows', () => {
