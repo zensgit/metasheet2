@@ -27,6 +27,11 @@ type HolidayBindings = {
   deleteHoliday: () => Promise<void> | void
 }
 
+type HolidayBindingOverrides = Partial<Omit<HolidayBindings, 'holidayRange' | 'holidayForm'>> & {
+  holidayRange?: Partial<HolidayBindings['holidayRange']>
+  holidayForm?: Partial<HolidayFormState>
+}
+
 function toDateInput(date: Date): string {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, '0')
@@ -50,6 +55,35 @@ function findCalendarDayButton(container: HTMLElement): HTMLButtonElement {
   const button = container.querySelector('.attendance__holiday-cell')
   expect(button, 'expected at least one calendar day button').toBeTruthy()
   return button as HTMLButtonElement
+}
+
+function createHolidayBindings(overrides: HolidayBindingOverrides = {}): HolidayBindings {
+  const holidayRange = reactive({
+    from: '2026-03-01',
+    to: '2026-03-31',
+    ...overrides.holidayRange,
+  })
+  const holidayForm = reactive({
+    date: '2026-03-15',
+    name: '',
+    isWorkingDay: false,
+    ...overrides.holidayForm,
+  })
+
+  return {
+    holidays: overrides.holidays ?? ref([]),
+    holidayTotal: overrides.holidayTotal ?? ref(0),
+    holidayLoading: overrides.holidayLoading ?? ref(false),
+    holidaySaving: overrides.holidaySaving ?? ref(false),
+    holidayEditingId: overrides.holidayEditingId ?? ref(null),
+    holidayRange,
+    holidayForm,
+    resetHolidayForm: overrides.resetHolidayForm ?? vi.fn(),
+    editHoliday: overrides.editHoliday ?? vi.fn(),
+    loadHolidays: overrides.loadHolidays ?? vi.fn(),
+    saveHoliday: overrides.saveHoliday ?? vi.fn(),
+    deleteHoliday: overrides.deleteHoliday ?? vi.fn(),
+  }
 }
 
 describe('AttendanceHolidayDataSection', () => {
@@ -78,27 +112,9 @@ describe('AttendanceHolidayDataSection', () => {
     vi.setSystemTime(new Date('2026-04-20T12:00:00Z'))
 
     const loadHolidays = vi.fn(async () => undefined)
-    const holidayBindings: HolidayBindings = {
-      holidays: ref([]),
-      holidayTotal: ref(0),
-      holidayLoading: ref(false),
-      holidaySaving: ref(false),
-      holidayEditingId: ref(null),
-      holidayRange: reactive({
-        from: '2026-03-01',
-        to: '2026-03-31',
-      }),
-      holidayForm: reactive({
-        date: '2026-03-15',
-        name: '',
-        isWorkingDay: false,
-      }),
-      resetHolidayForm: vi.fn(),
-      editHoliday: vi.fn(),
+    const holidayBindings = createHolidayBindings({
       loadHolidays,
-      saveHoliday: vi.fn(),
-      deleteHoliday: vi.fn(),
-    }
+    })
 
     app = createApp(AttendanceHolidayDataSection, {
       holiday: holidayBindings,
@@ -140,27 +156,9 @@ describe('AttendanceHolidayDataSection', () => {
   })
 
   it('shows loading feedback for the visible month and disables calendar day buttons while loading', async () => {
-    const holidayBindings: HolidayBindings = {
-      holidays: ref([]),
-      holidayTotal: ref(0),
+    const holidayBindings = createHolidayBindings({
       holidayLoading: ref(true),
-      holidaySaving: ref(false),
-      holidayEditingId: ref(null),
-      holidayRange: reactive({
-        from: '2026-03-01',
-        to: '2026-03-31',
-      }),
-      holidayForm: reactive({
-        date: '2026-03-15',
-        name: '',
-        isWorkingDay: false,
-      }),
-      resetHolidayForm: vi.fn(),
-      editHoliday: vi.fn(),
-      loadHolidays: vi.fn(),
-      saveHoliday: vi.fn(),
-      deleteHoliday: vi.fn(),
-    }
+    })
 
     app = createApp(AttendanceHolidayDataSection, {
       holiday: holidayBindings,
@@ -195,27 +193,15 @@ describe('AttendanceHolidayDataSection', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-02-01T12:00:00Z'))
 
-    const holidayBindings: HolidayBindings = {
-      holidays: ref([]),
-      holidayTotal: ref(0),
-      holidayLoading: ref(false),
-      holidaySaving: ref(false),
-      holidayEditingId: ref(null),
-      holidayRange: reactive({
+    const holidayBindings = createHolidayBindings({
+      holidayRange: {
         from: '2026-02-01',
         to: '2026-02-28',
-      }),
-      holidayForm: reactive({
+      },
+      holidayForm: {
         date: '2026-02-01',
-        name: '',
-        isWorkingDay: false,
-      }),
-      resetHolidayForm: vi.fn(),
-      editHoliday: vi.fn(),
-      loadHolidays: vi.fn(),
-      saveHoliday: vi.fn(),
-      deleteHoliday: vi.fn(),
-    }
+      },
+    })
 
     app = createApp(AttendanceHolidayDataSection, {
       holiday: holidayBindings,

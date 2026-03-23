@@ -271,7 +271,6 @@ const calendarDays = computed<CalendarDayCell[]>(() => {
       holidays: holidayMap.value.get(key) ?? [],
       lunarLabel: formatLunarDayLabel(date, {
         enabled: Boolean(props.showLunarCalendar),
-        timeZone: 'Asia/Shanghai',
       }),
     }
   })
