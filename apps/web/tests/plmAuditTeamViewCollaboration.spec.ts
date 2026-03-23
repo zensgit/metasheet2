@@ -16,6 +16,7 @@ import {
   prunePlmAuditTeamViewCollaborationFollowupForRemovedViews,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditClearedTeamViewDraftSelection,
+  resolvePlmAuditCompletedTeamViewBatchCollaborationDraft,
   resolvePlmAuditCompletedTeamViewCollaborationDraft,
   resolvePlmAuditSavedViewTakeoverCollaborationState,
   resolvePlmAuditTeamViewFollowupSelection,
@@ -428,6 +429,41 @@ describe('plmAuditTeamViewCollaboration', () => {
     })).toEqual({
       selectedIds: [],
       clearDraft: true,
+    })
+  })
+
+  it('clears matching drafts for batch lifecycle actions without consuming user multi-select', () => {
+    expect(resolvePlmAuditCompletedTeamViewBatchCollaborationDraft({
+      selectedIds: ['audit-view-9'],
+      draft: {
+        teamViewId: 'audit-view-9',
+      },
+      processedTeamViewIds: ['audit-view-9'],
+    })).toEqual({
+      selectedIds: [],
+      clearDraft: true,
+    })
+
+    expect(resolvePlmAuditCompletedTeamViewBatchCollaborationDraft({
+      selectedIds: ['audit-view-9', 'audit-view-10'],
+      draft: {
+        teamViewId: 'audit-view-9',
+      },
+      processedTeamViewIds: ['audit-view-9', 'audit-view-11'],
+    })).toEqual({
+      selectedIds: ['audit-view-9', 'audit-view-10'],
+      clearDraft: true,
+    })
+
+    expect(resolvePlmAuditCompletedTeamViewBatchCollaborationDraft({
+      selectedIds: ['audit-view-9'],
+      draft: {
+        teamViewId: 'audit-view-8',
+      },
+      processedTeamViewIds: ['audit-view-9'],
+    })).toEqual({
+      selectedIds: ['audit-view-9'],
+      clearDraft: false,
     })
   })
 

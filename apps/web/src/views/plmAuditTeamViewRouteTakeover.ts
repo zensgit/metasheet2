@@ -8,12 +8,17 @@ import {
   type PlmAuditTeamViewCollaborationDraft,
   type PlmAuditTeamViewCollaborationFollowup,
 } from './plmAuditTeamViewCollaboration'
+import {
+  resolvePlmAuditTakeoverTeamViewFormDraftState,
+  type PlmAuditTeamViewFormDraftState,
+} from './plmAuditTeamViewOwnership'
 import type { PlmAuditTeamViewShareEntry } from './plmAuditTeamViewShareEntry'
 
 export type PlmAuditTeamViewRouteTakeoverState = {
   attentionFocus: PlmAuditAttentionFocusState
   savedViewAttention: PlmAuditSavedViewAttentionState
   shareEntry: PlmAuditTeamViewShareEntry | null
+  formDraft: PlmAuditTeamViewFormDraftState
   collaboration: {
     selectedIds: string[]
     draft: PlmAuditTeamViewCollaborationDraft | null
@@ -25,6 +30,7 @@ export function buildPlmAuditTeamViewRouteTakeoverState(options: {
   attentionFocus: PlmAuditAttentionFocusState
   savedViewAttention: PlmAuditSavedViewAttentionState
   shareEntry: PlmAuditTeamViewShareEntry | null
+  formDraft: PlmAuditTeamViewFormDraftState
   collaboration: {
     selectedIds: string[]
     draft: PlmAuditTeamViewCollaborationDraft | null
@@ -40,6 +46,7 @@ export function buildPlmAuditTeamViewRouteTakeoverState(options: {
     attentionFocus: nextAttentionState.attentionFocus,
     savedViewAttention: nextAttentionState.savedViewAttention,
     shareEntry: null,
+    formDraft: resolvePlmAuditTakeoverTeamViewFormDraftState(options.formDraft),
     collaboration: resolvePlmAuditSavedViewTakeoverCollaborationState({
       selectedIds: options.collaboration.selectedIds,
       draft: options.collaboration.draft,

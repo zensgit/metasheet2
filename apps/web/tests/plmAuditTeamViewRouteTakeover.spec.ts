@@ -19,6 +19,11 @@ describe('plmAuditTeamViewRouteTakeover', () => {
       shareEntry: {
         teamViewId: 'team-view-legacy',
       },
+      formDraft: {
+        draftTeamViewName: 'Rename legacy view',
+        draftTeamViewNameOwnerId: 'team-view-legacy',
+        draftOwnerUserId: 'owner-a',
+      },
       collaboration: {
         selectedIds: ['team-view-1'],
         draft: {
@@ -50,6 +55,11 @@ describe('plmAuditTeamViewRouteTakeover', () => {
         focusedSavedViewId: '',
       },
       shareEntry: null,
+      formDraft: {
+        draftTeamViewName: '',
+        draftTeamViewNameOwnerId: '',
+        draftOwnerUserId: '',
+      },
       collaboration: {
         selectedIds: [],
         draft: null,
@@ -70,6 +80,11 @@ describe('plmAuditTeamViewRouteTakeover', () => {
         focusedSavedViewId: '',
       },
       shareEntry: null,
+      formDraft: {
+        draftTeamViewName: 'Create new view',
+        draftTeamViewNameOwnerId: '',
+        draftOwnerUserId: 'owner-b',
+      },
       collaboration: {
         selectedIds: ['team-view-1', 'team-view-2'],
         draft: {
@@ -107,6 +122,11 @@ describe('plmAuditTeamViewRouteTakeover', () => {
       shareEntry: {
         teamViewId: 'archived-view',
       },
+      formDraft: {
+        draftTeamViewName: 'Archived legacy draft',
+        draftTeamViewNameOwnerId: 'archived-view',
+        draftOwnerUserId: 'owner-c',
+      },
       collaboration: {
         selectedIds: ['archived-view'],
         draft: null,
@@ -123,6 +143,11 @@ describe('plmAuditTeamViewRouteTakeover', () => {
         focusedSavedViewId: '',
       },
       shareEntry: null,
+      formDraft: {
+        draftTeamViewName: '',
+        draftTeamViewNameOwnerId: '',
+        draftOwnerUserId: '',
+      },
       collaboration: {
         selectedIds: ['archived-view'],
         draft: null,

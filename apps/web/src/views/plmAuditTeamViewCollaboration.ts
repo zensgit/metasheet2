@@ -420,6 +420,27 @@ export function resolvePlmAuditCompletedTeamViewCollaborationDraft(options: {
   }
 }
 
+export function resolvePlmAuditCompletedTeamViewBatchCollaborationDraft(options: {
+  selectedIds: string[]
+  draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null
+  processedTeamViewIds: readonly string[]
+}) {
+  if (!options.draft || !options.processedTeamViewIds.includes(options.draft.teamViewId)) {
+    return {
+      selectedIds: options.selectedIds,
+      clearDraft: false,
+    }
+  }
+
+  return {
+    selectedIds: resolvePlmAuditClearedTeamViewDraftSelection({
+      selectedIds: options.selectedIds,
+      clearedDraft: options.draft,
+    }),
+    clearDraft: true,
+  }
+}
+
 export function resolvePlmAuditClearedTeamViewDraftSelection(options: {
   selectedIds: string[]
   clearedDraft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null

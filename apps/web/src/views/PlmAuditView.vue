@@ -862,6 +862,7 @@ import {
   findPlmAuditTeamViewCollaborationFollowupView,
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
+  resolvePlmAuditCompletedTeamViewBatchCollaborationDraft,
   resolvePlmAuditCompletedTeamViewCollaborationDraft,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
@@ -1310,6 +1311,11 @@ function applyResolvedTeamViewTakeoverCleanup() {
       focusedSavedViewId: focusedSavedViewId.value,
     },
     shareEntry: auditTeamViewShareEntry.value,
+    formDraft: {
+      draftTeamViewName: auditTeamViewName.value,
+      draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+      draftOwnerUserId: auditTeamViewOwnerUserId.value,
+    },
     collaboration: {
       selectedIds: auditTeamViewSelection.value,
       draft: auditTeamViewCollaborationDraft.value,
@@ -1321,6 +1327,9 @@ function applyResolvedTeamViewTakeoverCleanup() {
   focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
   auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
   auditTeamViewShareEntry.value = nextState.shareEntry
+  auditTeamViewName.value = nextState.formDraft.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextState.formDraft.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextState.formDraft.draftOwnerUserId
   auditTeamViewSelection.value = nextState.collaboration.selectedIds
   auditTeamViewCollaborationDraft.value = nextState.collaboration.draft
   auditTeamViewCollaborationFollowup.value = nextState.collaboration.followup
@@ -2697,6 +2706,17 @@ async function runAuditTeamViewLifecycleAction(
     focusedAuditTeamViewId.value = saved.id
 
     if (actionKind === 'archive') {
+      const nextDraftState = resolvePlmAuditCompletedTeamViewCollaborationDraft({
+        selectedIds: auditTeamViewSelection.value,
+        draft: auditTeamViewCollaborationDraft.value,
+        nextFollowup: null,
+        source: null,
+        targetTeamViewId: saved.id,
+      })
+      auditTeamViewSelection.value = nextDraftState.selectedIds
+      if (nextDraftState.clearDraft) {
+        clearAuditTeamViewCollaborationDraft()
+      }
       auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => id !== view.id)
       clearCurrentAuditTeamViewSelectionIfNeeded([view.id])
       await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'archive', readCurrentRouteState()))
@@ -2704,6 +2724,17 @@ async function runAuditTeamViewLifecycleAction(
       return
     }
 
+    const nextDraftState = resolvePlmAuditCompletedTeamViewCollaborationDraft({
+      selectedIds: auditTeamViewSelection.value,
+      draft: auditTeamViewCollaborationDraft.value,
+      nextFollowup: null,
+      source: null,
+      targetTeamViewId: saved.id,
+    })
+    auditTeamViewSelection.value = nextDraftState.selectedIds
+    if (nextDraftState.clearDraft) {
+      clearAuditTeamViewCollaborationDraft()
+    }
     await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'restore', readCurrentRouteState()))
     setStatus(tr('Audit team view restored. Showing matching audit logs.', '审计团队视图已恢复，已切换到对应审计日志。'))
   } catch (error: unknown) {
@@ -2745,6 +2776,16 @@ async function runAuditTeamViewBatchAction(actionKind: PlmAuditTeamViewLifecycle
       if (actionKind === 'archive') {
         clearCurrentAuditTeamViewSelectionIfNeeded(result.processedIds)
       }
+    }
+
+    const nextDraftState = resolvePlmAuditCompletedTeamViewBatchCollaborationDraft({
+      selectedIds: auditTeamViewSelection.value,
+      draft: auditTeamViewCollaborationDraft.value,
+      processedTeamViewIds: result.processedIds,
+    })
+    auditTeamViewSelection.value = nextDraftState.selectedIds
+    if (nextDraftState.clearDraft) {
+      clearAuditTeamViewCollaborationDraft()
     }
 
     const processedTotal = result.processedIds.length
