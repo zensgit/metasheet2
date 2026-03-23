@@ -35,6 +35,10 @@ export type PlmAuditClearedCollaborationFollowupAttentionState = {
   attentionFocus: PlmAuditAttentionFocusState
 }
 
+export type PlmAuditDismissedCollaborationDraftAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+}
+
 export type PlmAuditRoutePivotAttentionState = {
   attentionFocus: PlmAuditAttentionFocusState
   savedViewAttention: PlmAuditSavedViewAttentionState
@@ -130,6 +134,14 @@ export function buildPlmAuditClearedCollaborationFollowupAttentionState(
 ): PlmAuditClearedCollaborationFollowupAttentionState {
   return {
     attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-all' }),
+  }
+}
+
+export function buildPlmAuditDismissedCollaborationDraftAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+): PlmAuditDismissedCollaborationDraftAttentionState {
+  return {
+    attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-management' }),
   }
 }
 

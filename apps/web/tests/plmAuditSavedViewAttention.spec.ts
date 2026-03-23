@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   applyPlmAuditSourceFocusState,
   buildPlmAuditClearedCollaborationFollowupAttentionState,
+  buildPlmAuditDismissedCollaborationDraftAttentionState,
   buildPlmAuditRoutePivotAttentionState,
   buildPlmAuditSavedViewStoreAttentionState,
   buildPlmAuditSourceShareFollowupAttentionState,
@@ -286,17 +287,31 @@ describe('plmAuditSavedViewAttention', () => {
     })
   })
 
-  it('clears transient attention and saved-view followup on route pivots', () => {
-    expect(buildPlmAuditRoutePivotAttentionState({
+  it('clears only lifecycle management focus when a collaboration draft is dismissed', () => {
+    expect(buildPlmAuditDismissedCollaborationDraftAttentionState({
       focusedAuditTeamViewId: 'team-view-13',
       focusedRecommendedAuditTeamViewId: 'recommended-13',
       focusedSavedViewId: 'saved-view-13',
+    })).toEqual({
+      attentionFocus: {
+        focusedAuditTeamViewId: '',
+        focusedRecommendedAuditTeamViewId: 'recommended-13',
+        focusedSavedViewId: 'saved-view-13',
+      },
+    })
+  })
+
+  it('clears transient attention and saved-view followup on route pivots', () => {
+    expect(buildPlmAuditRoutePivotAttentionState({
+      focusedAuditTeamViewId: 'team-view-14',
+      focusedRecommendedAuditTeamViewId: 'recommended-14',
+      focusedSavedViewId: 'saved-view-14',
     }, {
       shareFollowup: {
-        savedViewId: 'saved-view-14',
+        savedViewId: 'saved-view-15',
         source: 'shared-entry',
       },
-      focusedSavedViewId: 'saved-view-14',
+      focusedSavedViewId: 'saved-view-15',
     })).toEqual({
       attentionFocus: {
         focusedAuditTeamViewId: '',

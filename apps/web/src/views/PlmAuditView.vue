@@ -789,6 +789,7 @@ import {
 import {
   applyPlmAuditSourceFocusState,
   buildPlmAuditClearedCollaborationFollowupAttentionState,
+  buildPlmAuditDismissedCollaborationDraftAttentionState,
   buildPlmAuditRoutePivotAttentionState,
   buildPlmAuditSavedViewStoreAttentionState,
   buildPlmAuditSourceShareFollowupAttentionState,
@@ -1339,6 +1340,20 @@ async function persistAuditTeamView(
 
 function clearAuditTeamViewCollaborationDraft() {
   auditTeamViewCollaborationDraft.value = null
+}
+
+function dismissAuditTeamViewCollaborationDraft() {
+  clearAuditTeamViewCollaborationDraft()
+  const nextState = buildPlmAuditDismissedCollaborationDraftAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
 }
 
 function clearAuditTeamViewShareEntry() {
@@ -1989,8 +2004,20 @@ async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
 
 async function focusRecommendedAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
   auditTeamViewRecommendationFilter.value = resolveAuditTeamViewRecommendationFilter(view)
-  focusedRecommendedAuditTeamViewId.value = view.id
-  focusedSavedViewId.value = ''
+  const nextFocusState = applyPlmAuditSourceFocusState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      focusedRecommendedAuditTeamViewId: view.id,
+      focusedSavedViewId: '',
+    },
+  )
+  focusedAuditTeamViewId.value = nextFocusState.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextFocusState.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextFocusState.focusedSavedViewId
   await nextTick()
   document.getElementById('plm-audit-recommended-team-views')?.scrollIntoView({
     behavior: 'smooth',
@@ -2040,7 +2067,7 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
   const sourceSavedViewId = auditTeamViewCollaborationDraft.value?.sourceSavedViewId
 
   if (actionKind === 'dismiss') {
-    clearAuditTeamViewCollaborationDraft()
+    dismissAuditTeamViewCollaborationDraft()
     return
   }
 
