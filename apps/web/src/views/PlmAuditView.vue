@@ -2454,9 +2454,7 @@ async function runAuditTeamViewCollaborationFollowupAction(
     focusedAuditTeamViewId.value = nextFocusState.focusedAuditTeamViewId
     focusedRecommendedAuditTeamViewId.value = nextFocusState.focusedRecommendedAuditTeamViewId
     focusedSavedViewId.value = nextFocusState.focusedSavedViewId
-    if (sourceFocusIntent.recommendationFilter !== null) {
-      auditTeamViewRecommendationFilter.value = sourceFocusIntent.recommendationFilter
-    }
+    auditTeamViewRecommendationFilter.value = sourceFocusIntent.recommendationFilter
     await nextTick()
     document.getElementById(sourceFocusIntent.anchorId)?.scrollIntoView({
       behavior: 'smooth',

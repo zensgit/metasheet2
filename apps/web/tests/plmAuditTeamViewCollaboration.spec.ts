@@ -672,7 +672,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       anchorId: 'plm-audit-saved-views',
       focusedRecommendationTeamViewId: null,
       focusedSavedViewId: null,
-      recommendationFilter: null,
+      recommendationFilter: '',
     })
   })
 
@@ -685,7 +685,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       anchorId: 'plm-audit-saved-views',
       focusedRecommendationTeamViewId: null,
       focusedSavedViewId: 'saved-view-7',
-      recommendationFilter: null,
+      recommendationFilter: '',
     })
   })
 
@@ -698,7 +698,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       anchorId: 'plm-audit-scene-context',
       focusedRecommendationTeamViewId: null,
       focusedSavedViewId: null,
-      recommendationFilter: null,
+      recommendationFilter: '',
     })
   })
 

@@ -74,7 +74,7 @@ export type PlmAuditTeamViewCollaborationSourceFocusIntent = {
   anchorId: string
   focusedRecommendationTeamViewId: string | null
   focusedSavedViewId: string | null
-  recommendationFilter: PlmRecommendedAuditTeamViewFilter | null
+  recommendationFilter: PlmRecommendedAuditTeamViewFilter
 }
 
 const PLM_AUDIT_TEAM_VIEW_COLLABORATION_LOGS_ANCHOR_ID = 'plm-audit-log-results'
@@ -191,7 +191,7 @@ export function buildPlmAuditTeamViewCollaborationSourceFocusIntent(
     focusedSavedViewId: followup.source === 'saved-view-promotion'
       ? followup.sourceSavedViewId || null
       : null,
-    recommendationFilter: null,
+    recommendationFilter: '',
   }
 }
 
