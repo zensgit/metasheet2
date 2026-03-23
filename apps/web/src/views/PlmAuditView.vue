@@ -846,10 +846,10 @@ import {
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   shouldClearPlmAuditTeamViewCollaborationDraft,
-  shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry,
   shouldKeepPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationFollowup,
   shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup,
+  shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry,
   syncPlmAuditTeamViewCollaborationFollowupSourceAnchor,
   type PlmAuditTeamViewCollaborationActionKind,
   type PlmAuditTeamViewCollaborationDraft,
@@ -1818,16 +1818,11 @@ async function refreshAuditTeamViews() {
       if (requestedSharedEntry && requestedState.teamViewId.trim()) {
         clearAuditAttentionFocus()
         applySavedViewAttentionAction({ kind: 'share-entry-takeover' })
-        if (shouldClearPlmAuditTeamViewCollaborationDraft(
+        if (shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry(
           auditTeamViewCollaborationDraft.value,
-          resolution.viewId,
+          auditTeamViewCollaborationFollowup.value,
         )) {
           clearAuditTeamViewCollaborationDraft()
-        }
-        if (shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry(
-          auditTeamViewCollaborationFollowup.value,
-          resolution.viewId,
-        )) {
           clearAuditTeamViewCollaborationFollowup()
         }
         auditTeamViewShareEntry.value = {
@@ -2077,6 +2072,12 @@ async function setAuditTeamViewDefaultEntry(
     }
     if (resolvePlmAuditTeamViewCollaborationAttentionMode(source, 'set-default') === 'managed-team-view') {
       applyAuditTeamViewHandoffAttention()
+    }
+    if (shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup(
+      auditTeamViewCollaborationDraft.value,
+      outcome.followup,
+    )) {
+      clearAuditTeamViewCollaborationDraft()
     }
     setStatus(outcome.statusMessage)
     auditTeamViewCollaborationFollowup.value = outcome.followup

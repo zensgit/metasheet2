@@ -20,6 +20,7 @@ import {
   shouldKeepPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationFollowup,
   shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup,
+  shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry,
   syncPlmAuditTeamViewCollaborationFollowupSourceAnchor,
 } from '../src/views/plmAuditTeamViewCollaboration'
 
@@ -920,13 +921,22 @@ describe('plmAuditTeamViewCollaboration', () => {
     )).toBe(false)
   })
 
-  it('replaces an existing collaboration draft once a share follow-up takes over', () => {
+  it('replaces an existing collaboration draft once any collaboration follow-up takes over', () => {
     expect(shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup(
       {
         teamViewId: 'audit-view-2',
       },
       {
         teamViewId: 'audit-view-2',
+      },
+    )).toBe(true)
+
+    expect(shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup(
+      {
+        teamViewId: 'audit-view-2',
+      },
+      {
+        teamViewId: 'audit-view-9',
       },
     )).toBe(true)
 
@@ -951,6 +961,36 @@ describe('plmAuditTeamViewCollaboration', () => {
       {
         teamViewId: 'audit-view-7',
       },
+    )).toBe(false)
+  })
+
+  it('replaces any collaboration owner once shared-entry takes over', () => {
+    expect(shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry(
+      {
+        teamViewId: 'audit-view-2',
+      },
+      null,
+    )).toBe(true)
+
+    expect(shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry(
+      null,
+      {
+        teamViewId: 'audit-view-8',
+      },
+    )).toBe(true)
+
+    expect(shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry(
+      {
+        teamViewId: 'audit-view-2',
+      },
+      {
+        teamViewId: 'audit-view-8',
+      },
+    )).toBe(true)
+
+    expect(shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry(
+      null,
+      null,
     )).toBe(false)
   })
 

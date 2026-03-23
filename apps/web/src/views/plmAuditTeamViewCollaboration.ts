@@ -334,6 +334,13 @@ export function shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup(
   return Boolean(draft && followup)
 }
 
+export function shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry(
+  draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null,
+  followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'teamViewId'> | null,
+) {
+  return Boolean(draft || followup)
+}
+
 export function shouldKeepPlmAuditTeamViewCollaborationDraft(
   draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null,
   teamViewId: string,
