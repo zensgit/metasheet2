@@ -118,3 +118,23 @@ export function resolvePlmAuditCanonicalTeamViewFormDraftState(options: {
     draftOwnerUserId: '',
   }
 }
+
+export function resolvePlmAuditTakeoverTeamViewFormDraftState(options: {
+  draftTeamViewName: string
+  draftTeamViewNameOwnerId: string
+  draftOwnerUserId: string
+}): PlmAuditTeamViewFormDraftState {
+  if (!options.draftTeamViewNameOwnerId.trim()) {
+    return {
+      draftTeamViewName: options.draftTeamViewName,
+      draftTeamViewNameOwnerId: options.draftTeamViewNameOwnerId,
+      draftOwnerUserId: options.draftOwnerUserId,
+    }
+  }
+
+  return {
+    draftTeamViewName: '',
+    draftTeamViewNameOwnerId: '',
+    draftOwnerUserId: '',
+  }
+}

@@ -76,6 +76,34 @@ describe('plmAuditTeamViewAudit', () => {
     })
   })
 
+  it('builds explicit audit filters for clear-default actions', () => {
+    expect(buildPlmAuditTeamViewLogState(
+      createAuditTeamView({ id: 'audit-view-clear-default' }),
+      'clear-default',
+      {
+        windowMinutes: 180,
+        returnToPlmPath: '/plm?sceneFocus=scene-clear-default',
+      },
+    )).toEqual({
+      page: 1,
+      q: 'audit-view-clear-default',
+      actorId: '',
+      kind: 'audit',
+      action: 'clear-default',
+      resourceType: 'plm-team-view-default',
+      from: '',
+      to: '',
+      windowMinutes: 180,
+      teamViewId: '',
+      sceneId: '',
+      sceneName: '',
+      sceneOwnerUserId: '',
+      sceneRecommendationReason: '',
+      sceneRecommendationSourceLabel: '',
+      returnToPlmPath: '/plm?sceneFocus=scene-clear-default',
+    })
+  })
+
   it('builds explicit audit filters for lifecycle actions', () => {
     expect(buildPlmAuditTeamViewLogState(
       createAuditTeamView({ id: 'audit-view-archive' }),

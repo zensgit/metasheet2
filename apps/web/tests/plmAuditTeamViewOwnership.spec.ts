@@ -3,6 +3,7 @@ import {
   prunePlmAuditTransientOwnershipForRemovedViews,
   resolvePlmAuditCanonicalTeamViewFormDraftState,
   resolvePlmAuditRemovedTeamViewIds,
+  resolvePlmAuditTakeoverTeamViewFormDraftState,
   trimPlmAuditExistingTeamViewUiState,
 } from '../src/views/plmAuditTeamViewOwnership'
 
@@ -211,6 +212,28 @@ describe('plmAuditTeamViewOwnership', () => {
       draftTeamViewName: '新建团队视图',
       draftTeamViewNameOwnerId: '',
       draftOwnerUserId: 'owner-i',
+    })
+  })
+
+  it('clears management-owned drafts for non-management takeovers while preserving create-mode drafts', () => {
+    expect(resolvePlmAuditTakeoverTeamViewFormDraftState({
+      draftTeamViewName: '重命名中的团队视图',
+      draftTeamViewNameOwnerId: 'audit-view-1',
+      draftOwnerUserId: 'owner-j',
+    })).toEqual({
+      draftTeamViewName: '',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: '',
+    })
+
+    expect(resolvePlmAuditTakeoverTeamViewFormDraftState({
+      draftTeamViewName: '新建团队视图',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: 'owner-k',
+    })).toEqual({
+      draftTeamViewName: '新建团队视图',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: 'owner-k',
     })
   })
 })

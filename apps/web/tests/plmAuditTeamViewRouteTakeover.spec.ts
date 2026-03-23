@@ -89,4 +89,45 @@ describe('plmAuditTeamViewRouteTakeover', () => {
       followup: null,
     })
   })
+
+  it('also clears stale shared-entry and saved-view attention for clear-selection refresh takeovers', () => {
+    expect(buildPlmAuditTeamViewRouteTakeoverState({
+      attentionFocus: {
+        focusedAuditTeamViewId: 'archived-view',
+        focusedRecommendedAuditTeamViewId: '',
+        focusedSavedViewId: 'saved-view-archived',
+      },
+      savedViewAttention: {
+        shareFollowup: {
+          savedViewId: 'saved-view-archived',
+          source: 'shared-entry',
+        },
+        focusedSavedViewId: 'saved-view-archived',
+      },
+      shareEntry: {
+        teamViewId: 'archived-view',
+      },
+      collaboration: {
+        selectedIds: ['archived-view'],
+        draft: null,
+        followup: null,
+      },
+    })).toMatchObject({
+      attentionFocus: {
+        focusedAuditTeamViewId: '',
+        focusedRecommendedAuditTeamViewId: '',
+        focusedSavedViewId: '',
+      },
+      savedViewAttention: {
+        shareFollowup: null,
+        focusedSavedViewId: '',
+      },
+      shareEntry: null,
+      collaboration: {
+        selectedIds: ['archived-view'],
+        draft: null,
+        followup: null,
+      },
+    })
+  })
 })

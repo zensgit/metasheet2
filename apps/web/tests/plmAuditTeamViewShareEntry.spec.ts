@@ -5,6 +5,7 @@ import {
   findPlmAuditTeamViewShareEntryView,
   isPlmAuditSharedLinkEntry,
   prunePlmAuditTeamViewShareEntryForRemovedViews,
+  resolvePlmAuditSharedEntryTakeoverSelection,
   resolvePlmAuditTeamViewShareEntryActionTarget,
   resolvePlmAuditSharedEntryRouteSyncDecision,
   shouldKeepPlmAuditTeamViewShareEntry,
@@ -83,6 +84,15 @@ describe('plmAuditTeamViewShareEntry', () => {
     ], {
       teamViewId: 'audit-view-2',
     })).toBeNull()
+  })
+
+  it('clears stale batch selection when a shared-entry takeover installs its own owner', () => {
+    expect(resolvePlmAuditSharedEntryTakeoverSelection([
+      'audit-view-1',
+      'audit-view-2',
+    ])).toEqual([])
+
+    expect(resolvePlmAuditSharedEntryTakeoverSelection([])).toEqual([])
   })
 
   it('keeps shared-entry notice actions pinned to the canonical entry target', () => {

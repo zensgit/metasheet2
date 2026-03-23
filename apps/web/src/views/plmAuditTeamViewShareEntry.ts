@@ -155,6 +155,12 @@ export function resolvePlmAuditTeamViewShareEntryActionTarget<T>(
   return entryTarget
 }
 
+export function resolvePlmAuditSharedEntryTakeoverSelection(
+  _selectedIds: string[],
+) {
+  return []
+}
+
 export function prunePlmAuditTeamViewShareEntryForRemovedViews(
   entry: PlmAuditTeamViewShareEntry | null,
   removedViewIds: readonly string[],

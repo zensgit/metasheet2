@@ -884,6 +884,7 @@ import {
   buildPlmAuditTeamViewShareEntryNotice,
   findPlmAuditTeamViewShareEntryView,
   isPlmAuditSharedLinkEntry,
+  resolvePlmAuditSharedEntryTakeoverSelection,
   resolvePlmAuditTeamViewShareEntryActionTarget,
   resolvePlmAuditSharedEntryRouteSyncDecision,
   shouldKeepPlmAuditTeamViewShareEntry,
@@ -897,6 +898,7 @@ import {
 } from './plmAuditTeamViewShareEntry'
 import {
   resolvePlmAuditCanonicalTeamViewFormDraftState,
+  resolvePlmAuditTakeoverTeamViewFormDraftState,
   prunePlmAuditTransientOwnershipForRemovedViews,
   resolvePlmAuditRemovedTeamViewIds,
   trimPlmAuditExistingTeamViewUiState,
@@ -1350,7 +1352,19 @@ function applySceneContextTakeoverCleanup() {
   auditTeamViewSelection.value = nextState.collaboration.selectedIds
   auditTeamViewCollaborationDraft.value = nextState.collaboration.draft
   auditTeamViewCollaborationFollowup.value = nextState.collaboration.followup
+  clearAuditTakeoverTeamViewFormDrafts()
   return nextState.consumeSharedEntry
+}
+
+function clearAuditTakeoverTeamViewFormDrafts() {
+  const nextDraftState = resolvePlmAuditTakeoverTeamViewFormDraftState({
+    draftTeamViewName: auditTeamViewName.value,
+    draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+  })
+  auditTeamViewName.value = nextDraftState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
 }
 
 async function clearAuditSceneContext() {
@@ -1511,6 +1525,7 @@ async function saveCurrentLocalViewWithFollowup(
   auditTeamViewSelection.value = nextCollaborationState.selectedIds
   auditTeamViewCollaborationDraft.value = nextCollaborationState.draft
   auditTeamViewCollaborationFollowup.value = nextCollaborationState.followup
+  clearAuditTakeoverTeamViewFormDrafts()
   applyAuditSourceLocalSaveAttention()
   applySavedViewAttentionAction({
     kind: 'install-followup',
@@ -2029,6 +2044,7 @@ function applySavedViewTakeover(actionKind: 'apply' | 'context-action') {
   if (shouldTakeOverPlmAuditSharedEntryOnSavedViewTakeover(auditTeamViewShareEntry.value)) {
     clearAuditTeamViewShareEntry()
   }
+  clearAuditTakeoverTeamViewFormDrafts()
 }
 
 function runSavedViewContextAction(
@@ -2071,6 +2087,10 @@ async function refreshAuditTeamViews() {
       if (requestedSharedEntry && requestedState.teamViewId.trim()) {
         clearAuditAttentionFocus()
         applySavedViewAttentionAction({ kind: 'share-entry-takeover' })
+        auditTeamViewSelection.value = resolvePlmAuditSharedEntryTakeoverSelection(
+          auditTeamViewSelection.value,
+        )
+        clearAuditTakeoverTeamViewFormDrafts()
         if (shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry(
           auditTeamViewCollaborationDraft.value,
           auditTeamViewCollaborationFollowup.value,
@@ -2092,6 +2112,7 @@ async function refreshAuditTeamViews() {
     }
 
     if (resolution.kind === 'clear-selection') {
+      applyResolvedTeamViewTakeoverCleanup()
       applyRouteState(resolution.nextState)
       if (!isPlmAuditRouteStateEqual(resolution.nextState, requestedState)) {
         await syncRouteState(resolution.nextState, true)
@@ -2459,6 +2480,17 @@ async function clearAuditTeamViewDefault() {
     replaceAuditTeamView(saved)
     applyAuditManagedTeamViewAttention()
     applyAuditTeamViewState(saved)
+    const nextDraftState = resolvePlmAuditCompletedTeamViewCollaborationDraft({
+      selectedIds: auditTeamViewSelection.value,
+      draft: auditTeamViewCollaborationDraft.value,
+      nextFollowup: null,
+      source: null,
+      targetTeamViewId: saved.id,
+    })
+    auditTeamViewSelection.value = nextDraftState.selectedIds
+    if (nextDraftState.clearDraft) {
+      clearAuditTeamViewCollaborationDraft()
+    }
     focusedAuditTeamViewId.value = saved.id
     await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'clear-default', readCurrentRouteState()))
     setStatus(tr('Audit team view default cleared. Showing matching audit logs.', '审计团队视图默认已取消，已切换到对应审计日志。'))

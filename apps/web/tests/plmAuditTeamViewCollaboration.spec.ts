@@ -30,6 +30,7 @@ import {
   shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry,
   syncPlmAuditTeamViewCollaborationFollowupSourceAnchor,
 } from '../src/views/plmAuditTeamViewCollaboration'
+import { buildPlmAuditTeamViewLogState } from '../src/views/plmAuditTeamViewAudit'
 
 function tr(en: string, zh: string) {
   return `${en}|${zh}`
@@ -400,6 +401,29 @@ describe('plmAuditTeamViewCollaboration', () => {
         action: 'share',
       },
       source: 'recommendation',
+      targetTeamViewId: 'audit-view-9',
+    })).toEqual({
+      selectedIds: [],
+      clearDraft: true,
+    })
+  })
+
+  it('still clears a matching draft for clear-default log actions after teamViewId is cleared', () => {
+    expect(buildPlmAuditTeamViewLogState({
+      id: 'audit-view-9',
+      kind: 'audit',
+    }, 'clear-default', {
+      windowMinutes: 180,
+      returnToPlmPath: '/plm?sceneFocus=scene-9',
+    }).teamViewId).toBe('')
+
+    expect(resolvePlmAuditCompletedTeamViewCollaborationDraft({
+      selectedIds: ['audit-view-9'],
+      draft: {
+        teamViewId: 'audit-view-9',
+      },
+      nextFollowup: null,
+      source: null,
       targetTeamViewId: 'audit-view-9',
     })).toEqual({
       selectedIds: [],
