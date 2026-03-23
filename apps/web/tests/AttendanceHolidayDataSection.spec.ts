@@ -103,6 +103,7 @@ describe('AttendanceHolidayDataSection', () => {
     app = createApp(AttendanceHolidayDataSection, {
       holiday: holidayBindings,
       formatDate,
+      showLunarCalendar: false,
       tr,
     })
     app.mount(container!)
@@ -164,6 +165,7 @@ describe('AttendanceHolidayDataSection', () => {
     app = createApp(AttendanceHolidayDataSection, {
       holiday: holidayBindings,
       formatDate,
+      showLunarCalendar: false,
       tr,
     })
     app.mount(container!)
@@ -187,5 +189,45 @@ describe('AttendanceHolidayDataSection', () => {
     expect(findButton(container!, 'Next month').disabled).toBe(false)
     expect(findButton(container!, 'Reload holidays').disabled).toBe(false)
     expect(findCalendarDayButton(container!).disabled).toBe(false)
+  })
+
+  it('shows lunar labels in holiday cells when lunar display is enabled', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-02-01T12:00:00Z'))
+
+    const holidayBindings: HolidayBindings = {
+      holidays: ref([]),
+      holidayTotal: ref(0),
+      holidayLoading: ref(false),
+      holidaySaving: ref(false),
+      holidayEditingId: ref(null),
+      holidayRange: reactive({
+        from: '2026-02-01',
+        to: '2026-02-28',
+      }),
+      holidayForm: reactive({
+        date: '2026-02-01',
+        name: '',
+        isWorkingDay: false,
+      }),
+      resetHolidayForm: vi.fn(),
+      editHoliday: vi.fn(),
+      loadHolidays: vi.fn(),
+      saveHoliday: vi.fn(),
+      deleteHoliday: vi.fn(),
+    }
+
+    app = createApp(AttendanceHolidayDataSection, {
+      holiday: holidayBindings,
+      formatDate,
+      showLunarCalendar: true,
+      tr,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const lunarLabel = container!.querySelector('.attendance__holiday-cell-lunar')
+    expect(lunarLabel).toBeTruthy()
+    expect(lunarLabel?.textContent?.trim()).toBeTruthy()
   })
 })

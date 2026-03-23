@@ -49,6 +49,7 @@
             @click="selectDate(day.date)"
           >
             <span class="attendance__holiday-cell-day">{{ day.dayNumber }}</span>
+            <span v-if="day.lunarLabel" class="attendance__holiday-cell-lunar">{{ day.lunarLabel }}</span>
             <span
               v-for="holiday in day.holidays.slice(0, 2)"
               :key="`${day.date}-${holiday.id}`"
@@ -128,6 +129,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, type Ref } from 'vue'
 import type { AttendanceHoliday } from './useAttendanceAdminScheduling'
+import { formatLunarDayLabel } from '../attendanceCalendarUtils'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -162,11 +164,13 @@ interface CalendarDayCell {
   isCurrentMonth: boolean
   isToday: boolean
   holidays: AttendanceHoliday[]
+  lunarLabel?: string
 }
 
 const props = defineProps<{
   holiday: HolidayDataBindings
   formatDate: (value: string | null | undefined) => string
+  showLunarCalendar?: boolean
   tr: Translate
 }>()
 
@@ -265,6 +269,10 @@ const calendarDays = computed<CalendarDayCell[]>(() => {
       isCurrentMonth: sameMonth(date, calendarMonth.value),
       isToday: key === toDateInput(today),
       holidays: holidayMap.value.get(key) ?? [],
+      lunarLabel: formatLunarDayLabel(date, {
+        enabled: Boolean(props.showLunarCalendar),
+        timeZone: 'Asia/Shanghai',
+      }),
     }
   })
 })
@@ -353,6 +361,7 @@ void syncMonthRange(calendarMonth.value)
 .attendance__holiday-cell--selected { box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.18); background: #f3f8ff; }
 .attendance__holiday-cell--holiday { background: #fffaf1; }
 .attendance__holiday-cell-day { font-weight: 600; }
+.attendance__holiday-cell-lunar { color: #8a5c2e; font-size: 11px; line-height: 1.3; }
 .attendance__holiday-chip { display: inline-flex; align-items: center; max-width: 100%; padding: 2px 6px; border-radius: 999px; font-size: 11px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attendance__holiday-chip--holiday { background: #ffe8e8; color: #9a1a1a; }
 .attendance__holiday-chip--working { background: #e5f7ec; color: #15693a; }

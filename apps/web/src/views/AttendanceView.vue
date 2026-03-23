@@ -276,7 +276,12 @@
               :tr="tr"
             />
 
-            <AttendanceHolidayDataSection :format-date="formatDate" :holiday="holidayDataSectionBindings" :tr="tr" />
+            <AttendanceHolidayDataSection
+              :format-date="formatDate"
+              :holiday="holidayDataSectionBindings"
+              :show-lunar-calendar="isZh"
+              :tr="tr"
+            />
 
             <AttendanceProvisioningSection :provisioning="provisioningSectionBindings" :tr="tr" />
 
