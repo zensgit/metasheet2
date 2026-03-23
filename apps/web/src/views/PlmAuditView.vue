@@ -801,6 +801,7 @@ import {
   type PlmAuditRouteState,
   type PlmAuditTeamViewState,
 } from './plmAuditQueryState'
+import { buildPlmAuditSceneContextTakeoverState } from './plmAuditSceneContextTakeover'
 import {
   applyPlmAuditSourceFocusState,
   buildPlmAuditAppliedTeamViewAttentionState,
@@ -1294,18 +1295,44 @@ function applyCollaborationTakeoverCleanup() {
   auditTeamViewCollaborationFollowup.value = nextCollaborationState.followup
 }
 
+function applySceneContextTakeoverCleanup() {
+  const nextState = buildPlmAuditSceneContextTakeoverState({
+    attentionFocus: {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    savedViewAttention: {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    collaboration: {
+      selectedIds: auditTeamViewSelection.value,
+      draft: auditTeamViewCollaborationDraft.value,
+      followup: auditTeamViewCollaborationFollowup.value,
+    },
+  })
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+  auditTeamViewSelection.value = nextState.collaboration.selectedIds
+  auditTeamViewCollaborationDraft.value = nextState.collaboration.draft
+  auditTeamViewCollaborationFollowup.value = nextState.collaboration.followup
+}
+
 async function clearAuditSceneContext() {
-  applyCollaborationTakeoverCleanup()
+  applySceneContextTakeoverCleanup()
   await syncRouteState(withoutPlmAuditSceneContext(readCanonicalTeamViewRouteState()))
 }
 
 async function applyAuditSceneOwnerContext() {
-  applyCollaborationTakeoverCleanup()
+  applySceneContextTakeoverCleanup()
   await syncRouteState(withPlmAuditSceneOwnerContext(readCanonicalTeamViewRouteState()))
 }
 
 async function restoreAuditSceneQuery() {
-  applyCollaborationTakeoverCleanup()
+  applySceneContextTakeoverCleanup()
   await syncRouteState(withPlmAuditSceneQueryContext(readCanonicalTeamViewRouteState()))
 }
 
