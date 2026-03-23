@@ -35,5 +35,6 @@ pnpm exec vitest run tests/plm*.spec.ts tests/usePlm*.spec.ts
 ## Verified Outcome
 
 - scene route takeovers now clear saved-view followup / focus together with shared-entry owner and collaboration owner
+- scene route takeovers now consume `auditEntry=share` whenever a stale shared-entry owner is being taken over
 - route pivots no longer rely on watcher side effects to clear stale scene-owned transient UI
 - draft-owned single selection is still trimmed conservatively, while user multi-select remains intact

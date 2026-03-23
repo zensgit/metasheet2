@@ -29,7 +29,7 @@
 
 - 清 route-pivot attention
 - 清 local saved-view followup / focus
-- 清 stale shared-entry owner
+- 清 stale shared-entry owner，并同步消费 `auditEntry=share`
 - 清 collaboration draft / followup
 - 只消费 draft 自动装出的单行 selection，不误伤用户主动维护的多选
 
@@ -51,5 +51,6 @@ Key changes:
 
 - scene route pivots 会和 saved-view/context takeovers 一样清掉 stale saved-view notice / focus
 - scene route pivots 不再和 shared-entry notice 并存
+- scene route pivots 即使落到幂等 route，也不会把 `auditEntry=share` 留在 URL
 - scene route pivots 不再留下旧 collaboration owner
 - 用户自己维护的多选不会被 scene takeover 误清
