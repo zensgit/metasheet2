@@ -13,6 +13,11 @@ const FALLBACK_TIMEZONES = [
 
 let cachedSupportedTimezones: string[] | null = null
 
+export interface TimezoneOptionEntry {
+  value: string
+  label: string
+}
+
 function loadSupportedTimezones(): string[] {
   if (cachedSupportedTimezones) return cachedSupportedTimezones
 
@@ -39,4 +44,47 @@ export function buildTimezoneOptions(currentValue?: string | null): string[] {
     options.unshift(normalized)
   }
   return options
+}
+
+export function formatTimezoneOffsetLabel(timezone?: string | null, date = new Date()): string {
+  const normalized = typeof timezone === 'string' ? timezone.trim() : ''
+  if (!normalized) return ''
+
+  try {
+    const timeZoneName = new Intl.DateTimeFormat('en-US', {
+      timeZone: normalized,
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZoneName: 'shortOffset',
+    })
+      .formatToParts(date)
+      .find((part) => part.type === 'timeZoneName')
+      ?.value
+
+    if (!timeZoneName) return ''
+    if (timeZoneName === 'GMT' || timeZoneName === 'UTC') return 'UTC+00:00'
+
+    const match = timeZoneName.match(/^(?:GMT|UTC)([+-])(\d{1,2})(?::?(\d{2}))?$/)
+    if (!match) return ''
+
+    const [, sign, hours, minutes = '00'] = match
+    return `UTC${sign}${hours.padStart(2, '0')}:${minutes.padStart(2, '0')}`
+  } catch {
+    return ''
+  }
+}
+
+export function formatTimezoneOptionLabel(timezone?: string | null, date = new Date()): string {
+  const normalized = typeof timezone === 'string' ? timezone.trim() : ''
+  if (!normalized) return ''
+
+  const offsetLabel = formatTimezoneOffsetLabel(normalized, date)
+  return offsetLabel ? `${normalized} (${offsetLabel})` : normalized
+}
+
+export function buildTimezoneOptionEntries(currentValue?: string | null): TimezoneOptionEntry[] {
+  return buildTimezoneOptions(currentValue).map((value) => ({
+    value,
+    label: formatTimezoneOptionLabel(value),
+  }))
 }

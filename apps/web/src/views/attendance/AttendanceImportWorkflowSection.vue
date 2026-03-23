@@ -245,12 +245,15 @@
       </label>
       <label class="attendance__field" for="attendance-import-group-timezone">
         <span>{{ tr('Group timezone (optional)', '分组时区（可选）') }}</span>
-        <input
+        <select
           id="attendance-import-group-timezone"
           v-model="importGroupTimezone"
-          type="text"
-          placeholder="Asia/Shanghai"
-        />
+        >
+          <option value="">{{ tr('(Optional) Use import timezone', '（可选）沿用导入时区') }}</option>
+          <option v-for="timezone in importGroupTimezoneOptions" :key="timezone.value" :value="timezone.value">
+            {{ timezone.label }}
+          </option>
+        </select>
       </label>
       <label class="attendance__field" for="attendance-import-user">
         <span>{{ tr('User ID', '用户 ID') }}</span>
@@ -264,12 +267,15 @@
       </label>
       <label class="attendance__field" for="attendance-import-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <input
+        <select
           id="attendance-import-timezone"
           name="importTimezone"
           v-model="importForm.timezone"
-          type="text"
-        />
+        >
+          <option v-for="timezone in importTimezoneOptions" :key="timezone.value" :value="timezone.value">
+            {{ timezone.label }}
+          </option>
+        </select>
       </label>
       <label class="attendance__field attendance__field--full" for="attendance-import-payload">
         <span>{{ tr('Payload (JSON)', '负载（JSON）') }}</span>
@@ -464,6 +470,10 @@
 
 <script setup lang="ts">
 import { computed, type ComputedRef, type Ref } from 'vue'
+import {
+  buildTimezoneOptionEntries,
+  formatTimezoneOptionLabel,
+} from './attendanceTimezones'
 import type {
   AttendanceImportCommitLane,
   AttendanceImportFormState,
@@ -578,6 +588,8 @@ const importGroupAutoCreate = props.workflow.importGroupAutoCreate
 const importGroupAutoAssign = props.workflow.importGroupAutoAssign
 const importGroupRuleSetId = props.workflow.importGroupRuleSetId
 const importGroupTimezone = props.workflow.importGroupTimezone
+const importTimezoneOptions = computed(() => buildTimezoneOptionEntries(importForm.timezone))
+const importGroupTimezoneOptions = computed(() => buildTimezoneOptionEntries(importGroupTimezone.value))
 const importScalabilityHint = props.workflow.importScalabilityHint
 const importPreviewTask = props.workflow.importPreviewTask
 const importAsyncJob = props.workflow.importAsyncJob
@@ -665,7 +677,8 @@ const importGroupSyncSummary = computed(() => {
   }
   const timezone = importGroupTimezone.value.trim()
   if (timezone) {
-    segments.push(tr(`timezone ${timezone}`, `时区 ${timezone}`))
+    const timezoneLabel = formatTimezoneOptionLabel(timezone)
+    segments.push(tr(`timezone ${timezoneLabel}`, `时区 ${timezoneLabel}`))
   }
 
   return segments.length > 0

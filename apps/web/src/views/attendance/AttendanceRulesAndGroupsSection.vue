@@ -68,7 +68,7 @@
           </div>
           <div class="attendance__rule-builder-summary">
             <span>{{ tr('Source', '来源') }}: <strong>{{ ruleBuilderSource || '--' }}</strong></span>
-            <span>{{ tr('Timezone', '时区') }}: <strong>{{ ruleBuilderTimezone || '--' }}</strong></span>
+            <span>{{ tr('Timezone', '时区') }}: <strong>{{ ruleBuilderTimezoneLabel || '--' }}</strong></span>
             <span>{{ tr('Working days', '工作日') }}: <strong>{{ formatWorkingDays(ruleBuilderWorkingDays) }}</strong></span>
           </div>
         </div>
@@ -85,12 +85,14 @@
           </label>
           <label class="attendance__field" for="attendance-rule-builder-timezone">
             <span>{{ tr('Timezone', '时区') }}</span>
-            <input
+            <select
               id="attendance-rule-builder-timezone"
               v-model="ruleBuilderTimezone"
-              type="text"
-              :placeholder="tr('Asia/Shanghai', 'Asia/Shanghai')"
-            />
+            >
+              <option v-for="timezone in ruleBuilderTimezoneOptions" :key="timezone.value" :value="timezone.value">
+                {{ timezone.label }}
+              </option>
+            </select>
           </label>
           <label class="attendance__field" for="attendance-rule-builder-start">
             <span>{{ tr('Work start time', '上班时间') }}</span>
@@ -677,8 +679,8 @@
       <label class="attendance__field" for="attendance-group-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
         <select id="attendance-group-timezone" v-model="attendanceGroupForm.timezone">
-          <option v-for="timezone in attendanceGroupTimezones" :key="timezone" :value="timezone">
-            {{ timezone }}
+          <option v-for="timezone in attendanceGroupTimezones" :key="timezone.value" :value="timezone.value">
+            {{ timezone.label }}
           </option>
         </select>
       </label>
@@ -724,7 +726,7 @@
           <tr v-for="item in attendanceGroups" :key="item.id">
             <td>{{ item.name }}</td>
             <td>{{ item.code || '-' }}</td>
-            <td>{{ item.timezone }}</td>
+            <td>{{ formatTimezoneOptionLabel(item.timezone) }}</td>
             <td>{{ resolveRuleSetName(item.ruleSetId) }}</td>
             <td class="attendance__table-actions">
               <button class="attendance__btn" @click="editAttendanceGroup(item)">{{ tr('Edit', '编辑') }}</button>
@@ -843,7 +845,10 @@ import type {
   AttendanceRuleTemplateVersion,
 } from './useAttendanceAdminRulesAndGroups'
 import AttendanceUserPickerField from './AttendanceUserPickerField.vue'
-import { buildTimezoneOptions } from './attendanceTimezones'
+import {
+  buildTimezoneOptionEntries,
+  formatTimezoneOptionLabel,
+} from './attendanceTimezones'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -987,7 +992,7 @@ const tr = props.tr
 const formatDateTime = props.formatDateTime
 const attendanceGroupEditingId = props.rules.attendanceGroupEditingId
 const attendanceGroupForm = props.rules.attendanceGroupForm
-const attendanceGroupTimezones = computed(() => buildTimezoneOptions(attendanceGroupForm.timezone))
+const attendanceGroupTimezones = computed(() => buildTimezoneOptionEntries(attendanceGroupForm.timezone))
 const attendanceGroupLoading = props.rules.attendanceGroupLoading
 const attendanceGroupMemberGroupId = props.rules.attendanceGroupMemberGroupId
 const attendanceGroupMemberLoading = props.rules.attendanceGroupMemberLoading
@@ -1041,6 +1046,8 @@ const localRuleSetPreviewEventsText = ref('[]')
 const localRuleSetPreviewResult = ref<RuleSetPreviewResult | null>(null)
 const ruleBuilderSource = props.rules.ruleBuilderSource ?? localRuleBuilderSource
 const ruleBuilderTimezone = props.rules.ruleBuilderTimezone ?? localRuleBuilderTimezone
+const ruleBuilderTimezoneOptions = computed(() => buildTimezoneOptionEntries(ruleBuilderTimezone.value))
+const ruleBuilderTimezoneLabel = computed(() => formatTimezoneOptionLabel(ruleBuilderTimezone.value))
 const ruleBuilderWorkStartTime = props.rules.ruleBuilderWorkStartTime ?? localRuleBuilderWorkStartTime
 const ruleBuilderWorkEndTime = props.rules.ruleBuilderWorkEndTime ?? localRuleBuilderWorkEndTime
 const ruleBuilderLateGraceMinutes = props.rules.ruleBuilderLateGraceMinutes ?? localRuleBuilderLateGraceMinutes

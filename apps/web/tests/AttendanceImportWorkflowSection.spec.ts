@@ -218,7 +218,12 @@ describe('AttendanceImportWorkflowSection', () => {
     expect(container!.textContent).toContain('Import will queue an async job because 240 rows meet the async threshold (200).')
     expect(container!.textContent).toContain('Mapping profile: DingTalk (2 required fields)')
     expect(container!.textContent).toContain('User map: 18 entries ready · key empNo · source 工号, 姓名')
-    expect(container!.textContent).toContain('Group sync: auto-create groups · rule set Ops Rules · timezone Asia/Shanghai')
+    expect(container!.textContent).toContain('Group sync: auto-create groups · rule set Ops Rules · timezone Asia/Shanghai (UTC+08:00)')
+    const importTimezone = container!.querySelector<HTMLSelectElement>('#attendance-import-timezone')
+    const importGroupTimezone = container!.querySelector<HTMLSelectElement>('#attendance-import-group-timezone')
+    expect(importTimezone).toBeTruthy()
+    expect(importGroupTimezone).toBeTruthy()
+    expect(importTimezone!.selectedOptions[0]?.textContent).toContain('Asia/Shanghai (UTC+08:00)')
   })
 
   it('shows manual-plan fallbacks when mapping, user map, and group sync are unset', async () => {

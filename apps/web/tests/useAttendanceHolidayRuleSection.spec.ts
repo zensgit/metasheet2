@@ -226,4 +226,33 @@ describe('AttendanceHolidayRuleSection', () => {
     expect(container!.querySelector('.attendance__table-cell--holiday-name input')).toBeTruthy()
     expect(container!.querySelector('.attendance__override-field input[placeholder="单休办公,白班"]')).toBeTruthy()
   })
+
+  it('shows the auto-sync timezone as a select with UTC offset labels', async () => {
+    const settingsForm = reactive<HolidaySettingsState>(createDefaultSettings())
+
+    const config = {
+      addHolidayOverride: vi.fn(),
+      holidaySyncLastRun: { value: null },
+      holidaySyncLoading: { value: false },
+      removeHolidayOverride: vi.fn(),
+      saveSettings: vi.fn(),
+      settingsForm,
+      settingsLoading: { value: false },
+      syncHolidays: vi.fn(),
+      syncHolidaysForYears: vi.fn(),
+    } as HolidayConfig
+
+    app = createApp(AttendanceHolidayRuleSection, {
+      attendanceGroupOptions: [],
+      config,
+      formatDateTime,
+      tr,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const timezoneSelect = container!.querySelector<HTMLSelectElement>('#attendance-holiday-sync-auto-tz')
+    expect(timezoneSelect).toBeTruthy()
+    expect(timezoneSelect!.selectedOptions[0]?.textContent).toContain('Asia/Shanghai (UTC+08:00)')
+  })
 })

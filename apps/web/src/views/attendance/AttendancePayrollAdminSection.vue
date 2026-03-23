@@ -25,8 +25,8 @@
           v-model="payrollTemplateForm.timezone"
           name="payrollTemplateTimezone"
         >
-          <option v-for="timezone in payrollTemplateTimezones" :key="timezone" :value="timezone">
-            {{ timezone }}
+          <option v-for="timezone in payrollTemplateTimezones" :key="timezone.value" :value="timezone.value">
+            {{ timezone.label }}
           </option>
         </select>
       </label>
@@ -125,7 +125,7 @@
         <tbody>
           <tr v-for="item in payrollTemplates" :key="item.id">
             <td>{{ item.name }}</td>
-            <td>{{ item.timezone }}</td>
+            <td>{{ formatTimezoneOptionLabel(item.timezone) }}</td>
             <td>{{ item.startDay }}</td>
             <td>{{ item.endDay }}</td>
             <td>{{ item.endMonthOffset }}</td>
@@ -383,7 +383,10 @@ import type {
   AttendancePayrollSummary,
   AttendancePayrollTemplate,
 } from './useAttendanceAdminPayroll'
-import { buildTimezoneOptions } from './attendanceTimezones'
+import {
+  buildTimezoneOptionEntries,
+  formatTimezoneOptionLabel,
+} from './attendanceTimezones'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -471,7 +474,7 @@ const payrollCycleSummary = props.payroll.payrollCycleSummary
 const payrollTemplateForm = props.payroll.payrollTemplateForm
 const payrollCycleForm = props.payroll.payrollCycleForm
 const payrollCycleGenerateForm = props.payroll.payrollCycleGenerateForm
-const payrollTemplateTimezones = computed(() => buildTimezoneOptions(payrollTemplateForm.timezone))
+const payrollTemplateTimezones = computed(() => buildTimezoneOptionEntries(payrollTemplateForm.timezone))
 const payrollTemplateName = props.payroll.payrollTemplateName
 const resetPayrollTemplateForm = () => props.payroll.resetPayrollTemplateForm()
 const editPayrollTemplate = (item: AttendancePayrollTemplate) => props.payroll.editPayrollTemplate(item)

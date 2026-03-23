@@ -273,7 +273,7 @@ describe('AttendanceRulesAndGroupsSection', () => {
     expect(builderRows()).toHaveLength(1)
 
     const sourceInput = container!.querySelector<HTMLInputElement>('#attendance-rule-builder-source')
-    const timezoneInput = container!.querySelector<HTMLInputElement>('#attendance-rule-builder-timezone')
+    const timezoneInput = container!.querySelector<HTMLSelectElement>('#attendance-rule-builder-timezone')
     const startInput = container!.querySelector<HTMLInputElement>('#attendance-rule-builder-start')
     const endInput = container!.querySelector<HTMLInputElement>('#attendance-rule-builder-end')
     const lateInput = container!.querySelector<HTMLInputElement>('#attendance-rule-builder-late-grace')
@@ -284,11 +284,12 @@ describe('AttendanceRulesAndGroupsSection', () => {
     expect(endInput).toBeTruthy()
     expect(lateInput).toBeTruthy()
     expect(earlyInput).toBeTruthy()
+    expect(timezoneInput!.selectedOptions[0]?.textContent).toContain('UTC')
 
     sourceInput!.value = 'csv'
     sourceInput!.dispatchEvent(new Event('input', { bubbles: true }))
     timezoneInput!.value = 'Europe/London'
-    timezoneInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    timezoneInput!.dispatchEvent(new Event('change', { bubbles: true }))
     startInput!.value = '08:30'
     startInput!.dispatchEvent(new Event('input', { bubbles: true }))
     endInput!.value = '17:30'
@@ -330,6 +331,7 @@ describe('AttendanceRulesAndGroupsSection', () => {
         workingDays: [1, 2, 3, 4, 5, 6],
       },
     })
+    expect(container!.textContent).toContain('Timezone: Europe/London (UTC')
 
     expect(JSON.parse(rules.ruleSetPreviewEventsText!.value)).toEqual([
       {
@@ -427,5 +429,28 @@ describe('AttendanceRulesAndGroupsSection', () => {
     previewButton!.click()
 
     expect(previewRuleSet).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows timezone options with UTC offset labels for groups and the rule builder', async () => {
+    const rules = createBindings()
+
+    app = createApp(AttendanceRulesAndGroupsSection, {
+      tr,
+      formatDateTime,
+      rules,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const ruleBuilderTimezone = container!.querySelector<HTMLSelectElement>('#attendance-rule-builder-timezone')
+    const attendanceGroupTimezone = container!.querySelector<HTMLSelectElement>('#attendance-group-timezone')
+
+    expect(ruleBuilderTimezone).toBeTruthy()
+    expect(attendanceGroupTimezone).toBeTruthy()
+    expect(ruleBuilderTimezone!.selectedOptions[0]?.textContent).toContain('Asia/Shanghai (UTC+08:00)')
+    expect(Array.from(attendanceGroupTimezone!.querySelectorAll('option')).map((option) => option.textContent)).toContain(
+      'Asia/Shanghai (UTC+08:00)',
+    )
+    expect(container!.textContent).toContain('Asia/Shanghai (UTC+08:00)')
   })
 })

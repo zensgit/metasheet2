@@ -359,4 +359,27 @@ describe('AttendanceSchedulingAdminSection', () => {
     expect(container!.textContent).toContain('Schedule')
     expect(container!.textContent).toContain('22:00 → 06:00 · Overnight')
   })
+
+  it('renders timezone selectors with UTC offset labels across scheduling forms', async () => {
+    const scheduling = createSchedulingBindings()
+
+    app = createApp(AttendanceSchedulingAdminSection, {
+      tr,
+      scheduling,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    const defaultRuleTimezone = container!.querySelector<HTMLSelectElement>('#attendance-rule-timezone')
+    const rotationTimezone = container!.querySelector<HTMLSelectElement>('#attendance-rotation-timezone')
+    const shiftTimezone = container!.querySelector<HTMLSelectElement>('#attendance-shift-timezone')
+
+    expect(defaultRuleTimezone).toBeTruthy()
+    expect(rotationTimezone).toBeTruthy()
+    expect(shiftTimezone).toBeTruthy()
+    expect(defaultRuleTimezone!.selectedOptions[0]?.textContent).toContain('UTC+00:00')
+    expect(rotationTimezone!.selectedOptions[0]?.textContent).toContain('UTC+00:00')
+    expect(shiftTimezone!.selectedOptions[0]?.textContent).toContain('UTC+00:00')
+    expect(container!.textContent).toContain('UTC (UTC+00:00)')
+  })
 })

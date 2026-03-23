@@ -13,7 +13,11 @@
       </label>
       <label class="attendance__field" for="attendance-rule-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <input id="attendance-rule-timezone" v-model="ruleForm.timezone" name="ruleTimezone" type="text" />
+        <select id="attendance-rule-timezone" v-model="ruleForm.timezone" name="ruleTimezone">
+          <option v-for="timezone in ruleTimezoneOptions" :key="timezone.value" :value="timezone.value">
+            {{ timezone.label }}
+          </option>
+        </select>
       </label>
       <label class="attendance__field" for="attendance-rule-start">
         <span>{{ tr('Work start', '上班时间') }}</span>
@@ -63,12 +67,15 @@
       </label>
       <label class="attendance__field" for="attendance-rotation-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <input
+        <select
           id="attendance-rotation-timezone"
           v-model="rotationRuleForm.timezone"
           name="rotationTimezone"
-          type="text"
-        />
+        >
+          <option v-for="timezone in rotationRuleTimezoneOptions" :key="timezone.value" :value="timezone.value">
+            {{ timezone.label }}
+          </option>
+        </select>
       </label>
       <label class="attendance__field attendance__field--full" for="attendance-rotation-sequence">
         <span>{{ tr('Shift sequence (IDs)', '班次序列（ID）') }}</span>
@@ -138,7 +145,7 @@
         <tbody>
           <tr v-for="rule in rotationRules" :key="rule.id">
             <td>{{ rule.name }}</td>
-            <td>{{ rule.timezone }}</td>
+            <td>{{ formatTimezoneOptionLabel(rule.timezone) }}</td>
             <td>{{ rule.shiftSequence.join(', ') }}</td>
             <td>{{ rule.isActive ? tr('Yes', '是') : tr('No', '否') }}</td>
             <td class="attendance__table-actions">
@@ -291,7 +298,11 @@
       </label>
       <label class="attendance__field" for="attendance-shift-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <input id="attendance-shift-timezone" v-model="shiftForm.timezone" name="shiftTimezone" type="text" />
+        <select id="attendance-shift-timezone" v-model="shiftForm.timezone" name="shiftTimezone">
+          <option v-for="timezone in shiftTimezoneOptions" :key="timezone.value" :value="timezone.value">
+            {{ timezone.label }}
+          </option>
+        </select>
       </label>
       <label class="attendance__field" for="attendance-shift-start">
         <span>{{ tr('Work start', '上班开始') }}</span>
@@ -378,7 +389,7 @@
         <tbody>
           <tr v-for="shift in shifts" :key="shift.id">
             <td>{{ shift.name }}</td>
-            <td>{{ shift.timezone }}</td>
+            <td>{{ formatTimezoneOptionLabel(shift.timezone) }}</td>
             <td>{{ formatShiftSchedule(shift) }}</td>
             <td>{{ shift.isOvernight ? tr('Yes', '是') : tr('No', '否') }}</td>
             <td>{{ shift.workingDays.join(',') }}</td>
@@ -509,6 +520,10 @@ import type {
   AttendanceShift,
 } from './useAttendanceAdminScheduling'
 import AttendanceUserPickerField from './AttendanceUserPickerField.vue'
+import {
+  buildTimezoneOptionEntries,
+  formatTimezoneOptionLabel,
+} from './attendanceTimezones'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -614,6 +629,7 @@ const props = defineProps<{
 const tr = props.tr
 const loadRule = () => props.scheduling.loadRule()
 const ruleForm = props.scheduling.ruleForm
+const ruleTimezoneOptions = computed(() => buildTimezoneOptionEntries(ruleForm.timezone))
 const ruleLoading = props.scheduling.ruleLoading
 const saveRule = () => props.scheduling.saveRule()
 const rotationRules = props.scheduling.rotationRules
@@ -621,6 +637,7 @@ const rotationRuleLoading = props.scheduling.rotationRuleLoading
 const rotationRuleSaving = props.scheduling.rotationRuleSaving
 const rotationRuleEditingId = props.scheduling.rotationRuleEditingId
 const rotationRuleForm = props.scheduling.rotationRuleForm
+const rotationRuleTimezoneOptions = computed(() => buildTimezoneOptionEntries(rotationRuleForm.timezone))
 const resetRotationRuleForm = () => props.scheduling.resetRotationRuleForm()
 const editRotationRule = (rule: AttendanceRotationRule) => props.scheduling.editRotationRule(rule)
 const loadRotationRules = () => props.scheduling.loadRotationRules()
@@ -641,6 +658,7 @@ const shiftLoading = props.scheduling.shiftLoading
 const shiftSaving = props.scheduling.shiftSaving
 const shiftEditingId = props.scheduling.shiftEditingId
 const shiftForm = props.scheduling.shiftForm
+const shiftTimezoneOptions = computed(() => buildTimezoneOptionEntries(shiftForm.timezone))
 const resetShiftForm = () => props.scheduling.resetShiftForm()
 const editShift = (shift: AttendanceShift) => props.scheduling.editShift(shift)
 const loadShifts = () => props.scheduling.loadShifts()
