@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  resolvePlmAuditCanonicalTeamViewManagementTarget,
   resolvePlmAuditCanonicalTeamViewManagementTargetId,
   resolvePlmAuditCanonicalTeamViewRouteState,
   resolvePlmAuditTeamViewDuplicateName,
@@ -18,6 +19,26 @@ describe('plmAuditTeamViewControlTarget', () => {
       routeTeamViewId: '',
       followupTeamViewId: 'audit-view-2',
     })).toBe('audit-view-2')
+  })
+
+  it('can recover the canonical management entry from a follow-up owner even when the selector is cleared', () => {
+    expect(resolvePlmAuditCanonicalTeamViewManagementTarget([
+      { id: 'audit-view-1', name: 'A' },
+      { id: 'audit-view-2', name: 'B' },
+    ], {
+      routeTeamViewId: '',
+      followupTeamViewId: 'audit-view-2',
+    })).toEqual({
+      id: 'audit-view-2',
+      name: 'B',
+    })
+
+    expect(resolvePlmAuditCanonicalTeamViewManagementTarget([
+      { id: 'audit-view-1', name: 'A' },
+    ], {
+      routeTeamViewId: '',
+      followupTeamViewId: 'audit-view-2',
+    })).toBeNull()
   })
 
   it('locks generic management actions when the local selector drifts away from the canonical route owner', () => {

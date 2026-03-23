@@ -890,6 +890,7 @@ import {
   type PlmAuditTeamViewShareEntryActionKind,
 } from './plmAuditTeamViewShareEntry'
 import {
+  resolvePlmAuditCanonicalTeamViewManagementTarget,
   resolvePlmAuditCanonicalTeamViewManagementTargetId,
   resolvePlmAuditCanonicalTeamViewRouteState,
   resolvePlmAuditTeamViewDuplicateName,
@@ -1010,6 +1011,13 @@ const canonicalAuditTeamViewManagementTargetId = computed(() => resolvePlmAuditC
   routeTeamViewId: canonicalAuditTeamViewId.value,
   followupTeamViewId: auditTeamViewCollaborationFollowup.value?.teamViewId || '',
 }))
+const canonicalAuditTeamViewManagementTarget = computed(() => resolvePlmAuditCanonicalTeamViewManagementTarget(
+  auditTeamViews.value,
+  {
+    routeTeamViewId: canonicalAuditTeamViewId.value,
+    followupTeamViewId: auditTeamViewCollaborationFollowup.value?.teamViewId || '',
+  },
+))
 const defaultAuditTeamView = computed(
   () => auditTeamViews.value.find((view) => view.isDefault && !view.isArchived) || null,
 )
@@ -1086,6 +1094,11 @@ const showPersistentReturnToScene = computed(() => shouldShowPlmAuditPersistentR
 const auditSceneFilterHighlight = computed(() => buildPlmAuditSceneFilterHighlight(auditSceneToken.value, tr))
 const {
   canApply: canApplyAuditTeamView,
+} = usePlmCollaborativePermissions({
+  selectedEntry: selectedAuditTeamView,
+  nameRef: auditTeamViewName,
+})
+const {
   canDuplicate: canDuplicateAuditTeamView,
   canShare: canShareAuditTeamView,
   canDelete: canDeleteAuditTeamView,
@@ -1096,7 +1109,7 @@ const {
   canSetDefault: canSetAuditTeamViewDefault,
   canClearDefault: canClearAuditTeamViewDefault,
 } = usePlmCollaborativePermissions({
-  selectedEntry: selectedAuditTeamView,
+  selectedEntry: canonicalAuditTeamViewManagementTarget,
   nameRef: auditTeamViewName,
   ownerUserIdRef: auditTeamViewOwnerUserId,
 })
@@ -1931,7 +1944,7 @@ async function applyAuditTeamView() {
 }
 
 async function shareAuditTeamView() {
-  const view = selectedAuditTeamView.value
+  const view = canonicalAuditTeamViewManagementTarget.value
   if (!view || auditTeamViewManagementTargetLocked.value || !canShareAuditTeamView.value) return
 
   await shareAuditTeamViewEntry(view)
@@ -1939,7 +1952,7 @@ async function shareAuditTeamView() {
 
 async function duplicateAuditTeamView() {
   if (auditTeamViewManagementTargetLocked.value) return
-  await duplicateAuditTeamViewEntry(selectedAuditTeamView.value)
+  await duplicateAuditTeamViewEntry(canonicalAuditTeamViewManagementTarget.value)
 }
 
 async function duplicateAuditTeamViewEntry(
@@ -1983,7 +1996,7 @@ async function duplicateAuditTeamViewEntry(
 }
 
 async function renameAuditTeamView() {
-  const view = selectedAuditTeamView.value
+  const view = canonicalAuditTeamViewManagementTarget.value
   if (!view || auditTeamViewManagementTargetLocked.value || !canRenameAuditTeamView.value) return
 
   auditTeamViewsLoading.value = true
@@ -2010,14 +2023,14 @@ async function renameAuditTeamView() {
 }
 
 async function setAuditTeamViewDefault() {
-  const view = selectedAuditTeamView.value
+  const view = canonicalAuditTeamViewManagementTarget.value
   if (!view || auditTeamViewManagementTargetLocked.value || !canSetAuditTeamViewDefault.value) return
 
   await setAuditTeamViewDefaultEntry(view)
 }
 
 async function transferAuditTeamView() {
-  const view = selectedAuditTeamView.value
+  const view = canonicalAuditTeamViewManagementTarget.value
   if (!view || auditTeamViewManagementTargetLocked.value || !canTransferAuditTeamView.value) return
 
   auditTeamViewsLoading.value = true
@@ -2242,7 +2255,7 @@ async function runRecommendedAuditTeamViewSecondaryAction(view: PlmRecommendedAu
 }
 
 async function clearAuditTeamViewDefault() {
-  const view = selectedAuditTeamView.value
+  const view = canonicalAuditTeamViewManagementTarget.value
   if (!view || auditTeamViewManagementTargetLocked.value || !canClearAuditTeamViewDefault.value) return
 
   auditTeamViewsLoading.value = true
@@ -2410,19 +2423,19 @@ async function runAuditSavedViewShareFollowupAction(actionKind: PlmAuditSavedVie
 }
 
 async function archiveAuditTeamView() {
-  const view = selectedAuditTeamView.value
+  const view = canonicalAuditTeamViewManagementTarget.value
   if (!view || auditTeamViewManagementTargetLocked.value || !canArchiveAuditTeamView.value) return
   await runAuditTeamViewLifecycleAction(view.id, 'archive')
 }
 
 async function restoreAuditTeamView() {
-  const view = selectedAuditTeamView.value
+  const view = canonicalAuditTeamViewManagementTarget.value
   if (!view || auditTeamViewManagementTargetLocked.value || !canRestoreAuditTeamView.value) return
   await runAuditTeamViewLifecycleAction(view.id, 'restore')
 }
 
 async function deleteAuditTeamView() {
-  const view = selectedAuditTeamView.value
+  const view = canonicalAuditTeamViewManagementTarget.value
   if (!view || auditTeamViewManagementTargetLocked.value || !canDeleteAuditTeamView.value) return
 
   auditTeamViewsLoading.value = true
