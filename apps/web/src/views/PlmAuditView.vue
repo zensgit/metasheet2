@@ -812,6 +812,7 @@ import {
 import {
   buildPlmAuditSavedViewShareFollowupNotice,
   resolvePlmAuditSavedViewLocalSaveFollowupSource,
+  resolvePlmAuditSavedViewLocalSaveState,
   type PlmAuditSavedViewShareFollowup,
   type PlmAuditSavedViewShareFollowupSource,
   type PlmAuditSavedViewShareFollowupActionKind,
@@ -2296,10 +2297,16 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
   if (!view) return
 
   if (actionKind === 'save-local') {
+    const canonicalRouteState = parsePlmAuditRouteState(route.query)
     await saveCurrentLocalViewWithFollowup(
       buildPlmAuditSharedEntrySavedViewName(view, tr),
       'shared-entry',
       tr('Shared audit team view saved locally.', '已将分享的审计团队视图保存为本地视图。'),
+      resolvePlmAuditSavedViewLocalSaveState({
+        source: 'shared-entry',
+        currentState: readCurrentRouteState(),
+        canonicalRouteState,
+      }),
     )
     return
   }
@@ -2561,9 +2568,10 @@ function saveCurrentView() {
 
 async function saveCurrentAuditView() {
   const currentRouteState = readCurrentRouteState()
+  const canonicalRouteState = parsePlmAuditRouteState(route.query)
   const followupSource = resolvePlmAuditSavedViewLocalSaveFollowupSource({
     sharedEntryTeamViewId: auditTeamViewShareEntry.value?.teamViewId || '',
-    routeTeamViewId: currentRouteState.teamViewId,
+    routeTeamViewId: canonicalRouteState.teamViewId,
     sceneContextActive: auditSceneOwnerContextActive.value || auditSceneQueryContextActive.value,
   })
 
@@ -2574,6 +2582,11 @@ async function saveCurrentAuditView() {
       followupSource === 'shared-entry'
         ? tr('Shared audit team view saved locally.', '已将分享的审计团队视图保存为本地视图。')
         : tr('Scene audit saved view stored.', '场景审计已保存为本地视图。'),
+      resolvePlmAuditSavedViewLocalSaveState({
+        source: followupSource,
+        currentState: currentRouteState,
+        canonicalRouteState,
+      }),
     )
     return
   }

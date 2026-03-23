@@ -1,3 +1,4 @@
+import type { PlmAuditRouteState } from './plmAuditQueryState'
 import type { PlmAuditSavedView } from './plmAuditSavedViews'
 
 export type PlmAuditSavedViewShareFollowupActionKind = 'promote-team' | 'promote-default' | 'dismiss'
@@ -21,6 +22,18 @@ export function resolvePlmAuditSavedViewLocalSaveFollowupSource(options: {
   }
 
   return options.sceneContextActive ? 'scene-context' : null
+}
+
+export function resolvePlmAuditSavedViewLocalSaveState(options: {
+  source: PlmAuditSavedViewShareFollowupSource | null
+  currentState: PlmAuditRouteState
+  canonicalRouteState: PlmAuditRouteState
+}) {
+  if (options.source === 'shared-entry') {
+    return options.canonicalRouteState
+  }
+
+  return options.currentState
 }
 
 export type PlmAuditSavedViewShareFollowupNotice = {
