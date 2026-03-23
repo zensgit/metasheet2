@@ -1379,6 +1379,43 @@ export function useAttendanceAdminImportWorkflow({
   }
 
   async function downloadImportTemplateCsv() {
+    const profileId = importProfileId.value.trim()
+    const query = new URLSearchParams()
+    if (profileId) query.set('profileId', profileId)
+    const endpoint = query.size > 0
+      ? `/api/attendance/import/template.csv?${query.toString()}`
+      : '/api/attendance/import/template.csv'
+    let fallbackError = ''
+
+    try {
+      const response = await apiFetch(endpoint, {
+        headers: {
+          Accept: 'text/csv',
+        },
+      })
+
+      if (response.ok) {
+        const csvText = await response.text()
+        if (csvText.trim()) {
+          const source = normalizeIdentifier(selectedImportProfile.value?.source ?? importTemplateGuide.value?.source ?? 'attendance') ?? 'attendance'
+          downloadText(`attendance-import-template-${source}.csv`, csvText, 'text/csv;charset=utf-8')
+          reportStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
+          return
+        }
+      } else if (response.status !== 404 && response.status !== 405) {
+        let message = ''
+        try {
+          const data = await response.json()
+          message = data?.error?.message || ''
+        } catch {
+          message = await response.text().catch(() => '')
+        }
+        throw new Error(message || tr('Failed to download CSV template', '下载 CSV 模板失败'))
+      }
+    } catch (error) {
+      fallbackError = (error as Error).message || ''
+    }
+
     let guide = importTemplateGuide.value
     if (!guide) {
       await loadImportTemplate()
@@ -1388,7 +1425,10 @@ export function useAttendanceAdminImportWorkflow({
         : null
     }
     if (!guide) {
-      reportStatus(tr('Load the import template first.', '请先加载导入模板。'), 'error')
+      reportStatus(
+        fallbackError || tr('Load the import template first.', '请先加载导入模板。'),
+        'error',
+      )
       return
     }
 

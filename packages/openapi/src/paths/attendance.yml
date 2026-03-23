@@ -2597,6 +2597,11 @@ paths:
     get:
       summary: Get attendance import template
       security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: profileId
+          schema: { type: string }
+          description: Optional import mapping profile ID used to shape the template payload.
       responses:
         '200':
           description: OK
@@ -2607,6 +2612,28 @@ paths:
                 properties:
                   ok: { type: boolean }
                   data: { $ref: '#/components/schemas/AttendanceImportTemplate' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/import/template.csv:
+    x-plugin: plugin-attendance
+    get:
+      summary: Download attendance import CSV template
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: profileId
+          schema: { type: string }
+          description: Optional import mapping profile ID used to shape the CSV template.
+      responses:
+        '200':
+          description: OK
+          content:
+            text/csv:
+              schema:
+                type: string
+        '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 

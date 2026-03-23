@@ -688,8 +688,39 @@ components:
           type: string
         mapping:
           type: object
+        mappingProfiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttendanceImportMappingProfile'
         payloadExample:
           type: object
+    AttendanceImportMappingProfile:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        source:
+          type: string
+          nullable: true
+        mapping:
+          type: object
+          nullable: true
+        requiredFields:
+          type: array
+          items:
+            type: string
+        userMapKeyField:
+          type: string
+          nullable: true
+        userMapSourceFields:
+          type: array
+          items:
+            type: string
     AttendanceImportPreviewItem:
       type: object
       properties:

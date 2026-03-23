@@ -196,6 +196,7 @@ const IMPORT_MAPPING_COLUMNS = [
 
 const DEFAULT_REQUIRED_FIELDS = ['日期']
 const DEFAULT_PUNCH_REQUIRED_FIELDS = ['上班1打卡时间', '下班1打卡时间']
+const DEFAULT_IMPORT_TEMPLATE_PROFILE_ID = 'dingtalk_csv_daily_summary'
 
 const IMPORT_MAPPING_PROFILES = [
   {
@@ -208,6 +209,8 @@ const IMPORT_MAPPING_PROFILES = [
     userMapSourceFields: ['empNo', '工号', '姓名'],
     requiredFields: DEFAULT_REQUIRED_FIELDS,
     punchRequiredFields: DEFAULT_PUNCH_REQUIRED_FIELDS,
+    templateColumns: ['日期', '工号', '姓名', '考勤组', '上班1打卡时间', '下班1打卡时间', '考勤结果', '异常原因'],
+    templateSampleRow: ['2026-03-23', 'EMP001', '张三', '总部日班', '2026-03-23 09:00', '2026-03-23 18:00', '正常', ''],
   },
   {
     id: 'dingtalk_api_columns',
@@ -216,6 +219,8 @@ const IMPORT_MAPPING_PROFILES = [
     source: 'dingtalk',
     mapping: { columns: IMPORT_MAPPING_COLUMNS },
     requiredFields: ['workDate'],
+    templateColumns: ['workDate', 'userId', '1_on_duty_user_check_time', '1_off_duty_user_check_time', 'attend_result'],
+    templateSampleRow: ['2026-03-23', 'user-001', '2026-03-23T09:00:00+08:00', '2026-03-23T18:00:00+08:00', 'Normal'],
   },
   {
     id: 'manual_rows',
@@ -224,12 +229,139 @@ const IMPORT_MAPPING_PROFILES = [
     source: 'manual',
     mapping: { columns: IMPORT_MAPPING_COLUMNS },
     requiredFields: ['workDate'],
+    templateColumns: ['workDate', 'userId', 'firstInAt', 'lastOutAt', 'status'],
+    templateSampleRow: ['2026-03-23', 'user-001', '2026-03-23T09:00:00+08:00', '2026-03-23T18:00:00+08:00', 'normal'],
   },
 ]
 
 function findImportProfile(profileId) {
   if (!profileId) return null
   return IMPORT_MAPPING_PROFILES.find((profile) => profile.id === profileId) ?? null
+}
+
+function uniqueImportTemplateStrings(values) {
+  if (!Array.isArray(values)) return []
+  const normalized = values
+    .map((value) => String(value ?? '').trim())
+    .filter(Boolean)
+  return Array.from(new Set(normalized))
+}
+
+function extractImportTemplateColumns(columns) {
+  if (!Array.isArray(columns)) return []
+  const values = []
+  for (const column of columns) {
+    if (typeof column === 'string') {
+      const text = column.trim()
+      if (text) values.push(text)
+      continue
+    }
+    if (!column || typeof column !== 'object') continue
+    const candidate = column.header
+      ?? column.sourceField
+      ?? column.source
+      ?? column.name
+      ?? column.field
+      ?? column.key
+      ?? column.targetField
+      ?? column.label
+    if (typeof candidate === 'string') {
+      const text = candidate.trim()
+      if (text) values.push(text)
+    }
+  }
+  return Array.from(new Set(values))
+}
+
+function getDefaultImportTemplateProfile() {
+  return findImportProfile(DEFAULT_IMPORT_TEMPLATE_PROFILE_ID)
+    ?? IMPORT_MAPPING_PROFILES[0]
+    ?? null
+}
+
+function resolveImportTemplateProfile(profileId) {
+  const normalized = typeof profileId === 'string' ? profileId.trim() : ''
+  if (!normalized) return { profile: getDefaultImportTemplateProfile(), error: null }
+  const profile = findImportProfile(normalized)
+  if (profile) return { profile, error: null }
+  return {
+    profile: null,
+    error: `Unknown import template profile: ${normalized}`,
+  }
+}
+
+function resolveImportTemplateColumns(profile) {
+  const templateColumns = uniqueImportTemplateStrings(profile?.templateColumns)
+  if (templateColumns.length > 0) return templateColumns
+  return extractImportTemplateColumns(profile?.mapping?.columns)
+}
+
+function resolveImportTemplateRequiredFields(profile) {
+  return uniqueImportTemplateStrings(profile?.requiredFields)
+}
+
+function buildImportTemplatePayloadExample(profile) {
+  const columns = resolveImportTemplateColumns(profile)
+  const requiredFields = resolveImportTemplateRequiredFields(profile)
+  const source = typeof profile?.source === 'string' && profile.source.trim()
+    ? profile.source.trim()
+    : 'dingtalk_csv'
+
+  return {
+    source,
+    mode: 'override',
+    columns,
+    requiredFields,
+    // Keep the template payload valid out-of-the-box: ruleSetId is optional.
+    userMapKeyField: typeof profile?.userMapKeyField === 'string' && profile.userMapKeyField.trim()
+      ? profile.userMapKeyField.trim()
+      : '工号',
+    userMapSourceFields: uniqueImportTemplateStrings(profile?.userMapSourceFields).length > 0
+      ? uniqueImportTemplateStrings(profile.userMapSourceFields)
+      : ['empNo', '工号', '姓名'],
+    userMap: {},
+    entries: [],
+  }
+}
+
+function buildAttendanceImportTemplateData(profile) {
+  return {
+    source: typeof profile?.source === 'string' && profile.source.trim()
+      ? profile.source.trim()
+      : 'dingtalk',
+    mapping: {
+      columns: IMPORT_MAPPING_COLUMNS,
+    },
+    mappingProfiles: IMPORT_MAPPING_PROFILES,
+    payloadExample: buildImportTemplatePayloadExample(profile),
+  }
+}
+
+function escapeImportTemplateCsvCell(value) {
+  const text = String(value ?? '')
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`
+  }
+  return text
+}
+
+function buildImportTemplateCsv(profile) {
+  const columns = resolveImportTemplateColumns(profile)
+  if (columns.length === 0) return ''
+  const sampleRow = Array.isArray(profile?.templateSampleRow) ? profile.templateSampleRow : []
+  const normalizedSampleRow = columns.map((_, index) => sampleRow[index] ?? '')
+  const header = columns.map(escapeImportTemplateCsvCell).join(',')
+  const row = normalizedSampleRow.map(escapeImportTemplateCsvCell).join(',')
+  return `${header}\n${row}\n`
+}
+
+function buildImportTemplateFilename(profile) {
+  const seed = String(profile?.id || profile?.source || 'attendance')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return `attendance-import-template-${seed || 'attendance'}.csv`
 }
 
 const IMPORT_COMMIT_TOKEN_TTL_MS = 10 * 60 * 1000
@@ -11895,26 +12027,38 @@ module.exports = {
 	    context.api.http.addRoute(
 	      'GET',
 	      '/api/attendance/import/template',
-	      withPermission('attendance:admin', async (_req, res) => {
+	      withPermission('attendance:admin', async (req, res) => {
+        const { profile, error } = resolveImportTemplateProfile(req.query?.profileId)
+        if (error) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error } })
+          return
+        }
         res.json({
           ok: true,
-          data: {
-            source: 'dingtalk',
-            mapping: {
-              columns: IMPORT_MAPPING_COLUMNS,
-            },
-            mappingProfiles: IMPORT_MAPPING_PROFILES,
-            payloadExample: {
-              source: 'dingtalk_csv',
-              mode: 'override',
-              // Keep the template payload valid out-of-the-box: ruleSetId is optional.
-              userMapKeyField: '工号',
-              userMapSourceFields: ['empNo', '工号', '姓名'],
-              userMap: {},
-              entries: [],
-            },
-          },
+          data: buildAttendanceImportTemplateData(profile),
         })
+	      })
+	    )
+
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/import/template.csv',
+	      withPermission('attendance:admin', async (req, res) => {
+        const { profile, error } = resolveImportTemplateProfile(req.query?.profileId)
+        if (error) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error } })
+          return
+        }
+
+        const csvText = buildImportTemplateCsv(profile)
+        if (!csvText) {
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Import template has no CSV columns' } })
+          return
+        }
+
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+        res.setHeader('Content-Disposition', `attachment; filename="${buildImportTemplateFilename(profile)}"`)
+        res.send(csvText)
 	      })
 	    )
 

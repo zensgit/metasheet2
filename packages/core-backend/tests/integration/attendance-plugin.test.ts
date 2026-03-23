@@ -1026,6 +1026,53 @@ describe('Attendance Plugin Integration', () => {
     }
   })
 
+  it('serves attendance import templates as JSON and CSV', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`attendance-template-${Date.now().toString(36)}`)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const importTemplateRes = await requestJson(`${baseUrl}/api/attendance/import/template`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(importTemplateRes.status).toBe(200)
+    const importTemplateData = (importTemplateRes.body as { data?: any } | undefined)?.data
+    expect(importTemplateData?.payloadExample?.ruleSetId).toBeUndefined()
+    expect(importTemplateData?.payloadExample?.columns).toContain('日期')
+    expect(importTemplateData?.payloadExample?.requiredFields).toContain('日期')
+
+    const importTemplateCsvRes = await requestJson(`${baseUrl}/api/attendance/import/template.csv`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(importTemplateCsvRes.status).toBe(200)
+    expect(importTemplateCsvRes.raw).toContain('日期,工号,姓名,考勤组,上班1打卡时间,下班1打卡时间,考勤结果,异常原因')
+    expect(importTemplateCsvRes.raw).toContain('2026-03-23,EMP001,张三,总部日班,2026-03-23 09:00,2026-03-23 18:00,正常,')
+
+    const importTemplateCsvProfileRes = await requestJson(`${baseUrl}/api/attendance/import/template.csv?profileId=manual_rows`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(importTemplateCsvProfileRes.status).toBe(200)
+    expect(importTemplateCsvProfileRes.raw).toContain('workDate,userId,firstInAt,lastOutAt,status')
+
+    const importTemplateCsvInvalidProfileRes = await requestJson(`${baseUrl}/api/attendance/import/template.csv?profileId=missing_profile`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(importTemplateCsvInvalidProfileRes.status).toBe(400)
+    expect((importTemplateCsvInvalidProfileRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
+  })
+
   it('supports shift and overtime rule lookup by id and rejects malformed ids with 400', async () => {
     if (!baseUrl) return
 

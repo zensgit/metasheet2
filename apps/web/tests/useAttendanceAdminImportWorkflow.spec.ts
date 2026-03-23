@@ -13,6 +13,20 @@ function jsonResponse(status: number, payload: unknown): Response {
   } as unknown as Response
 }
 
+function textResponse(status: number, text: string, contentType = 'text/plain'): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: {
+      get: (name: string) => name.toLowerCase() === 'content-type' ? contentType : null,
+    },
+    json: async () => {
+      throw new Error('Not JSON')
+    },
+    text: async () => text,
+  } as unknown as Response
+}
+
 function createWorkflow(overrides: Parameters<typeof useAttendanceAdminImportWorkflow>[0] = {}) {
   const setStatus = overrides.setStatus ?? vi.fn()
   const setStatusFromError = overrides.setStatusFromError ?? vi.fn()
@@ -113,23 +127,65 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(setStatus).toHaveBeenCalledWith('Import template loaded.', 'info', undefined)
   })
 
-  it('downloads a CSV template using the loaded template guide', async () => {
+  it('downloads a CSV template from the server endpoint', async () => {
     const { workflow, downloadText, setStatus } = createWorkflow({
-      apiFetch: vi.fn(async () => jsonResponse(200, {
-        ok: true,
-        data: {
-          payloadExample: {
-            source: 'dingtalk_csv',
-            mode: 'merge',
-            columns: ['userId', 'workDate', 'firstInAt'],
-          },
-          mappingProfiles: [],
-        },
-      })),
+      apiFetch: vi.fn(async (input: string) => {
+        expect(input).toBe('/api/attendance/import/template.csv')
+        return textResponse(200, 'userId,workDate,firstInAt\nuser-1,2026-03-23,2026-03-23T09:00:00Z\n', 'text/csv')
+      }),
     })
 
     await workflow.downloadImportTemplateCsv()
 
+    expect(downloadText).toHaveBeenCalledWith(
+      'attendance-import-template-attendance.csv',
+      'userId,workDate,firstInAt\nuser-1,2026-03-23,2026-03-23T09:00:00Z\n',
+      'text/csv;charset=utf-8',
+    )
+    expect(setStatus).toHaveBeenLastCalledWith('CSV template downloaded.', 'info', undefined)
+  })
+
+  it('falls back to the local template guide when the CSV endpoint is unavailable', async () => {
+    const apiFetch = vi.fn(async (input: string) => {
+      if (input === '/api/attendance/import/template.csv') {
+        return jsonResponse(404, {
+          ok: false,
+          error: {
+            code: 'NOT_FOUND',
+            message: 'missing',
+          },
+        })
+      }
+      if (input === '/api/attendance/import/template') {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            payloadExample: {
+              source: 'dingtalk_csv',
+              mode: 'merge',
+              columns: ['userId', 'workDate', 'firstInAt'],
+            },
+            mappingProfiles: [],
+          },
+        })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+
+    const { workflow, downloadText, setStatus } = createWorkflow({ apiFetch })
+
+    await workflow.downloadImportTemplateCsv()
+
+    expect(apiFetch).toHaveBeenNthCalledWith(
+      1,
+      '/api/attendance/import/template.csv',
+      expect.objectContaining({
+        headers: {
+          Accept: 'text/csv',
+        },
+      }),
+    )
+    expect(apiFetch).toHaveBeenNthCalledWith(2, '/api/attendance/import/template')
     expect(downloadText).toHaveBeenCalledWith(
       'attendance-import-template-dingtalk_csv.csv',
       'userId,workDate,firstInAt\n,,\n',
