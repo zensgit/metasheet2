@@ -41,7 +41,10 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
 import WorkflowDesigner from '../WorkflowDesigner.vue'
-import { readAttendanceWorkflowHandoff } from './attendanceWorkflowHandoff'
+import {
+  formatAttendanceWorkflowStarterLabel,
+  readAttendanceWorkflowHandoff,
+} from './attendanceWorkflowHandoff'
 
 withDefaults(
   defineProps<{
@@ -73,9 +76,11 @@ const requestTypeLabel = computed(() => {
   }
 })
 const starterLabel = computed(() => {
-  return workflowHandoff.value?.workflowStarterId === 'parallel-review'
-    ? (isZh.value ? '并行评审起步模板' : 'Parallel review starter')
-    : (isZh.value ? '简单审批起步模板' : 'Simple approval starter')
+  const starterId = workflowHandoff.value?.workflowStarterId || 'simple-approval'
+  return formatAttendanceWorkflowStarterLabel(
+    starterId,
+    (en, zh) => (isZh.value ? zh : en),
+  )
 })
 
 const t = computed(() => {

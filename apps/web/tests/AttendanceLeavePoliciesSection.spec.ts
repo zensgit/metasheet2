@@ -244,7 +244,7 @@ describe('AttendanceLeavePoliciesSection', () => {
     expect(container!.textContent).toContain('Role gates: 2')
     expect(container!.textContent).toContain('Direct users: 1')
     expect(container!.textContent).toContain('Manager -> HR')
-    expect(container!.textContent).toContain('Parallel review starter')
+    expect(container!.textContent).toContain('Leave manager -> HR starter')
     expect(container!.textContent).toContain('Advanced JSON fallback')
     expect(container!.textContent).toContain('Manager review -> HR review')
     expect(container!.textContent).toContain('starter draft with the recommended template')
@@ -282,8 +282,8 @@ describe('AttendanceLeavePoliciesSection', () => {
         approvalFlowId: 'flow-1',
         approvalFlowName: 'Leave manager to HR',
         approvalStepCount: '2',
-        workflowStarterId: 'parallel-review',
-        templateId: 'parallel-review',
+        workflowStarterId: 'attendance-leave-manager-hr',
+        templateId: 'attendance-leave-manager-hr',
       }),
     })
   })

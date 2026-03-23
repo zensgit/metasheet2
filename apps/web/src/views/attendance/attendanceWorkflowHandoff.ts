@@ -25,6 +25,8 @@ export interface AttendanceWorkflowHandoffState {
   templateId: string
 }
 
+type AttendanceWorkflowStarterTranslator = (en: string, zh: string) => string
+
 function normalizeQueryString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
@@ -76,9 +78,44 @@ function summarizeSteps(steps: AttendanceWorkflowHandoffStepInput[]): string {
 }
 
 export function resolveAttendanceWorkflowStarterId(requestType: string, approvalStepCount: number): string {
-  if (approvalStepCount > 1) return 'parallel-review'
-  if (requestType === 'leave' || requestType === 'overtime') return 'simple-approval'
-  return 'simple-approval'
+  const hasEscalation = approvalStepCount > 1
+
+  switch (requestType) {
+    case 'leave':
+      return hasEscalation ? 'attendance-leave-manager-hr' : 'attendance-leave-manager'
+    case 'overtime':
+      return hasEscalation ? 'attendance-overtime-manager-payroll' : 'attendance-overtime-manager'
+    case 'missed_check_in':
+    case 'missed_check_out':
+    case 'time_correction':
+      return hasEscalation ? 'attendance-exception-manager-ops' : 'attendance-exception-manager'
+    default:
+      return hasEscalation ? 'parallel-review' : 'simple-approval'
+  }
+}
+
+export function formatAttendanceWorkflowStarterLabel(
+  starterId: string,
+  translate: AttendanceWorkflowStarterTranslator = (en) => en,
+): string {
+  switch (starterId) {
+    case 'attendance-leave-manager':
+      return translate('Leave manager starter', '请假主管起步模板')
+    case 'attendance-leave-manager-hr':
+      return translate('Leave manager -> HR starter', '请假主管 -> HR 起步模板')
+    case 'attendance-overtime-manager':
+      return translate('Overtime manager starter', '加班主管起步模板')
+    case 'attendance-overtime-manager-payroll':
+      return translate('Overtime manager -> Payroll starter', '加班主管 -> 薪资起步模板')
+    case 'attendance-exception-manager':
+      return translate('Attendance exception manager starter', '考勤异常主管起步模板')
+    case 'attendance-exception-manager-ops':
+      return translate('Attendance exception manager -> Ops starter', '考勤异常主管 -> 运营起步模板')
+    case 'parallel-review':
+      return translate('Parallel review starter', '并行评审起步模板')
+    default:
+      return translate('Simple approval starter', '简单审批起步模板')
+  }
 }
 
 export function buildAttendanceWorkflowHandoffQuery(input: AttendanceWorkflowHandoffInput): Record<string, string> {

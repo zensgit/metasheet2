@@ -200,8 +200,8 @@ describe('WorkflowDesigner attendance handoff', () => {
       approvalStepSummary: 'Manager review -> HR review',
       workflowName: 'Leave manager to HR',
       workflowDescription: 'Attendance leave starter from approval builder',
-      workflowStarterId: 'parallel-review',
-      templateId: 'parallel-review',
+      workflowStarterId: 'attendance-leave-manager-hr',
+      templateId: 'attendance-leave-manager-hr',
     }
 
     mocks.instantiateWorkflowTemplateSpy.mockResolvedValue({
@@ -209,8 +209,8 @@ describe('WorkflowDesigner attendance handoff', () => {
       message: '模板已应用',
     })
     mocks.loadWorkflowTemplateCachedSpy.mockResolvedValue({
-      id: 'parallel-review',
-      name: 'Parallel review starter',
+      id: 'attendance-leave-manager-hr',
+      name: 'Attendance Leave Manager -> HR Starter',
       description: 'Reusable template',
       category: 'approval',
     })
@@ -238,7 +238,7 @@ describe('WorkflowDesigner attendance handoff', () => {
     await flushUi()
 
     expect(mocks.instantiateWorkflowTemplateSpy).toHaveBeenCalledWith({
-      templateId: 'parallel-review',
+      templateId: 'attendance-leave-manager-hr',
       name: 'Leave manager to HR',
       description: 'Attendance leave starter from approval builder',
       category: 'approval',

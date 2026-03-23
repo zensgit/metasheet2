@@ -80,8 +80,8 @@ describe('AttendanceWorkflowDesigner zh', () => {
       approvalFlowName: '请假审批流',
       approvalStepCount: '2',
       approvalStepSummary: '直属主管审批 -> HR 审批',
-      workflowStarterId: 'parallel-review',
-      templateId: 'parallel-review',
+      workflowStarterId: 'attendance-leave-manager-hr',
+      templateId: 'attendance-leave-manager-hr',
       workflowDescription: 'Attendance leave starter from approval builder',
     }
 
@@ -93,7 +93,7 @@ describe('AttendanceWorkflowDesigner zh', () => {
     expect(text).toContain('请假审批流')
     expect(text).toContain('2')
     expect(text).toContain('自动套用推荐起步模板')
-    expect(text).toContain('并行评审起步模板')
+    expect(text).toContain('请假主管 -> HR 起步模板')
     expect(text).toContain('直属主管审批 -> HR 审批')
 
     const buttons = Array.from(container?.querySelectorAll('button') ?? [])

@@ -428,6 +428,7 @@ import type {
 import { useFeatureFlags } from '../../stores/featureFlags'
 import {
   buildAttendanceWorkflowHandoffQuery,
+  formatAttendanceWorkflowStarterLabel,
   resolveAttendanceWorkflowStarterId,
 } from './attendanceWorkflowHandoff'
 
@@ -559,9 +560,7 @@ const workflowStarterLabel = computed(() => {
     approvalFlowForm.requestType,
     approvalFlowBuilderSummary.value.stepCount,
   )
-  return starterId === 'parallel-review'
-    ? tr('Parallel review starter', '并行评审起步模板')
-    : tr('Simple approval starter', '简单审批起步模板')
+  return formatAttendanceWorkflowStarterLabel(starterId, tr)
 })
 
 const workflowHandoffFlowName = computed(() => {

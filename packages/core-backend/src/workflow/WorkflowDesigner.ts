@@ -76,6 +76,219 @@ export interface WorkflowDefinition {
   tags?: string[]
 }
 
+interface AttendanceStarterStepDefinition {
+  id: string
+  name: string
+  candidateGroups: string[]
+  formKey: string
+}
+
+function buildAttendanceStarterTask(step: AttendanceStarterStepDefinition, x: number, y: number): WorkflowNode {
+  return {
+    id: `${step.id}-task`,
+    type: 'userTask',
+    name: step.name,
+    position: { x, y },
+    data: {
+      candidateGroups: step.candidateGroups,
+      formKey: step.formKey,
+      properties: { priority: 50 },
+    },
+  }
+}
+
+function buildAttendanceApprovalTemplate(input: {
+  id: string
+  name: string
+  description: string
+  tags: string[]
+  steps: AttendanceStarterStepDefinition[]
+}): WorkflowDefinition {
+  const laneY = 220
+  const approvedEndX = 680 + Math.max(input.steps.length - 1, 0) * 240
+  const rejectedEndX = approvedEndX
+  const nodes: WorkflowNode[] = [
+    {
+      id: 'start',
+      type: 'startEvent',
+      name: 'Start',
+      position: { x: 100, y: laneY },
+      data: { properties: { initiator: '${initiator}' } },
+    },
+    {
+      id: 'approved-end',
+      type: 'endEvent',
+      name: 'Approved',
+      position: { x: approvedEndX, y: 140 },
+      data: {},
+    },
+    {
+      id: 'rejected-end',
+      type: 'endEvent',
+      name: 'Rejected',
+      position: { x: rejectedEndX, y: 320 },
+      data: {},
+    },
+  ]
+  const edges: WorkflowEdge[] = []
+
+  input.steps.forEach((step, index) => {
+    const taskX = 260 + index * 240
+    const gatewayX = taskX + 140
+    const nextTaskId = input.steps[index + 1] ? `${input.steps[index + 1].id}-task` : 'approved-end'
+
+    nodes.push(buildAttendanceStarterTask(step, taskX, laneY))
+    nodes.push({
+      id: `${step.id}-gateway`,
+      type: 'exclusiveGateway',
+      name: 'Approved?',
+      position: { x: gatewayX, y: laneY },
+      data: { properties: { defaultFlow: `${step.id}-rejected` } },
+    })
+
+    if (index === 0) {
+      edges.push({ id: 'flow-start', source: 'start', target: `${step.id}-task` })
+    }
+
+    edges.push({ id: `${step.id}-review`, source: `${step.id}-task`, target: `${step.id}-gateway` })
+    edges.push({
+      id: `${step.id}-approved`,
+      source: `${step.id}-gateway`,
+      target: nextTaskId,
+      condition: '${approved}',
+      label: 'Yes',
+    })
+    edges.push({
+      id: `${step.id}-rejected`,
+      source: `${step.id}-gateway`,
+      target: 'rejected-end',
+      type: 'default',
+      label: 'No',
+    })
+  })
+
+  return {
+    id: input.id,
+    name: input.name,
+    description: input.description,
+    category: 'approval',
+    tags: ['attendance', 'approval', 'starter', ...input.tags],
+    nodes,
+    edges,
+    variables: {
+      initiator: { type: 'string', required: true },
+      approved: { type: 'boolean', default: false },
+    },
+  }
+}
+
+function buildAttendanceStarterTemplates(): WorkflowDefinition[] {
+  return [
+    buildAttendanceApprovalTemplate({
+      id: 'attendance-leave-manager',
+      name: 'Attendance Leave Manager Starter',
+      description: 'Starter workflow for leave requests that only require manager approval.',
+      tags: ['leave', 'manager'],
+      steps: [
+        {
+          id: 'manager-review',
+          name: 'Manager Review',
+          candidateGroups: ['manager'],
+          formKey: 'attendance-leave-manager-form',
+        },
+      ],
+    }),
+    buildAttendanceApprovalTemplate({
+      id: 'attendance-leave-manager-hr',
+      name: 'Attendance Leave Manager -> HR Starter',
+      description: 'Starter workflow for leave requests that escalate from manager review to HR review.',
+      tags: ['leave', 'manager', 'hr'],
+      steps: [
+        {
+          id: 'manager-review',
+          name: 'Manager Review',
+          candidateGroups: ['manager'],
+          formKey: 'attendance-leave-manager-form',
+        },
+        {
+          id: 'hr-review',
+          name: 'HR Review',
+          candidateGroups: ['hr'],
+          formKey: 'attendance-leave-hr-form',
+        },
+      ],
+    }),
+    buildAttendanceApprovalTemplate({
+      id: 'attendance-overtime-manager',
+      name: 'Attendance Overtime Manager Starter',
+      description: 'Starter workflow for overtime requests that only require manager approval.',
+      tags: ['overtime', 'manager'],
+      steps: [
+        {
+          id: 'manager-review',
+          name: 'Manager Review',
+          candidateGroups: ['manager'],
+          formKey: 'attendance-overtime-manager-form',
+        },
+      ],
+    }),
+    buildAttendanceApprovalTemplate({
+      id: 'attendance-overtime-manager-payroll',
+      name: 'Attendance Overtime Manager -> Payroll Starter',
+      description: 'Starter workflow for overtime requests that escalate from manager review to payroll review.',
+      tags: ['overtime', 'manager', 'payroll'],
+      steps: [
+        {
+          id: 'manager-review',
+          name: 'Manager Review',
+          candidateGroups: ['manager'],
+          formKey: 'attendance-overtime-manager-form',
+        },
+        {
+          id: 'payroll-review',
+          name: 'Payroll Review',
+          candidateGroups: ['payroll'],
+          formKey: 'attendance-overtime-payroll-form',
+        },
+      ],
+    }),
+    buildAttendanceApprovalTemplate({
+      id: 'attendance-exception-manager',
+      name: 'Attendance Exception Manager Starter',
+      description: 'Starter workflow for attendance exceptions that only require manager review.',
+      tags: ['exception', 'manager'],
+      steps: [
+        {
+          id: 'manager-review',
+          name: 'Manager Review',
+          candidateGroups: ['manager'],
+          formKey: 'attendance-exception-manager-form',
+        },
+      ],
+    }),
+    buildAttendanceApprovalTemplate({
+      id: 'attendance-exception-manager-ops',
+      name: 'Attendance Exception Manager -> Ops Starter',
+      description: 'Starter workflow for attendance exceptions that escalate from manager review to attendance operations review.',
+      tags: ['exception', 'manager', 'ops'],
+      steps: [
+        {
+          id: 'manager-review',
+          name: 'Manager Review',
+          candidateGroups: ['manager'],
+          formKey: 'attendance-exception-manager-form',
+        },
+        {
+          id: 'ops-review',
+          name: 'Attendance Ops Review',
+          candidateGroups: ['attendance_admin'],
+          formKey: 'attendance-exception-ops-form',
+        },
+      ],
+    }),
+  ]
+}
+
 // Node type definition structure
 interface NodeTypeDefinition {
   type: string
@@ -386,7 +599,8 @@ export class WorkflowDesigner extends EventEmitter {
           businessApproved: { type: 'boolean', default: false },
           finalApproved: { type: 'boolean', default: false }
         }
-      }
+      },
+      ...buildAttendanceStarterTemplates(),
     ]
 
     for (const template of templates) {
