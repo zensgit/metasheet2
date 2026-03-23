@@ -2553,9 +2553,10 @@ function saveCurrentView() {
 }
 
 async function saveCurrentAuditView() {
+  const currentRouteState = readCurrentRouteState()
   const followupSource = resolvePlmAuditSavedViewLocalSaveFollowupSource({
     sharedEntryTeamViewId: auditTeamViewShareEntry.value?.teamViewId || '',
-    selectedTeamViewId: auditTeamViewKey.value,
+    routeTeamViewId: currentRouteState.teamViewId,
     sceneContextActive: auditSceneOwnerContextActive.value || auditSceneQueryContextActive.value,
   })
 

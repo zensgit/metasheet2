@@ -12,19 +12,25 @@ describe('plmAuditSavedViewShareFollowup', () => {
   it('resolves the generic local-save followup source from shared-entry or scene-context ownership', () => {
     expect(resolvePlmAuditSavedViewLocalSaveFollowupSource({
       sharedEntryTeamViewId: 'audit-view-1',
-      selectedTeamViewId: 'audit-view-1',
+      routeTeamViewId: 'audit-view-1',
       sceneContextActive: true,
     })).toBe('shared-entry')
 
     expect(resolvePlmAuditSavedViewLocalSaveFollowupSource({
       sharedEntryTeamViewId: '',
-      selectedTeamViewId: 'audit-view-2',
+      routeTeamViewId: 'audit-view-2',
       sceneContextActive: true,
     })).toBe('scene-context')
 
     expect(resolvePlmAuditSavedViewLocalSaveFollowupSource({
       sharedEntryTeamViewId: 'audit-view-1',
-      selectedTeamViewId: 'audit-view-2',
+      routeTeamViewId: 'audit-view-1',
+      sceneContextActive: false,
+    })).toBe('shared-entry')
+
+    expect(resolvePlmAuditSavedViewLocalSaveFollowupSource({
+      sharedEntryTeamViewId: 'audit-view-1',
+      routeTeamViewId: 'audit-view-2',
       sceneContextActive: false,
     })).toBeNull()
   })
