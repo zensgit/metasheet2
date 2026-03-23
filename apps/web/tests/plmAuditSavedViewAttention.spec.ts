@@ -3,6 +3,7 @@ import {
   applyPlmAuditSourceFocusState,
   buildPlmAuditClearedCollaborationFollowupAttentionState,
   buildPlmAuditDismissedCollaborationDraftAttentionState,
+  buildPlmAuditPersistedTeamViewAttentionState,
   buildPlmAuditRoutePivotAttentionState,
   buildPlmAuditSavedViewStoreAttentionState,
   buildPlmAuditSourceShareFollowupAttentionState,
@@ -249,17 +250,41 @@ describe('plmAuditSavedViewAttention', () => {
     })
   })
 
-  it('clears management and source focus before installing a source-aware share followup', () => {
-    expect(buildPlmAuditSourceShareFollowupAttentionState({
-      focusedAuditTeamViewId: 'team-view-11',
-      focusedRecommendedAuditTeamViewId: 'recommended-11',
-      focusedSavedViewId: 'saved-view-11',
+  it('clears source focus and local saved-view followup when a persisted team view takes over', () => {
+    expect(buildPlmAuditPersistedTeamViewAttentionState({
+      focusedAuditTeamViewId: 'team-view-10',
+      focusedRecommendedAuditTeamViewId: 'recommended-10',
+      focusedSavedViewId: 'saved-view-10',
     }, {
       shareFollowup: {
-        savedViewId: 'saved-view-12',
+        savedViewId: 'saved-view-11',
+        source: 'shared-entry',
+      },
+      focusedSavedViewId: 'saved-view-11',
+    })).toEqual({
+      attentionFocus: {
+        focusedAuditTeamViewId: 'team-view-10',
+        focusedRecommendedAuditTeamViewId: '',
+        focusedSavedViewId: '',
+      },
+      savedViewAttention: {
+        shareFollowup: null,
+        focusedSavedViewId: '',
+      },
+    })
+  })
+
+  it('clears management and source focus before installing a source-aware share followup', () => {
+    expect(buildPlmAuditSourceShareFollowupAttentionState({
+      focusedAuditTeamViewId: 'team-view-12',
+      focusedRecommendedAuditTeamViewId: 'recommended-12',
+      focusedSavedViewId: 'saved-view-12',
+    }, {
+      shareFollowup: {
+        savedViewId: 'saved-view-13',
         source: 'scene-context',
       },
-      focusedSavedViewId: 'saved-view-12',
+      focusedSavedViewId: 'saved-view-13',
     })).toEqual({
       attentionFocus: {
         focusedAuditTeamViewId: '',
@@ -275,9 +300,9 @@ describe('plmAuditSavedViewAttention', () => {
 
   it('clears all transient attention when a collaboration followup is cleared', () => {
     expect(buildPlmAuditClearedCollaborationFollowupAttentionState({
-      focusedAuditTeamViewId: 'team-view-12',
-      focusedRecommendedAuditTeamViewId: 'recommended-12',
-      focusedSavedViewId: 'saved-view-12',
+      focusedAuditTeamViewId: 'team-view-14',
+      focusedRecommendedAuditTeamViewId: 'recommended-14',
+      focusedSavedViewId: 'saved-view-14',
     })).toEqual({
       attentionFocus: {
         focusedAuditTeamViewId: '',
@@ -289,29 +314,29 @@ describe('plmAuditSavedViewAttention', () => {
 
   it('clears only lifecycle management focus when a collaboration draft is dismissed', () => {
     expect(buildPlmAuditDismissedCollaborationDraftAttentionState({
-      focusedAuditTeamViewId: 'team-view-13',
-      focusedRecommendedAuditTeamViewId: 'recommended-13',
-      focusedSavedViewId: 'saved-view-13',
+      focusedAuditTeamViewId: 'team-view-15',
+      focusedRecommendedAuditTeamViewId: 'recommended-15',
+      focusedSavedViewId: 'saved-view-15',
     })).toEqual({
       attentionFocus: {
         focusedAuditTeamViewId: '',
-        focusedRecommendedAuditTeamViewId: 'recommended-13',
-        focusedSavedViewId: 'saved-view-13',
+        focusedRecommendedAuditTeamViewId: 'recommended-15',
+        focusedSavedViewId: 'saved-view-15',
       },
     })
   })
 
   it('clears transient attention and saved-view followup on route pivots', () => {
     expect(buildPlmAuditRoutePivotAttentionState({
-      focusedAuditTeamViewId: 'team-view-14',
-      focusedRecommendedAuditTeamViewId: 'recommended-14',
-      focusedSavedViewId: 'saved-view-14',
+      focusedAuditTeamViewId: 'team-view-16',
+      focusedRecommendedAuditTeamViewId: 'recommended-16',
+      focusedSavedViewId: 'saved-view-16',
     }, {
       shareFollowup: {
-        savedViewId: 'saved-view-15',
+        savedViewId: 'saved-view-17',
         source: 'shared-entry',
       },
-      focusedSavedViewId: 'saved-view-15',
+      focusedSavedViewId: 'saved-view-17',
     })).toEqual({
       attentionFocus: {
         focusedAuditTeamViewId: '',

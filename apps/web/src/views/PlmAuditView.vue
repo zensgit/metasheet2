@@ -790,6 +790,7 @@ import {
   applyPlmAuditSourceFocusState,
   buildPlmAuditClearedCollaborationFollowupAttentionState,
   buildPlmAuditDismissedCollaborationDraftAttentionState,
+  buildPlmAuditPersistedTeamViewAttentionState,
   buildPlmAuditRoutePivotAttentionState,
   buildPlmAuditSavedViewStoreAttentionState,
   buildPlmAuditSourceShareFollowupAttentionState,
@@ -1321,6 +1322,7 @@ async function persistAuditTeamView(
       },
     )
     upsertAuditTeamView(saved)
+    applyAuditPersistedTeamViewAttention()
     applyAuditTeamViewState(saved)
     auditTeamViewName.value = ''
     focusedAuditTeamViewId.value = saved.id
@@ -1472,6 +1474,24 @@ function applyAuditTeamViewHandoffAttention() {
 
 function applyAuditSavedViewStoreAttention() {
   const nextState = buildPlmAuditSavedViewStoreAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+}
+
+function applyAuditPersistedTeamViewAttention() {
+  const nextState = buildPlmAuditPersistedTeamViewAttentionState(
     {
       focusedAuditTeamViewId: focusedAuditTeamViewId.value,
       focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,

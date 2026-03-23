@@ -26,6 +26,11 @@ export type PlmAuditSavedViewStoreAttentionState = {
   savedViewAttention: PlmAuditSavedViewAttentionState
 }
 
+export type PlmAuditPersistedTeamViewAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+  savedViewAttention: PlmAuditSavedViewAttentionState
+}
+
 export type PlmAuditSourceShareFollowupAttentionState = {
   attentionFocus: PlmAuditAttentionFocusState
   savedViewAttention: PlmAuditSavedViewAttentionState
@@ -113,6 +118,16 @@ export function buildPlmAuditSavedViewStoreAttentionState(
   attentionFocus: PlmAuditAttentionFocusState,
   savedViewAttention: PlmAuditSavedViewAttentionState,
 ): PlmAuditSavedViewStoreAttentionState {
+  return {
+    attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-source' }),
+    savedViewAttention: reducePlmAuditSavedViewAttentionState(savedViewAttention, { kind: 'apply' }),
+  }
+}
+
+export function buildPlmAuditPersistedTeamViewAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+  savedViewAttention: PlmAuditSavedViewAttentionState,
+): PlmAuditPersistedTeamViewAttentionState {
   return {
     attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-source' }),
     savedViewAttention: reducePlmAuditSavedViewAttentionState(savedViewAttention, { kind: 'apply' }),
