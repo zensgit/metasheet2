@@ -10,6 +10,7 @@ Verified:
 4. import preview and local validation status feedback
 5. payroll summary status feedback
 6. TypeScript and production build integrity
+7. review follow-up centralization of import/payroll timezone helper ownership
 
 ## Commands
 

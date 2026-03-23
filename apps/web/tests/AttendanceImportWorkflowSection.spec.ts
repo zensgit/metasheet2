@@ -46,6 +46,9 @@ interface ImportWorkflowBindings {
   importGroupAutoAssign: Ref<boolean>
   importGroupRuleSetId: Ref<string>
   importGroupTimezone: Ref<string>
+  importTimezoneStatusLabel: ComputedRef<string>
+  importGroupTimezoneFallbackOptionLabel: ComputedRef<string>
+  importGroupTimezoneStatusLabel: ComputedRef<string>
   importScalabilityHint: ComputedRef<string>
   importPreviewTask: Ref<AttendanceImportPreviewTask | null>
   importAsyncJob: Ref<AttendanceImportJob | null>
@@ -75,14 +78,23 @@ function createWorkflowBindings(overrides: Partial<ImportWorkflowBindings> = {})
   const importMappingProfiles = ref<AttendanceImportMappingProfile[]>([])
   const importProfileId = ref('')
   const importGroupRuleSetId = ref('')
+  const importForm = reactive<AttendanceImportFormState>({
+    ruleSetId: '',
+    userId: '',
+    timezone: 'Asia/Shanghai',
+    payload: '{}',
+  })
+  const importGroupTimezone = ref('')
+  const importTimezoneStatusLabel = computed(() => `UTC+08:00 · ${importForm.timezone}`)
+  const importGroupTimezoneFallbackOptionLabel = computed(() => `Use import timezone (${importTimezoneStatusLabel.value})`)
+  const importGroupTimezoneStatusLabel = computed(() => (
+    importGroupTimezone.value.trim()
+      ? `UTC+08:00 · ${importGroupTimezone.value.trim()}`
+      : importGroupTimezoneFallbackOptionLabel.value
+  ))
 
   return {
-    importForm: reactive<AttendanceImportFormState>({
-      ruleSetId: '',
-      userId: '',
-      timezone: 'Asia/Shanghai',
-      payload: '{}',
-    }),
+    importForm,
     importLoading: ref(false),
     importMode: ref<AttendanceImportMode>('override'),
     importProfileId,
@@ -111,7 +123,10 @@ function createWorkflowBindings(overrides: Partial<ImportWorkflowBindings> = {})
     importGroupAutoCreate: ref(false),
     importGroupAutoAssign: ref(false),
     importGroupRuleSetId,
-    importGroupTimezone: ref(''),
+    importGroupTimezone,
+    importTimezoneStatusLabel,
+    importGroupTimezoneFallbackOptionLabel,
+    importGroupTimezoneStatusLabel,
     importScalabilityHint: computed(() => 'Auto mode hint'),
     importPreviewTask: ref<AttendanceImportPreviewTask | null>(null),
     importAsyncJob: ref<AttendanceImportJob | null>(null),
@@ -187,6 +202,8 @@ describe('AttendanceImportWorkflowSection', () => {
       importGroupAutoCreate: ref(true),
       importGroupRuleSetId: ref('rule-set-1'),
       importGroupTimezone: ref('Asia/Shanghai'),
+      importGroupTimezoneFallbackOptionLabel: computed(() => 'Use import timezone (UTC+08:00 · Asia/Shanghai)'),
+      importGroupTimezoneStatusLabel: computed(() => 'UTC+08:00 · Asia/Shanghai'),
     })
 
     app = createApp(AttendanceImportWorkflowSection, {

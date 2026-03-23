@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { computed, createApp, reactive, ref, type App, type Ref } from 'vue'
+import { computed, createApp, reactive, ref, type App, type ComputedRef, type Ref } from 'vue'
 import AttendancePayrollAdminSection from '../src/views/attendance/AttendancePayrollAdminSection.vue'
 import type {
   AttendancePayrollCycle,
@@ -54,6 +54,11 @@ interface PayrollBindings {
   payrollCycleForm: PayrollCycleFormState
   payrollCycleGenerateForm: PayrollCycleGenerateFormState
   payrollTemplateName: (templateId?: string | null) => string
+  formatPayrollTemplateTimezoneLabel: (template: AttendancePayrollTemplate) => string
+  resolvePayrollTemplateTimezoneContext: (templateId: string | null | undefined, emptyMode: 'manual' | 'default') => string
+  payrollCycleTemplateTimezoneHint: ComputedRef<string>
+  payrollCycleGenerateTimezoneHint: ComputedRef<string>
+  payrollCycleGenerateDefaultOptionLabel: ComputedRef<string>
   resetPayrollTemplateForm: () => MaybePromise<void>
   editPayrollTemplate: (item: AttendancePayrollTemplate) => MaybePromise<void>
   loadPayrollTemplates: () => MaybePromise<void>
@@ -130,6 +135,20 @@ function createPayrollBindings(overrides: Partial<PayrollBindings> = {}): Payrol
       if (!templateId) return 'Manual'
       return payrollTemplates.value.find(item => item.id === templateId)?.name ?? templateId
     },
+    formatPayrollTemplateTimezoneLabel: (template: AttendancePayrollTemplate) => `${template.name} (UTC+08:00 · ${template.timezone})`,
+    resolvePayrollTemplateTimezoneContext: (templateId: string | null | undefined, emptyMode: 'manual' | 'default') => {
+      const normalizedTemplateId = String(templateId || '').trim()
+      if (!normalizedTemplateId) {
+        if (emptyMode === 'manual') return 'Manual'
+        return 'CN Payroll (UTC+08:00 · Asia/Shanghai)'
+      }
+      return payrollTemplates.value.find(item => item.id === normalizedTemplateId)
+        ? 'CN Payroll (UTC+08:00 · Asia/Shanghai)'
+        : normalizedTemplateId
+    },
+    payrollCycleTemplateTimezoneHint: computed(() => 'Cycle template timezone: CN Payroll (UTC+08:00 · Asia/Shanghai)'),
+    payrollCycleGenerateTimezoneHint: computed(() => 'Generate timezone context: CN Payroll (UTC+08:00 · Asia/Shanghai)'),
+    payrollCycleGenerateDefaultOptionLabel: computed(() => 'Default template (CN Payroll · UTC+08:00 · Asia/Shanghai)'),
     resetPayrollTemplateForm: vi.fn(),
     editPayrollTemplate: vi.fn(),
     loadPayrollTemplates: vi.fn(),

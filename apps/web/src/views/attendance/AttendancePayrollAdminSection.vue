@@ -169,7 +169,7 @@
         >
           <option value="">{{ tr('Manual', '手工') }}</option>
           <option v-for="item in payrollTemplates" :key="item.id" :value="item.id">
-            {{ formatPayrollTemplateSelectLabel(item) }}
+            {{ formatPayrollTemplateTimezoneLabel(item) }}
           </option>
         </select>
         <small class="attendance__field-hint">
@@ -259,7 +259,7 @@
           >
             <option value="">{{ payrollCycleGenerateDefaultOptionLabel }}</option>
             <option v-for="item in payrollTemplates" :key="item.id" :value="item.id">
-              {{ formatPayrollTemplateSelectLabel(item) }}
+              {{ formatPayrollTemplateTimezoneLabel(item) }}
             </option>
           </select>
           <small class="attendance__field-hint">
@@ -392,7 +392,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, type Ref } from 'vue'
+import { computed, type ComputedRef, type Ref } from 'vue'
 import type {
   AttendancePayrollCycle,
   AttendancePayrollSummary,
@@ -452,6 +452,11 @@ interface PayrollBindings {
   payrollCycleForm: PayrollCycleFormState
   payrollCycleGenerateForm: PayrollCycleGenerateFormState
   payrollTemplateName: (templateId?: string | null) => string
+  formatPayrollTemplateTimezoneLabel: (template: AttendancePayrollTemplate) => string
+  resolvePayrollTemplateTimezoneContext: (templateId: string | null | undefined, emptyMode: 'manual' | 'default') => string
+  payrollCycleTemplateTimezoneHint: ComputedRef<string>
+  payrollCycleGenerateTimezoneHint: ComputedRef<string>
+  payrollCycleGenerateDefaultOptionLabel: ComputedRef<string>
   resetPayrollTemplateForm: () => MaybePromise<void>
   editPayrollTemplate: (item: AttendancePayrollTemplate) => MaybePromise<void>
   loadPayrollTemplates: () => MaybePromise<void>
@@ -493,6 +498,10 @@ const payrollCycleGenerateForm = props.payroll.payrollCycleGenerateForm
 const payrollTemplateTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(payrollTemplateForm.timezone))
 const payrollTemplateTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(payrollTemplateForm.timezone))
 const payrollTemplateName = props.payroll.payrollTemplateName
+const formatPayrollTemplateTimezoneLabel = props.payroll.formatPayrollTemplateTimezoneLabel
+const payrollCycleTemplateTimezoneHint = props.payroll.payrollCycleTemplateTimezoneHint
+const payrollCycleGenerateTimezoneHint = props.payroll.payrollCycleGenerateTimezoneHint
+const payrollCycleGenerateDefaultOptionLabel = props.payroll.payrollCycleGenerateDefaultOptionLabel
 const resetPayrollTemplateForm = () => props.payroll.resetPayrollTemplateForm()
 const editPayrollTemplate = (item: AttendancePayrollTemplate) => props.payroll.editPayrollTemplate(item)
 const loadPayrollTemplates = () => props.payroll.loadPayrollTemplates()
@@ -507,47 +516,6 @@ const savePayrollCycle = () => props.payroll.savePayrollCycle()
 const deletePayrollCycle = (id: string) => props.payroll.deletePayrollCycle(id)
 const loadPayrollCycleSummary = () => props.payroll.loadPayrollCycleSummary()
 const exportPayrollCycleSummary = () => props.payroll.exportPayrollCycleSummary()
-
-function resolvePayrollTemplateTimezoneContext(templateId: string, emptyMode: 'manual' | 'default'): string {
-  const normalizedTemplateId = templateId.trim()
-  if (!normalizedTemplateId) {
-    if (emptyMode === 'manual') {
-      return tr('Manual', '手工')
-    }
-    const defaultTemplate = payrollTemplates.value.find(item => item.isDefault)
-    if (!defaultTemplate) {
-      return tr('Default template not found', '未找到默认模板')
-    }
-    return `${defaultTemplate.name} (${formatTimezoneStatusLabel(defaultTemplate.timezone)})`
-  }
-
-  const template = payrollTemplates.value.find(item => item.id === normalizedTemplateId)
-  if (!template) return normalizedTemplateId
-  return `${template.name} (${formatTimezoneStatusLabel(template.timezone)})`
-}
-
-function formatPayrollTemplateSelectLabel(template: AttendancePayrollTemplate): string {
-  return `${template.name} (${formatTimezoneStatusLabel(template.timezone)})`
-}
-
-const payrollCycleGenerateDefaultOptionLabel = computed(() => {
-  const defaultTemplate = payrollTemplates.value.find(item => item.isDefault)
-  if (!defaultTemplate) {
-    return tr('Default template', '默认模板')
-  }
-  return tr(
-    `Default template (${defaultTemplate.name} · ${formatTimezoneStatusLabel(defaultTemplate.timezone)})`,
-    `默认模板（${defaultTemplate.name} · ${formatTimezoneStatusLabel(defaultTemplate.timezone)}）`,
-  )
-})
-
-const payrollCycleTemplateTimezoneHint = computed(() => (
-  `${tr('Cycle template timezone', '周期模板时区')}: ${resolvePayrollTemplateTimezoneContext(payrollCycleForm.templateId, 'manual')}`
-))
-
-const payrollCycleGenerateTimezoneHint = computed(() => (
-  `${tr('Generate timezone context', '生成时区上下文')}: ${resolvePayrollTemplateTimezoneContext(payrollCycleGenerateForm.templateId, 'default')}`
-))
 </script>
 
 <style scoped>

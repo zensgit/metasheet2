@@ -491,7 +491,6 @@ import { computed, type ComputedRef, type Ref } from 'vue'
 import {
   buildTimezoneOptionGroups,
   formatTimezoneOptionLabel,
-  formatTimezoneStatusLabel,
 } from './attendanceTimezones'
 import type {
   AttendanceImportCommitLane,
@@ -539,6 +538,9 @@ interface ImportWorkflowBindings {
   importGroupAutoAssign: Ref<boolean>
   importGroupRuleSetId: Ref<string>
   importGroupTimezone: Ref<string>
+  importTimezoneStatusLabel: ComputedRef<string>
+  importGroupTimezoneFallbackOptionLabel: ComputedRef<string>
+  importGroupTimezoneStatusLabel: ComputedRef<string>
   importScalabilityHint: ComputedRef<string>
   importPreviewTask: Ref<AttendanceImportPreviewTask | null>
   importAsyncJob: Ref<AttendanceImportJob | null>
@@ -607,18 +609,11 @@ const importGroupAutoCreate = props.workflow.importGroupAutoCreate
 const importGroupAutoAssign = props.workflow.importGroupAutoAssign
 const importGroupRuleSetId = props.workflow.importGroupRuleSetId
 const importGroupTimezone = props.workflow.importGroupTimezone
+const importTimezoneStatusLabel = props.workflow.importTimezoneStatusLabel
+const importGroupTimezoneFallbackOptionLabel = props.workflow.importGroupTimezoneFallbackOptionLabel
+const importGroupTimezoneStatusLabel = props.workflow.importGroupTimezoneStatusLabel
 const importTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importForm.timezone))
 const importGroupTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importGroupTimezone.value))
-const importTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(importForm.timezone))
-const importGroupTimezoneFallbackOptionLabel = computed(() => tr(
-  `Use import timezone (${importTimezoneStatusLabel.value || '--'})`,
-  `沿用导入时区（${importTimezoneStatusLabel.value || '--'}）`,
-))
-const importGroupTimezoneStatusLabel = computed(() => {
-  const timezone = importGroupTimezone.value.trim()
-  if (timezone) return formatTimezoneStatusLabel(timezone)
-  return importGroupTimezoneFallbackOptionLabel.value
-})
 const importScalabilityHint = props.workflow.importScalabilityHint
 const importPreviewTask = props.workflow.importPreviewTask
 const importAsyncJob = props.workflow.importAsyncJob

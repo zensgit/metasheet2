@@ -1,4 +1,4 @@
-import { reactive, ref, type Ref } from 'vue'
+import { computed, reactive, ref, type Ref } from 'vue'
 import { apiFetch as baseApiFetch } from '../../utils/api'
 import { formatTimezoneStatusLabel } from './attendanceTimezones'
 
@@ -232,6 +232,47 @@ export function useAttendanceAdminPayroll({
     metadata: '{}',
   })
 
+  function formatPayrollTemplateTimezoneLabel(template: AttendancePayrollTemplate): string {
+    return `${template.name} (${formatTimezoneStatusLabel(template.timezone)})`
+  }
+
+  function resolvePayrollTemplateTimezoneContext(templateId: string | null | undefined, emptyMode: 'manual' | 'default'): string {
+    const normalizedTemplateId = String(templateId || '').trim()
+    if (!normalizedTemplateId) {
+      if (emptyMode === 'manual') {
+        return tr('Manual', '手工')
+      }
+      const defaultTemplate = payrollTemplates.value.find(item => item.isDefault)
+      if (!defaultTemplate) {
+        return tr('Default template not found', '未找到默认模板')
+      }
+      return formatPayrollTemplateTimezoneLabel(defaultTemplate)
+    }
+
+    const template = payrollTemplates.value.find(item => item.id === normalizedTemplateId)
+    if (!template) return normalizedTemplateId
+    return formatPayrollTemplateTimezoneLabel(template)
+  }
+
+  const payrollCycleTemplateTimezoneHint = computed(() => (
+    `${tr('Cycle template timezone', '周期模板时区')}: ${resolvePayrollTemplateTimezoneContext(payrollCycleForm.templateId, 'manual')}`
+  ))
+
+  const payrollCycleGenerateTimezoneHint = computed(() => (
+    `${tr('Generate timezone context', '生成时区上下文')}: ${resolvePayrollTemplateTimezoneContext(payrollCycleGenerateForm.templateId, 'default')}`
+  ))
+
+  const payrollCycleGenerateDefaultOptionLabel = computed(() => {
+    const defaultTemplate = payrollTemplates.value.find(item => item.isDefault)
+    if (!defaultTemplate) {
+      return tr('Default template', '默认模板')
+    }
+    return tr(
+      `Default template (${defaultTemplate.name} · ${formatTimezoneStatusLabel(defaultTemplate.timezone)})`,
+      `默认模板（${defaultTemplate.name} · ${formatTimezoneStatusLabel(defaultTemplate.timezone)}）`,
+    )
+  })
+
   function resetPayrollTemplateForm() {
     payrollTemplateEditingId.value = null
     payrollTemplateForm.name = ''
@@ -454,7 +495,7 @@ export function useAttendanceAdminPayroll({
       adminForbidden.value = false
       await loadPayrollCycles()
       setStatus(tr('Payroll cycles generated.', '计薪周期已生成。'), 'info', {
-        hint: `${tr('Generate timezone context', '生成时区上下文')}: ${resolvePayrollTemplateTimezoneContext(payrollCycleGenerateForm.templateId, 'default')}`,
+        hint: payrollCycleGenerateTimezoneHint.value,
       })
     } catch (error) {
       const message = error instanceof Error && error.message
@@ -500,7 +541,7 @@ export function useAttendanceAdminPayroll({
       resetPayrollCycleForm()
       await loadPayrollCycles()
       setStatus(tr('Payroll cycle saved.', '计薪周期已保存。'), 'info', {
-        hint: `${tr('Cycle template timezone', '周期模板时区')}: ${resolvePayrollTemplateTimezoneContext(payrollCycleForm.templateId, 'manual')}`,
+        hint: payrollCycleTemplateTimezoneHint.value,
       })
     } catch (error) {
       const message = error instanceof Error && error.message
@@ -556,7 +597,7 @@ export function useAttendanceAdminPayroll({
       adminForbidden.value = false
       payrollCycleSummary.value = data.data?.summary ?? null
       setStatus(tr('Payroll summary loaded.', '计薪汇总已加载。'), 'info', {
-        hint: `${tr('Cycle template timezone', '周期模板时区')}: ${resolvePayrollTemplateTimezoneContext(payrollCycleForm.templateId, 'manual')}`,
+        hint: payrollCycleTemplateTimezoneHint.value,
       })
     } catch (error) {
       const message = error instanceof Error && error.message
@@ -596,24 +637,6 @@ export function useAttendanceAdminPayroll({
     return found?.name ?? templateId
   }
 
-  function resolvePayrollTemplateTimezoneContext(templateId: string | null | undefined, emptyMode: 'manual' | 'default'): string {
-    const normalizedTemplateId = String(templateId || '').trim()
-    if (!normalizedTemplateId) {
-      if (emptyMode === 'manual') {
-        return tr('Manual', '手工')
-      }
-      const defaultTemplate = payrollTemplates.value.find(item => item.isDefault)
-      if (!defaultTemplate) {
-        return tr('Default template not found', '未找到默认模板')
-      }
-      return `${defaultTemplate.name} (${formatTimezoneStatusLabel(defaultTemplate.timezone)})`
-    }
-
-    const template = payrollTemplates.value.find(item => item.id === normalizedTemplateId)
-    if (!template) return normalizedTemplateId
-    return `${template.name} (${formatTimezoneStatusLabel(template.timezone)})`
-  }
-
   return {
     payrollTemplateLoading,
     payrollTemplateSaving,
@@ -630,6 +653,11 @@ export function useAttendanceAdminPayroll({
     payrollCycleForm,
     payrollCycleGenerateForm,
     payrollTemplateName,
+    formatPayrollTemplateTimezoneLabel,
+    resolvePayrollTemplateTimezoneContext,
+    payrollCycleTemplateTimezoneHint,
+    payrollCycleGenerateTimezoneHint,
+    payrollCycleGenerateDefaultOptionLabel,
     resetPayrollTemplateForm,
     editPayrollTemplate,
     loadPayrollTemplates,

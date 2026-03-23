@@ -73,6 +73,8 @@ Default / inherited selector options also surface effective timezone context inl
 
 This reduces the need to scan down to the hint line just to understand what a blank/default selection actually means.
 
+The follow-up implementation keeps timezone inheritance/status helpers owned by composables instead of duplicating the same logic in section components. Components only render the exposed labels/hints.
+
 ## Implementation
 
 Core helper:

@@ -368,7 +368,6 @@ import { useAttendanceAdminImportWorkflow } from './attendance/useAttendanceAdmi
 import AttendanceLeavePoliciesSection from './attendance/AttendanceLeavePoliciesSection.vue'
 import { useAttendanceAdminLeavePolicies } from './attendance/useAttendanceAdminLeavePolicies'
 import AttendancePayrollAdminSection from './attendance/AttendancePayrollAdminSection.vue'
-import { formatTimezoneStatusLabel } from './attendance/attendanceTimezones'
 import { useAttendanceAdminPayroll } from './attendance/useAttendanceAdminPayroll'
 import { useAttendanceAdminProvisioning } from './attendance/useAttendanceAdminProvisioning'
 import AttendanceRulesAndGroupsSection from './attendance/AttendanceRulesAndGroupsSection.vue'
@@ -694,14 +693,18 @@ const {
   loadPayrollCycleSummary,
   loadPayrollCycles,
   loadPayrollTemplates,
+  formatPayrollTemplateTimezoneLabel,
   payrollCycleEditingId,
   payrollCycleForm,
+  payrollCycleGenerateDefaultOptionLabel,
   payrollCycleGenerateForm,
   payrollCycleGenerateResult,
   payrollCycleGenerating,
+  payrollCycleGenerateTimezoneHint,
   payrollCycleLoading,
   payrollCycleSaving,
   payrollCycleSummary,
+  payrollCycleTemplateTimezoneHint,
   payrollCycles,
   payrollTemplateEditingId,
   payrollTemplateForm,
@@ -709,6 +712,7 @@ const {
   payrollTemplateName,
   payrollTemplateSaving,
   payrollTemplates,
+  resolvePayrollTemplateTimezoneContext,
   resetPayrollCycleForm,
   resetPayrollCycleGenerateForm,
   resetPayrollTemplateForm,
@@ -1181,6 +1185,8 @@ const {
   importGroupAutoCreate,
   importGroupRuleSetId,
   importGroupTimezone,
+  importGroupTimezoneFallbackOptionLabel,
+  importGroupTimezoneStatusLabel,
   importLoading,
   importMappingProfiles,
   importMode,
@@ -1188,10 +1194,12 @@ const {
   importPreview,
   importPreviewLane,
   importPreviewLaneHint,
+  importPreviewTimezoneHint,
   importPreviewTask,
   importProfileId,
   importScalabilityHint,
   importTemplateGuide,
+  importTimezoneStatusLabel,
   importUserMapCount,
   importUserMapError,
   importUserMapFileName,
@@ -1241,6 +1249,8 @@ const importWorkflowSectionBindings = {
   importGroupAutoCreate,
   importGroupRuleSetId,
   importGroupTimezone,
+  importGroupTimezoneFallbackOptionLabel,
+  importGroupTimezoneStatusLabel,
   importLoading,
   importMappingProfiles,
   importMode,
@@ -1248,10 +1258,12 @@ const importWorkflowSectionBindings = {
   importPreview,
   importPreviewLane,
   importPreviewLaneHint,
+  importPreviewTimezoneHint,
   importPreviewTask,
   importProfileId,
   importScalabilityHint,
   importTemplateGuide,
+  importTimezoneStatusLabel,
   importUserMapCount,
   importUserMapError,
   importUserMapFileName,
@@ -1291,14 +1303,18 @@ const payrollSectionBindings = {
   loadPayrollCycleSummary,
   loadPayrollCycles,
   loadPayrollTemplates,
+  formatPayrollTemplateTimezoneLabel,
   payrollCycleEditingId,
   payrollCycleForm,
+  payrollCycleGenerateDefaultOptionLabel,
   payrollCycleGenerateForm,
   payrollCycleGenerateResult,
   payrollCycleGenerating,
+  payrollCycleGenerateTimezoneHint,
   payrollCycleLoading,
   payrollCycleSaving,
   payrollCycleSummary,
+  payrollCycleTemplateTimezoneHint,
   payrollCycles,
   payrollTemplateEditingId,
   payrollTemplateForm,
@@ -1306,25 +1322,13 @@ const payrollSectionBindings = {
   payrollTemplateName,
   payrollTemplateSaving,
   payrollTemplates,
+  resolvePayrollTemplateTimezoneContext,
   resetPayrollCycleForm,
   resetPayrollCycleGenerateForm,
   resetPayrollTemplateForm,
   savePayrollCycle,
   savePayrollTemplate,
 }
-
-const importTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(importForm.timezone))
-const importGroupTimezoneStatusLabel = computed(() => {
-  const timezone = importGroupTimezone.value.trim()
-  if (timezone) return formatTimezoneStatusLabel(timezone)
-  return tr(
-    `Use import timezone (${importTimezoneStatusLabel.value || '--'})`,
-    `沿用导入时区（${importTimezoneStatusLabel.value || '--'}）`,
-  )
-})
-const importPreviewTimezoneHint = computed(() => (
-  `${tr('Preview timezone', '预览时区')}: ${importTimezoneStatusLabel.value || '--'} · ${tr('Group timezone', '分组时区')}: ${importGroupTimezoneStatusLabel.value}`
-))
 
 function appendStatusHint(existingHint: string | undefined, extraHint: string): string {
   const normalizedExisting = typeof existingHint === 'string' ? existingHint.trim() : ''

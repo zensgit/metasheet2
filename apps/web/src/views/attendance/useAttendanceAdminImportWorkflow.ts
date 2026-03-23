@@ -945,13 +945,14 @@ export function useAttendanceAdminImportWorkflow({
   const importAsyncJob = ref<AttendanceImportJob | null>(null)
   const importAsyncPolling = ref(false)
   const importTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(importForm.timezone))
+  const importGroupTimezoneFallbackOptionLabel = computed(() => tr(
+    `Use import timezone (${importTimezoneStatusLabel.value || '--'})`,
+    `沿用导入时区（${importTimezoneStatusLabel.value || '--'}）`,
+  ))
   const importGroupTimezoneStatusLabel = computed(() => {
     const timezone = importGroupTimezone.value.trim()
     if (timezone) return formatTimezoneStatusLabel(timezone)
-    return tr(
-      `Use import timezone (${importTimezoneStatusLabel.value || '--'})`,
-      `沿用导入时区（${importTimezoneStatusLabel.value || '--'}）`,
-    )
+    return importGroupTimezoneFallbackOptionLabel.value
   })
   const importPreviewTimezoneHint = computed(() => (
     `${tr('Preview timezone', '预览时区')}: ${importTimezoneStatusLabel.value || '--'} · ${tr('Group timezone', '分组时区')}: ${importGroupTimezoneStatusLabel.value}`
@@ -1091,9 +1092,10 @@ export function useAttendanceAdminImportWorkflow({
     context: AttendanceImportStatusContext,
     meta: AttendanceImportStatusMeta = {},
   ): AttendanceImportStatusMeta {
-    const hint = typeof meta.hint === 'string' && meta.hint.trim().length > 0
-      ? `${meta.hint.trim()} ${importPreviewTimezoneHint.value}`
-      : importPreviewTimezoneHint.value
+    const hint = [meta.hint, importPreviewTimezoneHint.value]
+      .map(value => typeof value === 'string' ? value.trim() : '')
+      .filter(Boolean)
+      .join(' ')
     return {
       ...meta,
       context,
@@ -2362,6 +2364,10 @@ export function useAttendanceAdminImportWorkflow({
     importPreviewTask,
     importAsyncJob,
     importAsyncPolling,
+    importTimezoneStatusLabel,
+    importGroupTimezoneFallbackOptionLabel,
+    importGroupTimezoneStatusLabel,
+    importPreviewTimezoneHint,
     importUserMapCount,
     importScalabilityHint,
     importAsyncJobTelemetryText,
