@@ -8,6 +8,21 @@ export type PlmAuditSavedViewShareFollowup = {
   source: PlmAuditSavedViewShareFollowupSource
 }
 
+export function resolvePlmAuditSavedViewLocalSaveFollowupSource(options: {
+  sharedEntryTeamViewId: string
+  selectedTeamViewId: string
+  sceneContextAvailable: boolean
+}): PlmAuditSavedViewShareFollowupSource | null {
+  if (
+    options.sharedEntryTeamViewId
+    && options.sharedEntryTeamViewId === options.selectedTeamViewId
+  ) {
+    return 'shared-entry'
+  }
+
+  return options.sceneContextAvailable ? 'scene-context' : null
+}
+
 export type PlmAuditSavedViewShareFollowupNotice = {
   sourceLabel: string
   title: string

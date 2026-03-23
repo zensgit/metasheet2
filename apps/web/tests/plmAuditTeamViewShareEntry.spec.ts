@@ -5,6 +5,7 @@ import {
   isPlmAuditSharedLinkEntry,
   resolvePlmAuditSharedEntryRouteSyncDecision,
   shouldKeepPlmAuditTeamViewShareEntry,
+  shouldTakeOverPlmAuditSharedEntryOnManagementHandoff,
   shouldTakeOverPlmAuditSharedEntryOnLocalSave,
   shouldResolvePlmAuditSharedEntryOnQueryChange,
   reducePlmAuditTeamViewShareEntry,
@@ -138,6 +139,18 @@ describe('plmAuditTeamViewShareEntry', () => {
     }, 'audit-view-2')).toBe(false)
 
     expect(shouldTakeOverPlmAuditSharedEntryOnLocalSave(null, 'audit-view-1')).toBe(false)
+  })
+
+  it('treats recommendation management handoffs as shared-entry takeovers only for the active shared team view', () => {
+    expect(shouldTakeOverPlmAuditSharedEntryOnManagementHandoff({
+      teamViewId: 'audit-view-1',
+    }, 'audit-view-1')).toBe(true)
+
+    expect(shouldTakeOverPlmAuditSharedEntryOnManagementHandoff({
+      teamViewId: 'audit-view-1',
+    }, 'audit-view-2')).toBe(false)
+
+    expect(shouldTakeOverPlmAuditSharedEntryOnManagementHandoff(null, 'audit-view-1')).toBe(false)
   })
 
   it('forces a replace sync when share-entry cleanup must consume a stale route marker', () => {

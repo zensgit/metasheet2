@@ -809,7 +809,9 @@ import {
 } from './plmAuditSavedViews'
 import {
   buildPlmAuditSavedViewShareFollowupNotice,
+  resolvePlmAuditSavedViewLocalSaveFollowupSource,
   type PlmAuditSavedViewShareFollowup,
+  type PlmAuditSavedViewShareFollowupSource,
   type PlmAuditSavedViewShareFollowupActionKind,
 } from './plmAuditSavedViewShareFollowup'
 import {
@@ -857,7 +859,7 @@ import {
   isPlmAuditSharedLinkEntry,
   resolvePlmAuditSharedEntryRouteSyncDecision,
   shouldKeepPlmAuditTeamViewShareEntry,
-  shouldTakeOverPlmAuditSharedEntryOnLocalSave,
+  shouldTakeOverPlmAuditSharedEntryOnManagementHandoff,
   shouldResolvePlmAuditSharedEntryOnQueryChange,
   reducePlmAuditTeamViewShareEntry,
   type PlmAuditTeamViewShareEntry,
@@ -1217,23 +1219,12 @@ async function runAuditSceneSaveAction(actionKind: 'saved-view' | 'team-view' | 
   if (!draft) return
 
   if (actionKind === 'saved-view') {
-    const saved = storeAuditSavedView(
+    const saved = await saveCurrentLocalViewWithFollowup(
       draft.savedViewName,
+      'scene-context',
       tr('Scene audit saved view stored.', '场景审计已保存为本地视图。'),
     )
     if (!saved) return
-    applySavedViewAttentionAction({
-      kind: 'install-followup',
-      shareFollowup: {
-        savedViewId: saved.id,
-        source: 'scene-context',
-      },
-    })
-    await nextTick()
-    document.getElementById('plm-audit-saved-views')?.scrollIntoView({
-      behavior: 'smooth',
-      block: 'start',
-    })
     return
   }
 
@@ -1298,19 +1289,25 @@ function storeAuditSavedView(name: string, successMessage?: string) {
   return savedViews.value[0] || null
 }
 
-async function saveCurrentSharedEntryAsLocalView(name: string) {
+async function saveCurrentLocalViewWithFollowup(
+  name: string,
+  source: PlmAuditSavedViewShareFollowupSource,
+  successMessage: string,
+) {
   const saved = storeAuditSavedView(
     name,
-    tr('Shared audit team view saved locally.', '已将分享的审计团队视图保存为本地视图。'),
+    successMessage,
   )
   if (!saved) return null
 
   applySavedViewAttentionAction({
     kind: 'install-followup',
-    shareFollowup: { savedViewId: saved.id, source: 'shared-entry' },
+    shareFollowup: { savedViewId: saved.id, source },
   })
-  clearAuditTeamViewShareEntry()
-  await consumeAuditTeamViewShareEntryQuery()
+  if (source === 'shared-entry') {
+    clearAuditTeamViewShareEntry()
+    await consumeAuditTeamViewShareEntryQuery()
+  }
   await nextTick()
   document.getElementById('plm-audit-saved-views')?.scrollIntoView({
     behavior: 'smooth',
@@ -2029,6 +2026,10 @@ async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
   const target = findAuditTeamViewById(view.id)
   if (!target) return
 
+  const sharedEntryTakeover = shouldTakeOverPlmAuditSharedEntryOnManagementHandoff(
+    auditTeamViewShareEntry.value,
+    target.id,
+  )
   const collaborationHandoff = buildPlmAuditTeamViewCollaborationHandoff(
     target,
     {
@@ -2038,8 +2039,14 @@ async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
     },
     tr,
   )
+  if (sharedEntryTakeover) {
+    clearAuditTeamViewShareEntry()
+  }
   applyAuditTeamViewHandoffAttention()
   applyAuditTeamViewCollaborationHandoff(collaborationHandoff)
+  if (sharedEntryTakeover) {
+    await consumeAuditTeamViewShareEntryQuery()
+  }
   await nextTick()
   document.getElementById(collaborationHandoff.scrollTargetId)?.scrollIntoView({
     behavior: 'smooth',
@@ -2204,7 +2211,11 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
   if (!view) return
 
   if (actionKind === 'save-local') {
-    await saveCurrentSharedEntryAsLocalView(buildPlmAuditSharedEntrySavedViewName(view, tr))
+    await saveCurrentLocalViewWithFollowup(
+      buildPlmAuditSharedEntrySavedViewName(view, tr),
+      'shared-entry',
+      tr('Shared audit team view saved locally.', '已将分享的审计团队视图保存为本地视图。'),
+    )
     return
   }
 
@@ -2464,11 +2475,20 @@ function saveCurrentView() {
 }
 
 async function saveCurrentAuditView() {
-  if (shouldTakeOverPlmAuditSharedEntryOnLocalSave(
-    auditTeamViewShareEntry.value,
-    auditTeamViewKey.value,
-  )) {
-    await saveCurrentSharedEntryAsLocalView(savedViewName.value.trim())
+  const followupSource = resolvePlmAuditSavedViewLocalSaveFollowupSource({
+    sharedEntryTeamViewId: auditTeamViewShareEntry.value?.teamViewId || '',
+    selectedTeamViewId: auditTeamViewKey.value,
+    sceneContextAvailable: Boolean(auditSceneContext.value),
+  })
+
+  if (followupSource) {
+    await saveCurrentLocalViewWithFollowup(
+      savedViewName.value.trim(),
+      followupSource,
+      followupSource === 'shared-entry'
+        ? tr('Shared audit team view saved locally.', '已将分享的审计团队视图保存为本地视图。')
+        : tr('Scene audit saved view stored.', '场景审计已保存为本地视图。'),
+    )
     return
   }
 

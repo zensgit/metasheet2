@@ -146,3 +146,10 @@ export function shouldTakeOverPlmAuditSharedEntryOnLocalSave(
 ) {
   return shouldKeepPlmAuditTeamViewShareEntry(entry, selectedTeamViewId)
 }
+
+export function shouldTakeOverPlmAuditSharedEntryOnManagementHandoff(
+  entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
+  targetTeamViewId: string,
+) {
+  return shouldKeepPlmAuditTeamViewShareEntry(entry, targetTeamViewId)
+}

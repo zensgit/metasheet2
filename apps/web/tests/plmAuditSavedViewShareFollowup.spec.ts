@@ -1,11 +1,34 @@
 import { describe, expect, it } from 'vitest'
-import { buildPlmAuditSavedViewShareFollowupNotice } from '../src/views/plmAuditSavedViewShareFollowup'
+import {
+  buildPlmAuditSavedViewShareFollowupNotice,
+  resolvePlmAuditSavedViewLocalSaveFollowupSource,
+} from '../src/views/plmAuditSavedViewShareFollowup'
 
 function tr(en: string, zh: string) {
   return `${en}|${zh}`
 }
 
 describe('plmAuditSavedViewShareFollowup', () => {
+  it('resolves the generic local-save followup source from shared-entry or scene-context ownership', () => {
+    expect(resolvePlmAuditSavedViewLocalSaveFollowupSource({
+      sharedEntryTeamViewId: 'audit-view-1',
+      selectedTeamViewId: 'audit-view-1',
+      sceneContextAvailable: true,
+    })).toBe('shared-entry')
+
+    expect(resolvePlmAuditSavedViewLocalSaveFollowupSource({
+      sharedEntryTeamViewId: '',
+      selectedTeamViewId: 'audit-view-2',
+      sceneContextAvailable: true,
+    })).toBe('scene-context')
+
+    expect(resolvePlmAuditSavedViewLocalSaveFollowupSource({
+      sharedEntryTeamViewId: 'audit-view-1',
+      selectedTeamViewId: 'audit-view-2',
+      sceneContextAvailable: false,
+    })).toBeNull()
+  })
+
   it('builds local-save follow-up actions for the matching saved view', () => {
     expect(buildPlmAuditSavedViewShareFollowupNotice({
       id: 'saved-1',
