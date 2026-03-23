@@ -1776,6 +1776,11 @@ function applyAuditTeamViewState(view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' 
   applyRouteState(buildPlmAuditSelectedTeamViewRouteState(view, readCurrentRouteState()))
 }
 
+function applyAuditManagedTeamViewSelection(viewId: string) {
+  auditTeamViewKey.value = viewId
+  focusedAuditTeamViewId.value = viewId
+}
+
 function applyAuditTeamViewCollaborationHandoff(handoff: PlmAuditTeamViewCollaborationHandoff) {
   auditTeamViewCollaborationDraft.value = handoff.draft
   auditTeamViewCollaborationFollowup.value = handoff.followup
@@ -1972,10 +1977,8 @@ async function renameAuditTeamView() {
     )
     replaceAuditTeamView(renamed)
     applyAuditManagedTeamViewAttention()
-    applyAuditTeamViewState(renamed)
-    auditTeamViewKey.value = renamed.id
+    applyAuditManagedTeamViewSelection(renamed.id)
     auditTeamViewName.value = ''
-    focusedAuditTeamViewId.value = renamed.id
     setStatus(tr('Audit team view renamed.', '审计团队视图已重命名。'))
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
@@ -2008,10 +2011,8 @@ async function transferAuditTeamView() {
     )
     replaceAuditTeamView(saved)
     applyAuditManagedTeamViewAttention()
-    applyAuditTeamViewState(saved)
-    auditTeamViewKey.value = saved.id
+    applyAuditManagedTeamViewSelection(saved.id)
     auditTeamViewOwnerUserId.value = ''
-    focusedAuditTeamViewId.value = saved.id
     setStatus(tr('Audit team view owner transferred.', '审计团队视图所有者已转移。'))
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
