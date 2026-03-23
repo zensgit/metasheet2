@@ -19,6 +19,25 @@ export function resolvePlmAuditCanonicalTeamViewManagementTarget<T extends { id:
   return views.find((view) => view.id === targetId) || null
 }
 
+export function resolvePlmAuditTeamViewApplyTarget<T extends { id: string }>(
+  views: readonly T[],
+  options: {
+    selectedTeamViewId: string
+    routeTeamViewId: string
+    followupTeamViewId: string
+  },
+) {
+  const selectedTeamViewId = options.selectedTeamViewId.trim()
+  if (selectedTeamViewId) {
+    const selectedTarget = views.find((view) => view.id === selectedTeamViewId) || null
+    if (selectedTarget) {
+      return selectedTarget
+    }
+  }
+
+  return resolvePlmAuditCanonicalTeamViewManagementTarget(views, options)
+}
+
 export function shouldLockPlmAuditTeamViewManagementTarget(options: {
   canonicalTeamViewId: string
   selectedTeamViewId: string

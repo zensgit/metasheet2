@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  resolvePlmAuditTeamViewApplyTarget,
   resolvePlmAuditCanonicalTeamViewManagementTarget,
   resolvePlmAuditCanonicalTeamViewManagementTargetId,
   resolvePlmAuditCanonicalTeamViewRouteState,
@@ -41,6 +42,43 @@ describe('plmAuditTeamViewControlTarget', () => {
       routeTeamViewId: '',
       followupTeamViewId: 'audit-view-2',
     })).toBeNull()
+  })
+
+  it('resolves apply actions against the local selector before the canonical owner', () => {
+    expect(resolvePlmAuditTeamViewApplyTarget([
+      { id: 'audit-view-1', name: 'A' },
+      { id: 'audit-view-2', name: 'B' },
+    ], {
+      selectedTeamViewId: 'audit-view-2',
+      routeTeamViewId: 'audit-view-1',
+      followupTeamViewId: '',
+    })).toEqual({
+      id: 'audit-view-2',
+      name: 'B',
+    })
+
+    expect(resolvePlmAuditTeamViewApplyTarget([
+      { id: 'audit-view-1', name: 'A' },
+      { id: 'audit-view-2', name: 'B' },
+    ], {
+      selectedTeamViewId: '',
+      routeTeamViewId: 'audit-view-1',
+      followupTeamViewId: '',
+    })).toEqual({
+      id: 'audit-view-1',
+      name: 'A',
+    })
+
+    expect(resolvePlmAuditTeamViewApplyTarget([
+      { id: 'audit-view-1', name: 'A' },
+    ], {
+      selectedTeamViewId: 'audit-view-2',
+      routeTeamViewId: 'audit-view-1',
+      followupTeamViewId: '',
+    })).toEqual({
+      id: 'audit-view-1',
+      name: 'A',
+    })
   })
 
   it('locks generic management actions when the local selector drifts away from the canonical route owner', () => {

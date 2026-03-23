@@ -897,6 +897,7 @@ import {
   trimPlmAuditExistingTeamViewUiState,
 } from './plmAuditTeamViewOwnership'
 import {
+  resolvePlmAuditTeamViewApplyTarget,
   resolvePlmAuditCanonicalTeamViewManagementTarget,
   resolvePlmAuditCanonicalTeamViewManagementTargetId,
   resolvePlmAuditCanonicalTeamViewRouteState,
@@ -1017,6 +1018,14 @@ const selectedAuditTeamView = computed(
   () => auditTeamViews.value.find((view) => view.id === auditTeamViewKey.value) || null,
 )
 const canonicalAuditTeamViewId = computed(() => parsePlmAuditRouteState(route.query).teamViewId)
+const auditTeamViewApplyTarget = computed(() => resolvePlmAuditTeamViewApplyTarget(
+  auditTeamViews.value,
+  {
+    selectedTeamViewId: auditTeamViewKey.value,
+    routeTeamViewId: canonicalAuditTeamViewId.value,
+    followupTeamViewId: auditTeamViewCollaborationFollowup.value?.teamViewId || '',
+  },
+))
 const canonicalAuditTeamViewManagementTargetId = computed(() => resolvePlmAuditCanonicalTeamViewManagementTargetId({
   routeTeamViewId: canonicalAuditTeamViewId.value,
   followupTeamViewId: auditTeamViewCollaborationFollowup.value?.teamViewId || '',
@@ -1110,7 +1119,7 @@ const auditSceneFilterHighlight = computed(() => buildPlmAuditSceneFilterHighlig
 const {
   canApply: canApplyAuditTeamView,
 } = usePlmCollaborativePermissions({
-  selectedEntry: canonicalAuditTeamViewManagementTarget,
+  selectedEntry: auditTeamViewApplyTarget,
   nameRef: auditTeamViewName,
 })
 const {
@@ -1981,7 +1990,7 @@ async function saveAuditTeamView() {
 }
 
 async function applyAuditTeamView() {
-  const view = canonicalAuditTeamViewManagementTarget.value
+  const view = auditTeamViewApplyTarget.value
   if (!view || !canApplyAuditTeamView.value) return
 
   await applyAuditTeamViewEntry(view)
