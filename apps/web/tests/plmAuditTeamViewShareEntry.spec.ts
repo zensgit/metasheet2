@@ -4,6 +4,7 @@ import {
   buildPlmAuditTeamViewShareEntryNotice,
   isPlmAuditSharedLinkEntry,
   resolvePlmAuditSharedEntryRouteSyncDecision,
+  shouldKeepPlmAuditTeamViewShareEntry,
   shouldResolvePlmAuditSharedEntryOnQueryChange,
   reducePlmAuditTeamViewShareEntry,
 } from '../src/views/plmAuditTeamViewShareEntry'
@@ -112,6 +113,18 @@ describe('plmAuditTeamViewShareEntry', () => {
     })).toEqual({
       teamViewId: 'audit-view-1',
     })
+  })
+
+  it('keeps shared-link entry notices tied to the canonical team-view route only', () => {
+    expect(shouldKeepPlmAuditTeamViewShareEntry({
+      teamViewId: 'audit-view-1',
+    }, 'audit-view-1')).toBe(true)
+
+    expect(shouldKeepPlmAuditTeamViewShareEntry({
+      teamViewId: 'audit-view-1',
+    }, 'audit-view-2')).toBe(false)
+
+    expect(shouldKeepPlmAuditTeamViewShareEntry(null, 'audit-view-1')).toBe(false)
   })
 
   it('forces a replace sync when share-entry cleanup must consume a stale route marker', () => {

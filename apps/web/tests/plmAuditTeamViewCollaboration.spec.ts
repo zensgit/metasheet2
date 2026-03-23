@@ -16,6 +16,7 @@ import {
   resolvePlmAuditTeamViewCollaborationSourceAnchorId,
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry,
+  shouldKeepPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationFollowup,
   syncPlmAuditTeamViewCollaborationFollowupSourceAnchor,
 } from '../src/views/plmAuditTeamViewCollaboration'
@@ -244,6 +245,18 @@ describe('plmAuditTeamViewCollaboration', () => {
     expect(resolvePlmAuditTeamViewCollaborationAttentionMode(null, 'set-default')).toBe(
       'managed-team-view',
     )
+  })
+
+  it('keeps collaboration drafts pinned to the canonical team-view route only', () => {
+    expect(shouldKeepPlmAuditTeamViewCollaborationDraft({
+      teamViewId: 'audit-view-9',
+    }, 'audit-view-9')).toBe(true)
+
+    expect(shouldKeepPlmAuditTeamViewCollaborationDraft({
+      teamViewId: 'audit-view-9',
+    }, 'audit-view-10')).toBe(false)
+
+    expect(shouldKeepPlmAuditTeamViewCollaborationDraft(null, 'audit-view-9')).toBe(false)
   })
 
   it('builds a draft handoff for recommendation and promotion flows', () => {

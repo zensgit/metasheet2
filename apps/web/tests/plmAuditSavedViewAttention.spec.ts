@@ -3,6 +3,7 @@ import {
   applyPlmAuditSourceFocusState,
   buildPlmAuditClearedCollaborationFollowupAttentionState,
   buildPlmAuditDismissedCollaborationDraftAttentionState,
+  buildPlmAuditManagedTeamViewAttentionState,
   buildPlmAuditPersistedTeamViewAttentionState,
   buildPlmAuditRoutePivotAttentionState,
   buildPlmAuditSavedViewStoreAttentionState,
@@ -250,18 +251,20 @@ describe('plmAuditSavedViewAttention', () => {
     })
   })
 
-  it('clears source focus and local saved-view followup when a persisted team view takes over', () => {
-    expect(buildPlmAuditPersistedTeamViewAttentionState({
+  it('clears source focus and local saved-view followup when a managed team-view context takes over', () => {
+    const attentionFocus = {
       focusedAuditTeamViewId: 'team-view-10',
       focusedRecommendedAuditTeamViewId: 'recommended-10',
       focusedSavedViewId: 'saved-view-10',
-    }, {
+    }
+    const savedViewAttention = {
       shareFollowup: {
         savedViewId: 'saved-view-11',
         source: 'shared-entry',
       },
       focusedSavedViewId: 'saved-view-11',
-    })).toEqual({
+    }
+    const expected = {
       attentionFocus: {
         focusedAuditTeamViewId: 'team-view-10',
         focusedRecommendedAuditTeamViewId: '',
@@ -271,7 +274,17 @@ describe('plmAuditSavedViewAttention', () => {
         shareFollowup: null,
         focusedSavedViewId: '',
       },
-    })
+    }
+
+    expect(buildPlmAuditManagedTeamViewAttentionState(
+      attentionFocus,
+      savedViewAttention,
+    )).toEqual(expected)
+
+    expect(buildPlmAuditPersistedTeamViewAttentionState(
+      attentionFocus,
+      savedViewAttention,
+    )).toEqual(expected)
   })
 
   it('clears management and source focus before installing a source-aware share followup', () => {

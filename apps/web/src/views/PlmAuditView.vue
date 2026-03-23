@@ -790,7 +790,7 @@ import {
   applyPlmAuditSourceFocusState,
   buildPlmAuditClearedCollaborationFollowupAttentionState,
   buildPlmAuditDismissedCollaborationDraftAttentionState,
-  buildPlmAuditPersistedTeamViewAttentionState,
+  buildPlmAuditManagedTeamViewAttentionState,
   buildPlmAuditRoutePivotAttentionState,
   buildPlmAuditSavedViewStoreAttentionState,
   buildPlmAuditSourceShareFollowupAttentionState,
@@ -841,6 +841,7 @@ import {
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry,
+  shouldKeepPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationFollowup,
   syncPlmAuditTeamViewCollaborationFollowupSourceAnchor,
   type PlmAuditTeamViewCollaborationActionKind,
@@ -855,6 +856,7 @@ import {
   buildPlmAuditTeamViewShareEntryNotice,
   isPlmAuditSharedLinkEntry,
   resolvePlmAuditSharedEntryRouteSyncDecision,
+  shouldKeepPlmAuditTeamViewShareEntry,
   shouldResolvePlmAuditSharedEntryOnQueryChange,
   reducePlmAuditTeamViewShareEntry,
   type PlmAuditTeamViewShareEntry,
@@ -1322,7 +1324,7 @@ async function persistAuditTeamView(
       },
     )
     upsertAuditTeamView(saved)
-    applyAuditPersistedTeamViewAttention()
+    applyAuditManagedTeamViewAttention()
     applyAuditTeamViewState(saved)
     auditTeamViewName.value = ''
     focusedAuditTeamViewId.value = saved.id
@@ -1490,8 +1492,8 @@ function applyAuditSavedViewStoreAttention() {
   auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
 }
 
-function applyAuditPersistedTeamViewAttention() {
-  const nextState = buildPlmAuditPersistedTeamViewAttentionState(
+function applyAuditManagedTeamViewAttention() {
+  const nextState = buildPlmAuditManagedTeamViewAttentionState(
     {
       focusedAuditTeamViewId: focusedAuditTeamViewId.value,
       focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
@@ -1847,6 +1849,7 @@ async function renameAuditTeamView() {
       auditTeamViewName.value.trim(),
     )
     replaceAuditTeamView(renamed)
+    applyAuditManagedTeamViewAttention()
     applyAuditTeamViewState(renamed)
     auditTeamViewKey.value = renamed.id
     auditTeamViewName.value = ''
@@ -1882,6 +1885,7 @@ async function transferAuditTeamView() {
       auditTeamViewOwnerUserId.value.trim(),
     )
     replaceAuditTeamView(saved)
+    applyAuditManagedTeamViewAttention()
     applyAuditTeamViewState(saved)
     auditTeamViewKey.value = saved.id
     auditTeamViewOwnerUserId.value = ''
@@ -2066,6 +2070,7 @@ async function clearAuditTeamViewDefault() {
   try {
     const saved = await clearPlmWorkbenchTeamViewDefault('audit', view.id)
     replaceAuditTeamView(saved)
+    applyAuditManagedTeamViewAttention()
     applyAuditTeamViewState(saved)
     focusedAuditTeamViewId.value = saved.id
     await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'clear-default', readCurrentRouteState()))
@@ -2282,6 +2287,7 @@ async function runAuditTeamViewLifecycleAction(
       await deletePlmWorkbenchTeamView(view.id)
       removeAuditTeamViews([view.id])
       clearCurrentAuditTeamViewSelectionIfNeeded([view.id])
+      applyAuditManagedTeamViewAttention()
       focusedAuditTeamViewId.value = ''
       await syncRouteState(buildPlmAuditTeamViewLogState(view, 'delete', readCurrentRouteState()))
       setStatus(tr('Audit team view deleted. Showing matching audit logs.', '审计团队视图已删除，已切换到对应审计日志。'))
@@ -2293,6 +2299,7 @@ async function runAuditTeamViewLifecycleAction(
       : await restorePlmWorkbenchTeamView('audit', view.id)
 
     replaceAuditTeamView(saved)
+    applyAuditManagedTeamViewAttention()
     focusedAuditTeamViewId.value = saved.id
 
     if (actionKind === 'archive') {
@@ -2359,6 +2366,7 @@ async function runAuditTeamViewBatchAction(actionKind: PlmAuditTeamViewLifecycle
     const processedViews = result.processedIds
       .map((id) => findAuditTeamViewById(id))
       .filter((view): view is PlmWorkbenchTeamView<'audit'> => Boolean(view))
+    applyAuditManagedTeamViewAttention()
     await syncRouteState(buildPlmAuditTeamViewBatchLogState(
       processedViews.length ? processedViews : batchAction.eligibleIds.map((id) => ({ id, kind: 'audit' as const })),
       actionKind,
@@ -2560,18 +2568,6 @@ async function promoteSavedViewToTeam(
   }
 }
 
-watch(auditTeamViewKey, (value) => {
-  if (auditTeamViewShareEntry.value && value !== auditTeamViewShareEntry.value.teamViewId) {
-    clearAuditTeamViewShareEntry()
-  }
-  if (auditTeamViewCollaborationDraft.value && value !== auditTeamViewCollaborationDraft.value.teamViewId) {
-    clearAuditTeamViewCollaborationDraft()
-  }
-  if (auditTeamViewCollaborationFollowup.value && value !== auditTeamViewCollaborationFollowup.value.teamViewId) {
-    clearAuditTeamViewCollaborationFollowup()
-  }
-})
-
 function applyFilters() {
   applyAuditRoutePivotAttention()
   applyAuditTeamViewShareEntryAction({ kind: 'filter-navigation' })
@@ -2628,9 +2624,14 @@ watch(
       auditEntry: queryState.auditEntry,
     })
     const nextState = parsePlmAuditRouteState(queryState)
+    const previousRouteState = parsePlmAuditRouteState(previousQueryState || {})
     const currentState = readCurrentRouteState()
     const routeChanged = routeReady.value && !isPlmAuditRouteStateEqual(nextState, currentState)
-    if (!routeChanged && routeReady.value) {
+    const canonicalRouteChanged = routeReady.value
+      && !isPlmAuditRouteStateEqual(nextState, previousRouteState)
+    const canonicalTeamViewChanged = routeReady.value
+      && nextState.teamViewId !== previousRouteState.teamViewId
+    if (!routeChanged && !canonicalRouteChanged && routeReady.value) {
       if (shouldResolvePlmAuditSharedEntryOnQueryChange({
         routeReady: routeReady.value,
         routeChanged,
@@ -2648,7 +2649,24 @@ watch(
       }
     }
     if (
-      routeChanged
+      canonicalTeamViewChanged
+      && auditTeamViewShareEntry.value
+      && !shouldKeepPlmAuditTeamViewShareEntry(auditTeamViewShareEntry.value, nextState.teamViewId)
+    ) {
+      clearAuditTeamViewShareEntry()
+    }
+    if (
+      canonicalTeamViewChanged
+      && auditTeamViewCollaborationDraft.value
+      && !shouldKeepPlmAuditTeamViewCollaborationDraft(
+        auditTeamViewCollaborationDraft.value,
+        nextState.teamViewId,
+      )
+    ) {
+      clearAuditTeamViewCollaborationDraft()
+    }
+    if (
+      canonicalRouteChanged
       && auditTeamViewCollaborationFollowup.value
       && !shouldKeepPlmAuditTeamViewCollaborationFollowup(
         auditTeamViewCollaborationFollowup.value,

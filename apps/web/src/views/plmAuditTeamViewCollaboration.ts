@@ -319,6 +319,13 @@ export function shouldClearPlmAuditTeamViewCollaborationDraft(
   return draft?.teamViewId === viewId
 }
 
+export function shouldKeepPlmAuditTeamViewCollaborationDraft(
+  draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null,
+  teamViewId: string,
+) {
+  return draft?.teamViewId === teamViewId
+}
+
 export function shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry(
   followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'teamViewId'> | null,
   viewId: string,

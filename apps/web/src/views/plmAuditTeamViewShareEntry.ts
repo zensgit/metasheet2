@@ -132,3 +132,10 @@ export function reducePlmAuditTeamViewShareEntry(
 
   return entry
 }
+
+export function shouldKeepPlmAuditTeamViewShareEntry(
+  entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
+  teamViewId: string,
+) {
+  return entry?.teamViewId === teamViewId
+}
