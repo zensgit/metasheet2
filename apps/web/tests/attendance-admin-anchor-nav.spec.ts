@@ -82,15 +82,19 @@ describe('Attendance admin anchor navigation', () => {
     container = null
   })
 
-  it('renders a left nav for top-level admin anchors and excludes nested subsections', async () => {
+  it('renders grouped top-level admin anchors and excludes nested subsections', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
+    const groupLabels = Array.from(container!.querySelectorAll('.attendance__admin-nav-group-title')).map(
+      item => item.textContent?.trim() || '',
+    )
     const labels = Array.from(container!.querySelectorAll('.attendance__admin-nav-link')).map(
       item => item.textContent?.trim() || '',
     )
 
+    expect(groupLabels).toEqual(['Workspace', 'Policies', 'Organization', 'Data & Payroll', 'Scheduling'])
     expect(labels).toHaveLength(22)
     expect(labels).toEqual(
       expect.arrayContaining([
@@ -105,6 +109,25 @@ describe('Attendance admin anchor navigation', () => {
     )
     expect(labels).not.toContain('Holiday overrides')
     expect(labels).not.toContain('Template Versions')
+  })
+
+  it('collapses and expands admin anchor groups', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const policiesHeader = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-nav-group-header'))
+      .find(button => button.textContent?.includes('Policies'))
+    expect(policiesHeader).toBeTruthy()
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeTruthy()
+
+    policiesHeader!.click()
+    await flushUi(2)
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeNull()
+
+    policiesHeader!.click()
+    await flushUi(2)
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeTruthy()
   })
 
   it('scrolls to the selected anchor target and marks it active', async () => {
@@ -141,6 +164,10 @@ describe('Attendance admin anchor navigation', () => {
     const labels = Array.from(container!.querySelectorAll('.attendance__admin-nav-link')).map(
       item => item.textContent?.trim() || '',
     )
+    const groupLabels = Array.from(container!.querySelectorAll('.attendance__admin-nav-group-title')).map(
+      item => item.textContent?.trim() || '',
+    )
+    expect(groupLabels).toEqual(['Data & Payroll'])
     expect(labels).toEqual(['Payroll Templates', 'Payroll Cycles'])
     expect(container!.textContent).toContain('2/22 items')
   })

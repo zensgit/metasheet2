@@ -1,24 +1,71 @@
-# Attendance Admin Anchor Deeplink Design 2026-03-24
+# Attendance Admin Anchor Deeplink And Grouped Rail Design 2026-03-24
 
 ## Context
 
-`AttendanceView.vue` already carries the attendance admin console as a single long page with 22 top-level sections. The first-stage root-admin stabilization added a sticky left anchor rail, active-section tracking, and section-level refs. This follow-up tightens that model so the admin console is navigable when the section list grows and so deep links survive reloads.
+`AttendanceView.vue` already carries the attendance admin console as a single long page with 22 top-level sections. The first-stage root-admin stabilization added a sticky left anchor rail, active-section tracking, and section-level refs. The second stage added quick-find and hash deep links. This follow-up turns the rail into grouped navigation so the page stays scannable as the section list grows without rewriting the hash/observer model.
 
 ## Goals
 
 - Reduce scroll cost inside the attendance admin console.
+- Reduce cognitive load in the left rail itself.
 - Allow users to share or restore a concrete admin section via URL hash.
 - Keep the implementation local to attendance until a second real long-form admin page appears.
 
 ## Scope
 
-### 1. Quick-find on the admin anchor rail
+### 1. Grouped rail instead of a 22-item flat list
+
+The rail now groups the 22 top-level sections into five stable business domains:
+
+- `Workspace`
+  - `Settings`
+  - `User Access`
+  - `Batch Provisioning`
+  - `Audit Logs`
+- `Policies`
+  - `Holiday Sync`
+  - `Default Rule`
+  - `Rule Sets`
+  - `Rule Template Library`
+  - `Leave Types`
+  - `Overtime Rules`
+  - `Approval Flows`
+- `Organization`
+  - `Attendance groups`
+  - `Group members`
+- `Data & Payroll`
+  - `Import`
+  - `Import batches`
+  - `Payroll Templates`
+  - `Payroll Cycles`
+- `Scheduling`
+  - `Rotation Rules`
+  - `Rotation Assignments`
+  - `Shifts`
+  - `Assignments`
+  - `Holidays`
+
+Each group renders as a collapsible block with its own count badge. The implementation keeps a flat item list in code for hash lookup and observer bookkeeping, then derives grouped render data on top.
+
+This keeps the behavioral core unchanged:
+
+- section ids remain attendance-owned
+- observer logic still reads the flat section list
+- hash restore still targets the same ids
+
+### 2. Quick-find on the admin anchor rail
 
 The left rail now exposes a lightweight text filter above the anchor list. It filters only the existing top-level admin anchors, keeps the same order, updates the visible count, and shows an explicit empty state when no section matches.
 
 This is intentionally string-match only. The admin section list is small and stable, so there is no need to introduce fuzzy search state, token indexing, or a shared search store.
 
-### 2. Hash-based deep links
+When filtering is active:
+
+- only groups with matches stay visible
+- matching groups auto-expand
+- the top summary count remains `visible items / total items`
+
+### 3. Hash-based deep links
 
 The admin rail now treats each known section id as a valid deep-link target.
 
@@ -26,9 +73,9 @@ The admin rail now treats each known section id as a valid deep-link target.
 - First load reads the hash, restores the matching section, and marks the correct rail item active.
 - Active-section changes continue to keep the hash in sync after the initial restore.
 
-The restore path uses a bounded next-tick retry loop plus a non-reentrant guard. This makes the first-load hash restore resilient to mount timing without introducing duplicate scrolls, scroll polling, or route-level state.
+The restore path uses a bounded next-tick retry loop plus a non-reentrant guard. This makes the first-load hash restore resilient to mount timing without introducing duplicate scrolls, scroll polling, or route-level state. The same rule also guarantees that a hashed target remains visible when its group would otherwise be collapsed.
 
-### 3. Branch hygiene for timezone helpers
+### 4. Branch hygiene for timezone helpers
 
 This clean branch already depended on `apps/web/src/utils/timezones.ts` through `AttendanceView.vue`, but the file was missing from the branch itself. The follow-up includes it so the branch can build and type-check independently instead of relying on unrelated local dirt from another worktree.
 

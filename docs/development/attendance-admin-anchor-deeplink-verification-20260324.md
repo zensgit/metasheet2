@@ -1,11 +1,13 @@
-# Attendance Admin Anchor Deeplink Verification 2026-03-24
+# Attendance Admin Anchor Deeplink And Grouped Rail Verification 2026-03-24
 
 ## Scope Verified
 
-This verification covers the second-stage attendance admin navigation follow-up on top of the prior root-admin stabilization branch.
+This verification covers the third-stage attendance admin navigation follow-up on top of the prior root-admin stabilization branch.
 
 Verified behaviors:
 
+- the left rail renders five stable business-domain groups instead of a 22-item flat list
+- groups can be collapsed and re-expanded without breaking anchor behavior
 - quick-find filters the left anchor rail
 - count label changes from total-only to visible/total when filtered
 - empty-state copy renders when the filter produces no matches
@@ -25,7 +27,7 @@ pnpm --filter @metasheet/web exec vitest run tests/attendance-admin-anchor-nav.s
 Result:
 
 - `2` files passed
-- `9` tests passed
+- `10` tests passed
 
 ### Frontend type-check
 
@@ -61,5 +63,6 @@ Prior result on the parent clean branch:
 
 ## Notes
 
+- The grouped rail keeps a flat item list for `IntersectionObserver`, hash validation, and section element resolution. Grouping is purely a render-layer concern.
 - The initial hash-restore implementation still double-fired in the unit harness because mount-time restore and later admin-state synchronization could overlap. The final version keeps the bounded next-tick retry helper and adds a non-reentrant restore gate so first-load deep links scroll exactly once.
 - `apps/web/src/utils/timezones.ts` is included in this follow-up because `AttendanceView.vue` already imports it. Without the file, the clean branch cannot pass `vue-tsc` or `build` on its own.

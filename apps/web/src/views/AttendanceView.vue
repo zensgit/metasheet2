@@ -501,19 +501,40 @@
                 />
               </label>
               <nav class="attendance__admin-nav" :aria-label="tr('Attendance admin sections', '考勤管理区块')">
-                <button
-                  v-for="item in visibleAdminSectionNavItems"
-                  :key="item.id"
-                  class="attendance__admin-nav-link"
-                  :class="{ 'attendance__admin-nav-link--active': adminActiveSectionId === item.id }"
-                  :aria-current="adminActiveSectionId === item.id ? 'true' : undefined"
-                  :data-admin-anchor="item.id"
-                  type="button"
-                  @click="scrollToAdminSection(item.id)"
+                <section
+                  v-for="group in visibleAdminSectionNavGroups"
+                  :key="group.id"
+                  class="attendance__admin-nav-group"
+                  :data-admin-anchor-group="group.id"
                 >
-                  {{ item.label }}
-                </button>
-                <p v-if="visibleAdminSectionNavItems.length === 0" class="attendance__admin-nav-empty">
+                  <button
+                    class="attendance__admin-nav-group-header"
+                    type="button"
+                    :aria-expanded="group.expanded ? 'true' : 'false'"
+                    @click="toggleAdminSectionGroup(group.id)"
+                  >
+                    <span class="attendance__admin-nav-group-title">{{ group.label }}</span>
+                    <span class="attendance__admin-nav-group-meta">
+                      <span class="attendance__admin-nav-group-count">{{ group.countLabel }}</span>
+                      <span class="attendance__admin-nav-group-caret" aria-hidden="true">{{ group.expanded ? '▾' : '▸' }}</span>
+                    </span>
+                  </button>
+                  <div v-if="group.expanded" class="attendance__admin-nav-group-items">
+                    <button
+                      v-for="item in group.items"
+                      :key="item.id"
+                      class="attendance__admin-nav-link"
+                      :class="{ 'attendance__admin-nav-link--active': adminActiveSectionId === item.id }"
+                      :aria-current="adminActiveSectionId === item.id ? 'true' : undefined"
+                      :data-admin-anchor="item.id"
+                      type="button"
+                      @click="scrollToAdminSection(item.id)"
+                    >
+                      {{ item.label }}
+                    </button>
+                  </div>
+                </section>
+                <p v-if="visibleAdminSectionNavGroups.length === 0" class="attendance__admin-nav-empty">
                   {{ tr('No sections match the current filter.', '当前筛选没有匹配区块。') }}
                 </p>
               </nav>
@@ -4389,7 +4410,18 @@ const ATTENDANCE_ADMIN_SECTION_IDS = {
 
 const showAdmin = computed(() => props.mode === 'admin')
 const showOverview = computed(() => props.mode === 'overview')
-const adminSectionNavItems = computed(() => [
+type AdminSectionNavItem = {
+  id: string
+  label: string
+}
+
+type AdminSectionNavGroup = {
+  id: string
+  label: string
+  itemIds: string[]
+}
+
+const adminSectionNavItems = computed<AdminSectionNavItem[]>(() => [
   { id: ATTENDANCE_ADMIN_SECTION_IDS.settings, label: tr('Settings', '设置') },
   { id: ATTENDANCE_ADMIN_SECTION_IDS.userAccess, label: tr('User Access', '用户权限') },
   { id: ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning, label: tr('Batch Provisioning', '批量授权') },
@@ -4413,13 +4445,105 @@ const adminSectionNavItems = computed(() => [
   { id: ATTENDANCE_ADMIN_SECTION_IDS.assignments, label: tr('Assignments', '排班分配') },
   { id: ATTENDANCE_ADMIN_SECTION_IDS.holidays, label: tr('Holidays', '节假日') },
 ])
+const adminSectionItemMap = computed(() => new Map(adminSectionNavItems.value.map(item => [item.id, item])))
+const adminSectionNavGroups = computed<AdminSectionNavGroup[]>(() => [
+  {
+    id: 'workspace',
+    label: tr('Workspace', '工作台'),
+    itemIds: [
+      ATTENDANCE_ADMIN_SECTION_IDS.settings,
+      ATTENDANCE_ADMIN_SECTION_IDS.userAccess,
+      ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning,
+      ATTENDANCE_ADMIN_SECTION_IDS.auditLogs,
+    ],
+  },
+  {
+    id: 'policies',
+    label: tr('Policies', '规则策略'),
+    itemIds: [
+      ATTENDANCE_ADMIN_SECTION_IDS.holidaySync,
+      ATTENDANCE_ADMIN_SECTION_IDS.defaultRule,
+      ATTENDANCE_ADMIN_SECTION_IDS.ruleSets,
+      ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary,
+      ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes,
+      ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules,
+      ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows,
+    ],
+  },
+  {
+    id: 'organization',
+    label: tr('Organization', '组织分组'),
+    itemIds: [
+      ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups,
+      ATTENDANCE_ADMIN_SECTION_IDS.groupMembers,
+    ],
+  },
+  {
+    id: 'data-payroll',
+    label: tr('Data & Payroll', '数据与计薪'),
+    itemIds: [
+      ATTENDANCE_ADMIN_SECTION_IDS.import,
+      ATTENDANCE_ADMIN_SECTION_IDS.importBatches,
+      ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates,
+      ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles,
+    ],
+  },
+  {
+    id: 'scheduling',
+    label: tr('Scheduling', '排班执行'),
+    itemIds: [
+      ATTENDANCE_ADMIN_SECTION_IDS.rotationRules,
+      ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments,
+      ATTENDANCE_ADMIN_SECTION_IDS.shifts,
+      ATTENDANCE_ADMIN_SECTION_IDS.assignments,
+      ATTENDANCE_ADMIN_SECTION_IDS.holidays,
+    ],
+  },
+])
 const adminSectionFilter = ref('')
 const adminSectionFilterQuery = computed(() => adminSectionFilter.value.trim().toLowerCase())
-const visibleAdminSectionNavItems = computed(() => {
+const adminSectionFilterActive = computed(() => adminSectionFilterQuery.value.length > 0)
+const adminCollapsedGroupIds = ref<string[]>([])
+function isAdminSectionGroupExpanded(groupId: string, items: AdminSectionNavItem[]): boolean {
+  if (adminSectionFilterActive.value) return true
+  if (items.some(item => item.id === adminActiveSectionId.value)) return true
+  return !adminCollapsedGroupIds.value.includes(groupId)
+}
+
+function toggleAdminSectionGroup(groupId: string): void {
+  if (adminSectionFilterActive.value) return
+  if (adminCollapsedGroupIds.value.includes(groupId)) {
+    adminCollapsedGroupIds.value = adminCollapsedGroupIds.value.filter(id => id !== groupId)
+    return
+  }
+  adminCollapsedGroupIds.value = [...adminCollapsedGroupIds.value, groupId]
+}
+
+const visibleAdminSectionNavGroups = computed(() => {
   const query = adminSectionFilterQuery.value
-  if (!query) return adminSectionNavItems.value
-  return adminSectionNavItems.value.filter(item => item.label.toLowerCase().includes(query))
+  return adminSectionNavGroups.value
+    .map(group => {
+      const allItems = group.itemIds
+        .map(id => adminSectionItemMap.value.get(id))
+        .filter((item): item is AdminSectionNavItem => Boolean(item))
+      const items = query
+        ? allItems.filter(item => item.label.toLowerCase().includes(query))
+        : allItems
+      if (items.length === 0) return null
+      const countLabel = query && items.length !== allItems.length
+        ? `${items.length}/${allItems.length}`
+        : `${allItems.length}`
+      return {
+        ...group,
+        items,
+        countLabel,
+        expanded: isAdminSectionGroupExpanded(group.id, items),
+      }
+    })
+    .filter((group): group is AdminSectionNavGroup & { items: AdminSectionNavItem[]; countLabel: string; expanded: boolean } => Boolean(group))
 })
+
+const visibleAdminSectionNavItems = computed(() => visibleAdminSectionNavGroups.value.flatMap(group => group.items))
 const adminSectionNavCountLabel = computed(() => {
   const visible = visibleAdminSectionNavItems.value.length
   const total = adminSectionNavItems.value.length
@@ -10956,9 +11080,60 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
 .attendance__admin-nav {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
   max-height: calc(100vh - 160px);
   overflow: auto;
+}
+
+.attendance__admin-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attendance__admin-nav-group-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 10px;
+  background: #eef2ff;
+  color: #374151;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attendance__admin-nav-group-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.attendance__admin-nav-group-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #6b7280;
+  font-size: 11px;
+}
+
+.attendance__admin-nav-group-count {
+  min-width: 28px;
+  text-align: right;
+}
+
+.attendance__admin-nav-group-caret {
+  font-size: 12px;
+}
+
+.attendance__admin-nav-group-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .attendance__admin-nav-empty {
@@ -11120,6 +11295,11 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
     flex-direction: row;
     flex-wrap: wrap;
     max-height: none;
+  }
+
+  .attendance__admin-nav-group {
+    flex: 1 1 220px;
+    min-width: min(100%, 220px);
   }
 
   .attendance__admin-nav-link {
