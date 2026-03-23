@@ -16,6 +16,9 @@ describe('plmAuditSceneContextTakeover', () => {
         },
         focusedSavedViewId: 'saved-view-focus',
       },
+      shareEntry: {
+        teamViewId: 'team-view-shared',
+      },
       collaboration: {
         selectedIds: ['team-view-1'],
         draft: {
@@ -46,6 +49,7 @@ describe('plmAuditSceneContextTakeover', () => {
         shareFollowup: null,
         focusedSavedViewId: '',
       },
+      shareEntry: null,
       collaboration: {
         selectedIds: [],
         draft: null,
@@ -65,6 +69,7 @@ describe('plmAuditSceneContextTakeover', () => {
         shareFollowup: null,
         focusedSavedViewId: '',
       },
+      shareEntry: null,
       collaboration: {
         selectedIds: ['team-view-9', 'team-view-10'],
         draft: {
@@ -83,5 +88,27 @@ describe('plmAuditSceneContextTakeover', () => {
       draft: null,
       followup: null,
     })
+  })
+
+  it('clears shared-entry ownership when scene context takes over the route', () => {
+    expect(buildPlmAuditSceneContextTakeoverState({
+      attentionFocus: {
+        focusedAuditTeamViewId: '',
+        focusedRecommendedAuditTeamViewId: '',
+        focusedSavedViewId: '',
+      },
+      savedViewAttention: {
+        shareFollowup: null,
+        focusedSavedViewId: '',
+      },
+      shareEntry: {
+        teamViewId: 'team-view-shared',
+      },
+      collaboration: {
+        selectedIds: [],
+        draft: null,
+        followup: null,
+      },
+    }).shareEntry).toBeNull()
   })
 })

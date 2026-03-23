@@ -183,6 +183,12 @@ export function shouldTakeOverPlmAuditSharedEntryOnSavedViewTakeover(
   return Boolean(entry)
 }
 
+export function shouldTakeOverPlmAuditSharedEntryOnSceneContextTakeover(
+  entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
+) {
+  return Boolean(entry)
+}
+
 export function shouldTakeOverPlmAuditSharedEntryOnSourceAction(
   entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
   sourceAware: boolean,

@@ -1306,6 +1306,7 @@ function applySceneContextTakeoverCleanup() {
       shareFollowup: auditSavedViewShareFollowup.value,
       focusedSavedViewId: focusedSavedViewId.value,
     },
+    shareEntry: auditTeamViewShareEntry.value,
     collaboration: {
       selectedIds: auditTeamViewSelection.value,
       draft: auditTeamViewCollaborationDraft.value,
@@ -1316,6 +1317,7 @@ function applySceneContextTakeoverCleanup() {
   focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
   focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
   auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+  auditTeamViewShareEntry.value = nextState.shareEntry
   auditTeamViewSelection.value = nextState.collaboration.selectedIds
   auditTeamViewCollaborationDraft.value = nextState.collaboration.draft
   auditTeamViewCollaborationFollowup.value = nextState.collaboration.followup

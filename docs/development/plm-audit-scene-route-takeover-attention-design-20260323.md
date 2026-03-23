@@ -12,14 +12,14 @@
 
 ## Problem
 
-这些 scene route pivots 之前仍然没有接入 saved-view / transient attention cleanup。
+这些 scene route pivots 之前仍然没有完整接入 saved-view / transient ownership cleanup。
 
 结果是：
 
 1. 用户先通过 `scene-context` 保存本地视图
 2. 页面出现 local saved-view followup / saved-view focus
 3. 用户继续点 scene banner 的 owner / restore / clear
-4. route 已经切到新的 scene-owned state，但旧 saved-view followup / focus 还留在页面上
+4. route 已经切到新的 scene-owned state，但旧 saved-view followup / focus，甚至 shared-entry notice 还留在页面上
 
 这和前面已经收口的 saved-view takeovers、filter-navigation、route pivots 语义不一致。
 
@@ -29,6 +29,7 @@
 
 - 清 route-pivot attention
 - 清 local saved-view followup / focus
+- 清 stale shared-entry owner
 - 清 collaboration draft / followup
 - 只消费 draft 自动装出的单行 selection，不误伤用户主动维护的多选
 
@@ -49,5 +50,6 @@ Key changes:
 ## Expected Behavior
 
 - scene route pivots 会和 saved-view/context takeovers 一样清掉 stale saved-view notice / focus
+- scene route pivots 不再和 shared-entry notice 并存
 - scene route pivots 不再留下旧 collaboration owner
 - 用户自己维护的多选不会被 scene takeover 误清
