@@ -434,7 +434,7 @@ export function resolvePlmAuditClearedTeamViewDraftSelection(options: {
   return options.selectedIds
 }
 
-export function resolvePlmAuditSourceLocalSaveCollaborationState(options: {
+export function resolvePlmAuditSavedViewTakeoverCollaborationState(options: {
   selectedIds: string[]
   draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null
   followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'teamViewId'> | null

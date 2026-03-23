@@ -17,7 +17,7 @@ import {
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditClearedTeamViewDraftSelection,
   resolvePlmAuditCompletedTeamViewCollaborationDraft,
-  resolvePlmAuditSourceLocalSaveCollaborationState,
+  resolvePlmAuditSavedViewTakeoverCollaborationState,
   resolvePlmAuditTeamViewFollowupSelection,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
@@ -407,8 +407,8 @@ describe('plmAuditTeamViewCollaboration', () => {
     })
   })
 
-  it('clears collaboration owners before a source-aware local save takes over', () => {
-    expect(resolvePlmAuditSourceLocalSaveCollaborationState({
+  it('clears collaboration owners before a saved-view takeover installs its own state', () => {
+    expect(resolvePlmAuditSavedViewTakeoverCollaborationState({
       selectedIds: ['audit-view-9'],
       draft: {
         teamViewId: 'audit-view-9',
@@ -422,7 +422,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       followup: null,
     })
 
-    expect(resolvePlmAuditSourceLocalSaveCollaborationState({
+    expect(resolvePlmAuditSavedViewTakeoverCollaborationState({
       selectedIds: ['audit-view-9', 'audit-view-10'],
       draft: {
         teamViewId: 'audit-view-9',

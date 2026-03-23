@@ -864,7 +864,7 @@ import {
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
   resolvePlmAuditClearedTeamViewDraftSelection,
-  resolvePlmAuditSourceLocalSaveCollaborationState,
+  resolvePlmAuditSavedViewTakeoverCollaborationState,
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationFollowup,
@@ -1423,7 +1423,7 @@ async function saveCurrentLocalViewWithFollowup(
   )
   if (!saved) return null
 
-  const nextCollaborationState = resolvePlmAuditSourceLocalSaveCollaborationState({
+  const nextCollaborationState = resolvePlmAuditSavedViewTakeoverCollaborationState({
     selectedIds: auditTeamViewSelection.value,
     draft: auditTeamViewCollaborationDraft.value,
     followup: auditTeamViewCollaborationFollowup.value,
@@ -2764,7 +2764,14 @@ async function saveCurrentAuditView() {
 function applySavedView(view: PlmAuditSavedView) {
   clearAuditAttentionFocus()
   applySavedViewAttentionAction({ kind: 'apply' })
-  clearAuditTeamViewCollaborationFollowup()
+  const nextCollaborationState = resolvePlmAuditSavedViewTakeoverCollaborationState({
+    selectedIds: auditTeamViewSelection.value,
+    draft: auditTeamViewCollaborationDraft.value,
+    followup: auditTeamViewCollaborationFollowup.value,
+  })
+  auditTeamViewSelection.value = nextCollaborationState.selectedIds
+  auditTeamViewCollaborationDraft.value = nextCollaborationState.draft
+  auditTeamViewCollaborationFollowup.value = nextCollaborationState.followup
   void syncRouteState(restorePlmAuditSavedViewState(view.state))
 }
 
