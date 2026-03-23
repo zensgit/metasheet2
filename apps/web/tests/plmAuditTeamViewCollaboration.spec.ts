@@ -465,6 +465,20 @@ describe('plmAuditTeamViewCollaboration', () => {
     })
   })
 
+  it('clears draft-owned single selection when a generic local save takes over collaboration state', () => {
+    expect(resolvePlmAuditSavedViewTakeoverCollaborationState({
+      selectedIds: ['audit-view-local'],
+      draft: {
+        teamViewId: 'audit-view-local',
+      },
+      followup: null,
+    })).toEqual({
+      selectedIds: [],
+      draft: null,
+      followup: null,
+    })
+  })
+
   it('keeps collaboration drafts pinned to the canonical team-view route only', () => {
     expect(shouldKeepPlmAuditTeamViewCollaborationDraft({
       teamViewId: 'audit-view-9',

@@ -886,6 +886,7 @@ import {
   resolvePlmAuditSharedEntryRouteSyncDecision,
   shouldKeepPlmAuditTeamViewShareEntry,
   shouldTakeOverPlmAuditSharedEntryOnManagementHandoff,
+  shouldTakeOverPlmAuditSharedEntryOnSavedViewTakeover,
   shouldTakeOverPlmAuditSharedEntryOnSourceAction,
   shouldResolvePlmAuditSharedEntryOnQueryChange,
   reducePlmAuditTeamViewShareEntry,
@@ -1960,6 +1961,9 @@ function applySavedViewTakeover(actionKind: 'apply' | 'context-action') {
   clearAuditAttentionFocus()
   applySavedViewAttentionAction({ kind: actionKind })
   applyCollaborationTakeoverCleanup()
+  if (shouldTakeOverPlmAuditSharedEntryOnSavedViewTakeover(auditTeamViewShareEntry.value)) {
+    clearAuditTeamViewShareEntry()
+  }
 }
 
 function runSavedViewContextAction(
@@ -1969,7 +1973,9 @@ function runSavedViewContextAction(
   const badge = savedViewContextBadge(view)
   if (badge?.quickAction?.disabled) return
   applySavedViewTakeover('context-action')
-  void syncRouteState(buildSavedViewContextState(view, actionKind))
+  void syncRouteState(buildSavedViewContextState(view, actionKind), false, {
+    consumeSharedEntry: true,
+  })
 }
 
 function downloadCsvText(filename: string, csvText: string) {
@@ -2777,12 +2783,16 @@ async function saveCurrentAuditView() {
     return
   }
 
-  storeAuditSavedView(savedViewName.value.trim())
+  const saved = storeAuditSavedView(savedViewName.value.trim())
+  if (!saved) return
+  applyCollaborationTakeoverCleanup()
 }
 
 function applySavedView(view: PlmAuditSavedView) {
   applySavedViewTakeover('apply')
-  void syncRouteState(restorePlmAuditSavedViewState(view.state))
+  void syncRouteState(restorePlmAuditSavedViewState(view.state), false, {
+    consumeSharedEntry: true,
+  })
 }
 
 function deleteSavedViewEntry(id: string) {
