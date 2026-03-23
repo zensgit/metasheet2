@@ -383,5 +383,6 @@ describe('AttendanceSchedulingAdminSection', () => {
     expect(Array.from(defaultRuleTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Common timezones')
     expect(Array.from(rotationTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Asia')
     expect(container!.textContent).toContain('UTC (UTC+00:00)')
+    expect(container!.textContent).toContain('Current: UTC+00:00 · UTC')
   })
 })

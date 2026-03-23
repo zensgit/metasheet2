@@ -99,6 +99,9 @@
                 </option>
               </optgroup>
             </select>
+            <small class="attendance__field-hint">
+              {{ tr('Current', '当前') }}: {{ ruleBuilderTimezoneStatusLabel || '--' }}
+            </small>
           </label>
           <label class="attendance__field" for="attendance-rule-builder-start">
             <span>{{ tr('Work start time', '上班时间') }}</span>
@@ -695,6 +698,9 @@
             </option>
           </optgroup>
         </select>
+        <small class="attendance__field-hint">
+          {{ tr('Current', '当前') }}: {{ attendanceGroupTimezoneStatusLabel || '--' }}
+        </small>
       </label>
       <label class="attendance__field" for="attendance-group-rule-set">
         <span>{{ tr('Rule set', '规则集') }}</span>
@@ -860,6 +866,7 @@ import AttendanceUserPickerField from './AttendanceUserPickerField.vue'
 import {
   buildTimezoneOptionGroups,
   formatTimezoneOptionLabel,
+  formatTimezoneStatusLabel,
 } from './attendanceTimezones'
 
 type Translate = (en: string, zh: string) => string
@@ -1005,6 +1012,7 @@ const formatDateTime = props.formatDateTime
 const attendanceGroupEditingId = props.rules.attendanceGroupEditingId
 const attendanceGroupForm = props.rules.attendanceGroupForm
 const attendanceGroupTimezoneGroups = computed(() => buildTimezoneOptionGroups(attendanceGroupForm.timezone))
+const attendanceGroupTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(attendanceGroupForm.timezone))
 const attendanceGroupLoading = props.rules.attendanceGroupLoading
 const attendanceGroupMemberGroupId = props.rules.attendanceGroupMemberGroupId
 const attendanceGroupMemberLoading = props.rules.attendanceGroupMemberLoading
@@ -1060,6 +1068,7 @@ const ruleBuilderSource = props.rules.ruleBuilderSource ?? localRuleBuilderSourc
 const ruleBuilderTimezone = props.rules.ruleBuilderTimezone ?? localRuleBuilderTimezone
 const ruleBuilderTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(ruleBuilderTimezone.value))
 const ruleBuilderTimezoneLabel = computed(() => formatTimezoneOptionLabel(ruleBuilderTimezone.value))
+const ruleBuilderTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(ruleBuilderTimezone.value))
 const ruleBuilderWorkStartTime = props.rules.ruleBuilderWorkStartTime ?? localRuleBuilderWorkStartTime
 const ruleBuilderWorkEndTime = props.rules.ruleBuilderWorkEndTime ?? localRuleBuilderWorkEndTime
 const ruleBuilderLateGraceMinutes = props.rules.ruleBuilderLateGraceMinutes ?? localRuleBuilderLateGraceMinutes

@@ -226,6 +226,8 @@ describe('AttendanceImportWorkflowSection', () => {
     expect(importTimezone!.selectedOptions[0]?.textContent).toContain('Asia/Shanghai (UTC+08:00)')
     expect(Array.from(importTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Common timezones')
     expect(Array.from(importGroupTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Asia')
+    expect(container!.textContent).toContain('Current: UTC+08:00 · Asia/Shanghai')
+    expect(container!.textContent).toContain('Current effective timezone: UTC+08:00 · Asia/Shanghai')
   })
 
   it('shows manual-plan fallbacks when mapping, user map, and group sync are unset', async () => {
@@ -264,5 +266,6 @@ describe('AttendanceImportWorkflowSection', () => {
     expect(container!.textContent).toContain('Mapping profile: manual payload only')
     expect(container!.textContent).toContain('User map: not configured')
     expect(container!.textContent).toContain('Group sync: disabled')
+    expect(container!.textContent).toContain('Current effective timezone: Use import timezone (UTC+08:00 · Asia/Shanghai)')
   })
 })

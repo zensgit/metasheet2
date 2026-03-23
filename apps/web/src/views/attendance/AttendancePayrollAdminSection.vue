@@ -35,6 +35,9 @@
             </option>
           </optgroup>
         </select>
+        <small class="attendance__field-hint">
+          {{ tr('Current', '当前') }}: {{ payrollTemplateTimezoneStatusLabel || '--' }}
+        </small>
       </label>
       <label class="attendance__field" for="attendance-payroll-template-start">
         <span>{{ tr('Start day', '起始日') }}</span>
@@ -169,6 +172,9 @@
             {{ item.name }}
           </option>
         </select>
+        <small class="attendance__field-hint">
+          {{ payrollCycleTemplateTimezoneHint }}
+        </small>
       </label>
       <label class="attendance__field" for="attendance-payroll-cycle-name">
         <span>{{ tr('Name', '名称') }}</span>
@@ -256,6 +262,9 @@
               {{ item.name }}
             </option>
           </select>
+          <small class="attendance__field-hint">
+            {{ payrollCycleGenerateTimezoneHint }}
+          </small>
         </label>
         <label class="attendance__field" for="attendance-payroll-cycle-gen-anchor">
           <span>{{ tr('Anchor date', '锚点日期') }}</span>
@@ -392,6 +401,7 @@ import type {
 import {
   buildTimezoneOptionGroups,
   formatTimezoneOptionLabel,
+  formatTimezoneStatusLabel,
 } from './attendanceTimezones'
 
 type Translate = (en: string, zh: string) => string
@@ -481,6 +491,7 @@ const payrollTemplateForm = props.payroll.payrollTemplateForm
 const payrollCycleForm = props.payroll.payrollCycleForm
 const payrollCycleGenerateForm = props.payroll.payrollCycleGenerateForm
 const payrollTemplateTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(payrollTemplateForm.timezone))
+const payrollTemplateTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(payrollTemplateForm.timezone))
 const payrollTemplateName = props.payroll.payrollTemplateName
 const resetPayrollTemplateForm = () => props.payroll.resetPayrollTemplateForm()
 const editPayrollTemplate = (item: AttendancePayrollTemplate) => props.payroll.editPayrollTemplate(item)
@@ -496,6 +507,32 @@ const savePayrollCycle = () => props.payroll.savePayrollCycle()
 const deletePayrollCycle = (id: string) => props.payroll.deletePayrollCycle(id)
 const loadPayrollCycleSummary = () => props.payroll.loadPayrollCycleSummary()
 const exportPayrollCycleSummary = () => props.payroll.exportPayrollCycleSummary()
+
+function resolvePayrollTemplateTimezoneContext(templateId: string, emptyMode: 'manual' | 'default'): string {
+  const normalizedTemplateId = templateId.trim()
+  if (!normalizedTemplateId) {
+    if (emptyMode === 'manual') {
+      return tr('Manual', '手工')
+    }
+    const defaultTemplate = payrollTemplates.value.find(item => item.isDefault)
+    if (!defaultTemplate) {
+      return tr('Default template not found', '未找到默认模板')
+    }
+    return `${defaultTemplate.name} (${formatTimezoneStatusLabel(defaultTemplate.timezone)})`
+  }
+
+  const template = payrollTemplates.value.find(item => item.id === normalizedTemplateId)
+  if (!template) return normalizedTemplateId
+  return `${template.name} (${formatTimezoneStatusLabel(template.timezone)})`
+}
+
+const payrollCycleTemplateTimezoneHint = computed(() => (
+  `${tr('Cycle template timezone', '周期模板时区')}: ${resolvePayrollTemplateTimezoneContext(payrollCycleForm.templateId, 'manual')}`
+))
+
+const payrollCycleGenerateTimezoneHint = computed(() => (
+  `${tr('Generate timezone context', '生成时区上下文')}: ${resolvePayrollTemplateTimezoneContext(payrollCycleGenerateForm.templateId, 'default')}`
+))
 </script>
 
 <style scoped>

@@ -120,7 +120,13 @@ describe('useAttendanceAdminPayroll', () => {
     })
     expect(payroll.payrollTemplateForm.name).toBe('')
     expect(payroll.payrollTemplates.value[0]?.id).toBe('tpl-2')
-    expect(options.setStatus).toHaveBeenCalledWith('Payroll template saved.')
+    expect(options.setStatus).toHaveBeenCalledWith(
+      'Payroll template saved.',
+      'info',
+      expect.objectContaining({
+        hint: expect.stringContaining('Template timezone context: UTC+00:00 · UTC'),
+      }),
+    )
   })
 
   it('requires a payroll template name before saving', async () => {
@@ -168,7 +174,13 @@ describe('useAttendanceAdminPayroll', () => {
 
     expect(payroll.payrollCycleGenerateResult.value).toEqual({ created: 2, skipped: 1 })
     expect(payroll.payrollCycles.value).toHaveLength(1)
-    expect(options.setStatus).toHaveBeenCalledWith('Payroll cycles generated.')
+    expect(options.setStatus).toHaveBeenCalledWith(
+      'Payroll cycles generated.',
+      'info',
+      expect.objectContaining({
+        hint: expect.stringContaining('Generate timezone context:'),
+      }),
+    )
   })
 
   it('loads payroll summary and exports it through the injected downloader', async () => {

@@ -146,6 +146,9 @@
             </option>
           </optgroup>
         </select>
+        <small class="attendance__field-hint">
+          {{ tr('Current', '当前') }}: {{ holidaySyncTimezoneStatusLabel || '--' }}
+        </small>
       </label>
       <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-index">
         <span>{{ tr('Append day index', '追加节假日序号') }}</span>
@@ -188,7 +191,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch, type Ref } from 'vue'
-import { buildTimezoneOptionGroups } from './attendanceTimezones'
+import { buildTimezoneOptionGroups, formatTimezoneStatusLabel } from './attendanceTimezones'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -266,6 +269,7 @@ const holidaySyncLoading = props.config.holidaySyncLoading
 const saveSettings = () => props.config.saveSettings()
 const settingsForm = props.config.settingsForm
 const holidaySyncTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(settingsForm.holidaySyncAutoTimezone))
+const holidaySyncTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(settingsForm.holidaySyncAutoTimezone))
 const settingsLoading = props.config.settingsLoading
 const syncHolidays = () => props.config.syncHolidays()
 const syncHolidaysForYears = (years: number[]) => props.config.syncHolidaysForYears(years)

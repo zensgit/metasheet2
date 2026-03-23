@@ -145,6 +145,14 @@ export function formatTimezoneOptionLabel(timezone?: string | null, date = new D
   return offsetLabel ? `${normalized} (${offsetLabel})` : normalized
 }
 
+export function formatTimezoneStatusLabel(timezone?: string | null, date = new Date()): string {
+  const normalized = normalizeTimezoneValue(timezone)
+  if (!normalized) return ''
+
+  const offsetLabel = formatTimezoneOffsetLabel(normalized, date)
+  return offsetLabel ? `${offsetLabel} · ${normalized}` : normalized
+}
+
 export function buildTimezoneOptionEntries(currentValue?: string | null): TimezoneOptionEntry[] {
   return buildTimezoneOptions(currentValue).map((value) => ({
     value,

@@ -4,6 +4,7 @@ import {
   buildTimezoneOptionGroups,
   formatTimezoneOffsetLabel,
   formatTimezoneOptionLabel,
+  formatTimezoneStatusLabel,
 } from '../src/views/attendance/attendanceTimezones'
 
 describe('attendanceTimezones', () => {
@@ -14,6 +15,7 @@ describe('attendanceTimezones', () => {
 
   it('builds timezone labels with UTC offsets', () => {
     expect(formatTimezoneOptionLabel('Asia/Shanghai')).toBe('Asia/Shanghai (UTC+08:00)')
+    expect(formatTimezoneStatusLabel('Asia/Shanghai')).toBe('UTC+08:00 · Asia/Shanghai')
 
     const options = buildTimezoneOptionEntries('Asia/Shanghai')
     const selected = options.find((item) => item.value === 'Asia/Shanghai')

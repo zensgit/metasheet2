@@ -260,6 +260,9 @@
             </option>
           </optgroup>
         </select>
+        <small class="attendance__field-hint">
+          {{ tr('Current effective timezone', '当前生效时区') }}: {{ importGroupTimezoneStatusLabel }}
+        </small>
       </label>
       <label class="attendance__field" for="attendance-import-user">
         <span>{{ tr('User ID', '用户 ID') }}</span>
@@ -288,6 +291,9 @@
             </option>
           </optgroup>
         </select>
+        <small class="attendance__field-hint">
+          {{ tr('Current', '当前') }}: {{ importTimezoneStatusLabel || '--' }}
+        </small>
       </label>
       <label class="attendance__field attendance__field--full" for="attendance-import-payload">
         <span>{{ tr('Payload (JSON)', '负载（JSON）') }}</span>
@@ -485,6 +491,7 @@ import { computed, type ComputedRef, type Ref } from 'vue'
 import {
   buildTimezoneOptionGroups,
   formatTimezoneOptionLabel,
+  formatTimezoneStatusLabel,
 } from './attendanceTimezones'
 import type {
   AttendanceImportCommitLane,
@@ -602,6 +609,15 @@ const importGroupRuleSetId = props.workflow.importGroupRuleSetId
 const importGroupTimezone = props.workflow.importGroupTimezone
 const importTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importForm.timezone))
 const importGroupTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importGroupTimezone.value))
+const importTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(importForm.timezone))
+const importGroupTimezoneStatusLabel = computed(() => {
+  const timezone = importGroupTimezone.value.trim()
+  if (timezone) return formatTimezoneStatusLabel(timezone)
+  return tr(
+    `Use import timezone (${importTimezoneStatusLabel.value || '--'})`,
+    `沿用导入时区（${importTimezoneStatusLabel.value || '--'}）`,
+  )
+})
 const importScalabilityHint = props.workflow.importScalabilityHint
 const importPreviewTask = props.workflow.importPreviewTask
 const importAsyncJob = props.workflow.importAsyncJob

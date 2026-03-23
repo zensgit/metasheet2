@@ -368,6 +368,7 @@ import { useAttendanceAdminImportWorkflow } from './attendance/useAttendanceAdmi
 import AttendanceLeavePoliciesSection from './attendance/AttendanceLeavePoliciesSection.vue'
 import { useAttendanceAdminLeavePolicies } from './attendance/useAttendanceAdminLeavePolicies'
 import AttendancePayrollAdminSection from './attendance/AttendancePayrollAdminSection.vue'
+import { formatTimezoneStatusLabel } from './attendance/attendanceTimezones'
 import { useAttendanceAdminPayroll } from './attendance/useAttendanceAdminPayroll'
 import { useAttendanceAdminProvisioning } from './attendance/useAttendanceAdminProvisioning'
 import AttendanceRulesAndGroupsSection from './attendance/AttendanceRulesAndGroupsSection.vue'
@@ -1311,6 +1312,27 @@ const payrollSectionBindings = {
   savePayrollCycle,
   savePayrollTemplate,
 }
+
+const importTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(importForm.timezone))
+const importGroupTimezoneStatusLabel = computed(() => {
+  const timezone = importGroupTimezone.value.trim()
+  if (timezone) return formatTimezoneStatusLabel(timezone)
+  return tr(
+    `Use import timezone (${importTimezoneStatusLabel.value || '--'})`,
+    `沿用导入时区（${importTimezoneStatusLabel.value || '--'}）`,
+  )
+})
+const importPreviewTimezoneHint = computed(() => (
+  `${tr('Preview timezone', '预览时区')}: ${importTimezoneStatusLabel.value || '--'} · ${tr('Group timezone', '分组时区')}: ${importGroupTimezoneStatusLabel.value}`
+))
+
+function appendStatusHint(existingHint: string | undefined, extraHint: string): string {
+  const normalizedExisting = typeof existingHint === 'string' ? existingHint.trim() : ''
+  const normalizedExtra = extraHint.trim()
+  if (!normalizedExisting) return normalizedExtra
+  if (!normalizedExtra) return normalizedExisting
+  return `${normalizedExisting} ${normalizedExtra}`
+}
 const leavePoliciesSectionBindings = {
   approvalFlowEditingId,
   approvalFlowForm,
@@ -2051,8 +2073,12 @@ function classifyStatusError(
 function setStatusFromError(error: unknown, fallbackMessage: string, context: AttendanceStatusContext) {
   const { message, meta } = classifyStatusError(error, fallbackMessage, context)
   const sticky = context === 'import-preview' || context === 'import-run'
+  const hint = (context === 'import-preview' || context === 'import-run')
+    ? appendStatusHint(meta?.hint, importPreviewTimezoneHint.value)
+    : meta?.hint
   setStatus(message || fallbackMessage, 'error', {
     ...(meta || {}),
+    hint,
     context,
     sticky,
   })
@@ -2118,7 +2144,7 @@ async function runStatusAction() {
 
 function setStatus(message: string, kind: 'info' | 'error' = 'info', meta: AttendanceStatusMeta | null = null) {
   statusKind.value = kind
-  statusMeta.value = kind === 'error' ? meta : null
+  statusMeta.value = meta
   if (statusMessage.value === message && message) {
     statusMessage.value = ''
     void nextTick(() => {

@@ -1,5 +1,6 @@
 import { computed, reactive, ref, watch, type Ref } from 'vue'
 import { apiFetch as baseApiFetch } from '../../utils/api'
+import { formatTimezoneStatusLabel } from './attendanceTimezones'
 
 type ApiFetchFn = typeof baseApiFetch
 type Translate = (en: string, zh: string) => string
@@ -943,6 +944,18 @@ export function useAttendanceAdminImportWorkflow({
   const importPreviewTask = ref<AttendanceImportPreviewTask | null>(null)
   const importAsyncJob = ref<AttendanceImportJob | null>(null)
   const importAsyncPolling = ref(false)
+  const importTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(importForm.timezone))
+  const importGroupTimezoneStatusLabel = computed(() => {
+    const timezone = importGroupTimezone.value.trim()
+    if (timezone) return formatTimezoneStatusLabel(timezone)
+    return tr(
+      `Use import timezone (${importTimezoneStatusLabel.value || '--'})`,
+      `沿用导入时区（${importTimezoneStatusLabel.value || '--'}）`,
+    )
+  })
+  const importPreviewTimezoneHint = computed(() => (
+    `${tr('Preview timezone', '预览时区')}: ${importTimezoneStatusLabel.value || '--'} · ${tr('Group timezone', '分组时区')}: ${importGroupTimezoneStatusLabel.value}`
+  ))
 
   const selectedImportProfile = computed(() => {
     if (!importProfileId.value) return null
@@ -1072,6 +1085,20 @@ export function useAttendanceAdminImportWorkflow({
     meta?: AttendanceImportStatusMeta,
   ) {
     setStatus?.(message, kind, meta)
+  }
+
+  function withImportTimezoneHint(
+    context: AttendanceImportStatusContext,
+    meta: AttendanceImportStatusMeta = {},
+  ): AttendanceImportStatusMeta {
+    const hint = typeof meta.hint === 'string' && meta.hint.trim().length > 0
+      ? `${meta.hint.trim()} ${importPreviewTimezoneHint.value}`
+      : importPreviewTimezoneHint.value
+    return {
+      ...meta,
+      context,
+      hint,
+    }
   }
 
   function reportError(
@@ -1707,7 +1734,7 @@ export function useAttendanceAdminImportWorkflow({
     const suffix = invalidCount || duplicateCount
       ? tr(` Invalid: ${invalidCount}. Duplicates: ${duplicateCount}.`, ` 无效：${invalidCount}。重复：${duplicateCount}。`)
       : ''
-    reportStatus(`${message}${suffix}`)
+    reportStatus(`${message}${suffix}`, 'info', withImportTimezoneHint('import-preview'))
 
     importPreviewTask.value = {
       mode: 'chunked',
@@ -1779,10 +1806,14 @@ export function useAttendanceAdminImportWorkflow({
       const job = await fetchImportJob(jobId)
       importAsyncJob.value = job
       if (!options.silent) {
-        reportStatus(tr(
-          `Import job ${jobId.slice(0, 8)} reloaded (${job.status}).`,
-          `导入任务 ${jobId.slice(0, 8)} 已重载（${job.status}）。`
-        ))
+        reportStatus(
+          tr(
+            `Import job ${jobId.slice(0, 8)} reloaded (${job.status}).`,
+            `导入任务 ${jobId.slice(0, 8)} 已重载（${job.status}）。`,
+          ),
+          'info',
+          withImportTimezoneHint('import-run'),
+        )
       }
     } catch (error) {
       if (!options.silent) {
@@ -1809,7 +1840,11 @@ export function useAttendanceAdminImportWorkflow({
           ]
           importCsvWarnings.value = Array.from(new Set(previewWarnings))
         }
-        reportStatus(tr(`Preview job completed (${jobId.slice(0, 8)}).`, `预览任务完成（${jobId.slice(0, 8)}）。`))
+        reportStatus(
+          tr(`Preview job completed (${jobId.slice(0, 8)}).`, `预览任务完成（${jobId.slice(0, 8)}）。`),
+          'info',
+          withImportTimezoneHint('import-preview'),
+        )
         return
       }
 
@@ -1823,15 +1858,23 @@ export function useAttendanceAdminImportWorkflow({
         elapsedMs: finalJob.elapsedMs,
       })
       if (total && imported !== total) {
-        reportStatus(tr(
-          `Imported ${imported}/${total} rows (async job).${perfSuffix.en}`,
-          `已导入 ${imported}/${total} 行（异步任务）。${perfSuffix.zh}`,
-        ))
+        reportStatus(
+          tr(
+            `Imported ${imported}/${total} rows (async job).${perfSuffix.en}`,
+            `已导入 ${imported}/${total} 行（异步任务）。${perfSuffix.zh}`,
+          ),
+          'info',
+          withImportTimezoneHint('import-run'),
+        )
       } else {
-        reportStatus(tr(
-          `Imported ${imported} rows (async job).${perfSuffix.en}`,
-          `已导入 ${imported} 行（异步任务）。${perfSuffix.zh}`,
-        ))
+        reportStatus(
+          tr(
+            `Imported ${imported} rows (async job).${perfSuffix.en}`,
+            `已导入 ${imported} 行（异步任务）。${perfSuffix.zh}`,
+          ),
+          'info',
+          withImportTimezoneHint('import-run'),
+        )
       }
       await loadRecords()
       await loadImportBatches({ orgId: normalizedOrgId() })
@@ -1901,7 +1944,11 @@ export function useAttendanceAdminImportWorkflow({
 
     adminForbiddenRef.value = false
     importAsyncJob.value = job
-    reportStatus(tr(`Preview job queued (${job.status}).`, `预览任务已排队（${job.status}）。`))
+    reportStatus(
+      tr(`Preview job queued (${job.status}).`, `预览任务已排队（${job.status}）。`),
+      'info',
+      withImportTimezoneHint('import-preview'),
+    )
 
     const finalJob = await pollImportJob(job.id)
     const previewData = finalJob.preview && typeof finalJob.preview === 'object' ? finalJob.preview : null
@@ -1929,7 +1976,7 @@ export function useAttendanceAdminImportWorkflow({
     const suffix = invalidCount || dupCount
       ? tr(` Invalid: ${invalidCount}. Duplicates: ${dupCount}.`, ` 无效：${invalidCount}。重复：${dupCount}。`)
       : ''
-    reportStatus(`${baseMsg}${suffix}`)
+    reportStatus(`${baseMsg}${suffix}`, 'info', withImportTimezoneHint('import-preview'))
 
     importPreviewTask.value = {
       mode: 'single',
@@ -1959,11 +2006,10 @@ export function useAttendanceAdminImportWorkflow({
       reportStatus(
         tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'),
         'error',
-        {
-          context: 'import-preview',
+        withImportTimezoneHint('import-preview', {
           hint: tr('Fix JSON syntax in payload and retry preview.', '请修复载荷 JSON 语法后重试预览。'),
           action: 'retry-preview-import',
-        },
+        }),
       )
       return
     }
@@ -2033,7 +2079,7 @@ export function useAttendanceAdminImportWorkflow({
       const suffix = invalidCount || dupCount
         ? tr(` Invalid: ${invalidCount}. Duplicates: ${dupCount}.`, ` 无效：${invalidCount}。重复：${dupCount}。`)
         : ''
-      reportStatus(`${baseMsg}${suffix}`)
+      reportStatus(`${baseMsg}${suffix}`, 'info', withImportTimezoneHint('import-preview'))
       importPreviewTask.value = {
         mode: 'single',
         status: 'completed',
@@ -2068,11 +2114,10 @@ export function useAttendanceAdminImportWorkflow({
       reportStatus(
         tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'),
         'error',
-        {
-          context: 'import-run',
+        withImportTimezoneHint('import-run', {
           hint: tr('Fix JSON syntax in payload and retry import.', '请修复载荷 JSON 语法后重试导入。'),
           action: 'retry-run-import',
-        },
+        }),
       )
       return
     }
@@ -2122,7 +2167,11 @@ export function useAttendanceAdminImportWorkflow({
           }
           adminForbiddenRef.value = false
           importAsyncJob.value = job
-          reportStatus(tr(`Import job queued (${job.status}).`, `导入任务已排队（${job.status}）。`))
+          reportStatus(
+            tr(`Import job queued (${job.status}).`, `导入任务已排队（${job.status}）。`),
+            'info',
+            withImportTimezoneHint('import-run'),
+          )
 
           const finalJob = await pollImportJob(job.id)
           const imported = Number(finalJob.progress ?? 0)
@@ -2134,15 +2183,23 @@ export function useAttendanceAdminImportWorkflow({
             failedRows: finalJob.failedRows,
             elapsedMs: finalJob.elapsedMs,
           })
-          reportStatus(tr(
-            `Imported ${imported} rows (async job).${perfSuffix.en}`,
-            `已导入 ${imported} 行（异步任务）。${perfSuffix.zh}`,
-          ))
+          reportStatus(
+            tr(
+              `Imported ${imported} rows (async job).${perfSuffix.en}`,
+              `已导入 ${imported} 行（异步任务）。${perfSuffix.zh}`,
+            ),
+            'info',
+            withImportTimezoneHint('import-run'),
+          )
           if (total && imported !== total) {
-            reportStatus(tr(
-              `Imported ${imported}/${total} rows (async job).${perfSuffix.en}`,
-              `已导入 ${imported}/${total} 行（异步任务）。${perfSuffix.zh}`,
-            ))
+            reportStatus(
+              tr(
+                `Imported ${imported}/${total} rows (async job).${perfSuffix.en}`,
+                `已导入 ${imported}/${total} 行（异步任务）。${perfSuffix.zh}`,
+              ),
+              'info',
+              withImportTimezoneHint('import-run'),
+            )
           }
 
           await loadRecords()
@@ -2214,12 +2271,20 @@ export function useAttendanceAdminImportWorkflow({
       const groupCreated = data.data?.meta?.groupCreated ?? 0
       const groupMembersAdded = data.data?.meta?.groupMembersAdded ?? 0
       if (groupCreated || groupMembersAdded) {
-        reportStatus(tr(
-          `Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.${perfSuffix.en}`,
-          `已导入 ${count} 行。新建分组：${groupCreated}。新增成员：${groupMembersAdded}。${perfSuffix.zh}`,
-        ))
+        reportStatus(
+          tr(
+            `Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.${perfSuffix.en}`,
+            `已导入 ${count} 行。新建分组：${groupCreated}。新增成员：${groupMembersAdded}。${perfSuffix.zh}`,
+          ),
+          'info',
+          withImportTimezoneHint('import-run'),
+        )
       } else {
-        reportStatus(tr(`Imported ${count} rows.${perfSuffix.en}`, `已导入 ${count} 行。${perfSuffix.zh}`))
+        reportStatus(
+          tr(`Imported ${count} rows.${perfSuffix.en}`, `已导入 ${count} 行。${perfSuffix.zh}`),
+          'info',
+          withImportTimezoneHint('import-run'),
+        )
       }
       await loadRecords()
       await loadImportBatches({ orgId: normalizedOrgId() })

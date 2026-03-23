@@ -547,7 +547,7 @@ describe('useAttendanceAdminImportWorkflow', () => {
       invoke: async (workflow: ReturnType<typeof useAttendanceAdminImportWorkflow>) => workflow.previewImport(),
       expectedMeta: {
         context: 'import-preview',
-        hint: 'Fix JSON syntax in payload and retry preview.',
+        hintPrefix: 'Fix JSON syntax in payload and retry preview.',
         action: 'retry-preview-import',
       },
     },
@@ -556,7 +556,7 @@ describe('useAttendanceAdminImportWorkflow', () => {
       invoke: async (workflow: ReturnType<typeof useAttendanceAdminImportWorkflow>) => workflow.runImport(),
       expectedMeta: {
         context: 'import-run',
-        hint: 'Fix JSON syntax in payload and retry import.',
+        hintPrefix: 'Fix JSON syntax in payload and retry import.',
         action: 'retry-run-import',
       },
     },
@@ -571,8 +571,15 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(setStatus).toHaveBeenCalledWith(
       'Invalid JSON payload for import.',
       'error',
-      expectedMeta,
+      expect.objectContaining({
+        context: expectedMeta.context,
+        action: expectedMeta.action,
+        hint: expect.stringContaining(expectedMeta.hintPrefix),
+      }),
     )
+    const statusMeta = setStatus.mock.calls[0]?.[2]
+    expect(statusMeta?.hint).toContain('Preview timezone:')
+    expect(statusMeta?.hint).toContain('Group timezone:')
   })
 
   it('refreshes records and batches after a successful import commit', async () => {
@@ -619,6 +626,14 @@ describe('useAttendanceAdminImportWorkflow', () => {
     expect(loadImportBatches).toHaveBeenCalledWith({ orgId: 'org-1' })
     expect(workflow.importCommitToken.value).toBe('')
     expect(workflow.importCommitTokenExpiresAt.value).toBe('')
-    expect(setStatus).toHaveBeenCalledWith('Imported 2 rows. (processed=2, failed=0, elapsedMs=0)', 'info', undefined)
+    expect(setStatus).toHaveBeenCalledWith(
+      'Imported 2 rows. (processed=2, failed=0, elapsedMs=0)',
+      'info',
+      expect.objectContaining({
+        context: 'import-run',
+        hint: expect.stringContaining('Preview timezone:'),
+      }),
+    )
+    expect(setStatus.mock.calls.at(-1)?.[2]?.hint).toContain('Group timezone:')
   })
 })

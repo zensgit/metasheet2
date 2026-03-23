@@ -24,6 +24,9 @@
             </option>
           </optgroup>
         </select>
+        <small class="attendance__field-hint">
+          {{ tr('Current', '当前') }}: {{ ruleTimezoneStatusLabel || '--' }}
+        </small>
       </label>
       <label class="attendance__field" for="attendance-rule-start">
         <span>{{ tr('Work start', '上班时间') }}</span>
@@ -88,6 +91,9 @@
             </option>
           </optgroup>
         </select>
+        <small class="attendance__field-hint">
+          {{ tr('Current', '当前') }}: {{ rotationRuleTimezoneStatusLabel || '--' }}
+        </small>
       </label>
       <label class="attendance__field attendance__field--full" for="attendance-rotation-sequence">
         <span>{{ tr('Shift sequence (IDs)', '班次序列（ID）') }}</span>
@@ -321,6 +327,9 @@
             </option>
           </optgroup>
         </select>
+        <small class="attendance__field-hint">
+          {{ tr('Current', '当前') }}: {{ shiftTimezoneStatusLabel || '--' }}
+        </small>
       </label>
       <label class="attendance__field" for="attendance-shift-start">
         <span>{{ tr('Work start', '上班开始') }}</span>
@@ -541,6 +550,7 @@ import AttendanceUserPickerField from './AttendanceUserPickerField.vue'
 import {
   buildTimezoneOptionGroups,
   formatTimezoneOptionLabel,
+  formatTimezoneStatusLabel,
 } from './attendanceTimezones'
 
 type Translate = (en: string, zh: string) => string
@@ -648,6 +658,7 @@ const tr = props.tr
 const loadRule = () => props.scheduling.loadRule()
 const ruleForm = props.scheduling.ruleForm
 const ruleTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(ruleForm.timezone))
+const ruleTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(ruleForm.timezone))
 const ruleLoading = props.scheduling.ruleLoading
 const saveRule = () => props.scheduling.saveRule()
 const rotationRules = props.scheduling.rotationRules
@@ -656,6 +667,7 @@ const rotationRuleSaving = props.scheduling.rotationRuleSaving
 const rotationRuleEditingId = props.scheduling.rotationRuleEditingId
 const rotationRuleForm = props.scheduling.rotationRuleForm
 const rotationRuleTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(rotationRuleForm.timezone))
+const rotationRuleTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(rotationRuleForm.timezone))
 const resetRotationRuleForm = () => props.scheduling.resetRotationRuleForm()
 const editRotationRule = (rule: AttendanceRotationRule) => props.scheduling.editRotationRule(rule)
 const loadRotationRules = () => props.scheduling.loadRotationRules()
@@ -677,6 +689,7 @@ const shiftSaving = props.scheduling.shiftSaving
 const shiftEditingId = props.scheduling.shiftEditingId
 const shiftForm = props.scheduling.shiftForm
 const shiftTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(shiftForm.timezone))
+const shiftTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(shiftForm.timezone))
 const resetShiftForm = () => props.scheduling.resetShiftForm()
 const editShift = (shift: AttendanceShift) => props.scheduling.editShift(shift)
 const loadShifts = () => props.scheduling.loadShifts()

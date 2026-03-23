@@ -454,5 +454,6 @@ describe('AttendanceRulesAndGroupsSection', () => {
     )
     expect(Array.from(attendanceGroupTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Asia')
     expect(container!.textContent).toContain('Asia/Shanghai (UTC+08:00)')
+    expect(container!.textContent).toContain('Current: UTC+08:00 · Asia/Shanghai')
   })
 })
