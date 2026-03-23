@@ -138,4 +138,33 @@ describe('usePlmCollaborativePermissions', () => {
       permissions: {},
     })).toBe(false)
   })
+
+  it('keeps apply available when the current control target comes from a canonical follow-up owner', () => {
+    const selectedEntry = ref({
+      canManage: true,
+      isArchived: false,
+      isDefault: false,
+      ownerUserId: 'owner-a',
+      permissions: {
+        canApply: true,
+      },
+    })
+
+    const model = usePlmCollaborativePermissions({
+      selectedEntry: computed(() => selectedEntry.value),
+      nameRef: ref(''),
+    })
+
+    expect(model.canApply.value).toBe(true)
+
+    selectedEntry.value = {
+      ...selectedEntry.value,
+      isArchived: true,
+      permissions: {
+        canApply: false,
+      },
+    }
+
+    expect(model.canApply.value).toBe(false)
+  })
 })

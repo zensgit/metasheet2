@@ -38,14 +38,13 @@ It resolves the actionable entry from:
 
 In `PlmAuditView.vue`:
 
-- keep `selectedAuditTeamView` for selector-driven `Apply`
 - add `canonicalAuditTeamViewManagementTarget`
 - drive generic management permissions from the canonical target
 - run generic management actions against the canonical target instead of the local selector
+- drive `Apply` from the canonical target as well, so follow-up/log routes do not lose it when the selector is cleared
 
 ## Expected Behavior
 
-- `Apply` still acts on the local selector
-- generic management controls act on the canonical owner
+- `Apply` and the generic management controls act on the canonical owner
 - when the selector drifts away from an applied route owner, `auditTeamViewManagementTargetLocked` still blocks management actions
 - when the selector is cleared by a log/follow-up route, the canonical follow-up owner still keeps the generic controls actionable

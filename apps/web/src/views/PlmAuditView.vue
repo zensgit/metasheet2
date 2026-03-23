@@ -855,9 +855,7 @@ import {
   buildPlmAuditTeamViewCollaborationSourceFocusIntent,
   findPlmAuditTeamViewCollaborationDraftView,
   findPlmAuditTeamViewCollaborationFollowupView,
-  prunePlmAuditTeamViewCollaborationDraftForRemovedViews,
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
-  prunePlmAuditTeamViewCollaborationFollowupForRemovedViews,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   shouldClearPlmAuditTeamViewCollaborationDraft,
@@ -878,7 +876,6 @@ import {
   buildPlmAuditTeamViewShareEntryNotice,
   findPlmAuditTeamViewShareEntryView,
   isPlmAuditSharedLinkEntry,
-  prunePlmAuditTeamViewShareEntryForRemovedViews,
   resolvePlmAuditTeamViewShareEntryActionTarget,
   resolvePlmAuditSharedEntryRouteSyncDecision,
   shouldKeepPlmAuditTeamViewShareEntry,
@@ -889,6 +886,10 @@ import {
   type PlmAuditTeamViewShareEntry,
   type PlmAuditTeamViewShareEntryActionKind,
 } from './plmAuditTeamViewShareEntry'
+import {
+  prunePlmAuditTransientOwnershipForRemovedViews,
+  resolvePlmAuditRemovedTeamViewIds,
+} from './plmAuditTeamViewOwnership'
 import {
   resolvePlmAuditCanonicalTeamViewManagementTarget,
   resolvePlmAuditCanonicalTeamViewManagementTargetId,
@@ -1095,7 +1096,7 @@ const auditSceneFilterHighlight = computed(() => buildPlmAuditSceneFilterHighlig
 const {
   canApply: canApplyAuditTeamView,
 } = usePlmCollaborativePermissions({
-  selectedEntry: selectedAuditTeamView,
+  selectedEntry: canonicalAuditTeamViewManagementTarget,
   nameRef: auditTeamViewName,
 })
 const {
@@ -1751,18 +1752,17 @@ function replaceAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
 }
 
 function pruneRemovedAuditTeamViewTransientState(viewIds: string[]) {
-  auditTeamViewCollaborationDraft.value = prunePlmAuditTeamViewCollaborationDraftForRemovedViews(
-    auditTeamViewCollaborationDraft.value,
+  const nextState = prunePlmAuditTransientOwnershipForRemovedViews(
+    {
+      collaborationDraft: auditTeamViewCollaborationDraft.value,
+      collaborationFollowup: auditTeamViewCollaborationFollowup.value,
+      shareEntry: auditTeamViewShareEntry.value,
+    },
     viewIds,
   )
-  auditTeamViewCollaborationFollowup.value = prunePlmAuditTeamViewCollaborationFollowupForRemovedViews(
-    auditTeamViewCollaborationFollowup.value,
-    viewIds,
-  )
-  auditTeamViewShareEntry.value = prunePlmAuditTeamViewShareEntryForRemovedViews(
-    auditTeamViewShareEntry.value,
-    viewIds,
-  )
+  auditTeamViewCollaborationDraft.value = nextState.collaborationDraft
+  auditTeamViewCollaborationFollowup.value = nextState.collaborationFollowup
+  auditTeamViewShareEntry.value = nextState.shareEntry
 }
 
 function removeAuditTeamViews(viewIds: string[]) {
@@ -1937,7 +1937,7 @@ async function saveAuditTeamView() {
 }
 
 async function applyAuditTeamView() {
-  const view = selectedAuditTeamView.value
+  const view = canonicalAuditTeamViewManagementTarget.value
   if (!view || !canApplyAuditTeamView.value) return
 
   await applyAuditTeamViewEntry(view)
@@ -2818,7 +2818,11 @@ function goToPage(nextPage: number) {
   })
 }
 
-watch(auditTeamViews, () => {
+watch(auditTeamViews, (views, previousViews) => {
+  const removedViewIds = resolvePlmAuditRemovedTeamViewIds(previousViews || [], views)
+  if (removedViewIds.length) {
+    pruneRemovedAuditTeamViewTransientState(removedViewIds)
+  }
   trimAuditTeamViewSelection()
 })
 

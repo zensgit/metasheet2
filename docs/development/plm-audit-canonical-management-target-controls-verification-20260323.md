@@ -16,6 +16,11 @@ Verify that generic team-view controls continue to target the canonical owner wh
 
 ### Existing behavior guardrails
 
+`apps/web/tests/usePlmCollaborativePermissions.spec.ts`
+
+- `canApply` stays available for a live canonical follow-up target
+- `canApply` drops once that target becomes non-applicable
+
 `apps/web/tests/plmAuditTeamViewCollaboration.spec.ts`
 
 - follow-up ownership and dismissal behavior still hold
@@ -23,10 +28,6 @@ Verify that generic team-view controls continue to target the canonical owner wh
 `apps/web/tests/plmAuditTeamViewShareEntry.spec.ts`
 
 - shared-entry ownership logic still resolves actions against the right entry
-
-`apps/web/tests/usePlmCollaborativePermissions.spec.ts`
-
-- permission derivation still honors explicit entry permissions and follow-up targets
 
 ## Commands
 
@@ -39,5 +40,5 @@ cd apps/web && pnpm exec vitest run tests/plm*.spec.ts tests/usePlm*.spec.ts
 ## Result
 
 - `type-check`: pass
-- focused Vitest: `4` files, `57` tests passed
-- full PLM/frontend Vitest: `45` files, `279` tests passed
+- focused Vitest: `4` files, `58` tests passed
+- full PLM/frontend Vitest: `46` files, `282` tests passed
