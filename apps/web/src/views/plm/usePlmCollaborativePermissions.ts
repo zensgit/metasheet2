@@ -30,6 +30,22 @@ function resolveCanManage(entry: CollaborativeEntry) {
   return Boolean(entry.canManage)
 }
 
+export function canSharePlmCollaborativeEntry(entry: CollaborativeEntry) {
+  if (!entry) return false
+  if (typeof entry.permissions?.canShare === 'boolean') {
+    return entry.permissions.canShare
+  }
+  return resolveCanManage(entry) && !entry.isArchived
+}
+
+export function canDuplicatePlmCollaborativeEntry(entry: CollaborativeEntry) {
+  if (!entry) return false
+  if (typeof entry.permissions?.canDuplicate === 'boolean') {
+    return entry.permissions.canDuplicate
+  }
+  return true
+}
+
 export function canSetDefaultPlmCollaborativeEntry(entry: CollaborativeEntry) {
   if (!entry) return false
   if (typeof entry.permissions?.canSetDefault === 'boolean') {
@@ -71,12 +87,7 @@ export function usePlmCollaborativePermissions<TEntry extends CollaborativeEntry
     return true
   })
   const canShare = computed(() => {
-    const entry = options.selectedEntry.value
-    if (!entry) return false
-    if (typeof entry.permissions?.canShare === 'boolean') {
-      return entry.permissions.canShare
-    }
-    return canManageSelectedEntry.value && !entry.isArchived
+    return canSharePlmCollaborativeEntry(options.selectedEntry.value)
   })
   const canDelete = computed(() => {
     const entry = options.selectedEntry.value

@@ -839,6 +839,7 @@ import {
   buildPlmAuditTeamViewCollaborationFollowupNotice,
   buildPlmAuditTeamViewCollaborationNotice,
   buildPlmAuditTeamViewCollaborationSourceFocusIntent,
+  findPlmAuditTeamViewCollaborationDraftView,
   findPlmAuditTeamViewCollaborationFollowupView,
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
@@ -858,6 +859,7 @@ import {
 import {
   buildPlmAuditSharedEntrySavedViewName,
   buildPlmAuditTeamViewShareEntryNotice,
+  findPlmAuditTeamViewShareEntryView,
   isPlmAuditSharedLinkEntry,
   resolvePlmAuditSharedEntryRouteSyncDecision,
   shouldKeepPlmAuditTeamViewShareEntry,
@@ -908,6 +910,8 @@ import {
 import { copyTextToClipboard } from './plm/plmClipboard'
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
 import {
+  canDuplicatePlmCollaborativeEntry,
+  canSharePlmCollaborativeEntry,
   canSetDefaultPlmCollaborativeEntry,
   usePlmCollaborativePermissions,
 } from './plm/usePlmCollaborativePermissions'
@@ -1058,8 +1062,16 @@ const {
   nameRef: auditTeamViewName,
   ownerUserIdRef: auditTeamViewOwnerUserId,
 })
+const auditTeamViewCollaborationDraftTarget = computed(() => findPlmAuditTeamViewCollaborationDraftView(
+  auditTeamViews.value,
+  auditTeamViewCollaborationDraft.value,
+))
+const auditTeamViewShareEntryTarget = computed(() => findPlmAuditTeamViewShareEntryView(
+  auditTeamViews.value,
+  auditTeamViewShareEntry.value,
+))
 const auditTeamViewCollaborationNotice = computed(() => {
-  const view = selectedAuditTeamView.value
+  const view = auditTeamViewCollaborationDraftTarget.value
   if (!view) return null
   if (auditTeamViewCollaborationFollowup.value?.teamViewId === view.id) return null
   if (auditTeamViewShareEntry.value?.teamViewId === view.id) return null
@@ -1067,21 +1079,21 @@ const auditTeamViewCollaborationNotice = computed(() => {
     view,
     auditTeamViewCollaborationDraft.value,
     {
-      canShare: canShareAuditTeamView.value,
-      canSetDefault: canSetAuditTeamViewDefault.value,
+      canShare: canSharePlmCollaborativeEntry(view),
+      canSetDefault: canSetDefaultPlmCollaborativeEntry(view),
     },
     tr,
   )
 })
 const auditTeamViewShareEntryNotice = computed(() => {
-  const view = selectedAuditTeamView.value
+  const view = auditTeamViewShareEntryTarget.value
   if (!view) return null
   return buildPlmAuditTeamViewShareEntryNotice(
     view,
     auditTeamViewShareEntry.value,
     {
-      canDuplicate: canDuplicateAuditTeamView.value,
-      canSetDefault: canSetAuditTeamViewDefault.value,
+      canDuplicate: canDuplicatePlmCollaborativeEntry(view),
+      canSetDefault: canSetDefaultPlmCollaborativeEntry(view),
     },
     tr,
   )
@@ -2175,8 +2187,6 @@ async function clearAuditTeamViewDefault() {
 }
 
 async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewCollaborationActionKind) {
-  const view = selectedAuditTeamView.value
-  if (!view) return
   const source = auditTeamViewCollaborationDraft.value?.source
   const sourceSavedViewId = auditTeamViewCollaborationDraft.value?.sourceSavedViewId
 
@@ -2184,6 +2194,9 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
     dismissAuditTeamViewCollaborationDraft()
     return
   }
+
+  const view = auditTeamViewCollaborationDraftTarget.value || selectedAuditTeamView.value
+  if (!view) return
 
   if (actionKind === 'share') {
     const ok = await shareAuditTeamViewEntry(view, source, sourceSavedViewId)
@@ -2267,7 +2280,7 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
     return
   }
 
-  const view = selectedAuditTeamView.value
+  const view = auditTeamViewShareEntryTarget.value || selectedAuditTeamView.value
   if (!view) return
 
   if (actionKind === 'save-local') {

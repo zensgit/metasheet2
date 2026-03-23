@@ -157,6 +157,14 @@ export function findPlmAuditTeamViewCollaborationFollowupView<T extends { id: st
   return views.find((view) => view.id === followup.teamViewId) || null
 }
 
+export function findPlmAuditTeamViewCollaborationDraftView<T extends { id: string }>(
+  views: readonly T[],
+  draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null,
+): T | null {
+  if (!draft) return null
+  return views.find((view) => view.id === draft.teamViewId) || null
+}
+
 export function buildPlmAuditTeamViewCollaborationSourceFocusIntent(
   followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'source' | 'sourceAnchorId' | 'sourceSavedViewId'>,
   view?: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'isDefault' | 'lastDefaultSetAt'> | null,

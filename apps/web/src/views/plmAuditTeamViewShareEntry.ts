@@ -140,6 +140,14 @@ export function shouldKeepPlmAuditTeamViewShareEntry(
   return entry?.teamViewId === teamViewId
 }
 
+export function findPlmAuditTeamViewShareEntryView<T extends { id: string }>(
+  views: readonly T[],
+  entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
+): T | null {
+  if (!entry) return null
+  return views.find((view) => view.id === entry.teamViewId) || null
+}
+
 export function shouldTakeOverPlmAuditSharedEntryOnLocalSave(
   entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
   selectedTeamViewId: string,

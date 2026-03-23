@@ -9,6 +9,7 @@ import {
   buildPlmAuditTeamViewCollaborationFollowupNotice,
   buildPlmAuditTeamViewCollaborationNotice,
   buildPlmAuditTeamViewCollaborationSourceFocusIntent,
+  findPlmAuditTeamViewCollaborationDraftView,
   findPlmAuditTeamViewCollaborationFollowupView,
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
@@ -40,6 +41,24 @@ describe('plmAuditTeamViewCollaboration', () => {
       statusMessage:
         'Prepared collaboration controls for this audit team view.|已为该审计团队视图准备好协作操作。',
     })
+  })
+
+  it('finds the draft target view independently from the local selector state', () => {
+    expect(findPlmAuditTeamViewCollaborationDraftView([
+      { id: 'audit-view-1', name: 'A' },
+      { id: 'audit-view-2', name: 'B' },
+    ], {
+      teamViewId: 'audit-view-1',
+    })).toEqual({
+      id: 'audit-view-1',
+      name: 'A',
+    })
+
+    expect(findPlmAuditTeamViewCollaborationDraftView([
+      { id: 'audit-view-1', name: 'A' },
+    ], {
+      teamViewId: 'audit-view-2',
+    })).toBeNull()
   })
 
   it('builds a saved-view-promotion collaboration draft', () => {

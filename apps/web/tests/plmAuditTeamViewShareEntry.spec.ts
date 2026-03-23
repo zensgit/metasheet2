@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPlmAuditSharedEntrySavedViewName,
   buildPlmAuditTeamViewShareEntryNotice,
+  findPlmAuditTeamViewShareEntryView,
   isPlmAuditSharedLinkEntry,
   resolvePlmAuditSharedEntryRouteSyncDecision,
   shouldKeepPlmAuditTeamViewShareEntry,
@@ -61,6 +62,24 @@ describe('plmAuditTeamViewShareEntry', () => {
         },
       ],
     })
+  })
+
+  it('finds the shared-entry target view independently from the local selector state', () => {
+    expect(findPlmAuditTeamViewShareEntryView([
+      { id: 'audit-view-1', name: 'A' },
+      { id: 'audit-view-2', name: 'B' },
+    ], {
+      teamViewId: 'audit-view-1',
+    })).toEqual({
+      id: 'audit-view-1',
+      name: 'A',
+    })
+
+    expect(findPlmAuditTeamViewShareEntryView([
+      { id: 'audit-view-1', name: 'A' },
+    ], {
+      teamViewId: 'audit-view-2',
+    })).toBeNull()
   })
 
   it('omits unavailable actions for default archived views', () => {
