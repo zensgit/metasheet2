@@ -30,7 +30,7 @@ pnpm exec vitest run tests/plm*.spec.ts tests/usePlm*.spec.ts
 - `pnpm --filter @metasheet/web type-check`
   - 通过
 - `pnpm exec vitest run tests/plm*.spec.ts tests/usePlm*.spec.ts`
-  - `47` 个文件，`305` 个测试通过
+  - `48` 个文件，`307` 个测试通过
 
 ## Verified Outcome
 

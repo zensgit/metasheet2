@@ -802,6 +802,7 @@ import {
   type PlmAuditTeamViewState,
 } from './plmAuditQueryState'
 import { buildPlmAuditSceneContextTakeoverState } from './plmAuditSceneContextTakeover'
+import { buildPlmAuditTeamViewRouteTakeoverState } from './plmAuditTeamViewRouteTakeover'
 import {
   applyPlmAuditSourceFocusState,
   buildPlmAuditAppliedTeamViewAttentionState,
@@ -1293,6 +1294,34 @@ function applyCollaborationTakeoverCleanup() {
   auditTeamViewSelection.value = nextCollaborationState.selectedIds
   auditTeamViewCollaborationDraft.value = nextCollaborationState.draft
   auditTeamViewCollaborationFollowup.value = nextCollaborationState.followup
+}
+
+function applyResolvedTeamViewTakeoverCleanup() {
+  const nextState = buildPlmAuditTeamViewRouteTakeoverState({
+    attentionFocus: {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    savedViewAttention: {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    shareEntry: auditTeamViewShareEntry.value,
+    collaboration: {
+      selectedIds: auditTeamViewSelection.value,
+      draft: auditTeamViewCollaborationDraft.value,
+      followup: auditTeamViewCollaborationFollowup.value,
+    },
+  })
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+  auditTeamViewShareEntry.value = nextState.shareEntry
+  auditTeamViewSelection.value = nextState.collaboration.selectedIds
+  auditTeamViewCollaborationDraft.value = nextState.collaboration.draft
+  auditTeamViewCollaborationFollowup.value = nextState.collaboration.followup
 }
 
 function applySceneContextTakeoverCleanup() {
@@ -2052,6 +2081,8 @@ async function refreshAuditTeamViews() {
         auditTeamViewShareEntry.value = {
           teamViewId: resolution.viewId,
         }
+      } else {
+        applyResolvedTeamViewTakeoverCleanup()
       }
       applyRouteState(resolution.nextState)
       if (!isPlmAuditRouteStateEqual(resolution.nextState, requestedState)) {
