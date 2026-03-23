@@ -104,6 +104,34 @@ describe('plmAuditTeamViewAudit', () => {
     })
   })
 
+  it('builds delete log routes that clear the selected team view', () => {
+    expect(buildPlmAuditTeamViewLogState(
+      createAuditTeamView({ id: 'audit-view-delete' }),
+      'delete',
+      {
+        windowMinutes: 90,
+        returnToPlmPath: '/plm?sceneFocus=scene-delete',
+      },
+    )).toEqual({
+      page: 1,
+      q: 'audit-view-delete',
+      actorId: '',
+      kind: 'audit',
+      action: 'delete',
+      resourceType: 'plm-team-view-batch',
+      from: '',
+      to: '',
+      windowMinutes: 90,
+      teamViewId: '',
+      sceneId: '',
+      sceneName: '',
+      sceneOwnerUserId: '',
+      sceneRecommendationReason: '',
+      sceneRecommendationSourceLabel: '',
+      returnToPlmPath: '/plm?sceneFocus=scene-delete',
+    })
+  })
+
   it('uses the first processed view to anchor batch audit filters', () => {
     expect(buildPlmAuditTeamViewBatchLogState([
       createAuditTeamView({ id: 'batch-view-a' }),

@@ -2540,27 +2540,7 @@ async function restoreAuditTeamView() {
 async function deleteAuditTeamView() {
   const view = canonicalAuditTeamViewManagementTarget.value
   if (!view || auditTeamViewManagementTargetLocked.value || !canDeleteAuditTeamView.value) return
-
-  auditTeamViewsLoading.value = true
-  auditTeamViewsError.value = ''
-  try {
-    await deletePlmWorkbenchTeamView(view.id)
-    removeAuditTeamViews([view.id])
-    auditTeamViewKey.value = ''
-    const nextState = {
-      ...readCurrentRouteState(),
-      teamViewId: '',
-    }
-    await syncRouteState(nextState)
-    setStatus(tr('Audit team view deleted.', '审计团队视图已删除。'))
-  } catch (error: unknown) {
-    auditTeamViewsError.value = error instanceof Error
-      ? error.message
-      : tr('Failed to delete audit team view', '删除审计团队视图失败')
-    setStatus(auditTeamViewsError.value, 'error')
-  } finally {
-    auditTeamViewsLoading.value = false
-  }
+  await runAuditTeamViewLifecycleAction(view.id, 'delete')
 }
 
 async function runAuditTeamViewLifecycleAction(
