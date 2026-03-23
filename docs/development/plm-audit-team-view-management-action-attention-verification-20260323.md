@@ -16,10 +16,9 @@ Command:
 pnpm --filter @metasheet/web type-check
 ```
 
-Expected:
+Result:
 
-- the new managed-team-view attention helper compiles cleanly
-- `PlmAuditView.vue` type-checks after rename/transfer/lifecycle actions reuse the shared cleanup contract
+- passed
 
 ### Focused regression
 
@@ -29,9 +28,14 @@ Command:
 cd apps/web && pnpm exec vitest run tests/plmAuditSavedViewAttention.spec.ts
 ```
 
-Expected:
+Result:
 
-- the attention suite proves the generic managed-team-view helper clears source/local attention
+- `1` file passed
+- `13` tests passed
+
+Covered assertions:
+
+- the generic managed-team-view helper clears source/local attention
 - the persisted-team-view helper still matches the generic managed-team-view contract
 
 ### Full PLM frontend regression
@@ -42,9 +46,14 @@ Command:
 cd apps/web && pnpm exec vitest run tests/plm*.spec.ts tests/usePlm*.spec.ts
 ```
 
-Expected:
+Result:
 
-- no regressions across the PLM audit/workbench state-closure suite
+- `43` files passed
+- `257` tests passed
+
+Note:
+
+- Vitest printed `WebSocket server error: Port is already in use`, but the run completed successfully and all tests passed.
 
 ## Behavioral Assertions
 
