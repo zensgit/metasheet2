@@ -1235,15 +1235,15 @@ async function syncRouteState(
 }
 
 async function clearAuditSceneContext() {
-  await syncRouteState(withoutPlmAuditSceneContext(readCurrentRouteState()))
+  await syncRouteState(withoutPlmAuditSceneContext(readCanonicalTeamViewRouteState()))
 }
 
 async function applyAuditSceneOwnerContext() {
-  await syncRouteState(withPlmAuditSceneOwnerContext(readCurrentRouteState()))
+  await syncRouteState(withPlmAuditSceneOwnerContext(readCanonicalTeamViewRouteState()))
 }
 
 async function restoreAuditSceneQuery() {
-  await syncRouteState(withPlmAuditSceneQueryContext(readCurrentRouteState()))
+  await syncRouteState(withPlmAuditSceneQueryContext(readCanonicalTeamViewRouteState()))
 }
 
 async function runAuditSceneTokenAction(actionKind: PlmAuditSceneTokenActionKind | null) {
@@ -1282,7 +1282,7 @@ async function runAuditSceneSaveAction(actionKind: 'saved-view' | 'team-view' | 
       draft.savedViewName,
       'scene-context',
       tr('Scene audit saved view stored.', '场景审计已保存为本地视图。'),
-      buildPlmAuditSceneSavedViewState(readCurrentRouteState()),
+      buildPlmAuditSceneSavedViewState(readCanonicalTeamViewRouteState()),
     )
     if (!saved) return
     return
@@ -1296,7 +1296,7 @@ async function runAuditSceneSaveAction(actionKind: 'saved-view' | 'team-view' | 
     actionKind === 'team-default'
       ? tr('Scene audit saved as the default team view.', '场景审计已保存为团队默认视图。')
       : tr('Scene audit saved to team views.', '场景审计已保存到团队视图。'),
-    buildPlmAuditSceneTeamViewState(readCurrentRouteState()),
+    buildPlmAuditSceneTeamViewState(readCanonicalTeamViewRouteState()),
   )
   if (!saved) return
   applyAuditTeamViewHandoffAttention()

@@ -36,7 +36,7 @@ describe('plmAuditSavedViewShareFollowup', () => {
     })).toBeNull()
   })
 
-  it('uses the canonical route state for shared-entry local saves', () => {
+  it('uses the canonical route state for shared-entry local saves and canonical team-view ownership for scene saves', () => {
     expect(resolvePlmAuditSavedViewLocalSaveState({
       source: 'shared-entry',
       currentState: {
@@ -142,7 +142,7 @@ describe('plmAuditSavedViewShareFollowup', () => {
       from: '',
       to: '',
       windowMinutes: 180,
-      teamViewId: 'audit-view-2',
+      teamViewId: 'audit-view-1',
       sceneId: 'scene-77',
       sceneName: '采购延迟',
       sceneOwnerUserId: 'owner-7',
