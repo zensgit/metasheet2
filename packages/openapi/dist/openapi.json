@@ -1591,6 +1591,13 @@
             "type": "string",
             "deprecated": true
           },
+          "isOvernight": {
+            "type": "boolean"
+          },
+          "is_overnight": {
+            "type": "boolean",
+            "deprecated": true
+          },
           "lateGraceMinutes": {
             "type": "integer"
           },
@@ -4587,20 +4594,62 @@
                   "workStartTime": {
                     "type": "string"
                   },
+                  "work_start_time": {
+                    "type": "string",
+                    "deprecated": true
+                  },
+                  "start_time": {
+                    "type": "string",
+                    "deprecated": true
+                  },
                   "workEndTime": {
                     "type": "string"
+                  },
+                  "work_end_time": {
+                    "type": "string",
+                    "deprecated": true
+                  },
+                  "end_time": {
+                    "type": "string",
+                    "deprecated": true
+                  },
+                  "isOvernight": {
+                    "type": "boolean"
+                  },
+                  "is_overnight": {
+                    "type": "boolean",
+                    "deprecated": true
                   },
                   "lateGraceMinutes": {
                     "type": "integer"
                   },
+                  "late_grace_minutes": {
+                    "type": "integer",
+                    "deprecated": true
+                  },
                   "earlyGraceMinutes": {
                     "type": "integer"
+                  },
+                  "early_grace_minutes": {
+                    "type": "integer",
+                    "deprecated": true
                   },
                   "roundingMinutes": {
                     "type": "integer"
                   },
+                  "rounding_minutes": {
+                    "type": "integer",
+                    "deprecated": true
+                  },
                   "workingDays": {
                     "type": "array",
+                    "items": {
+                      "type": "integer"
+                    }
+                  },
+                  "working_days": {
+                    "type": "array",
+                    "deprecated": true,
                     "items": {
                       "type": "integer"
                     }
@@ -4745,20 +4794,62 @@
                   "workStartTime": {
                     "type": "string"
                   },
+                  "work_start_time": {
+                    "type": "string",
+                    "deprecated": true
+                  },
+                  "start_time": {
+                    "type": "string",
+                    "deprecated": true
+                  },
                   "workEndTime": {
                     "type": "string"
+                  },
+                  "work_end_time": {
+                    "type": "string",
+                    "deprecated": true
+                  },
+                  "end_time": {
+                    "type": "string",
+                    "deprecated": true
+                  },
+                  "isOvernight": {
+                    "type": "boolean"
+                  },
+                  "is_overnight": {
+                    "type": "boolean",
+                    "deprecated": true
                   },
                   "lateGraceMinutes": {
                     "type": "integer"
                   },
+                  "late_grace_minutes": {
+                    "type": "integer",
+                    "deprecated": true
+                  },
                   "earlyGraceMinutes": {
                     "type": "integer"
+                  },
+                  "early_grace_minutes": {
+                    "type": "integer",
+                    "deprecated": true
                   },
                   "roundingMinutes": {
                     "type": "integer"
                   },
+                  "rounding_minutes": {
+                    "type": "integer",
+                    "deprecated": true
+                  },
                   "workingDays": {
                     "type": "array",
+                    "items": {
+                      "type": "integer"
+                    }
+                  },
+                  "working_days": {
+                    "type": "array",
+                    "deprecated": true,
                     "items": {
                       "type": "integer"
                     }

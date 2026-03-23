@@ -15,6 +15,7 @@ Date: 2026-03-23
 - Attendance metrics now anchor overnight shift end thresholds to the next calendar day.
 - Persisted shift times in `HH:MM:SS` form are normalized correctly before overnight metric calculation.
 - Shift create and update now share one timing validator, so overnight contract checks are no longer duplicated across routes.
+- Generated OpenAPI dist artifacts are synced to the overnight shift schema changes.
 
 ## Validation Rules
 
@@ -46,6 +47,7 @@ pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.co
 pnpm --filter @metasheet/web exec vue-tsc --noEmit
 pnpm --filter @metasheet/core-backend exec tsc --noEmit
 pnpm --filter @metasheet/web build
+./scripts/ops/attendance-run-gate-contract-case.sh openapi
 ```
 
 ## Result
@@ -57,6 +59,7 @@ pnpm --filter @metasheet/web build
 - `vue-tsc --noEmit` passed
 - `tsc --noEmit` passed
 - `apps/web build` passed
+- `attendance-run-gate-contract-case.sh openapi` passed after syncing generated dist artifacts
 
 ## Notes
 
