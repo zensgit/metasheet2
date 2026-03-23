@@ -860,6 +860,7 @@ import {
   resolvePlmAuditSharedEntryRouteSyncDecision,
   shouldKeepPlmAuditTeamViewShareEntry,
   shouldTakeOverPlmAuditSharedEntryOnManagementHandoff,
+  shouldTakeOverPlmAuditSharedEntryOnSourceAction,
   shouldResolvePlmAuditSharedEntryOnQueryChange,
   reducePlmAuditTeamViewShareEntry,
   type PlmAuditTeamViewShareEntry,
@@ -1954,6 +1955,14 @@ async function shareAuditTeamViewEntry(
       sourceSavedViewId,
     },
   )
+  const sharedEntryTakeover = shouldTakeOverPlmAuditSharedEntryOnSourceAction(
+    auditTeamViewShareEntry.value,
+    view.id,
+    Boolean(source),
+  )
+  if (sharedEntryTakeover) {
+    clearAuditTeamViewShareEntry()
+  }
   if (resolvePlmAuditTeamViewCollaborationAttentionMode(source, 'share') === 'source-share-followup') {
     applyAuditSourceShareFollowupAttention()
   } else {
@@ -1961,6 +1970,9 @@ async function shareAuditTeamViewEntry(
   }
   setStatus(outcome.statusMessage)
   auditTeamViewCollaborationFollowup.value = outcome.followup
+  if (sharedEntryTakeover) {
+    await consumeAuditTeamViewShareEntryQuery()
+  }
   return true
 }
 
@@ -1972,6 +1984,11 @@ async function setAuditTeamViewDefaultEntry(
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
   try {
+    const sharedEntryTakeover = shouldTakeOverPlmAuditSharedEntryOnSourceAction(
+      auditTeamViewShareEntry.value,
+      view.id,
+      Boolean(source),
+    )
     const saved = await setPlmWorkbenchTeamViewDefault('audit', view.id)
     auditTeamViews.value = sortAuditTeamViews(
       auditTeamViews.value.map((entry) => {
@@ -1992,6 +2009,9 @@ async function setAuditTeamViewDefaultEntry(
         sourceSavedViewId,
       },
     )
+    if (sharedEntryTakeover) {
+      clearAuditTeamViewShareEntry()
+    }
     if (resolvePlmAuditTeamViewCollaborationAttentionMode(source, 'set-default') === 'managed-team-view') {
       applyAuditTeamViewHandoffAttention()
     }
