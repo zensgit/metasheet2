@@ -788,6 +788,7 @@ import {
 } from './plmAuditQueryState'
 import {
   applyPlmAuditSourceFocusState,
+  buildPlmAuditClearedCollaborationFollowupAttentionState,
   buildPlmAuditSavedViewStoreAttentionState,
   buildPlmAuditSourceShareFollowupAttentionState,
   buildPlmAuditTeamViewHandoffAttentionState,
@@ -1364,7 +1365,16 @@ function applyAuditTeamViewShareEntryAction(
 
 function clearAuditTeamViewCollaborationFollowup() {
   auditTeamViewCollaborationFollowup.value = null
-  clearAuditSourceFocus()
+  const nextState = buildPlmAuditClearedCollaborationFollowupAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
 }
 
 function clearAuditSavedViewShareFollowup() {

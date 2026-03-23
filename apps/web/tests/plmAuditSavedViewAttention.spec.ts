@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyPlmAuditSourceFocusState,
+  buildPlmAuditClearedCollaborationFollowupAttentionState,
   buildPlmAuditSavedViewStoreAttentionState,
   buildPlmAuditSourceShareFollowupAttentionState,
   buildPlmAuditTeamViewHandoffAttentionState,
@@ -265,6 +266,20 @@ describe('plmAuditSavedViewAttention', () => {
       },
       savedViewAttention: {
         shareFollowup: null,
+        focusedSavedViewId: '',
+      },
+    })
+  })
+
+  it('clears all transient attention when a collaboration followup is cleared', () => {
+    expect(buildPlmAuditClearedCollaborationFollowupAttentionState({
+      focusedAuditTeamViewId: 'team-view-12',
+      focusedRecommendedAuditTeamViewId: 'recommended-12',
+      focusedSavedViewId: 'saved-view-12',
+    })).toEqual({
+      attentionFocus: {
+        focusedAuditTeamViewId: '',
+        focusedRecommendedAuditTeamViewId: '',
         focusedSavedViewId: '',
       },
     })
