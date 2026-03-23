@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_PLM_AUDIT_ROUTE_STATE } from '../src/views/plmAuditQueryState'
 import {
   buildPlmAuditSceneSavedViewState,
+  buildPlmAuditSceneTeamViewState,
   buildPlmAuditSceneQueryValue,
   isPlmAuditSceneQueryContextActive,
   isPlmAuditSceneOwnerContextActive,
@@ -130,6 +131,55 @@ describe('plmAuditSceneContext', () => {
       sceneRecommendationReason: 'default',
       sceneRecommendationSourceLabel: '当前团队默认场景',
       returnToPlmPath: '/plm?sceneFocus=owner-b',
+    })
+  })
+
+  it('normalizes saved scene team views back to canonical scene filters before storing them', () => {
+    expect(buildPlmAuditSceneTeamViewState({
+      ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      page: 4,
+      q: 'supplier-42',
+      actorId: 'user-9',
+      kind: 'team-view',
+      windowMinutes: 720,
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+      sceneRecommendationReason: 'recent-update',
+      sceneRecommendationSourceLabel: '近期更新的团队场景',
+      returnToPlmPath: '/plm?sceneFocus=scene-1',
+    })).toEqual({
+      page: 1,
+      q: 'scene-1',
+      actorId: 'user-9',
+      kind: 'team-view',
+      action: '',
+      resourceType: '',
+      from: '',
+      to: '',
+      windowMinutes: 720,
+    })
+
+    expect(buildPlmAuditSceneTeamViewState({
+      ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      page: 6,
+      q: 'supplier-42',
+      sceneId: '',
+      sceneName: '',
+      sceneOwnerUserId: 'owner-b',
+      sceneRecommendationReason: 'default',
+      sceneRecommendationSourceLabel: '当前团队默认场景',
+      returnToPlmPath: '/plm?sceneFocus=owner-b',
+    })).toEqual({
+      page: 1,
+      q: 'owner-b',
+      actorId: '',
+      kind: '',
+      action: '',
+      resourceType: '',
+      from: '',
+      to: '',
+      windowMinutes: 180,
     })
   })
 

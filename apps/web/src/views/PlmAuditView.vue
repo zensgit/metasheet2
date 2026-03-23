@@ -785,6 +785,7 @@ import {
   parsePlmAuditRouteState,
   resetPlmAuditRouteFilters,
   type PlmAuditRouteState,
+  type PlmAuditTeamViewState,
 } from './plmAuditQueryState'
 import {
   applyPlmAuditSourceFocusState,
@@ -882,6 +883,7 @@ import {
 } from './plmAuditSceneCopy'
 import {
   buildPlmAuditSceneSavedViewState,
+  buildPlmAuditSceneTeamViewState,
   buildPlmAuditSceneQueryValue,
   isPlmAuditSceneOwnerContextActive,
   isPlmAuditSceneQueryContextActive,
@@ -1240,6 +1242,7 @@ async function runAuditSceneSaveAction(actionKind: 'saved-view' | 'team-view' | 
     actionKind === 'team-default'
       ? tr('Scene audit saved as the default team view.', '场景审计已保存为团队默认视图。')
       : tr('Scene audit saved to team views.', '场景审计已保存到团队视图。'),
+    buildPlmAuditSceneTeamViewState(readCurrentRouteState()),
   )
   if (!saved) return
   applyAuditTeamViewHandoffAttention()
@@ -1341,6 +1344,7 @@ async function persistAuditTeamView(
     isDefault?: boolean
   },
   successMessage?: string,
+  stateOverride?: PlmAuditTeamViewState,
 ) {
   const trimmedName = name.trim()
   if (!trimmedName) {
@@ -1351,7 +1355,7 @@ async function persistAuditTeamView(
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
   try {
-    const saved = await savePlmWorkbenchTeamView('audit', trimmedName, buildCurrentAuditTeamViewState(), {
+    const saved = await savePlmWorkbenchTeamView('audit', trimmedName, stateOverride || buildCurrentAuditTeamViewState(), {
       isDefault: options?.isDefault,
     })
     const savedState = buildPlmAuditPersistedTeamViewRouteState(

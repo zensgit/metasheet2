@@ -1,4 +1,8 @@
-import type { PlmAuditRouteState } from './plmAuditQueryState'
+import {
+  buildPlmAuditTeamViewState,
+  type PlmAuditRouteState,
+  type PlmAuditTeamViewState,
+} from './plmAuditQueryState'
 
 export function buildPlmAuditSceneQueryValue(state: Pick<PlmAuditRouteState, 'sceneId' | 'sceneName'>) {
   return state.sceneId || state.sceneName || ''
@@ -48,6 +52,10 @@ export function buildPlmAuditSceneSavedViewState(state: PlmAuditRouteState): Plm
   }
 
   return withPlmAuditSceneOwnerContext(state)
+}
+
+export function buildPlmAuditSceneTeamViewState(state: PlmAuditRouteState): PlmAuditTeamViewState {
+  return buildPlmAuditTeamViewState(buildPlmAuditSceneSavedViewState(state))
 }
 
 export function withoutPlmAuditSceneContext(state: PlmAuditRouteState): PlmAuditRouteState {
