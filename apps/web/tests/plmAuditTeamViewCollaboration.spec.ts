@@ -16,6 +16,7 @@ import {
   prunePlmAuditTeamViewCollaborationFollowupForRemovedViews,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
+  resolvePlmAuditTeamViewCollaborationActionTarget,
   resolvePlmAuditTeamViewCollaborationSourceAnchorId,
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry,
@@ -63,6 +64,21 @@ describe('plmAuditTeamViewCollaboration', () => {
     ], {
       teamViewId: 'audit-view-2',
     })).toBeNull()
+  })
+
+  it('keeps collaboration notice actions pinned to the draft target', () => {
+    expect(resolvePlmAuditTeamViewCollaborationActionTarget(
+      { id: 'audit-view-1', name: 'A' },
+      { id: 'audit-view-2', name: 'B' },
+    )).toEqual({
+      id: 'audit-view-1',
+      name: 'A',
+    })
+
+    expect(resolvePlmAuditTeamViewCollaborationActionTarget(
+      null,
+      { id: 'audit-view-2', name: 'B' },
+    )).toBeNull()
   })
 
   it('builds a saved-view-promotion collaboration draft', () => {

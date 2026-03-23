@@ -150,9 +150,9 @@ export function findPlmAuditTeamViewShareEntryView<T extends { id: string }>(
 
 export function resolvePlmAuditTeamViewShareEntryActionTarget<T>(
   entryTarget: T | null,
-  selectedTarget: T | null,
+  _selectedTarget: T | null,
 ) {
-  return entryTarget || selectedTarget
+  return entryTarget
 }
 
 export function prunePlmAuditTeamViewShareEntryForRemovedViews(

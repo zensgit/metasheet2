@@ -858,6 +858,7 @@ import {
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
+  resolvePlmAuditTeamViewCollaborationActionTarget,
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationFollowup,
@@ -889,6 +890,7 @@ import {
 import {
   prunePlmAuditTransientOwnershipForRemovedViews,
   resolvePlmAuditRemovedTeamViewIds,
+  trimPlmAuditExistingTeamViewUiState,
 } from './plmAuditTeamViewOwnership'
 import {
   resolvePlmAuditCanonicalTeamViewManagementTarget,
@@ -1773,14 +1775,19 @@ function removeAuditTeamViews(viewIds: string[]) {
 }
 
 function trimAuditTeamViewSelection() {
-  const existingIds = new Set(auditTeamViews.value.map((view) => view.id))
-  auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => existingIds.has(id))
-  if (focusedAuditTeamViewId.value && !existingIds.has(focusedAuditTeamViewId.value)) {
-    focusedAuditTeamViewId.value = ''
-  }
-  if (focusedRecommendedAuditTeamViewId.value && !existingIds.has(focusedRecommendedAuditTeamViewId.value)) {
-    focusedRecommendedAuditTeamViewId.value = ''
-  }
+  const nextState = trimPlmAuditExistingTeamViewUiState(
+    {
+      selectedTeamViewId: auditTeamViewKey.value,
+      selectedIds: auditTeamViewSelection.value,
+      focusedTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedTeamViewId: focusedRecommendedAuditTeamViewId.value,
+    },
+    auditTeamViews.value,
+  )
+  auditTeamViewKey.value = nextState.selectedTeamViewId
+  auditTeamViewSelection.value = nextState.selectedIds
+  focusedAuditTeamViewId.value = nextState.focusedTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.focusedRecommendedTeamViewId
 }
 
 function setAllSelectableAuditTeamViewsSelected(nextSelected: boolean) {
@@ -2287,7 +2294,10 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
     return
   }
 
-  const view = auditTeamViewCollaborationDraftTarget.value || selectedAuditTeamView.value
+  const view = resolvePlmAuditTeamViewCollaborationActionTarget(
+    auditTeamViewCollaborationDraftTarget.value,
+    selectedAuditTeamView.value,
+  )
   if (!view) return
 
   if (actionKind === 'share') {

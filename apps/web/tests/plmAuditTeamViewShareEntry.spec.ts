@@ -84,7 +84,7 @@ describe('plmAuditTeamViewShareEntry', () => {
     })).toBeNull()
   })
 
-  it('resolves shared-entry actions against the canonical entry target before falling back to the local selector', () => {
+  it('keeps shared-entry notice actions pinned to the canonical entry target', () => {
     expect(resolvePlmAuditTeamViewShareEntryActionTarget(
       { id: 'audit-view-1', name: 'A' },
       { id: 'audit-view-2', name: 'B' },
@@ -96,10 +96,7 @@ describe('plmAuditTeamViewShareEntry', () => {
     expect(resolvePlmAuditTeamViewShareEntryActionTarget(
       null,
       { id: 'audit-view-2', name: 'B' },
-    )).toEqual({
-      id: 'audit-view-2',
-      name: 'B',
-    })
+    )).toBeNull()
   })
 
   it('omits unavailable actions for default archived views', () => {

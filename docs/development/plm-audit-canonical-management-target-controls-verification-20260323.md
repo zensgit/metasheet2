@@ -40,5 +40,5 @@ cd apps/web && pnpm exec vitest run tests/plm*.spec.ts tests/usePlm*.spec.ts
 ## Result
 
 - `type-check`: pass
-- focused Vitest: `4` files, `58` tests passed
-- full PLM/frontend Vitest: `46` files, `282` tests passed
+- focused Vitest: `4` files, `59` tests passed
+- full PLM/frontend Vitest: `46` files, `284` tests passed
