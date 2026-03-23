@@ -388,6 +388,21 @@ export function resolvePlmAuditClearedTeamViewDraftSelection(options: {
   return options.selectedIds
 }
 
+export function resolvePlmAuditSourceLocalSaveCollaborationState(options: {
+  selectedIds: string[]
+  draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null
+  followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'teamViewId'> | null
+}) {
+  return {
+    selectedIds: resolvePlmAuditClearedTeamViewDraftSelection({
+      selectedIds: options.selectedIds,
+      clearedDraft: options.draft,
+    }),
+    draft: null,
+    followup: null,
+  }
+}
+
 export function shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry(
   draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null,
   followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'teamViewId'> | null,

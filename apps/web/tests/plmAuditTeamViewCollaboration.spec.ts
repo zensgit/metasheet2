@@ -16,6 +16,7 @@ import {
   prunePlmAuditTeamViewCollaborationFollowupForRemovedViews,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditClearedTeamViewDraftSelection,
+  resolvePlmAuditSourceLocalSaveCollaborationState,
   resolvePlmAuditTeamViewFollowupSelection,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
@@ -344,6 +345,36 @@ describe('plmAuditTeamViewCollaboration', () => {
         teamViewId: 'audit-view-9',
       },
     })).toEqual(['audit-view-10'])
+  })
+
+  it('clears collaboration owners before a source-aware local save takes over', () => {
+    expect(resolvePlmAuditSourceLocalSaveCollaborationState({
+      selectedIds: ['audit-view-9'],
+      draft: {
+        teamViewId: 'audit-view-9',
+      },
+      followup: {
+        teamViewId: 'audit-view-10',
+      },
+    })).toEqual({
+      selectedIds: [],
+      draft: null,
+      followup: null,
+    })
+
+    expect(resolvePlmAuditSourceLocalSaveCollaborationState({
+      selectedIds: ['audit-view-9', 'audit-view-10'],
+      draft: {
+        teamViewId: 'audit-view-9',
+      },
+      followup: {
+        teamViewId: 'audit-view-11',
+      },
+    })).toEqual({
+      selectedIds: ['audit-view-9', 'audit-view-10'],
+      draft: null,
+      followup: null,
+    })
   })
 
   it('keeps collaboration drafts pinned to the canonical team-view route only', () => {

@@ -863,6 +863,7 @@ import {
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
   resolvePlmAuditClearedTeamViewDraftSelection,
+  resolvePlmAuditSourceLocalSaveCollaborationState,
   resolvePlmAuditTeamViewFollowupSelection,
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationDraft,
@@ -1423,6 +1424,14 @@ async function saveCurrentLocalViewWithFollowup(
   )
   if (!saved) return null
 
+  const nextCollaborationState = resolvePlmAuditSourceLocalSaveCollaborationState({
+    selectedIds: auditTeamViewSelection.value,
+    draft: auditTeamViewCollaborationDraft.value,
+    followup: auditTeamViewCollaborationFollowup.value,
+  })
+  auditTeamViewSelection.value = nextCollaborationState.selectedIds
+  auditTeamViewCollaborationDraft.value = nextCollaborationState.draft
+  auditTeamViewCollaborationFollowup.value = nextCollaborationState.followup
   applyAuditSourceLocalSaveAttention()
   applySavedViewAttentionAction({
     kind: 'install-followup',
