@@ -177,6 +177,12 @@ export function shouldTakeOverPlmAuditSharedEntryOnManagementHandoff(
   return shouldKeepPlmAuditTeamViewShareEntry(entry, targetTeamViewId)
 }
 
+export function shouldTakeOverPlmAuditSharedEntryOnSavedViewTakeover(
+  entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
+) {
+  return Boolean(entry)
+}
+
 export function shouldTakeOverPlmAuditSharedEntryOnSourceAction(
   entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
   sourceAware: boolean,

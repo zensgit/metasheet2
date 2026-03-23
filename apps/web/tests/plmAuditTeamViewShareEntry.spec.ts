@@ -10,6 +10,7 @@ import {
   shouldKeepPlmAuditTeamViewShareEntry,
   shouldTakeOverPlmAuditSharedEntryOnManagementHandoff,
   shouldTakeOverPlmAuditSharedEntryOnLocalSave,
+  shouldTakeOverPlmAuditSharedEntryOnSavedViewTakeover,
   shouldTakeOverPlmAuditSharedEntryOnSourceAction,
   shouldResolvePlmAuditSharedEntryOnQueryChange,
   reducePlmAuditTeamViewShareEntry,
@@ -200,6 +201,14 @@ describe('plmAuditTeamViewShareEntry', () => {
     }, 'audit-view-2')).toBe(false)
 
     expect(shouldTakeOverPlmAuditSharedEntryOnManagementHandoff(null, 'audit-view-1')).toBe(false)
+  })
+
+  it('always treats saved-view takeovers as shared-entry owner takeovers', () => {
+    expect(shouldTakeOverPlmAuditSharedEntryOnSavedViewTakeover({
+      teamViewId: 'audit-view-1',
+    })).toBe(true)
+
+    expect(shouldTakeOverPlmAuditSharedEntryOnSavedViewTakeover(null)).toBe(false)
   })
 
   it('only treats source-aware collaboration actions as takeovers when the target still matches the shared entry', () => {
