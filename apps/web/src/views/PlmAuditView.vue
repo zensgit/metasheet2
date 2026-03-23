@@ -793,6 +793,7 @@ import {
   buildPlmAuditManagedTeamViewAttentionState,
   buildPlmAuditRoutePivotAttentionState,
   buildPlmAuditSavedViewStoreAttentionState,
+  buildPlmAuditSourceLocalSaveAttentionState,
   buildPlmAuditSourceShareFollowupAttentionState,
   buildPlmAuditTeamViewHandoffAttentionState,
   reducePlmAuditAttentionFocusState,
@@ -880,6 +881,7 @@ import {
   resolvePlmAuditSceneSemantic,
 } from './plmAuditSceneCopy'
 import {
+  buildPlmAuditSceneSavedViewState,
   buildPlmAuditSceneQueryValue,
   isPlmAuditSceneOwnerContextActive,
   isPlmAuditSceneQueryContextActive,
@@ -1224,6 +1226,7 @@ async function runAuditSceneSaveAction(actionKind: 'saved-view' | 'team-view' | 
       draft.savedViewName,
       'scene-context',
       tr('Scene audit saved view stored.', '场景审计已保存为本地视图。'),
+      buildPlmAuditSceneSavedViewState(readCurrentRouteState()),
     )
     if (!saved) return
     return
@@ -1277,13 +1280,25 @@ function setStatus(message: string, kindValue: 'info' | 'error' = 'info') {
 }
 
 function storeAuditSavedView(name: string, successMessage?: string) {
+  return storeAuditSavedViewState(
+    name,
+    readCurrentRouteState(),
+    successMessage,
+  )
+}
+
+function storeAuditSavedViewState(
+  name: string,
+  state: PlmAuditRouteState,
+  successMessage?: string,
+) {
   const trimmedName = name.trim()
   if (!trimmedName) {
     setStatus(tr('Enter a name for the saved view.', '请输入已保存视图名称。'), 'error')
     return null
   }
 
-  savedViews.value = savePlmAuditSavedView(trimmedName, readCurrentRouteState())
+  savedViews.value = savePlmAuditSavedView(trimmedName, state)
   applyAuditSavedViewStoreAttention()
   savedViewName.value = ''
   setStatus(successMessage || tr('Audit saved view stored.', '审计已保存视图已保存。'))
@@ -1294,13 +1309,16 @@ async function saveCurrentLocalViewWithFollowup(
   name: string,
   source: PlmAuditSavedViewShareFollowupSource,
   successMessage: string,
+  stateOverride?: PlmAuditRouteState,
 ) {
-  const saved = storeAuditSavedView(
+  const saved = storeAuditSavedViewState(
     name,
+    stateOverride || readCurrentRouteState(),
     successMessage,
   )
   if (!saved) return null
 
+  applyAuditSourceLocalSaveAttention()
   applySavedViewAttentionAction({
     kind: 'install-followup',
     shareFollowup: { savedViewId: saved.id, source },
@@ -1496,6 +1514,24 @@ function applyAuditTeamViewHandoffAttention() {
 
 function applyAuditSavedViewStoreAttention() {
   const nextState = buildPlmAuditSavedViewStoreAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+}
+
+function applyAuditSourceLocalSaveAttention() {
+  const nextState = buildPlmAuditSourceLocalSaveAttentionState(
     {
       focusedAuditTeamViewId: focusedAuditTeamViewId.value,
       focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
@@ -2498,7 +2534,7 @@ async function saveCurrentAuditView() {
   const followupSource = resolvePlmAuditSavedViewLocalSaveFollowupSource({
     sharedEntryTeamViewId: auditTeamViewShareEntry.value?.teamViewId || '',
     selectedTeamViewId: auditTeamViewKey.value,
-    sceneContextAvailable: Boolean(auditSceneContext.value),
+    sceneContextActive: auditSceneOwnerContextActive.value || auditSceneQueryContextActive.value,
   })
 
   if (followupSource) {

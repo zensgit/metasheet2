@@ -38,6 +38,18 @@ export function withPlmAuditSceneQueryContext(state: PlmAuditRouteState): PlmAud
   }
 }
 
+export function buildPlmAuditSceneSavedViewState(state: PlmAuditRouteState): PlmAuditRouteState {
+  if (isPlmAuditSceneOwnerContextActive(state)) {
+    return withPlmAuditSceneOwnerContext(state)
+  }
+
+  if (buildPlmAuditSceneQueryValue(state)) {
+    return withPlmAuditSceneQueryContext(state)
+  }
+
+  return withPlmAuditSceneOwnerContext(state)
+}
+
 export function withoutPlmAuditSceneContext(state: PlmAuditRouteState): PlmAuditRouteState {
   return {
     ...state,

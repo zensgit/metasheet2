@@ -13,19 +13,19 @@ describe('plmAuditSavedViewShareFollowup', () => {
     expect(resolvePlmAuditSavedViewLocalSaveFollowupSource({
       sharedEntryTeamViewId: 'audit-view-1',
       selectedTeamViewId: 'audit-view-1',
-      sceneContextAvailable: true,
+      sceneContextActive: true,
     })).toBe('shared-entry')
 
     expect(resolvePlmAuditSavedViewLocalSaveFollowupSource({
       sharedEntryTeamViewId: '',
       selectedTeamViewId: 'audit-view-2',
-      sceneContextAvailable: true,
+      sceneContextActive: true,
     })).toBe('scene-context')
 
     expect(resolvePlmAuditSavedViewLocalSaveFollowupSource({
       sharedEntryTeamViewId: 'audit-view-1',
       selectedTeamViewId: 'audit-view-2',
-      sceneContextAvailable: false,
+      sceneContextActive: false,
     })).toBeNull()
   })
 

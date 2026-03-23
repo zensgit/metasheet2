@@ -11,7 +11,7 @@ export type PlmAuditSavedViewShareFollowup = {
 export function resolvePlmAuditSavedViewLocalSaveFollowupSource(options: {
   sharedEntryTeamViewId: string
   selectedTeamViewId: string
-  sceneContextAvailable: boolean
+  sceneContextActive: boolean
 }): PlmAuditSavedViewShareFollowupSource | null {
   if (
     options.sharedEntryTeamViewId
@@ -20,7 +20,7 @@ export function resolvePlmAuditSavedViewLocalSaveFollowupSource(options: {
     return 'shared-entry'
   }
 
-  return options.sceneContextAvailable ? 'scene-context' : null
+  return options.sceneContextActive ? 'scene-context' : null
 }
 
 export type PlmAuditSavedViewShareFollowupNotice = {

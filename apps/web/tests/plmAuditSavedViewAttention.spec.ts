@@ -7,6 +7,7 @@ import {
   buildPlmAuditPersistedTeamViewAttentionState,
   buildPlmAuditRoutePivotAttentionState,
   buildPlmAuditSavedViewStoreAttentionState,
+  buildPlmAuditSourceLocalSaveAttentionState,
   buildPlmAuditSourceShareFollowupAttentionState,
   buildPlmAuditTeamViewHandoffAttentionState,
   clearPlmAuditSourceFocusState,
@@ -289,6 +290,30 @@ describe('plmAuditSavedViewAttention', () => {
 
   it('clears management and source focus before installing a source-aware share followup', () => {
     expect(buildPlmAuditSourceShareFollowupAttentionState({
+      focusedAuditTeamViewId: 'team-view-12',
+      focusedRecommendedAuditTeamViewId: 'recommended-12',
+      focusedSavedViewId: 'saved-view-12',
+    }, {
+      shareFollowup: {
+        savedViewId: 'saved-view-13',
+        source: 'scene-context',
+      },
+      focusedSavedViewId: 'saved-view-13',
+    })).toEqual({
+      attentionFocus: {
+        focusedAuditTeamViewId: '',
+        focusedRecommendedAuditTeamViewId: '',
+        focusedSavedViewId: '',
+      },
+      savedViewAttention: {
+        shareFollowup: null,
+        focusedSavedViewId: '',
+      },
+    })
+  })
+
+  it('clears management and source focus before installing a source-aware local-save followup', () => {
+    expect(buildPlmAuditSourceLocalSaveAttentionState({
       focusedAuditTeamViewId: 'team-view-12',
       focusedRecommendedAuditTeamViewId: 'recommended-12',
       focusedSavedViewId: 'saved-view-12',

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_PLM_AUDIT_ROUTE_STATE } from '../src/views/plmAuditQueryState'
 import {
+  buildPlmAuditSceneSavedViewState,
   buildPlmAuditSceneQueryValue,
   isPlmAuditSceneQueryContextActive,
   isPlmAuditSceneOwnerContextActive,
@@ -64,6 +65,71 @@ describe('plmAuditSceneContext', () => {
       sceneRecommendationReason: 'default',
       sceneRecommendationSourceLabel: '当前团队默认场景',
       returnToPlmPath: '/plm?sceneFocus=scene-1',
+    })
+  })
+
+  it('normalizes saved scene views back to canonical scene state before storing them', () => {
+    expect(buildPlmAuditSceneSavedViewState({
+      ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      page: 3,
+      q: 'owner-a',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+      sceneRecommendationReason: 'recent-update',
+      sceneRecommendationSourceLabel: '近期更新的团队场景',
+      returnToPlmPath: '/plm?sceneFocus=scene-1',
+    })).toMatchObject({
+      page: 1,
+      q: 'owner-a',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+      sceneRecommendationReason: 'recent-update',
+      sceneRecommendationSourceLabel: '近期更新的团队场景',
+      returnToPlmPath: '/plm?sceneFocus=scene-1',
+    })
+
+    expect(buildPlmAuditSceneSavedViewState({
+      ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      page: 5,
+      q: 'supplier-42',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+      sceneRecommendationReason: 'recent-update',
+      sceneRecommendationSourceLabel: '近期更新的团队场景',
+      returnToPlmPath: '/plm?sceneFocus=scene-1',
+    })).toMatchObject({
+      page: 1,
+      q: 'scene-1',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+      sceneRecommendationReason: 'recent-update',
+      sceneRecommendationSourceLabel: '近期更新的团队场景',
+      returnToPlmPath: '/plm?sceneFocus=scene-1',
+    })
+
+    expect(buildPlmAuditSceneSavedViewState({
+      ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      page: 4,
+      q: 'supplier-42',
+      sceneId: '',
+      sceneName: '',
+      sceneOwnerUserId: 'owner-b',
+      sceneRecommendationReason: 'default',
+      sceneRecommendationSourceLabel: '当前团队默认场景',
+      returnToPlmPath: '/plm?sceneFocus=owner-b',
+    })).toMatchObject({
+      page: 1,
+      q: 'owner-b',
+      sceneId: '',
+      sceneName: '',
+      sceneOwnerUserId: 'owner-b',
+      sceneRecommendationReason: 'default',
+      sceneRecommendationSourceLabel: '当前团队默认场景',
+      returnToPlmPath: '/plm?sceneFocus=owner-b',
     })
   })
 
