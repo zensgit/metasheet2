@@ -489,11 +489,20 @@
             <aside class="attendance__admin-nav-panel">
               <div class="attendance__admin-nav-header">
                 <strong>{{ tr('Sections', '区块') }}</strong>
-                <span>{{ adminSectionNavItems.length }} {{ tr('items', '项') }}</span>
+                <span>{{ adminSectionNavCountLabel }}</span>
               </div>
+              <label class="attendance__field attendance__field--compact" for="attendance-admin-nav-filter">
+                <span>{{ tr('Quick find', '快速查找') }}</span>
+                <input
+                  id="attendance-admin-nav-filter"
+                  v-model="adminSectionFilter"
+                  type="text"
+                  :placeholder="tr('Search sections', '搜索区块')"
+                />
+              </label>
               <nav class="attendance__admin-nav" :aria-label="tr('Attendance admin sections', '考勤管理区块')">
                 <button
-                  v-for="item in adminSectionNavItems"
+                  v-for="item in visibleAdminSectionNavItems"
                   :key="item.id"
                   class="attendance__admin-nav-link"
                   :class="{ 'attendance__admin-nav-link--active': adminActiveSectionId === item.id }"
@@ -504,6 +513,9 @@
                 >
                   {{ item.label }}
                 </button>
+                <p v-if="visibleAdminSectionNavItems.length === 0" class="attendance__admin-nav-empty">
+                  {{ tr('No sections match the current filter.', '当前筛选没有匹配区块。') }}
+                </p>
               </nav>
             </aside>
             <div class="attendance__admin-content">
@@ -4401,9 +4413,25 @@ const adminSectionNavItems = computed(() => [
   { id: ATTENDANCE_ADMIN_SECTION_IDS.assignments, label: tr('Assignments', '排班分配') },
   { id: ATTENDANCE_ADMIN_SECTION_IDS.holidays, label: tr('Holidays', '节假日') },
 ])
+const adminSectionFilter = ref('')
+const adminSectionFilterQuery = computed(() => adminSectionFilter.value.trim().toLowerCase())
+const visibleAdminSectionNavItems = computed(() => {
+  const query = adminSectionFilterQuery.value
+  if (!query) return adminSectionNavItems.value
+  return adminSectionNavItems.value.filter(item => item.label.toLowerCase().includes(query))
+})
+const adminSectionNavCountLabel = computed(() => {
+  const visible = visibleAdminSectionNavItems.value.length
+  const total = adminSectionNavItems.value.length
+  if (!adminSectionFilterQuery.value || visible === total) {
+    return `${total} ${tr('items', '项')}`
+  }
+  return `${visible}/${total} ${tr('items', '项')}`
+})
 const adminActiveSectionId = ref<string>(ATTENDANCE_ADMIN_SECTION_IDS.settings)
 const adminSectionElements = new Map<string, HTMLElement>()
 let adminSectionObserver: IntersectionObserver | null = null
+let adminHashSyncReady = false
 const statusCode = computed(() => statusMeta.value?.code || '')
 const statusHint = computed(() => statusMeta.value?.hint || '')
 const canResumeImportJobFromStatus = computed(() => {
@@ -4908,12 +4936,53 @@ function disconnectAdminSectionObserver(): void {
   adminSectionObserver = null
 }
 
+function isKnownAdminSectionId(id: string | null | undefined): id is string {
+  if (!id) return false
+  return adminSectionNavItems.value.some(item => item.id === id)
+}
+
+function readAdminSectionHash(): string | null {
+  if (typeof window === 'undefined') return null
+  const hash = window.location.hash.replace(/^#/, '').trim()
+  return isKnownAdminSectionId(hash) ? hash : null
+}
+
+function syncAdminSectionHash(id: string): void {
+  if (typeof window === 'undefined' || !isKnownAdminSectionId(id)) return
+  const nextHash = `#${id}`
+  if (window.location.hash === nextHash) return
+  window.history.replaceState(window.history.state, '', nextHash)
+}
+
+async function restoreAdminSectionFromHash(maxAttempts = 4): Promise<boolean> {
+  const hashedId = readAdminSectionHash()
+  if (!hashedId) return false
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const target = adminSectionElements.get(hashedId) ?? document.getElementById(hashedId)
+    if (target instanceof HTMLElement) {
+      target.scrollIntoView({ behavior: 'auto', block: 'start' })
+      adminActiveSectionId.value = hashedId
+      return true
+    }
+    await nextTick()
+  }
+  return false
+}
+
+async function syncAdminSectionNavigationState(): Promise<void> {
+  await nextTick()
+  syncAdminSectionObserver()
+  await restoreAdminSectionFromHash()
+  adminHashSyncReady = true
+}
+
 function syncAdminSectionObserver(): void {
   disconnectAdminSectionObserver()
   if (typeof window === 'undefined' || adminForbidden.value || !showAdmin.value) return
   const elements = resolveAdminSectionElements()
   if (elements.length === 0) return
-  adminActiveSectionId.value = elements[0].id
+  const initialId = readAdminSectionHash() ?? elements[0].id
+  adminActiveSectionId.value = initialId
   if (typeof window.IntersectionObserver === 'undefined') return
   adminSectionObserver = new window.IntersectionObserver(
     entries => {
@@ -4940,6 +5009,8 @@ function scrollToAdminSection(id: string): void {
   const target = adminSectionElements.get(id) ?? document.getElementById(id)
   if (!(target instanceof HTMLElement)) return
   adminActiveSectionId.value = id
+  adminHashSyncReady = true
+  syncAdminSectionHash(id)
   target.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
@@ -10247,10 +10318,19 @@ onMounted(() => {
     .catch(() => {
       pluginsLoaded.value = true
     })
+
+  if (showAdmin.value && !adminForbidden.value) {
+    nextTick().then(() => restoreAdminSectionFromHash())
+  }
 })
 
 onBeforeUnmount(() => {
   disconnectAdminSectionObserver()
+})
+
+onMounted(async () => {
+  if (!showAdmin.value || adminForbidden.value) return
+  await syncAdminSectionNavigationState()
 })
 
 watch(orgId, () => {
@@ -10263,11 +10343,16 @@ watch(orgId, () => {
 watch([showAdmin, adminForbidden], async ([isAdminView, forbidden]) => {
   if (!isAdminView || forbidden) {
     disconnectAdminSectionObserver()
+    adminHashSyncReady = false
     return
   }
-  await nextTick()
-  syncAdminSectionObserver()
-}, { immediate: true })
+  await syncAdminSectionNavigationState()
+})
+
+watch(adminActiveSectionId, (id) => {
+  if (!showAdmin.value || !adminHashSyncReady || !isKnownAdminSectionId(id)) return
+  syncAdminSectionHash(id)
+})
 
 watch(attendanceGroupMemberGroupId, () => {
   if (attendancePluginActive.value) {
@@ -10849,12 +10934,29 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   color: #6b7280;
 }
 
+.attendance__field--compact {
+  gap: 6px;
+}
+
+.attendance__field--compact span {
+  font-size: 12px;
+}
+
 .attendance__admin-nav {
   display: flex;
   flex-direction: column;
   gap: 6px;
   max-height: calc(100vh - 160px);
   overflow: auto;
+}
+
+.attendance__admin-nav-empty {
+  margin: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: #f8fafc;
+  color: #6b7280;
+  font-size: 12px;
 }
 
 .attendance__admin-nav-link {

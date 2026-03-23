@@ -49,6 +49,7 @@ describe('Attendance admin anchor navigation', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     window.localStorage.setItem('metasheet_locale', 'en')
+    window.history.replaceState({}, '', '/attendance')
     vi.mocked(apiFetch).mockResolvedValue(
       jsonResponse(200, {
         ok: true,
@@ -121,7 +122,41 @@ describe('Attendance admin anchor navigation', () => {
     expect(scrollIntoViewSpy).toHaveBeenCalledTimes(1)
     const target = scrollIntoViewSpy.mock.instances[0] as HTMLElement
     expect(target.id).toBe('attendance-admin-import-batches')
+    expect(window.location.hash).toBe('#attendance-admin-import-batches')
     expect(button?.getAttribute('aria-current')).toBe('true')
     expect(button?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
+  })
+
+  it('filters anchor items with the quick-find input', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const input = container!.querySelector<HTMLInputElement>('#attendance-admin-nav-filter')
+    expect(input).toBeTruthy()
+    input!.value = 'payroll'
+    input!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const labels = Array.from(container!.querySelectorAll('.attendance__admin-nav-link')).map(
+      item => item.textContent?.trim() || '',
+    )
+    expect(labels).toEqual(['Payroll Templates', 'Payroll Cycles'])
+    expect(container!.textContent).toContain('2/22 items')
+  })
+
+  it('restores the hashed admin anchor on first load', async () => {
+    window.history.replaceState({}, '', '/attendance#attendance-admin-approval-flows')
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    expect(scrollIntoViewSpy).toHaveBeenCalledTimes(1)
+    const target = scrollIntoViewSpy.mock.instances[0] as HTMLElement
+    expect(target.id).toBe('attendance-admin-approval-flows')
+    const button = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-approval-flows"]')
+    expect(button?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
+    expect(button?.getAttribute('aria-current')).toBe('true')
+    expect(window.location.hash).toBe('#attendance-admin-approval-flows')
   })
 })
