@@ -26,7 +26,7 @@ The admin rail now treats each known section id as a valid deep-link target.
 - First load reads the hash, restores the matching section, and marks the correct rail item active.
 - Active-section changes continue to keep the hash in sync after the initial restore.
 
-The restore path uses a bounded next-tick retry loop. This makes the first-load hash restore resilient to mount timing without introducing scroll polling or route-level state.
+The restore path uses a bounded next-tick retry loop plus a non-reentrant guard. This makes the first-load hash restore resilient to mount timing without introducing duplicate scrolls, scroll polling, or route-level state.
 
 ### 3. Branch hygiene for timezone helpers
 

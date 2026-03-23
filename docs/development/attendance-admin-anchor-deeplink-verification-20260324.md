@@ -61,5 +61,5 @@ Prior result on the parent clean branch:
 
 ## Notes
 
-- The initial hash-restore implementation needed an extra mount-safe restore pass. The final version uses a bounded next-tick retry helper so the deep link is restored reliably on first load and remains deterministic in the unit test harness.
+- The initial hash-restore implementation still double-fired in the unit harness because mount-time restore and later admin-state synchronization could overlap. The final version keeps the bounded next-tick retry helper and adds a non-reentrant restore gate so first-load deep links scroll exactly once.
 - `apps/web/src/utils/timezones.ts` is included in this follow-up because `AttendanceView.vue` already imports it. Without the file, the clean branch cannot pass `vue-tsc` or `build` on its own.

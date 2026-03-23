@@ -4432,6 +4432,8 @@ const adminActiveSectionId = ref<string>(ATTENDANCE_ADMIN_SECTION_IDS.settings)
 const adminSectionElements = new Map<string, HTMLElement>()
 let adminSectionObserver: IntersectionObserver | null = null
 let adminHashSyncReady = false
+let adminHashRestoreCompleted = false
+let adminHashRestorePending = false
 const statusCode = computed(() => statusMeta.value?.code || '')
 const statusHint = computed(() => statusMeta.value?.hint || '')
 const canResumeImportJobFromStatus = computed(() => {
@@ -4955,18 +4957,25 @@ function syncAdminSectionHash(id: string): void {
 }
 
 async function restoreAdminSectionFromHash(maxAttempts = 4): Promise<boolean> {
+  if (adminHashRestoreCompleted || adminHashRestorePending) return false
   const hashedId = readAdminSectionHash()
   if (!hashedId) return false
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const target = adminSectionElements.get(hashedId) ?? document.getElementById(hashedId)
-    if (target instanceof HTMLElement) {
-      target.scrollIntoView({ behavior: 'auto', block: 'start' })
-      adminActiveSectionId.value = hashedId
-      return true
+  adminHashRestorePending = true
+  try {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const target = adminSectionElements.get(hashedId) ?? document.getElementById(hashedId)
+      if (target instanceof HTMLElement) {
+        target.scrollIntoView({ behavior: 'auto', block: 'start' })
+        adminActiveSectionId.value = hashedId
+        adminHashRestoreCompleted = true
+        return true
+      }
+      await nextTick()
     }
-    await nextTick()
+    return false
+  } finally {
+    adminHashRestorePending = false
   }
-  return false
 }
 
 async function syncAdminSectionNavigationState(): Promise<void> {
@@ -10344,6 +10353,8 @@ watch([showAdmin, adminForbidden], async ([isAdminView, forbidden]) => {
   if (!isAdminView || forbidden) {
     disconnectAdminSectionObserver()
     adminHashSyncReady = false
+    adminHashRestoreCompleted = false
+    adminHashRestorePending = false
     return
   }
   await syncAdminSectionNavigationState()
