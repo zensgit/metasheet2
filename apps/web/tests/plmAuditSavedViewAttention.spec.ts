@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   applyPlmAuditSourceFocusState,
   buildPlmAuditSavedViewStoreAttentionState,
+  buildPlmAuditSourceShareFollowupAttentionState,
   buildPlmAuditTeamViewHandoffAttentionState,
   clearPlmAuditSourceFocusState,
   reducePlmAuditAttentionFocusState,
@@ -235,6 +236,30 @@ describe('plmAuditSavedViewAttention', () => {
     })).toEqual({
       attentionFocus: {
         focusedAuditTeamViewId: 'team-view-9',
+        focusedRecommendedAuditTeamViewId: '',
+        focusedSavedViewId: '',
+      },
+      savedViewAttention: {
+        shareFollowup: null,
+        focusedSavedViewId: '',
+      },
+    })
+  })
+
+  it('clears management and source focus before installing a source-aware share followup', () => {
+    expect(buildPlmAuditSourceShareFollowupAttentionState({
+      focusedAuditTeamViewId: 'team-view-11',
+      focusedRecommendedAuditTeamViewId: 'recommended-11',
+      focusedSavedViewId: 'saved-view-11',
+    }, {
+      shareFollowup: {
+        savedViewId: 'saved-view-12',
+        source: 'scene-context',
+      },
+      focusedSavedViewId: 'saved-view-12',
+    })).toEqual({
+      attentionFocus: {
+        focusedAuditTeamViewId: '',
         focusedRecommendedAuditTeamViewId: '',
         focusedSavedViewId: '',
       },

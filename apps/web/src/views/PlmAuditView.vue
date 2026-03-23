@@ -789,6 +789,7 @@ import {
 import {
   applyPlmAuditSourceFocusState,
   buildPlmAuditSavedViewStoreAttentionState,
+  buildPlmAuditSourceShareFollowupAttentionState,
   buildPlmAuditTeamViewHandoffAttentionState,
   reducePlmAuditAttentionFocusState,
   reducePlmAuditSavedViewAttentionState,
@@ -1433,6 +1434,24 @@ function applyAuditSavedViewStoreAttention() {
   auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
 }
 
+function applyAuditSourceShareFollowupAttention() {
+  const nextState = buildPlmAuditSourceShareFollowupAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+}
+
 function actionLabel(value: string): string {
   if (value === 'archive') return tr('Archive', '归档')
   if (value === 'restore') return tr('Restore', '恢复')
@@ -1839,7 +1858,7 @@ async function shareAuditTeamViewEntry(
     },
   )
   if (source) {
-    applyAuditTeamViewHandoffAttention()
+    applyAuditSourceShareFollowupAttention()
   }
   setStatus(outcome.statusMessage)
   auditTeamViewCollaborationFollowup.value = outcome.followup

@@ -26,6 +26,11 @@ export type PlmAuditSavedViewStoreAttentionState = {
   savedViewAttention: PlmAuditSavedViewAttentionState
 }
 
+export type PlmAuditSourceShareFollowupAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+  savedViewAttention: PlmAuditSavedViewAttentionState
+}
+
 export type PlmAuditSavedViewAttentionAction =
   | { kind: 'install-followup'; shareFollowup: PlmAuditSavedViewShareFollowup }
   | { kind: 'apply' | 'context-action' | 'filter-navigation' | 'promotion-handoff' | 'reset-filters' | 'share-entry-takeover' }
@@ -97,6 +102,16 @@ export function buildPlmAuditSavedViewStoreAttentionState(
 ): PlmAuditSavedViewStoreAttentionState {
   return {
     attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-source' }),
+    savedViewAttention: reducePlmAuditSavedViewAttentionState(savedViewAttention, { kind: 'apply' }),
+  }
+}
+
+export function buildPlmAuditSourceShareFollowupAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+  savedViewAttention: PlmAuditSavedViewAttentionState,
+): PlmAuditSourceShareFollowupAttentionState {
+  return {
+    attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-all' }),
     savedViewAttention: reducePlmAuditSavedViewAttentionState(savedViewAttention, { kind: 'apply' }),
   }
 }
