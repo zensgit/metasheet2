@@ -449,6 +449,22 @@ describe('plmAuditTeamViewCollaboration', () => {
     })
   })
 
+  it('clears draft-owned single selection for route takeovers that reuse the saved-view takeover contract', () => {
+    expect(resolvePlmAuditSavedViewTakeoverCollaborationState({
+      selectedIds: ['audit-view-scene'],
+      draft: {
+        teamViewId: 'audit-view-scene',
+      },
+      followup: {
+        teamViewId: 'audit-view-logs',
+      },
+    })).toEqual({
+      selectedIds: [],
+      draft: null,
+      followup: null,
+    })
+  })
+
   it('keeps collaboration drafts pinned to the canonical team-view route only', () => {
     expect(shouldKeepPlmAuditTeamViewCollaborationDraft({
       teamViewId: 'audit-view-9',

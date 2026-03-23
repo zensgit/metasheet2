@@ -1282,15 +1282,29 @@ async function syncRouteState(
   })
 }
 
+function applyCollaborationTakeoverCleanup() {
+  const nextCollaborationState = resolvePlmAuditSavedViewTakeoverCollaborationState({
+    selectedIds: auditTeamViewSelection.value,
+    draft: auditTeamViewCollaborationDraft.value,
+    followup: auditTeamViewCollaborationFollowup.value,
+  })
+  auditTeamViewSelection.value = nextCollaborationState.selectedIds
+  auditTeamViewCollaborationDraft.value = nextCollaborationState.draft
+  auditTeamViewCollaborationFollowup.value = nextCollaborationState.followup
+}
+
 async function clearAuditSceneContext() {
+  applyCollaborationTakeoverCleanup()
   await syncRouteState(withoutPlmAuditSceneContext(readCanonicalTeamViewRouteState()))
 }
 
 async function applyAuditSceneOwnerContext() {
+  applyCollaborationTakeoverCleanup()
   await syncRouteState(withPlmAuditSceneOwnerContext(readCanonicalTeamViewRouteState()))
 }
 
 async function restoreAuditSceneQuery() {
+  applyCollaborationTakeoverCleanup()
   await syncRouteState(withPlmAuditSceneQueryContext(readCanonicalTeamViewRouteState()))
 }
 
@@ -1945,14 +1959,7 @@ function isSavedViewActive(view: PlmAuditSavedView) {
 function applySavedViewTakeover(actionKind: 'apply' | 'context-action') {
   clearAuditAttentionFocus()
   applySavedViewAttentionAction({ kind: actionKind })
-  const nextCollaborationState = resolvePlmAuditSavedViewTakeoverCollaborationState({
-    selectedIds: auditTeamViewSelection.value,
-    draft: auditTeamViewCollaborationDraft.value,
-    followup: auditTeamViewCollaborationFollowup.value,
-  })
-  auditTeamViewSelection.value = nextCollaborationState.selectedIds
-  auditTeamViewCollaborationDraft.value = nextCollaborationState.draft
-  auditTeamViewCollaborationFollowup.value = nextCollaborationState.followup
+  applyCollaborationTakeoverCleanup()
 }
 
 function runSavedViewContextAction(
