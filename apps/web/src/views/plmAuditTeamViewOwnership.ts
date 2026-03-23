@@ -24,6 +24,11 @@ export type PlmAuditTeamViewListUiState = {
   draftOwnerUserId: string
 }
 
+export type PlmAuditTeamViewFormDraftState = {
+  draftTeamViewName: string
+  draftOwnerUserId: string
+}
+
 export function resolvePlmAuditRemovedTeamViewIds<T extends { id: string }>(
   previousViews: readonly T[],
   nextViews: readonly T[],
@@ -57,12 +62,19 @@ export function prunePlmAuditTransientOwnershipForRemovedViews(
 }
 
 export function trimPlmAuditExistingTeamViewUiState<T extends { id: string }>(
-  state: PlmAuditTeamViewListUiState,
+  state: PlmAuditTeamViewListUiState & {
+    managedTeamViewId: string
+  },
   views: readonly T[],
 ): PlmAuditTeamViewListUiState {
   const existingIds = new Set(views.map((view) => view.id))
   const selectedTeamViewId = state.selectedTeamViewId.trim()
+  const managedTeamViewId = state.managedTeamViewId.trim()
   const selectedTeamViewStillExists = !selectedTeamViewId || existingIds.has(selectedTeamViewId)
+  const managedTeamViewStillExists = !managedTeamViewId || existingIds.has(managedTeamViewId)
+  const shouldPreserveDrafts = selectedTeamViewId
+    ? selectedTeamViewStillExists
+    : managedTeamViewStillExists
 
   return {
     selectedTeamViewId: selectedTeamViewStillExists ? state.selectedTeamViewId : '',
@@ -71,7 +83,32 @@ export function trimPlmAuditExistingTeamViewUiState<T extends { id: string }>(
     focusedRecommendedTeamViewId: existingIds.has(state.focusedRecommendedTeamViewId)
       ? state.focusedRecommendedTeamViewId
       : '',
-    draftTeamViewName: selectedTeamViewStillExists ? state.draftTeamViewName : '',
-    draftOwnerUserId: selectedTeamViewStillExists ? state.draftOwnerUserId : '',
+    draftTeamViewName: shouldPreserveDrafts ? state.draftTeamViewName : '',
+    draftOwnerUserId: shouldPreserveDrafts ? state.draftOwnerUserId : '',
+  }
+}
+
+export function resolvePlmAuditCanonicalTeamViewFormDraftState(options: {
+  previousCanonicalTeamViewId: string
+  nextCanonicalTeamViewId: string
+  draftTeamViewName: string
+  draftOwnerUserId: string
+}): PlmAuditTeamViewFormDraftState {
+  const previousCanonicalTeamViewId = options.previousCanonicalTeamViewId.trim()
+  const nextCanonicalTeamViewId = options.nextCanonicalTeamViewId.trim()
+
+  if (
+    previousCanonicalTeamViewId === nextCanonicalTeamViewId
+    || (!previousCanonicalTeamViewId && !nextCanonicalTeamViewId)
+  ) {
+    return {
+      draftTeamViewName: options.draftTeamViewName,
+      draftOwnerUserId: options.draftOwnerUserId,
+    }
+  }
+
+  return {
+    draftTeamViewName: '',
+    draftOwnerUserId: '',
   }
 }

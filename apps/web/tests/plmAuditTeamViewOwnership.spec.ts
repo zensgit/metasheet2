@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   prunePlmAuditTransientOwnershipForRemovedViews,
+  resolvePlmAuditCanonicalTeamViewFormDraftState,
   resolvePlmAuditRemovedTeamViewIds,
   trimPlmAuditExistingTeamViewUiState,
 } from '../src/views/plmAuditTeamViewOwnership'
@@ -69,6 +70,7 @@ describe('plmAuditTeamViewOwnership', () => {
   it('clears stale local selectors and focus when refresh removes their backing team views', () => {
     expect(trimPlmAuditExistingTeamViewUiState({
       selectedTeamViewId: 'audit-view-3',
+      managedTeamViewId: 'audit-view-3',
       selectedIds: ['audit-view-1', 'audit-view-3'],
       focusedTeamViewId: 'audit-view-3',
       focusedRecommendedTeamViewId: 'audit-view-2',
@@ -90,6 +92,7 @@ describe('plmAuditTeamViewOwnership', () => {
   it('keeps create-form drafts when no selected team view is being removed', () => {
     expect(trimPlmAuditExistingTeamViewUiState({
       selectedTeamViewId: '',
+      managedTeamViewId: '',
       selectedIds: [],
       focusedTeamViewId: '',
       focusedRecommendedTeamViewId: '',
@@ -104,6 +107,94 @@ describe('plmAuditTeamViewOwnership', () => {
       focusedRecommendedTeamViewId: '',
       draftTeamViewName: '新的团队视图',
       draftOwnerUserId: 'owner-c',
+    })
+  })
+
+  it('clears stale drafts when the canonical management owner disappears after refresh', () => {
+    expect(trimPlmAuditExistingTeamViewUiState({
+      selectedTeamViewId: '',
+      managedTeamViewId: 'audit-view-3',
+      selectedIds: [],
+      focusedTeamViewId: 'audit-view-3',
+      focusedRecommendedTeamViewId: '',
+      draftTeamViewName: '待设默认团队视图',
+      draftOwnerUserId: 'owner-d',
+    }, [
+      { id: 'audit-view-1' },
+      { id: 'audit-view-2' },
+    ])).toEqual({
+      selectedTeamViewId: '',
+      selectedIds: [],
+      focusedTeamViewId: '',
+      focusedRecommendedTeamViewId: '',
+      draftTeamViewName: '',
+      draftOwnerUserId: '',
+    })
+  })
+
+  it('keeps local selector drafts when only a different canonical owner disappears', () => {
+    expect(trimPlmAuditExistingTeamViewUiState({
+      selectedTeamViewId: 'audit-view-2',
+      managedTeamViewId: 'audit-view-3',
+      selectedIds: ['audit-view-2'],
+      focusedTeamViewId: 'audit-view-2',
+      focusedRecommendedTeamViewId: '',
+      draftTeamViewName: '本地选择的团队视图',
+      draftOwnerUserId: 'owner-e',
+    }, [
+      { id: 'audit-view-1' },
+      { id: 'audit-view-2' },
+    ])).toEqual({
+      selectedTeamViewId: 'audit-view-2',
+      selectedIds: ['audit-view-2'],
+      focusedTeamViewId: 'audit-view-2',
+      focusedRecommendedTeamViewId: '',
+      draftTeamViewName: '本地选择的团队视图',
+      draftOwnerUserId: 'owner-e',
+    })
+  })
+
+  it('clears management form drafts when the canonical management target changes', () => {
+    expect(resolvePlmAuditCanonicalTeamViewFormDraftState({
+      previousCanonicalTeamViewId: 'audit-view-1',
+      nextCanonicalTeamViewId: 'audit-view-2',
+      draftTeamViewName: '重命名中的团队视图',
+      draftOwnerUserId: 'owner-f',
+    })).toEqual({
+      draftTeamViewName: '',
+      draftOwnerUserId: '',
+    })
+
+    expect(resolvePlmAuditCanonicalTeamViewFormDraftState({
+      previousCanonicalTeamViewId: 'audit-view-1',
+      nextCanonicalTeamViewId: '',
+      draftTeamViewName: '转移中的团队视图',
+      draftOwnerUserId: 'owner-g',
+    })).toEqual({
+      draftTeamViewName: '',
+      draftOwnerUserId: '',
+    })
+  })
+
+  it('keeps form drafts when the canonical target stays the same or stays empty', () => {
+    expect(resolvePlmAuditCanonicalTeamViewFormDraftState({
+      previousCanonicalTeamViewId: 'audit-view-1',
+      nextCanonicalTeamViewId: 'audit-view-1',
+      draftTeamViewName: '同一团队视图',
+      draftOwnerUserId: 'owner-h',
+    })).toEqual({
+      draftTeamViewName: '同一团队视图',
+      draftOwnerUserId: 'owner-h',
+    })
+
+    expect(resolvePlmAuditCanonicalTeamViewFormDraftState({
+      previousCanonicalTeamViewId: '',
+      nextCanonicalTeamViewId: '',
+      draftTeamViewName: '新建团队视图',
+      draftOwnerUserId: 'owner-i',
+    })).toEqual({
+      draftTeamViewName: '新建团队视图',
+      draftOwnerUserId: 'owner-i',
     })
   })
 })

@@ -888,6 +888,7 @@ import {
   type PlmAuditTeamViewShareEntryActionKind,
 } from './plmAuditTeamViewShareEntry'
 import {
+  resolvePlmAuditCanonicalTeamViewFormDraftState,
   prunePlmAuditTransientOwnershipForRemovedViews,
   resolvePlmAuditRemovedTeamViewIds,
   trimPlmAuditExistingTeamViewUiState,
@@ -1774,10 +1775,11 @@ function removeAuditTeamViews(viewIds: string[]) {
   pruneRemovedAuditTeamViewTransientState(viewIds)
 }
 
-function trimAuditTeamViewSelection() {
+function trimAuditTeamViewSelection(managedTeamViewId = canonicalAuditTeamViewManagementTargetId.value) {
   const nextState = trimPlmAuditExistingTeamViewUiState(
     {
       selectedTeamViewId: auditTeamViewKey.value,
+      managedTeamViewId,
       selectedIds: auditTeamViewSelection.value,
       focusedTeamViewId: focusedAuditTeamViewId.value,
       focusedRecommendedTeamViewId: focusedRecommendedAuditTeamViewId.value,
@@ -2834,10 +2836,11 @@ function goToPage(nextPage: number) {
 
 watch(auditTeamViews, (views, previousViews) => {
   const removedViewIds = resolvePlmAuditRemovedTeamViewIds(previousViews || [], views)
+  const previousManagedTeamViewId = canonicalAuditTeamViewManagementTargetId.value
   if (removedViewIds.length) {
     pruneRemovedAuditTeamViewTransientState(removedViewIds)
   }
-  trimAuditTeamViewSelection()
+  trimAuditTeamViewSelection(previousManagedTeamViewId)
 })
 
 watch(recommendedAuditTeamViews, (views) => {
@@ -2845,6 +2848,17 @@ watch(recommendedAuditTeamViews, (views) => {
     views,
     focusedRecommendedAuditTeamViewId.value,
   )
+})
+
+watch(canonicalAuditTeamViewManagementTargetId, (nextManagedTeamViewId, previousManagedTeamViewId) => {
+  const nextDraftState = resolvePlmAuditCanonicalTeamViewFormDraftState({
+    previousCanonicalTeamViewId: previousManagedTeamViewId || '',
+    nextCanonicalTeamViewId: nextManagedTeamViewId || '',
+    draftTeamViewName: auditTeamViewName.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+  })
+  auditTeamViewName.value = nextDraftState.draftTeamViewName
+  auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
 })
 
 watch(
