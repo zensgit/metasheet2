@@ -837,6 +837,7 @@ import {
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry,
   shouldKeepPlmAuditTeamViewCollaborationFollowup,
+  syncPlmAuditTeamViewCollaborationFollowupSourceAnchor,
   type PlmAuditTeamViewCollaborationActionKind,
   type PlmAuditTeamViewCollaborationDraft,
   type PlmAuditTeamViewCollaborationFollowup,
@@ -1070,14 +1071,20 @@ const auditTeamViewShareEntryNotice = computed(() => {
   )
 })
 const auditTeamViewCollaborationFollowupNotice = computed(() => {
+  const followup = syncPlmAuditTeamViewCollaborationFollowupSourceAnchor(
+    auditTeamViewCollaborationFollowup.value,
+    {
+      sceneContextAvailable: Boolean(auditSceneContext.value),
+    },
+  )
   const view = findPlmAuditTeamViewCollaborationFollowupView(
     auditTeamViews.value,
-    auditTeamViewCollaborationFollowup.value,
+    followup,
   )
   if (!view) return null
   return buildPlmAuditTeamViewCollaborationFollowupNotice(
     view,
-    auditTeamViewCollaborationFollowup.value,
+    followup,
     {
       canSetDefault: canSetDefaultPlmCollaborativeEntry(view),
     },
@@ -2021,7 +2028,12 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
 async function runAuditTeamViewCollaborationFollowupAction(
   actionKind: PlmAuditTeamViewCollaborationFollowupActionKind,
 ) {
-  const followup = auditTeamViewCollaborationFollowup.value
+  const followup = syncPlmAuditTeamViewCollaborationFollowupSourceAnchor(
+    auditTeamViewCollaborationFollowup.value,
+    {
+      sceneContextAvailable: Boolean(auditSceneContext.value),
+    },
+  )
   if (!followup) return
 
   if (actionKind === 'dismiss') {

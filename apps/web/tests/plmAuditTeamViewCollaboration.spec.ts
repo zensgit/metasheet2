@@ -16,6 +16,7 @@ import {
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry,
   shouldKeepPlmAuditTeamViewCollaborationFollowup,
+  syncPlmAuditTeamViewCollaborationFollowupSourceAnchor,
 } from '../src/views/plmAuditTeamViewCollaboration'
 
 function tr(en: string, zh: string) {
@@ -628,6 +629,44 @@ describe('plmAuditTeamViewCollaboration', () => {
           emphasis: 'secondary',
         },
       ],
+    })
+  })
+
+  it('retargets scene-context followups when the scene banner disappears', () => {
+    expect(syncPlmAuditTeamViewCollaborationFollowupSourceAnchor({
+      teamViewId: 'audit-view-9',
+      source: 'scene-context',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-scene-context',
+      sourceSavedViewId: null,
+    }, {
+      sceneContextAvailable: false,
+    })).toEqual({
+      teamViewId: 'audit-view-9',
+      source: 'scene-context',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-team-view-controls',
+      sourceSavedViewId: null,
+    })
+
+    expect(syncPlmAuditTeamViewCollaborationFollowupSourceAnchor({
+      teamViewId: 'audit-view-10',
+      source: 'saved-view-promotion',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-saved-views',
+      sourceSavedViewId: 'saved-view-10',
+    }, {
+      sceneContextAvailable: false,
+    })).toEqual({
+      teamViewId: 'audit-view-10',
+      source: 'saved-view-promotion',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-saved-views',
+      sourceSavedViewId: 'saved-view-10',
     })
   })
 
