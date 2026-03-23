@@ -421,7 +421,7 @@ export function buildPlmAuditTeamViewCollaborationHandoff(
     selectedTeamViewId: null,
     teamViewName: null,
     teamViewOwnerUserId: null,
-    selectedIds: options.selectable ? [view.id] : [],
+    selectedIds: [],
     focusedTeamViewId: view.id,
     draft: null,
     followup,

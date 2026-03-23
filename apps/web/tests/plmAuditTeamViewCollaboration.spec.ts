@@ -422,7 +422,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       selectedTeamViewId: null,
       teamViewName: null,
       teamViewOwnerUserId: null,
-      selectedIds: ['audit-view-12'],
+      selectedIds: [],
       focusedTeamViewId: 'audit-view-12',
       draft: null,
       followup: {
