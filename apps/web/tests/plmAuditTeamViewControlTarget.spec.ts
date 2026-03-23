@@ -4,6 +4,7 @@ import {
   resolvePlmAuditCanonicalTeamViewManagementTargetId,
   resolvePlmAuditCanonicalTeamViewRouteState,
   resolvePlmAuditTeamViewDuplicateName,
+  shouldDisablePlmAuditTeamViewTransferOwnerInput,
   shouldLockPlmAuditTeamViewManagementTarget,
 } from '../src/views/plmAuditTeamViewControlTarget'
 import { DEFAULT_PLM_AUDIT_ROUTE_STATE } from '../src/views/plmAuditQueryState'
@@ -101,5 +102,31 @@ describe('plmAuditTeamViewControlTarget', () => {
       draftName: '   ',
       allowDraftName: true,
     })).toBeUndefined()
+  })
+
+  it('disables transfer-owner drafts whenever the canonical target is not actionable', () => {
+    expect(shouldDisablePlmAuditTeamViewTransferOwnerInput({
+      managementTargetLocked: true,
+      canTransfer: true,
+      loading: false,
+    })).toBe(true)
+
+    expect(shouldDisablePlmAuditTeamViewTransferOwnerInput({
+      managementTargetLocked: false,
+      canTransfer: false,
+      loading: false,
+    })).toBe(true)
+
+    expect(shouldDisablePlmAuditTeamViewTransferOwnerInput({
+      managementTargetLocked: false,
+      canTransfer: true,
+      loading: true,
+    })).toBe(true)
+
+    expect(shouldDisablePlmAuditTeamViewTransferOwnerInput({
+      managementTargetLocked: false,
+      canTransfer: true,
+      loading: false,
+    })).toBe(false)
   })
 })

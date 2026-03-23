@@ -483,6 +483,7 @@
           class="plm-audit__saved-view-input"
           type="text"
           :placeholder="tr('Target owner user ID', '目标所有者用户 ID')"
+          :disabled="transferAuditTeamViewOwnerInputDisabled"
           @keydown.enter.prevent="transferAuditTeamView"
         />
         <button class="plm-audit__button" type="button" :disabled="auditTeamViewManagementTargetLocked || !canTransferAuditTeamView || auditTeamViewsLoading" @click="transferAuditTeamView">
@@ -898,6 +899,7 @@ import {
   resolvePlmAuditCanonicalTeamViewManagementTargetId,
   resolvePlmAuditCanonicalTeamViewRouteState,
   resolvePlmAuditTeamViewDuplicateName,
+  shouldDisablePlmAuditTeamViewTransferOwnerInput,
   shouldLockPlmAuditTeamViewManagementTarget,
 } from './plmAuditTeamViewControlTarget'
 import {
@@ -1045,6 +1047,11 @@ const selectableAuditTeamViewCount = computed(() => auditTeamViewManagement.valu
 const auditTeamViewManagementTargetLocked = computed(() => shouldLockPlmAuditTeamViewManagementTarget({
   canonicalTeamViewId: canonicalAuditTeamViewManagementTargetId.value,
   selectedTeamViewId: auditTeamViewKey.value,
+}))
+const transferAuditTeamViewOwnerInputDisabled = computed(() => shouldDisablePlmAuditTeamViewTransferOwnerInput({
+  managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+  canTransfer: canTransferAuditTeamView.value,
+  loading: auditTeamViewsLoading.value,
 }))
 const allSelectableAuditTeamViewsSelected = computed(() => (
   selectableAuditTeamViewCount.value > 0
