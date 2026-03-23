@@ -861,6 +861,7 @@ import {
   buildPlmAuditTeamViewShareEntryNotice,
   findPlmAuditTeamViewShareEntryView,
   isPlmAuditSharedLinkEntry,
+  resolvePlmAuditTeamViewShareEntryActionTarget,
   resolvePlmAuditSharedEntryRouteSyncDecision,
   shouldKeepPlmAuditTeamViewShareEntry,
   shouldTakeOverPlmAuditSharedEntryOnManagementHandoff,
@@ -1877,8 +1878,12 @@ async function shareAuditTeamView() {
 }
 
 async function duplicateAuditTeamView() {
-  const view = selectedAuditTeamView.value
-  if (!view || !canDuplicateAuditTeamView.value) return
+  await duplicateAuditTeamViewEntry(selectedAuditTeamView.value)
+}
+
+async function duplicateAuditTeamViewEntry(targetView?: PlmWorkbenchTeamView<'audit'> | null) {
+  const view = targetView || null
+  if (!view || !canDuplicatePlmCollaborativeEntry(view)) return
 
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
@@ -2009,7 +2014,6 @@ async function shareAuditTeamViewEntry(
   )
   const sharedEntryTakeover = shouldTakeOverPlmAuditSharedEntryOnSourceAction(
     auditTeamViewShareEntry.value,
-    view.id,
     Boolean(source),
   )
   if (sharedEntryTakeover) {
@@ -2038,7 +2042,6 @@ async function setAuditTeamViewDefaultEntry(
   try {
     const sharedEntryTakeover = shouldTakeOverPlmAuditSharedEntryOnSourceAction(
       auditTeamViewShareEntry.value,
-      view.id,
       Boolean(source),
     )
     const saved = await setPlmWorkbenchTeamViewDefault('audit', view.id)
@@ -2100,7 +2103,6 @@ async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
 
   const sharedEntryTakeover = shouldTakeOverPlmAuditSharedEntryOnManagementHandoff(
     auditTeamViewShareEntry.value,
-    target.id,
   )
   const collaborationHandoff = buildPlmAuditTeamViewCollaborationHandoff(
     target,
@@ -2280,7 +2282,10 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
     return
   }
 
-  const view = auditTeamViewShareEntryTarget.value || selectedAuditTeamView.value
+  const view = resolvePlmAuditTeamViewShareEntryActionTarget(
+    auditTeamViewShareEntryTarget.value,
+    selectedAuditTeamView.value,
+  )
   if (!view) return
 
   if (actionKind === 'save-local') {
@@ -2293,7 +2298,7 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
   }
 
   if (actionKind === 'duplicate') {
-    await duplicateAuditTeamView()
+    await duplicateAuditTeamViewEntry(view)
     return
   }
 

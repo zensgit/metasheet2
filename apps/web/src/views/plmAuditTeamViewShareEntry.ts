@@ -148,6 +148,13 @@ export function findPlmAuditTeamViewShareEntryView<T extends { id: string }>(
   return views.find((view) => view.id === entry.teamViewId) || null
 }
 
+export function resolvePlmAuditTeamViewShareEntryActionTarget<T>(
+  entryTarget: T | null,
+  selectedTarget: T | null,
+) {
+  return entryTarget || selectedTarget
+}
+
 export function shouldTakeOverPlmAuditSharedEntryOnLocalSave(
   entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
   selectedTeamViewId: string,
@@ -157,15 +164,13 @@ export function shouldTakeOverPlmAuditSharedEntryOnLocalSave(
 
 export function shouldTakeOverPlmAuditSharedEntryOnManagementHandoff(
   entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
-  targetTeamViewId: string,
 ) {
-  return shouldKeepPlmAuditTeamViewShareEntry(entry, targetTeamViewId)
+  return Boolean(entry)
 }
 
 export function shouldTakeOverPlmAuditSharedEntryOnSourceAction(
   entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
-  targetTeamViewId: string,
   sourceAware: boolean,
 ) {
-  return sourceAware && shouldKeepPlmAuditTeamViewShareEntry(entry, targetTeamViewId)
+  return sourceAware && Boolean(entry)
 }
