@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   prunePlmAuditTransientOwnershipForRemovedViews,
   resolvePlmAuditRemovedTeamViewIds,
+  trimPlmAuditExistingTeamViewUiState,
 } from '../src/views/plmAuditTeamViewOwnership'
 
 describe('plmAuditTeamViewOwnership', () => {
@@ -62,6 +63,23 @@ describe('plmAuditTeamViewOwnership', () => {
         sourceSavedViewId: null,
       },
       shareEntry: null,
+    })
+  })
+
+  it('clears stale local selectors and focus when refresh removes their backing team views', () => {
+    expect(trimPlmAuditExistingTeamViewUiState({
+      selectedTeamViewId: 'audit-view-3',
+      selectedIds: ['audit-view-1', 'audit-view-3'],
+      focusedTeamViewId: 'audit-view-3',
+      focusedRecommendedTeamViewId: 'audit-view-2',
+    }, [
+      { id: 'audit-view-1' },
+      { id: 'audit-view-2' },
+    ])).toEqual({
+      selectedTeamViewId: '',
+      selectedIds: ['audit-view-1'],
+      focusedTeamViewId: '',
+      focusedRecommendedTeamViewId: 'audit-view-2',
     })
   })
 })

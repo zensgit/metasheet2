@@ -15,6 +15,13 @@ export type PlmAuditTeamViewTransientOwnershipState = {
   shareEntry: PlmAuditTeamViewShareEntry | null
 }
 
+export type PlmAuditTeamViewListUiState = {
+  selectedTeamViewId: string
+  selectedIds: string[]
+  focusedTeamViewId: string
+  focusedRecommendedTeamViewId: string
+}
+
 export function resolvePlmAuditRemovedTeamViewIds<T extends { id: string }>(
   previousViews: readonly T[],
   nextViews: readonly T[],
@@ -44,5 +51,21 @@ export function prunePlmAuditTransientOwnershipForRemovedViews(
       state.shareEntry,
       removedViewIds,
     ),
+  }
+}
+
+export function trimPlmAuditExistingTeamViewUiState<T extends { id: string }>(
+  state: PlmAuditTeamViewListUiState,
+  views: readonly T[],
+): PlmAuditTeamViewListUiState {
+  const existingIds = new Set(views.map((view) => view.id))
+
+  return {
+    selectedTeamViewId: existingIds.has(state.selectedTeamViewId) ? state.selectedTeamViewId : '',
+    selectedIds: state.selectedIds.filter((id) => existingIds.has(id)),
+    focusedTeamViewId: existingIds.has(state.focusedTeamViewId) ? state.focusedTeamViewId : '',
+    focusedRecommendedTeamViewId: existingIds.has(state.focusedRecommendedTeamViewId)
+      ? state.focusedRecommendedTeamViewId
+      : '',
   }
 }
