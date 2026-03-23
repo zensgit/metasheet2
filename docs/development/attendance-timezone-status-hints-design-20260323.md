@@ -65,6 +65,14 @@ The second pattern is reserved for fields with inheritance/fallback behavior.
 
 Status feedback keeps the existing primary message and appends timezone context as a secondary hint instead of rewriting the main message.
 
+Default / inherited selector options also surface effective timezone context inline where that context is knowable:
+
+1. import group timezone blank option now renders `Use import timezone (UTC+08:00 · Asia/Shanghai)`
+2. payroll cycle template options now render template timezone context inline
+3. payroll batch-generate blank option now renders the current default template and its timezone context
+
+This reduces the need to scan down to the hint line just to understand what a blank/default selection actually means.
+
 ## Implementation
 
 Core helper:

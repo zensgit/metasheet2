@@ -6,9 +6,10 @@ Verified:
 
 1. shared timezone status formatter
 2. rule/group/scheduling/holiday/import/payroll form hints
-3. import preview and local validation status feedback
-4. payroll summary status feedback
-5. TypeScript and production build integrity
+3. inherited/default selector option labels for import and payroll timezone contexts
+4. import preview and local validation status feedback
+5. payroll summary status feedback
+6. TypeScript and production build integrity
 
 ## Commands
 
@@ -23,6 +24,8 @@ pnpm --filter @metasheet/web exec vitest run \
   tests/AttendancePayrollAdminSection.spec.ts \
   tests/attendance-import-timezone-status.spec.ts \
   tests/attendance-payroll-timezone-status.spec.ts \
+  tests/useAttendanceAdminImportWorkflow.spec.ts \
+  tests/useAttendanceAdminPayroll.spec.ts \
   --watch=false
 
 cd /Users/huazhou/Downloads/Github/metasheet2/.worktrees/attendance-run20-field-compat-20260320
@@ -36,8 +39,8 @@ pnpm --filter @metasheet/web build
 
 Vitest:
 
-1. `8 files`
-2. `20 tests passed`
+1. `10 files`
+2. `40 tests passed`
 
 Type check:
 

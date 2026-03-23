@@ -249,7 +249,7 @@
           id="attendance-import-group-timezone"
           v-model="importGroupTimezone"
         >
-          <option value="">{{ tr('(Optional) Use import timezone', '（可选）沿用导入时区') }}</option>
+          <option value="">{{ importGroupTimezoneFallbackOptionLabel }}</option>
           <optgroup
             v-for="group in importGroupTimezoneOptionGroups"
             :key="group.id"
@@ -610,13 +610,14 @@ const importGroupTimezone = props.workflow.importGroupTimezone
 const importTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importForm.timezone))
 const importGroupTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importGroupTimezone.value))
 const importTimezoneStatusLabel = computed(() => formatTimezoneStatusLabel(importForm.timezone))
+const importGroupTimezoneFallbackOptionLabel = computed(() => tr(
+  `Use import timezone (${importTimezoneStatusLabel.value || '--'})`,
+  `沿用导入时区（${importTimezoneStatusLabel.value || '--'}）`,
+))
 const importGroupTimezoneStatusLabel = computed(() => {
   const timezone = importGroupTimezone.value.trim()
   if (timezone) return formatTimezoneStatusLabel(timezone)
-  return tr(
-    `Use import timezone (${importTimezoneStatusLabel.value || '--'})`,
-    `沿用导入时区（${importTimezoneStatusLabel.value || '--'}）`,
-  )
+  return importGroupTimezoneFallbackOptionLabel.value
 })
 const importScalabilityHint = props.workflow.importScalabilityHint
 const importPreviewTask = props.workflow.importPreviewTask

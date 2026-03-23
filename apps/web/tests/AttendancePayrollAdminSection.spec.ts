@@ -180,8 +180,14 @@ describe('AttendancePayrollAdminSection', () => {
     await flushUi()
 
     const templateTimezone = container!.querySelector<HTMLSelectElement>('#attendance-payroll-template-timezone')
+    const cycleTemplate = container!.querySelector<HTMLSelectElement>('#attendance-payroll-cycle-template')
+    const generateTemplate = container!.querySelector<HTMLSelectElement>('#attendance-payroll-cycle-gen-template')
     expect(templateTimezone).toBeTruthy()
+    expect(cycleTemplate).toBeTruthy()
+    expect(generateTemplate).toBeTruthy()
     expect(templateTimezone!.selectedOptions[0]?.textContent).toContain('Asia/Shanghai (UTC+08:00)')
+    expect(cycleTemplate!.selectedOptions[0]?.textContent).toContain('CN Payroll (UTC+08:00 · Asia/Shanghai)')
+    expect(generateTemplate!.selectedOptions[0]?.textContent).toContain('Default template (CN Payroll · UTC+08:00 · Asia/Shanghai)')
     expect(Array.from(templateTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Common timezones')
 
     expect(container!.textContent).toContain('Current: UTC+08:00 · Asia/Shanghai')

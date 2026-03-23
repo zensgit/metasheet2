@@ -169,7 +169,7 @@
         >
           <option value="">{{ tr('Manual', '手工') }}</option>
           <option v-for="item in payrollTemplates" :key="item.id" :value="item.id">
-            {{ item.name }}
+            {{ formatPayrollTemplateSelectLabel(item) }}
           </option>
         </select>
         <small class="attendance__field-hint">
@@ -257,9 +257,9 @@
             name="payrollCycleGenTemplate"
             :disabled="payrollTemplates.length === 0"
           >
-            <option value="">{{ tr('Default template', '默认模板') }}</option>
+            <option value="">{{ payrollCycleGenerateDefaultOptionLabel }}</option>
             <option v-for="item in payrollTemplates" :key="item.id" :value="item.id">
-              {{ item.name }}
+              {{ formatPayrollTemplateSelectLabel(item) }}
             </option>
           </select>
           <small class="attendance__field-hint">
@@ -525,6 +525,21 @@ function resolvePayrollTemplateTimezoneContext(templateId: string, emptyMode: 'm
   if (!template) return normalizedTemplateId
   return `${template.name} (${formatTimezoneStatusLabel(template.timezone)})`
 }
+
+function formatPayrollTemplateSelectLabel(template: AttendancePayrollTemplate): string {
+  return `${template.name} (${formatTimezoneStatusLabel(template.timezone)})`
+}
+
+const payrollCycleGenerateDefaultOptionLabel = computed(() => {
+  const defaultTemplate = payrollTemplates.value.find(item => item.isDefault)
+  if (!defaultTemplate) {
+    return tr('Default template', '默认模板')
+  }
+  return tr(
+    `Default template (${defaultTemplate.name} · ${formatTimezoneStatusLabel(defaultTemplate.timezone)})`,
+    `默认模板（${defaultTemplate.name} · ${formatTimezoneStatusLabel(defaultTemplate.timezone)}）`,
+  )
+})
 
 const payrollCycleTemplateTimezoneHint = computed(() => (
   `${tr('Cycle template timezone', '周期模板时区')}: ${resolvePayrollTemplateTimezoneContext(payrollCycleForm.templateId, 'manual')}`
