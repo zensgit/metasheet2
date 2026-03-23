@@ -15,7 +15,7 @@ import {
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
   prunePlmAuditTeamViewCollaborationFollowupForRemovedViews,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
-  resolvePlmAuditTeamViewDismissedDraftSelection,
+  resolvePlmAuditClearedTeamViewDraftSelection,
   resolvePlmAuditTeamViewFollowupSelection,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
@@ -323,24 +323,24 @@ describe('plmAuditTeamViewCollaboration', () => {
     })).toEqual(['audit-view-9'])
   })
 
-  it('clears draft-owned single selection when a collaboration draft is dismissed', () => {
-    expect(resolvePlmAuditTeamViewDismissedDraftSelection({
+  it('clears draft-owned single selection whenever collaboration draft ownership is cleared', () => {
+    expect(resolvePlmAuditClearedTeamViewDraftSelection({
       selectedIds: ['audit-view-9'],
-      dismissedDraft: {
+      clearedDraft: {
         teamViewId: 'audit-view-9',
       },
     })).toEqual([])
 
-    expect(resolvePlmAuditTeamViewDismissedDraftSelection({
+    expect(resolvePlmAuditClearedTeamViewDraftSelection({
       selectedIds: ['audit-view-9', 'audit-view-10'],
-      dismissedDraft: {
+      clearedDraft: {
         teamViewId: 'audit-view-9',
       },
     })).toEqual(['audit-view-9', 'audit-view-10'])
 
-    expect(resolvePlmAuditTeamViewDismissedDraftSelection({
+    expect(resolvePlmAuditClearedTeamViewDraftSelection({
       selectedIds: ['audit-view-10'],
-      dismissedDraft: {
+      clearedDraft: {
         teamViewId: 'audit-view-9',
       },
     })).toEqual(['audit-view-10'])

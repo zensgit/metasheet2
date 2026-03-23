@@ -861,7 +861,7 @@ import {
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
-  resolvePlmAuditTeamViewDismissedDraftSelection,
+  resolvePlmAuditClearedTeamViewDraftSelection,
   resolvePlmAuditTeamViewFollowupSelection,
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationDraft,
@@ -1486,15 +1486,15 @@ async function persistAuditTeamView(
 }
 
 function clearAuditTeamViewCollaborationDraft() {
+  const previousDraft = auditTeamViewCollaborationDraft.value
+  auditTeamViewSelection.value = resolvePlmAuditClearedTeamViewDraftSelection({
+    selectedIds: auditTeamViewSelection.value,
+    clearedDraft: previousDraft,
+  })
   auditTeamViewCollaborationDraft.value = null
 }
 
 function dismissAuditTeamViewCollaborationDraft() {
-  const previousDraft = auditTeamViewCollaborationDraft.value
-  auditTeamViewSelection.value = resolvePlmAuditTeamViewDismissedDraftSelection({
-    selectedIds: auditTeamViewSelection.value,
-    dismissedDraft: previousDraft,
-  })
   clearAuditTeamViewCollaborationDraft()
   const nextState = buildPlmAuditDismissedCollaborationDraftAttentionState(
     {

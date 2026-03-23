@@ -374,14 +374,14 @@ export function resolvePlmAuditTeamViewFollowupSelection(options: {
   return options.selectedIds
 }
 
-export function resolvePlmAuditTeamViewDismissedDraftSelection(options: {
+export function resolvePlmAuditClearedTeamViewDraftSelection(options: {
   selectedIds: string[]
-  dismissedDraft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null
+  clearedDraft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null
 }) {
-  if (!options.dismissedDraft) return options.selectedIds
+  if (!options.clearedDraft) return options.selectedIds
   if (
     options.selectedIds.length === 1
-    && options.selectedIds[0] === options.dismissedDraft.teamViewId
+    && options.selectedIds[0] === options.clearedDraft.teamViewId
   ) {
     return []
   }
