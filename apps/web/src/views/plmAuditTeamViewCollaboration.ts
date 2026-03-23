@@ -374,6 +374,52 @@ export function resolvePlmAuditTeamViewFollowupSelection(options: {
   return options.selectedIds
 }
 
+export function resolvePlmAuditCompletedTeamViewCollaborationDraft(options: {
+  selectedIds: string[]
+  draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null
+  nextFollowup: Pick<PlmAuditTeamViewCollaborationFollowup, 'teamViewId' | 'action'> | null
+  source: PlmAuditTeamViewCollaborationSource | null | undefined
+  targetTeamViewId: string
+}) {
+  if (
+    options.nextFollowup
+    && shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup(
+      options.draft,
+      options.nextFollowup,
+    )
+  ) {
+    return {
+      selectedIds: resolvePlmAuditTeamViewFollowupSelection({
+        selectedIds: options.selectedIds,
+        previousDraft: options.draft,
+        nextFollowup: options.nextFollowup,
+      }),
+      clearDraft: true,
+    }
+  }
+
+  if (
+    !options.source
+    && shouldClearPlmAuditTeamViewCollaborationDraft(
+      options.draft,
+      options.targetTeamViewId,
+    )
+  ) {
+    return {
+      selectedIds: resolvePlmAuditClearedTeamViewDraftSelection({
+        selectedIds: options.selectedIds,
+        clearedDraft: options.draft,
+      }),
+      clearDraft: true,
+    }
+  }
+
+  return {
+    selectedIds: options.selectedIds,
+    clearDraft: false,
+  }
+}
+
 export function resolvePlmAuditClearedTeamViewDraftSelection(options: {
   selectedIds: string[]
   clearedDraft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null

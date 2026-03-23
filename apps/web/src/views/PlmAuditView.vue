@@ -860,15 +860,14 @@ import {
   findPlmAuditTeamViewCollaborationFollowupView,
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
+  resolvePlmAuditCompletedTeamViewCollaborationDraft,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
   resolvePlmAuditClearedTeamViewDraftSelection,
   resolvePlmAuditSourceLocalSaveCollaborationState,
-  resolvePlmAuditTeamViewFollowupSelection,
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationFollowup,
-  shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup,
   shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry,
   syncPlmAuditTeamViewCollaborationFollowupSourceAnchor,
   type PlmAuditTeamViewCollaborationActionKind,
@@ -2193,15 +2192,15 @@ async function shareAuditTeamViewEntry(
   } else {
     applyAuditTeamViewHandoffAttention()
   }
-  if (shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup(
-    auditTeamViewCollaborationDraft.value,
-    outcome.followup,
-  )) {
-    auditTeamViewSelection.value = resolvePlmAuditTeamViewFollowupSelection({
-      selectedIds: auditTeamViewSelection.value,
-      previousDraft,
-      nextFollowup: outcome.followup,
-    })
+  const nextDraftState = resolvePlmAuditCompletedTeamViewCollaborationDraft({
+    selectedIds: auditTeamViewSelection.value,
+    draft: previousDraft,
+    nextFollowup: outcome.followup,
+    source,
+    targetTeamViewId: view.id,
+  })
+  auditTeamViewSelection.value = nextDraftState.selectedIds
+  if (nextDraftState.clearDraft) {
     clearAuditTeamViewCollaborationDraft()
   }
   setStatus(outcome.statusMessage)
@@ -2251,10 +2250,15 @@ async function setAuditTeamViewDefaultEntry(
     if (resolvePlmAuditTeamViewCollaborationAttentionMode(source, 'set-default') === 'managed-team-view') {
       applyAuditTeamViewHandoffAttention()
     }
-    if (shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup(
-      auditTeamViewCollaborationDraft.value,
-      outcome.followup,
-    )) {
+    const nextDraftState = resolvePlmAuditCompletedTeamViewCollaborationDraft({
+      selectedIds: auditTeamViewSelection.value,
+      draft: auditTeamViewCollaborationDraft.value,
+      nextFollowup: outcome.followup,
+      source,
+      targetTeamViewId: saved.id,
+    })
+    auditTeamViewSelection.value = nextDraftState.selectedIds
+    if (nextDraftState.clearDraft) {
       clearAuditTeamViewCollaborationDraft()
     }
     setStatus(outcome.statusMessage)

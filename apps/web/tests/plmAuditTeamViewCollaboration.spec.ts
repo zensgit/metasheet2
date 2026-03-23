@@ -16,6 +16,7 @@ import {
   prunePlmAuditTeamViewCollaborationFollowupForRemovedViews,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditClearedTeamViewDraftSelection,
+  resolvePlmAuditCompletedTeamViewCollaborationDraft,
   resolvePlmAuditSourceLocalSaveCollaborationState,
   resolvePlmAuditTeamViewFollowupSelection,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
@@ -345,6 +346,65 @@ describe('plmAuditTeamViewCollaboration', () => {
         teamViewId: 'audit-view-9',
       },
     })).toEqual(['audit-view-10'])
+  })
+
+  it('clears the matching collaboration draft when a generic managed action completes', () => {
+    expect(resolvePlmAuditCompletedTeamViewCollaborationDraft({
+      selectedIds: ['audit-view-9'],
+      draft: {
+        teamViewId: 'audit-view-9',
+      },
+      nextFollowup: null,
+      source: null,
+      targetTeamViewId: 'audit-view-9',
+    })).toEqual({
+      selectedIds: [],
+      clearDraft: true,
+    })
+
+    expect(resolvePlmAuditCompletedTeamViewCollaborationDraft({
+      selectedIds: ['audit-view-9', 'audit-view-10'],
+      draft: {
+        teamViewId: 'audit-view-9',
+      },
+      nextFollowup: null,
+      source: null,
+      targetTeamViewId: 'audit-view-9',
+    })).toEqual({
+      selectedIds: ['audit-view-9', 'audit-view-10'],
+      clearDraft: true,
+    })
+  })
+
+  it('keeps generic managed actions from clearing unrelated or source-owned drafts', () => {
+    expect(resolvePlmAuditCompletedTeamViewCollaborationDraft({
+      selectedIds: ['audit-view-9'],
+      draft: {
+        teamViewId: 'audit-view-7',
+      },
+      nextFollowup: null,
+      source: null,
+      targetTeamViewId: 'audit-view-9',
+    })).toEqual({
+      selectedIds: ['audit-view-9'],
+      clearDraft: false,
+    })
+
+    expect(resolvePlmAuditCompletedTeamViewCollaborationDraft({
+      selectedIds: ['audit-view-9'],
+      draft: {
+        teamViewId: 'audit-view-9',
+      },
+      nextFollowup: {
+        teamViewId: 'audit-view-9',
+        action: 'share',
+      },
+      source: 'recommendation',
+      targetTeamViewId: 'audit-view-9',
+    })).toEqual({
+      selectedIds: [],
+      clearDraft: true,
+    })
   })
 
   it('clears collaboration owners before a source-aware local save takes over', () => {
