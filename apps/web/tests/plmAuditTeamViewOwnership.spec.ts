@@ -72,6 +72,8 @@ describe('plmAuditTeamViewOwnership', () => {
       selectedIds: ['audit-view-1', 'audit-view-3'],
       focusedTeamViewId: 'audit-view-3',
       focusedRecommendedTeamViewId: 'audit-view-2',
+      draftTeamViewName: '即将删除团队视图',
+      draftOwnerUserId: 'owner-b',
     }, [
       { id: 'audit-view-1' },
       { id: 'audit-view-2' },
@@ -80,6 +82,28 @@ describe('plmAuditTeamViewOwnership', () => {
       selectedIds: ['audit-view-1'],
       focusedTeamViewId: '',
       focusedRecommendedTeamViewId: 'audit-view-2',
+      draftTeamViewName: '',
+      draftOwnerUserId: '',
+    })
+  })
+
+  it('keeps create-form drafts when no selected team view is being removed', () => {
+    expect(trimPlmAuditExistingTeamViewUiState({
+      selectedTeamViewId: '',
+      selectedIds: [],
+      focusedTeamViewId: '',
+      focusedRecommendedTeamViewId: '',
+      draftTeamViewName: '新的团队视图',
+      draftOwnerUserId: 'owner-c',
+    }, [
+      { id: 'audit-view-1' },
+    ])).toEqual({
+      selectedTeamViewId: '',
+      selectedIds: [],
+      focusedTeamViewId: '',
+      focusedRecommendedTeamViewId: '',
+      draftTeamViewName: '新的团队视图',
+      draftOwnerUserId: 'owner-c',
     })
   })
 })

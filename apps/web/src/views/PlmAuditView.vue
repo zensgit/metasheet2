@@ -1781,6 +1781,8 @@ function trimAuditTeamViewSelection() {
       selectedIds: auditTeamViewSelection.value,
       focusedTeamViewId: focusedAuditTeamViewId.value,
       focusedRecommendedTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      draftTeamViewName: auditTeamViewName.value,
+      draftOwnerUserId: auditTeamViewOwnerUserId.value,
     },
     auditTeamViews.value,
   )
@@ -1788,6 +1790,8 @@ function trimAuditTeamViewSelection() {
   auditTeamViewSelection.value = nextState.selectedIds
   focusedAuditTeamViewId.value = nextState.focusedTeamViewId
   focusedRecommendedAuditTeamViewId.value = nextState.focusedRecommendedTeamViewId
+  auditTeamViewName.value = nextState.draftTeamViewName
+  auditTeamViewOwnerUserId.value = nextState.draftOwnerUserId
 }
 
 function setAllSelectableAuditTeamViewsSelected(nextSelected: boolean) {

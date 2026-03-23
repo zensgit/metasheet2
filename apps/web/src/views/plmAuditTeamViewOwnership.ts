@@ -20,6 +20,8 @@ export type PlmAuditTeamViewListUiState = {
   selectedIds: string[]
   focusedTeamViewId: string
   focusedRecommendedTeamViewId: string
+  draftTeamViewName: string
+  draftOwnerUserId: string
 }
 
 export function resolvePlmAuditRemovedTeamViewIds<T extends { id: string }>(
@@ -59,13 +61,17 @@ export function trimPlmAuditExistingTeamViewUiState<T extends { id: string }>(
   views: readonly T[],
 ): PlmAuditTeamViewListUiState {
   const existingIds = new Set(views.map((view) => view.id))
+  const selectedTeamViewId = state.selectedTeamViewId.trim()
+  const selectedTeamViewStillExists = !selectedTeamViewId || existingIds.has(selectedTeamViewId)
 
   return {
-    selectedTeamViewId: existingIds.has(state.selectedTeamViewId) ? state.selectedTeamViewId : '',
+    selectedTeamViewId: selectedTeamViewStillExists ? state.selectedTeamViewId : '',
     selectedIds: state.selectedIds.filter((id) => existingIds.has(id)),
     focusedTeamViewId: existingIds.has(state.focusedTeamViewId) ? state.focusedTeamViewId : '',
     focusedRecommendedTeamViewId: existingIds.has(state.focusedRecommendedTeamViewId)
       ? state.focusedRecommendedTeamViewId
       : '',
+    draftTeamViewName: selectedTeamViewStillExists ? state.draftTeamViewName : '',
+    draftOwnerUserId: selectedTeamViewStillExists ? state.draftOwnerUserId : '',
   }
 }
