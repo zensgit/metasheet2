@@ -1911,6 +1911,7 @@ async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
     },
     tr,
   )
+  applyAuditTeamViewHandoffAttention()
   applyAuditTeamViewCollaborationHandoff(collaborationHandoff)
   await nextTick()
   document.getElementById(collaborationHandoff.scrollTargetId)?.scrollIntoView({
