@@ -1942,14 +1942,26 @@ function isSavedViewActive(view: PlmAuditSavedView) {
   return isPlmAuditRouteStateEqual(view.state, readCurrentRouteState())
 }
 
+function applySavedViewTakeover(actionKind: 'apply' | 'context-action') {
+  clearAuditAttentionFocus()
+  applySavedViewAttentionAction({ kind: actionKind })
+  const nextCollaborationState = resolvePlmAuditSavedViewTakeoverCollaborationState({
+    selectedIds: auditTeamViewSelection.value,
+    draft: auditTeamViewCollaborationDraft.value,
+    followup: auditTeamViewCollaborationFollowup.value,
+  })
+  auditTeamViewSelection.value = nextCollaborationState.selectedIds
+  auditTeamViewCollaborationDraft.value = nextCollaborationState.draft
+  auditTeamViewCollaborationFollowup.value = nextCollaborationState.followup
+}
+
 function runSavedViewContextAction(
   view: PlmAuditSavedView,
   actionKind: 'owner' | 'scene' | 'reapply-scene',
 ) {
   const badge = savedViewContextBadge(view)
   if (badge?.quickAction?.disabled) return
-  clearAuditAttentionFocus()
-  applySavedViewAttentionAction({ kind: 'context-action' })
+  applySavedViewTakeover('context-action')
   void syncRouteState(buildSavedViewContextState(view, actionKind))
 }
 
@@ -2762,16 +2774,7 @@ async function saveCurrentAuditView() {
 }
 
 function applySavedView(view: PlmAuditSavedView) {
-  clearAuditAttentionFocus()
-  applySavedViewAttentionAction({ kind: 'apply' })
-  const nextCollaborationState = resolvePlmAuditSavedViewTakeoverCollaborationState({
-    selectedIds: auditTeamViewSelection.value,
-    draft: auditTeamViewCollaborationDraft.value,
-    followup: auditTeamViewCollaborationFollowup.value,
-  })
-  auditTeamViewSelection.value = nextCollaborationState.selectedIds
-  auditTeamViewCollaborationDraft.value = nextCollaborationState.draft
-  auditTeamViewCollaborationFollowup.value = nextCollaborationState.followup
+  applySavedViewTakeover('apply')
   void syncRouteState(restorePlmAuditSavedViewState(view.state))
 }
 

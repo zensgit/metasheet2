@@ -435,6 +435,18 @@ describe('plmAuditTeamViewCollaboration', () => {
       draft: null,
       followup: null,
     })
+
+    expect(resolvePlmAuditSavedViewTakeoverCollaborationState({
+      selectedIds: ['audit-view-12'],
+      draft: {
+        teamViewId: 'audit-view-12',
+      },
+      followup: null,
+    })).toEqual({
+      selectedIds: [],
+      draft: null,
+      followup: null,
+    })
   })
 
   it('keeps collaboration drafts pinned to the canonical team-view route only', () => {
