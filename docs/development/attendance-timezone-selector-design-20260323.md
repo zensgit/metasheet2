@@ -64,3 +64,13 @@ This change does not:
 1. Rework backend timezone handling
 2. Add fuzzy timezone search
 3. Reorganize all settings screens outside the attendance admin flow
+
+## Post-Merge Status
+
+This design shipped to `main` on `2026-03-23`.
+
+1. Pull request: `#542 feat(attendance-ui): add timezone selectors with offset labels`
+2. Merge commit: `8fba63dcfe08490bb728f2f230079498072f2a8a`
+3. The post-merge `main` workflow chain for this commit completed without red jobs.
+
+That means the selector-based timezone UX described in this document is no longer a branch-only proposal. It is the current `main` behavior baseline.
