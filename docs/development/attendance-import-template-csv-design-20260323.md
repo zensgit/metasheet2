@@ -90,7 +90,8 @@ If generated OpenAPI artifacts are tracked in this branch, they should be refres
 - `401` when the caller is not authenticated.
 - `403` when the caller lacks `attendance:admin` permission.
 - `400` when `profileId` is present but does not match a known template profile.
-- `500` only for unexpected server-side template generation failures.
+- `400` when the selected template profile is misconfigured and resolves to no CSV columns.
+- `500` only for truly unexpected server-side failures.
 
 Do not silently fall back to a different template profile when the caller explicitly passes an invalid `profileId`.
 

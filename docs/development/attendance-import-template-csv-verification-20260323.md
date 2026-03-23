@@ -65,6 +65,7 @@ Additional note:
 - Uses the expected import profile when `profileId` is omitted.
 - Uses the requested profile when `profileId` is valid.
 - Returns `400` for an unknown `profileId`.
+- Returns `400` when a selected profile is present but misconfigured with no resolvable CSV columns.
 
 ### Auth Semantics
 

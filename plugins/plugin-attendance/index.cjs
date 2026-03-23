@@ -12052,7 +12052,7 @@ module.exports = {
 
         const csvText = buildImportTemplateCsv(profile)
         if (!csvText) {
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Import template has no CSV columns' } })
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Import template has no CSV columns' } })
           return
         }
 
