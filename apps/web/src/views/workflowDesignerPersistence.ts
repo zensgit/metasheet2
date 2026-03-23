@@ -498,6 +498,35 @@ export async function instantiateWorkflowTemplate(input: InstantiateWorkflowTemp
   return normalizeSavedWorkflow(payload)
 }
 
+export interface AttendanceApprovalFlowWorkflowLinkResult {
+  id: string
+  workflowId: string | null
+  name: string
+  requestType: string
+}
+
+export async function linkAttendanceApprovalFlowWorkflow(
+  approvalFlowId: string,
+  workflowId: string | null,
+): Promise<AttendanceApprovalFlowWorkflowLinkResult> {
+  const { response, payload } = await requestJson(`/api/attendance/approval-flows/${approvalFlowId}/workflow-link`, {
+    method: 'PUT',
+    body: JSON.stringify({ workflowId }),
+  })
+
+  if (!response.ok) {
+    throw new Error(extractErrorMessage(payload, '绑定审批流工作流草稿失败'))
+  }
+
+  const data = unwrapEnvelope(payload)
+  return {
+    id: typeof data.id === 'string' ? data.id : approvalFlowId,
+    workflowId: typeof data.workflowId === 'string' && data.workflowId.trim() ? data.workflowId : null,
+    name: typeof data.name === 'string' ? data.name : '',
+    requestType: typeof data.requestType === 'string' ? data.requestType : '',
+  }
+}
+
 export async function duplicateWorkflowDraft(workflowId: string, name?: string): Promise<WorkflowDraftActionResult> {
   const { response, payload } = await requestJson(`/api/workflow-designer/workflows/${workflowId}/duplicate`, {
     method: 'POST',

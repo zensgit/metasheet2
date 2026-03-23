@@ -58,6 +58,7 @@ export interface AttendanceApprovalFlow {
   orgId?: string
   name: string
   requestType: string
+  workflowId?: string | null
   steps: AttendanceApprovalStep[]
   isActive: boolean
 }
@@ -318,6 +319,7 @@ export function useAttendanceAdminLeavePolicies({
   const approvalFlowForm = reactive({
     name: '',
     requestType: 'leave',
+    workflowId: '',
     steps: '',
     isActive: true,
   })
@@ -681,6 +683,7 @@ export function useAttendanceAdminLeavePolicies({
     approvalFlowEditingId.value = null
     approvalFlowForm.name = ''
     approvalFlowForm.requestType = 'leave'
+    approvalFlowForm.workflowId = ''
     approvalFlowForm.steps = ''
     approvalFlowForm.isActive = true
   }
@@ -689,8 +692,19 @@ export function useAttendanceAdminLeavePolicies({
     approvalFlowEditingId.value = flow.id
     approvalFlowForm.name = flow.name
     approvalFlowForm.requestType = flow.requestType
+    approvalFlowForm.workflowId = typeof flow.workflowId === 'string' ? flow.workflowId : ''
     approvalFlowForm.steps = formatApprovalSteps(flow.steps)
     approvalFlowForm.isActive = flow.isActive
+  }
+
+  function syncApprovalFlowCollection(flow: AttendanceApprovalFlow) {
+    approvalFlows.value = approvalFlows.value.some((item) => item.id === flow.id)
+      ? approvalFlows.value.map((item) => (item.id === flow.id ? flow : item))
+      : [flow, ...approvalFlows.value]
+
+    if (approvalFlowEditingId.value === flow.id) {
+      approvalFlowForm.workflowId = typeof flow.workflowId === 'string' ? flow.workflowId : ''
+    }
   }
 
   async function loadApprovalFlows() {
@@ -792,6 +806,40 @@ export function useAttendanceAdminLeavePolicies({
     }
   }
 
+  async function linkApprovalFlowWorkflow(flowId: string, workflowId: string | null) {
+    try {
+      const response = await apiFetch(`/api/attendance/approval-flows/${flowId}/workflow-link`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          workflowId,
+          orgId: getOrgId(),
+        }),
+      })
+      if (response.status === 403) {
+        adminForbidden.value = true
+        throw new Error(tr('Admin permissions required', '需要管理员权限'))
+      }
+      const data = await readJson<ApiEnvelope<AttendanceApprovalFlow>>(response)
+      if (!response.ok || !data?.ok || !data.data) {
+        throw new Error(data?.error?.message || tr('Failed to update approval flow workflow link', '更新审批流程工作流关联失败'))
+      }
+      adminForbidden.value = false
+      syncApprovalFlowCollection(data.data)
+      setStatus(
+        workflowId
+          ? tr('Workflow draft linked to approval flow.', '工作流草稿已关联到审批流程。')
+          : tr('Workflow draft link cleared.', '审批流程工作流关联已清除。'),
+      )
+      return data.data
+    } catch (error) {
+      const message = error instanceof Error && error.message
+        ? error.message
+        : tr('Failed to update approval flow workflow link', '更新审批流程工作流关联失败')
+      setStatus(message, 'error')
+      throw error
+    }
+  }
+
   return {
     leaveTypes,
     leaveTypeLoading,
@@ -830,5 +878,6 @@ export function useAttendanceAdminLeavePolicies({
     loadApprovalFlows,
     saveApprovalFlow,
     deleteApprovalFlow,
+    linkApprovalFlowWorkflow,
   }
 }

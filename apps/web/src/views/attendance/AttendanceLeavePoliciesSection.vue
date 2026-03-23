@@ -345,9 +345,33 @@
           >
             {{ canOpenWorkflowDesigner ? tr('Open in workflow designer', '在流程设计器中打开') : tr('Workflow capability required', '需要流程能力') }}
           </button>
+          <button
+            v-if="linkedWorkflowId"
+            class="attendance__btn"
+            type="button"
+            @click="openLinkedWorkflowDraft"
+          >
+            {{ tr('Open linked draft', '打开已关联草稿') }}
+          </button>
+          <button
+            v-if="approvalFlowEditingId && linkedWorkflowId"
+            class="attendance__btn"
+            type="button"
+            @click="clearLinkedWorkflowDraft"
+          >
+            {{ tr('Clear link', '清除关联') }}
+          </button>
+        </div>
+        <div class="attendance__builder-link-state">
+          <strong>{{ tr('Linked workflow draft', '已关联工作流草稿') }}:</strong>
+          <span v-if="linkedWorkflowId">{{ linkedWorkflowId }}</span>
+          <span v-else>{{ tr('No linked workflow draft', '暂无已关联工作流草稿') }}</span>
         </div>
         <small class="attendance__field-hint">
           {{ tr('The workflow designer will receive request type, flow name, step count, and step summary, then seed a starter draft with the recommended template.', '流程设计器会接收申请类型、流程名称、步骤数量和步骤摘要，并用推荐模板生成起步草稿。') }}
+        </small>
+        <small v-if="!approvalFlowEditingId" class="attendance__field-hint">
+          {{ tr('Save the approval flow first if you want to keep a persistent workflow draft link.', '如需保留正式工作流草稿关联，请先保存当前审批流程。') }}
         </small>
       </div>
       <label class="attendance__field attendance__field--full" for="attendance-approval-steps">
@@ -457,6 +481,7 @@ interface OvertimeRuleFormState {
 interface ApprovalFlowFormState {
   name: string
   requestType: string
+  workflowId: string
   steps: string
   isActive: boolean
 }
@@ -504,6 +529,7 @@ interface LeavePoliciesBindings {
   loadApprovalFlows: () => MaybePromise<void>
   saveApprovalFlow: () => MaybePromise<void>
   deleteApprovalFlow: (id: string) => MaybePromise<void>
+  linkApprovalFlowWorkflow: (flowId: string, workflowId: string | null) => MaybePromise<unknown>
 }
 
 const props = defineProps<{
@@ -553,7 +579,9 @@ const editApprovalFlow = (item: AttendanceApprovalFlow) => props.policies.editAp
 const loadApprovalFlows = () => props.policies.loadApprovalFlows()
 const saveApprovalFlow = () => props.policies.saveApprovalFlow()
 const deleteApprovalFlow = (id: string) => props.policies.deleteApprovalFlow(id)
+const linkApprovalFlowWorkflow = (flowId: string, workflowId: string | null) => props.policies.linkApprovalFlowWorkflow(flowId, workflowId)
 const canOpenWorkflowDesigner = computed(() => hasFeature('workflow'))
+const linkedWorkflowId = computed(() => approvalFlowForm.workflowId.trim())
 
 const workflowStarterLabel = computed(() => {
   const starterId = resolveAttendanceWorkflowStarterId(
@@ -610,6 +638,19 @@ async function openWorkflowDesignerFromApprovalFlow(): Promise<void> {
       steps: approvalFlowBuilderSteps.value,
     }),
   })
+}
+
+async function openLinkedWorkflowDraft(): Promise<void> {
+  if (!linkedWorkflowId.value) return
+  await router.push({
+    name: 'workflow-designer',
+    params: { id: linkedWorkflowId.value },
+  })
+}
+
+async function clearLinkedWorkflowDraft(): Promise<void> {
+  if (!approvalFlowEditingId.value) return
+  await linkApprovalFlowWorkflow(approvalFlowEditingId.value, null)
 }
 </script>
 
@@ -795,5 +836,14 @@ async function openWorkflowDesignerFromApprovalFlow(): Promise<void> {
   border-radius: 10px;
   padding: 12px;
   background: #f7fbff;
+}
+
+.attendance__builder-link-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #475569;
 }
 </style>

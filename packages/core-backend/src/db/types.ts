@@ -982,6 +982,7 @@ export interface AttendanceApprovalFlowsTable {
   name: string
   request_type: string
   steps: JSONColumnType<Array<Record<string, unknown>> | null>
+  workflow_id: string | null
   is_active: boolean
   created_at: CreatedAt
   updated_at: UpdatedAt

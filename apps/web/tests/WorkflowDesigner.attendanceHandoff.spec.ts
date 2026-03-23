@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => {
     messageSuccessSpy: vi.fn(),
     messageErrorSpy: vi.fn(),
     instantiateWorkflowTemplateSpy: vi.fn(),
+    linkAttendanceApprovalFlowWorkflowSpy: vi.fn(),
     loadWorkflowDraftSpy: vi.fn(),
     loadWorkflowTemplateCachedSpy: vi.fn(),
     routeState,
@@ -97,6 +98,7 @@ vi.mock('../src/views/workflowDesignerPersistence', async () => {
   return {
     ...actual,
     instantiateWorkflowTemplate: mocks.instantiateWorkflowTemplateSpy,
+    linkAttendanceApprovalFlowWorkflow: mocks.linkAttendanceApprovalFlowWorkflowSpy,
     loadWorkflowDraft: mocks.loadWorkflowDraftSpy,
     saveWorkflowDraft: vi.fn(),
     deploySavedWorkflowDraft: vi.fn(),
@@ -208,6 +210,12 @@ describe('WorkflowDesigner attendance handoff', () => {
       workflowId: 'wf-123',
       message: '模板已应用',
     })
+    mocks.linkAttendanceApprovalFlowWorkflowSpy.mockResolvedValue({
+      id: 'flow-1',
+      workflowId: 'wf-123',
+      name: 'Leave manager to HR',
+      requestType: 'leave',
+    })
     mocks.loadWorkflowTemplateCachedSpy.mockResolvedValue({
       id: 'attendance-leave-manager-hr',
       name: 'Attendance Leave Manager -> HR Starter',
@@ -243,6 +251,7 @@ describe('WorkflowDesigner attendance handoff', () => {
       description: 'Attendance leave starter from approval builder',
       category: 'approval',
     })
+    expect(mocks.linkAttendanceApprovalFlowWorkflowSpy).toHaveBeenCalledWith('flow-1', 'wf-123')
     expect(mocks.loadWorkflowDraftSpy).toHaveBeenCalledWith('wf-123')
     expect(mocks.replaceSpy).toHaveBeenCalledWith({
       name: 'workflow-designer',
@@ -251,5 +260,6 @@ describe('WorkflowDesigner attendance handoff', () => {
     })
     expect(mocks.messageSuccessSpy).toHaveBeenCalled()
     expect(mocks.messageErrorSpy).not.toHaveBeenCalled()
+    expect(container!.textContent).toContain('考勤审批流反向绑定')
   })
 })

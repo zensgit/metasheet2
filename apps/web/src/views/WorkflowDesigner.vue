@@ -17,6 +17,26 @@
       @deploy-workflow="deployWorkflow"
     />
 
+    <div v-if="attendanceLinkContext" class="attendance-handoff-banner">
+      <div class="attendance-handoff-banner__copy">
+        <strong>考勤审批流反向绑定</strong>
+        <span>
+          审批流 {{ attendanceLinkContext.approvalFlowName }} ({{ attendanceLinkContext.approvalFlowId }})
+          {{ attendanceApprovalLinkMessage || '可将当前草稿正式关联回考勤审批流。' }}
+        </span>
+      </div>
+      <div class="attendance-handoff-banner__actions">
+        <button
+          class="attendance-handoff-banner__btn"
+          type="button"
+          :disabled="attendanceApprovalLinkState === 'binding' || !workflowId"
+          @click="bindAttendanceApprovalFlow()"
+        >
+          {{ attendanceApprovalLinkState === 'linked' ? '重新绑定当前草稿' : attendanceApprovalLinkState === 'binding' ? '绑定中...' : '绑定当前草稿' }}
+        </button>
+      </div>
+    </div>
+
     <!-- Main Content -->
     <div class="designer-content">
       <!-- Tool Palette -->
@@ -160,6 +180,7 @@ import {
   deploySavedWorkflowDraft,
   deployWorkflowXml,
   instantiateWorkflowTemplate,
+  linkAttendanceApprovalFlowWorkflow,
   loadWorkflowDraft,
   saveWorkflowDraft,
   type WorkflowDesignerPagination,
@@ -256,6 +277,9 @@ const recentTemplateItems = ref<RecentWorkflowTemplateItem[]>([])
 const selectedTemplateId = ref<string | null>(null)
 const selectedTemplate = ref<WorkflowDesignerTemplateDetail | null>(null)
 const attendanceWorkflowHandoff = computed(() => readAttendanceWorkflowHandoff(route.query as Record<string, unknown>))
+const activeAttendanceHandoff = ref(attendanceWorkflowHandoff.value)
+const attendanceApprovalLinkState = ref<'idle' | 'binding' | 'linked' | 'error'>('idle')
+const attendanceApprovalLinkMessage = ref('')
 
 const selectedElement = ref<BpmnElement | null>(null)
 const elementName = ref('')
@@ -270,6 +294,14 @@ const draggedItem = ref<PaletteItem | null>(null)
 
 const elementCount = ref(0)
 const connectionCount = ref(0)
+const attendanceLinkContext = computed(() => {
+  const handoff = activeAttendanceHandoff.value
+  if (!handoff?.approvalFlowId) return null
+  return {
+    approvalFlowId: handoff.approvalFlowId,
+    approvalFlowName: handoff.approvalFlowName,
+  }
+})
 
 // Palette Items
 const eventElements: PaletteItem[] = [
@@ -318,6 +350,12 @@ const templateRangeLabel = computed(() => {
   const end = templatePagination.value.offset + templatePagination.value.returned
   return `${start}-${end} / ${templatePagination.value.total}`
 })
+
+watch(attendanceWorkflowHandoff, (value) => {
+  if (value) {
+    activeAttendanceHandoff.value = value
+  }
+}, { immediate: true })
 
 // Element Type Labels
 function getElementTypeLabel(type: string): string {
@@ -669,6 +707,10 @@ async function applyTemplate(templateId?: string, options: { skipConfirm?: boole
       throw new Error('模板实例化后未返回工作流 ID')
     }
 
+    if (workflowHandoff?.handoff === 'approval-flow' && workflowHandoff.approvalFlowId) {
+      await bindAttendanceApprovalFlow(result.workflowId)
+    }
+
     recentTemplateItems.value = rememberRecentWorkflowTemplate(buildRecentWorkflowTemplateItem(templateRecord))
 
     await router.replace({
@@ -687,6 +729,25 @@ async function applyTemplate(templateId?: string, options: { skipConfirm?: boole
     ElMessage.error(error instanceof Error ? error.message : '应用模板失败')
   } finally {
     applyingTemplate.value = false
+  }
+}
+
+async function bindAttendanceApprovalFlow(targetWorkflowId = workflowId.value): Promise<void> {
+  const handoff = activeAttendanceHandoff.value
+  if (!handoff?.approvalFlowId || !targetWorkflowId) return
+
+  attendanceApprovalLinkState.value = 'binding'
+  attendanceApprovalLinkMessage.value = '正在把当前草稿回写到考勤审批流。'
+  try {
+    const linked = await linkAttendanceApprovalFlowWorkflow(handoff.approvalFlowId, targetWorkflowId)
+    attendanceApprovalLinkState.value = 'linked'
+    attendanceApprovalLinkMessage.value = linked.workflowId
+      ? `已绑定到草稿 ${linked.workflowId}。`
+      : '审批流链接已清除。'
+  } catch (error) {
+    attendanceApprovalLinkState.value = 'error'
+    attendanceApprovalLinkMessage.value = error instanceof Error ? error.message : '绑定审批流草稿失败'
+    ElMessage.error(attendanceApprovalLinkMessage.value)
   }
 }
 
@@ -1022,6 +1083,44 @@ watch(isDirty, (dirty) => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.attendance-handoff-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #eef6ff;
+  border-bottom: 1px solid #d7e7ff;
+}
+
+.attendance-handoff-banner__copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #1e3a5f;
+  font-size: 13px;
+}
+
+.attendance-handoff-banner__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.attendance-handoff-banner__btn {
+  border: 1px solid #7aa2e3;
+  background: #ffffff;
+  color: #2454a6;
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.attendance-handoff-banner__btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .validation-item {

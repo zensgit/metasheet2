@@ -74,6 +74,7 @@ export interface WorkflowDefinition {
   variables?: Record<string, VariableDefinition>
   category?: string
   tags?: string[]
+  createdBy?: string
 }
 
 interface AttendanceStarterStepDefinition {
@@ -658,7 +659,7 @@ export class WorkflowDesigner extends EventEmitter {
           definition: JSON.stringify(storedDefinition),
           status: existing?.status || 'draft',
           is_active: true,
-          created_by: existing?.createdBy || 'system'  // Required field, use system as default
+          created_by: definition.createdBy || existing?.createdBy || 'system',
         })
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .onConflict((oc: any) => oc.column('id').doUpdateSet({

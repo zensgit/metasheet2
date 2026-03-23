@@ -530,6 +530,7 @@ router.post(
         name: typeof req.body.name === 'string' && req.body.name.trim() ? req.body.name.trim() : definition.name,
         description: typeof req.body.description === 'string' ? req.body.description : definition.description,
         category: typeof req.body.category === 'string' && req.body.category.trim() ? req.body.category.trim() : definition.category,
+        createdBy: userId,
       })
 
       await recordWorkflowAnalytics({
@@ -616,6 +617,7 @@ router.post(
             return designer.saveWorkflow({
               ...(workflowDefinition as unknown as WorkflowDefinition),
               id: undefined,
+              createdBy: userId,
             })
           })()
 

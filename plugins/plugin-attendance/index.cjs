@@ -2703,9 +2703,37 @@ function mapApprovalFlowRow(row) {
     orgId: row.org_id ?? DEFAULT_ORG_ID,
     name: row.name,
     requestType: row.request_type,
+    workflowId: typeof row.workflow_id === 'string' && row.workflow_id.trim() ? row.workflow_id : null,
     steps: normalizeJsonArray(row.steps, []).filter(step => step && typeof step === 'object'),
     isActive: row.is_active ?? true,
   }
+}
+
+function parseWorkflowDraftShares(definition) {
+  try {
+    const envelope = typeof definition === 'string'
+      ? JSON.parse(definition)
+      : definition
+    if (!envelope || typeof envelope !== 'object' || !Array.isArray(envelope.shares)) return []
+    return envelope.shares.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return []
+      const record = entry
+      if (typeof record.userId !== 'string' || !record.userId.trim()) return []
+      return [{
+        userId: record.userId.trim(),
+        canEdit: Boolean(record.canEdit),
+      }]
+    })
+  } catch {
+    return []
+  }
+}
+
+function canEditWorkflowDraftRow(row, userId) {
+  if (!userId) return false
+  if (typeof row?.created_by === 'string' && row.created_by === userId) return true
+  const shares = parseWorkflowDraftShares(row?.definition)
+  return shares.some((entry) => entry.userId === userId && entry.canEdit)
 }
 
 function mapRotationRuleRow(row) {
@@ -8580,6 +8608,10 @@ module.exports = {
       orgId: z.string().optional(),
     })
     const approvalFlowUpdateSchema = approvalFlowCreateSchema.partial()
+    const approvalFlowWorkflowLinkSchema = z.object({
+      workflowId: z.string().uuid().nullable().optional(),
+      orgId: z.string().optional(),
+    })
 
     const rotationRuleCreateSchema = z.object({
       name: z.string().min(1),
@@ -10643,6 +10675,82 @@ module.exports = {
           }
           logger.error('Attendance approval flow delete failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete approval flow' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/approval-flows/:id/workflow-link',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = approvalFlowWorkflowLinkSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const flowId = normalizeUuidString(req.params.id)
+        if (!flowId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        const workflowId = parsed.data.workflowId ?? null
+        const userId = getUserId(req)
+
+        try {
+          const existingRows = await db.query(
+            'SELECT * FROM attendance_approval_flows WHERE id = $1 AND org_id = $2',
+            [flowId, orgId]
+          )
+          if (!existingRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Approval flow not found' } })
+            return
+          }
+
+          if (workflowId) {
+            const workflowRows = await db.query(
+              'SELECT id, created_by, definition FROM workflow_definitions WHERE id = $1',
+              [workflowId]
+            )
+            if (!workflowRows.length) {
+              res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Workflow draft not found' } })
+              return
+            }
+            if (!canEditWorkflowDraftRow(workflowRows[0], userId)) {
+              res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Workflow draft edit access required' } })
+              return
+            }
+          }
+
+          const rows = await db.query(
+            `UPDATE attendance_approval_flows
+             SET workflow_id = $3,
+                 updated_at = now()
+             WHERE id = $1 AND org_id = $2
+             RETURNING *`,
+            [flowId, orgId, workflowId]
+          )
+
+          const flow = mapApprovalFlowRow(rows[0])
+          emitEvent('attendance.approvalFlow.updated', {
+            orgId,
+            approvalFlowId: flow.id,
+            workflowId: flow.workflowId,
+          })
+          res.json({ ok: true, data: flow })
+        } catch (error) {
+          if (error?.code === '22P02') {
+            respondInvalidUuid(res, 'workflowId')
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance approval flow workflow link update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update approval flow workflow link' } })
         }
       })
     )

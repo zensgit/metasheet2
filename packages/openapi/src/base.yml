@@ -433,6 +433,9 @@ components:
           type: string
         requestType:
           type: string
+        workflowId:
+          type: string
+          nullable: true
         steps:
           type: array
           items:

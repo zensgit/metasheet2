@@ -68,6 +68,7 @@ interface LeavePoliciesBindings {
   approvalFlowForm: {
     name: string
     requestType: string
+    workflowId: string
     steps: string
     isActive: boolean
   }
@@ -88,6 +89,7 @@ interface LeavePoliciesBindings {
   loadApprovalFlows: () => MaybePromise<void>
   saveApprovalFlow: () => MaybePromise<void>
   deleteApprovalFlow: (id: string) => MaybePromise<void>
+  linkApprovalFlowWorkflow: (flowId: string, workflowId: string | null) => MaybePromise<void>
 }
 
 function flushUi(): Promise<void> {
@@ -136,6 +138,7 @@ function createBindings(overrides: Partial<LeavePoliciesBindings> = {}): LeavePo
         id: 'flow-1',
         name: 'Leave manager to HR',
         requestType: 'leave',
+        workflowId: 'wf-123',
         steps: [
           { name: 'Manager review', approverRoleIds: ['manager'] },
           { name: 'HR review', approverRoleIds: ['hr'] },
@@ -149,6 +152,7 @@ function createBindings(overrides: Partial<LeavePoliciesBindings> = {}): LeavePo
     approvalFlowForm: reactive({
       name: 'Leave manager to HR',
       requestType: 'leave',
+      workflowId: 'wf-123',
       steps: JSON.stringify([
         { name: 'Manager review', approverRoleIds: ['manager'] },
         { name: 'HR review', approverRoleIds: ['hr'] },
@@ -201,6 +205,7 @@ function createBindings(overrides: Partial<LeavePoliciesBindings> = {}): LeavePo
     loadApprovalFlows: vi.fn(),
     saveApprovalFlow: vi.fn(),
     deleteApprovalFlow: vi.fn(),
+    linkApprovalFlowWorkflow: vi.fn(),
     ...overrides,
   }
 }
@@ -240,6 +245,8 @@ describe('AttendanceLeavePoliciesSection', () => {
     expect(container!.textContent).toContain('Visual approval builder')
     expect(container!.textContent).toContain('Workflow designer handoff')
     expect(container!.textContent).toContain('auto-apply the recommended starter template')
+    expect(container!.textContent).toContain('Linked workflow draft')
+    expect(container!.textContent).toContain('wf-123')
     expect(container!.textContent).toContain('Steps: 2')
     expect(container!.textContent).toContain('Role gates: 2')
     expect(container!.textContent).toContain('Direct users: 1')
@@ -256,17 +263,23 @@ describe('AttendanceLeavePoliciesSection', () => {
     const templateButton = buttons.find((button) => button.textContent?.includes('Manager -> HR'))
     const addStepButton = buttons.find((button) => button.textContent?.includes('Add step'))
     const workflowButton = buttons.find((button) => button.textContent?.includes('Open in workflow designer'))
+    const linkedWorkflowButton = buttons.find((button) => button.textContent?.includes('Open linked draft'))
+    const clearLinkButton = buttons.find((button) => button.textContent?.includes('Clear link'))
     const removeButtons = buttons.filter((button) => button.textContent?.includes('Remove'))
 
     expect(templateButton).toBeTruthy()
     expect(addStepButton).toBeTruthy()
     expect(workflowButton).toBeTruthy()
+    expect(linkedWorkflowButton).toBeTruthy()
+    expect(clearLinkButton).toBeTruthy()
     expect(removeButtons).toHaveLength(2)
 
     templateButton!.click()
     addStepButton!.click()
     removeButtons[0]!.click()
     workflowButton!.click()
+    linkedWorkflowButton!.click()
+    clearLinkButton!.click()
     await flushUi()
 
     expect(policies.applyApprovalFlowTemplate).toHaveBeenCalledWith('manager-hr')
@@ -286,6 +299,11 @@ describe('AttendanceLeavePoliciesSection', () => {
         templateId: 'attendance-leave-manager-hr',
       }),
     })
+    expect(pushSpy).toHaveBeenCalledWith({
+      name: 'workflow-designer',
+      params: { id: 'wf-123' },
+    })
+    expect(policies.linkApprovalFlowWorkflow).toHaveBeenCalledWith('flow-1', null)
   })
 
   it('shows builder sync errors from the JSON fallback', async () => {
@@ -305,6 +323,14 @@ describe('AttendanceLeavePoliciesSection', () => {
         directUserCount: 0,
         placeholderCount: 1,
       }),
+      approvalFlowEditingId: ref<string | null>(null),
+      approvalFlowForm: reactive({
+        name: 'Draft flow',
+        requestType: 'leave',
+        workflowId: '',
+        steps: '[]',
+        isActive: true,
+      }),
     })
 
     app = createApp(AttendanceLeavePoliciesSection, {
@@ -318,5 +344,7 @@ describe('AttendanceLeavePoliciesSection', () => {
     expect(container!.textContent).toContain('Fix the JSON fallback before editing with the visual builder.')
     expect(container!.textContent).toContain('Roles: Any role')
     expect(container!.textContent).toContain('Users: No direct users')
+    expect(container!.textContent).toContain('No linked workflow draft')
+    expect(container!.textContent).toContain('Save the approval flow first')
   })
 })

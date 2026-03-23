@@ -339,6 +339,28 @@ describe('Attendance Plugin Integration', () => {
     const autoLeaveTypeCode = (autoLeaveTypeRes.body as { data?: { code?: string } } | undefined)?.data?.code
     expect(autoLeaveTypeCode).toMatch(/^[a-z0-9-]+-[a-f0-9]{8}$/)
 
+    const leaveApprovalFlowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Leave Flow ${runSuffix}`,
+        requestType: 'leave',
+        steps: [
+          {
+            name: 'Manager review',
+            approverUserIds: [testUserId],
+          },
+        ],
+        isActive: true,
+      }),
+    })
+    expect(leaveApprovalFlowRes.status).toBe(201)
+    const leaveApprovalFlowId = (leaveApprovalFlowRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(leaveApprovalFlowId).toBeTruthy()
+
     const overtimeRuleRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, {
       method: 'POST',
       headers: {
@@ -374,6 +396,7 @@ describe('Attendance Plugin Integration', () => {
           workDate,
           requestType: 'leave',
           leaveTypeId,
+          approvalFlowId: leaveApprovalFlowId,
           minutes: 120,
         }),
       })
@@ -5078,5 +5101,89 @@ describe('Attendance Plugin Integration', () => {
     expect(response.status).toBe(410)
     const code = (response.body as { error?: { code?: string } } | undefined)?.error?.code
     expect(code).toBe('EXPIRED')
+  })
+
+  it('links approval flows to editable workflow drafts and clears the link again', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-link-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const approvalFlowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Workflow link flow ${runSuffix}`,
+        requestType: 'leave',
+        steps: [
+          {
+            name: 'Manager review',
+            approverUserIds: [testUserId],
+          },
+        ],
+        isActive: true,
+      }),
+    })
+    expect(approvalFlowRes.status).toBe(201)
+    const approvalFlowId = (approvalFlowRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(approvalFlowId).toBeTruthy()
+    if (!approvalFlowId) return
+
+    const instantiateRes = await requestJson(`${baseUrl}/api/workflow-designer/templates/attendance-leave-manager/instantiate`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Workflow link draft ${runSuffix}`,
+        description: 'Attendance reverse binding integration test',
+        category: 'approval',
+      }),
+    })
+    expect(instantiateRes.status).toBe(201)
+    const workflowId = (instantiateRes.body as { data?: { workflowId?: string } } | undefined)?.data?.workflowId
+    expect(workflowId).toBeTruthy()
+    if (!workflowId) return
+
+    const linkRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/${approvalFlowId}/workflow-link`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ workflowId }),
+    })
+    expect(linkRes.status).toBe(200)
+    expect((linkRes.body as { data?: { workflowId?: string | null } } | undefined)?.data?.workflowId).toBe(workflowId)
+
+    const listRes = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(listRes.status).toBe(200)
+    const items = (listRes.body as { data?: { items?: Array<{ id?: string; workflowId?: string | null }> } } | undefined)?.data?.items ?? []
+    expect(items.find((item) => item?.id === approvalFlowId)?.workflowId).toBe(workflowId)
+
+    const clearRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/${approvalFlowId}/workflow-link`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ workflowId: null }),
+    })
+    expect(clearRes.status).toBe(200)
+    expect((clearRes.body as { data?: { workflowId?: string | null } } | undefined)?.data?.workflowId ?? null).toBeNull()
   })
 })
