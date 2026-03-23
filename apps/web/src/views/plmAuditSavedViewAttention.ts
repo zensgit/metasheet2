@@ -35,6 +35,11 @@ export type PlmAuditClearedCollaborationFollowupAttentionState = {
   attentionFocus: PlmAuditAttentionFocusState
 }
 
+export type PlmAuditRoutePivotAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+  savedViewAttention: PlmAuditSavedViewAttentionState
+}
+
 export type PlmAuditSavedViewAttentionAction =
   | { kind: 'install-followup'; shareFollowup: PlmAuditSavedViewShareFollowup }
   | { kind: 'apply' | 'context-action' | 'filter-navigation' | 'promotion-handoff' | 'reset-filters' | 'share-entry-takeover' }
@@ -125,6 +130,16 @@ export function buildPlmAuditClearedCollaborationFollowupAttentionState(
 ): PlmAuditClearedCollaborationFollowupAttentionState {
   return {
     attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-all' }),
+  }
+}
+
+export function buildPlmAuditRoutePivotAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+  savedViewAttention: PlmAuditSavedViewAttentionState,
+): PlmAuditRoutePivotAttentionState {
+  return {
+    attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-all' }),
+    savedViewAttention: reducePlmAuditSavedViewAttentionState(savedViewAttention, { kind: 'filter-navigation' }),
   }
 }
 

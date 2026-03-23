@@ -789,6 +789,7 @@ import {
 import {
   applyPlmAuditSourceFocusState,
   buildPlmAuditClearedCollaborationFollowupAttentionState,
+  buildPlmAuditRoutePivotAttentionState,
   buildPlmAuditSavedViewStoreAttentionState,
   buildPlmAuditSourceShareFollowupAttentionState,
   buildPlmAuditTeamViewHandoffAttentionState,
@@ -913,6 +914,7 @@ const exporting = ref(false)
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'error'>('info')
 const routeReady = ref(false)
+let pendingLocalRouteSync = false
 const savedViewName = ref('')
 const savedViews = ref<PlmAuditSavedView[]>(readPlmAuditSavedViews())
 const auditSavedViewShareFollowup = ref<PlmAuditSavedViewShareFollowup | null>(null)
@@ -1157,6 +1159,7 @@ async function syncRouteState(
     auditEntry: route.query.auditEntry,
   })
   if (!routeSyncDecision.shouldSync) return
+  pendingLocalRouteSync = true
   const method = routeSyncDecision.replace ? router.replace : router.push
   await method.call(router, {
     name: 'plm-audit',
@@ -1401,6 +1404,24 @@ function clearAuditSourceFocus() {
 
 function clearAuditAttentionFocus() {
   applyAuditAttentionFocusAction({ kind: 'clear-all' })
+}
+
+function applyAuditRoutePivotAttention() {
+  const nextState = buildPlmAuditRoutePivotAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
 }
 
 function applySavedViewAttentionAction(action: PlmAuditSavedViewAttentionAction) {
@@ -2502,9 +2523,8 @@ watch(auditTeamViewKey, (value) => {
 })
 
 function applyFilters() {
-  clearAuditAttentionFocus()
+  applyAuditRoutePivotAttention()
   applyAuditTeamViewShareEntryAction({ kind: 'filter-navigation' })
-  applySavedViewAttentionAction({ kind: 'filter-navigation' })
   void syncRouteState({
     ...readCurrentRouteState(),
     page: 1,
@@ -2514,9 +2534,8 @@ function applyFilters() {
 }
 
 function resetFilters() {
-  clearAuditAttentionFocus()
+  applyAuditRoutePivotAttention()
   applyAuditTeamViewShareEntryAction({ kind: 'filter-navigation' })
-  applySavedViewAttentionAction({ kind: 'reset-filters' })
   clearAuditTeamViewCollaborationFollowup()
   void syncRouteState(resetPlmAuditRouteFilters(readCurrentRouteState()), false, {
     consumeSharedEntry: true,
@@ -2528,9 +2547,8 @@ function reloadLogs() {
 }
 
 function goToPage(nextPage: number) {
-  clearAuditAttentionFocus()
+  applyAuditRoutePivotAttention()
   applyAuditTeamViewShareEntryAction({ kind: 'filter-navigation' })
-  applySavedViewAttentionAction({ kind: 'filter-navigation' })
   void syncRouteState({
     ...readCurrentRouteState(),
     page: nextPage,
@@ -2553,6 +2571,8 @@ watch(recommendedAuditTeamViews, (views) => {
 watch(
   () => route.query,
   async (queryState, previousQueryState) => {
+    const localRouteSync = pendingLocalRouteSync
+    pendingLocalRouteSync = false
     applyAuditTeamViewShareEntryAction({
       kind: 'route-query',
       auditEntry: queryState.auditEntry,
@@ -2573,7 +2593,9 @@ watch(
       return
     }
     if (routeChanged) {
-      applySavedViewAttentionAction({ kind: 'filter-navigation' })
+      if (!localRouteSync) {
+        applyAuditRoutePivotAttention()
+      }
     }
     if (
       routeChanged

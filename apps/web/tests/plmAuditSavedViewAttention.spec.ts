@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   applyPlmAuditSourceFocusState,
   buildPlmAuditClearedCollaborationFollowupAttentionState,
+  buildPlmAuditRoutePivotAttentionState,
   buildPlmAuditSavedViewStoreAttentionState,
   buildPlmAuditSourceShareFollowupAttentionState,
   buildPlmAuditTeamViewHandoffAttentionState,
@@ -280,6 +281,30 @@ describe('plmAuditSavedViewAttention', () => {
       attentionFocus: {
         focusedAuditTeamViewId: '',
         focusedRecommendedAuditTeamViewId: '',
+        focusedSavedViewId: '',
+      },
+    })
+  })
+
+  it('clears transient attention and saved-view followup on route pivots', () => {
+    expect(buildPlmAuditRoutePivotAttentionState({
+      focusedAuditTeamViewId: 'team-view-13',
+      focusedRecommendedAuditTeamViewId: 'recommended-13',
+      focusedSavedViewId: 'saved-view-13',
+    }, {
+      shareFollowup: {
+        savedViewId: 'saved-view-14',
+        source: 'shared-entry',
+      },
+      focusedSavedViewId: 'saved-view-14',
+    })).toEqual({
+      attentionFocus: {
+        focusedAuditTeamViewId: '',
+        focusedRecommendedAuditTeamViewId: '',
+        focusedSavedViewId: '',
+      },
+      savedViewAttention: {
+        shareFollowup: null,
         focusedSavedViewId: '',
       },
     })
