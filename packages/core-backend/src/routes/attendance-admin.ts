@@ -1,9 +1,10 @@
-import type { Request, Response } from 'express'
+import type { NextFunction, Request, Response } from 'express'
 import { Router } from 'express'
 import { rbacGuard } from '../rbac/rbac'
 import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { query } from '../db/pg'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
+import { readErrorMessage } from '../utils/error'
 
 type AttendanceRoleTemplateId = 'employee' | 'approver' | 'admin'
 
@@ -281,7 +282,7 @@ export function attendanceAdminRouter(): Router {
       const templates = Object.values(ATTENDANCE_ROLE_TEMPLATES)
       return jsonOk(res, { templates })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_TEMPLATES_FAILED', (error as Error)?.message || 'Failed to load role templates')
+      return jsonError(res, 500, 'ROLE_TEMPLATES_FAILED', readErrorMessage(error, 'Failed to load role templates'))
     }
   })
 
@@ -312,7 +313,7 @@ export function attendanceAdminRouter(): Router {
 
       return jsonOk(res, { items: list.rows, page, pageSize, total })
     } catch (error) {
-      return jsonError(res, 500, 'USER_SEARCH_FAILED', (error as Error)?.message || 'Failed to search users')
+      return jsonError(res, 500, 'USER_SEARCH_FAILED', readErrorMessage(error, 'Failed to search users'))
     }
   })
 
@@ -337,13 +338,17 @@ export function attendanceAdminRouter(): Router {
         isAdmin,
       })
     } catch (error) {
-      return jsonError(res, 500, 'USER_ACCESS_FAILED', (error as Error)?.message || 'Failed to load user access')
+      return jsonError(res, 500, 'USER_ACCESS_FAILED', readErrorMessage(error, 'Failed to load user access'))
     }
   })
 
-  r.post('/api/attendance-admin/users/:userId/roles/assign', async (req: Request, res: Response) => {
+  r.post('/api/attendance-admin/users/:userId/roles/assign', async (req: Request, res: Response, next: NextFunction) => {
     try {
       const userId = String(req.params.userId || '').trim()
+      if (userId === 'batch') {
+        next()
+        return
+      }
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
 
       const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
@@ -377,13 +382,17 @@ export function attendanceAdminRouter(): Router {
         isAdmin,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to assign role')
+      return jsonError(res, 500, 'ROLE_ASSIGN_FAILED', readErrorMessage(error, 'Failed to assign role'))
     }
   })
 
-  r.post('/api/attendance-admin/users/:userId/roles/unassign', async (req: Request, res: Response) => {
+  r.post('/api/attendance-admin/users/:userId/roles/unassign', async (req: Request, res: Response, next: NextFunction) => {
     try {
       const userId = String(req.params.userId || '').trim()
+      if (userId === 'batch') {
+        next()
+        return
+      }
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
 
       const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
@@ -414,7 +423,7 @@ export function attendanceAdminRouter(): Router {
         isAdmin,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to unassign role')
+      return jsonError(res, 500, 'ROLE_UNASSIGN_FAILED', readErrorMessage(error, 'Failed to unassign role'))
     }
   })
 
@@ -470,7 +479,7 @@ export function attendanceAdminRouter(): Router {
 
       return jsonOk(res, { items: list.rows, page, pageSize, total })
     } catch (error) {
-      return jsonError(res, 500, 'AUDIT_LOGS_FAILED', (error as Error)?.message || 'Failed to load audit logs')
+      return jsonError(res, 500, 'AUDIT_LOGS_FAILED', readErrorMessage(error, 'Failed to load audit logs'))
     }
   })
 
@@ -573,7 +582,7 @@ export function attendanceAdminRouter(): Router {
 
       res.send(lines.join('\n'))
     } catch (error) {
-      return jsonError(res, 500, 'AUDIT_LOGS_EXPORT_FAILED', (error as Error)?.message || 'Failed to export audit logs')
+      return jsonError(res, 500, 'AUDIT_LOGS_EXPORT_FAILED', readErrorMessage(error, 'Failed to export audit logs'))
     }
   })
 
@@ -613,7 +622,7 @@ export function attendanceAdminRouter(): Router {
         errors: errors.rows,
       })
     } catch (error) {
-      return jsonError(res, 500, 'AUDIT_LOGS_SUMMARY_FAILED', (error as Error)?.message || 'Failed to load audit summary')
+      return jsonError(res, 500, 'AUDIT_LOGS_SUMMARY_FAILED', readErrorMessage(error, 'Failed to load audit summary'))
     }
   })
 
@@ -635,7 +644,7 @@ export function attendanceAdminRouter(): Router {
         items: resolved.items,
       })
     } catch (error) {
-      return jsonError(res, 500, 'BATCH_USER_RESOLVE_FAILED', (error as Error)?.message || 'Failed to resolve users')
+      return jsonError(res, 500, 'BATCH_USER_RESOLVE_FAILED', readErrorMessage(error, 'Failed to resolve users'))
     }
   })
 
@@ -704,7 +713,7 @@ export function attendanceAdminRouter(): Router {
         items: resolvedUsers.items,
       })
     } catch (error) {
-      return jsonError(res, 500, 'BATCH_ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to batch assign role')
+      return jsonError(res, 500, 'BATCH_ROLE_ASSIGN_FAILED', readErrorMessage(error, 'Failed to batch assign role'))
     }
   })
 
@@ -770,7 +779,7 @@ export function attendanceAdminRouter(): Router {
         items: resolvedUsers.items,
       })
     } catch (error) {
-      return jsonError(res, 500, 'BATCH_ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to batch unassign role')
+      return jsonError(res, 500, 'BATCH_ROLE_UNASSIGN_FAILED', readErrorMessage(error, 'Failed to batch unassign role'))
     }
   })
 

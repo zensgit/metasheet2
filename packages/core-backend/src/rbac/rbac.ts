@@ -10,6 +10,38 @@ import { Logger } from '../core/logger'
 const logger = new Logger('RBACGuard')
 const trustTokenClaims = process.env.RBAC_TOKEN_TRUST === 'true' || process.env.RBAC_TOKEN_TRUST === '1'
 
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => String(item ?? '').trim())
+    .filter(Boolean)
+}
+
+function hasPermissionCode(permissionCodes: string[], permissionCode: string): boolean {
+  if (permissionCodes.includes(permissionCode) || permissionCodes.includes('*:*')) return true
+  const resource = permissionCode.split(':')[0]
+  return resource ? permissionCodes.includes(`${resource}:*`) : false
+}
+
+function requestUserIsAdmin(user: Express.Request['user']): boolean {
+  if (!user) return false
+  if (user.role === 'admin') return true
+  const roles = normalizeStringArray(user.roles)
+  return roles.includes('admin')
+}
+
+function requestUserHasResolvedPermission(user: Express.Request['user'], permissionCode: string): boolean {
+  if (!user) return false
+  if (requestUserIsAdmin(user)) return true
+  return hasPermissionCode(normalizeStringArray(user.permissions), permissionCode)
+}
+
+function trustedTokenClaimsAllowPermission(user: Express.Request['user'], permissionCode: string): boolean {
+  if (!trustTokenClaims || !user) return false
+  if (normalizeStringArray(user.roles).includes('admin')) return true
+  return hasPermissionCode(normalizeStringArray((user as { perms?: unknown }).perms), permissionCode)
+}
+
 /**
  * RBAC guard middleware factory
  * Creates middleware that checks if user has required permission
@@ -25,20 +57,20 @@ export function rbacGuard(resourceOrPermission: string, action?: string): Reques
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const userId = req.user?.id?.toString()
-      const tokenRoles = Array.isArray(req.user?.roles) ? req.user?.roles : []
-      const tokenPerms = Array.isArray(req.user?.perms) ? req.user?.perms : []
 
       if (!userId) {
         res.status(401).json({ error: 'Authentication required' })
         return
       }
 
-      if (trustTokenClaims) {
-        // Fast-path for trusted JWT roles/permissions (useful for dev tokens)
-        if (tokenRoles.includes('admin') || tokenPerms.includes(permissionCode)) {
-          next()
-          return
-        }
+      if (requestUserHasResolvedPermission(req.user, permissionCode)) {
+        next()
+        return
+      }
+
+      if (trustedTokenClaimsAllowPermission(req.user, permissionCode)) {
+        next()
+        return
       }
 
       // Check if user is admin (admins bypass permission checks)
@@ -71,26 +103,28 @@ export function rbacGuardAny(permissionCodes: string[]): RequestHandler {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const userId = req.user?.id?.toString()
-      const tokenRoles = Array.isArray(req.user?.roles) ? req.user?.roles : []
-      const tokenPerms = Array.isArray(req.user?.perms) ? req.user?.perms : []
 
       if (!userId) {
         res.status(401).json({ error: 'Authentication required' })
         return
       }
 
+      const requestUser = req.user
+      if (requestUserIsAdmin(requestUser) || permissionCodes.some((code) => requestUserHasResolvedPermission(requestUser, code))) {
+        next()
+        return
+      }
+
       if (trustTokenClaims) {
-        if (tokenRoles.includes('admin')) {
+        if (requestUserIsAdmin(requestUser)) {
           next()
           return
         }
 
-        if (tokenPerms.length > 0) {
-          const hasAny = permissionCodes.some((code) => tokenPerms.includes(code))
-          if (hasAny) {
-            next()
-            return
-          }
+        const tokenPerms = normalizeStringArray((requestUser as { perms?: unknown } | undefined)?.perms)
+        if (permissionCodes.some((code) => hasPermissionCode(tokenPerms, code))) {
+          next()
+          return
         }
       }
 
@@ -126,26 +160,28 @@ export function rbacGuardAll(permissionCodes: string[]): RequestHandler {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const userId = req.user?.id?.toString()
-      const tokenRoles = Array.isArray(req.user?.roles) ? req.user?.roles : []
-      const tokenPerms = Array.isArray(req.user?.perms) ? req.user?.perms : []
 
       if (!userId) {
         res.status(401).json({ error: 'Authentication required' })
         return
       }
 
+      const requestUser = req.user
+      if (requestUserIsAdmin(requestUser) || permissionCodes.every((code) => requestUserHasResolvedPermission(requestUser, code))) {
+        next()
+        return
+      }
+
       if (trustTokenClaims) {
-        if (tokenRoles.includes('admin')) {
+        if (requestUserIsAdmin(requestUser)) {
           next()
           return
         }
 
-        if (tokenPerms.length > 0) {
-          const hasAll = permissionCodes.every((code) => tokenPerms.includes(code))
-          if (hasAll) {
-            next()
-            return
-          }
+        const tokenPerms = normalizeStringArray((requestUser as { perms?: unknown } | undefined)?.perms)
+        if (permissionCodes.every((code) => hasPermissionCode(tokenPerms, code))) {
+          next()
+          return
         }
       }
 

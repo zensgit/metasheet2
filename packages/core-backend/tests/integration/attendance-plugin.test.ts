@@ -119,15 +119,12 @@ describe('Attendance Plugin Integration', () => {
     // Keep CSV guardrail deterministic and testable across environments.
     process.env.ATTENDANCE_IMPORT_CSV_MAX_ROWS = '1000'
     // Keep bulk/staging auto-switch testable in integration scope.
-    if (!process.env.ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD) {
-      process.env.ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD = '100'
-    }
-    if (!process.env.ATTENDANCE_IMPORT_COPY_ENABLED) {
-      process.env.ATTENDANCE_IMPORT_COPY_ENABLED = 'true'
-    }
-    if (!process.env.ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS) {
-      process.env.ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS = '100'
-    }
+    process.env.ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD = '100'
+    process.env.ATTENDANCE_IMPORT_BULK_ENGINE_MODE = 'auto'
+    process.env.ATTENDANCE_IMPORT_COPY_ENABLED = 'true'
+    process.env.ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS = '100'
+    process.env.ATTENDANCE_IMPORT_RECORD_UPSERT_MODE = 'unnest'
+    process.env.ATTENDANCE_IMPORT_ITEMS_INSERT_MODE = 'unnest'
     // Isolate import upload channel state (csvFileId) under a temp directory for integration tests.
     const repoRoot = path.join(__dirname, '../../../../')
     importUploadDir = path.join(repoRoot, 'tmp', `attendance-import-upload-${Date.now().toString(36)}`)
@@ -194,9 +191,10 @@ describe('Attendance Plugin Integration', () => {
 
   it('registers attendance routes and lists plugin', async () => {
     if (!baseUrl) return
-    const runSuffix = Date.now().toString(36)
+    const runSuffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    const requestUserId = `attendance-test-${runSuffix}`
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-test&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requestUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -364,7 +362,7 @@ describe('Attendance Plugin Integration', () => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        userId: 'attendance-test',
+        userId: requestUserId,
         shiftId,
         startDate: workDate,
         isActive: true,
@@ -430,7 +428,7 @@ describe('Attendance Plugin Integration', () => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        userId: 'attendance-test',
+        userId: requestUserId,
         rotationRuleId,
         startDate: workDate,
         isActive: true,
@@ -542,7 +540,7 @@ describe('Attendance Plugin Integration', () => {
     expect(importTemplateData?.payloadExample?.ruleSetId).toBeUndefined()
 
     const importPayload = {
-      userId: 'attendance-test',
+      userId: requestUserId,
       rows: [
         {
           workDate,
@@ -588,7 +586,7 @@ describe('Attendance Plugin Integration', () => {
     })()
 
     const anomalyPayload = {
-      userId: 'attendance-test',
+      userId: requestUserId,
       rows: [
         {
           workDate: anomalyDate,
@@ -614,11 +612,14 @@ describe('Attendance Plugin Integration', () => {
     })
     expect(anomalyImportRes.status).toBe(200)
 
-    const anomaliesRes = await requestJson(`${baseUrl}/api/attendance/anomalies?from=${anomalyDate}&to=${anomalyDate}`, {
+    const anomaliesRes = await requestJson(
+      `${baseUrl}/api/attendance/anomalies?from=${anomalyDate}&to=${anomalyDate}&userId=${encodeURIComponent(requestUserId)}`,
+      {
       headers: {
         Authorization: `Bearer ${token}`,
       },
-    })
+      }
+    )
     expect(anomaliesRes.status).toBe(200)
     const anomalyData = (anomaliesRes.body as {
       data?: {
@@ -662,7 +663,7 @@ describe('Attendance Plugin Integration', () => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          userIds: ['attendance-test'],
+          userIds: [requestUserId],
         }),
       })
       expect(addGroupMemberRes.status).toBe(200)
@@ -674,12 +675,12 @@ describe('Attendance Plugin Integration', () => {
       })
       expect(listGroupMembersRes.status).toBe(200)
       const groupMemberItems = (listGroupMembersRes.body as { data?: { items?: { userId?: string }[] } } | undefined)?.data?.items ?? []
-      expect(groupMemberItems.some(item => item.userId === 'attendance-test')).toBe(true)
+      expect(groupMemberItems.some(item => item.userId === requestUserId)).toBe(true)
     }
 
     const csvGroupName = `CSV Group ${runSuffix}`
     const csvImportPayload = {
-      userId: 'attendance-test',
+      userId: requestUserId,
       csvText: `日期,工号,考勤组,上班1打卡时间,下班1打卡时间,考勤结果\n${workDate},A001,${csvGroupName},09:00,18:00,正常`,
       mapping: {
         columns: [
@@ -692,7 +693,7 @@ describe('Attendance Plugin Integration', () => {
         ],
       },
       userMap: {
-        A001: 'attendance-test',
+        A001: requestUserId,
       },
       groupSync: {
         autoCreate: true,
@@ -729,7 +730,7 @@ describe('Attendance Plugin Integration', () => {
       })
       expect(csvGroupMembersRes.status).toBe(200)
       const csvGroupMembers = (csvGroupMembersRes.body as { data?: { items?: { userId?: string }[] } } | undefined)?.data?.items ?? []
-      expect(csvGroupMembers.some(item => item.userId === 'attendance-test')).toBe(true)
+      expect(csvGroupMembers.some(item => item.userId === requestUserId)).toBe(true)
     }
 
     const templateGetRes = await requestJson(`${baseUrl}/api/attendance/rule-templates`, {
@@ -825,6 +826,80 @@ describe('Attendance Plugin Integration', () => {
     if (attendance) {
       expect(attendance.status).toBe('active')
     }
+  })
+
+  it('returns compatibility aliases on the health endpoint', async () => {
+    if (!baseUrl) return
+
+    const healthRes = await requestJson(`${baseUrl}/health`)
+
+    expect(healthRes.status).toBe(200)
+    expect((healthRes.body as { status?: string } | undefined)?.status).toBe('ok')
+    expect((healthRes.body as { ok?: boolean } | undefined)?.ok).toBe(true)
+    expect((healthRes.body as { success?: boolean } | undefined)?.success).toBe(true)
+  })
+
+  it('rejects invalid attendance date ranges with 400', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-invalid-range&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const summaryRes = await requestJson(`${baseUrl}/api/attendance/summary?from=invalid&to=invalid`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+
+    expect(summaryRes.status).toBe(400)
+    expect((summaryRes.body as { ok?: boolean } | undefined)?.ok).toBe(false)
+    expect((summaryRes.body as { success?: boolean } | undefined)?.success).toBe(false)
+    expect((summaryRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('rejects duplicate attendance requests for the same date and type', async () => {
+    if (!baseUrl) return
+
+    const userId = `attendance-dup-${Date.now().toString(36)}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const payload = {
+      workDate,
+      requestType: 'missed_check_in',
+      requestedInAt: `${workDate}T09:00:00.000Z`,
+    }
+
+    const firstRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    })
+    expect(firstRes.status).toBe(201)
+
+    const secondRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    })
+
+    expect(secondRes.status).toBe(409)
+    expect((secondRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('DUPLICATE_REQUEST')
+    expect((secondRes.body as { ok?: boolean } | undefined)?.ok).toBe(false)
+    expect((secondRes.body as { success?: boolean } | undefined)?.success).toBe(false)
   })
 
   it('supports import commit idempotencyKey retries (without requiring a new commitToken)', async () => {
@@ -1051,7 +1126,7 @@ describe('Attendance Plugin Integration', () => {
     expect(commitToken).toBeTruthy()
 
     const seedDate = new Date(Date.UTC(2026, 0, 1))
-    const rows = Array.from({ length: 120 }, (_, index) => {
+    const rows = Array.from({ length: 1000 }, (_, index) => {
       const date = new Date(seedDate)
       date.setUTCDate(seedDate.getUTCDate() + index)
       const workDate = date.toISOString().slice(0, 10)
@@ -1084,7 +1159,7 @@ describe('Attendance Plugin Integration', () => {
     const commitData = (commitRes.body as { data?: any } | undefined)?.data
     expect(commitData?.batchId).toBeTruthy()
     expect(commitData?.engine).toBe('bulk')
-    expect(Number(commitData?.processedRows ?? 0)).toBeGreaterThanOrEqual(120)
+    expect(Number(commitData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1000)
     expect(commitData?.recordUpsertStrategy).toBe('staging')
     expect(commitData?.meta?.recordUpsertStrategy).toBe('staging')
 

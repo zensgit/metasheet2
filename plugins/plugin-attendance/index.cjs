@@ -622,6 +622,91 @@ function parseDateInput(value) {
   return date
 }
 
+function parseDateOnlyInput(value) {
+  if (!value) return null
+  const text = String(value).trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null
+  const date = new Date(`${text}T00:00:00.000Z`)
+  if (Number.isNaN(date.getTime())) return null
+  return date.toISOString().slice(0, 10) === text ? date : null
+}
+
+function resolveDateRangeInput(rawFrom, rawTo, fallbackDays = 30) {
+  const fromText = typeof rawFrom === 'string' ? rawFrom.trim() : ''
+  const toText = typeof rawTo === 'string' ? rawTo.trim() : ''
+  const fromDate = fromText ? parseDateOnlyInput(fromText) : null
+  const toDate = toText ? parseDateOnlyInput(toText) : null
+
+  if (fromText && !fromDate) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid from date. Expected YYYY-MM-DD')
+  }
+  if (toText && !toDate) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid to date. Expected YYYY-MM-DD')
+  }
+
+  const fallbackTo = new Date()
+  const fallbackFrom = new Date(Date.now() - fallbackDays * 24 * 60 * 60 * 1000)
+  const from = (fromDate ?? fallbackFrom).toISOString().slice(0, 10)
+  const to = (toDate ?? fallbackTo).toISOString().slice(0, 10)
+
+  if (from > to) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'Invalid date range')
+  }
+
+  return { from, to }
+}
+
+function resolveDateRangeOrSend(res, rawFrom, rawTo, fallbackDays = 30) {
+  try {
+    return resolveDateRangeInput(rawFrom, rawTo, fallbackDays)
+  } catch (error) {
+    if (error instanceof HttpError) {
+      res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+      return null
+    }
+    throw error
+  }
+}
+
+function normalizeRequestText(value) {
+  if (value === null || value === undefined) return null
+  const text = String(value).trim()
+  return text || null
+}
+
+function toIsoStringOrNull(value) {
+  const date = parseDateInput(value)
+  return date ? date.toISOString() : null
+}
+
+function buildAttendanceRequestDedupSignature(input) {
+  const minutes = Number(input?.minutes)
+  return JSON.stringify({
+    requestType: normalizeRequestText(input?.requestType),
+    requestedInAt: toIsoStringOrNull(input?.requestedInAt),
+    requestedOutAt: toIsoStringOrNull(input?.requestedOutAt),
+    reason: normalizeRequestText(input?.reason),
+    minutes: Number.isFinite(minutes) ? minutes : null,
+    leaveTypeId: normalizeRequestText(input?.leaveTypeId),
+    overtimeRuleId: normalizeRequestText(input?.overtimeRuleId),
+    attachmentUrl: normalizeRequestText(input?.attachmentUrl),
+  })
+}
+
+function buildAttendanceRequestRowDedupSignature(row) {
+  const metadata = normalizeMetadata(row?.metadata)
+  return buildAttendanceRequestDedupSignature({
+    requestType: row?.request_type,
+    requestedInAt: row?.requested_in_at,
+    requestedOutAt: row?.requested_out_at,
+    reason: row?.reason,
+    minutes: metadata?.minutes,
+    leaveTypeId: metadata?.leaveType?.id ?? metadata?.leaveTypeId,
+    overtimeRuleId: metadata?.overtimeRule?.id ?? metadata?.overtimeRuleId,
+    attachmentUrl: metadata?.attachmentUrl,
+  })
+}
+
 function normalizeStatusLabel(value) {
   if (value === null || value === undefined) return null
   const text = String(value).trim()
@@ -2297,7 +2382,10 @@ function normalizeNumber(value) {
 function normalizeDateOnly(value) {
   if (!value) return null
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return value.toISOString().slice(0, 10)
+    const year = value.getFullYear().toString().padStart(4, '0')
+    const month = String(value.getMonth() + 1).padStart(2, '0')
+    const day = String(value.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
   }
   const raw = String(value).trim()
   if (!raw) return null
@@ -2316,6 +2404,32 @@ function normalizeDateOnly(value) {
   if (raw.includes('T')) return raw.slice(0, 10)
   if (raw.includes(' ')) return raw.split(' ')[0]
   return raw.slice(0, 10)
+}
+
+function normalizeImportWorkDateValue(value) {
+  return normalizeDateOnly(value)
+}
+
+function buildAttendanceUserDateKey(userId, workDate) {
+  const normalizedUserId = normalizeRequestText(userId)
+  const normalizedWorkDate = normalizeImportWorkDateValue(workDate)
+  if (!normalizedUserId || !normalizedWorkDate) return null
+  return `${normalizedUserId}:${normalizedWorkDate}`
+}
+
+function mapAttendanceRecordByUserDate(map, row) {
+  const key = buildAttendanceUserDateKey(
+    row?.user_id ?? row?.userId,
+    row?.work_date ?? row?.workDate
+  )
+  if (!key) return
+  map.set(key, row)
+}
+
+function getAttendanceRecordByUserDate(map, userId, workDate) {
+  const key = buildAttendanceUserDateKey(userId, workDate)
+  if (!key) return null
+  return map.get(key) ?? null
 }
 
 function augmentFieldValuesWithDates(fieldValues, workDate) {
@@ -4068,7 +4182,8 @@ async function loadApprovedMinutesRange(db, orgId, userId, fromDate, toDate) {
 
   const map = new Map()
   for (const row of rows) {
-    const workDate = row.work_date
+    const workDate = normalizeDateOnly(row.work_date)
+    if (!workDate) continue
     if (!map.has(workDate)) {
       map.set(workDate, { leaveMinutes: 0, overtimeMinutes: 0 })
     }
@@ -4321,9 +4436,7 @@ async function batchUpsertAttendanceRecordsValues(client, rows) {
 
   const map = new Map()
   for (const row of inserted) {
-    if (!row?.user_id || !row?.work_date) continue
-    const workDateKey = normalizeDateOnly(row.work_date) ?? String(row.work_date).slice(0, 10)
-    map.set(`${row.user_id}:${workDateKey}`, row)
+    mapAttendanceRecordByUserDate(map, row)
   }
   return map
 }
@@ -4443,9 +4556,7 @@ async function batchUpsertAttendanceRecordsUnnest(client, rows) {
 
   const map = new Map()
   for (const row of inserted) {
-    if (!row?.user_id || !row?.work_date) continue
-    const workDateKey = normalizeDateOnly(row.work_date) ?? String(row.work_date).slice(0, 10)
-    map.set(`${row.user_id}:${workDateKey}`, row)
+    mapAttendanceRecordByUserDate(map, row)
   }
   return map
 }
@@ -4699,9 +4810,7 @@ async function batchUpsertAttendanceRecordsStaging(client, rows, options = {}) {
 
   const map = new Map()
   for (const row of inserted) {
-    if (!row?.user_id || !row?.work_date) continue
-    const workDateKey = normalizeDateOnly(row.work_date) ?? String(row.work_date).slice(0, 10)
-    map.set(`${row.user_id}:${workDateKey}`, row)
+    mapAttendanceRecordByUserDate(map, row)
   }
   return map
 }
@@ -6084,7 +6193,7 @@ module.exports = {
 
 	      for (const row of rows) {
 	        const shouldRender = preview.length < previewLimit
-	        const workDate = row.workDate
+        const workDate = normalizeImportWorkDateValue(row.workDate)
 	        const rowUserId = resolveRowUserId({
 	          row,
 	          fallbackUserId: payload.userId ?? requesterId,
@@ -6132,7 +6241,29 @@ module.exports = {
 	          continue
 	        }
 
-	        const dedupKey = `${rowUserId}:${workDate}`
+        const dedupKey = buildAttendanceUserDateKey(rowUserId, workDate)
+        if (!dedupKey) {
+          previewStats.invalid += 1
+          if (shouldRender) {
+            preview.push({
+              userId: rowUserId ?? 'unknown',
+              workDate: workDate ?? '',
+              firstInAt: null,
+              lastOutAt: null,
+              workMinutes: 0,
+              lateMinutes: 0,
+              earlyLeaveMinutes: 0,
+              leaveMinutes: 0,
+              overtimeMinutes: 0,
+              status: 'invalid',
+              isWorkday: undefined,
+              warnings: ['Missing userId or workDate'],
+              appliedPolicies: [],
+              userGroups: [],
+            })
+          }
+          continue
+        }
 	        if (seenKeys.has(dedupKey)) {
 	          previewStats.duplicates += 1
 	          if (shouldRender) {
@@ -6577,8 +6708,8 @@ module.exports = {
 	        const scopeWorkDates = new Set()
 	        const scopeUserIds = new Set()
 	        for (const row of rows) {
-	          const workDate = row?.workDate
-	          if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
+	          const workDate = normalizeImportWorkDateValue(row?.workDate)
+	          if (workDate) scopeWorkDates.add(workDate)
 	          const rowUserId = resolveRowUserId({
 	            row,
 	            fallbackUserId: requesterId,
@@ -6646,7 +6777,7 @@ module.exports = {
 				              if (!recordUpsertsBuffer.length) return
 				              const chunk = recordUpsertsBuffer.splice(0, recordUpsertsBuffer.length)
 				              const chunkUserIds = chunk.map((item) => item.userId)
-				              const chunkWorkDates = chunk.map((item) => normalizeDateOnly(item.workDate) ?? item.workDate)
+					              const chunkWorkDates = chunk.map((item) => normalizeImportWorkDateValue(item.workDate) ?? item.workDate)
 
 				              const existingRows = await queryImportHeavy(
 				                trx,
@@ -6659,14 +6790,14 @@ module.exports = {
 	            [orgId, chunkUserIds, chunkWorkDates]
 	          )
 	          const existingMap = new Map()
-	          for (const row of existingRows) {
-	            const workDateKey = normalizeDateOnly(row.work_date) ?? row.work_date
-	            existingMap.set(`${row.user_id}:${workDateKey}`, row)
-	          }
+		          for (const row of existingRows) {
+		            mapAttendanceRecordByUserDate(existingMap, row)
+		          }
 
 	          const upsertRows = []
 	          for (const item of chunk) {
-	            const existingRow = existingMap.get(`${item.userId}:${item.workDate}`) ?? undefined
+		            const workDateKey = normalizeImportWorkDateValue(item.workDate) ?? item.workDate
+				                const existingRow = getAttendanceRecordByUserDate(existingMap, item.userId, workDateKey) ?? undefined
 	            const values = computeAttendanceRecordUpsertValues({
 	              existingRow,
 	              updateFirstInAt: item.updateFirstInAt,
@@ -6684,7 +6815,7 @@ module.exports = {
 	            upsertRows.push({
 	              userId: item.userId,
 	              orgId,
-	              workDate: item.workDate,
+		              workDate: workDateKey,
 	              timezone: item.timezone,
 	              firstInAt: values.firstInAt,
 	              lastOutAt: values.lastOutAt,
@@ -6704,14 +6835,15 @@ module.exports = {
 	          })
 
 	          for (const item of chunk) {
-	            const record = upserted.get(`${item.userId}:${item.workDate}`)
-	            if (!record?.id) {
-	              throw new Error(`Attendance record upsert failed for ${item.userId}:${item.workDate}`)
-	            }
+		            const workDateKey = normalizeImportWorkDateValue(item.workDate) ?? item.workDate
+		            const record = getAttendanceRecordByUserDate(upserted, item.userId, workDateKey)
+		            if (!record?.id) {
+		              throw new Error(`Attendance record upsert failed for ${item.userId}:${workDateKey}`)
+		            }
 
 	            await enqueueImportItem({
 	              userId: item.userId,
-	              workDate: item.workDate,
+		              workDate: workDateKey,
 	              recordId: record.id,
 	              previewSnapshot: item.previewSnapshot,
 	            })
@@ -6740,7 +6872,7 @@ module.exports = {
 
 	        const seenRowKeys = new Set()
 	        for (const row of rows) {
-	          const workDate = row.workDate
+		          const workDate = normalizeImportWorkDateValue(row.workDate)
 	          const groupKey = resolveAttendanceGroupKey(row)
 	          const rowUserId = resolveRowUserId({
 	            row,
@@ -6794,7 +6926,20 @@ module.exports = {
 	            continue
 	          }
 
-	          const dedupKey = `${rowUserId}:${workDate}`
+		          const dedupKey = buildAttendanceUserDateKey(rowUserId, workDate)
+		          if (!dedupKey) {
+		            const warnings = ['Missing userId or workDate']
+		            const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'validation' })
+		            await enqueueImportItem({
+		              userId: rowUserId ?? null,
+		              workDate: workDate ?? null,
+		              recordId: null,
+		              previewSnapshot: snapshot,
+		            })
+		            skipped.push({ userId: rowUserId ?? null, workDate: workDate ?? null, warnings })
+		            releaseImportRowMemory(row)
+		            continue
+		          }
 	          if (seenRowKeys.has(dedupKey)) {
 	            const warnings = ['Duplicate row in payload (same userId + workDate)']
 	            const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
@@ -7437,8 +7582,9 @@ module.exports = {
         }
 
         const { page, pageSize, offset } = parsePagination(req.query)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+        const dateRange = resolveDateRangeOrSend(res, parsed.data.from, parsed.data.to)
+        if (!dateRange) return
+        const { from, to } = dateRange
 
         try {
           const countRows = await db.query(
@@ -7457,15 +7603,17 @@ module.exports = {
             [targetUserId, orgId, from, to, pageSize, offset]
           )
 
-          const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
-          const records = rows.map((row) => {
-            const meta = normalizeMetadata(row.meta)
-            const approved = approvedMap.get(row.work_date) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
-            return {
-              ...row,
-              meta: {
-                ...meta,
-                leave_minutes: approved.leaveMinutes,
+	          const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
+	          const records = rows.map((row) => {
+	            const meta = normalizeMetadata(row.meta)
+	            const workDate = normalizeDateOnly(row.work_date)
+	            const approved = workDate ? (approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0 }) : { leaveMinutes: 0, overtimeMinutes: 0 }
+	            return {
+	              ...row,
+	              work_date: workDate,
+	              meta: {
+	                ...meta,
+	                leave_minutes: approved.leaveMinutes,
                 overtime_minutes: approved.overtimeMinutes,
               },
             }
@@ -7481,6 +7629,10 @@ module.exports = {
             },
           })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -7531,8 +7683,9 @@ module.exports = {
 	        }
 
 	        const { page, pageSize, offset } = parsePagination(req.query)
-	        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-	        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const dateRange = resolveDateRangeOrSend(res, parsed.data.from, parsed.data.to)
+	        if (!dateRange) return
+	        const { from, to } = dateRange
 
 	        const excludedStatuses = ['normal', 'off', 'adjusted']
 
@@ -7595,7 +7748,8 @@ module.exports = {
 	          )
 	          const requestByDate = new Map()
 	          for (const row of requestRows) {
-	            const workDate = row.work_date
+	            const workDate = normalizeDateOnly(row.work_date)
+	            if (!workDate) continue
 	            const entry = requestByDate.get(workDate) ?? {
 	              hasPending: false,
 	              pending: null,
@@ -7617,15 +7771,16 @@ module.exports = {
 	          const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
 	          const items = rows.map((row) => {
 	            const meta = normalizeMetadata(row.meta)
-	            const approved = approvedMap.get(row.work_date) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
+	            const workDate = normalizeDateOnly(row.work_date)
+	            const approved = workDate ? (approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0 }) : { leaveMinutes: 0, overtimeMinutes: 0 }
 	            const warnings = extractWarnings(meta)
-	            const requestSummary = requestByDate.get(row.work_date) ?? { hasPending: false, pending: null, latest: null }
+	            const requestSummary = workDate ? (requestByDate.get(workDate) ?? { hasPending: false, pending: null, latest: null }) : { hasPending: false, pending: null, latest: null }
 	            const suggestedRequestType = suggestRequestType(row)
 	            const state = requestSummary.hasPending ? 'pending' : 'open'
 
 	            return {
 	              recordId: row.id,
-	              workDate: row.work_date,
+	              workDate,
 	              status: row.status,
 	              isWorkday: row.is_workday,
 	              firstInAt: row.first_in_at,
@@ -7641,10 +7796,6 @@ module.exports = {
 	              suggestedRequestType,
 	            }
 	          })
-
-	          if (csvFileId) {
-	            await deleteImportUpload({ orgId, fileId: csvFileId })
-	          }
 
 	          res.json({
 	            ok: true,
@@ -7707,13 +7858,18 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+        const dateRange = resolveDateRangeOrSend(res, parsed.data.from, parsed.data.to)
+        if (!dateRange) return
+        const { from, to } = dateRange
 
         try {
           const summary = await loadAttendanceSummary(db, orgId, targetUserId, from, to)
           res.json({ ok: true, data: summary })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -7763,8 +7919,9 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+        const dateRange = resolveDateRangeOrSend(res, parsed.data.from, parsed.data.to)
+        if (!dateRange) return
+        const { from, to } = dateRange
 
         try {
           const rows = await db.query(
@@ -7830,6 +7987,11 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
+        const workDate = parseDateOnlyInput(parsed.data.workDate)?.toISOString().slice(0, 10) ?? null
+        if (!workDate) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid workDate. Expected YYYY-MM-DD' } })
+          return
+        }
         const requestedInAt = parseDateInput(parsed.data.requestedInAt)
         const requestedOutAt = parseDateInput(parsed.data.requestedOutAt)
         if (requestedInAt && requestedOutAt && requestedOutAt <= requestedInAt) {
@@ -7942,6 +8104,27 @@ module.exports = {
         try {
           const request = await db.transaction(async (trx) => {
             await trx.query(
+              'SELECT pg_advisory_xact_lock(hashtext($1))',
+              [`attendance-request:${userId}:${orgId}:${workDate}:${requestType}`]
+            )
+
+            const duplicateRows = await trx.query(
+              `SELECT id, status, request_type, requested_in_at, requested_out_at, reason, metadata
+               FROM attendance_requests
+               WHERE user_id = $1
+                 AND org_id = $2
+                 AND work_date = $3
+                 AND request_type = $4
+                 AND status IN ('pending', 'approved')
+               ORDER BY created_at DESC
+               FOR UPDATE`,
+              [userId, orgId, workDate, requestType]
+            )
+            if (duplicateRows.length > 0) {
+              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Request already exists for the same date and type')
+            }
+
+            await trx.query(
               'INSERT INTO approval_instances (id, status, version) VALUES ($1, $2, $3)',
               [approvalId, 'pending', 0]
             )
@@ -7955,7 +8138,7 @@ module.exports = {
                 randomUUID(),
                 userId,
                 orgId,
-                parsed.data.workDate,
+                workDate,
                 requestType,
                 requestedInAt,
                 requestedOutAt,
@@ -7972,11 +8155,15 @@ module.exports = {
           emitEvent('attendance.requested', {
             orgId,
             userId,
-            workDate: parsed.data.workDate,
+            workDate,
             requestType,
           })
           res.status(201).json({ ok: true, data: { request } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -8029,8 +8216,9 @@ module.exports = {
 
         const { page, pageSize, offset } = parsePagination(req.query)
         const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+        const dateRange = resolveDateRangeOrSend(res, parsed.data.from, parsed.data.to)
+        if (!dateRange) return
+        const { from, to } = dateRange
 
         try {
           const params = [targetUserId, orgId, from, to]
@@ -10502,7 +10690,7 @@ module.exports = {
           const seenKeys = new Set()
           for (const row of rows) {
             const shouldRender = previewLimit == null || preview.length < previewLimit
-            const workDate = row.workDate
+            const workDate = normalizeImportWorkDateValue(row.workDate)
             const rowUserId = resolveRowUserId({
               row,
               fallbackUserId: userId,
@@ -10561,7 +10749,29 @@ module.exports = {
               continue
             }
 
-            const dedupKey = `${rowUserId}:${workDate}`
+            const dedupKey = buildAttendanceUserDateKey(rowUserId, workDate)
+            if (!dedupKey) {
+              previewStats.invalid += 1
+              if (shouldRender) {
+                preview.push({
+                  userId: rowUserId ?? 'unknown',
+                  workDate: workDate ?? '',
+                  firstInAt: null,
+                  lastOutAt: null,
+                  workMinutes: 0,
+                  lateMinutes: 0,
+                  earlyLeaveMinutes: 0,
+                  leaveMinutes: 0,
+                  overtimeMinutes: 0,
+                  status: 'invalid',
+                  isWorkday: undefined,
+                  warnings: ['Missing userId or workDate'],
+                  appliedPolicies: [],
+                  userGroups: [],
+                })
+              }
+              continue
+            }
             if (seenKeys.has(dedupKey)) {
               previewStats.duplicates += 1
               if (shouldRender) {
@@ -11119,8 +11329,8 @@ module.exports = {
 			            const scopeWorkDates = new Set()
 			            const scopeUserIds = new Set()
 			            for (const row of rows) {
-			              const workDate = row?.workDate
-			              if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
+			              const workDate = normalizeImportWorkDateValue(row?.workDate)
+			              if (workDate) scopeWorkDates.add(workDate)
 			              const rowUserId = resolveRowUserId({
 			                row,
 			                fallbackUserId: requesterId,
@@ -11188,7 +11398,7 @@ module.exports = {
 			              if (!recordUpsertsBuffer.length) return
 			              const chunk = recordUpsertsBuffer.splice(0, recordUpsertsBuffer.length)
 			              const chunkUserIds = chunk.map((item) => item.userId)
-			              const chunkWorkDates = chunk.map((item) => item.workDate)
+			              const chunkWorkDates = chunk.map((item) => normalizeImportWorkDateValue(item.workDate) ?? item.workDate)
 
 				              const existingRows = await queryImportHeavy(
 				                trx,
@@ -11202,14 +11412,13 @@ module.exports = {
 					              )
 				              const existingMap = new Map()
 				              for (const row of existingRows) {
-				                const workDateKey = normalizeDateOnly(row.work_date) ?? row.work_date
-				                existingMap.set(`${row.user_id}:${workDateKey}`, row)
+				                mapAttendanceRecordByUserDate(existingMap, row)
 				              }
 
 				              const upsertRows = []
 				              for (const item of chunk) {
-				                const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
-				                const existingRow = existingMap.get(`${item.userId}:${workDateKey}`) ?? undefined
+				                const workDateKey = normalizeImportWorkDateValue(item.workDate) ?? item.workDate
+				                const existingRow = getAttendanceRecordByUserDate(existingMap, item.userId, workDateKey) ?? undefined
 				                const values = computeAttendanceRecordUpsertValues({
 				                  existingRow,
 				                  updateFirstInAt: item.updateFirstInAt,
@@ -11247,8 +11456,8 @@ module.exports = {
 				              })
 
 				              for (const item of chunk) {
-				                const workDateKey = normalizeDateOnly(item.workDate) ?? item.workDate
-				                const record = upserted.get(`${item.userId}:${workDateKey}`)
+				                const workDateKey = normalizeImportWorkDateValue(item.workDate) ?? item.workDate
+				                const record = getAttendanceRecordByUserDate(upserted, item.userId, workDateKey)
 				                if (!record?.id) {
 				                  throw new Error(`Attendance record upsert failed for ${item.userId}:${workDateKey}`)
 				                }
@@ -11280,7 +11489,7 @@ module.exports = {
 
 			            const seenRowKeys = new Set()
 			            for (const row of rows) {
-			              const workDate = row.workDate
+			              const workDate = normalizeImportWorkDateValue(row.workDate)
 			              const groupKey = resolveAttendanceGroupKey(row)
 			              const rowUserId = resolveRowUserId({
                 row,
@@ -11334,7 +11543,20 @@ module.exports = {
 	                continue
 	              }
 
-		              const dedupKey = `${rowUserId}:${workDate}`
+		              const dedupKey = buildAttendanceUserDateKey(rowUserId, workDate)
+		              if (!dedupKey) {
+		                const warnings = ['Missing userId or workDate']
+		                const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'validation' })
+		                await enqueueImportItem({
+		                  userId: rowUserId ?? null,
+		                  workDate: workDate ?? null,
+		                  recordId: null,
+		                  previewSnapshot: snapshot,
+		                })
+		                skipped.push({ userId: rowUserId ?? null, workDate: workDate ?? null, warnings })
+		                releaseImportRowMemory(row)
+		                continue
+		              }
 		              if (seenRowKeys.has(dedupKey)) {
 		                const warnings = ['Duplicate row in payload (same userId + workDate)']
 		                const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
@@ -12057,6 +12279,10 @@ module.exports = {
 
           res.json({ ok: true, data: { job: mapImportJobRow(jobRow) } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -12249,7 +12475,7 @@ module.exports = {
             }
             const groupMembersToInsert = new Map()
             for (const row of rows) {
-              const workDate = row.workDate
+              const workDate = normalizeImportWorkDateValue(row.workDate)
               const groupKey = resolveAttendanceGroupKey(row)
               const rowUserId = resolveRowUserId({
                 row,
@@ -12956,7 +13182,7 @@ module.exports = {
 
                   const seenRowKeys = new Set()
                   for (const row of importRows) {
-                    const workDate = row.workDate
+                    const workDate = normalizeImportWorkDateValue(row.workDate)
                     const rowUserId = resolveRowUserId({
                       row,
                       fallbackUserId: importUserId,
@@ -13012,7 +13238,27 @@ module.exports = {
                       continue
                     }
 
-                    const dedupKey = `${rowUserId}:${workDate}`
+                    const dedupKey = buildAttendanceUserDateKey(rowUserId, workDate)
+                    if (!dedupKey) {
+                      const warnings = ['Missing userId or workDate']
+                      const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'validation' })
+                      await trx.query(
+                        `INSERT INTO attendance_import_items
+                         (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())`,
+                        [
+                          randomUUID(),
+                          newBatchId,
+                          orgId,
+                          rowUserId ?? null,
+                          workDate ?? null,
+                          null,
+                          JSON.stringify(snapshot),
+                        ]
+                      )
+                      skippedRows.push({ userId: rowUserId ?? null, workDate: workDate ?? null, warnings })
+                      continue
+                    }
                     if (seenRowKeys.has(dedupKey)) {
                       const warnings = ['Duplicate row in payload (same userId + workDate)']
                       const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
@@ -15154,8 +15400,9 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+        const dateRange = resolveDateRangeOrSend(res, parsed.data.from, parsed.data.to)
+        if (!dateRange) return
+        const { from, to } = dateRange
 
         try {
           const countRows = await db.query(
@@ -15486,8 +15733,9 @@ module.exports = {
           }
         }
 
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+        const dateRange = resolveDateRangeOrSend(res, parsed.data.from, parsed.data.to)
+        if (!dateRange) return
+        const { from, to } = dateRange
         const requestedLimit = parseNumber(parsed.data.limit, 1000)
         const limit = Math.min(Math.max(requestedLimit, 1), 5000)
 

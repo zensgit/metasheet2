@@ -49,7 +49,7 @@
             :placeholder="tr('Current user', '当前用户')"
           />
         </label>
-        <button class="attendance__btn" :disabled="loading" @click="refreshAll">{{ tr('Refresh', '刷新') }}</button>
+        <button class="attendance__btn" :disabled="loading" @click="refreshOverviewWithStatus">{{ tr('Refresh', '刷新') }}</button>
         <div v-if="statusMessage" class="attendance__status-block">
           <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
             {{ statusMessage }}
@@ -75,6 +75,7 @@
       <section class="attendance__grid" v-if="showOverview">
         <div class="attendance__card">
           <h3>{{ tr('Summary', '汇总') }}</h3>
+          <small class="attendance__field-hint">{{ summaryTimezoneContextHint }}</small>
           <div v-if="summary" class="attendance__summary">
             <div class="attendance__summary-item">
               <span>{{ tr('Total days', '总天数') }}</span>
@@ -155,6 +156,7 @@
               </label>
             </div>
           </div>
+          <small class="attendance__field-hint">{{ calendarTimezoneContextHint }}</small>
           <div class="attendance__calendar-weekdays">
             <span v-for="day in weekDays" :key="day">{{ day }}</span>
           </div>
@@ -181,6 +183,7 @@
 
         <div class="attendance__card">
           <h3>{{ tr('Adjustment Request', '补卡申请') }}</h3>
+          <small class="attendance__field-hint">{{ requestTimezoneContextHint }}</small>
           <div class="attendance__request-form">
             <label class="attendance__field" for="attendance-request-work-date">
               <span>{{ tr('Work date', '工作日期') }}</span>
@@ -285,7 +288,7 @@
           <div class="attendance__requests">
             <div class="attendance__requests-header">
               <span>{{ tr('Recent requests', '最近申请') }}</span>
-              <button class="attendance__btn" :disabled="loading" @click="loadRequests">{{ tr('Reload', '重载') }}</button>
+              <button class="attendance__btn" :disabled="loading" @click="reloadRequestsWithStatus">{{ tr('Reload', '重载') }}</button>
             </div>
             <div v-if="requests.length === 0" class="attendance__empty">{{ tr('No requests.', '暂无申请。') }}</div>
             <ul v-else class="attendance__request-list">
@@ -318,10 +321,11 @@
         <div class="attendance__card">
           <div class="attendance__requests-header">
             <h3>{{ tr('Anomalies', '异常') }}</h3>
-            <button class="attendance__btn" :disabled="anomaliesLoading || loading" @click="loadAnomalies">
+            <button class="attendance__btn" :disabled="anomaliesLoading || loading" @click="reloadAnomaliesWithStatus">
               {{ anomaliesLoading ? tr('Loading...', '加载中...') : tr('Reload anomalies', '重载异常') }}
             </button>
           </div>
+          <small class="attendance__field-hint">{{ anomaliesTimezoneContextHint }}</small>
           <div v-if="anomaliesLoading" class="attendance__empty">{{ tr('Loading anomalies...', '正在加载异常...') }}</div>
           <div v-else-if="anomalies.length === 0" class="attendance__empty">{{ tr('No anomalies.', '暂无异常。') }}</div>
           <div v-else class="attendance__table-wrapper">
@@ -370,10 +374,11 @@
         <div class="attendance__card">
           <div class="attendance__requests-header">
             <h3>{{ tr('Request Report', '申请报表') }}</h3>
-            <button class="attendance__btn" :disabled="reportLoading" @click="loadRequestReport">
+            <button class="attendance__btn" :disabled="reportLoading" @click="reloadRequestReportWithStatus">
               {{ reportLoading ? tr('Loading...', '加载中...') : tr('Reload report', '重载报表') }}
             </button>
           </div>
+          <small class="attendance__field-hint">{{ requestReportTimezoneContextHint }}</small>
           <div v-if="requestReport.length === 0" class="attendance__empty">{{ tr('No report data.', '暂无报表数据。') }}</div>
           <div v-else class="attendance__table-wrapper">
             <table class="attendance__table">
@@ -402,12 +407,13 @@
         <div class="attendance__records-header">
           <h3>{{ tr('Records', '记录') }}</h3>
           <div class="attendance__records-actions">
-            <button class="attendance__btn" :disabled="loading" @click="loadRecords">{{ tr('Reload', '重载') }}</button>
+            <button class="attendance__btn" :disabled="loading" @click="reloadRecordsWithStatus">{{ tr('Reload', '重载') }}</button>
             <button class="attendance__btn" :disabled="exporting || loading" @click="exportCsv">
               {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
             </button>
           </div>
         </div>
+        <small class="attendance__field-hint">{{ recordsTimezoneContextHint }}</small>
         <div v-if="records.length === 0" class="attendance__empty">{{ tr('No records.', '暂无记录。') }}</div>
         <div v-else class="attendance__table-wrapper">
           <table class="attendance__table attendance__table--records">
@@ -479,8 +485,29 @@
             </button>
           </div>
           <div v-if="adminForbidden" class="attendance__empty">{{ tr('Admin permissions required to manage attendance settings.', '需要管理员权限才能管理考勤设置。') }}</div>
-          <div v-else>
-            <div class="attendance__admin-section">
+          <div v-else class="attendance__admin-shell">
+            <aside class="attendance__admin-nav-panel">
+              <div class="attendance__admin-nav-header">
+                <strong>{{ tr('Sections', '区块') }}</strong>
+                <span>{{ adminSectionNavItems.length }} {{ tr('items', '项') }}</span>
+              </div>
+              <nav class="attendance__admin-nav" :aria-label="tr('Attendance admin sections', '考勤管理区块')">
+                <button
+                  v-for="item in adminSectionNavItems"
+                  :key="item.id"
+                  class="attendance__admin-nav-link"
+                  :class="{ 'attendance__admin-nav-link--active': adminActiveSectionId === item.id }"
+                  :aria-current="adminActiveSectionId === item.id ? 'true' : undefined"
+                  :data-admin-anchor="item.id"
+                  type="button"
+                  @click="scrollToAdminSection(item.id)"
+                >
+                  {{ item.label }}
+                </button>
+              </nav>
+            </aside>
+            <div class="attendance__admin-content">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.settings)">
               <h4>{{ tr('Settings', '设置') }}</h4>
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--checkbox" for="attendance-auto-absence-enabled">
@@ -731,7 +758,7 @@
               </button>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.userAccess)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('User Access', '用户权限') }}</h4>
                 <div class="attendance__admin-actions">
@@ -849,7 +876,7 @@
               <p v-else-if="provisionHasLoaded" class="attendance__empty">{{ tr('No permissions loaded.', '未加载到权限。') }}</p>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Batch Provisioning', '批量授权') }}</h4>
                 <div class="attendance__admin-actions">
@@ -957,7 +984,7 @@
               </p>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.auditLogs)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Audit Logs', '审计日志') }}</h4>
                 <div class="attendance__admin-actions">
@@ -1125,7 +1152,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidaySync)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Holiday Sync', '节假日同步') }}</h4>
                 <div class="attendance__admin-actions">
@@ -1188,13 +1215,16 @@
                 </label>
                 <label class="attendance__field" for="attendance-holiday-sync-auto-tz">
                   <span>{{ tr('Auto sync timezone', '自动同步时区') }}</span>
-                  <input
+                  <select
                     id="attendance-holiday-sync-auto-tz"
                     name="holidaySyncAutoTimezone"
                     v-model="settingsForm.holidaySyncAutoTimezone"
-                    type="text"
-                    :placeholder="tr('Asia/Shanghai', 'Asia/Shanghai')"
-                  />
+                  >
+                    <option v-for="option in timezoneOptions" :key="`holiday-sync-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ holidaySyncAutoTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-index">
                   <span>{{ tr('Append day index', '追加节假日序号') }}</span>
@@ -1264,7 +1294,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.defaultRule)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Default Rule', '默认规则') }}</h4>
                 <button class="attendance__btn" :disabled="ruleLoading" @click="loadRule">
@@ -1278,12 +1308,16 @@
                 </label>
                 <label class="attendance__field" for="attendance-rule-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <input
+                  <select
                     id="attendance-rule-timezone"
                     name="ruleTimezone"
                     v-model="ruleForm.timezone"
-                    type="text"
-                  />
+                  >
+                    <option v-for="option in timezoneOptions" :key="`rule-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ ruleTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-rule-start">
                   <span>{{ tr('Work start', '上班时间') }}</span>
@@ -1349,7 +1383,7 @@
               </button>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.ruleSets)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rule Sets', '规则集') }}</h4>
                 <button class="attendance__btn" :disabled="ruleSetLoading" @click="loadRuleSets">
@@ -1457,7 +1491,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rule Template Library', '规则模板库') }}</h4>
                 <button
@@ -1540,7 +1574,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Attendance groups', '考勤组') }}</h4>
                 <button class="attendance__btn" :disabled="attendanceGroupLoading" @click="loadAttendanceGroups">
@@ -1558,7 +1592,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-group-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <input id="attendance-group-timezone" v-model="attendanceGroupForm.timezone" type="text" />
+                  <select id="attendance-group-timezone" v-model="attendanceGroupForm.timezone">
+                    <option v-for="option in timezoneOptions" :key="`group-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ attendanceGroupTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-group-rule-set">
                   <span>{{ tr('Rule set', '规则集') }}</span>
@@ -1606,7 +1645,7 @@
                     <tr v-for="item in attendanceGroups" :key="item.id">
                       <td>{{ item.name }}</td>
                       <td>{{ item.code || '-' }}</td>
-                      <td>{{ item.timezone }}</td>
+                      <td>{{ displayTimezone(item.timezone) }}</td>
                       <td>{{ resolveRuleSetName(item.ruleSetId) }}</td>
                       <td class="attendance__table-actions">
                         <button class="attendance__btn" @click="editAttendanceGroup(item)">{{ tr('Edit', '编辑') }}</button>
@@ -1620,7 +1659,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.groupMembers)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Group members', '分组成员') }}</h4>
                 <button
@@ -1694,7 +1733,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.import)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Import (DingTalk / Manual)', '导入（钉钉 / 手工）') }}</h4>
                 <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
@@ -1838,12 +1877,16 @@
                 </label>
                 <label class="attendance__field" for="attendance-import-group-timezone">
                   <span>{{ tr('Group timezone (optional)', '分组时区（可选）') }}</span>
-                  <input
+                  <select
                     id="attendance-import-group-timezone"
                     v-model="importGroupTimezone"
-                    type="text"
-                    placeholder="Asia/Shanghai"
-                  />
+                  >
+                    <option value="">{{ tr('Use import timezone', '使用导入时区') }}</option>
+                    <option v-for="option in timezoneOptions" :key="`import-group-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current effective timezone', '当前生效时区') }}: {{ importGroupTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-import-user">
                   <span>{{ tr('User ID', '用户 ID') }}</span>
@@ -1857,12 +1900,16 @@
                 </label>
                 <label class="attendance__field" for="attendance-import-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <input
+                  <select
                     id="attendance-import-timezone"
                     name="importTimezone"
                     v-model="importForm.timezone"
-                    type="text"
-                  />
+                  >
+                    <option v-for="option in timezoneOptions" :key="`import-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ importTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-import-payload">
                   <span>{{ tr('Payload (JSON)', '负载（JSON）') }}</span>
@@ -1897,6 +1944,9 @@
               <small class="attendance__field-hint">
                 {{ importScalabilityHint }}
               </small>
+              <small class="attendance__field-hint">
+                {{ importPreviewTimezoneHint }}
+              </small>
               <div
                 v-if="importPreviewTask"
                 class="attendance__status"
@@ -1917,6 +1967,7 @@
                 <div v-if="importPreviewTask.totalRows">
                   {{ tr('Progress', '进度') }}: {{ importPreviewTask.processedRows }} / {{ importPreviewTask.totalRows }}
                 </div>
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
                 <div v-if="importPreviewTask.message">{{ importPreviewTask.message }}</div>
               </div>
               <div
@@ -1964,13 +2015,19 @@
                 <div v-if="importAsyncJob.kind === 'preview' && importAsyncJob.preview?.rowCount">
                   {{ tr('Preview rows', '预览行数') }}: {{ importAsyncJob.preview?.total ?? 0 }} / {{ importAsyncJob.preview?.rowCount }}
                 </div>
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
                 <div v-if="importAsyncJob.error">{{ tr('Error', '错误') }}: {{ importAsyncJob.error }}</div>
               </div>
               <div v-if="importCsvWarnings.length" class="attendance__status attendance__status--error">
-                {{ tr('CSV warnings', 'CSV 警告') }}: {{ importCsvWarnings.join('; ') }}
+                <div>{{ tr('CSV warnings', 'CSV 警告') }}: {{ importCsvWarnings.join('; ') }}</div>
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
               </div>
-              <div v-if="importPreview.length === 0" class="attendance__empty">{{ tr('No preview data.', '暂无预览数据。') }}</div>
+              <div v-if="importPreview.length === 0" class="attendance__empty-state">
+                <div class="attendance__empty">{{ tr('No preview data.', '暂无预览数据。') }}</div>
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
+              </div>
               <div v-else class="attendance__table-wrapper">
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
                 <table class="attendance__table">
                   <thead>
                     <tr>
@@ -1999,14 +2056,18 @@
                 </table>
               </div>
 
-              <div class="attendance__admin-section-header">
+              <div class="attendance__admin-section-header" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)">
                 <h4>{{ tr('Import batches', '导入批次') }}</h4>
                 <button class="attendance__btn" :disabled="importLoading" @click="loadImportBatches">
                   {{ importLoading ? tr('Loading...', '加载中...') : tr('Reload batches', '重载批次') }}
                 </button>
               </div>
-              <div v-if="importBatches.length === 0" class="attendance__empty">{{ tr('No import batches.', '暂无导入批次。') }}</div>
+              <div v-if="importBatches.length === 0" class="attendance__empty-state">
+                <div class="attendance__empty">{{ tr('No import batches.', '暂无导入批次。') }}</div>
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
+              </div>
               <div v-else class="attendance__table-wrapper">
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
                 <table class="attendance__table">
                   <thead>
                     <tr>
@@ -2058,6 +2119,7 @@
                     </button>
                   </div>
                 </div>
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
                 <table class="attendance__table">
                   <thead>
                     <tr>
@@ -2080,11 +2142,21 @@
                     </tr>
                   </tbody>
                 </table>
-                <pre v-if="importBatchSnapshot" class="attendance__code">{{ formatJson(importBatchSnapshot) }}</pre>
+                <div v-if="importBatchSnapshot" class="attendance__snapshot-panel">
+                  <div class="attendance__field-hint">
+                    {{ tr('Snapshot context', '快照上下文') }}: {{ importBatchSnapshotContextLabel }}
+                  </div>
+                  <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
+                  <pre class="attendance__code">{{ formatJson(importBatchSnapshot.snapshot) }}</pre>
+                </div>
+              </div>
+              <div v-else-if="importBatchSelectedId" class="attendance__empty-state">
+                <div class="attendance__empty">{{ tr('No batch items.', '暂无批次条目。') }}</div>
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Payroll Templates', '计薪模板') }}</h4>
                 <button class="attendance__btn" :disabled="payrollTemplateLoading" @click="loadPayrollTemplates">
@@ -2103,12 +2175,16 @@
                 </label>
                 <label class="attendance__field" for="attendance-payroll-template-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <input
+                  <select
                     id="attendance-payroll-template-timezone"
                     name="payrollTemplateTimezone"
                     v-model="payrollTemplateForm.timezone"
-                    type="text"
-                  />
+                  >
+                    <option v-for="option in timezoneOptions" :key="`payroll-template-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ payrollTemplateTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-payroll-template-start">
                   <span>{{ tr('Start day', '起始日') }}</span>
@@ -2189,7 +2265,15 @@
                   {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
-              <div v-if="payrollTemplates.length === 0" class="attendance__empty">{{ tr('No payroll templates yet.', '暂无计薪模板。') }}</div>
+              <small class="attendance__field-hint">
+                {{ tr('Template timezone context', '模板时区上下文') }}: {{ payrollTemplateTimezoneLabel }}
+              </small>
+              <div v-if="payrollTemplates.length === 0" class="attendance__empty-state">
+                <div class="attendance__empty">{{ tr('No payroll templates yet.', '暂无计薪模板。') }}</div>
+                <div class="attendance__field-hint">
+                  {{ tr('Template timezone context', '模板时区上下文') }}: {{ payrollTemplateTimezoneLabel }}
+                </div>
+              </div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
@@ -2206,7 +2290,7 @@
                   <tbody>
                     <tr v-for="item in payrollTemplates" :key="item.id">
                       <td>{{ item.name }}</td>
-                      <td>{{ item.timezone }}</td>
+                      <td>{{ displayTimezone(item.timezone) }}</td>
                       <td>{{ item.startDay }}</td>
                       <td>{{ item.endDay }}</td>
                       <td>{{ item.endMonthOffset }}</td>
@@ -2223,7 +2307,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Payroll Cycles', '计薪周期') }}</h4>
                 <button class="attendance__btn" :disabled="payrollCycleLoading" @click="loadPayrollCycles">
@@ -2318,6 +2402,9 @@
                   {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
+              <small class="attendance__field-hint">
+                {{ payrollCycleTemplateTimezoneHint }}
+              </small>
 
               <details class="attendance__details">
                 <summary class="attendance__details-summary">{{ tr('Batch generate cycles', '批量生成周期') }}</summary>
@@ -2404,7 +2491,11 @@
                     {{ tr('Created', '已创建') }} {{ payrollCycleGenerateResult.created }}，{{ tr('skipped', '跳过') }} {{ payrollCycleGenerateResult.skipped }}。
                   </span>
                 </div>
+                <small class="attendance__field-hint">
+                  {{ payrollCycleGenerateTimezoneHint }}
+                </small>
               </details>
+              <div v-if="payrollCycleSummary" class="attendance__field-hint">{{ payrollCycleTemplateTimezoneHint }}</div>
               <div v-if="payrollCycleSummary" class="attendance__summary">
                 <div class="attendance__summary-item">
                   <span>{{ tr('Cycle total minutes', '周期总分钟数') }}</span>
@@ -2427,7 +2518,11 @@
                   <strong>{{ payrollCycleSummary.total_early_leave_minutes ?? 0 }}</strong>
                 </div>
               </div>
-              <div v-if="payrollCycles.length === 0" class="attendance__empty">{{ tr('No payroll cycles yet.', '暂无计薪周期。') }}</div>
+              <div v-if="payrollCycles.length === 0" class="attendance__empty-state">
+                <div class="attendance__empty">{{ tr('No payroll cycles yet.', '暂无计薪周期。') }}</div>
+                <div class="attendance__field-hint">{{ payrollCycleTemplateTimezoneHint }}</div>
+                <div class="attendance__field-hint">{{ payrollCycleGenerateTimezoneHint }}</div>
+              </div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
@@ -2459,7 +2554,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Leave Types', '请假类型') }}</h4>
                 <button class="attendance__btn" :disabled="leaveTypeLoading" @click="loadLeaveTypes">
@@ -2560,7 +2655,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Overtime Rules', '加班规则') }}</h4>
                 <button class="attendance__btn" :disabled="overtimeRuleLoading" @click="loadOvertimeRules">
@@ -2672,7 +2767,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Approval Flows', '审批流') }}</h4>
                 <button class="attendance__btn" :disabled="approvalFlowLoading" @click="loadApprovalFlows">
@@ -2766,7 +2861,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationRules)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rotation Rules', '轮班规则') }}</h4>
                 <button class="attendance__btn" :disabled="rotationRuleLoading" @click="loadRotationRules">
@@ -2785,12 +2880,16 @@
                 </label>
                 <label class="attendance__field" for="attendance-rotation-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <input
+                  <select
                     id="attendance-rotation-timezone"
                     name="rotationTimezone"
                     v-model="rotationRuleForm.timezone"
-                    type="text"
-                  />
+                  >
+                    <option v-for="option in timezoneOptions" :key="`rotation-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ rotationRuleTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-rotation-sequence">
                   <span>{{ tr('Shift sequence (IDs)', '班次序列（ID）') }}</span>
@@ -2844,7 +2943,7 @@
                   <tbody>
                     <tr v-for="rule in rotationRules" :key="rule.id">
                       <td>{{ rule.name }}</td>
-                      <td>{{ rule.timezone }}</td>
+                      <td>{{ displayTimezone(rule.timezone) }}</td>
                       <td>{{ rule.shiftSequence.join(', ') }}</td>
                       <td>{{ rule.isActive ? tr('Yes', '是') : tr('No', '否') }}</td>
                       <td class="attendance__table-actions">
@@ -2859,7 +2958,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rotation Assignments', '轮班分配') }}</h4>
                 <button class="attendance__btn" :disabled="rotationAssignmentLoading" @click="loadRotationAssignments">
@@ -2970,7 +3069,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.shifts)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Shifts', '班次') }}</h4>
                 <button class="attendance__btn" :disabled="shiftLoading" @click="loadShifts">
@@ -2984,12 +3083,16 @@
                 </label>
                 <label class="attendance__field" for="attendance-shift-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <input
+                  <select
                     id="attendance-shift-timezone"
                     name="shiftTimezone"
                     v-model="shiftForm.timezone"
-                    type="text"
-                  />
+                  >
+                    <option v-for="option in timezoneOptions" :key="`shift-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ shiftTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-shift-start">
                   <span>{{ tr('Work start', '上班开始') }}</span>
@@ -3074,7 +3177,7 @@
                   <tbody>
                     <tr v-for="shift in shifts" :key="shift.id">
                       <td>{{ shift.name }}</td>
-                      <td>{{ shift.timezone }}</td>
+                      <td>{{ displayTimezone(shift.timezone) }}</td>
                       <td>{{ shift.workStartTime }}</td>
                       <td>{{ shift.workEndTime }}</td>
                       <td>{{ shift.workingDays.join(',') }}</td>
@@ -3090,7 +3193,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.assignments)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Assignments', '排班分配') }}</h4>
                 <button class="attendance__btn" :disabled="assignmentLoading" @click="loadAssignments">
@@ -3197,7 +3300,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidays)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Holidays', '节假日') }}</h4>
                 <button class="attendance__btn" :disabled="holidayLoading" @click="loadHolidays">
@@ -3274,6 +3377,7 @@
                 </table>
               </div>
             </div>
+            </div>
           </div>
         </div>
       </section>
@@ -3282,11 +3386,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
+import { buildTimezoneOptions, formatTimezoneLabel } from '../utils/timezones'
 
 type AttendancePageMode = 'overview' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
@@ -3694,6 +3799,17 @@ interface AttendanceImportItem {
   createdAt?: string
 }
 
+interface AttendanceImportBatchSnapshotContext {
+  userId: string | null
+  workDate: string | null
+  recordId: string | null
+}
+
+interface AttendanceImportBatchSnapshotState {
+  snapshot: Record<string, any>
+  context: AttendanceImportBatchSnapshotContext
+}
+
 interface AttendanceImportMappingProfile {
   id: string
   name: string
@@ -4041,6 +4157,60 @@ const payrollCycleGenerateResult = ref<{ created: number; skipped: number } | nu
 const importLoading = ref(false)
 const adminForbidden = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+const timezoneOptions = computed(() =>
+  buildTimezoneOptions([defaultTimezone, 'UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York'])
+)
+const overviewTimezoneLabel = computed(() => displayTimezone(defaultTimezone))
+const overviewRefreshTimezoneContextHint = computed(() =>
+  `${tr('Overview timezone context', '总览时区上下文')}: ${overviewTimezoneLabel.value}`
+)
+const calendarTimezoneContextHint = computed(() =>
+  `${tr('Calendar timezone context', '日历时区上下文')}: ${overviewTimezoneLabel.value}`
+)
+const requestTimezoneContextHint = computed(() =>
+  `${tr('Request timezone context', '申请时区上下文')}: ${overviewTimezoneLabel.value}`
+)
+const summaryTimezoneContextHint = computed(() =>
+  `${tr('Summary timezone context', '汇总时区上下文')}: ${overviewTimezoneLabel.value}`
+)
+const anomaliesTimezoneContextHint = computed(() =>
+  `${tr('Anomalies timezone context', '异常时区上下文')}: ${overviewTimezoneLabel.value}`
+)
+const requestReportTimezoneContextHint = computed(() =>
+  `${tr('Request report timezone context', '申请报表时区上下文')}: ${overviewTimezoneLabel.value}`
+)
+const recordsTimezoneContextHint = computed(() =>
+  `${tr('Records timezone context', '记录时区上下文')}: ${overviewTimezoneLabel.value}`
+)
+const holidaySyncAutoTimezoneLabel = computed(() => displayTimezone(settingsForm.holidaySyncAutoTimezone))
+const ruleTimezoneLabel = computed(() => displayTimezone(ruleForm.timezone))
+const attendanceGroupTimezoneLabel = computed(() => displayTimezone(attendanceGroupForm.timezone))
+const importTimezoneLabel = computed(() => displayTimezone(importForm.timezone))
+const importGroupTimezoneLabel = computed(() =>
+  importGroupTimezone.value
+    ? displayTimezone(importGroupTimezone.value)
+    : `${tr('Use import timezone', '使用导入时区')} (${displayTimezone(importForm.timezone)})`
+)
+const importPreviewTimezoneHint = computed(() =>
+  `${tr('Preview timezone', '预览时区')}: ${importTimezoneLabel.value} · ${tr('Group timezone', '分组时区')}: ${importGroupTimezoneLabel.value}`
+)
+const importBatchSnapshotContextLabel = computed(() => {
+  const snapshot = importBatchSnapshot.value
+  if (!snapshot) return '--'
+  const context = snapshot.context && typeof snapshot.context === 'object'
+    ? snapshot.context
+    : null
+  return `userId: ${context?.userId || '--'} · workDate: ${context?.workDate || '--'} · recordId: ${context?.recordId || '--'}`
+})
+const payrollTemplateTimezoneLabel = computed(() => displayTimezone(payrollTemplateForm.timezone))
+const payrollCycleTemplateTimezoneHint = computed(() =>
+  `${tr('Cycle template timezone', '周期模板时区')}: ${resolvePayrollTemplateTimezoneLabel(payrollCycleForm.templateId, 'manual')}`
+)
+const payrollCycleGenerateTimezoneHint = computed(() =>
+  `${tr('Generate timezone context', '生成时区上下文')}: ${resolvePayrollTemplateTimezoneLabel(payrollCycleGenerateForm.templateId, 'default')}`
+)
+const rotationRuleTimezoneLabel = computed(() => displayTimezone(rotationRuleForm.timezone))
+const shiftTimezoneLabel = computed(() => displayTimezone(shiftForm.timezone))
 
 const provisionRolePermissions: Record<ProvisionRole, string[]> = {
   employee: ['attendance:read', 'attendance:write'],
@@ -4069,7 +4239,7 @@ const importPreview = ref<AttendanceImportPreviewItem[]>([])
 const importBatches = ref<AttendanceImportBatch[]>([])
 const importBatchItems = ref<AttendanceImportItem[]>([])
 const importBatchSelectedId = ref('')
-const importBatchSnapshot = ref<Record<string, any> | null>(null)
+const importBatchSnapshot = ref<AttendanceImportBatchSnapshotState | null>(null)
 const importCsvWarnings = ref<string[]>([])
 const importPreviewTask = ref<AttendanceImportPreviewTask | null>(null)
 const importAsyncJob = ref<AttendanceImportJob | null>(null)
@@ -4180,8 +4350,60 @@ const pluginLoading = computed(() => !pluginsLoaded.value || pluginsLoading.valu
 const pluginMissing = computed(() => pluginsLoaded.value && !attendancePluginActive.value)
 const pluginErrorMessage = computed(() => pluginsError.value)
 
+const ATTENDANCE_ADMIN_SECTION_IDS = {
+  settings: 'attendance-admin-settings',
+  userAccess: 'attendance-admin-user-access',
+  batchProvisioning: 'attendance-admin-batch-provisioning',
+  auditLogs: 'attendance-admin-audit-logs',
+  holidaySync: 'attendance-admin-holiday-sync',
+  defaultRule: 'attendance-admin-default-rule',
+  ruleSets: 'attendance-admin-rule-sets',
+  ruleTemplateLibrary: 'attendance-admin-rule-template-library',
+  attendanceGroups: 'attendance-admin-groups',
+  groupMembers: 'attendance-admin-group-members',
+  import: 'attendance-admin-import',
+  importBatches: 'attendance-admin-import-batches',
+  payrollTemplates: 'attendance-admin-payroll-templates',
+  payrollCycles: 'attendance-admin-payroll-cycles',
+  leaveTypes: 'attendance-admin-leave-types',
+  overtimeRules: 'attendance-admin-overtime-rules',
+  approvalFlows: 'attendance-admin-approval-flows',
+  rotationRules: 'attendance-admin-rotation-rules',
+  rotationAssignments: 'attendance-admin-rotation-assignments',
+  shifts: 'attendance-admin-shifts',
+  assignments: 'attendance-admin-assignments',
+  holidays: 'attendance-admin-holidays',
+} as const
+
 const showAdmin = computed(() => props.mode === 'admin')
 const showOverview = computed(() => props.mode === 'overview')
+const adminSectionNavItems = computed(() => [
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.settings, label: tr('Settings', '设置') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.userAccess, label: tr('User Access', '用户权限') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning, label: tr('Batch Provisioning', '批量授权') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.auditLogs, label: tr('Audit Logs', '审计日志') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.holidaySync, label: tr('Holiday Sync', '节假日同步') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.defaultRule, label: tr('Default Rule', '默认规则') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.ruleSets, label: tr('Rule Sets', '规则集') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary, label: tr('Rule Template Library', '规则模板库') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups, label: tr('Attendance groups', '考勤组') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.groupMembers, label: tr('Group members', '分组成员') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.import, label: tr('Import', '导入') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.importBatches, label: tr('Import batches', '导入批次') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates, label: tr('Payroll Templates', '计薪模板') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles, label: tr('Payroll Cycles', '计薪周期') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes, label: tr('Leave Types', '请假类型') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules, label: tr('Overtime Rules', '加班规则') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows, label: tr('Approval Flows', '审批流') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.rotationRules, label: tr('Rotation Rules', '轮班规则') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments, label: tr('Rotation Assignments', '轮班分配') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.shifts, label: tr('Shifts', '班次') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.assignments, label: tr('Assignments', '排班分配') },
+  { id: ATTENDANCE_ADMIN_SECTION_IDS.holidays, label: tr('Holidays', '节假日') },
+])
+const adminActiveSectionId = ref<string>(ATTENDANCE_ADMIN_SECTION_IDS.settings)
+const adminSectionElements = new Map<string, HTMLElement>()
+let adminSectionObserver: IntersectionObserver | null = null
 const statusCode = computed(() => statusMeta.value?.code || '')
 const statusHint = computed(() => statusMeta.value?.hint || '')
 const canResumeImportJobFromStatus = computed(() => {
@@ -4519,6 +4741,10 @@ function formatDateTime(value: string | null): string {
   return date.toLocaleString(locale.value)
 }
 
+function displayTimezone(value: string | null | undefined): string {
+  return formatTimezoneLabel(value)
+}
+
 function formatStatus(value: string): string {
   const raw = String(value || '').trim()
   if (!raw) return '--'
@@ -4654,14 +4880,88 @@ function formatWarningsShort(warnings: string[]): string {
   return head
 }
 
+function setAdminSectionRef(id: string, element: Element | null): void {
+  if (element instanceof HTMLElement) {
+    adminSectionElements.set(id, element)
+    return
+  }
+  adminSectionElements.delete(id)
+}
+
+function adminSectionBinding(id: string): Record<string, unknown> {
+  return {
+    id,
+    'data-admin-section': id,
+    ref: (element: Element | null) => setAdminSectionRef(id, element),
+  }
+}
+
+function resolveAdminSectionElements(): HTMLElement[] {
+  if (typeof document === 'undefined') return []
+  return adminSectionNavItems.value
+    .map(item => adminSectionElements.get(item.id) ?? document.getElementById(item.id))
+    .filter((element): element is HTMLElement => element instanceof HTMLElement)
+}
+
+function disconnectAdminSectionObserver(): void {
+  adminSectionObserver?.disconnect()
+  adminSectionObserver = null
+}
+
+function syncAdminSectionObserver(): void {
+  disconnectAdminSectionObserver()
+  if (typeof window === 'undefined' || adminForbidden.value || !showAdmin.value) return
+  const elements = resolveAdminSectionElements()
+  if (elements.length === 0) return
+  adminActiveSectionId.value = elements[0].id
+  if (typeof window.IntersectionObserver === 'undefined') return
+  adminSectionObserver = new window.IntersectionObserver(
+    entries => {
+      const visible = entries
+        .filter(entry => entry.isIntersecting)
+        .sort((left, right) => {
+          const ratioDelta = right.intersectionRatio - left.intersectionRatio
+          if (Math.abs(ratioDelta) > 0.001) return ratioDelta
+          return left.boundingClientRect.top - right.boundingClientRect.top
+        })
+      const nextId = visible[0]?.target?.id
+      if (nextId) adminActiveSectionId.value = nextId
+    },
+    {
+      rootMargin: '-96px 0px -60% 0px',
+      threshold: [0.15, 0.35, 0.6],
+    },
+  )
+  elements.forEach(element => adminSectionObserver?.observe(element))
+}
+
+function scrollToAdminSection(id: string): void {
+  if (typeof document === 'undefined') return
+  const target = adminSectionElements.get(id) ?? document.getElementById(id)
+  if (!(target instanceof HTMLElement)) return
+  adminActiveSectionId.value = id
+  target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
 async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void> {
   if (item.state === 'pending') {
-    setStatus(tr('A pending request already exists for this work date.', '该工作日已存在待处理申请。'), 'error')
+    setStatus(
+      appendStatusContext(
+        tr('A pending request already exists for this work date.', '该工作日已存在待处理申请。'),
+        requestTimezoneContextHint.value,
+      ),
+      'error',
+    )
     return
   }
   requestForm.workDate = item.workDate
   requestForm.requestType = item.suggestedRequestType ?? 'time_correction'
-  setStatus(tr('Request form updated from anomaly.', '已根据异常记录填充申请表单。'))
+  setStatus(
+    appendStatusContext(
+      tr('Request form updated from anomaly.', '已根据异常记录填充申请表单。'),
+      requestTimezoneContextHint.value,
+    ),
+  )
   await nextTick()
   document.getElementById('attendance-request-work-date')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
@@ -5100,6 +5400,50 @@ function payrollTemplateName(templateId?: string | null): string {
   return found?.name ?? templateId
 }
 
+function resolvePayrollTemplateTimezoneLabel(
+  templateId: string | null | undefined,
+  fallback: 'manual' | 'default',
+): string {
+  if (templateId) {
+    const found = payrollTemplates.value.find(item => item.id === templateId)
+    if (found) return `${found.name} (${displayTimezone(found.timezone)})`
+    return `${templateId} (${tr('template unavailable', '模板不可用')})`
+  }
+
+  if (fallback === 'default') {
+    const found = payrollTemplates.value.find(item => item.isDefault) ?? payrollTemplates.value[0]
+    if (found) return `${tr('Default template', '默认模板')} · ${found.name} (${displayTimezone(found.timezone)})`
+    return tr('Default template unavailable', '默认模板不可用')
+  }
+
+  return tr('Manual dates (no template timezone)', '手工日期（无模板时区）')
+}
+
+function appendStatusContext(message: string, context: string): string {
+  return `${message} · ${context}`
+}
+
+function appendStatusHintContext(hint: string | undefined, context: string): string {
+  return hint ? `${hint} ${context}` : context
+}
+
+function setStatusFromErrorWithContext(
+  error: unknown,
+  fallbackMessage: string,
+  statusContext: string,
+  context: AttendanceStatusContext,
+) {
+  const { message, meta } = classifyStatusError(error, fallbackMessage, context)
+  setStatus(
+    message || fallbackMessage,
+    'error',
+    {
+      ...meta,
+      hint: appendStatusHintContext(meta.hint, statusContext),
+    },
+  )
+}
+
 async function loadImportTemplate() {
   clearImportPreviewTask()
   importLoading.value = true
@@ -5446,7 +5790,7 @@ async function runChunkedImportPreview(payload: Record<string, any>, plan: Impor
   const suffix = invalidCount || duplicateCount
     ? tr(` Invalid: ${invalidCount}. Duplicates: ${duplicateCount}.`, ` 无效：${invalidCount}。重复：${duplicateCount}。`)
     : ''
-  setStatus(`${message}${suffix}`)
+  setStatus(appendStatusContext(`${message}${suffix}`, importPreviewTimezoneHint.value))
 
   importPreviewTask.value = {
     mode: 'chunked',
@@ -5511,7 +5855,10 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
 
   adminForbidden.value = false
   importAsyncJob.value = job
-  setStatus(tr(`Preview job queued (${job.status}).`, `预览任务已排队（${job.status}）。`))
+  setStatus(appendStatusContext(
+    tr(`Preview job queued (${job.status}).`, `预览任务已排队（${job.status}）。`),
+    importPreviewTimezoneHint.value,
+  ))
 
   const finalJob = await pollImportJob(job.id)
   const previewData = finalJob.preview && typeof finalJob.preview === 'object' ? finalJob.preview : null
@@ -5539,7 +5886,7 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
   const suffix = invalidCount || dupCount
     ? tr(` Invalid: ${invalidCount}. Duplicates: ${dupCount}.`, ` 无效：${invalidCount}。重复：${dupCount}。`)
     : ''
-  setStatus(`${baseMsg}${suffix}`)
+  setStatus(appendStatusContext(`${baseMsg}${suffix}`, importPreviewTimezoneHint.value))
 
   importPreviewTask.value = {
     mode: 'single',
@@ -5561,7 +5908,10 @@ async function previewImport() {
   clearImportAsyncJob()
   const payload = buildImportPayload()
   if (!payload) {
-    setStatus(tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'), 'error', {
+    setStatus(appendStatusContext(
+      tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'),
+      importPreviewTimezoneHint.value,
+    ), 'error', {
       hint: tr('Fix JSON syntax in payload and retry preview.', '请修复载荷 JSON 语法后重试预览。'),
       action: 'retry-preview-import',
     })
@@ -5630,7 +5980,7 @@ async function previewImport() {
     const suffix = invalidCount || dupCount
       ? tr(` Invalid: ${invalidCount}. Duplicates: ${dupCount}.`, ` 无效：${invalidCount}。重复：${dupCount}。`)
       : ''
-    setStatus(`${baseMsg}${suffix}`)
+    setStatus(appendStatusContext(`${baseMsg}${suffix}`, importPreviewTimezoneHint.value))
     importPreviewTask.value = {
       mode: 'single',
       status: 'completed',
@@ -5651,7 +6001,12 @@ async function previewImport() {
         message: readErrorMessage(error, tr('Preview failed', '预览失败')),
       }
     }
-    setStatusFromError(error, tr('Failed to preview import', '预览导入失败'), 'import-preview')
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to preview import', '预览导入失败'),
+      importPreviewTimezoneHint.value,
+      'import-preview',
+    )
   } finally {
     importLoading.value = false
   }
@@ -5713,7 +6068,12 @@ async function refreshImportAsyncJob(options: { silent?: boolean } = {}) {
   try {
     const job = await fetchImportJob(jobId)
     importAsyncJob.value = job
-    if (!options.silent) setStatus(tr(`Import job ${jobId.slice(0, 8)} reloaded (${job.status}).`, `导入任务 ${jobId.slice(0, 8)} 已重载（${job.status}）。`))
+    if (!options.silent) {
+      setStatus(appendStatusContext(
+        tr(`Import job ${jobId.slice(0, 8)} reloaded (${job.status}).`, `导入任务 ${jobId.slice(0, 8)} 已重载（${job.status}）。`),
+        importPreviewTimezoneHint.value,
+      ))
+    }
   } catch (error) {
     if (!options.silent) {
       setStatusFromError(error, tr('Failed to reload import job', '重载导入任务失败'), 'import-run')
@@ -5734,20 +6094,34 @@ async function resumeImportAsyncJobPolling() {
       if (previewData) {
         importPreview.value = Array.isArray(previewData.items) ? previewData.items as AttendanceImportPreviewItem[] : []
       }
-      setStatus(tr(`Preview job completed (${jobId.slice(0, 8)}).`, `预览任务完成（${jobId.slice(0, 8)}）。`))
+      setStatus(appendStatusContext(
+        tr(`Preview job completed (${jobId.slice(0, 8)}).`, `预览任务完成（${jobId.slice(0, 8)}）。`),
+        importPreviewTimezoneHint.value,
+      ))
       return
     }
     const imported = Number(finalJob.progress ?? 0)
     const total = Number(finalJob.total ?? 0)
     if (total && imported !== total) {
-      setStatus(tr(`Imported ${imported}/${total} rows (async job).`, `已导入 ${imported}/${total} 行（异步任务）。`))
+      setStatus(appendStatusContext(
+        tr(`Imported ${imported}/${total} rows (async job).`, `已导入 ${imported}/${total} 行（异步任务）。`),
+        importPreviewTimezoneHint.value,
+      ))
     } else {
-      setStatus(tr(`Imported ${imported} rows (async job).`, `已导入 ${imported} 行（异步任务）。`))
+      setStatus(appendStatusContext(
+        tr(`Imported ${imported} rows (async job).`, `已导入 ${imported} 行（异步任务）。`),
+        importPreviewTimezoneHint.value,
+      ))
     }
     await loadRecords()
     await loadImportBatches()
   } catch (error) {
-    setStatusFromError(error, tr('Failed while polling import job', '轮询导入任务失败'), 'import-run')
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed while polling import job', '轮询导入任务失败'),
+      importPreviewTimezoneHint.value,
+      'import-run',
+    )
   }
 }
 
@@ -5762,7 +6136,10 @@ async function runImport() {
   clearImportPreviewTask()
   const payload = buildImportPayload()
   if (!payload) {
-    setStatus(tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'), 'error', {
+    setStatus(appendStatusContext(
+      tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'),
+      importPreviewTimezoneHint.value,
+    ), 'error', {
       hint: tr('Fix JSON syntax in payload and retry import.', '请修复载荷 JSON 语法后重试导入。'),
       action: 'retry-run-import',
     })
@@ -5812,14 +6189,23 @@ async function runImport() {
         }
         adminForbidden.value = false
         importAsyncJob.value = job
-        setStatus(tr(`Import job queued (${job.status}).`, `导入任务已排队（${job.status}）。`))
+        setStatus(appendStatusContext(
+          tr(`Import job queued (${job.status}).`, `导入任务已排队（${job.status}）。`),
+          importPreviewTimezoneHint.value,
+        ))
 
         const finalJob = await pollImportJob(job.id)
         const imported = Number(finalJob.progress ?? 0)
         const total = Number(finalJob.total ?? 0)
-        setStatus(tr(`Imported ${imported} rows (async job).`, `已导入 ${imported} 行（异步任务）。`))
+        setStatus(appendStatusContext(
+          tr(`Imported ${imported} rows (async job).`, `已导入 ${imported} 行（异步任务）。`),
+          importPreviewTimezoneHint.value,
+        ))
         if (total && imported !== total) {
-          setStatus(tr(`Imported ${imported}/${total} rows (async job).`, `已导入 ${imported}/${total} 行（异步任务）。`))
+          setStatus(appendStatusContext(
+            tr(`Imported ${imported}/${total} rows (async job).`, `已导入 ${imported}/${total} 行（异步任务）。`),
+            importPreviewTimezoneHint.value,
+          ))
         }
 
         await loadRecords()
@@ -5877,16 +6263,27 @@ async function runImport() {
     const groupCreated = data.data?.meta?.groupCreated ?? 0
     const groupMembersAdded = data.data?.meta?.groupMembersAdded ?? 0
     if (groupCreated || groupMembersAdded) {
-      setStatus(tr(`Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.`, `已导入 ${count} 行。新建分组：${groupCreated}。新增成员：${groupMembersAdded}。`))
+      setStatus(appendStatusContext(
+        tr(`Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.`, `已导入 ${count} 行。新建分组：${groupCreated}。新增成员：${groupMembersAdded}。`),
+        importPreviewTimezoneHint.value,
+      ))
     } else {
-      setStatus(tr(`Imported ${count} rows.`, `已导入 ${count} 行。`))
+      setStatus(appendStatusContext(
+        tr(`Imported ${count} rows.`, `已导入 ${count} 行。`),
+        importPreviewTimezoneHint.value,
+      ))
     }
     await loadRecords()
     await loadImportBatches()
     importCommitToken.value = ''
     importCommitTokenExpiresAt.value = ''
   } catch (error) {
-    setStatusFromError(error, tr('Failed to import attendance', '导入考勤失败'), 'import-run')
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to import attendance', '导入考勤失败'),
+      importPreviewTimezoneHint.value,
+      'import-run',
+    )
   } finally {
     importLoading.value = false
   }
@@ -5923,7 +6320,10 @@ async function loadImportBatches() {
     }
     importBatches.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to load import batches', '加载导入批次失败')), 'error')
+    setStatus(appendStatusContext(
+      readErrorMessage(error, tr('Failed to load import batches', '加载导入批次失败')),
+      importPreviewTimezoneHint.value,
+    ), 'error')
   } finally {
     importLoading.value = false
   }
@@ -5945,8 +6345,15 @@ async function loadImportBatchItems(batchId: string) {
     importBatchSelectedId.value = batchId
     importBatchItems.value = data.data?.items ?? []
     importBatchSnapshot.value = null
+    setStatus(appendStatusContext(
+      tr(`Batch items loaded (${importBatchItems.value.length} rows).`, `批次条目已加载（${importBatchItems.value.length} 行）。`),
+      importPreviewTimezoneHint.value,
+    ))
   } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to load import batch items', '加载导入批次明细失败')), 'error')
+    setStatus(appendStatusContext(
+      readErrorMessage(error, tr('Failed to load import batch items', '加载导入批次明细失败')),
+      importPreviewTimezoneHint.value,
+    ), 'error')
   } finally {
     importLoading.value = false
   }
@@ -5957,10 +6364,17 @@ function toggleImportBatchSnapshot(item: AttendanceImportItem) {
     importBatchSnapshot.value = null
     return
   }
-  if (importBatchSnapshot.value === item.previewSnapshot) {
+  if (importBatchSnapshot.value?.snapshot === item.previewSnapshot) {
     importBatchSnapshot.value = null
   } else {
-    importBatchSnapshot.value = item.previewSnapshot
+    importBatchSnapshot.value = {
+      snapshot: item.previewSnapshot,
+      context: {
+        userId: item.userId ?? null,
+        workDate: item.workDate ?? null,
+        recordId: item.recordId ?? null,
+      },
+    }
   }
 }
 
@@ -5983,9 +6397,15 @@ async function rollbackImportBatch(batchId: string) {
       importBatchSnapshot.value = null
       importBatchSelectedId.value = ''
     }
-    setStatus(tr('Import batch rolled back.', '导入批次已回滚。'))
+    setStatus(appendStatusContext(
+      tr('Import batch rolled back.', '导入批次已回滚。'),
+      importPreviewTimezoneHint.value,
+    ))
   } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to rollback import batch', '回滚导入批次失败')), 'error')
+    setStatus(appendStatusContext(
+      readErrorMessage(error, tr('Failed to rollback import batch', '回滚导入批次失败')),
+      importPreviewTimezoneHint.value,
+    ), 'error')
   } finally {
     importLoading.value = false
   }
@@ -6068,7 +6488,10 @@ async function fetchAllImportBatchItems(batchId: string): Promise<AttendanceImpo
 async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
   const batchId = importBatchSelectedId.value
   if (!batchId) {
-    setStatus(tr('Select a batch first.', '请先选择批次。'), 'error')
+    setStatus(appendStatusContext(
+      tr('Select a batch first.', '请先选择批次。'),
+      importPreviewTimezoneHint.value,
+    ), 'error')
     return
   }
   importLoading.value = true
@@ -6091,7 +6514,10 @@ async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
       const stamp = new Date().toISOString().slice(0, 10)
       const filename = `attendance-import-${batchId.slice(0, 8)}-${exportType}-${stamp}.csv`
       downloadCsvText(filename, csvText)
-      setStatus(tr('CSV exported.', 'CSV 已导出。'))
+      setStatus(appendStatusContext(
+        tr('CSV exported.', 'CSV 已导出。'),
+        importPreviewTimezoneHint.value,
+      ))
       return
     }
 
@@ -6103,7 +6529,10 @@ async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
 
     const allItems = await fetchAllImportBatchItems(batchId)
     if (allItems.length === 0) {
-      setStatus(tr('No batch items found.', '未找到批次明细。'), 'error')
+      setStatus(appendStatusContext(
+        tr('No batch items found.', '未找到批次明细。'),
+        importPreviewTimezoneHint.value,
+      ), 'error')
       return
     }
     allItems.sort((a, b) => {
@@ -6185,9 +6614,15 @@ async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
     const stamp = new Date().toISOString().slice(0, 10)
     const filename = `attendance-import-${batchId.slice(0, 8)}-${onlyAnomalies ? 'anomalies' : 'items'}-${stamp}.csv`
     downloadCsvText(filename, lines.join('\n'))
-    setStatus(tr(`CSV exported (${rows.length}/${allItems.length}).`, `CSV 已导出（${rows.length}/${allItems.length}）。`))
+    setStatus(appendStatusContext(
+      tr(`CSV exported (${rows.length}/${allItems.length}).`, `CSV 已导出（${rows.length}/${allItems.length}）。`),
+      importPreviewTimezoneHint.value,
+    ))
   } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to export CSV', '导出 CSV 失败')), 'error')
+    setStatus(appendStatusContext(
+      readErrorMessage(error, tr('Failed to export CSV', '导出 CSV 失败')),
+      importPreviewTimezoneHint.value,
+    ), 'error')
   } finally {
     importLoading.value = false
   }
@@ -7421,35 +7856,127 @@ async function loadRequestReport() {
       throw new Error(readErrorMessage(data, tr('Failed to load request report', '加载申请报表失败')))
     }
     requestReport.value = data.data.items || []
-  } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to load request report', '加载申请报表失败')), 'error')
   } finally {
     reportLoading.value = false
   }
 }
 
-async function refreshAll() {
-  if (!attendancePluginActive.value) return
+async function refreshAll(): Promise<boolean> {
+  if (!attendancePluginActive.value) return false
   loading.value = true
   recordsPage.value = 1
   calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
+  let success = true
   try {
     await Promise.all([loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()])
   } catch (error: any) {
+    success = false
     setStatusFromError(error, tr('Refresh failed', '刷新失败'), 'refresh')
   } finally {
     loading.value = false
   }
+  return success
 }
 
-function shiftMonth(delta: number) {
+async function refreshOverviewWithStatus() {
+  const success = await refreshAll()
+  if (!success) return
+  setStatus(
+    appendStatusContext(tr('Overview refreshed.', '总览已刷新。'), overviewRefreshTimezoneContextHint.value),
+  )
+}
+
+async function reloadAnomaliesWithStatus() {
+  try {
+    await loadAnomalies()
+    setStatus(
+      appendStatusContext(
+        tr(`Anomalies loaded (${anomalies.value.length}).`, `异常已加载（${anomalies.value.length} 条）。`),
+        anomaliesTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load anomalies', '加载异常失败'),
+      anomaliesTimezoneContextHint.value,
+      'refresh',
+    )
+  }
+}
+
+async function reloadRequestReportWithStatus() {
+  try {
+    await loadRequestReport()
+    setStatus(
+      appendStatusContext(
+        tr(`Report loaded (${requestReport.value.length}).`, `报表已加载（${requestReport.value.length} 条）。`),
+        requestReportTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load request report', '加载申请报表失败'),
+      requestReportTimezoneContextHint.value,
+      'refresh',
+    )
+  }
+}
+
+async function reloadRecordsWithStatus() {
+  try {
+    await loadRecords()
+    setStatus(
+      appendStatusContext(
+        tr(`Records loaded (${records.value.length}).`, `记录已加载（${records.value.length} 条）。`),
+        recordsTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load records', '加载记录失败'),
+      recordsTimezoneContextHint.value,
+      'refresh',
+    )
+  }
+}
+
+async function reloadRequestsWithStatus() {
+  try {
+    await loadRequests()
+    setStatus(
+      appendStatusContext(
+        tr(`Requests loaded (${requests.value.length}).`, `申请已加载（${requests.value.length} 条）。`),
+        requestTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load requests', '加载申请失败'),
+      requestTimezoneContextHint.value,
+      'refresh',
+    )
+  }
+}
+
+async function shiftMonth(delta: number) {
   const next = new Date(calendarMonth.value)
   next.setMonth(next.getMonth() + delta, 1)
   const from = new Date(next.getFullYear(), next.getMonth(), 1)
   const to = new Date(next.getFullYear(), next.getMonth() + 1, 0)
   fromDate.value = toDateInput(from)
   toDate.value = toDateInput(to)
-  refreshAll()
+  const success = await refreshAll()
+  if (!success) return
+  setStatus(
+    appendStatusContext(
+      tr(`Calendar updated: ${calendarLabel.value}.`, `日历已切换：${calendarLabel.value}。`),
+      calendarTimezoneContextHint.value,
+    ),
+  )
 }
 
 function validateRequestForm(): string | null {
@@ -7505,7 +8032,7 @@ async function submitRequest() {
   try {
     const validationMessage = validateRequestForm()
     if (validationMessage) {
-      setStatus(validationMessage, 'error')
+      setStatus(appendStatusContext(validationMessage, requestTimezoneContextHint.value), 'error')
       return
     }
     const orgValue = normalizedOrgId()
@@ -7531,10 +8058,15 @@ async function submitRequest() {
     if (!response.ok || !data.ok) {
       throw createApiError(response, data, tr('Request failed', '申请失败'))
     }
-    setStatus(tr('Request submitted.', '申请已提交。'))
+    setStatus(appendStatusContext(tr('Request submitted.', '申请已提交。'), requestTimezoneContextHint.value))
     await loadRequests()
   } catch (error: any) {
-    setStatusFromError(error, tr('Request failed', '申请失败'), 'request-submit')
+    setStatusFromErrorWithContext(
+      error,
+      tr('Request failed', '申请失败'),
+      requestTimezoneContextHint.value,
+      'request-submit',
+    )
   } finally {
     requestSubmitting.value = false
   }
@@ -7550,13 +8082,22 @@ async function resolveRequest(id: string, action: 'approve' | 'reject') {
     if (!response.ok || !data.ok) {
       throw createApiError(response, data, tr('Request update failed', '申请处理失败'))
     }
-    const actionText = action === 'approve' ? tr('approved', '已批准') : tr('rejected', '已驳回')
-    setStatus(tr(`Request ${action}d.`, `申请${actionText}。`))
+    const actionLabel = action === 'approve'
+      ? tr('Request approved.', '申请已批准。')
+      : tr('Request rejected.', '申请已驳回。')
+    setStatus(
+      appendStatusContext(actionLabel, requestTimezoneContextHint.value),
+    )
     await loadRequests()
     await loadSummary()
     await loadRecords()
   } catch (error: any) {
-    setStatusFromError(error, tr('Request update failed', '申请处理失败'), 'request-resolve')
+    setStatusFromErrorWithContext(
+      error,
+      tr('Request update failed', '申请处理失败'),
+      requestTimezoneContextHint.value,
+      'request-resolve',
+    )
   }
 }
 
@@ -7570,10 +8111,15 @@ async function cancelRequest(id: string) {
     if (!response.ok || !data.ok) {
       throw createApiError(response, data, tr('Request cancel failed', '申请取消失败'))
     }
-    setStatus(tr('Request cancelled.', '申请已取消。'))
+    setStatus(appendStatusContext(tr('Request cancelled.', '申请已取消。'), requestTimezoneContextHint.value))
     await loadRequests()
   } catch (error: any) {
-    setStatusFromError(error, tr('Request cancel failed', '申请取消失败'), 'request-cancel')
+    setStatusFromErrorWithContext(
+      error,
+      tr('Request cancel failed', '申请取消失败'),
+      requestTimezoneContextHint.value,
+      'request-cancel',
+    )
   }
 }
 
@@ -7581,7 +8127,22 @@ async function changeRecordsPage(delta: number) {
   const next = recordsPage.value + delta
   if (next < 1 || next > recordsTotalPages.value) return
   recordsPage.value = next
-  await loadRecords()
+  try {
+    await loadRecords()
+    setStatus(
+      appendStatusContext(
+        tr(`Records page ${recordsPage.value}/${recordsTotalPages.value} loaded.`, `记录页 ${recordsPage.value}/${recordsTotalPages.value} 已加载。`),
+        recordsTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load records', '加载记录失败'),
+      recordsTimezoneContextHint.value,
+      'refresh',
+    )
+  }
 }
 
 async function exportCsv() {
@@ -7617,9 +8178,12 @@ async function exportCsv() {
     link.click()
     link.remove()
     URL.revokeObjectURL(url)
-    setStatus(tr('Export ready.', '导出完成。'))
+    setStatus(appendStatusContext(tr('Export ready.', '导出完成。'), recordsTimezoneContextHint.value))
   } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Export failed', '导出失败')), 'error')
+    setStatus(
+      appendStatusContext(readErrorMessage(error, tr('Export failed', '导出失败')), recordsTimezoneContextHint.value),
+      'error',
+    )
   } finally {
     exporting.value = false
   }
@@ -9494,9 +10058,18 @@ async function generatePayrollCycles() {
     payrollCycleGenerateResult.value = { created, skipped }
     adminForbidden.value = false
     await loadPayrollCycles()
-    setStatus(tr('Payroll cycles generated.', '计薪周期已生成。'))
+    setStatus(appendStatusContext(
+      tr('Payroll cycles generated.', '计薪周期已生成。'),
+      payrollCycleGenerateTimezoneHint.value,
+    ))
   } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to generate payroll cycles', '生成计薪周期失败')), 'error')
+    setStatus(
+      appendStatusContext(
+        readErrorMessage(error, tr('Failed to generate payroll cycles', '生成计薪周期失败')),
+        payrollCycleGenerateTimezoneHint.value,
+      ),
+      'error',
+    )
   } finally {
     payrollCycleGenerating.value = false
   }
@@ -9582,9 +10155,18 @@ async function loadPayrollCycleSummary() {
       throw new Error(readErrorMessage(data, tr('Failed to load payroll summary', '加载计薪汇总失败')))
     }
     payrollCycleSummary.value = data.data?.summary ?? null
-    setStatus(tr('Payroll summary loaded.', '计薪汇总已加载。'))
+    setStatus(appendStatusContext(
+      tr('Payroll summary loaded.', '计薪汇总已加载。'),
+      payrollCycleTemplateTimezoneHint.value,
+    ))
   } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to load payroll summary', '加载计薪汇总失败')), 'error')
+    setStatus(
+      appendStatusContext(
+        readErrorMessage(error, tr('Failed to load payroll summary', '加载计薪汇总失败')),
+        payrollCycleTemplateTimezoneHint.value,
+      ),
+      'error',
+    )
   }
 }
 
@@ -9610,9 +10192,18 @@ async function exportPayrollCycleSummary() {
     link.click()
     link.remove()
     URL.revokeObjectURL(url)
-    setStatus(tr('Payroll summary exported.', '计薪汇总已导出。'))
+    setStatus(appendStatusContext(
+      tr('Payroll summary exported.', '计薪汇总已导出。'),
+      payrollCycleTemplateTimezoneHint.value,
+    ))
   } catch (error: any) {
-    setStatus(readErrorMessage(error, tr('Failed to export payroll summary', '导出计薪汇总失败')), 'error')
+    setStatus(
+      appendStatusContext(
+        readErrorMessage(error, tr('Failed to export payroll summary', '导出计薪汇总失败')),
+        payrollCycleTemplateTimezoneHint.value,
+      ),
+      'error',
+    )
   }
 }
 
@@ -9658,12 +10249,25 @@ onMounted(() => {
     })
 })
 
+onBeforeUnmount(() => {
+  disconnectAdminSectionObserver()
+})
+
 watch(orgId, () => {
   if (attendancePluginActive.value) {
     refreshAll()
     loadAdminData()
   }
 })
+
+watch([showAdmin, adminForbidden], async ([isAdminView, forbidden]) => {
+  if (!isAdminView || forbidden) {
+    disconnectAdminSectionObserver()
+    return
+  }
+  await nextTick()
+  syncAdminSectionObserver()
+}, { immediate: true })
 
 watch(attendanceGroupMemberGroupId, () => {
   if (attendancePluginActive.value) {
@@ -10196,12 +10800,96 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   margin-top: 8px;
 }
 
+.attendance__empty-state {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attendance__snapshot-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .attendance__admin-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
   margin-bottom: 12px;
+}
+
+.attendance__admin-shell {
+  display: grid;
+  grid-template-columns: minmax(220px, 250px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.attendance__admin-nav-panel {
+  position: sticky;
+  top: 24px;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.attendance__admin-nav-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.attendance__admin-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: calc(100vh - 160px);
+  overflow: auto;
+}
+
+.attendance__admin-nav-link {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: #374151;
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.attendance__admin-nav-link:hover {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+}
+
+.attendance__admin-nav-link--active {
+  background: #dbeafe;
+  border-color: #93c5fd;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+.attendance__admin-content {
+  min-width: 0;
+}
+
+[data-admin-section] {
+  scroll-margin-top: 96px;
 }
 
 .attendance__admin-section {
@@ -10305,6 +10993,24 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   .attendance__calendar-nav,
   .attendance__calendar-flags {
     flex-wrap: wrap;
+  }
+
+  .attendance__admin-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .attendance__admin-nav-panel {
+    position: static;
+  }
+
+  .attendance__admin-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    max-height: none;
+  }
+
+  .attendance__admin-nav-link {
+    flex: 1 1 180px;
   }
 
   .attendance__request-meta {

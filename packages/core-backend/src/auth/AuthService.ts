@@ -35,6 +35,7 @@ export interface TokenPayload {
   sub?: string
   sid?: string
   id?: string
+  authProvider?: string
   iat: number
   exp: number
 }
@@ -141,11 +142,17 @@ export class AuthService {
   /**
    * 创建JWT token
    */
-  createToken(user: User): string {
+  createToken(user: User, options: {
+    sessionId?: string
+    authProvider?: string
+  } = {}): string {
     const payload: Omit<TokenPayload, 'iat' | 'exp'> = {
       userId: user.id,
       email: user.email,
-      role: user.role
+      role: user.role,
+      sub: user.id,
+      sid: options.sessionId,
+      authProvider: options.authProvider,
     }
 
     return jwt.sign(payload, this.config.jwtSecret, {
@@ -280,8 +287,8 @@ export class AuthService {
         this.logger.warn('Database query failed', dbError instanceof Error ? dbError : undefined)
       }
 
-      // 降级：返回mock用户（仅开发环境）
-      if (process.env.NODE_ENV === 'development') {
+      // 降级：返回mock用户（非生产环境）
+      if (process.env.NODE_ENV !== 'production') {
         return {
           id: userId,
           email: 'dev@metasheet.com',
@@ -458,7 +465,10 @@ export class AuthService {
       }
 
       // 生成新token
-      return this.createToken(user)
+      return this.createToken(user, {
+        sessionId: typeof payload.sid === 'string' ? payload.sid : undefined,
+        authProvider: typeof payload.authProvider === 'string' ? payload.authProvider : undefined,
+      })
     } catch (error) {
       this.logger.warn('Token refresh failed', error instanceof Error ? error : undefined)
       return null
