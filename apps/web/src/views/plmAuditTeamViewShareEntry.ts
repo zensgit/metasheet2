@@ -139,3 +139,10 @@ export function shouldKeepPlmAuditTeamViewShareEntry(
 ) {
   return entry?.teamViewId === teamViewId
 }
+
+export function shouldTakeOverPlmAuditSharedEntryOnLocalSave(
+  entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
+  selectedTeamViewId: string,
+) {
+  return shouldKeepPlmAuditTeamViewShareEntry(entry, selectedTeamViewId)
+}
