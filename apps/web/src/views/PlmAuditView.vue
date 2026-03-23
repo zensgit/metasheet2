@@ -467,12 +467,13 @@
           class="plm-audit__saved-view-input"
           type="text"
           :placeholder="tr('Team view name', '团队视图名称')"
+          @input="captureAuditTeamViewNameDraftOwner"
           @keydown.enter.prevent="saveAuditTeamView"
         />
         <button class="plm-audit__button plm-audit__button--primary" type="button" :disabled="!canSaveAuditTeamView || auditTeamViewsLoading" @click="saveAuditTeamView">
           {{ tr('Save to team', '保存到团队') }}
         </button>
-        <button class="plm-audit__button" type="button" :disabled="auditTeamViewManagementTargetLocked || !canRenameAuditTeamView || auditTeamViewsLoading" @click="renameAuditTeamView">
+        <button class="plm-audit__button" type="button" :disabled="auditTeamViewManagementTargetLocked || !canSubmitAuditTeamViewRename || auditTeamViewsLoading" @click="renameAuditTeamView">
           {{ tr('Rename', '重命名') }}
         </button>
       </div>
@@ -901,6 +902,7 @@ import {
   resolvePlmAuditCanonicalTeamViewRouteState,
   resolvePlmAuditTeamViewDuplicateName,
   shouldDisablePlmAuditTeamViewTransferOwnerInput,
+  shouldEnablePlmAuditTeamViewRenameAction,
   shouldLockPlmAuditTeamViewManagementTarget,
 } from './plmAuditTeamViewControlTarget'
 import {
@@ -971,6 +973,7 @@ const auditSavedViewShareFollowup = ref<PlmAuditSavedViewShareFollowup | null>(n
 const focusedSavedViewId = ref('')
 const auditTeamViewKey = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.teamViewId)
 const auditTeamViewName = ref('')
+const auditTeamViewNameOwnerId = ref('')
 const auditTeamViewOwnerUserId = ref('')
 const auditTeamViewShareEntry = ref<PlmAuditTeamViewShareEntry | null>(null)
 const auditTeamViewCollaborationDraft = ref<PlmAuditTeamViewCollaborationDraft | null>(null)
@@ -1126,6 +1129,11 @@ const {
   nameRef: auditTeamViewName,
   ownerUserIdRef: auditTeamViewOwnerUserId,
 })
+const canSubmitAuditTeamViewRename = computed(() => shouldEnablePlmAuditTeamViewRenameAction({
+  canRename: canRenameAuditTeamView.value,
+  canonicalTeamViewId: canonicalAuditTeamViewManagementTargetId.value,
+  draftOwnerTeamViewId: auditTeamViewNameOwnerId.value,
+}))
 const auditTeamViewCollaborationDraftTarget = computed(() => findPlmAuditTeamViewCollaborationDraftView(
   auditTeamViews.value,
   auditTeamViewCollaborationDraft.value,
@@ -1451,7 +1459,7 @@ async function persistAuditTeamView(
     upsertAuditTeamView(saved)
     applyAuditManagedTeamViewAttention()
     applyAuditTeamViewState(saved)
-    auditTeamViewName.value = ''
+    setAuditTeamViewNameDraft('', '')
     focusedAuditTeamViewId.value = saved.id
     await syncRouteState(savedState)
     setStatus(successMessage || tr('Audit team view saved.', '审计团队视图已保存。'))
@@ -1793,6 +1801,7 @@ function trimAuditTeamViewSelection(managedTeamViewId = canonicalAuditTeamViewMa
       focusedTeamViewId: focusedAuditTeamViewId.value,
       focusedRecommendedTeamViewId: focusedRecommendedAuditTeamViewId.value,
       draftTeamViewName: auditTeamViewName.value,
+      draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
       draftOwnerUserId: auditTeamViewOwnerUserId.value,
     },
     auditTeamViews.value,
@@ -1802,6 +1811,7 @@ function trimAuditTeamViewSelection(managedTeamViewId = canonicalAuditTeamViewMa
   focusedAuditTeamViewId.value = nextState.focusedTeamViewId
   focusedRecommendedAuditTeamViewId.value = nextState.focusedRecommendedTeamViewId
   auditTeamViewName.value = nextState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextState.draftTeamViewNameOwnerId
   auditTeamViewOwnerUserId.value = nextState.draftOwnerUserId
 }
 
@@ -1830,6 +1840,15 @@ function applyAuditTeamViewState(view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' 
   applyRouteState(buildPlmAuditSelectedTeamViewRouteState(view, readCurrentRouteState()))
 }
 
+function setAuditTeamViewNameDraft(value: string, ownerId = canonicalAuditTeamViewManagementTargetId.value) {
+  auditTeamViewName.value = value
+  auditTeamViewNameOwnerId.value = ownerId.trim()
+}
+
+function captureAuditTeamViewNameDraftOwner() {
+  auditTeamViewNameOwnerId.value = canonicalAuditTeamViewManagementTargetId.value.trim()
+}
+
 function applyAuditManagedTeamViewSelection(viewId: string) {
   auditTeamViewKey.value = viewId
   focusedAuditTeamViewId.value = viewId
@@ -1840,7 +1859,10 @@ function applyAuditTeamViewCollaborationHandoff(handoff: PlmAuditTeamViewCollabo
   auditTeamViewCollaborationFollowup.value = handoff.followup
   auditTeamViewKey.value = handoff.selectedTeamViewId || ''
   if (handoff.teamViewName !== null) {
-    auditTeamViewName.value = handoff.teamViewName
+    setAuditTeamViewNameDraft(
+      handoff.teamViewName,
+      handoff.selectedTeamViewId || handoff.followup?.teamViewId || '',
+    )
   }
   if (handoff.teamViewOwnerUserId !== null) {
     auditTeamViewOwnerUserId.value = handoff.teamViewOwnerUserId
@@ -2003,7 +2025,7 @@ async function duplicateAuditTeamViewEntry(
     applySavedViewAttentionAction({ kind: 'apply' })
     applyRouteState(duplicatedState)
     clearAuditTeamViewShareEntry()
-    auditTeamViewName.value = ''
+    setAuditTeamViewNameDraft('', '')
     focusedAuditTeamViewId.value = duplicated.id
     await syncRouteState(duplicatedState)
     setStatus(tr('Audit team view duplicated.', '审计团队视图已复制。'))
@@ -2019,7 +2041,7 @@ async function duplicateAuditTeamViewEntry(
 
 async function renameAuditTeamView() {
   const view = canonicalAuditTeamViewManagementTarget.value
-  if (!view || auditTeamViewManagementTargetLocked.value || !canRenameAuditTeamView.value) return
+  if (!view || auditTeamViewManagementTargetLocked.value || !canSubmitAuditTeamViewRename.value) return
 
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
@@ -2032,7 +2054,7 @@ async function renameAuditTeamView() {
     replaceAuditTeamView(renamed)
     applyAuditManagedTeamViewAttention()
     applyAuditManagedTeamViewSelection(renamed.id)
-    auditTeamViewName.value = ''
+    setAuditTeamViewNameDraft('', '')
     setStatus(tr('Audit team view renamed.', '审计团队视图已重命名。'))
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
@@ -2870,9 +2892,11 @@ watch(canonicalAuditTeamViewManagementTargetId, (nextManagedTeamViewId, previous
     previousCanonicalTeamViewId: previousManagedTeamViewId || '',
     nextCanonicalTeamViewId: nextManagedTeamViewId || '',
     draftTeamViewName: auditTeamViewName.value,
+    draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
     draftOwnerUserId: auditTeamViewOwnerUserId.value,
   })
   auditTeamViewName.value = nextDraftState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
   auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
 })
 

@@ -21,11 +21,13 @@ export type PlmAuditTeamViewListUiState = {
   focusedTeamViewId: string
   focusedRecommendedTeamViewId: string
   draftTeamViewName: string
+  draftTeamViewNameOwnerId: string
   draftOwnerUserId: string
 }
 
 export type PlmAuditTeamViewFormDraftState = {
   draftTeamViewName: string
+  draftTeamViewNameOwnerId: string
   draftOwnerUserId: string
 }
 
@@ -84,6 +86,7 @@ export function trimPlmAuditExistingTeamViewUiState<T extends { id: string }>(
       ? state.focusedRecommendedTeamViewId
       : '',
     draftTeamViewName: shouldPreserveDrafts ? state.draftTeamViewName : '',
+    draftTeamViewNameOwnerId: shouldPreserveDrafts ? state.draftTeamViewNameOwnerId : '',
     draftOwnerUserId: shouldPreserveDrafts ? state.draftOwnerUserId : '',
   }
 }
@@ -92,6 +95,7 @@ export function resolvePlmAuditCanonicalTeamViewFormDraftState(options: {
   previousCanonicalTeamViewId: string
   nextCanonicalTeamViewId: string
   draftTeamViewName: string
+  draftTeamViewNameOwnerId: string
   draftOwnerUserId: string
 }): PlmAuditTeamViewFormDraftState {
   const previousCanonicalTeamViewId = options.previousCanonicalTeamViewId.trim()
@@ -103,12 +107,14 @@ export function resolvePlmAuditCanonicalTeamViewFormDraftState(options: {
   ) {
     return {
       draftTeamViewName: options.draftTeamViewName,
+      draftTeamViewNameOwnerId: options.draftTeamViewNameOwnerId,
       draftOwnerUserId: options.draftOwnerUserId,
     }
   }
 
   return {
-    draftTeamViewName: '',
+    draftTeamViewName: options.draftTeamViewName,
+    draftTeamViewNameOwnerId: options.draftTeamViewNameOwnerId,
     draftOwnerUserId: '',
   }
 }

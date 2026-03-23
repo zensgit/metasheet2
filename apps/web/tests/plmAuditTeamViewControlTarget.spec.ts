@@ -4,6 +4,7 @@ import {
   resolvePlmAuditCanonicalTeamViewManagementTargetId,
   resolvePlmAuditCanonicalTeamViewRouteState,
   resolvePlmAuditTeamViewDuplicateName,
+  shouldEnablePlmAuditTeamViewRenameAction,
   shouldDisablePlmAuditTeamViewTransferOwnerInput,
   shouldLockPlmAuditTeamViewManagementTarget,
 } from '../src/views/plmAuditTeamViewControlTarget'
@@ -127,6 +128,32 @@ describe('plmAuditTeamViewControlTarget', () => {
       managementTargetLocked: false,
       canTransferTarget: true,
       loading: false,
+    })).toBe(false)
+  })
+
+  it('only allows rename submission when the name draft still belongs to the current canonical owner', () => {
+    expect(shouldEnablePlmAuditTeamViewRenameAction({
+      canRename: true,
+      canonicalTeamViewId: 'audit-view-1',
+      draftOwnerTeamViewId: 'audit-view-1',
+    })).toBe(true)
+
+    expect(shouldEnablePlmAuditTeamViewRenameAction({
+      canRename: true,
+      canonicalTeamViewId: 'audit-view-2',
+      draftOwnerTeamViewId: 'audit-view-1',
+    })).toBe(false)
+
+    expect(shouldEnablePlmAuditTeamViewRenameAction({
+      canRename: true,
+      canonicalTeamViewId: 'audit-view-2',
+      draftOwnerTeamViewId: '',
+    })).toBe(false)
+
+    expect(shouldEnablePlmAuditTeamViewRenameAction({
+      canRename: false,
+      canonicalTeamViewId: 'audit-view-2',
+      draftOwnerTeamViewId: 'audit-view-2',
     })).toBe(false)
   })
 })

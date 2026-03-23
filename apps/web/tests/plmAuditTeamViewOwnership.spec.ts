@@ -75,6 +75,7 @@ describe('plmAuditTeamViewOwnership', () => {
       focusedTeamViewId: 'audit-view-3',
       focusedRecommendedTeamViewId: 'audit-view-2',
       draftTeamViewName: '即将删除团队视图',
+      draftTeamViewNameOwnerId: 'audit-view-3',
       draftOwnerUserId: 'owner-b',
     }, [
       { id: 'audit-view-1' },
@@ -85,6 +86,7 @@ describe('plmAuditTeamViewOwnership', () => {
       focusedTeamViewId: '',
       focusedRecommendedTeamViewId: 'audit-view-2',
       draftTeamViewName: '',
+      draftTeamViewNameOwnerId: '',
       draftOwnerUserId: '',
     })
   })
@@ -97,6 +99,7 @@ describe('plmAuditTeamViewOwnership', () => {
       focusedTeamViewId: '',
       focusedRecommendedTeamViewId: '',
       draftTeamViewName: '新的团队视图',
+      draftTeamViewNameOwnerId: '',
       draftOwnerUserId: 'owner-c',
     }, [
       { id: 'audit-view-1' },
@@ -106,6 +109,7 @@ describe('plmAuditTeamViewOwnership', () => {
       focusedTeamViewId: '',
       focusedRecommendedTeamViewId: '',
       draftTeamViewName: '新的团队视图',
+      draftTeamViewNameOwnerId: '',
       draftOwnerUserId: 'owner-c',
     })
   })
@@ -118,6 +122,7 @@ describe('plmAuditTeamViewOwnership', () => {
       focusedTeamViewId: 'audit-view-3',
       focusedRecommendedTeamViewId: '',
       draftTeamViewName: '待设默认团队视图',
+      draftTeamViewNameOwnerId: 'audit-view-3',
       draftOwnerUserId: 'owner-d',
     }, [
       { id: 'audit-view-1' },
@@ -128,6 +133,7 @@ describe('plmAuditTeamViewOwnership', () => {
       focusedTeamViewId: '',
       focusedRecommendedTeamViewId: '',
       draftTeamViewName: '',
+      draftTeamViewNameOwnerId: '',
       draftOwnerUserId: '',
     })
   })
@@ -140,6 +146,7 @@ describe('plmAuditTeamViewOwnership', () => {
       focusedTeamViewId: 'audit-view-2',
       focusedRecommendedTeamViewId: '',
       draftTeamViewName: '本地选择的团队视图',
+      draftTeamViewNameOwnerId: 'audit-view-2',
       draftOwnerUserId: 'owner-e',
     }, [
       { id: 'audit-view-1' },
@@ -150,18 +157,21 @@ describe('plmAuditTeamViewOwnership', () => {
       focusedTeamViewId: 'audit-view-2',
       focusedRecommendedTeamViewId: '',
       draftTeamViewName: '本地选择的团队视图',
+      draftTeamViewNameOwnerId: 'audit-view-2',
       draftOwnerUserId: 'owner-e',
     })
   })
 
-  it('clears management form drafts when the canonical management target changes', () => {
+  it('preserves team-view name drafts while clearing owner drafts when the canonical management target changes', () => {
     expect(resolvePlmAuditCanonicalTeamViewFormDraftState({
       previousCanonicalTeamViewId: 'audit-view-1',
       nextCanonicalTeamViewId: 'audit-view-2',
       draftTeamViewName: '重命名中的团队视图',
+      draftTeamViewNameOwnerId: 'audit-view-1',
       draftOwnerUserId: 'owner-f',
     })).toEqual({
-      draftTeamViewName: '',
+      draftTeamViewName: '重命名中的团队视图',
+      draftTeamViewNameOwnerId: 'audit-view-1',
       draftOwnerUserId: '',
     })
 
@@ -169,9 +179,11 @@ describe('plmAuditTeamViewOwnership', () => {
       previousCanonicalTeamViewId: 'audit-view-1',
       nextCanonicalTeamViewId: '',
       draftTeamViewName: '转移中的团队视图',
+      draftTeamViewNameOwnerId: 'audit-view-1',
       draftOwnerUserId: 'owner-g',
     })).toEqual({
-      draftTeamViewName: '',
+      draftTeamViewName: '转移中的团队视图',
+      draftTeamViewNameOwnerId: 'audit-view-1',
       draftOwnerUserId: '',
     })
   })
@@ -181,9 +193,11 @@ describe('plmAuditTeamViewOwnership', () => {
       previousCanonicalTeamViewId: 'audit-view-1',
       nextCanonicalTeamViewId: 'audit-view-1',
       draftTeamViewName: '同一团队视图',
+      draftTeamViewNameOwnerId: 'audit-view-1',
       draftOwnerUserId: 'owner-h',
     })).toEqual({
       draftTeamViewName: '同一团队视图',
+      draftTeamViewNameOwnerId: 'audit-view-1',
       draftOwnerUserId: 'owner-h',
     })
 
@@ -191,9 +205,11 @@ describe('plmAuditTeamViewOwnership', () => {
       previousCanonicalTeamViewId: '',
       nextCanonicalTeamViewId: '',
       draftTeamViewName: '新建团队视图',
+      draftTeamViewNameOwnerId: '',
       draftOwnerUserId: 'owner-i',
     })).toEqual({
       draftTeamViewName: '新建团队视图',
+      draftTeamViewNameOwnerId: '',
       draftOwnerUserId: 'owner-i',
     })
   })

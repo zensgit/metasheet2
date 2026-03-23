@@ -56,3 +56,13 @@ export function shouldDisablePlmAuditTeamViewTransferOwnerInput(options: {
 }) {
   return options.managementTargetLocked || !options.canTransferTarget || options.loading
 }
+
+export function shouldEnablePlmAuditTeamViewRenameAction(options: {
+  canRename: boolean
+  canonicalTeamViewId: string
+  draftOwnerTeamViewId: string
+}) {
+  return options.canRename
+    && Boolean(options.canonicalTeamViewId.trim())
+    && options.canonicalTeamViewId.trim() === options.draftOwnerTeamViewId.trim()
+}
