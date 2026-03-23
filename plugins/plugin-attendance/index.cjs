@@ -29,6 +29,7 @@ const DEFAULT_SHIFT = {
   timezone: DEFAULT_RULE.timezone,
   workStartTime: DEFAULT_RULE.workStartTime,
   workEndTime: DEFAULT_RULE.workEndTime,
+  isOvernight: false,
   lateGraceMinutes: DEFAULT_RULE.lateGraceMinutes,
   earlyGraceMinutes: DEFAULT_RULE.earlyGraceMinutes,
   roundingMinutes: DEFAULT_RULE.roundingMinutes,
@@ -861,6 +862,27 @@ function normalizeTimeString(value) {
   const hh = String(hours).padStart(2, '0')
   const mm = String(minutes).padStart(2, '0')
   return `${hh}:${mm}`
+}
+
+function addDaysToDateKey(dateKey, days) {
+  const normalized = normalizeDateOnly(dateKey)
+  if (!normalized) return null
+  const date = new Date(`${normalized}T00:00:00Z`)
+  if (Number.isNaN(date.getTime())) return null
+  date.setUTCDate(date.getUTCDate() + Number(days || 0))
+  return date.toISOString().slice(0, 10)
+}
+
+function inferOvernightFlag(workStartTime, workEndTime) {
+  const normalizedStart = normalizeTimeString(workStartTime)
+  const normalizedEnd = normalizeTimeString(workEndTime)
+  if (!normalizedStart || !normalizedEnd || normalizedStart === normalizedEnd) return false
+  return parseTimeToMinutes(normalizedStart, 0) > parseTimeToMinutes(normalizedEnd, 0)
+}
+
+function resolveOvernightFlag(explicitValue, workStartTime, workEndTime) {
+  if (typeof explicitValue === 'boolean') return explicitValue
+  return inferOvernightFlag(workStartTime, workEndTime)
 }
 
 function resolveShiftTimeRange(shiftName) {
@@ -2062,16 +2084,21 @@ function mapRuleRow(row) {
 }
 
 function mapShiftRow(row) {
+  const workStartTime = row.work_start_time ?? DEFAULT_SHIFT.workStartTime
+  const workEndTime = row.work_end_time ?? DEFAULT_SHIFT.workEndTime
+  const isOvernight = resolveOvernightFlag(row.is_overnight, workStartTime, workEndTime)
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
     org_id: row.org_id ?? DEFAULT_ORG_ID,
     name: row.name ?? DEFAULT_SHIFT.name,
     timezone: row.timezone ?? DEFAULT_SHIFT.timezone,
-    workStartTime: row.work_start_time ?? DEFAULT_SHIFT.workStartTime,
-    work_start_time: row.work_start_time ?? DEFAULT_SHIFT.workStartTime,
-    workEndTime: row.work_end_time ?? DEFAULT_SHIFT.workEndTime,
-    work_end_time: row.work_end_time ?? DEFAULT_SHIFT.workEndTime,
+    workStartTime,
+    work_start_time: workStartTime,
+    workEndTime,
+    work_end_time: workEndTime,
+    isOvernight,
+    is_overnight: isOvernight,
     lateGraceMinutes: Number(row.late_grace_minutes ?? DEFAULT_SHIFT.lateGraceMinutes),
     late_grace_minutes: Number(row.late_grace_minutes ?? DEFAULT_SHIFT.lateGraceMinutes),
     earlyGraceMinutes: Number(row.early_grace_minutes ?? DEFAULT_SHIFT.earlyGraceMinutes),
@@ -2289,6 +2316,7 @@ function mapShiftFromAssignmentRow(row) {
     timezone: row.shift_timezone,
     work_start_time: row.shift_work_start_time,
     work_end_time: row.shift_work_end_time,
+    is_overnight: row.shift_is_overnight,
     late_grace_minutes: row.shift_late_grace_minutes,
     early_grace_minutes: row.shift_early_grace_minutes,
     rounding_minutes: row.shift_rounding_minutes,
@@ -2622,6 +2650,20 @@ function normalizeAssignmentPayload(value) {
   }
 }
 
+function normalizeShiftPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    workStartTime: firstDefinedValue(payload.workStartTime, payload.work_start_time, payload.startTime, payload.start_time),
+    workEndTime: firstDefinedValue(payload.workEndTime, payload.work_end_time, payload.endTime, payload.end_time),
+    isOvernight: firstDefinedValue(payload.isOvernight, payload.is_overnight),
+    lateGraceMinutes: firstDefinedValue(payload.lateGraceMinutes, payload.late_grace_minutes),
+    earlyGraceMinutes: firstDefinedValue(payload.earlyGraceMinutes, payload.early_grace_minutes),
+    roundingMinutes: firstDefinedValue(payload.roundingMinutes, payload.rounding_minutes),
+    workingDays: firstDefinedValue(payload.workingDays, payload.working_days),
+  }
+}
+
 function normalizeApprovalStepPayload(value) {
   const payload = normalizeObjectPayload(value)
   return {
@@ -2835,7 +2877,7 @@ function diffDays(fromDate, toDate) {
 }
 
 function computeMetrics(options) {
-  const { rule, firstInAt, lastOutAt, isWorkingDay, leaveMinutes, overtimeMinutes } = options
+  const { rule, firstInAt, lastOutAt, isWorkingDay, leaveMinutes, overtimeMinutes, workDate } = options
 
   if (!isWorkingDay) {
     if (!firstInAt && !lastOutAt) {
@@ -2863,16 +2905,20 @@ function computeMetrics(options) {
   const rawMinutes = Math.max(0, Math.floor((lastOutAt.getTime() - firstInAt.getTime()) / 60000))
   const workMinutes = roundMinutes(rawMinutes, rule.roundingMinutes)
 
-  const startMinutes = parseTimeToMinutes(rule.workStartTime, 9 * 60)
-  const endMinutes = parseTimeToMinutes(rule.workEndTime, 18 * 60)
-  const firstInMinutes = getZonedMinutes(firstInAt, rule.timezone)
-  const lastOutMinutes = getZonedMinutes(lastOutAt, rule.timezone)
+  const normalizedWorkDate = normalizeDateOnly(workDate)
+    ?? toWorkDate(firstInAt ?? lastOutAt ?? new Date(), rule.timezone ?? DEFAULT_RULE.timezone)
+  const normalizedStartTime = normalizeTimeString(rule.workStartTime) ?? DEFAULT_RULE.workStartTime
+  const normalizedEndTime = normalizeTimeString(rule.workEndTime) ?? DEFAULT_RULE.workEndTime
+  const isOvernight = resolveOvernightFlag(rule?.isOvernight, normalizedStartTime, normalizedEndTime)
+  const shiftEndDate = isOvernight ? (addDaysToDateKey(normalizedWorkDate, 1) ?? normalizedWorkDate) : normalizedWorkDate
+  const shiftStartAt = buildZonedDate(normalizedWorkDate, normalizedStartTime, rule.timezone ?? DEFAULT_RULE.timezone)
+  const shiftEndAt = buildZonedDate(shiftEndDate, normalizedEndTime, rule.timezone ?? DEFAULT_RULE.timezone)
 
-  const lateThreshold = startMinutes + Math.max(0, rule.lateGraceMinutes)
-  const earlyThreshold = endMinutes - Math.max(0, rule.earlyGraceMinutes)
+  const lateThresholdAt = new Date(shiftStartAt.getTime() + Math.max(0, rule.lateGraceMinutes) * 60000)
+  const earlyThresholdAt = new Date(shiftEndAt.getTime() - Math.max(0, rule.earlyGraceMinutes) * 60000)
 
-  const lateMinutes = Math.max(0, firstInMinutes - lateThreshold)
-  const earlyLeaveMinutes = Math.max(0, earlyThreshold - lastOutMinutes)
+  const lateMinutes = Math.max(0, Math.floor((firstInAt.getTime() - lateThresholdAt.getTime()) / 60000))
+  const earlyLeaveMinutes = Math.max(0, Math.floor((earlyThresholdAt.getTime() - lastOutAt.getTime()) / 60000))
 
   let status = 'normal'
   if (lateMinutes > 0 && earlyLeaveMinutes > 0) status = 'late_early'
@@ -4352,7 +4398,7 @@ async function loadShiftAssignment(db, orgId, userId, workDate) {
     const rows = await db.query(
       `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
               s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
-              s.work_end_time AS shift_work_end_time, s.late_grace_minutes AS shift_late_grace_minutes,
+              s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
               s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
               s.working_days AS shift_working_days
        FROM attendance_shift_assignments a
@@ -4552,7 +4598,7 @@ async function loadShiftAssignmentMapForUsersRange(db, orgId, userIds, fromDate,
     const rows = await db.query(
       `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
               s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
-              s.work_end_time AS shift_work_end_time, s.late_grace_minutes AS shift_late_grace_minutes,
+              s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
               s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
               s.working_days AS shift_working_days
        FROM attendance_shift_assignments a
@@ -4886,6 +4932,7 @@ async function upsertAttendanceRecord(options) {
     existingRow: existing[0] ?? null,
     updateFirstInAt,
     updateLastOutAt,
+    workDate,
     mode,
     statusOverride,
     overrideMetrics,
@@ -4941,6 +4988,7 @@ function computeAttendanceRecordUpsertValues(options) {
     existingRow,
     updateFirstInAt,
     updateLastOutAt,
+    workDate,
     mode,
     statusOverride,
     overrideMetrics,
@@ -4981,6 +5029,7 @@ function computeAttendanceRecordUpsertValues(options) {
     rule,
     firstInAt,
     lastOutAt,
+    workDate,
     isWorkingDay: isWorkday !== false,
     leaveMinutes,
     overtimeMinutes,
@@ -6293,6 +6342,7 @@ module.exports = {
       timezone: z.string().optional(),
       workStartTime: z.string().optional(),
       workEndTime: z.string().optional(),
+      isOvernight: z.boolean().optional(),
       lateGraceMinutes: z.number().int().min(0).optional(),
       earlyGraceMinutes: z.number().int().min(0).optional(),
       roundingMinutes: z.number().int().min(0).optional(),
@@ -7967,6 +8017,7 @@ module.exports = {
 	              existingRow,
 	              updateFirstInAt: item.updateFirstInAt,
 	              updateLastOutAt: item.updateLastOutAt,
+	              workDate: item.workDate,
 	              mode: item.mode,
 	              statusOverride: item.statusOverride,
 	              overrideMetrics: item.overrideMetrics,
@@ -8231,6 +8282,7 @@ module.exports = {
 	            rule: ruleForMetrics,
 	            firstInAt,
 	            lastOutAt,
+	            workDate,
 	            isWorkingDay: context.isWorkingDay,
 	            leaveMinutes,
 	            overtimeMinutes,
@@ -11782,6 +11834,7 @@ module.exports = {
               rule: context.rule,
               firstInAt: entry.firstInAt,
               lastOutAt: entry.lastOutAt,
+              workDate: entry.workDate,
               isWorkingDay: context.isWorkingDay,
             })
             preview.push({
@@ -12284,6 +12337,7 @@ module.exports = {
               rule: ruleForMetrics,
               firstInAt,
               lastOutAt,
+              workDate,
               isWorkingDay: context.isWorkingDay,
               leaveMinutes,
               overtimeMinutes,
@@ -12837,6 +12891,7 @@ module.exports = {
 				                  existingRow,
 				                  updateFirstInAt: item.updateFirstInAt,
 				                  updateLastOutAt: item.updateLastOutAt,
+				                  workDate: workDateKey,
 				                  mode: item.mode,
 				                  statusOverride: item.statusOverride,
 				                  overrideMetrics: item.overrideMetrics,
@@ -13099,6 +13154,7 @@ module.exports = {
                 rule: ruleForMetrics,
                 firstInAt,
                 lastOutAt,
+                workDate,
                 isWorkingDay: context.isWorkingDay,
                 leaveMinutes,
                 overtimeMinutes,
@@ -14065,6 +14121,7 @@ module.exports = {
                 rule: ruleForMetrics,
                 firstInAt,
                 lastOutAt,
+                workDate,
                 isWorkingDay: context.isWorkingDay,
                 leaveMinutes,
                 overtimeMinutes,
@@ -14775,6 +14832,7 @@ module.exports = {
                       rule: ruleForMetrics,
                       firstInAt,
                       lastOutAt,
+                      workDate,
                       isWorkingDay: context.isWorkingDay,
                       leaveMinutes,
                       overtimeMinutes,
@@ -16576,18 +16634,34 @@ module.exports = {
       'POST',
       '/api/attendance/shifts',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = shiftCreateSchema.safeParse(req.body)
+        const parsed = shiftCreateSchema.safeParse(normalizeShiftPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
+        const workStartTime = normalizeTimeString(parsed.data.workStartTime ?? DEFAULT_SHIFT.workStartTime)
+        const workEndTime = normalizeTimeString(parsed.data.workEndTime ?? DEFAULT_SHIFT.workEndTime)
+        if (!workStartTime || !workEndTime) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Shift times must use HH:MM format' } })
+          return
+        }
+        const inferredOvernight = inferOvernightFlag(workStartTime, workEndTime)
+        if (parsed.data.isOvernight === false && inferredOvernight) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Set isOvernight=true when shift end is earlier than shift start' } })
+          return
+        }
+        if (parsed.data.isOvernight === true && !inferredOvernight) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Overnight shifts must end after midnight' } })
+          return
+        }
         const payload = {
           name: parsed.data.name ?? DEFAULT_SHIFT.name,
           timezone: parsed.data.timezone ?? DEFAULT_SHIFT.timezone,
-          workStartTime: parsed.data.workStartTime ?? DEFAULT_SHIFT.workStartTime,
-          workEndTime: parsed.data.workEndTime ?? DEFAULT_SHIFT.workEndTime,
+          workStartTime,
+          workEndTime,
+          isOvernight: resolveOvernightFlag(parsed.data.isOvernight, workStartTime, workEndTime),
           lateGraceMinutes: parsed.data.lateGraceMinutes ?? DEFAULT_SHIFT.lateGraceMinutes,
           earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? DEFAULT_SHIFT.earlyGraceMinutes,
           roundingMinutes: parsed.data.roundingMinutes ?? DEFAULT_SHIFT.roundingMinutes,
@@ -16597,8 +16671,8 @@ module.exports = {
         try {
           const rows = await db.query(
             `INSERT INTO attendance_shifts
-             (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes, rounding_minutes, working_days)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+             (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, late_grace_minutes, early_grace_minutes, rounding_minutes, working_days)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
              RETURNING *`,
             [
               randomUUID(),
@@ -16607,6 +16681,7 @@ module.exports = {
               payload.timezone,
               payload.workStartTime,
               payload.workEndTime,
+              payload.isOvernight,
               payload.lateGraceMinutes,
               payload.earlyGraceMinutes,
               payload.roundingMinutes,
@@ -16631,7 +16706,7 @@ module.exports = {
       'PUT',
       '/api/attendance/shifts/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = shiftUpdateSchema.safeParse(req.body ?? {})
+        const parsed = shiftUpdateSchema.safeParse(normalizeShiftPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -16658,12 +16733,28 @@ module.exports = {
           const workingDays = parsed.data.workingDays
             ? normalizeWorkingDays(parsed.data.workingDays)
             : normalizeWorkingDays(existing.working_days)
+          const workStartTime = normalizeTimeString(parsed.data.workStartTime ?? existing.work_start_time)
+          const workEndTime = normalizeTimeString(parsed.data.workEndTime ?? existing.work_end_time)
+          if (!workStartTime || !workEndTime) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Shift times must use HH:MM format' } })
+            return
+          }
+          const inferredOvernight = inferOvernightFlag(workStartTime, workEndTime)
+          if (parsed.data.isOvernight === false && inferredOvernight) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Set isOvernight=true when shift end is earlier than shift start' } })
+            return
+          }
+          if (parsed.data.isOvernight === true && !inferredOvernight) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Overnight shifts must end after midnight' } })
+            return
+          }
 
           const payload = {
             name: parsed.data.name ?? existing.name,
             timezone: parsed.data.timezone ?? existing.timezone,
-            workStartTime: parsed.data.workStartTime ?? existing.work_start_time,
-            workEndTime: parsed.data.workEndTime ?? existing.work_end_time,
+            workStartTime,
+            workEndTime,
+            isOvernight: resolveOvernightFlag(parsed.data.isOvernight ?? existing.is_overnight, workStartTime, workEndTime),
             lateGraceMinutes: parsed.data.lateGraceMinutes ?? existing.late_grace_minutes,
             earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? existing.early_grace_minutes,
             roundingMinutes: parsed.data.roundingMinutes ?? existing.rounding_minutes,
@@ -16676,10 +16767,11 @@ module.exports = {
                  timezone = $4,
                  work_start_time = $5,
                  work_end_time = $6,
-                 late_grace_minutes = $7,
-                 early_grace_minutes = $8,
-                 rounding_minutes = $9,
-                 working_days = $10::jsonb,
+                 is_overnight = $7,
+                 late_grace_minutes = $8,
+                 early_grace_minutes = $9,
+                 rounding_minutes = $10,
+                 working_days = $11::jsonb,
                  updated_at = now()
              WHERE id = $1 AND org_id = $2
              RETURNING *`,
@@ -16690,6 +16782,7 @@ module.exports = {
               payload.timezone,
               payload.workStartTime,
               payload.workEndTime,
+              payload.isOvernight,
               payload.lateGraceMinutes,
               payload.earlyGraceMinutes,
               payload.roundingMinutes,
@@ -16788,7 +16881,7 @@ module.exports = {
           const rows = await db.query(
             `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
                     s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
-                    s.work_end_time AS shift_work_end_time, s.late_grace_minutes AS shift_late_grace_minutes,
+                    s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
                     s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
                     s.working_days AS shift_working_days
              FROM attendance_shift_assignments a

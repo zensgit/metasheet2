@@ -1067,6 +1067,11 @@ components:
         work_end_time:
           type: string
           deprecated: true
+        isOvernight:
+          type: boolean
+        is_overnight:
+          type: boolean
+          deprecated: true
         lateGraceMinutes:
           type: integer
         late_grace_minutes:

@@ -51,17 +51,18 @@ describe('useAttendanceAdminScheduling', () => {
         ok: true,
         data: {
           items: [
-            {
-              id: 'shift-1',
-              name: 'Ops Shift',
-              timezone: 'Asia/Shanghai',
-              workStartTime: '08:30',
-              workEndTime: '17:30',
-              lateGraceMinutes: 8,
-              earlyGraceMinutes: 7,
-              roundingMinutes: 10,
-              workingDays: [1, 3, 5],
-            },
+          {
+            id: 'shift-1',
+            name: 'Ops Shift',
+            timezone: 'Asia/Shanghai',
+            workStartTime: '08:30',
+            workEndTime: '17:30',
+            isOvernight: false,
+            lateGraceMinutes: 8,
+            earlyGraceMinutes: 7,
+            roundingMinutes: 10,
+            workingDays: [1, 3, 5],
+          },
           ],
         },
       }))
@@ -78,6 +79,7 @@ describe('useAttendanceAdminScheduling', () => {
     scheduling.shiftForm.timezone = 'Asia/Shanghai'
     scheduling.shiftForm.workStartTime = '08:30'
     scheduling.shiftForm.workEndTime = '17:30'
+    scheduling.shiftForm.isOvernight = false
     scheduling.shiftForm.lateGraceMinutes = 8
     scheduling.shiftForm.earlyGraceMinutes = 7
     scheduling.shiftForm.roundingMinutes = 10
@@ -92,6 +94,7 @@ describe('useAttendanceAdminScheduling', () => {
         timezone: 'Asia/Shanghai',
         workStartTime: '08:30',
         workEndTime: '17:30',
+        isOvernight: false,
         lateGraceMinutes: 8,
         earlyGraceMinutes: 7,
         roundingMinutes: 10,
@@ -220,6 +223,75 @@ describe('useAttendanceAdminScheduling', () => {
 
     expect(apiFetch).not.toHaveBeenCalled()
     expect(setStatus).toHaveBeenCalledWith('Late grace must be a non-negative integer', 'error')
+  })
+
+  it('allows overnight shifts when the overnight flag is enabled', async () => {
+    const adminForbidden = ref(false)
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, data: { items: [] } }))
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      getOrgId: () => 'org-overnight',
+      setStatus,
+    })
+
+    scheduling.shiftForm.name = 'Night Shift'
+    scheduling.shiftForm.timezone = 'Asia/Shanghai'
+    scheduling.shiftForm.workStartTime = '22:00'
+    scheduling.shiftForm.workEndTime = '06:00'
+    scheduling.shiftForm.isOvernight = true
+    scheduling.shiftForm.workingDays = '1,2,3,4,5'
+
+    await scheduling.saveShift()
+
+    expect(apiFetch).toHaveBeenNthCalledWith(1, '/api/attendance/shifts', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'Night Shift',
+        timezone: 'Asia/Shanghai',
+        workStartTime: '22:00',
+        workEndTime: '06:00',
+        isOvernight: true,
+        lateGraceMinutes: 10,
+        earlyGraceMinutes: 10,
+        roundingMinutes: 5,
+        workingDays: [1, 2, 3, 4, 5],
+        orgId: 'org-overnight',
+      }),
+    })
+    expect(setStatus).toHaveBeenCalledWith('Shift created.')
+  })
+
+  it('rejects overnight-looking shifts when the overnight flag is disabled', async () => {
+    const adminForbidden = ref(false)
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+
+    const scheduling = useAttendanceAdminScheduling({
+      adminForbidden,
+      apiFetch,
+      defaultTimezone: 'UTC',
+      setStatus,
+    })
+
+    scheduling.shiftForm.name = 'Night Shift'
+    scheduling.shiftForm.workStartTime = '22:00'
+    scheduling.shiftForm.workEndTime = '06:00'
+    scheduling.shiftForm.isOvernight = false
+    scheduling.shiftForm.workingDays = '1,2,3,4,5'
+
+    await scheduling.saveShift()
+
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(setStatus).toHaveBeenCalledWith(
+      'Shift end must be later than start unless overnight is enabled',
+      'error',
+    )
   })
 
   it('deletes a rotation rule and reloads both rules and assignments', async () => {

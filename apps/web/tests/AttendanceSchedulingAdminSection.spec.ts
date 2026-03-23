@@ -43,6 +43,7 @@ interface ShiftFormState {
   timezone: string
   workStartTime: string
   workEndTime: string
+  isOvernight: boolean
   lateGraceMinutes: number
   earlyGraceMinutes: number
   roundingMinutes: number
@@ -187,6 +188,7 @@ function createSchedulingBindings(overrides: Partial<SchedulingBindings> = {}): 
         timezone: 'UTC',
         workStartTime: '09:00',
         workEndTime: '18:00',
+        isOvernight: false,
         lateGraceMinutes: 10,
         earlyGraceMinutes: 10,
         roundingMinutes: 5,
@@ -201,6 +203,7 @@ function createSchedulingBindings(overrides: Partial<SchedulingBindings> = {}): 
       timezone: 'UTC',
       workStartTime: '09:00',
       workEndTime: '18:00',
+      isOvernight: false,
       lateGraceMinutes: 10,
       earlyGraceMinutes: 10,
       roundingMinutes: 5,
@@ -227,6 +230,7 @@ function createSchedulingBindings(overrides: Partial<SchedulingBindings> = {}): 
           timezone: 'UTC',
           workStartTime: '09:00',
           workEndTime: '18:00',
+          isOvernight: false,
           lateGraceMinutes: 10,
           earlyGraceMinutes: 10,
           roundingMinutes: 5,
@@ -312,5 +316,47 @@ describe('AttendanceSchedulingAdminSection', () => {
     expect(container!.textContent).not.toContain('Editing rotation assignment:')
     expect(container!.textContent).not.toContain('Editing shift:')
     expect(container!.textContent).not.toContain('Editing shift assignment:')
+  })
+
+  it('shows overnight shift summaries and the overnight toggle', async () => {
+    const scheduling = createSchedulingBindings({
+      shifts: ref<AttendanceShift[]>([
+        {
+          id: 'shift-night',
+          name: 'Night shift',
+          timezone: 'UTC',
+          workStartTime: '22:00',
+          workEndTime: '06:00',
+          isOvernight: true,
+          lateGraceMinutes: 10,
+          earlyGraceMinutes: 10,
+          roundingMinutes: 5,
+          workingDays: [1, 2, 3, 4, 5],
+        },
+      ]),
+      shiftForm: reactive<ShiftFormState>({
+        name: 'Night shift',
+        timezone: 'UTC',
+        workStartTime: '22:00',
+        workEndTime: '06:00',
+        isOvernight: true,
+        lateGraceMinutes: 10,
+        earlyGraceMinutes: 10,
+        roundingMinutes: 5,
+        workingDays: '1,2,3,4,5',
+      }),
+      shiftEditingId: ref('shift-night'),
+    })
+
+    app = createApp(AttendanceSchedulingAdminSection, {
+      tr,
+      scheduling,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.textContent).toContain('Overnight shift')
+    expect(container!.textContent).toContain('Schedule')
+    expect(container!.textContent).toContain('22:00 → 06:00 · Overnight')
   })
 })
