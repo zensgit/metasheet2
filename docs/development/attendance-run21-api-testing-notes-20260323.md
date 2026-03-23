@@ -2,6 +2,11 @@
 
 Date: 2026-03-23
 
+## Status
+
+- The overnight shift follow-up that closed the last Run21 API gap shipped via [#539](https://github.com/zensgit/metasheet2/pull/539) on 2026-03-23.
+- `main` now contains the merged head `db6fa3ce328c2fabfce4a241994f8f7a9ae4d917`.
+
 ## Scope
 
 This note captures the API testing expectations confirmed during Run21 validation so future runs do not regress on endpoint selection or status code interpretation.

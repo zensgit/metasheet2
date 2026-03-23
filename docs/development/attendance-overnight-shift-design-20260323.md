@@ -2,6 +2,12 @@
 
 Date: 2026-03-23
 
+## Status
+
+- Merged to `main` via [#539](https://github.com/zensgit/metasheet2/pull/539) on 2026-03-23.
+- The merged head is `db6fa3ce328c2fabfce4a241994f8f7a9ae4d917`.
+- Post-merge mainline workflows completed without introducing a new overnight-specific blocker.
+
 ## Goal
 
 Add minimal, usable overnight-shift support end-to-end across attendance scheduling, persistence, and metrics calculation.
