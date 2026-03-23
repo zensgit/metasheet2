@@ -1050,7 +1050,7 @@ const auditTeamViewManagementTargetLocked = computed(() => shouldLockPlmAuditTea
 }))
 const transferAuditTeamViewOwnerInputDisabled = computed(() => shouldDisablePlmAuditTeamViewTransferOwnerInput({
   managementTargetLocked: auditTeamViewManagementTargetLocked.value,
-  canTransfer: canTransferAuditTeamView.value,
+  canTransferTarget: canTransferAuditTeamViewTarget.value,
   loading: auditTeamViewsLoading.value,
 }))
 const allSelectableAuditTeamViewsSelected = computed(() => (
@@ -1116,6 +1116,7 @@ const {
   canArchive: canArchiveAuditTeamView,
   canRestore: canRestoreAuditTeamView,
   canRename: canRenameAuditTeamView,
+  canTransferTarget: canTransferAuditTeamViewTarget,
   canTransfer: canTransferAuditTeamView,
   canSetDefault: canSetAuditTeamViewDefault,
   canClearDefault: canClearAuditTeamViewDefault,

@@ -122,16 +122,21 @@ export function usePlmCollaborativePermissions<TEntry extends CollaborativeEntry
         : canManageSelectedEntry.value && !entry.isArchived
     return canRenameEntry && Boolean(options.nameRef.value.trim())
   })
+  const canTransferTarget = computed(() => {
+    const entry = options.selectedEntry.value
+    if (!entry) return false
+    return (
+      typeof entry.permissions?.canTransfer === 'boolean'
+        ? entry.permissions.canTransfer
+        : canManageSelectedEntry.value && !entry.isArchived
+    )
+  })
   const canTransfer = computed(() => {
     const entry = options.selectedEntry.value
     if (!entry) return false
     const targetOwnerUserId = options.ownerUserIdRef?.value.trim() || ''
-    const canTransferEntry =
-      typeof entry.permissions?.canTransfer === 'boolean'
-        ? entry.permissions.canTransfer
-        : canManageSelectedEntry.value && !entry.isArchived
     return (
-      canTransferEntry
+      canTransferTarget.value
       && Boolean(targetOwnerUserId)
       && targetOwnerUserId !== entry.ownerUserId
     )
@@ -169,6 +174,7 @@ export function usePlmCollaborativePermissions<TEntry extends CollaborativeEntry
     canArchive,
     canRestore,
     canRename,
+    canTransferTarget,
     canTransfer,
     canSetDefault,
     canClearDefault,

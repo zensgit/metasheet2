@@ -51,8 +51,8 @@ export function resolvePlmAuditTeamViewDuplicateName(options: {
 
 export function shouldDisablePlmAuditTeamViewTransferOwnerInput(options: {
   managementTargetLocked: boolean
-  canTransfer: boolean
+  canTransferTarget: boolean
   loading: boolean
 }) {
-  return options.managementTargetLocked || !options.canTransfer || options.loading
+  return options.managementTargetLocked || !options.canTransferTarget || options.loading
 }

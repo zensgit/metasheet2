@@ -107,25 +107,25 @@ describe('plmAuditTeamViewControlTarget', () => {
   it('disables transfer-owner drafts whenever the canonical target is not actionable', () => {
     expect(shouldDisablePlmAuditTeamViewTransferOwnerInput({
       managementTargetLocked: true,
-      canTransfer: true,
+      canTransferTarget: true,
       loading: false,
     })).toBe(true)
 
     expect(shouldDisablePlmAuditTeamViewTransferOwnerInput({
       managementTargetLocked: false,
-      canTransfer: false,
+      canTransferTarget: false,
       loading: false,
     })).toBe(true)
 
     expect(shouldDisablePlmAuditTeamViewTransferOwnerInput({
       managementTargetLocked: false,
-      canTransfer: true,
+      canTransferTarget: true,
       loading: true,
     })).toBe(true)
 
     expect(shouldDisablePlmAuditTeamViewTransferOwnerInput({
       managementTargetLocked: false,
-      canTransfer: true,
+      canTransferTarget: true,
       loading: false,
     })).toBe(false)
   })

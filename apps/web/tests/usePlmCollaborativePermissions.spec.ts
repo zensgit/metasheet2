@@ -76,11 +76,16 @@ describe('usePlmCollaborativePermissions', () => {
 
     expect(model.canDuplicate.value).toBe(true)
     expect(model.canRename.value).toBe(true)
+    expect(model.canTransferTarget.value).toBe(true)
     expect(model.canTransfer.value).toBe(true)
     expect(model.canArchive.value).toBe(true)
     expect(model.canRestore.value).toBe(false)
 
     nameRef.value = ''
+    ownerUserIdRef.value = ''
+    expect(model.canTransferTarget.value).toBe(true)
+    expect(model.canTransfer.value).toBe(false)
+
     ownerUserIdRef.value = 'owner-a'
     selectedEntry.value = {
       ...selectedEntry.value,
@@ -95,6 +100,7 @@ describe('usePlmCollaborativePermissions', () => {
     }
 
     expect(model.canRename.value).toBe(false)
+    expect(model.canTransferTarget.value).toBe(false)
     expect(model.canTransfer.value).toBe(false)
     expect(model.canArchive.value).toBe(false)
     expect(model.canRestore.value).toBe(true)
