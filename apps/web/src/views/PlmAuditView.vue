@@ -803,6 +803,7 @@ import {
 } from './plmAuditQueryState'
 import {
   applyPlmAuditSourceFocusState,
+  buildPlmAuditAppliedTeamViewAttentionState,
   buildPlmAuditClearedCollaborationFollowupAttentionState,
   buildPlmAuditDismissedCollaborationDraftAttentionState,
   buildPlmAuditManagedTeamViewAttentionState,
@@ -1676,6 +1677,25 @@ function applyAuditManagedTeamViewAttention() {
   auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
 }
 
+function applyAuditAppliedTeamViewAttention(teamViewId: string) {
+  const nextState = buildPlmAuditAppliedTeamViewAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    teamViewId,
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+}
+
 function applyAuditSourceShareFollowupAttention() {
   const nextState = buildPlmAuditSourceShareFollowupAttentionState(
     {
@@ -2123,6 +2143,7 @@ async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
   clearAuditTeamViewCollaborationDraft()
   clearAuditTeamViewShareEntry()
   clearAuditTeamViewCollaborationFollowup()
+  applyAuditAppliedTeamViewAttention(view.id)
   await syncRouteState(nextState, false, {
     consumeSharedEntry: true,
   })

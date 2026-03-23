@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildPlmAuditAppliedTeamViewAttentionState,
   applyPlmAuditSourceFocusState,
   buildPlmAuditClearedCollaborationFollowupAttentionState,
   buildPlmAuditDismissedCollaborationDraftAttentionState,
@@ -302,6 +303,30 @@ describe('plmAuditSavedViewAttention', () => {
     })).toEqual({
       attentionFocus: {
         focusedAuditTeamViewId: '',
+        focusedRecommendedAuditTeamViewId: '',
+        focusedSavedViewId: '',
+      },
+      savedViewAttention: {
+        shareFollowup: null,
+        focusedSavedViewId: '',
+      },
+    })
+  })
+
+  it('replaces stale focus with the newly applied team view when an apply action completes', () => {
+    expect(buildPlmAuditAppliedTeamViewAttentionState({
+      focusedAuditTeamViewId: 'team-view-old',
+      focusedRecommendedAuditTeamViewId: 'recommended-11',
+      focusedSavedViewId: 'saved-view-11',
+    }, {
+      shareFollowup: {
+        savedViewId: 'saved-view-12',
+        source: 'shared-entry',
+      },
+      focusedSavedViewId: 'saved-view-12',
+    }, 'team-view-11')).toEqual({
+      attentionFocus: {
+        focusedAuditTeamViewId: 'team-view-11',
         focusedRecommendedAuditTeamViewId: '',
         focusedSavedViewId: '',
       },
