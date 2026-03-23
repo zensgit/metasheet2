@@ -4,6 +4,7 @@ import {
   buildPlmAuditTeamViewShareEntryNotice,
   findPlmAuditTeamViewShareEntryView,
   isPlmAuditSharedLinkEntry,
+  prunePlmAuditTeamViewShareEntryForRemovedViews,
   resolvePlmAuditTeamViewShareEntryActionTarget,
   resolvePlmAuditSharedEntryRouteSyncDecision,
   shouldKeepPlmAuditTeamViewShareEntry,
@@ -166,6 +167,18 @@ describe('plmAuditTeamViewShareEntry', () => {
     }, 'audit-view-2')).toBe(false)
 
     expect(shouldKeepPlmAuditTeamViewShareEntry(null, 'audit-view-1')).toBe(false)
+  })
+
+  it('clears shared-entry ownership when the owning team view entry is removed', () => {
+    expect(prunePlmAuditTeamViewShareEntryForRemovedViews({
+      teamViewId: 'audit-view-1',
+    }, ['audit-view-1'])).toBeNull()
+
+    expect(prunePlmAuditTeamViewShareEntryForRemovedViews({
+      teamViewId: 'audit-view-1',
+    }, ['audit-view-2'])).toEqual({
+      teamViewId: 'audit-view-1',
+    })
   })
 
   it('only treats local saves as shared-entry takeovers when the selected team view still matches the shared entry', () => {

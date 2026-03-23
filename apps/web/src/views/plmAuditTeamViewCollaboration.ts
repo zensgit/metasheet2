@@ -320,6 +320,22 @@ export function prunePlmAuditTeamViewCollaborationFollowupSavedViewSource(
   }
 }
 
+export function prunePlmAuditTeamViewCollaborationDraftForRemovedViews(
+  draft: PlmAuditTeamViewCollaborationDraft | null,
+  removedViewIds: readonly string[],
+): PlmAuditTeamViewCollaborationDraft | null {
+  if (!draft || !removedViewIds.includes(draft.teamViewId)) return draft
+  return null
+}
+
+export function prunePlmAuditTeamViewCollaborationFollowupForRemovedViews(
+  followup: PlmAuditTeamViewCollaborationFollowup | null,
+  removedViewIds: readonly string[],
+): PlmAuditTeamViewCollaborationFollowup | null {
+  if (!followup || !removedViewIds.includes(followup.teamViewId)) return followup
+  return null
+}
+
 export function shouldClearPlmAuditTeamViewCollaborationDraft(
   draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null,
   viewId: string,

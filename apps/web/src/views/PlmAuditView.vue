@@ -855,7 +855,9 @@ import {
   buildPlmAuditTeamViewCollaborationSourceFocusIntent,
   findPlmAuditTeamViewCollaborationDraftView,
   findPlmAuditTeamViewCollaborationFollowupView,
+  prunePlmAuditTeamViewCollaborationDraftForRemovedViews,
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
+  prunePlmAuditTeamViewCollaborationFollowupForRemovedViews,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   shouldClearPlmAuditTeamViewCollaborationDraft,
@@ -876,6 +878,7 @@ import {
   buildPlmAuditTeamViewShareEntryNotice,
   findPlmAuditTeamViewShareEntryView,
   isPlmAuditSharedLinkEntry,
+  prunePlmAuditTeamViewShareEntryForRemovedViews,
   resolvePlmAuditTeamViewShareEntryActionTarget,
   resolvePlmAuditSharedEntryRouteSyncDecision,
   shouldKeepPlmAuditTeamViewShareEntry,
@@ -1734,6 +1737,28 @@ function replaceAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
   )
 }
 
+function pruneRemovedAuditTeamViewTransientState(viewIds: string[]) {
+  auditTeamViewCollaborationDraft.value = prunePlmAuditTeamViewCollaborationDraftForRemovedViews(
+    auditTeamViewCollaborationDraft.value,
+    viewIds,
+  )
+  auditTeamViewCollaborationFollowup.value = prunePlmAuditTeamViewCollaborationFollowupForRemovedViews(
+    auditTeamViewCollaborationFollowup.value,
+    viewIds,
+  )
+  auditTeamViewShareEntry.value = prunePlmAuditTeamViewShareEntryForRemovedViews(
+    auditTeamViewShareEntry.value,
+    viewIds,
+  )
+}
+
+function removeAuditTeamViews(viewIds: string[]) {
+  const removed = new Set(viewIds)
+  auditTeamViews.value = auditTeamViews.value.filter((entry) => !removed.has(entry.id))
+  auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => !removed.has(id))
+  pruneRemovedAuditTeamViewTransientState(viewIds)
+}
+
 function trimAuditTeamViewSelection() {
   const existingIds = new Set(auditTeamViews.value.map((view) => view.id))
   auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => existingIds.has(id))
@@ -1753,12 +1778,6 @@ function setAllSelectableAuditTeamViewsSelected(nextSelected: boolean) {
   auditTeamViewSelection.value = auditTeamViewManagementItems.value
     .filter((item) => item.selectable)
     .map((item) => item.id)
-}
-
-function removeAuditTeamViews(viewIds: string[]) {
-  const removed = new Set(viewIds)
-  auditTeamViews.value = auditTeamViews.value.filter((entry) => !removed.has(entry.id))
-  auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => !removed.has(id))
 }
 
 function clearCurrentAuditTeamViewSelectionIfNeeded(viewIds: string[]) {
@@ -2410,7 +2429,7 @@ async function deleteAuditTeamView() {
   auditTeamViewsError.value = ''
   try {
     await deletePlmWorkbenchTeamView(view.id)
-    auditTeamViews.value = auditTeamViews.value.filter((entry) => entry.id !== view.id)
+    removeAuditTeamViews([view.id])
     auditTeamViewKey.value = ''
     const nextState = {
       ...readCurrentRouteState(),

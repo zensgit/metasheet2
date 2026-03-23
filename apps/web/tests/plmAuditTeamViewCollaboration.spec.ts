@@ -11,7 +11,9 @@ import {
   buildPlmAuditTeamViewCollaborationSourceFocusIntent,
   findPlmAuditTeamViewCollaborationDraftView,
   findPlmAuditTeamViewCollaborationFollowupView,
+  prunePlmAuditTeamViewCollaborationDraftForRemovedViews,
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
+  prunePlmAuditTeamViewCollaborationFollowupForRemovedViews,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationSourceAnchorId,
@@ -278,6 +280,43 @@ describe('plmAuditTeamViewCollaboration', () => {
     }, 'audit-view-10')).toBe(false)
 
     expect(shouldKeepPlmAuditTeamViewCollaborationDraft(null, 'audit-view-9')).toBe(false)
+  })
+
+  it('clears collaboration ownership when the owning team view entry is removed', () => {
+    expect(prunePlmAuditTeamViewCollaborationDraftForRemovedViews({
+      teamViewId: 'audit-view-9',
+      teamViewName: 'A',
+      teamViewOwnerUserId: '',
+      focusTargetId: 'plm-audit-team-view-controls',
+      source: 'recommendation',
+      sourceSavedViewId: null,
+      statusMessage: 'prepared',
+    }, ['audit-view-9'])).toBeNull()
+
+    expect(prunePlmAuditTeamViewCollaborationFollowupForRemovedViews({
+      teamViewId: 'audit-view-9',
+      source: 'recommendation',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-recommended-team-views',
+      sourceSavedViewId: null,
+    }, ['audit-view-9'])).toBeNull()
+
+    expect(prunePlmAuditTeamViewCollaborationFollowupForRemovedViews({
+      teamViewId: 'audit-view-9',
+      source: 'recommendation',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-recommended-team-views',
+      sourceSavedViewId: null,
+    }, ['audit-view-10'])).toEqual({
+      teamViewId: 'audit-view-9',
+      source: 'recommendation',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-recommended-team-views',
+      sourceSavedViewId: null,
+    })
   })
 
   it('builds a draft handoff for recommendation and promotion flows', () => {

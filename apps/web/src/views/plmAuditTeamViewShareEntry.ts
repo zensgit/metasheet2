@@ -155,6 +155,14 @@ export function resolvePlmAuditTeamViewShareEntryActionTarget<T>(
   return entryTarget || selectedTarget
 }
 
+export function prunePlmAuditTeamViewShareEntryForRemovedViews(
+  entry: PlmAuditTeamViewShareEntry | null,
+  removedViewIds: readonly string[],
+): PlmAuditTeamViewShareEntry | null {
+  if (!entry || !removedViewIds.includes(entry.teamViewId)) return entry
+  return null
+}
+
 export function shouldTakeOverPlmAuditSharedEntryOnLocalSave(
   entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
   selectedTeamViewId: string,
