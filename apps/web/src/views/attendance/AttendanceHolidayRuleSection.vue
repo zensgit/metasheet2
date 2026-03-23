@@ -136,9 +136,15 @@
       <label class="attendance__field" for="attendance-holiday-sync-auto-tz">
         <span>{{ tr('Auto sync timezone', '自动同步时区') }}</span>
         <select id="attendance-holiday-sync-auto-tz" v-model="settingsForm.holidaySyncAutoTimezone" name="holidaySyncAutoTimezone">
-          <option v-for="timezone in holidaySyncTimezoneOptions" :key="timezone.value" :value="timezone.value">
-            {{ timezone.label }}
-          </option>
+          <optgroup
+            v-for="group in holidaySyncTimezoneOptionGroups"
+            :key="group.id"
+            :label="tr(group.labelEn, group.labelZh)"
+          >
+            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
+              {{ timezone.label }}
+            </option>
+          </optgroup>
         </select>
       </label>
       <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-index">
@@ -182,7 +188,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch, type Ref } from 'vue'
-import { buildTimezoneOptionEntries } from './attendanceTimezones'
+import { buildTimezoneOptionGroups } from './attendanceTimezones'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -259,7 +265,7 @@ const holidaySyncLastRun = props.config.holidaySyncLastRun
 const holidaySyncLoading = props.config.holidaySyncLoading
 const saveSettings = () => props.config.saveSettings()
 const settingsForm = props.config.settingsForm
-const holidaySyncTimezoneOptions = computed(() => buildTimezoneOptionEntries(settingsForm.holidaySyncAutoTimezone))
+const holidaySyncTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(settingsForm.holidaySyncAutoTimezone))
 const settingsLoading = props.config.settingsLoading
 const syncHolidays = () => props.config.syncHolidays()
 const syncHolidaysForYears = (years: number[]) => props.config.syncHolidaysForYears(years)

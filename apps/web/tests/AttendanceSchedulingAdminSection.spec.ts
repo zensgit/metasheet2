@@ -380,6 +380,8 @@ describe('AttendanceSchedulingAdminSection', () => {
     expect(defaultRuleTimezone!.selectedOptions[0]?.textContent).toContain('UTC+00:00')
     expect(rotationTimezone!.selectedOptions[0]?.textContent).toContain('UTC+00:00')
     expect(shiftTimezone!.selectedOptions[0]?.textContent).toContain('UTC+00:00')
+    expect(Array.from(defaultRuleTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Common timezones')
+    expect(Array.from(rotationTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Asia')
     expect(container!.textContent).toContain('UTC (UTC+00:00)')
   })
 })

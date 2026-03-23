@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildTimezoneOptionEntries,
+  buildTimezoneOptionGroups,
   formatTimezoneOffsetLabel,
   formatTimezoneOptionLabel,
 } from '../src/views/attendance/attendanceTimezones'
@@ -20,5 +21,15 @@ describe('attendanceTimezones', () => {
       value: 'Asia/Shanghai',
       label: 'Asia/Shanghai (UTC+08:00)',
     })
+  })
+
+  it('groups timezone options into common and regional buckets', () => {
+    const groups = buildTimezoneOptionGroups('America/New_York')
+
+    expect(groups[0]?.id).toBe('common')
+    expect(groups[0]?.labelEn).toBe('Common timezones')
+    expect(groups[0]?.options.some((item) => item.value === 'America/New_York')).toBe(true)
+    expect(groups.some((group) => group.id === 'Asia')).toBe(true)
+    expect(groups.some((group) => group.id === 'Europe')).toBe(true)
   })
 })

@@ -254,5 +254,6 @@ describe('AttendanceHolidayRuleSection', () => {
     const timezoneSelect = container!.querySelector<HTMLSelectElement>('#attendance-holiday-sync-auto-tz')
     expect(timezoneSelect).toBeTruthy()
     expect(timezoneSelect!.selectedOptions[0]?.textContent).toContain('Asia/Shanghai (UTC+08:00)')
+    expect(Array.from(timezoneSelect!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('常用时区')
   })
 })

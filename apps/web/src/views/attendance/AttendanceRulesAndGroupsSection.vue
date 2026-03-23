@@ -89,9 +89,15 @@
               id="attendance-rule-builder-timezone"
               v-model="ruleBuilderTimezone"
             >
-              <option v-for="timezone in ruleBuilderTimezoneOptions" :key="timezone.value" :value="timezone.value">
-                {{ timezone.label }}
-              </option>
+              <optgroup
+                v-for="group in ruleBuilderTimezoneOptionGroups"
+                :key="group.id"
+                :label="tr(group.labelEn, group.labelZh)"
+              >
+                <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
+                  {{ timezone.label }}
+                </option>
+              </optgroup>
             </select>
           </label>
           <label class="attendance__field" for="attendance-rule-builder-start">
@@ -679,9 +685,15 @@
       <label class="attendance__field" for="attendance-group-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
         <select id="attendance-group-timezone" v-model="attendanceGroupForm.timezone">
-          <option v-for="timezone in attendanceGroupTimezones" :key="timezone.value" :value="timezone.value">
-            {{ timezone.label }}
-          </option>
+          <optgroup
+            v-for="group in attendanceGroupTimezoneGroups"
+            :key="group.id"
+            :label="tr(group.labelEn, group.labelZh)"
+          >
+            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
+              {{ timezone.label }}
+            </option>
+          </optgroup>
         </select>
       </label>
       <label class="attendance__field" for="attendance-group-rule-set">
@@ -846,7 +858,7 @@ import type {
 } from './useAttendanceAdminRulesAndGroups'
 import AttendanceUserPickerField from './AttendanceUserPickerField.vue'
 import {
-  buildTimezoneOptionEntries,
+  buildTimezoneOptionGroups,
   formatTimezoneOptionLabel,
 } from './attendanceTimezones'
 
@@ -992,7 +1004,7 @@ const tr = props.tr
 const formatDateTime = props.formatDateTime
 const attendanceGroupEditingId = props.rules.attendanceGroupEditingId
 const attendanceGroupForm = props.rules.attendanceGroupForm
-const attendanceGroupTimezones = computed(() => buildTimezoneOptionEntries(attendanceGroupForm.timezone))
+const attendanceGroupTimezoneGroups = computed(() => buildTimezoneOptionGroups(attendanceGroupForm.timezone))
 const attendanceGroupLoading = props.rules.attendanceGroupLoading
 const attendanceGroupMemberGroupId = props.rules.attendanceGroupMemberGroupId
 const attendanceGroupMemberLoading = props.rules.attendanceGroupMemberLoading
@@ -1046,7 +1058,7 @@ const localRuleSetPreviewEventsText = ref('[]')
 const localRuleSetPreviewResult = ref<RuleSetPreviewResult | null>(null)
 const ruleBuilderSource = props.rules.ruleBuilderSource ?? localRuleBuilderSource
 const ruleBuilderTimezone = props.rules.ruleBuilderTimezone ?? localRuleBuilderTimezone
-const ruleBuilderTimezoneOptions = computed(() => buildTimezoneOptionEntries(ruleBuilderTimezone.value))
+const ruleBuilderTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(ruleBuilderTimezone.value))
 const ruleBuilderTimezoneLabel = computed(() => formatTimezoneOptionLabel(ruleBuilderTimezone.value))
 const ruleBuilderWorkStartTime = props.rules.ruleBuilderWorkStartTime ?? localRuleBuilderWorkStartTime
 const ruleBuilderWorkEndTime = props.rules.ruleBuilderWorkEndTime ?? localRuleBuilderWorkEndTime

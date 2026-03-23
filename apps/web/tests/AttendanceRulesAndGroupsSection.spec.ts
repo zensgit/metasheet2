@@ -448,9 +448,11 @@ describe('AttendanceRulesAndGroupsSection', () => {
     expect(ruleBuilderTimezone).toBeTruthy()
     expect(attendanceGroupTimezone).toBeTruthy()
     expect(ruleBuilderTimezone!.selectedOptions[0]?.textContent).toContain('Asia/Shanghai (UTC+08:00)')
+    expect(Array.from(ruleBuilderTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Common timezones')
     expect(Array.from(attendanceGroupTimezone!.querySelectorAll('option')).map((option) => option.textContent)).toContain(
       'Asia/Shanghai (UTC+08:00)',
     )
+    expect(Array.from(attendanceGroupTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Asia')
     expect(container!.textContent).toContain('Asia/Shanghai (UTC+08:00)')
   })
 })

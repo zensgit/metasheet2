@@ -250,9 +250,15 @@
           v-model="importGroupTimezone"
         >
           <option value="">{{ tr('(Optional) Use import timezone', '（可选）沿用导入时区') }}</option>
-          <option v-for="timezone in importGroupTimezoneOptions" :key="timezone.value" :value="timezone.value">
-            {{ timezone.label }}
-          </option>
+          <optgroup
+            v-for="group in importGroupTimezoneOptionGroups"
+            :key="group.id"
+            :label="tr(group.labelEn, group.labelZh)"
+          >
+            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
+              {{ timezone.label }}
+            </option>
+          </optgroup>
         </select>
       </label>
       <label class="attendance__field" for="attendance-import-user">
@@ -272,9 +278,15 @@
           name="importTimezone"
           v-model="importForm.timezone"
         >
-          <option v-for="timezone in importTimezoneOptions" :key="timezone.value" :value="timezone.value">
-            {{ timezone.label }}
-          </option>
+          <optgroup
+            v-for="group in importTimezoneOptionGroups"
+            :key="group.id"
+            :label="tr(group.labelEn, group.labelZh)"
+          >
+            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
+              {{ timezone.label }}
+            </option>
+          </optgroup>
         </select>
       </label>
       <label class="attendance__field attendance__field--full" for="attendance-import-payload">
@@ -471,7 +483,7 @@
 <script setup lang="ts">
 import { computed, type ComputedRef, type Ref } from 'vue'
 import {
-  buildTimezoneOptionEntries,
+  buildTimezoneOptionGroups,
   formatTimezoneOptionLabel,
 } from './attendanceTimezones'
 import type {
@@ -588,8 +600,8 @@ const importGroupAutoCreate = props.workflow.importGroupAutoCreate
 const importGroupAutoAssign = props.workflow.importGroupAutoAssign
 const importGroupRuleSetId = props.workflow.importGroupRuleSetId
 const importGroupTimezone = props.workflow.importGroupTimezone
-const importTimezoneOptions = computed(() => buildTimezoneOptionEntries(importForm.timezone))
-const importGroupTimezoneOptions = computed(() => buildTimezoneOptionEntries(importGroupTimezone.value))
+const importTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importForm.timezone))
+const importGroupTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importGroupTimezone.value))
 const importScalabilityHint = props.workflow.importScalabilityHint
 const importPreviewTask = props.workflow.importPreviewTask
 const importAsyncJob = props.workflow.importAsyncJob

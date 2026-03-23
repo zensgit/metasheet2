@@ -224,6 +224,8 @@ describe('AttendanceImportWorkflowSection', () => {
     expect(importTimezone).toBeTruthy()
     expect(importGroupTimezone).toBeTruthy()
     expect(importTimezone!.selectedOptions[0]?.textContent).toContain('Asia/Shanghai (UTC+08:00)')
+    expect(Array.from(importTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Common timezones')
+    expect(Array.from(importGroupTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Asia')
   })
 
   it('shows manual-plan fallbacks when mapping, user map, and group sync are unset', async () => {
