@@ -853,13 +853,12 @@ function parseImportedDateTime(value, workDate, timeZone) {
 
 function normalizeTimeString(value) {
   if (!value || typeof value !== 'string') return null
-  const match = value.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/)
+  const match = value.trim().match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/)
   if (!match) return null
   const hours = Number(match[1])
   const minutes = Number(match[2])
-  const seconds = match[3] === undefined ? 0 : Number(match[3])
-  if (!Number.isFinite(hours) || !Number.isFinite(minutes) || !Number.isFinite(seconds)) return null
-  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59) return null
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null
   const hh = String(hours).padStart(2, '0')
   const mm = String(minutes).padStart(2, '0')
   return `${hh}:${mm}`
@@ -884,6 +883,26 @@ function inferOvernightFlag(workStartTime, workEndTime) {
 function resolveOvernightFlag(explicitValue, workStartTime, workEndTime) {
   if (typeof explicitValue === 'boolean') return explicitValue
   return inferOvernightFlag(workStartTime, workEndTime)
+}
+
+function resolveShiftTiming({ workStartTime: rawWorkStartTime, workEndTime: rawWorkEndTime, explicitOvernight, fallbackOvernight }) {
+  const workStartTime = normalizeTimeString(rawWorkStartTime)
+  const workEndTime = normalizeTimeString(rawWorkEndTime)
+  if (!workStartTime || !workEndTime) {
+    return { error: 'Shift times must use HH:MM format' }
+  }
+  const inferredOvernight = inferOvernightFlag(workStartTime, workEndTime)
+  if (explicitOvernight === false && inferredOvernight) {
+    return { error: 'Set isOvernight=true when shift end is earlier than shift start' }
+  }
+  if (explicitOvernight === true && !inferredOvernight) {
+    return { error: 'Overnight shifts must end after midnight' }
+  }
+  return {
+    workStartTime,
+    workEndTime,
+    isOvernight: resolveOvernightFlag(firstDefinedValue(explicitOvernight, fallbackOvernight), workStartTime, workEndTime),
+  }
 }
 
 function resolveShiftTimeRange(shiftName) {
@@ -16642,27 +16661,21 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const workStartTime = normalizeTimeString(parsed.data.workStartTime ?? DEFAULT_SHIFT.workStartTime)
-        const workEndTime = normalizeTimeString(parsed.data.workEndTime ?? DEFAULT_SHIFT.workEndTime)
-        if (!workStartTime || !workEndTime) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Shift times must use HH:MM format' } })
-          return
-        }
-        const inferredOvernight = inferOvernightFlag(workStartTime, workEndTime)
-        if (parsed.data.isOvernight === false && inferredOvernight) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Set isOvernight=true when shift end is earlier than shift start' } })
-          return
-        }
-        if (parsed.data.isOvernight === true && !inferredOvernight) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Overnight shifts must end after midnight' } })
+        const shiftTiming = resolveShiftTiming({
+          workStartTime: parsed.data.workStartTime ?? DEFAULT_SHIFT.workStartTime,
+          workEndTime: parsed.data.workEndTime ?? DEFAULT_SHIFT.workEndTime,
+          explicitOvernight: parsed.data.isOvernight,
+        })
+        if (shiftTiming.error) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: shiftTiming.error } })
           return
         }
         const payload = {
           name: parsed.data.name ?? DEFAULT_SHIFT.name,
           timezone: parsed.data.timezone ?? DEFAULT_SHIFT.timezone,
-          workStartTime,
-          workEndTime,
-          isOvernight: resolveOvernightFlag(parsed.data.isOvernight, workStartTime, workEndTime),
+          workStartTime: shiftTiming.workStartTime,
+          workEndTime: shiftTiming.workEndTime,
+          isOvernight: shiftTiming.isOvernight,
           lateGraceMinutes: parsed.data.lateGraceMinutes ?? DEFAULT_SHIFT.lateGraceMinutes,
           earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? DEFAULT_SHIFT.earlyGraceMinutes,
           roundingMinutes: parsed.data.roundingMinutes ?? DEFAULT_SHIFT.roundingMinutes,
@@ -16734,28 +16747,23 @@ module.exports = {
           const workingDays = parsed.data.workingDays
             ? normalizeWorkingDays(parsed.data.workingDays)
             : normalizeWorkingDays(existing.working_days)
-          const workStartTime = normalizeTimeString(parsed.data.workStartTime ?? existing.work_start_time)
-          const workEndTime = normalizeTimeString(parsed.data.workEndTime ?? existing.work_end_time)
-          if (!workStartTime || !workEndTime) {
-            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Shift times must use HH:MM format' } })
-            return
-          }
-          const inferredOvernight = inferOvernightFlag(workStartTime, workEndTime)
-          if (parsed.data.isOvernight === false && inferredOvernight) {
-            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Set isOvernight=true when shift end is earlier than shift start' } })
-            return
-          }
-          if (parsed.data.isOvernight === true && !inferredOvernight) {
-            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Overnight shifts must end after midnight' } })
+          const shiftTiming = resolveShiftTiming({
+            workStartTime: parsed.data.workStartTime ?? existing.work_start_time,
+            workEndTime: parsed.data.workEndTime ?? existing.work_end_time,
+            explicitOvernight: parsed.data.isOvernight,
+            fallbackOvernight: existing.is_overnight,
+          })
+          if (shiftTiming.error) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: shiftTiming.error } })
             return
           }
 
           const payload = {
             name: parsed.data.name ?? existing.name,
             timezone: parsed.data.timezone ?? existing.timezone,
-            workStartTime,
-            workEndTime,
-            isOvernight: resolveOvernightFlag(parsed.data.isOvernight ?? existing.is_overnight, workStartTime, workEndTime),
+            workStartTime: shiftTiming.workStartTime,
+            workEndTime: shiftTiming.workEndTime,
+            isOvernight: shiftTiming.isOvernight,
             lateGraceMinutes: parsed.data.lateGraceMinutes ?? existing.late_grace_minutes,
             earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? existing.early_grace_minutes,
             roundingMinutes: parsed.data.roundingMinutes ?? existing.rounding_minutes,

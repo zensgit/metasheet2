@@ -14,6 +14,7 @@ Date: 2026-03-23
 - Assignment-embedded shift payloads expose the overnight flag.
 - Attendance metrics now anchor overnight shift end thresholds to the next calendar day.
 - Persisted shift times in `HH:MM:SS` form are normalized correctly before overnight metric calculation.
+- Shift create and update now share one timing validator, so overnight contract checks are no longer duplicated across routes.
 
 ## Validation Rules
 

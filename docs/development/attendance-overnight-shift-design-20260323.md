@@ -40,6 +40,7 @@ Add minimal, usable overnight-shift support end-to-end across attendance schedul
 - Expose `isOvernight` and deprecated `is_overnight` in shift responses, assignment-embedded shift payloads, and OpenAPI.
 - Update attendance import and record upsert paths so `computeMetrics()` receives `workDate` and evaluates late/early thresholds against the correct calendar window.
 - Accept persisted database times in either `HH:MM` or `HH:MM:SS` form so overnight metrics do not silently fall back to default day-shift thresholds.
+- Centralize shift time normalization and overnight validation so create and update routes enforce the same contract.
 
 ## Guardrails
 
