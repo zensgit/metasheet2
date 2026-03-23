@@ -848,6 +848,7 @@ import {
   shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry,
   shouldKeepPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationFollowup,
+  shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup,
   syncPlmAuditTeamViewCollaborationFollowupSourceAnchor,
   type PlmAuditTeamViewCollaborationActionKind,
   type PlmAuditTeamViewCollaborationDraft,
@@ -2023,6 +2024,12 @@ async function shareAuditTeamViewEntry(
     applyAuditSourceShareFollowupAttention()
   } else {
     applyAuditTeamViewHandoffAttention()
+  }
+  if (shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup(
+    auditTeamViewCollaborationDraft.value,
+    outcome.followup,
+  )) {
+    clearAuditTeamViewCollaborationDraft()
   }
   setStatus(outcome.statusMessage)
   auditTeamViewCollaborationFollowup.value = outcome.followup

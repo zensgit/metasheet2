@@ -19,6 +19,7 @@ import {
   shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry,
   shouldKeepPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationFollowup,
+  shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup,
   syncPlmAuditTeamViewCollaborationFollowupSourceAnchor,
 } from '../src/views/plmAuditTeamViewCollaboration'
 
@@ -916,6 +917,40 @@ describe('plmAuditTeamViewCollaboration', () => {
         teamViewId: 'audit-view-2',
       },
       'audit-view-7',
+    )).toBe(false)
+  })
+
+  it('replaces an existing collaboration draft once a share follow-up takes over', () => {
+    expect(shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup(
+      {
+        teamViewId: 'audit-view-2',
+      },
+      {
+        teamViewId: 'audit-view-2',
+      },
+    )).toBe(true)
+
+    expect(shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup(
+      {
+        teamViewId: 'audit-view-2',
+      },
+      {
+        teamViewId: 'audit-view-7',
+      },
+    )).toBe(true)
+
+    expect(shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup(
+      {
+        teamViewId: 'audit-view-2',
+      },
+      null,
+    )).toBe(false)
+
+    expect(shouldReplacePlmAuditTeamViewCollaborationDraftWithFollowup(
+      null,
+      {
+        teamViewId: 'audit-view-7',
+      },
     )).toBe(false)
   })
 
