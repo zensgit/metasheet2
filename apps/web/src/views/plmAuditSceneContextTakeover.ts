@@ -17,6 +17,7 @@ export type PlmAuditSceneContextTakeoverState = {
   attentionFocus: PlmAuditAttentionFocusState
   savedViewAttention: PlmAuditSavedViewAttentionState
   shareEntry: PlmAuditTeamViewShareEntry | null
+  consumeSharedEntry: boolean
   collaboration: {
     selectedIds: string[]
     draft: PlmAuditTeamViewCollaborationDraft | null
@@ -38,13 +39,15 @@ export function buildPlmAuditSceneContextTakeoverState(options: {
     options.attentionFocus,
     options.savedViewAttention,
   )
+  const sharedEntryTakenOver = shouldTakeOverPlmAuditSharedEntryOnSceneContextTakeover(
+    options.shareEntry,
+  )
 
   return {
     attentionFocus: nextAttentionState.attentionFocus,
     savedViewAttention: nextAttentionState.savedViewAttention,
-    shareEntry: shouldTakeOverPlmAuditSharedEntryOnSceneContextTakeover(options.shareEntry)
-      ? null
-      : options.shareEntry,
+    shareEntry: sharedEntryTakenOver ? null : options.shareEntry,
+    consumeSharedEntry: sharedEntryTakenOver,
     collaboration: resolvePlmAuditSavedViewTakeoverCollaborationState({
       selectedIds: options.collaboration.selectedIds,
       draft: options.collaboration.draft,

@@ -50,6 +50,7 @@ describe('plmAuditSceneContextTakeover', () => {
         focusedSavedViewId: '',
       },
       shareEntry: null,
+      consumeSharedEntry: true,
       collaboration: {
         selectedIds: [],
         draft: null,
@@ -83,10 +84,13 @@ describe('plmAuditSceneContextTakeover', () => {
         },
         followup: null,
       },
-    }).collaboration).toEqual({
-      selectedIds: ['team-view-9', 'team-view-10'],
-      draft: null,
-      followup: null,
+    })).toMatchObject({
+      consumeSharedEntry: false,
+      collaboration: {
+        selectedIds: ['team-view-9', 'team-view-10'],
+        draft: null,
+        followup: null,
+      },
     })
   })
 
@@ -109,6 +113,9 @@ describe('plmAuditSceneContextTakeover', () => {
         draft: null,
         followup: null,
       },
-    }).shareEntry).toBeNull()
+    })).toMatchObject({
+      shareEntry: null,
+      consumeSharedEntry: true,
+    })
   })
 })

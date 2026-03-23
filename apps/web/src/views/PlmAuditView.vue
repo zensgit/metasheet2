@@ -1321,21 +1321,28 @@ function applySceneContextTakeoverCleanup() {
   auditTeamViewSelection.value = nextState.collaboration.selectedIds
   auditTeamViewCollaborationDraft.value = nextState.collaboration.draft
   auditTeamViewCollaborationFollowup.value = nextState.collaboration.followup
+  return nextState.consumeSharedEntry
 }
 
 async function clearAuditSceneContext() {
-  applySceneContextTakeoverCleanup()
-  await syncRouteState(withoutPlmAuditSceneContext(readCanonicalTeamViewRouteState()))
+  const consumeSharedEntry = applySceneContextTakeoverCleanup()
+  await syncRouteState(withoutPlmAuditSceneContext(readCanonicalTeamViewRouteState()), false, {
+    consumeSharedEntry,
+  })
 }
 
 async function applyAuditSceneOwnerContext() {
-  applySceneContextTakeoverCleanup()
-  await syncRouteState(withPlmAuditSceneOwnerContext(readCanonicalTeamViewRouteState()))
+  const consumeSharedEntry = applySceneContextTakeoverCleanup()
+  await syncRouteState(withPlmAuditSceneOwnerContext(readCanonicalTeamViewRouteState()), false, {
+    consumeSharedEntry,
+  })
 }
 
 async function restoreAuditSceneQuery() {
-  applySceneContextTakeoverCleanup()
-  await syncRouteState(withPlmAuditSceneQueryContext(readCanonicalTeamViewRouteState()))
+  const consumeSharedEntry = applySceneContextTakeoverCleanup()
+  await syncRouteState(withPlmAuditSceneQueryContext(readCanonicalTeamViewRouteState()), false, {
+    consumeSharedEntry,
+  })
 }
 
 async function runAuditSceneTokenAction(actionKind: PlmAuditSceneTokenActionKind | null) {
