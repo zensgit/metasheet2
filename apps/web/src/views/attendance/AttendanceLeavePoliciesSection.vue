@@ -367,6 +367,92 @@
           <span v-if="linkedWorkflowId">{{ linkedWorkflowId }}</span>
           <span v-else>{{ tr('No linked workflow draft', '暂无已关联工作流草稿') }}</span>
         </div>
+        <div v-if="approvalFlowEditingId && linkedWorkflowId" class="attendance__admin-actions">
+          <button
+            class="attendance__btn"
+            type="button"
+            :disabled="approvalFlowWorkflowSyncLoading"
+            @click="previewApprovalFlowWorkflowSync"
+          >
+            {{
+              approvalFlowWorkflowSyncLoading
+                ? tr('Loading sync preview...', '加载同步预览中...')
+                : tr('Preview sync from linked draft', '预览已关联草稿同步')
+            }}
+          </button>
+          <button
+            v-if="approvalFlowWorkflowSyncPreview"
+            class="attendance__btn attendance__btn--primary"
+            type="button"
+            @click="applyApprovalFlowWorkflowSyncPreview"
+          >
+            {{ tr('Apply synced steps', '应用同步步骤') }}
+          </button>
+          <button
+            v-if="approvalFlowWorkflowSyncPreview || approvalFlowWorkflowSyncError"
+            class="attendance__btn"
+            type="button"
+            @click="clearApprovalFlowWorkflowSyncPreview"
+          >
+            {{ tr('Clear sync preview', '清除同步预览') }}
+          </button>
+        </div>
+        <div v-if="approvalFlowWorkflowSyncPreview" class="attendance__builder-card attendance__builder-card--static">
+          <div class="attendance__builder-card-header">
+            <strong>{{ tr('Workflow sync preview', '工作流同步预览') }}</strong>
+            <small class="attendance__field-hint">
+              {{ approvalFlowWorkflowSyncPreview.workflowName }} · {{ approvalFlowWorkflowSyncPreview.workflowId }}
+            </small>
+          </div>
+          <div class="attendance__builder-summary">
+            <span class="attendance__builder-chip">
+              {{ tr('Current steps', '当前步骤') }}: {{ approvalFlowBuilderSummary.stepCount }}
+            </span>
+            <span class="attendance__builder-chip">
+              {{ tr('Derived steps', '提取步骤') }}: {{ approvalFlowWorkflowSyncPreview.summary.derivedStepCount }}
+            </span>
+            <span class="attendance__builder-chip">
+              {{ tr('User tasks', '用户任务') }}: {{ approvalFlowWorkflowSyncPreview.summary.userTaskCount }}
+            </span>
+            <span class="attendance__builder-chip">
+              {{ tr('Warnings', '警告') }}: {{ approvalFlowWorkflowSyncPreview.summary.unsupportedNodeCount }}
+            </span>
+          </div>
+          <div class="attendance__builder-link-state">
+            <strong>{{ tr('Sync source', '同步来源') }}:</strong>
+            <span>
+              {{
+                approvalFlowWorkflowSyncPreview.sourceMode === 'bpmn+visual-fallback'
+                  ? tr('BPMN with visual fallback', 'BPMN + 可视定义回退')
+                  : tr('BPMN', 'BPMN')
+              }}
+            </span>
+          </div>
+          <div class="attendance__builder-list">
+            <div
+              v-for="(step, index) in approvalFlowWorkflowSyncPreview.steps"
+              :key="`${approvalFlowWorkflowSyncPreview.workflowId}-sync-${index}`"
+              class="attendance__builder-card"
+            >
+              <div class="attendance__builder-card-header">
+                <strong>{{ tr('Derived step', '提取步骤') }} {{ index + 1 }}</strong>
+              </div>
+              <small class="attendance__field-hint">{{ summarizeWorkflowSyncStep(step) }}</small>
+            </div>
+          </div>
+          <div v-if="approvalFlowWorkflowSyncPreview.warnings.length > 0" class="attendance__field attendance__field--full">
+            <span>{{ tr('Sync warnings', '同步警告') }}</span>
+            <ul class="attendance__field-hint attendance__field-hint--danger attendance__sync-warning-list">
+              <li v-for="warning in approvalFlowWorkflowSyncPreview.warnings" :key="warning">{{ warning }}</li>
+            </ul>
+          </div>
+          <small class="attendance__field-hint">
+            {{ tr('Applying the preview replaces the current visual builder steps only. Use Update flow to persist the synced result.', '应用预览只会替换当前可视化构建器中的步骤，仍需点击更新流程才能持久化。') }}
+          </small>
+        </div>
+        <small v-else-if="approvalFlowWorkflowSyncError" class="attendance__field-hint attendance__field-hint--danger">
+          {{ approvalFlowWorkflowSyncError }}
+        </small>
         <small class="attendance__field-hint">
           {{ tr('The workflow designer will receive request type, flow name, step count, and step summary, then seed a starter draft with the recommended template.', '流程设计器会接收申请类型、流程名称、步骤数量和步骤摘要，并用推荐模板生成起步草稿。') }}
         </small>
@@ -446,6 +532,7 @@ import type {
   AttendanceApprovalFlow,
   AttendanceApprovalFlowTemplateChoice,
   AttendanceApprovalStep,
+  AttendanceApprovalWorkflowSyncPreview,
   AttendanceLeaveType,
   AttendanceOvertimeRule,
 } from './useAttendanceAdminLeavePolicies'
@@ -514,6 +601,9 @@ interface LeavePoliciesBindings {
   approvalFlowForm: ApprovalFlowFormState
   approvalFlowBuilderSteps: Ref<AttendanceApprovalBuilderStep[]>
   approvalFlowBuilderError: Ref<string>
+  approvalFlowWorkflowSyncLoading: Ref<boolean>
+  approvalFlowWorkflowSyncError: Ref<string>
+  approvalFlowWorkflowSyncPreview: Ref<AttendanceApprovalWorkflowSyncPreview | null>
   approvalFlowBuilderSummary: Ref<{
     stepCount: number
     roleAssignmentCount: number
@@ -524,6 +614,9 @@ interface LeavePoliciesBindings {
   addApprovalFlowBuilderStep: () => MaybePromise<void>
   removeApprovalFlowBuilderStep: (index: number) => MaybePromise<void>
   applyApprovalFlowTemplate: (templateId: string) => MaybePromise<void>
+  clearApprovalFlowWorkflowSyncPreview: () => MaybePromise<void>
+  previewApprovalFlowWorkflowSync: () => MaybePromise<void>
+  applyApprovalFlowWorkflowSyncPreview: () => MaybePromise<void>
   resetApprovalFlowForm: () => MaybePromise<void>
   editApprovalFlow: (item: AttendanceApprovalFlow) => MaybePromise<void>
   loadApprovalFlows: () => MaybePromise<void>
@@ -569,11 +662,17 @@ const approvalFlowEditingId = props.policies.approvalFlowEditingId
 const approvalFlowForm = props.policies.approvalFlowForm
 const approvalFlowBuilderSteps = props.policies.approvalFlowBuilderSteps
 const approvalFlowBuilderError = props.policies.approvalFlowBuilderError
+const approvalFlowWorkflowSyncLoading = props.policies.approvalFlowWorkflowSyncLoading
+const approvalFlowWorkflowSyncError = props.policies.approvalFlowWorkflowSyncError
+const approvalFlowWorkflowSyncPreview = props.policies.approvalFlowWorkflowSyncPreview
 const approvalFlowBuilderSummary = props.policies.approvalFlowBuilderSummary
 const approvalFlowTemplates = props.policies.approvalFlowTemplates
 const addApprovalFlowBuilderStep = () => props.policies.addApprovalFlowBuilderStep()
 const removeApprovalFlowBuilderStep = (index: number) => props.policies.removeApprovalFlowBuilderStep(index)
 const applyApprovalFlowTemplate = (templateId: string) => props.policies.applyApprovalFlowTemplate(templateId)
+const clearApprovalFlowWorkflowSyncPreview = () => props.policies.clearApprovalFlowWorkflowSyncPreview()
+const previewApprovalFlowWorkflowSync = () => props.policies.previewApprovalFlowWorkflowSync()
+const applyApprovalFlowWorkflowSyncPreview = () => props.policies.applyApprovalFlowWorkflowSyncPreview()
 const resetApprovalFlowForm = () => props.policies.resetApprovalFlowForm()
 const editApprovalFlow = (item: AttendanceApprovalFlow) => props.policies.editApprovalFlow(item)
 const loadApprovalFlows = () => props.policies.loadApprovalFlows()
@@ -625,6 +724,19 @@ function summarizeFlowSteps(steps: AttendanceApprovalStep[]): string {
       return name
     })
     .join(' -> ')
+}
+
+function summarizeWorkflowSyncStep(step: AttendanceApprovalStep): string {
+  const name = typeof step.name === 'string' && step.name.trim()
+    ? step.name.trim()
+    : tr('Unnamed step', '未命名步骤')
+  const roleSummary = Array.isArray(step.approverRoleIds) && step.approverRoleIds.length > 0
+    ? step.approverRoleIds.join(', ')
+    : tr('No role gates', '无角色关卡')
+  const userSummary = Array.isArray(step.approverUserIds) && step.approverUserIds.length > 0
+    ? step.approverUserIds.join(', ')
+    : tr('No direct users', '未指定用户')
+  return `${name} | ${tr('Roles', '角色')}: ${roleSummary} | ${tr('Users', '用户')}: ${userSummary}`
 }
 
 async function openWorkflowDesignerFromApprovalFlow(): Promise<void> {
@@ -824,6 +936,10 @@ async function clearLinkedWorkflowDraft(): Promise<void> {
   background: #fafcff;
 }
 
+.attendance__builder-card--static {
+  margin-top: 4px;
+}
+
 .attendance__builder-card-header {
   display: flex;
   justify-content: space-between;
@@ -845,5 +961,10 @@ async function clearLinkedWorkflowDraft(): Promise<void> {
   gap: 8px;
   font-size: 13px;
   color: #475569;
+}
+
+.attendance__sync-warning-list {
+  margin: 0;
+  padding-left: 18px;
 }
 </style>

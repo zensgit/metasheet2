@@ -100,6 +100,8 @@ const zonedPartsFormatterCache = new Map()
 const timeToMinutesCache = new Map()
 let attendanceCopyFromFactory = null
 let attendanceCopyFromUnavailable = false
+let attendanceXml2js = null
+let attendanceXml2jsUnavailable = false
 
 function resolveAttendanceCopyFromFactory() {
   if (attendanceCopyFromFactory) return attendanceCopyFromFactory
@@ -119,6 +121,18 @@ function resolveAttendanceCopyFromFactory() {
     return attendanceCopyFromFactory
   } catch (_error) {
     attendanceCopyFromUnavailable = true
+    return null
+  }
+}
+
+function resolveAttendanceXml2js() {
+  if (attendanceXml2js) return attendanceXml2js
+  if (attendanceXml2jsUnavailable) return null
+  try {
+    attendanceXml2js = require('xml2js')
+    return attendanceXml2js
+  } catch (_error) {
+    attendanceXml2jsUnavailable = true
     return null
   }
 }
@@ -2734,6 +2748,302 @@ function canEditWorkflowDraftRow(row, userId) {
   if (typeof row?.created_by === 'string' && row.created_by === userId) return true
   const shares = parseWorkflowDraftShares(row?.definition)
   return shares.some((entry) => entry.userId === userId && entry.canEdit)
+}
+
+function parseWorkflowDraftDefinitionEnvelope(definition) {
+  try {
+    if (!definition) return {}
+    const envelope = typeof definition === 'string'
+      ? JSON.parse(definition)
+      : definition
+    if (!envelope || typeof envelope !== 'object') return {}
+    return envelope
+  } catch {
+    return {}
+  }
+}
+
+function ensureArray(value) {
+  if (Array.isArray(value)) return value
+  if (value == null) return []
+  return [value]
+}
+
+function readXmlNodeText(value) {
+  if (typeof value === 'string') return value.trim()
+  if (!value || typeof value !== 'object') return ''
+  if (typeof value._ === 'string') return value._.trim()
+  return ''
+}
+
+function normalizeWorkflowValueList(value) {
+  const text = readXmlNodeText(value) || (typeof value === 'string' ? value.trim() : '')
+  if (!text) return []
+  return text
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function uniqueStrings(values) {
+  return Array.from(new Set(ensureArray(values).map((item) => String(item).trim()).filter(Boolean)))
+}
+
+function extractWorkflowPotentialOwnerUsers(potentialOwner) {
+  for (const owner of ensureArray(potentialOwner)) {
+    const expressions = ensureArray(owner?.resourceAssignmentExpression)
+    for (const expression of expressions) {
+      const formalExpressions = ensureArray(expression?.formalExpression)
+      for (const formalExpression of formalExpressions) {
+        const resolved = normalizeWorkflowValueList(formalExpression)
+        if (resolved.length > 0) {
+          return resolved
+        }
+      }
+    }
+  }
+  return []
+}
+
+function createWarningCollector() {
+  const messages = []
+  const seen = new Set()
+  return {
+    add(message) {
+      const normalized = typeof message === 'string' ? message.trim() : ''
+      if (!normalized || seen.has(normalized)) return
+      seen.add(normalized)
+      messages.push(normalized)
+    },
+    values() {
+      return messages
+    },
+  }
+}
+
+function isRejectedWorkflowTarget(node, conditionText) {
+  if (!node || node.type !== 'endEvent') return false
+  const combined = `${node.name || ''} ${conditionText || ''}`.toLowerCase()
+  return /reject|rejected|deny|denied|refuse|refused|驳回|拒绝|否决/.test(combined)
+}
+
+function buildWorkflowVisualTaskMap(visual) {
+  const map = new Map()
+  const nodes = Array.isArray(visual?.nodes) ? visual.nodes : []
+  for (const node of nodes) {
+    if (!node || typeof node !== 'object' || node.type !== 'userTask') continue
+    const nodeId = typeof node.id === 'string' ? node.id.trim() : ''
+    if (!nodeId) continue
+    map.set(nodeId, {
+      name: typeof node.name === 'string' ? node.name.trim() : '',
+      candidateGroups: uniqueStrings(node.data?.candidateGroups),
+      candidateUsers: uniqueStrings(node.data?.candidateUsers),
+      assignee: typeof node.data?.assignee === 'string' ? node.data.assignee.trim() : '',
+    })
+  }
+  return map
+}
+
+async function buildApprovalFlowWorkflowSyncPreview({ flow, workflowRow, logger }) {
+  const xml2js = resolveAttendanceXml2js()
+  if (!xml2js) {
+    const error = new Error('Workflow sync preview requires xml2js support')
+    error.code = 'DEPENDENCY_UNAVAILABLE'
+    throw error
+  }
+
+  const storedDefinition = parseWorkflowDraftDefinitionEnvelope(workflowRow.definition)
+  const bpmnXml = typeof storedDefinition.bpmn === 'string' && storedDefinition.bpmn.trim()
+    ? storedDefinition.bpmn.trim()
+    : ''
+  if (!bpmnXml) {
+    const error = new Error('Linked workflow draft does not contain BPMN XML')
+    error.code = 'SYNC_PREVIEW_UNAVAILABLE'
+    throw error
+  }
+
+  const parser = new xml2js.Parser({
+    explicitArray: false,
+    trim: true,
+    tagNameProcessors: [xml2js.processors.stripPrefix],
+    attrNameProcessors: [xml2js.processors.stripPrefix],
+  })
+
+  const parsed = await parser.parseStringPromise(bpmnXml)
+  const definitions = parsed && typeof parsed === 'object'
+    ? parsed.definitions || parsed
+    : null
+  const processRecord = definitions && typeof definitions === 'object'
+    ? ensureArray(definitions.process)[0]
+    : null
+
+  if (!processRecord || typeof processRecord !== 'object') {
+    const error = new Error('Linked workflow draft BPMN process is invalid')
+    error.code = 'SYNC_PREVIEW_INVALID_BPMN'
+    throw error
+  }
+
+  const warnings = createWarningCollector()
+  const visualTaskMap = buildWorkflowVisualTaskMap(storedDefinition.visual)
+  const nodes = new Map()
+  const flows = new Map()
+  const nodeTypes = [
+    'startEvent',
+    'endEvent',
+    'userTask',
+    'serviceTask',
+    'scriptTask',
+    'exclusiveGateway',
+    'parallelGateway',
+    'intermediateCatchEvent',
+  ]
+
+  for (const type of nodeTypes) {
+    for (const rawNode of ensureArray(processRecord[type])) {
+      if (!rawNode || typeof rawNode !== 'object') continue
+      const attrs = rawNode.$ && typeof rawNode.$ === 'object' ? rawNode.$ : {}
+      const id = typeof attrs.id === 'string' ? attrs.id.trim() : ''
+      if (!id) continue
+      nodes.set(id, {
+        id,
+        type,
+        name: typeof attrs.name === 'string' ? attrs.name.trim() : '',
+        outgoingFlowIds: ensureArray(rawNode.outgoing).map(readXmlNodeText).filter(Boolean),
+        incomingFlowIds: ensureArray(rawNode.incoming).map(readXmlNodeText).filter(Boolean),
+        assignee: typeof attrs.assignee === 'string' ? attrs.assignee.trim() : '',
+        formKey: typeof attrs.formKey === 'string' ? attrs.formKey.trim() : '',
+        candidateGroups: uniqueStrings(normalizeWorkflowValueList(attrs.candidateGroups)),
+        candidateUsers: uniqueStrings(extractWorkflowPotentialOwnerUsers(rawNode.potentialOwner)),
+      })
+    }
+  }
+
+  for (const rawFlow of ensureArray(processRecord.sequenceFlow)) {
+    if (!rawFlow || typeof rawFlow !== 'object') continue
+    const attrs = rawFlow.$ && typeof rawFlow.$ === 'object' ? rawFlow.$ : {}
+    const id = typeof attrs.id === 'string' ? attrs.id.trim() : ''
+    if (!id) continue
+    flows.set(id, {
+      id,
+      sourceRef: typeof attrs.sourceRef === 'string' ? attrs.sourceRef.trim() : '',
+      targetRef: typeof attrs.targetRef === 'string' ? attrs.targetRef.trim() : '',
+      conditionText: readXmlNodeText(rawFlow.conditionExpression),
+    })
+  }
+
+  const startNodes = Array.from(nodes.values()).filter((node) => node.type === 'startEvent')
+  let currentNode = startNodes[0] ?? Array.from(nodes.values()).find((node) => node.type === 'userTask') ?? null
+  let userTaskCount = 0
+  let unsupportedNodeCount = 0
+  let usedVisualFallback = false
+  const derivedSteps = []
+  const visited = new Set()
+
+  if (!startNodes.length && currentNode) {
+    warnings.add('Linked workflow draft has no BPMN start event. Preview follows the first user task instead.')
+  }
+
+  function chooseNextFlow(node) {
+    const outgoing = node.outgoingFlowIds
+      .map((flowId) => flows.get(flowId))
+      .filter(Boolean)
+    if (!outgoing.length) return null
+
+    if (node.type === 'exclusiveGateway') {
+      const nonRejected = outgoing.filter((flow) => !isRejectedWorkflowTarget(nodes.get(flow.targetRef), flow.conditionText))
+      if (nonRejected.length === 1) return nonRejected[0]
+      if (nonRejected.length > 1) {
+        unsupportedNodeCount += 1
+        warnings.add(`Exclusive gateway "${node.name || node.id}" branches to multiple non-rejection paths. Preview follows the first branch only.`)
+        return nonRejected[0]
+      }
+      return outgoing[0]
+    }
+
+    if (node.type === 'parallelGateway') {
+      unsupportedNodeCount += 1
+      warnings.add(`Parallel gateway "${node.name || node.id}" is not fully supported. Preview follows the first branch only.`)
+      return outgoing[0]
+    }
+
+    if (outgoing.length > 1) {
+      unsupportedNodeCount += 1
+      warnings.add(`Node "${node.name || node.id}" has multiple outgoing branches. Preview follows the first branch only.`)
+    }
+
+    return outgoing[0]
+  }
+
+  while (currentNode) {
+    if (visited.has(currentNode.id)) {
+      unsupportedNodeCount += 1
+      warnings.add(`Loop detected at "${currentNode.name || currentNode.id}". Preview stopped before repeating steps.`)
+      break
+    }
+    visited.add(currentNode.id)
+
+    if (currentNode.type === 'userTask') {
+      userTaskCount += 1
+      const visualNode = visualTaskMap.get(currentNode.id)
+      const approverRoleIds = currentNode.candidateGroups.length > 0
+        ? [...currentNode.candidateGroups]
+        : uniqueStrings(visualNode?.candidateGroups)
+      const approverUserIds = uniqueStrings([
+        ...(currentNode.assignee ? [currentNode.assignee] : []),
+        ...currentNode.candidateUsers,
+        ...uniqueStrings(visualNode?.candidateUsers),
+        ...(typeof visualNode?.assignee === 'string' && visualNode.assignee.trim() ? [visualNode.assignee.trim()] : []),
+      ])
+
+      if (currentNode.candidateGroups.length === 0 && approverRoleIds.length > 0) {
+        usedVisualFallback = true
+      }
+
+      if (approverRoleIds.length === 0 && approverUserIds.length === 0) {
+        unsupportedNodeCount += 1
+        warnings.add(`User task "${currentNode.name || currentNode.id}" has no approver users or roles, so it was skipped from sync preview.`)
+      } else {
+        derivedSteps.push({
+          ...(currentNode.name ? { name: currentNode.name } : {}),
+          ...(approverUserIds.length > 0 ? { approverUserIds } : {}),
+          ...(approverRoleIds.length > 0 ? { approverRoleIds } : {}),
+        })
+      }
+    } else if (['serviceTask', 'scriptTask', 'intermediateCatchEvent', 'parallelGateway'].includes(currentNode.type)) {
+      unsupportedNodeCount += 1
+      warnings.add(`Node "${currentNode.name || currentNode.id}" of type ${currentNode.type} is not converted into attendance approval steps.`)
+    }
+
+    if (currentNode.type === 'endEvent') break
+
+    const nextFlow = chooseNextFlow(currentNode)
+    if (!nextFlow) break
+    currentNode = nodes.get(nextFlow.targetRef) ?? null
+  }
+
+  if (usedVisualFallback) {
+    warnings.add('Some approver role assignments were recovered from saved visual draft metadata. Re-save the workflow draft to persist those roles into BPMN metadata.')
+  }
+
+  if (derivedSteps.length === 0) {
+    const error = new Error('Linked workflow draft does not contain any syncable approval user tasks')
+    error.code = 'SYNC_PREVIEW_UNSUPPORTED'
+    throw error
+  }
+
+  return {
+    workflowId: workflowRow.id,
+    workflowName: workflowRow.name,
+    sourceMode: usedVisualFallback ? 'bpmn+visual-fallback' : 'bpmn',
+    steps: derivedSteps,
+    warnings: warnings.values(),
+    summary: {
+      currentStepCount: normalizeApprovalSteps(flow.steps).length,
+      userTaskCount,
+      derivedStepCount: derivedSteps.length,
+      unsupportedNodeCount,
+    },
+  }
 }
 
 function mapRotationRuleRow(row) {
@@ -10751,6 +11061,76 @@ module.exports = {
           }
           logger.error('Attendance approval flow workflow link update failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update approval flow workflow link' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/approval-flows/:id/workflow-sync-preview',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const flowId = normalizeUuidString(req.params.id)
+        if (!flowId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        const userId = getUserId(req)
+
+        try {
+          const flowRows = await db.query(
+            'SELECT * FROM attendance_approval_flows WHERE id = $1 AND org_id = $2',
+            [flowId, orgId]
+          )
+          if (!flowRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Approval flow not found' } })
+            return
+          }
+
+          const flow = flowRows[0]
+          const workflowId = normalizeUuidString(flow.workflow_id)
+          if (!workflowId) {
+            res.status(409).json({ ok: false, error: { code: 'WORKFLOW_LINK_REQUIRED', message: 'Approval flow is not linked to a workflow draft' } })
+            return
+          }
+
+          const workflowRows = await db.query(
+            'SELECT id, name, created_by, definition FROM workflow_definitions WHERE id = $1',
+            [workflowId]
+          )
+          if (!workflowRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Workflow draft not found' } })
+            return
+          }
+
+          if (!canEditWorkflowDraftRow(workflowRows[0], userId)) {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Workflow draft edit access required' } })
+            return
+          }
+
+          const preview = await buildApprovalFlowWorkflowSyncPreview({
+            flow,
+            workflowRow: workflowRows[0],
+            logger,
+          })
+
+          res.json({ ok: true, data: preview })
+        } catch (error) {
+          if (error?.code === 'SYNC_PREVIEW_UNSUPPORTED' || error?.code === 'SYNC_PREVIEW_INVALID_BPMN' || error?.code === 'SYNC_PREVIEW_UNAVAILABLE') {
+            res.status(409).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (error?.code === 'DEPENDENCY_UNAVAILABLE') {
+            res.status(503).json({ ok: false, error: { code: 'DEPENDENCY_UNAVAILABLE', message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance approval flow workflow sync preview failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview approval flow workflow sync' } })
         }
       })
     )

@@ -439,4 +439,147 @@ describe('useAttendanceAdminLeavePolicies', () => {
     expect(policies.approvalFlowForm.workflowId).toBe('wf-123')
     expect(setStatus).toHaveBeenCalledWith('Workflow draft linked to approval flow.')
   })
+
+  it('loads a workflow sync preview and applies the derived steps into the builder', async () => {
+    const adminForbidden = ref(false)
+    const requestForm = reactive({ leaveTypeId: '', overtimeRuleId: '' })
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [
+            {
+              id: 'flow-1',
+              name: 'Leave manager to HR',
+              requestType: 'leave',
+              workflowId: 'wf-123',
+              steps: [{ name: 'Manager review', approverRoleIds: ['manager'] }],
+              isActive: true,
+            },
+          ],
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          workflowId: 'wf-123',
+          workflowName: 'Leave linked draft',
+          sourceMode: 'bpmn',
+          steps: [
+            { name: 'Manager review', approverRoleIds: ['manager'] },
+            { name: 'HR review', approverRoleIds: ['hr'] },
+          ],
+          warnings: [],
+          summary: {
+            currentStepCount: 1,
+            userTaskCount: 2,
+            derivedStepCount: 2,
+            unsupportedNodeCount: 0,
+          },
+        },
+      }))
+
+    const policies = useAttendanceAdminLeavePolicies({
+      adminForbidden,
+      requestForm,
+      apiFetch,
+      getOrgId: () => 'org-1',
+      setStatus,
+    })
+
+    await policies.loadApprovalFlows()
+    policies.editApprovalFlow(policies.approvalFlows.value[0]!)
+
+    await policies.previewApprovalFlowWorkflowSync()
+
+    expect(apiFetch).toHaveBeenNthCalledWith(2, '/api/attendance/approval-flows/flow-1/workflow-sync-preview?orgId=org-1')
+    expect(policies.approvalFlowWorkflowSyncPreview.value).toMatchObject({
+      workflowId: 'wf-123',
+      summary: {
+        derivedStepCount: 2,
+      },
+    })
+
+    policies.applyApprovalFlowWorkflowSyncPreview()
+    await flushUi()
+
+    expect(policies.approvalFlowWorkflowSyncPreview.value).toBeNull()
+    expect(policies.approvalFlowBuilderSteps.value).toHaveLength(2)
+    expect(JSON.parse(policies.approvalFlowForm.steps)).toEqual([
+      { name: 'Manager review', approverRoleIds: ['manager'] },
+      { name: 'HR review', approverRoleIds: ['hr'] },
+    ])
+    expect(setStatus).toHaveBeenCalledWith('Workflow draft steps applied to the approval builder. Save the flow to persist them.')
+  })
+
+  it('surfaces workflow sync preview warnings and clears stale preview when the link changes', async () => {
+    const adminForbidden = ref(false)
+    const requestForm = reactive({ leaveTypeId: '', overtimeRuleId: '' })
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [
+            {
+              id: 'flow-1',
+              name: 'Leave manager to HR',
+              requestType: 'leave',
+              workflowId: 'wf-123',
+              steps: [{ name: 'Manager review', approverRoleIds: ['manager'] }],
+              isActive: true,
+            },
+          ],
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          workflowId: 'wf-123',
+          workflowName: 'Leave linked draft',
+          sourceMode: 'bpmn+visual-fallback',
+          steps: [
+            { name: 'Manager review', approverRoleIds: ['manager'] },
+          ],
+          warnings: ['Recovered role gates from visual metadata.'],
+          summary: {
+            currentStepCount: 1,
+            userTaskCount: 1,
+            derivedStepCount: 1,
+            unsupportedNodeCount: 1,
+          },
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          id: 'flow-1',
+          name: 'Leave manager to HR',
+          requestType: 'leave',
+          workflowId: null,
+          steps: [{ name: 'Manager review', approverRoleIds: ['manager'] }],
+          isActive: true,
+        },
+      }))
+
+    const policies = useAttendanceAdminLeavePolicies({
+      adminForbidden,
+      requestForm,
+      apiFetch,
+      setStatus,
+    })
+
+    await policies.loadApprovalFlows()
+    policies.editApprovalFlow(policies.approvalFlows.value[0]!)
+
+    await policies.previewApprovalFlowWorkflowSync()
+
+    expect(policies.approvalFlowWorkflowSyncPreview.value?.warnings).toEqual(['Recovered role gates from visual metadata.'])
+
+    await policies.linkApprovalFlowWorkflow('flow-1', null)
+
+    expect(policies.approvalFlowWorkflowSyncPreview.value).toBeNull()
+    expect(policies.approvalFlowWorkflowSyncError.value).toBe('')
+  })
 })

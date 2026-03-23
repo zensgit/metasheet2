@@ -442,6 +442,36 @@ components:
             $ref: '#/components/schemas/AttendanceApprovalStep'
         isActive:
           type: boolean
+    AttendanceApprovalWorkflowSyncPreviewSummary:
+      type: object
+      properties:
+        currentStepCount:
+          type: integer
+        userTaskCount:
+          type: integer
+        derivedStepCount:
+          type: integer
+        unsupportedNodeCount:
+          type: integer
+    AttendanceApprovalWorkflowSyncPreview:
+      type: object
+      properties:
+        workflowId:
+          type: string
+        workflowName:
+          type: string
+        sourceMode:
+          type: string
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttendanceApprovalStep'
+        warnings:
+          type: array
+          items:
+            type: string
+        summary:
+          $ref: '#/components/schemas/AttendanceApprovalWorkflowSyncPreviewSummary'
     AttendanceRotationRule:
       type: object
       properties:

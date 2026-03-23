@@ -63,6 +63,22 @@ export interface AttendanceApprovalFlow {
   isActive: boolean
 }
 
+export interface AttendanceApprovalWorkflowSyncPreviewSummary {
+  currentStepCount: number
+  userTaskCount: number
+  derivedStepCount: number
+  unsupportedNodeCount: number
+}
+
+export interface AttendanceApprovalWorkflowSyncPreview {
+  workflowId: string
+  workflowName: string
+  sourceMode?: string
+  steps: AttendanceApprovalStep[]
+  warnings: string[]
+  summary: AttendanceApprovalWorkflowSyncPreviewSummary
+}
+
 export interface AttendanceAdminRequestFormLike {
   leaveTypeId: string
   overtimeRuleId: string
@@ -325,6 +341,9 @@ export function useAttendanceAdminLeavePolicies({
   })
   const approvalFlowBuilderSteps = ref<AttendanceApprovalBuilderStep[]>([])
   const approvalFlowBuilderError = ref('')
+  const approvalFlowWorkflowSyncLoading = ref(false)
+  const approvalFlowWorkflowSyncError = ref('')
+  const approvalFlowWorkflowSyncPreview = ref<AttendanceApprovalWorkflowSyncPreview | null>(null)
   const approvalFlowBuilderSummary = computed(() => {
     const normalizedSteps = approvalFlowBuilderSteps.value
       .map((step) => buildApprovalStepFromBuilder(step))
@@ -416,6 +435,71 @@ export function useAttendanceAdminLeavePolicies({
     const template = approvalFlowTemplates.value.find((item) => item.id === templateId)
     if (!template) return
     approvalFlowBuilderSteps.value = template.steps.map((step) => createApprovalBuilderStep(step))
+  }
+
+  function clearApprovalFlowWorkflowSyncPreview() {
+    approvalFlowWorkflowSyncError.value = ''
+    approvalFlowWorkflowSyncPreview.value = null
+  }
+
+  async function previewApprovalFlowWorkflowSync() {
+    const flowId = approvalFlowEditingId.value
+    const workflowId = approvalFlowForm.workflowId.trim()
+    if (!flowId || !workflowId) {
+      const message = tr('Link and save the approval flow before previewing workflow sync.', '请先保存并关联审批流程，再预览工作流同步结果。')
+      approvalFlowWorkflowSyncError.value = message
+      setStatus(message, 'error')
+      return
+    }
+
+    approvalFlowWorkflowSyncLoading.value = true
+    approvalFlowWorkflowSyncError.value = ''
+    try {
+      const query = buildOrgQuery(getOrgId())
+      const queryText = query.toString()
+      const response = await apiFetch(
+        `/api/attendance/approval-flows/${flowId}/workflow-sync-preview${queryText ? `?${queryText}` : ''}`,
+      )
+      if (response.status === 403) {
+        adminForbidden.value = true
+        throw createForbiddenError(tr('Admin permissions required', '需要管理员权限'))
+      }
+      const data = await readJson<ApiEnvelope<AttendanceApprovalWorkflowSyncPreview>>(response)
+      if (!response.ok || !data?.ok || !data.data) {
+        throw createApiError(response, data, tr('Failed to preview workflow approval sync', '预览工作流审批同步失败'))
+      }
+      adminForbidden.value = false
+      approvalFlowWorkflowSyncPreview.value = data.data
+      setStatus(tr('Workflow sync preview ready.', '工作流同步预览已生成。'))
+    } catch (error) {
+      const message = error instanceof Error && error.message
+        ? error.message
+        : tr('Failed to preview workflow approval sync', '预览工作流审批同步失败')
+      approvalFlowWorkflowSyncError.value = message
+      approvalFlowWorkflowSyncPreview.value = null
+      setStatus(message, 'error')
+    } finally {
+      approvalFlowWorkflowSyncLoading.value = false
+    }
+  }
+
+  function applyApprovalFlowWorkflowSyncPreview() {
+    const preview = approvalFlowWorkflowSyncPreview.value
+    if (!preview) {
+      const message = tr('Generate a workflow sync preview first.', '请先生成工作流同步预览。')
+      approvalFlowWorkflowSyncError.value = message
+      setStatus(message, 'error')
+      return
+    }
+    approvalFlowBuilderSteps.value = preview.steps.map((step) => createApprovalBuilderStep(step))
+    approvalFlowWorkflowSyncPreview.value = null
+    approvalFlowWorkflowSyncError.value = ''
+    setStatus(
+      tr(
+        'Workflow draft steps applied to the approval builder. Save the flow to persist them.',
+        '工作流草稿步骤已应用到审批构建器，请保存审批流程以持久化。',
+      ),
+    )
   }
 
   function forwardAdminError(error: unknown, fallbackMessage: string) {
@@ -686,6 +770,7 @@ export function useAttendanceAdminLeavePolicies({
     approvalFlowForm.workflowId = ''
     approvalFlowForm.steps = ''
     approvalFlowForm.isActive = true
+    clearApprovalFlowWorkflowSyncPreview()
   }
 
   function editApprovalFlow(flow: AttendanceApprovalFlow) {
@@ -695,6 +780,7 @@ export function useAttendanceAdminLeavePolicies({
     approvalFlowForm.workflowId = typeof flow.workflowId === 'string' ? flow.workflowId : ''
     approvalFlowForm.steps = formatApprovalSteps(flow.steps)
     approvalFlowForm.isActive = flow.isActive
+    clearApprovalFlowWorkflowSyncPreview()
   }
 
   function syncApprovalFlowCollection(flow: AttendanceApprovalFlow) {
@@ -825,6 +911,9 @@ export function useAttendanceAdminLeavePolicies({
       }
       adminForbidden.value = false
       syncApprovalFlowCollection(data.data)
+      if (approvalFlowEditingId.value === flowId) {
+        clearApprovalFlowWorkflowSyncPreview()
+      }
       setStatus(
         workflowId
           ? tr('Workflow draft linked to approval flow.', '工作流草稿已关联到审批流程。')
@@ -868,11 +957,17 @@ export function useAttendanceAdminLeavePolicies({
     approvalFlowForm,
     approvalFlowBuilderSteps,
     approvalFlowBuilderError,
+    approvalFlowWorkflowSyncLoading,
+    approvalFlowWorkflowSyncError,
+    approvalFlowWorkflowSyncPreview,
     approvalFlowBuilderSummary,
     approvalFlowTemplates,
     addApprovalFlowBuilderStep,
     removeApprovalFlowBuilderStep,
     applyApprovalFlowTemplate,
+    clearApprovalFlowWorkflowSyncPreview,
+    previewApprovalFlowWorkflowSync,
+    applyApprovalFlowWorkflowSyncPreview,
     resetApprovalFlowForm,
     editApprovalFlow,
     loadApprovalFlows,

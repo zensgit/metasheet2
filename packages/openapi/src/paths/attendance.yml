@@ -2053,6 +2053,36 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/attendance/approval-flows/{id}/workflow-sync-preview:
+    x-plugin: plugin-attendance
+    get:
+      summary: Preview approval steps derived from the linked workflow draft
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/AttendanceApprovalWorkflowSyncPreview'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Preview unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /api/attendance/rotation-rules:
     x-plugin: plugin-attendance
     get:

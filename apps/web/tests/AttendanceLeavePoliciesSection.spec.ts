@@ -5,6 +5,7 @@ import type {
   AttendanceApprovalBuilderStep,
   AttendanceApprovalFlow,
   AttendanceApprovalFlowTemplateChoice,
+  AttendanceApprovalWorkflowSyncPreview,
   AttendanceLeaveType,
   AttendanceOvertimeRule,
 } from '../src/views/attendance/useAttendanceAdminLeavePolicies'
@@ -74,6 +75,9 @@ interface LeavePoliciesBindings {
   }
   approvalFlowBuilderSteps: Ref<AttendanceApprovalBuilderStep[]>
   approvalFlowBuilderError: Ref<string>
+  approvalFlowWorkflowSyncLoading: Ref<boolean>
+  approvalFlowWorkflowSyncError: Ref<string>
+  approvalFlowWorkflowSyncPreview: Ref<AttendanceApprovalWorkflowSyncPreview | null>
   approvalFlowBuilderSummary: Ref<{
     stepCount: number
     roleAssignmentCount: number
@@ -84,6 +88,9 @@ interface LeavePoliciesBindings {
   addApprovalFlowBuilderStep: () => MaybePromise<void>
   removeApprovalFlowBuilderStep: (index: number) => MaybePromise<void>
   applyApprovalFlowTemplate: (templateId: string) => MaybePromise<void>
+  clearApprovalFlowWorkflowSyncPreview: () => MaybePromise<void>
+  previewApprovalFlowWorkflowSync: () => MaybePromise<void>
+  applyApprovalFlowWorkflowSyncPreview: () => MaybePromise<void>
   resetApprovalFlowForm: () => MaybePromise<void>
   editApprovalFlow: (item: AttendanceApprovalFlow) => MaybePromise<void>
   loadApprovalFlows: () => MaybePromise<void>
@@ -174,6 +181,24 @@ function createBindings(overrides: Partial<LeavePoliciesBindings> = {}): LeavePo
       },
     ]),
     approvalFlowBuilderError: ref(''),
+    approvalFlowWorkflowSyncLoading: ref(false),
+    approvalFlowWorkflowSyncError: ref(''),
+    approvalFlowWorkflowSyncPreview: ref<AttendanceApprovalWorkflowSyncPreview | null>({
+      workflowId: 'wf-123',
+      workflowName: 'Leave linked draft',
+      sourceMode: 'bpmn',
+      steps: [
+        { name: 'Manager review', approverRoleIds: ['manager'] },
+        { name: 'HR review', approverRoleIds: ['hr'] },
+      ],
+      warnings: ['Parallel gateway is not fully supported.'],
+      summary: {
+        currentStepCount: 2,
+        userTaskCount: 2,
+        derivedStepCount: 2,
+        unsupportedNodeCount: 1,
+      },
+    }),
     approvalFlowBuilderSummary: ref({
       stepCount: 2,
       roleAssignmentCount: 2,
@@ -200,6 +225,9 @@ function createBindings(overrides: Partial<LeavePoliciesBindings> = {}): LeavePo
     addApprovalFlowBuilderStep: vi.fn(),
     removeApprovalFlowBuilderStep: vi.fn(),
     applyApprovalFlowTemplate: vi.fn(),
+    clearApprovalFlowWorkflowSyncPreview: vi.fn(),
+    previewApprovalFlowWorkflowSync: vi.fn(),
+    applyApprovalFlowWorkflowSyncPreview: vi.fn(),
     resetApprovalFlowForm: vi.fn(),
     editApprovalFlow: vi.fn(),
     loadApprovalFlows: vi.fn(),
@@ -255,6 +283,10 @@ describe('AttendanceLeavePoliciesSection', () => {
     expect(container!.textContent).toContain('Advanced JSON fallback')
     expect(container!.textContent).toContain('Manager review -> HR review')
     expect(container!.textContent).toContain('starter draft with the recommended template')
+    expect(container!.textContent).toContain('Workflow sync preview')
+    expect(container!.textContent).toContain('Preview sync from linked draft')
+    expect(container!.textContent).toContain('Apply synced steps')
+    expect(container!.textContent).toContain('Parallel gateway is not fully supported.')
 
     const rowsTextarea = container!.querySelector<HTMLTextAreaElement>('#attendance-approval-steps')
     expect(rowsTextarea?.getAttribute('rows')).toBe('8')
@@ -265,6 +297,9 @@ describe('AttendanceLeavePoliciesSection', () => {
     const workflowButton = buttons.find((button) => button.textContent?.includes('Open in workflow designer'))
     const linkedWorkflowButton = buttons.find((button) => button.textContent?.includes('Open linked draft'))
     const clearLinkButton = buttons.find((button) => button.textContent?.includes('Clear link'))
+    const previewSyncButton = buttons.find((button) => button.textContent?.includes('Preview sync from linked draft'))
+    const applySyncButton = buttons.find((button) => button.textContent?.includes('Apply synced steps'))
+    const clearSyncPreviewButton = buttons.find((button) => button.textContent?.includes('Clear sync preview'))
     const removeButtons = buttons.filter((button) => button.textContent?.includes('Remove'))
 
     expect(templateButton).toBeTruthy()
@@ -272,6 +307,9 @@ describe('AttendanceLeavePoliciesSection', () => {
     expect(workflowButton).toBeTruthy()
     expect(linkedWorkflowButton).toBeTruthy()
     expect(clearLinkButton).toBeTruthy()
+    expect(previewSyncButton).toBeTruthy()
+    expect(applySyncButton).toBeTruthy()
+    expect(clearSyncPreviewButton).toBeTruthy()
     expect(removeButtons).toHaveLength(2)
 
     templateButton!.click()
@@ -279,12 +317,18 @@ describe('AttendanceLeavePoliciesSection', () => {
     removeButtons[0]!.click()
     workflowButton!.click()
     linkedWorkflowButton!.click()
+    previewSyncButton!.click()
+    applySyncButton!.click()
+    clearSyncPreviewButton!.click()
     clearLinkButton!.click()
     await flushUi()
 
     expect(policies.applyApprovalFlowTemplate).toHaveBeenCalledWith('manager-hr')
     expect(policies.addApprovalFlowBuilderStep).toHaveBeenCalledTimes(1)
     expect(policies.removeApprovalFlowBuilderStep).toHaveBeenCalledWith(0)
+    expect(policies.previewApprovalFlowWorkflowSync).toHaveBeenCalledTimes(1)
+    expect(policies.applyApprovalFlowWorkflowSyncPreview).toHaveBeenCalledTimes(1)
+    expect(policies.clearApprovalFlowWorkflowSyncPreview).toHaveBeenCalledTimes(1)
     expect(pushSpy).toHaveBeenCalledWith({
       name: 'attendance',
       query: expect.objectContaining({
@@ -309,6 +353,8 @@ describe('AttendanceLeavePoliciesSection', () => {
   it('shows builder sync errors from the JSON fallback', async () => {
     const policies = createBindings({
       approvalFlowBuilderError: ref('Fix the JSON fallback before editing with the visual builder.'),
+      approvalFlowWorkflowSyncPreview: ref(null),
+      approvalFlowWorkflowSyncError: ref('Workflow draft link is missing.'),
       approvalFlowBuilderSteps: ref([
         {
           id: 'step-1',
@@ -345,6 +391,7 @@ describe('AttendanceLeavePoliciesSection', () => {
     expect(container!.textContent).toContain('Roles: Any role')
     expect(container!.textContent).toContain('Users: No direct users')
     expect(container!.textContent).toContain('No linked workflow draft')
+    expect(container!.textContent).toContain('Workflow draft link is missing.')
     expect(container!.textContent).toContain('Save the approval flow first')
   })
 })

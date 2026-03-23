@@ -27,4 +27,17 @@ describe('WorkflowDesigner builtin attendance starters', () => {
     expect(leaveStarter?.nodes.some((node) => node.name === 'HR Review')).toBe(true)
     expect(exceptionStarter?.nodes.some((node) => node.name === 'Attendance Ops Review')).toBe(true)
   })
+
+  it('serializes attendance starter candidate groups into BPMN metadata', () => {
+    const designer = new WorkflowDesigner()
+    const leaveStarter = designer.getTemplates().find((template) => template.id === 'attendance-leave-manager-hr')
+
+    expect(leaveStarter).toBeTruthy()
+
+    const bpmnXml = (designer as unknown as { convertToBPMN: (definition: unknown) => string }).convertToBPMN(leaveStarter)
+
+    expect(bpmnXml).toContain('xmlns:metasheet="http://metasheet.com/bpmn/extensions"')
+    expect(bpmnXml).toContain('metasheet:candidateGroups="manager"')
+    expect(bpmnXml).toContain('metasheet:candidateGroups="hr"')
+  })
 })

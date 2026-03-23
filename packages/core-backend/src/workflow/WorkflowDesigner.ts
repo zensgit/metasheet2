@@ -84,6 +84,19 @@ interface AttendanceStarterStepDefinition {
   formKey: string
 }
 
+function escapeXmlText(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+}
+
+function escapeXmlAttribute(value: string): string {
+  return escapeXmlText(value)
+    .replaceAll('"', '&quot;')
+    .replaceAll('\'', '&apos;')
+}
+
 function buildAttendanceStarterTask(step: AttendanceStarterStepDefinition, x: number, y: number): WorkflowNode {
   return {
     id: `${step.id}-task`,
@@ -929,6 +942,7 @@ export class WorkflowDesigner extends EventEmitter {
              xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
              xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
              xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+             xmlns:metasheet="http://metasheet.com/bpmn/extensions"
              targetNamespace="http://metasheet.com/bpmn"
              id="Definitions_${definition.id}">
 
@@ -1005,9 +1019,12 @@ export class WorkflowDesigner extends EventEmitter {
         break
 
       case 'userTask':
-        xml = `    <userTask id="${node.id}" name="${node.name}"`
-        if (node.data.assignee) xml += ` assignee="${node.data.assignee}"`
-        if (node.data.formKey) xml += ` formKey="${node.data.formKey}"`
+        xml = `    <userTask id="${escapeXmlAttribute(node.id)}" name="${escapeXmlAttribute(node.name)}"`
+        if (node.data.assignee) xml += ` assignee="${escapeXmlAttribute(node.data.assignee)}"`
+        if (node.data.formKey) xml += ` formKey="${escapeXmlAttribute(node.data.formKey)}"`
+        if (node.data.candidateGroups?.length) {
+          xml += ` metasheet:candidateGroups="${escapeXmlAttribute(node.data.candidateGroups.join(','))}"`
+        }
         xml += `>\n`
 
         if (incoming.length > 0) {
@@ -1018,7 +1035,7 @@ export class WorkflowDesigner extends EventEmitter {
         }
 
         if (node.data.candidateUsers?.length) {
-          xml += `      <potentialOwner>\n        <resourceAssignmentExpression>\n          <formalExpression>${node.data.candidateUsers.join(',')}</formalExpression>\n        </resourceAssignmentExpression>\n      </potentialOwner>\n`
+          xml += `      <potentialOwner>\n        <resourceAssignmentExpression>\n          <formalExpression>${escapeXmlText(node.data.candidateUsers.join(','))}</formalExpression>\n        </resourceAssignmentExpression>\n      </potentialOwner>\n`
         }
 
         xml += `    </userTask>\n`

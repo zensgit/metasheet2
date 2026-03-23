@@ -5186,4 +5186,94 @@ describe('Attendance Plugin Integration', () => {
     expect(clearRes.status).toBe(200)
     expect((clearRes.body as { data?: { workflowId?: string | null } } | undefined)?.data?.workflowId ?? null).toBeNull()
   })
+
+  it('previews approval steps from linked workflow drafts', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-sync-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const approvalFlowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Workflow sync flow ${runSuffix}`,
+        requestType: 'leave',
+        steps: [
+          {
+            name: 'Manager review',
+            approverUserIds: [testUserId],
+          },
+        ],
+        isActive: true,
+      }),
+    })
+    expect(approvalFlowRes.status).toBe(201)
+    const approvalFlowId = (approvalFlowRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(approvalFlowId).toBeTruthy()
+    if (!approvalFlowId) return
+
+    const instantiateRes = await requestJson(`${baseUrl}/api/workflow-designer/templates/attendance-leave-manager-hr/instantiate`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Workflow sync draft ${runSuffix}`,
+        description: 'Attendance workflow sync preview integration test',
+        category: 'approval',
+      }),
+    })
+    expect(instantiateRes.status).toBe(201)
+    const workflowId = (instantiateRes.body as { data?: { workflowId?: string } } | undefined)?.data?.workflowId
+    expect(workflowId).toBeTruthy()
+    if (!workflowId) return
+
+    const linkRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/${approvalFlowId}/workflow-link`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ workflowId }),
+    })
+    expect(linkRes.status).toBe(200)
+
+    const previewRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/${approvalFlowId}/workflow-sync-preview`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(previewRes.status).toBe(200)
+
+    const preview = (previewRes.body as { data?: {
+      workflowId?: string
+      sourceMode?: string
+      steps?: Array<{ name?: string; approverRoleIds?: string[] }>
+      summary?: { currentStepCount?: number; derivedStepCount?: number; userTaskCount?: number; unsupportedNodeCount?: number }
+    } } | undefined)?.data
+
+    expect(preview?.workflowId).toBe(workflowId)
+    expect(preview?.sourceMode).toBe('bpmn')
+    expect(preview?.steps).toEqual([
+      { name: 'Manager Review', approverRoleIds: ['manager'] },
+      { name: 'HR Review', approverRoleIds: ['hr'] },
+    ])
+    expect(preview?.summary).toMatchObject({
+      currentStepCount: 1,
+      derivedStepCount: 2,
+      userTaskCount: 2,
+      unsupportedNodeCount: 0,
+    })
+  })
 })
