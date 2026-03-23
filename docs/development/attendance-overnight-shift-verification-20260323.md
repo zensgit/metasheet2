@@ -13,6 +13,7 @@ Date: 2026-03-23
 - Shift create/update accepts legacy aliases such as `start_time`, `end_time`, `is_overnight`, and `working_days`.
 - Assignment-embedded shift payloads expose the overnight flag.
 - Attendance metrics now anchor overnight shift end thresholds to the next calendar day.
+- Persisted shift times in `HH:MM:SS` form are normalized correctly before overnight metric calculation.
 
 ## Validation Rules
 
@@ -40,7 +41,7 @@ Date: 2026-03-23
 
 ```bash
 pnpm --filter @metasheet/web exec vitest run tests/useAttendanceAdminScheduling.spec.ts tests/AttendanceSchedulingAdminSection.spec.ts --watch=false
-pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts
+pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-plugin.test.ts -t "supports shift and overtime rule lookup by id and rejects malformed ids with 400|keeps camelCase and snake_case field aliases on shift and assignment responses|computes overnight shift metrics against the next-day shift end window|accepts legacy snake_case payload aliases for attendance admin create routes and rejects malformed ids with 400|exposes workday context for holiday overrides and shift schedules on attendance records"
 pnpm --filter @metasheet/web exec vue-tsc --noEmit
 pnpm --filter @metasheet/core-backend exec tsc --noEmit
 pnpm --filter @metasheet/web build
@@ -50,8 +51,8 @@ pnpm --filter @metasheet/web build
 
 - 2 test files passed
 - 24 tests passed
-- 1 backend integration file passed
-- 48 backend integration tests passed
+- 1 targeted backend integration file passed
+- 5 targeted backend integration tests passed
 - `vue-tsc --noEmit` passed
 - `tsc --noEmit` passed
 - `apps/web build` passed
@@ -59,4 +60,5 @@ pnpm --filter @metasheet/web build
 ## Notes
 
 - This pass keeps the attendance record keyed by the existing `workDate`; no storage redesign was required.
+- The local persistent test database had stale migration history, so local verification required a one-off `attendance_shifts.is_overnight` column patch before rerunning the overnight-targeted integration subset. The repository still carries the formal migration file for normal environments.
 - The next likely follow-up is a dedicated API-level CSV template endpoint if external clients need file downloads without going through the web UI.

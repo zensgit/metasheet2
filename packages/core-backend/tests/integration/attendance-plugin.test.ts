@@ -1235,6 +1235,9 @@ describe('Attendance Plugin Integration', () => {
     }
 
     const workDate = pickFutureWeekday(1)
+    const nextDate = new Date(`${workDate}T00:00:00.000Z`)
+    nextDate.setUTCDate(nextDate.getUTCDate() + 1)
+    const overnightCheckoutDate = nextDate.toISOString().slice(0, 10)
     const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
       method: 'POST',
       headers: {
@@ -1306,8 +1309,8 @@ describe('Attendance Plugin Integration', () => {
           {
             workDate,
             fields: {
-              firstInAt: `${workDate}T14:05:00Z`,
-              lastOutAt: `${workDate}T21:55:00Z`,
+              firstInAt: `${workDate}T22:05:00`,
+              lastOutAt: `${overnightCheckoutDate}T05:55:00`,
               status: 'normal',
             },
           },
@@ -1318,17 +1321,26 @@ describe('Attendance Plugin Integration', () => {
     })
     expect(importRes.status).toBe(200)
 
-    const recordRows = await pool.query(
-      `SELECT work_minutes, late_minutes, early_leave_minutes, status
-         FROM attendance_records
-        WHERE user_id = $1 AND org_id = $2 AND work_date = $3`,
-      [userId, 'default', workDate]
-    )
-    expect(recordRows).toHaveLength(1)
-    expect(recordRows[0]?.work_minutes).toBe(470)
-    expect(recordRows[0]?.late_minutes).toBe(0)
-    expect(recordRows[0]?.early_leave_minutes).toBe(0)
-    expect(recordRows[0]?.status).toBe('normal')
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    expect(dbUrl).toBeTruthy()
+    if (!dbUrl) return
+
+    const pool = new Pool({ connectionString: dbUrl })
+    try {
+      const { rows: recordRows } = await pool.query(
+        `SELECT work_minutes, late_minutes, early_leave_minutes, status
+           FROM attendance_records
+          WHERE user_id = $1 AND org_id = $2 AND work_date = $3`,
+        [userId, 'default', workDate]
+      )
+      expect(recordRows).toHaveLength(1)
+      expect(recordRows[0]?.work_minutes).toBe(470)
+      expect(recordRows[0]?.late_minutes).toBe(0)
+      expect(recordRows[0]?.early_leave_minutes).toBe(0)
+      expect(recordRows[0]?.status).toBe('normal')
+    } finally {
+      await pool.end().catch(() => undefined)
+    }
   })
 
   it('accepts legacy snake_case payload aliases for attendance admin create routes and rejects malformed ids with 400', async () => {

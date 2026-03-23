@@ -853,12 +853,13 @@ function parseImportedDateTime(value, workDate, timeZone) {
 
 function normalizeTimeString(value) {
   if (!value || typeof value !== 'string') return null
-  const match = value.trim().match(/^(\d{1,2}):(\d{2})$/)
+  const match = value.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/)
   if (!match) return null
   const hours = Number(match[1])
   const minutes = Number(match[2])
-  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null
-  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null
+  const seconds = match[3] === undefined ? 0 : Number(match[3])
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes) || !Number.isFinite(seconds)) return null
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59) return null
   const hh = String(hours).padStart(2, '0')
   const mm = String(minutes).padStart(2, '0')
   return `${hh}:${mm}`
