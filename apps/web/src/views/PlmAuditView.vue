@@ -9,6 +9,15 @@
         </p>
       </div>
       <div class="plm-audit__actions">
+        <button
+          v-if="showPersistentReturnToScene"
+          class="plm-audit__button plm-audit__button--primary"
+          type="button"
+          :disabled="logsLoading"
+          @click="returnToWorkbenchScene"
+        >
+          {{ tr('Return to scene', '返回原场景') }}
+        </button>
         <button class="plm-audit__button" type="button" :disabled="exporting" @click="exportCsv">
           {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
         </button>
@@ -828,6 +837,7 @@ import {
   buildPlmAuditSavedViewContextBadge,
   buildPlmAuditSavedViewSummary,
 } from './plmAuditSavedViewSummary'
+import { shouldShowPlmAuditPersistentReturnToScene } from './plmAuditReturnToScene'
 import {
   buildAuditTeamViewSummaryChips,
   buildAuditTeamViewSummaryHint,
@@ -877,6 +887,8 @@ import {
   type PlmAuditTeamViewShareEntryActionKind,
 } from './plmAuditTeamViewShareEntry'
 import {
+  resolvePlmAuditCanonicalTeamViewManagementTargetId,
+  resolvePlmAuditCanonicalTeamViewRouteState,
   resolvePlmAuditTeamViewDuplicateName,
   shouldLockPlmAuditTeamViewManagementTarget,
 } from './plmAuditTeamViewControlTarget'
@@ -991,6 +1003,10 @@ const selectedAuditTeamView = computed(
   () => auditTeamViews.value.find((view) => view.id === auditTeamViewKey.value) || null,
 )
 const canonicalAuditTeamViewId = computed(() => parsePlmAuditRouteState(route.query).teamViewId)
+const canonicalAuditTeamViewManagementTargetId = computed(() => resolvePlmAuditCanonicalTeamViewManagementTargetId({
+  routeTeamViewId: canonicalAuditTeamViewId.value,
+  followupTeamViewId: auditTeamViewCollaborationFollowup.value?.teamViewId || '',
+}))
 const defaultAuditTeamView = computed(
   () => auditTeamViews.value.find((view) => view.isDefault && !view.isArchived) || null,
 )
@@ -1012,7 +1028,7 @@ const auditTeamViewBatchActions = computed(() => auditTeamViewManagement.value.b
 const selectedAuditTeamViewCount = computed(() => auditTeamViewManagement.value.selectedCount)
 const selectableAuditTeamViewCount = computed(() => auditTeamViewManagement.value.selectableCount)
 const auditTeamViewManagementTargetLocked = computed(() => shouldLockPlmAuditTeamViewManagementTarget({
-  routeTeamViewId: canonicalAuditTeamViewId.value,
+  canonicalTeamViewId: canonicalAuditTeamViewManagementTargetId.value,
   selectedTeamViewId: auditTeamViewKey.value,
 }))
 const allSelectableAuditTeamViewsSelected = computed(() => (
@@ -1060,6 +1076,10 @@ const auditSceneSaveDraft = computed(() => buildPlmAuditSceneSaveDraft({
   sceneOwnerUserId: auditSceneOwnerUserId.value,
   recommendationReason: auditSceneRecommendationReason.value,
 }, tr))
+const showPersistentReturnToScene = computed(() => shouldShowPlmAuditPersistentReturnToScene({
+  returnToPlmPath: auditReturnToPlmPath.value,
+  sceneContextVisible: Boolean(auditSceneContext.value),
+}))
 const auditSceneFilterHighlight = computed(() => buildPlmAuditSceneFilterHighlight(auditSceneToken.value, tr))
 const {
   canApply: canApplyAuditTeamView,
@@ -1161,6 +1181,13 @@ function readCurrentRouteState(): PlmAuditRouteState {
     sceneRecommendationSourceLabel: auditSceneRecommendationSourceLabel.value,
     returnToPlmPath: auditReturnToPlmPath.value,
   }
+}
+
+function readCanonicalTeamViewRouteState(): PlmAuditRouteState {
+  return resolvePlmAuditCanonicalTeamViewRouteState({
+    currentState: readCurrentRouteState(),
+    routeTeamViewId: canonicalAuditTeamViewId.value,
+  })
 }
 
 function applyRouteState(state: PlmAuditRouteState) {
@@ -1434,7 +1461,7 @@ function clearAuditTeamViewShareEntry() {
 }
 
 async function consumeAuditTeamViewShareEntryQuery() {
-  await syncRouteState(readCurrentRouteState(), true, {
+  await syncRouteState(parsePlmAuditRouteState(route.query), true, {
     consumeSharedEntry: true,
   })
 }
@@ -2727,7 +2754,7 @@ function applyFilters() {
   applyAuditRoutePivotAttention()
   applyAuditTeamViewShareEntryAction({ kind: 'filter-navigation' })
   void syncRouteState({
-    ...readCurrentRouteState(),
+    ...readCanonicalTeamViewRouteState(),
     page: 1,
   }, false, {
     consumeSharedEntry: true,
@@ -2738,7 +2765,7 @@ function resetFilters() {
   applyAuditRoutePivotAttention()
   applyAuditTeamViewShareEntryAction({ kind: 'filter-navigation' })
   clearAuditTeamViewCollaborationFollowup()
-  void syncRouteState(resetPlmAuditRouteFilters(readCurrentRouteState()), false, {
+  void syncRouteState(resetPlmAuditRouteFilters(readCanonicalTeamViewRouteState()), false, {
     consumeSharedEntry: true,
   })
 }
@@ -2751,7 +2778,7 @@ function goToPage(nextPage: number) {
   applyAuditRoutePivotAttention()
   applyAuditTeamViewShareEntryAction({ kind: 'filter-navigation' })
   void syncRouteState({
-    ...readCurrentRouteState(),
+    ...readCanonicalTeamViewRouteState(),
     page: nextPage,
   }, false, {
     consumeSharedEntry: true,
