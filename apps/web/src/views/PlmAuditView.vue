@@ -1838,6 +1838,9 @@ async function shareAuditTeamViewEntry(
       sourceSavedViewId,
     },
   )
+  if (source) {
+    applyAuditTeamViewHandoffAttention()
+  }
   setStatus(outcome.statusMessage)
   auditTeamViewCollaborationFollowup.value = outcome.followup
   return true
@@ -1871,6 +1874,9 @@ async function setAuditTeamViewDefaultEntry(
         sourceSavedViewId,
       },
     )
+    if (source) {
+      applyAuditTeamViewHandoffAttention()
+    }
     setStatus(outcome.statusMessage)
     auditTeamViewCollaborationFollowup.value = outcome.followup
     await nextTick()
