@@ -374,6 +374,20 @@ export function resolvePlmAuditTeamViewFollowupSelection(options: {
   return options.selectedIds
 }
 
+export function resolvePlmAuditTeamViewDismissedDraftSelection(options: {
+  selectedIds: string[]
+  dismissedDraft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null
+}) {
+  if (!options.dismissedDraft) return options.selectedIds
+  if (
+    options.selectedIds.length === 1
+    && options.selectedIds[0] === options.dismissedDraft.teamViewId
+  ) {
+    return []
+  }
+  return options.selectedIds
+}
+
 export function shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry(
   draft: Pick<PlmAuditTeamViewCollaborationDraft, 'teamViewId'> | null,
   followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'teamViewId'> | null,

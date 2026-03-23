@@ -15,6 +15,7 @@ import {
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
   prunePlmAuditTeamViewCollaborationFollowupForRemovedViews,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
+  resolvePlmAuditTeamViewDismissedDraftSelection,
   resolvePlmAuditTeamViewFollowupSelection,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
@@ -320,6 +321,29 @@ describe('plmAuditTeamViewCollaboration', () => {
         action: 'set-default',
       },
     })).toEqual(['audit-view-9'])
+  })
+
+  it('clears draft-owned single selection when a collaboration draft is dismissed', () => {
+    expect(resolvePlmAuditTeamViewDismissedDraftSelection({
+      selectedIds: ['audit-view-9'],
+      dismissedDraft: {
+        teamViewId: 'audit-view-9',
+      },
+    })).toEqual([])
+
+    expect(resolvePlmAuditTeamViewDismissedDraftSelection({
+      selectedIds: ['audit-view-9', 'audit-view-10'],
+      dismissedDraft: {
+        teamViewId: 'audit-view-9',
+      },
+    })).toEqual(['audit-view-9', 'audit-view-10'])
+
+    expect(resolvePlmAuditTeamViewDismissedDraftSelection({
+      selectedIds: ['audit-view-10'],
+      dismissedDraft: {
+        teamViewId: 'audit-view-9',
+      },
+    })).toEqual(['audit-view-10'])
   })
 
   it('keeps collaboration drafts pinned to the canonical team-view route only', () => {

@@ -861,6 +861,7 @@ import {
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
+  resolvePlmAuditTeamViewDismissedDraftSelection,
   resolvePlmAuditTeamViewFollowupSelection,
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationDraft,
@@ -1489,6 +1490,11 @@ function clearAuditTeamViewCollaborationDraft() {
 }
 
 function dismissAuditTeamViewCollaborationDraft() {
+  const previousDraft = auditTeamViewCollaborationDraft.value
+  auditTeamViewSelection.value = resolvePlmAuditTeamViewDismissedDraftSelection({
+    selectedIds: auditTeamViewSelection.value,
+    dismissedDraft: previousDraft,
+  })
   clearAuditTeamViewCollaborationDraft()
   const nextState = buildPlmAuditDismissedCollaborationDraftAttentionState(
     {
@@ -2147,6 +2153,7 @@ async function shareAuditTeamViewEntry(
   const sharedEntryTakeover = shouldTakeOverPlmAuditSharedEntryOnSourceAction(
     auditTeamViewShareEntry.value,
     Boolean(source),
+    view.id,
   )
   if (sharedEntryTakeover) {
     clearAuditTeamViewShareEntry()
@@ -2186,6 +2193,7 @@ async function setAuditTeamViewDefaultEntry(
     const sharedEntryTakeover = shouldTakeOverPlmAuditSharedEntryOnSourceAction(
       auditTeamViewShareEntry.value,
       Boolean(source),
+      view.id,
     )
     const saved = await setPlmWorkbenchTeamViewDefault('audit', view.id)
     auditTeamViews.value = sortAuditTeamViews(
@@ -2252,6 +2260,7 @@ async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
 
   const sharedEntryTakeover = shouldTakeOverPlmAuditSharedEntryOnManagementHandoff(
     auditTeamViewShareEntry.value,
+    target.id,
   )
   const collaborationHandoff = buildPlmAuditTeamViewCollaborationHandoff(
     target,

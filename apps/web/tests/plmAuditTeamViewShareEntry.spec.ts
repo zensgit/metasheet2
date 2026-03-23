@@ -190,24 +190,32 @@ describe('plmAuditTeamViewShareEntry', () => {
     expect(shouldTakeOverPlmAuditSharedEntryOnLocalSave(null, 'audit-view-1')).toBe(false)
   })
 
-  it('treats recommendation management handoffs as higher-priority takeovers for any active shared entry', () => {
+  it('only treats recommendation management handoffs as takeovers when the target still matches the shared entry', () => {
     expect(shouldTakeOverPlmAuditSharedEntryOnManagementHandoff({
       teamViewId: 'audit-view-1',
-    })).toBe(true)
+    }, 'audit-view-1')).toBe(true)
 
-    expect(shouldTakeOverPlmAuditSharedEntryOnManagementHandoff(null)).toBe(false)
+    expect(shouldTakeOverPlmAuditSharedEntryOnManagementHandoff({
+      teamViewId: 'audit-view-1',
+    }, 'audit-view-2')).toBe(false)
+
+    expect(shouldTakeOverPlmAuditSharedEntryOnManagementHandoff(null, 'audit-view-1')).toBe(false)
   })
 
-  it('treats source-aware collaboration actions as higher-priority takeovers for any active shared entry', () => {
+  it('only treats source-aware collaboration actions as takeovers when the target still matches the shared entry', () => {
     expect(shouldTakeOverPlmAuditSharedEntryOnSourceAction({
       teamViewId: 'audit-view-1',
-    }, true)).toBe(true)
+    }, true, 'audit-view-1')).toBe(true)
 
     expect(shouldTakeOverPlmAuditSharedEntryOnSourceAction({
       teamViewId: 'audit-view-1',
-    }, false)).toBe(false)
+    }, true, 'audit-view-2')).toBe(false)
 
-    expect(shouldTakeOverPlmAuditSharedEntryOnSourceAction(null, true)).toBe(false)
+    expect(shouldTakeOverPlmAuditSharedEntryOnSourceAction({
+      teamViewId: 'audit-view-1',
+    }, false, 'audit-view-1')).toBe(false)
+
+    expect(shouldTakeOverPlmAuditSharedEntryOnSourceAction(null, true, 'audit-view-1')).toBe(false)
   })
 
   it('forces a replace sync when share-entry cleanup must consume a stale route marker', () => {
