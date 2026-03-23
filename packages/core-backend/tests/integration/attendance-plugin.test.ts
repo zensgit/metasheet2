@@ -1236,6 +1236,124 @@ describe('Attendance Plugin Integration', () => {
     expect(assignmentRow?.shift?.work_start_time).toBe('08:30:00')
   })
 
+  it('computes overnight shift metrics against the next-day shift end window', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const userId = `attendance-overnight-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const pickFutureWeekday = (targetDay: number): string => {
+      const cursor = new Date('2029-03-01T00:00:00.000Z')
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        if (cursor.getUTCDay() === targetDay) return cursor.toISOString().slice(0, 10)
+        cursor.setUTCDate(cursor.getUTCDate() + 1)
+      }
+      throw new Error(`Unable to reserve future weekday ${targetDay}`)
+    }
+
+    const workDate = pickFutureWeekday(1)
+    const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Overnight Shift ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        start_time: '22:00',
+        end_time: '06:00',
+        is_overnight: true,
+        working_days: [1, 2, 3, 4, 5],
+      }),
+    })
+    expect(shiftRes.status).toBe(201)
+    const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(shiftId).toBeTruthy()
+    if (!shiftId) return
+
+    const shiftLookupRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(shiftLookupRes.status).toBe(200)
+    const shiftLookup = (shiftLookupRes.body as { data?: { isOvernight?: boolean; is_overnight?: boolean } } | undefined)?.data
+    expect(shiftLookup?.isOvernight).toBe(true)
+    expect(shiftLookup?.is_overnight).toBe(true)
+
+    const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId,
+        shiftId,
+        startDate: workDate,
+        isActive: true,
+      }),
+    })
+    expect(assignmentRes.status).toBe(201)
+
+    const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareRes.status).toBe(200)
+    const commitToken = (prepareRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+    if (!commitToken) return
+
+    const importRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId,
+        timezone: 'Asia/Shanghai',
+        rows: [
+          {
+            workDate,
+            fields: {
+              firstInAt: `${workDate}T14:05:00Z`,
+              lastOutAt: `${workDate}T21:55:00Z`,
+              status: 'normal',
+            },
+          },
+        ],
+        mode: 'override',
+        commitToken,
+      }),
+    })
+    expect(importRes.status).toBe(200)
+
+    const recordRows = await pool.query(
+      `SELECT work_minutes, late_minutes, early_leave_minutes, status
+         FROM attendance_records
+        WHERE user_id = $1 AND org_id = $2 AND work_date = $3`,
+      [userId, 'default', workDate]
+    )
+    expect(recordRows).toHaveLength(1)
+    expect(recordRows[0]?.work_minutes).toBe(470)
+    expect(recordRows[0]?.late_minutes).toBe(0)
+    expect(recordRows[0]?.early_leave_minutes).toBe(0)
+    expect(recordRows[0]?.status).toBe('normal')
+  })
+
   it('accepts legacy snake_case payload aliases for attendance admin create routes and rejects malformed ids with 400', async () => {
     if (!baseUrl) return
 
@@ -1257,15 +1375,20 @@ describe('Attendance Plugin Integration', () => {
       body: JSON.stringify({
         name: `Snake Shift ${runSuffix}`,
         timezone: 'Asia/Shanghai',
-        workStartTime: '09:00',
-        workEndTime: '18:00',
-        workingDays: [1, 2, 3, 4, 5],
+        start_time: '22:00',
+        end_time: '06:00',
+        is_overnight: true,
+        working_days: [1, 2, 3, 4, 5],
       }),
     })
     expect(shiftRes.status).toBe(201)
     const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
     expect(shiftId).toBeTruthy()
     if (!shiftId) return
+    const createdShift = (shiftRes.body as { data?: { isOvernight?: boolean; workStartTime?: string; workEndTime?: string } } | undefined)?.data
+    expect(createdShift?.workStartTime).toBe('22:00:00')
+    expect(createdShift?.workEndTime).toBe('06:00:00')
+    expect(createdShift?.isOvernight).toBe(true)
 
     const groupRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
       method: 'POST',

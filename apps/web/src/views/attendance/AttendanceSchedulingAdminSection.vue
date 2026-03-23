@@ -301,6 +301,18 @@
         <span>{{ tr('Work end', '下班结束') }}</span>
         <input id="attendance-shift-end" v-model="shiftForm.workEndTime" name="shiftWorkEndTime" type="time" />
       </label>
+      <label class="attendance__field attendance__field--checkbox" for="attendance-shift-overnight">
+        <span>{{ tr('Overnight shift', '跨夜班次') }}</span>
+        <input
+          id="attendance-shift-overnight"
+          v-model="shiftForm.isOvernight"
+          name="shiftIsOvernight"
+          type="checkbox"
+        />
+        <small class="attendance__field-hint">
+          {{ tr('Allow the shift to cross midnight.', '允许班次跨越午夜。') }}
+        </small>
+      </label>
       <label class="attendance__field" for="attendance-shift-late-grace">
         <span>{{ tr('Late grace (min)', '迟到宽限（分钟）') }}</span>
         <input
@@ -357,8 +369,8 @@
           <tr>
             <th>{{ tr('Name', '名称') }}</th>
             <th>{{ tr('Timezone', '时区') }}</th>
-            <th>{{ tr('Start', '开始') }}</th>
-            <th>{{ tr('End', '结束') }}</th>
+            <th>{{ tr('Schedule', '班次时间') }}</th>
+            <th>{{ tr('Overnight', '跨夜') }}</th>
             <th>{{ tr('Working days', '工作日') }}</th>
             <th>{{ tr('Actions', '操作') }}</th>
           </tr>
@@ -367,8 +379,8 @@
           <tr v-for="shift in shifts" :key="shift.id">
             <td>{{ shift.name }}</td>
             <td>{{ shift.timezone }}</td>
-            <td>{{ shift.workStartTime }}</td>
-            <td>{{ shift.workEndTime }}</td>
+            <td>{{ formatShiftSchedule(shift) }}</td>
+            <td>{{ shift.isOvernight ? tr('Yes', '是') : tr('No', '否') }}</td>
             <td>{{ shift.workingDays.join(',') }}</td>
             <td class="attendance__table-actions">
               <button class="attendance__btn" @click="editShift(shift)">{{ tr('Edit', '编辑') }}</button>
@@ -521,6 +533,7 @@ interface ShiftFormState {
   timezone: string
   workStartTime: string
   workEndTime: string
+  isOvernight: boolean
   lateGraceMinutes: number
   earlyGraceMinutes: number
   roundingMinutes: number
@@ -690,6 +703,11 @@ const shiftEditingLabel = computed(() => {
   )
 })
 
+function formatShiftSchedule(shift: AttendanceShift): string {
+  const base = `${shift.workStartTime} → ${shift.workEndTime}`
+  return shift.isOvernight ? `${base} · ${tr('Overnight', '跨夜')}` : base
+}
+
 const assignmentEditingLabel = computed(() => {
   const userId = assignmentForm.userId.trim()
   const shiftId = assignmentForm.shiftId.trim()
@@ -736,6 +754,10 @@ const assignmentEditingLabel = computed(() => {
 .attendance__field-hint {
   color: #666;
   font-size: 12px;
+}
+
+.attendance__field--checkbox .attendance__field-hint {
+  margin-top: -2px;
 }
 
 .attendance__section-meta {

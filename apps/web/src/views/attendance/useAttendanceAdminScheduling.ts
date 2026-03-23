@@ -15,6 +15,7 @@ export interface AttendanceShift {
   timezone: string
   workStartTime: string
   workEndTime: string
+  isOvernight: boolean
   lateGraceMinutes: number
   earlyGraceMinutes: number
   roundingMinutes: number
@@ -236,6 +237,7 @@ export function useAttendanceAdminScheduling({
     timezone: defaultTimezone,
     workStartTime: '09:00',
     workEndTime: '18:00',
+    isOvernight: false,
     lateGraceMinutes: 10,
     earlyGraceMinutes: 10,
     roundingMinutes: 5,
@@ -496,6 +498,7 @@ export function useAttendanceAdminScheduling({
     shiftForm.timezone = defaultTimezone
     shiftForm.workStartTime = '09:00'
     shiftForm.workEndTime = '18:00'
+    shiftForm.isOvernight = false
     shiftForm.lateGraceMinutes = 10
     shiftForm.earlyGraceMinutes = 10
     shiftForm.roundingMinutes = 5
@@ -508,6 +511,7 @@ export function useAttendanceAdminScheduling({
     shiftForm.timezone = shift.timezone
     shiftForm.workStartTime = shift.workStartTime
     shiftForm.workEndTime = shift.workEndTime
+    shiftForm.isOvernight = Boolean(shift.isOvernight)
     shiftForm.lateGraceMinutes = shift.lateGraceMinutes
     shiftForm.earlyGraceMinutes = shift.earlyGraceMinutes
     shiftForm.roundingMinutes = shift.roundingMinutes
@@ -528,7 +532,10 @@ export function useAttendanceAdminScheduling({
         throw new Error(data?.error?.message || tr('Failed to load shifts', '加载班次失败'))
       }
       adminForbidden.value = false
-      shifts.value = data.data?.items || []
+      shifts.value = (data.data?.items || []).map(item => ({
+        ...item,
+        isOvernight: Boolean(item.isOvernight),
+      }))
       if (!assignmentForm.shiftId && shifts.value.length > 0) {
         assignmentForm.shiftId = shifts.value[0].id
       }
@@ -549,11 +556,18 @@ export function useAttendanceAdminScheduling({
       if (workStartTime === workEndTime) {
         throw new Error(tr('Shift start and end times cannot be the same', '上下班时间不能相同'))
       }
+      if (!shiftForm.isOvernight && workStartTime > workEndTime) {
+        throw new Error(tr(
+          'Shift end must be later than start unless overnight is enabled',
+          '未启用跨夜时，下班时间必须晚于上班时间',
+        ))
+      }
       const payload = {
         name,
         timezone: shiftForm.timezone.trim(),
         workStartTime,
         workEndTime,
+        isOvernight: shiftForm.isOvernight,
         lateGraceMinutes: requireNonNegativeInteger(
           shiftForm.lateGraceMinutes,
           tr('Late grace must be a non-negative integer', '迟到宽限必须是非负整数'),
