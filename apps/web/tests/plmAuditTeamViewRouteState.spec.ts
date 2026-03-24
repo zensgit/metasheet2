@@ -11,6 +11,9 @@ type AuditTeamViewRouteCandidate = {
   id: string
   kind: 'audit'
   isArchived: boolean
+  permissions?: {
+    canApply?: boolean
+  }
   state: PlmAuditTeamViewState
 }
 
@@ -19,6 +22,9 @@ function createView(id: string, overrides?: Partial<PlmAuditTeamViewState>): Aud
     id,
     kind: 'audit',
     isArchived: false,
+    permissions: {
+      canApply: true,
+    },
     state: {
       page: 2,
       q: 'documents',
@@ -177,6 +183,32 @@ describe('plmAuditTeamViewRouteState', () => {
     })
   })
 
+  it('clears the requested selection when the requested team view still exists but can no longer be applied', () => {
+    expect(resolvePlmAuditRequestedTeamViewRouteState(
+      {
+        ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+        teamViewId: 'readonly-view',
+        q: 'workbench',
+      },
+      [createView('readonly-view', {
+        q: 'documents',
+      })].map((view) => ({
+        ...view,
+        permissions: {
+          canApply: false,
+        },
+      })),
+      null,
+    )).toEqual({
+      kind: 'clear-selection',
+      nextState: {
+        ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+        teamViewId: '',
+        q: 'workbench',
+      },
+    })
+  })
+
   it('falls back to the default team view when there are no explicit filters', () => {
     expect(resolvePlmAuditRequestedTeamViewRouteState(
       DEFAULT_PLM_AUDIT_ROUTE_STATE,
@@ -194,6 +226,25 @@ describe('plmAuditTeamViewRouteState', () => {
         action: 'set-default',
         resourceType: 'plm-team-view-default',
       }), DEFAULT_PLM_AUDIT_ROUTE_STATE),
+    })
+  })
+
+  it('does not auto-apply a default team view that exists but is no longer applicable', () => {
+    expect(resolvePlmAuditRequestedTeamViewRouteState(
+      DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      [createView('audit-view-1')],
+      {
+        ...createView('audit-default', {
+          kind: 'workbench',
+          action: 'set-default',
+          resourceType: 'plm-team-view-default',
+        }),
+        permissions: {
+          canApply: false,
+        },
+      },
+    )).toEqual({
+      kind: 'noop',
     })
   })
 

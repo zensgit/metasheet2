@@ -5,9 +5,13 @@ import {
   hasPlmAuditSceneContext,
   type PlmAuditRouteState,
 } from './plmAuditQueryState'
+import { canApplyPlmAuditTeamView } from './plmAuditTeamViewManagement'
 import { buildPlmAuditTeamViewLogState } from './plmAuditTeamViewAudit'
 
-type PlmAuditTeamViewRouteCandidate = Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'isArchived' | 'state'>
+type PlmAuditTeamViewRouteCandidate = Pick<
+  PlmWorkbenchTeamView<'audit'>,
+  'id' | 'isArchived' | 'permissions' | 'state'
+>
 
 export type PlmAuditRequestedTeamViewRouteResolution =
   | {
@@ -69,7 +73,11 @@ export function resolvePlmAuditRequestedTeamViewRouteState(
 ): PlmAuditRequestedTeamViewRouteResolution {
   const requestedViewId = requestedState.teamViewId.trim()
   const requestedView = requestedViewId
-    ? views.find((view) => view.id === requestedViewId && !view.isArchived) || null
+    ? views.find((view) => (
+      view.id === requestedViewId
+      && !view.isArchived
+      && canApplyPlmAuditTeamView(view)
+    )) || null
     : null
 
   if (requestedView) {
@@ -93,6 +101,7 @@ export function resolvePlmAuditRequestedTeamViewRouteState(
   if (
     defaultView
     && !defaultView.isArchived
+    && canApplyPlmAuditTeamView(defaultView)
     && !hasExplicitPlmAuditFilters(requestedState)
     && !hasPlmAuditSceneContext(requestedState)
   ) {
