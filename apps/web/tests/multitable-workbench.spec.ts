@@ -65,6 +65,95 @@ describe('useMultitableWorkbench', () => {
     expect(wb.capabilities.value.canRead).toBe(true)
   })
 
+  it('loads base-scoped sheet metadata when initialBaseId is preselected', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (input.startsWith('/api/multitable/context?baseId=base_ops')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            base: { id: 'base_ops', name: 'Ops Base' },
+            sheet: { id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null },
+            sheets: [
+              { id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null },
+              { id: 'sheet_people', baseId: 'base_ops', name: 'People', description: '__metasheet_system:people__' },
+            ],
+            views: [{ id: 'view_grid', sheetId: 'sheet_orders', name: 'Grid', type: 'grid' }],
+            capabilities: {
+              canRead: true,
+              canCreateRecord: true,
+              canEditRecord: true,
+              canDeleteRecord: false,
+              canManageFields: true,
+              canManageViews: true,
+              canComment: true,
+              canManageAutomation: false,
+            },
+          },
+        }), { status: 200 })
+      }
+      if (input.startsWith('/api/multitable/fields?sheetId=sheet_orders')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { fields: [{ id: 'fld_title', name: 'Title', type: 'string' }] },
+        }), { status: 200 })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+
+    const client = new MultitableApiClient({ fetchFn })
+    const wb = useMultitableWorkbench({ client, initialBaseId: 'base_ops' })
+    await wb.loadSheets()
+
+    expect(wb.activeBaseId.value).toBe('base_ops')
+    expect(wb.activeSheetId.value).toBe('sheet_orders')
+    expect(wb.activeViewId.value).toBe('view_grid')
+    expect(wb.sheets.value).toEqual([
+      { id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', description: null },
+    ])
+    expect(wb.fields.value).toEqual([{ id: 'fld_title', name: 'Title', type: 'string' }])
+  })
+
+  it('syncs activeBaseId from loaded sheet metadata', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (input.startsWith('/api/multitable/fields?sheetId=s2')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { fields: [{ id: 'fld_title', name: 'Title', type: 'string' }] },
+        }), { status: 200 })
+      }
+      if (input.startsWith('/api/multitable/context?sheetId=s2')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            base: { id: 'base_sales', name: 'Sales Base' },
+            sheet: { id: 's2', baseId: 'base_sales', name: 'Opportunities', description: null },
+            sheets: [{ id: 's2', baseId: 'base_sales', name: 'Opportunities', description: null }],
+            views: [{ id: 'v2', sheetId: 's2', name: 'Grid', type: 'grid' }],
+            capabilities: {
+              canRead: true,
+              canCreateRecord: true,
+              canEditRecord: true,
+              canDeleteRecord: false,
+              canManageFields: false,
+              canManageViews: false,
+              canComment: true,
+              canManageAutomation: false,
+            },
+          },
+        }), { status: 200 })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+
+    const client = new MultitableApiClient({ fetchFn })
+    const wb = useMultitableWorkbench({ client })
+    await wb.loadSheetMeta('s2')
+
+    expect(wb.activeBaseId.value).toBe('base_sales')
+    expect(wb.activeSheetId.value).toBe('s2')
+    expect(wb.activeViewId.value).toBe('v2')
+  })
+
   it('selectSheet resets viewId', () => {
     const client = mockClient({})
     const wb = useMultitableWorkbench({ client, initialSheetId: 's1', initialViewId: 'v1' })
