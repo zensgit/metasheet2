@@ -8,6 +8,22 @@ export type PlmAuditTeamViewLogActionKind =
   | 'set-default'
   | 'clear-default'
 
+export function isPlmAuditOwnerlessTeamViewLifecycleLogRoute(
+  state: Pick<PlmAuditRouteState, 'teamViewId' | 'action' | 'resourceType'>,
+) {
+  if (state.teamViewId.trim()) return false
+
+  if (state.action === 'clear-default') {
+    return state.resourceType === 'plm-team-view-default'
+  }
+
+  if (state.action === 'archive' || state.action === 'restore' || state.action === 'delete') {
+    return state.resourceType === 'plm-team-view-batch'
+  }
+
+  return false
+}
+
 function getAuditResourceType(action: PlmAuditTeamViewLogActionKind) {
   return action === 'set-default' || action === 'clear-default'
     ? 'plm-team-view-default'

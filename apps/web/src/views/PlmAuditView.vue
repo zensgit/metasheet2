@@ -919,6 +919,7 @@ import {
 import {
   buildPlmAuditTeamViewBatchLogState,
   buildPlmAuditTeamViewLogState,
+  isPlmAuditOwnerlessTeamViewLifecycleLogRoute,
 } from './plmAuditTeamViewAudit'
 import {
   buildPlmAuditTeamViewManagement,
@@ -3137,6 +3138,10 @@ watch(
     })
     const nextState = parsePlmAuditRouteState(queryState)
     const previousRouteState = parsePlmAuditRouteState(previousQueryState || {})
+    const previousCanonicalManagementTargetId = resolvePlmAuditCanonicalTeamViewManagementTargetId({
+      routeTeamViewId: previousRouteState.teamViewId,
+      followupTeamViewId: auditTeamViewCollaborationFollowup.value?.teamViewId || '',
+    })
     const currentState = readCurrentRouteState()
     const routeChanged = routeReady.value && !isPlmAuditRouteStateEqual(nextState, currentState)
     const canonicalRouteChanged = routeReady.value
@@ -3186,6 +3191,13 @@ watch(
       )
     ) {
       clearAuditTeamViewCollaborationFollowup()
+    }
+    if (
+      canonicalRouteChanged
+      && previousCanonicalManagementTargetId
+      && isPlmAuditOwnerlessTeamViewLifecycleLogRoute(nextState)
+    ) {
+      clearAuditLogRouteTakeoverTeamViewFormDrafts()
     }
     applyRouteState(nextState)
     routeReady.value = true

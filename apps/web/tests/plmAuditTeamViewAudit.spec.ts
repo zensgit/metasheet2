@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPlmAuditTeamViewBatchLogState,
   buildPlmAuditTeamViewLogState,
+  isPlmAuditOwnerlessTeamViewLifecycleLogRoute,
 } from '../src/views/plmAuditTeamViewAudit'
 import type { PlmWorkbenchTeamView } from '../src/views/plm/plmPanelModels'
 
@@ -185,5 +186,31 @@ describe('plmAuditTeamViewAudit', () => {
       sceneRecommendationSourceLabel: '',
       returnToPlmPath: '/plm?sceneFocus=batch-view-a',
     })
+  })
+
+  it('detects ownerless lifecycle log routes while excluding active team-view and set-default routes', () => {
+    expect(isPlmAuditOwnerlessTeamViewLifecycleLogRoute({
+      teamViewId: '',
+      action: 'delete',
+      resourceType: 'plm-team-view-batch',
+    })).toBe(true)
+
+    expect(isPlmAuditOwnerlessTeamViewLifecycleLogRoute({
+      teamViewId: '',
+      action: 'clear-default',
+      resourceType: 'plm-team-view-default',
+    })).toBe(true)
+
+    expect(isPlmAuditOwnerlessTeamViewLifecycleLogRoute({
+      teamViewId: '',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+    })).toBe(false)
+
+    expect(isPlmAuditOwnerlessTeamViewLifecycleLogRoute({
+      teamViewId: 'audit-view-1',
+      action: 'delete',
+      resourceType: 'plm-team-view-batch',
+    })).toBe(false)
   })
 })
