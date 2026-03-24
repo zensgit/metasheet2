@@ -4,8 +4,10 @@ import {
   buildPlmAuditSceneSavedViewState,
   buildPlmAuditSceneTeamViewState,
   buildPlmAuditSceneQueryValue,
+  isPlmAuditSceneContextActive,
   isPlmAuditSceneQueryContextActive,
   isPlmAuditSceneOwnerContextActive,
+  shouldTakeOverPlmAuditSceneContextOnRouteChange,
   withoutPlmAuditSceneContext,
   withPlmAuditSceneOwnerContext,
   withPlmAuditSceneQueryContext,
@@ -227,6 +229,91 @@ describe('plmAuditSceneContext', () => {
       q: 'owner-a',
       sceneId: 'scene-1',
       sceneName: '采购团队场景',
+    })).toBe(false)
+  })
+
+  it('detects when any scene context is active', () => {
+    expect(isPlmAuditSceneContextActive({
+      q: 'owner-a',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+    })).toBe(true)
+
+    expect(isPlmAuditSceneContextActive({
+      q: 'scene-1',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+    })).toBe(true)
+
+    expect(isPlmAuditSceneContextActive({
+      q: 'supplier-42',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+    })).toBe(false)
+  })
+
+  it('detects when external route changes should trigger scene-context takeover cleanup', () => {
+    expect(shouldTakeOverPlmAuditSceneContextOnRouteChange({
+      previousState: {
+        q: 'supplier-42',
+        sceneId: 'scene-1',
+        sceneName: '采购团队场景',
+        sceneOwnerUserId: 'owner-a',
+      },
+      nextState: {
+        q: 'scene-1',
+        sceneId: 'scene-1',
+        sceneName: '采购团队场景',
+        sceneOwnerUserId: 'owner-a',
+      },
+    })).toBe(true)
+
+    expect(shouldTakeOverPlmAuditSceneContextOnRouteChange({
+      previousState: {
+        q: 'owner-a',
+        sceneId: 'scene-1',
+        sceneName: '采购团队场景',
+        sceneOwnerUserId: 'owner-a',
+      },
+      nextState: {
+        q: 'scene-2',
+        sceneId: 'scene-2',
+        sceneName: '发货场景',
+        sceneOwnerUserId: 'owner-a',
+      },
+    })).toBe(true)
+
+    expect(shouldTakeOverPlmAuditSceneContextOnRouteChange({
+      previousState: {
+        q: 'scene-1',
+        sceneId: 'scene-1',
+        sceneName: '采购团队场景',
+        sceneOwnerUserId: 'owner-a',
+      },
+      nextState: {
+        q: 'scene-1',
+        sceneId: 'scene-1',
+        sceneName: '采购团队场景',
+        sceneOwnerUserId: 'owner-a',
+      },
+    })).toBe(false)
+
+    expect(shouldTakeOverPlmAuditSceneContextOnRouteChange({
+      previousState: {
+        q: 'scene-1',
+        sceneId: 'scene-1',
+        sceneName: '采购团队场景',
+        sceneOwnerUserId: 'owner-a',
+      },
+      nextState: {
+        q: 'supplier-42',
+        sceneId: 'scene-1',
+        sceneName: '采购团队场景',
+        sceneOwnerUserId: 'owner-a',
+      },
     })).toBe(false)
   })
 })

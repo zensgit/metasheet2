@@ -21,6 +21,28 @@ export function isPlmAuditSceneQueryContextActive(
   return Boolean(sceneQuery) && state.q === sceneQuery
 }
 
+export function isPlmAuditSceneContextActive(
+  state: Pick<PlmAuditRouteState, 'q' | 'sceneId' | 'sceneName' | 'sceneOwnerUserId'>,
+) {
+  return isPlmAuditSceneOwnerContextActive(state) || isPlmAuditSceneQueryContextActive(state)
+}
+
+export function shouldTakeOverPlmAuditSceneContextOnRouteChange(options: {
+  previousState: Pick<PlmAuditRouteState, 'q' | 'sceneId' | 'sceneName' | 'sceneOwnerUserId'>
+  nextState: Pick<PlmAuditRouteState, 'q' | 'sceneId' | 'sceneName' | 'sceneOwnerUserId'>
+}) {
+  if (!isPlmAuditSceneContextActive(options.nextState)) return false
+
+  if (!isPlmAuditSceneContextActive(options.previousState)) {
+    return true
+  }
+
+  return options.previousState.q !== options.nextState.q
+    || options.previousState.sceneId !== options.nextState.sceneId
+    || options.previousState.sceneName !== options.nextState.sceneName
+    || options.previousState.sceneOwnerUserId !== options.nextState.sceneOwnerUserId
+}
+
 export function withPlmAuditSceneOwnerContext(state: PlmAuditRouteState): PlmAuditRouteState {
   if (!state.sceneOwnerUserId) return state
 

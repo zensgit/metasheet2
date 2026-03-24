@@ -934,6 +934,7 @@ import {
   buildPlmAuditSceneSavedViewState,
   buildPlmAuditSceneTeamViewState,
   buildPlmAuditSceneQueryValue,
+  shouldTakeOverPlmAuditSceneContextOnRouteChange,
   isPlmAuditSceneOwnerContextActive,
   isPlmAuditSceneQueryContextActive,
   withoutPlmAuditSceneContext,
@@ -1338,7 +1339,7 @@ function applyResolvedTeamViewTakeoverCleanup() {
   auditTeamViewCollaborationFollowup.value = nextState.collaboration.followup
 }
 
-function applySceneContextTakeoverCleanup() {
+function applySceneContextTakeoverCleanup(targetTeamViewId = readCanonicalTeamViewRouteState().teamViewId) {
   const nextState = buildPlmAuditSceneContextTakeoverState({
     attentionFocus: {
       focusedAuditTeamViewId: focusedAuditTeamViewId.value,
@@ -1365,7 +1366,7 @@ function applySceneContextTakeoverCleanup() {
   auditTeamViewCollaborationDraft.value = nextState.collaboration.draft
   auditTeamViewCollaborationFollowup.value = nextState.collaboration.followup
   clearAuditTakeoverTeamViewFormDrafts()
-  alignAuditTakeoverTeamViewSelector(readCanonicalTeamViewRouteState().teamViewId)
+  alignAuditTakeoverTeamViewSelector(targetTeamViewId)
   return nextState.consumeSharedEntry
 }
 
@@ -3192,6 +3193,16 @@ watch(
     ) {
       clearAuditTeamViewCollaborationFollowup()
     }
+    const externalSceneContextTakeover = canonicalRouteChanged
+      && !localRouteSync
+      && shouldTakeOverPlmAuditSceneContextOnRouteChange({
+        previousState: previousRouteState,
+        nextState,
+      })
+    let consumeExternalSceneSharedEntry = false
+    if (externalSceneContextTakeover) {
+      consumeExternalSceneSharedEntry = applySceneContextTakeoverCleanup(nextState.teamViewId)
+    }
     if (
       canonicalRouteChanged
       && previousCanonicalManagementTargetId
@@ -3201,6 +3212,11 @@ watch(
     }
     applyRouteState(nextState)
     routeReady.value = true
+    if (consumeExternalSceneSharedEntry) {
+      await syncRouteState(nextState, true, {
+        consumeSharedEntry: true,
+      })
+    }
     await Promise.all([loadSummary(nextState.windowMinutes), loadLogs(nextState.page)])
     if (
       nextState.teamViewId
