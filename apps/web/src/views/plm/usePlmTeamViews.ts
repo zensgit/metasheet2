@@ -196,6 +196,11 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       teamViewSelection.value = teamViewSelection.value.filter((id) => availableIds.has(id))
       if (!items.some((view) => view.id === teamViewKey.value)) {
         teamViewKey.value = ''
+      } else if (teamViewKey.value) {
+        const activeView = items.find((view) => view.id === teamViewKey.value)
+        if (activeView && !canApplyPlmCollaborativeEntry(activeView)) {
+          teamViewKey.value = ''
+        }
       }
       if (options.requestedViewId?.value && !items.some((view) => view.id === options.requestedViewId?.value)) {
         options.syncRequestedViewId?.(undefined)
@@ -252,7 +257,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   async function deleteTeamView() {
     const view = selectedTeamView.value
     if (!view) return
-    if (!view.canManage) {
+    if (!canManageSelectedTeamView.value) {
       options.setMessage(`仅创建者可删除${options.label}团队视角。`, true)
       return
     }
@@ -287,7 +292,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
-    if (!view.canManage) {
+    if (!canManageSelectedTeamView.value) {
       options.setMessage(`仅创建者可归档${options.label}团队视角。`, true)
       return
     }
@@ -326,7 +331,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
-    if (!view.canManage) {
+    if (!canManageSelectedTeamView.value) {
       options.setMessage(`仅创建者可恢复${options.label}团队视角。`, true)
       return
     }
@@ -411,7 +416,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
-    if (!view.canManage) {
+    if (!canManageSelectedTeamView.value) {
       options.setMessage(`仅创建者可重命名${options.label}团队视角。`, true)
       return
     }
@@ -446,7 +451,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
-    if (!view.canManage) {
+    if (!canManageSelectedTeamView.value) {
       options.setMessage(`仅创建者可设置${options.label}默认团队视角。`, true)
       return
     }
@@ -517,7 +522,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
-    if (!view.canManage) {
+    if (!canManageSelectedTeamView.value) {
       options.setMessage(`仅创建者可取消${options.label}默认团队视角。`, true)
       return
     }

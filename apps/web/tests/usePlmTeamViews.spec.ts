@@ -294,6 +294,102 @@ describe('usePlmTeamViews', () => {
     expect(setMessage).not.toHaveBeenCalled()
   })
 
+  it('clears a stale non-applyable selection on refresh before auto-applying the default view', async () => {
+    const requestedViewId = ref('')
+    const syncRequestedViewId = vi.fn((value?: string) => {
+      requestedViewId.value = value || ''
+    })
+    const workbenchApply = vi.fn(() => requestedViewId.value)
+    let autoApplyDefault = false
+
+    vi.mocked(listPlmWorkbenchTeamViews)
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: 'workbench-stale',
+            kind: 'workbench',
+            scope: 'team',
+            name: '旧工作台视角',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            isDefault: false,
+            state: {
+              query: {
+                documentFilter: 'legacy',
+              },
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: 'workbench-default',
+            kind: 'workbench',
+            scope: 'team',
+            name: '默认工作台视角',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            isDefault: true,
+            state: {
+              query: {
+                documentFilter: 'default-gear',
+              },
+            },
+          },
+          {
+            id: 'workbench-stale',
+            kind: 'workbench',
+            scope: 'team',
+            name: '旧工作台视角',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            isDefault: false,
+            permissions: {
+              canApply: false,
+            },
+            state: {
+              query: {
+                documentFilter: 'legacy',
+              },
+            },
+          },
+        ],
+      })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState: workbenchApply,
+      setMessage,
+      requestedViewId,
+      syncRequestedViewId,
+      shouldAutoApplyDefault: () => autoApplyDefault,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-stale'
+    requestedViewId.value = 'workbench-stale'
+    autoApplyDefault = true
+    workbenchApply.mockClear()
+    syncRequestedViewId.mockClear()
+
+    await model.refreshTeamViews()
+
+    expect(model.teamViewKey.value).toBe('workbench-default')
+    expect(requestedViewId.value).toBe('workbench-default')
+    expect(syncRequestedViewId).toHaveBeenLastCalledWith('workbench-default')
+    expect(workbenchApply).toHaveBeenCalledWith({
+      query: {
+        documentFilter: 'default-gear',
+      },
+    })
+    expect(setMessage).toHaveBeenLastCalledWith('已应用工作台默认团队视角：默认工作台视角')
+  })
+
   it('syncs requested workbench view id before applying workbench state', async () => {
     const requestedViewId = ref('')
     const syncRequestedViewId = vi.fn((value?: string) => {
@@ -964,6 +1060,193 @@ describe('usePlmTeamViews', () => {
     expect(transferPlmWorkbenchTeamView).not.toHaveBeenCalled()
     expect(setMessage).toHaveBeenNthCalledWith(1, '仅创建者可分享工作台团队视角。', true)
     expect(setMessage).toHaveBeenNthCalledWith(2, '仅创建者可转移工作台团队视角。', true)
+  })
+
+  it('allows rename, set-default, and clear-default when permissions.canManage overrides legacy false', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-managed',
+          kind: 'workbench',
+          scope: 'team',
+          name: '管理员工作台视角',
+          ownerUserId: 'owner-2',
+          canManage: false,
+          isDefault: false,
+          permissions: {
+            canManage: true,
+            canApply: true,
+            canRename: true,
+            canSetDefault: true,
+            canClearDefault: true,
+          },
+          state: {
+            query: {
+              documentFilter: 'managed-doc',
+            },
+          },
+        },
+      ],
+    })
+    vi.mocked(renamePlmWorkbenchTeamView).mockResolvedValue({
+      id: 'workbench-managed',
+      kind: 'workbench',
+      scope: 'team',
+      name: '管理员重命名视角',
+      ownerUserId: 'owner-2',
+      canManage: false,
+      isDefault: false,
+      permissions: {
+        canManage: true,
+        canApply: true,
+        canRename: true,
+        canSetDefault: true,
+        canClearDefault: true,
+      },
+      state: {
+        query: {
+          documentFilter: 'managed-doc',
+        },
+      },
+    })
+    vi.mocked(setPlmWorkbenchTeamViewDefault).mockResolvedValue({
+      id: 'workbench-managed',
+      kind: 'workbench',
+      scope: 'team',
+      name: '管理员重命名视角',
+      ownerUserId: 'owner-2',
+      canManage: false,
+      isDefault: true,
+      permissions: {
+        canManage: true,
+        canApply: true,
+        canRename: true,
+        canSetDefault: true,
+        canClearDefault: true,
+      },
+      state: {
+        query: {
+          documentFilter: 'managed-doc',
+        },
+      },
+    })
+    vi.mocked(clearPlmWorkbenchTeamViewDefault).mockResolvedValue({
+      id: 'workbench-managed',
+      kind: 'workbench',
+      scope: 'team',
+      name: '管理员重命名视角',
+      ownerUserId: 'owner-2',
+      canManage: false,
+      isDefault: false,
+      permissions: {
+        canManage: true,
+        canApply: true,
+        canRename: true,
+        canSetDefault: true,
+        canClearDefault: true,
+      },
+      state: {
+        query: {
+          documentFilter: 'managed-doc',
+        },
+      },
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-managed'
+    model.teamViewName.value = '管理员重命名视角'
+
+    await model.renameTeamView()
+    await model.setTeamViewDefault()
+    await model.clearTeamViewDefault()
+
+    expect(renamePlmWorkbenchTeamView).toHaveBeenCalledWith('workbench', 'workbench-managed', '管理员重命名视角')
+    expect(setPlmWorkbenchTeamViewDefault).toHaveBeenCalledWith('workbench', 'workbench-managed')
+    expect(clearPlmWorkbenchTeamViewDefault).toHaveBeenCalledWith('workbench', 'workbench-managed')
+    expect(model.teamViews.value.find((view) => view.id === 'workbench-managed')?.isDefault).toBe(false)
+  })
+
+  it('allows restore when permissions.canManage overrides legacy false', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'cad-archived',
+          kind: 'cad',
+          scope: 'team',
+          name: '管理员归档 CAD 视角',
+          ownerUserId: 'owner-2',
+          canManage: false,
+          isDefault: false,
+          isArchived: true,
+          archivedAt: '2026-03-11T03:00:00.000Z',
+          permissions: {
+            canManage: true,
+            canApply: true,
+            canRestore: true,
+          },
+          state: {
+            fileId: 'cad-main',
+            otherFileId: '',
+            reviewState: 'approved',
+            reviewNote: '',
+          },
+        },
+      ],
+    })
+    vi.mocked(restorePlmWorkbenchTeamView).mockResolvedValue({
+      id: 'cad-archived',
+      kind: 'cad',
+      scope: 'team',
+      name: '管理员归档 CAD 视角',
+      ownerUserId: 'owner-2',
+      canManage: false,
+      isDefault: false,
+      isArchived: false,
+      permissions: {
+        canManage: true,
+        canApply: true,
+        canRestore: true,
+      },
+      state: {
+        fileId: 'cad-main',
+        otherFileId: '',
+        reviewState: 'approved',
+        reviewNote: '',
+      },
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'cad',
+      label: 'CAD',
+      getCurrentViewState: () => ({
+        fileId: '',
+        otherFileId: '',
+        reviewState: '',
+        reviewNote: '',
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'cad-archived'
+
+    await model.restoreTeamView()
+
+    expect(restorePlmWorkbenchTeamView).toHaveBeenCalledWith('cad', 'cad-archived')
+    expect(model.teamViews.value.find((view) => view.id === 'cad-archived')?.isArchived).toBe(false)
   })
 
   it('shares the current documents team view through an explicit deep link without changing identity', async () => {
