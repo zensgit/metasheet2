@@ -49,7 +49,7 @@
             :placeholder="tr('Current user', '当前用户')"
           />
         </label>
-        <button class="attendance__btn" :disabled="loading" @click="refreshAll">{{ tr('Refresh', '刷新') }}</button>
+        <button class="attendance__btn" :disabled="loading" @click="refreshOverviewWithStatus">{{ tr('Refresh', '刷新') }}</button>
         <div v-if="statusMessage" class="attendance__status-block">
           <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
             {{ statusMessage }}
@@ -75,6 +75,7 @@
       <section class="attendance__grid" v-if="showOverview">
         <div class="attendance__card">
           <h3>{{ tr('Summary', '汇总') }}</h3>
+          <small class="attendance__field-hint">{{ summaryTimezoneContextHint }}</small>
           <div v-if="summary" class="attendance__summary">
             <div class="attendance__summary-item">
               <span>{{ tr('Total days', '总天数') }}</span>
@@ -144,7 +145,18 @@
               <span class="attendance__calendar-label">{{ calendarLabel }}</span>
               <button class="attendance__btn" @click="shiftMonth(1)">{{ tr('Next', '下月') }}</button>
             </div>
+            <div class="attendance__calendar-flags">
+              <label class="attendance__calendar-flag">
+                <input v-model="showLunarLabel" type="checkbox" />
+                <span>{{ tr('Lunar', '农历') }}</span>
+              </label>
+              <label class="attendance__calendar-flag">
+                <input v-model="showHolidayBadge" type="checkbox" />
+                <span>{{ tr('Holiday', '节假日') }}</span>
+              </label>
+            </div>
           </div>
+          <small class="attendance__field-hint">{{ calendarTimezoneContextHint }}</small>
           <div class="attendance__calendar-weekdays">
             <span v-for="day in weekDays" :key="day">{{ day }}</span>
           </div>
@@ -163,14 +175,15 @@
               <span class="attendance__calendar-date">{{ day.day }}</span>
               <span v-if="day.statusLabel" class="attendance__calendar-status">{{ day.statusLabel }}</span>
               <span v-else class="attendance__calendar-status attendance__calendar-status--empty">--</span>
-              <span v-if="day.lunarLabel" class="attendance__calendar-lunar">{{ day.lunarLabel }}</span>
-              <span v-if="day.holidayName" class="attendance__calendar-holiday">{{ day.holidayName }}</span>
+              <span v-if="showLunarLabel && day.lunarLabel" class="attendance__calendar-lunar">{{ day.lunarLabel }}</span>
+              <span v-if="showHolidayBadge && day.holidayName" class="attendance__calendar-holiday">{{ day.holidayName }}</span>
             </div>
           </div>
         </div>
 
         <div class="attendance__card">
           <h3>{{ tr('Adjustment Request', '补卡申请') }}</h3>
+          <small class="attendance__field-hint">{{ requestTimezoneContextHint }}</small>
           <div class="attendance__request-form">
             <label class="attendance__field" for="attendance-request-work-date">
               <span>{{ tr('Work date', '工作日期') }}</span>
@@ -275,7 +288,7 @@
           <div class="attendance__requests">
             <div class="attendance__requests-header">
               <span>{{ tr('Recent requests', '最近申请') }}</span>
-              <button class="attendance__btn" :disabled="loading" @click="loadRequests">{{ tr('Reload', '重载') }}</button>
+              <button class="attendance__btn" :disabled="loading" @click="reloadRequestsWithStatus">{{ tr('Reload', '重载') }}</button>
             </div>
             <div v-if="requests.length === 0" class="attendance__empty">{{ tr('No requests.', '暂无申请。') }}</div>
             <ul v-else class="attendance__request-list">
@@ -308,10 +321,11 @@
         <div class="attendance__card">
           <div class="attendance__requests-header">
             <h3>{{ tr('Anomalies', '异常') }}</h3>
-            <button class="attendance__btn" :disabled="anomaliesLoading || loading" @click="loadAnomalies">
+            <button class="attendance__btn" :disabled="anomaliesLoading || loading" @click="reloadAnomaliesWithStatus">
               {{ anomaliesLoading ? tr('Loading...', '加载中...') : tr('Reload anomalies', '重载异常') }}
             </button>
           </div>
+          <small class="attendance__field-hint">{{ anomaliesTimezoneContextHint }}</small>
           <div v-if="anomaliesLoading" class="attendance__empty">{{ tr('Loading anomalies...', '正在加载异常...') }}</div>
           <div v-else-if="anomalies.length === 0" class="attendance__empty">{{ tr('No anomalies.', '暂无异常。') }}</div>
           <div v-else class="attendance__table-wrapper">
@@ -360,10 +374,11 @@
         <div class="attendance__card">
           <div class="attendance__requests-header">
             <h3>{{ tr('Request Report', '申请报表') }}</h3>
-            <button class="attendance__btn" :disabled="reportLoading" @click="loadRequestReport">
+            <button class="attendance__btn" :disabled="reportLoading" @click="reloadRequestReportWithStatus">
               {{ reportLoading ? tr('Loading...', '加载中...') : tr('Reload report', '重载报表') }}
             </button>
           </div>
+          <small class="attendance__field-hint">{{ requestReportTimezoneContextHint }}</small>
           <div v-if="requestReport.length === 0" class="attendance__empty">{{ tr('No report data.', '暂无报表数据。') }}</div>
           <div v-else class="attendance__table-wrapper">
             <table class="attendance__table">
@@ -392,12 +407,13 @@
         <div class="attendance__records-header">
           <h3>{{ tr('Records', '记录') }}</h3>
           <div class="attendance__records-actions">
-            <button class="attendance__btn" :disabled="loading" @click="loadRecords">{{ tr('Reload', '重载') }}</button>
+            <button class="attendance__btn" :disabled="loading" @click="reloadRecordsWithStatus">{{ tr('Reload', '重载') }}</button>
             <button class="attendance__btn" :disabled="exporting || loading" @click="exportCsv">
               {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
             </button>
           </div>
         </div>
+        <small class="attendance__field-hint">{{ recordsTimezoneContextHint }}</small>
         <div v-if="records.length === 0" class="attendance__empty">{{ tr('No records.', '暂无记录。') }}</div>
         <div v-else class="attendance__table-wrapper">
           <table class="attendance__table attendance__table--records">
@@ -469,8 +485,34 @@
             </button>
           </div>
           <div v-if="adminForbidden" class="attendance__empty">{{ tr('Admin permissions required to manage attendance settings.', '需要管理员权限才能管理考勤设置。') }}</div>
-          <div v-else>
-            <div class="attendance__admin-section">
+          <div v-else class="attendance__admin-shell">
+            <AttendanceAdminRail
+              :tr="tr"
+              :admin-section-nav-count-label="adminSectionNavCountLabel"
+              :admin-nav-storage-scope="adminNavStorageScope"
+              :admin-nav-default-storage-scope="adminNavDefaultStorageScope"
+              :admin-nav-scope-feedback="adminNavScopeFeedback"
+              :active-admin-section-context-label="activeAdminSectionContextLabel"
+              :is-compact-admin-nav="isCompactAdminNav"
+              :admin-compact-nav-open="adminCompactNavOpen"
+              :admin-section-filter="adminSectionFilter"
+              :admin-section-filter-active="adminSectionFilterActive"
+              :all-admin-section-groups-expanded="allAdminSectionGroupsExpanded"
+              :all-admin-section-groups-collapsed="allAdminSectionGroupsCollapsed"
+              :visible-recent-admin-section-nav-items="visibleRecentAdminSectionNavItems"
+              :visible-admin-section-nav-groups="visibleAdminSectionNavGroups"
+              :admin-active-section-id="adminActiveSectionId"
+              @update:compact-nav-open="adminCompactNavOpen = $event"
+              @update:section-filter="adminSectionFilter = $event"
+              @expand-all="expandAllAdminSectionGroups"
+              @collapse-all="collapseAllAdminSectionGroups"
+              @copy-current-link="copyCurrentAdminSectionLink"
+              @clear-recents="clearRecentAdminSections"
+              @toggle-group="toggleAdminSectionGroup"
+              @select-section="scrollToAdminSection"
+            />
+            <div class="attendance__admin-content">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.settings)">
               <h4>{{ tr('Settings', '设置') }}</h4>
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--checkbox" for="attendance-auto-absence-enabled">
@@ -721,7 +763,7 @@
               </button>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.userAccess)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('User Access', '用户权限') }}</h4>
                 <div class="attendance__admin-actions">
@@ -839,7 +881,7 @@
               <p v-else-if="provisionHasLoaded" class="attendance__empty">{{ tr('No permissions loaded.', '未加载到权限。') }}</p>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Batch Provisioning', '批量授权') }}</h4>
                 <div class="attendance__admin-actions">
@@ -947,7 +989,7 @@
               </p>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.auditLogs)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Audit Logs', '审计日志') }}</h4>
                 <div class="attendance__admin-actions">
@@ -1115,7 +1157,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidaySync)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Holiday Sync', '节假日同步') }}</h4>
                 <div class="attendance__admin-actions">
@@ -1178,13 +1220,16 @@
                 </label>
                 <label class="attendance__field" for="attendance-holiday-sync-auto-tz">
                   <span>{{ tr('Auto sync timezone', '自动同步时区') }}</span>
-                  <input
+                  <select
                     id="attendance-holiday-sync-auto-tz"
                     name="holidaySyncAutoTimezone"
                     v-model="settingsForm.holidaySyncAutoTimezone"
-                    type="text"
-                    :placeholder="tr('Asia/Shanghai', 'Asia/Shanghai')"
-                  />
+                  >
+                    <option v-for="option in timezoneOptions" :key="`holiday-sync-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ holidaySyncAutoTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-index">
                   <span>{{ tr('Append day index', '追加节假日序号') }}</span>
@@ -1254,7 +1299,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.defaultRule)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Default Rule', '默认规则') }}</h4>
                 <button class="attendance__btn" :disabled="ruleLoading" @click="loadRule">
@@ -1268,12 +1313,16 @@
                 </label>
                 <label class="attendance__field" for="attendance-rule-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <input
+                  <select
                     id="attendance-rule-timezone"
                     name="ruleTimezone"
                     v-model="ruleForm.timezone"
-                    type="text"
-                  />
+                  >
+                    <option v-for="option in timezoneOptions" :key="`rule-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ ruleTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-rule-start">
                   <span>{{ tr('Work start', '上班时间') }}</span>
@@ -1339,7 +1388,7 @@
               </button>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.ruleSets)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rule Sets', '规则集') }}</h4>
                 <button class="attendance__btn" :disabled="ruleSetLoading" @click="loadRuleSets">
@@ -1447,7 +1496,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rule Template Library', '规则模板库') }}</h4>
                 <button
@@ -1530,7 +1579,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Attendance groups', '考勤组') }}</h4>
                 <button class="attendance__btn" :disabled="attendanceGroupLoading" @click="loadAttendanceGroups">
@@ -1548,7 +1597,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-group-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <input id="attendance-group-timezone" v-model="attendanceGroupForm.timezone" type="text" />
+                  <select id="attendance-group-timezone" v-model="attendanceGroupForm.timezone">
+                    <option v-for="option in timezoneOptions" :key="`group-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ attendanceGroupTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-group-rule-set">
                   <span>{{ tr('Rule set', '规则集') }}</span>
@@ -1596,7 +1650,7 @@
                     <tr v-for="item in attendanceGroups" :key="item.id">
                       <td>{{ item.name }}</td>
                       <td>{{ item.code || '-' }}</td>
-                      <td>{{ item.timezone }}</td>
+                      <td>{{ displayTimezone(item.timezone) }}</td>
                       <td>{{ resolveRuleSetName(item.ruleSetId) }}</td>
                       <td class="attendance__table-actions">
                         <button class="attendance__btn" @click="editAttendanceGroup(item)">{{ tr('Edit', '编辑') }}</button>
@@ -1610,7 +1664,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.groupMembers)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Group members', '分组成员') }}</h4>
                 <button
@@ -1684,7 +1738,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.import)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Import (DingTalk / Manual)', '导入（钉钉 / 手工）') }}</h4>
                 <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
@@ -1828,12 +1882,16 @@
                 </label>
                 <label class="attendance__field" for="attendance-import-group-timezone">
                   <span>{{ tr('Group timezone (optional)', '分组时区（可选）') }}</span>
-                  <input
+                  <select
                     id="attendance-import-group-timezone"
                     v-model="importGroupTimezone"
-                    type="text"
-                    placeholder="Asia/Shanghai"
-                  />
+                  >
+                    <option value="">{{ tr('Use import timezone', '使用导入时区') }}</option>
+                    <option v-for="option in timezoneOptions" :key="`import-group-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current effective timezone', '当前生效时区') }}: {{ importGroupTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-import-user">
                   <span>{{ tr('User ID', '用户 ID') }}</span>
@@ -1847,12 +1905,16 @@
                 </label>
                 <label class="attendance__field" for="attendance-import-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <input
+                  <select
                     id="attendance-import-timezone"
                     name="importTimezone"
                     v-model="importForm.timezone"
-                    type="text"
-                  />
+                  >
+                    <option v-for="option in timezoneOptions" :key="`import-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ importTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-import-payload">
                   <span>{{ tr('Payload (JSON)', '负载（JSON）') }}</span>
@@ -1887,6 +1949,9 @@
               <small class="attendance__field-hint">
                 {{ importScalabilityHint }}
               </small>
+              <small class="attendance__field-hint">
+                {{ importPreviewTimezoneHint }}
+              </small>
               <div
                 v-if="importPreviewTask"
                 class="attendance__status"
@@ -1907,6 +1972,7 @@
                 <div v-if="importPreviewTask.totalRows">
                   {{ tr('Progress', '进度') }}: {{ importPreviewTask.processedRows }} / {{ importPreviewTask.totalRows }}
                 </div>
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
                 <div v-if="importPreviewTask.message">{{ importPreviewTask.message }}</div>
               </div>
               <div
@@ -1954,29 +2020,19 @@
                 <div v-if="importAsyncJob.kind === 'preview' && importAsyncJob.preview?.rowCount">
                   {{ tr('Preview rows', '预览行数') }}: {{ importAsyncJob.preview?.total ?? 0 }} / {{ importAsyncJob.preview?.rowCount }}
                 </div>
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
                 <div v-if="importAsyncJob.error">{{ tr('Error', '错误') }}: {{ importAsyncJob.error }}</div>
               </div>
-              <div v-if="importStatusVisible" class="attendance__status attendance__status--error">
-                <div>
-                  {{ statusMessage }}
-                </div>
-                <div v-if="statusCode">{{ tr('Code', '代码') }}: {{ statusCode }}</div>
-                <div v-if="statusHint">{{ statusHint }}</div>
-                <button
-                  v-if="statusActionLabel"
-                  class="attendance__btn attendance__btn--inline"
-                  type="button"
-                  :disabled="statusActionBusy"
-                  @click="runStatusAction"
-                >
-                  {{ statusActionBusy ? tr('Working...', '处理中...') : statusActionLabel }}
-                </button>
-              </div>
               <div v-if="importCsvWarnings.length" class="attendance__status attendance__status--error">
-                {{ tr('CSV warnings', 'CSV 警告') }}: {{ importCsvWarnings.join('; ') }}
+                <div>{{ tr('CSV warnings', 'CSV 警告') }}: {{ importCsvWarnings.join('; ') }}</div>
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
               </div>
-              <div v-if="importPreview.length === 0" class="attendance__empty">{{ tr('No preview data.', '暂无预览数据。') }}</div>
+              <div v-if="importPreview.length === 0" class="attendance__empty-state">
+                <div class="attendance__empty">{{ tr('No preview data.', '暂无预览数据。') }}</div>
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
+              </div>
               <div v-else class="attendance__table-wrapper">
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
                 <table class="attendance__table">
                   <thead>
                     <tr>
@@ -2005,14 +2061,18 @@
                 </table>
               </div>
 
-              <div class="attendance__admin-section-header">
+              <div class="attendance__admin-section-header" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)">
                 <h4>{{ tr('Import batches', '导入批次') }}</h4>
                 <button class="attendance__btn" :disabled="importLoading" @click="loadImportBatches">
                   {{ importLoading ? tr('Loading...', '加载中...') : tr('Reload batches', '重载批次') }}
                 </button>
               </div>
-              <div v-if="importBatches.length === 0" class="attendance__empty">{{ tr('No import batches.', '暂无导入批次。') }}</div>
+              <div v-if="importBatches.length === 0" class="attendance__empty-state">
+                <div class="attendance__empty">{{ tr('No import batches.', '暂无导入批次。') }}</div>
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
+              </div>
               <div v-else class="attendance__table-wrapper">
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
                 <table class="attendance__table">
                   <thead>
                     <tr>
@@ -2064,6 +2124,7 @@
                     </button>
                   </div>
                 </div>
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
                 <table class="attendance__table">
                   <thead>
                     <tr>
@@ -2086,11 +2147,21 @@
                     </tr>
                   </tbody>
                 </table>
-                <pre v-if="importBatchSnapshot" class="attendance__code">{{ formatJson(importBatchSnapshot) }}</pre>
+                <div v-if="importBatchSnapshot" class="attendance__snapshot-panel">
+                  <div class="attendance__field-hint">
+                    {{ tr('Snapshot context', '快照上下文') }}: {{ importBatchSnapshotContextLabel }}
+                  </div>
+                  <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
+                  <pre class="attendance__code">{{ formatJson(importBatchSnapshot.snapshot) }}</pre>
+                </div>
+              </div>
+              <div v-else-if="importBatchSelectedId" class="attendance__empty-state">
+                <div class="attendance__empty">{{ tr('No batch items.', '暂无批次条目。') }}</div>
+                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Payroll Templates', '计薪模板') }}</h4>
                 <button class="attendance__btn" :disabled="payrollTemplateLoading" @click="loadPayrollTemplates">
@@ -2109,12 +2180,16 @@
                 </label>
                 <label class="attendance__field" for="attendance-payroll-template-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <input
+                  <select
                     id="attendance-payroll-template-timezone"
                     name="payrollTemplateTimezone"
                     v-model="payrollTemplateForm.timezone"
-                    type="text"
-                  />
+                  >
+                    <option v-for="option in timezoneOptions" :key="`payroll-template-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ payrollTemplateTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-payroll-template-start">
                   <span>{{ tr('Start day', '起始日') }}</span>
@@ -2195,7 +2270,15 @@
                   {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
-              <div v-if="payrollTemplates.length === 0" class="attendance__empty">{{ tr('No payroll templates yet.', '暂无计薪模板。') }}</div>
+              <small class="attendance__field-hint">
+                {{ tr('Template timezone context', '模板时区上下文') }}: {{ payrollTemplateTimezoneLabel }}
+              </small>
+              <div v-if="payrollTemplates.length === 0" class="attendance__empty-state">
+                <div class="attendance__empty">{{ tr('No payroll templates yet.', '暂无计薪模板。') }}</div>
+                <div class="attendance__field-hint">
+                  {{ tr('Template timezone context', '模板时区上下文') }}: {{ payrollTemplateTimezoneLabel }}
+                </div>
+              </div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
@@ -2212,7 +2295,7 @@
                   <tbody>
                     <tr v-for="item in payrollTemplates" :key="item.id">
                       <td>{{ item.name }}</td>
-                      <td>{{ item.timezone }}</td>
+                      <td>{{ displayTimezone(item.timezone) }}</td>
                       <td>{{ item.startDay }}</td>
                       <td>{{ item.endDay }}</td>
                       <td>{{ item.endMonthOffset }}</td>
@@ -2229,7 +2312,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Payroll Cycles', '计薪周期') }}</h4>
                 <button class="attendance__btn" :disabled="payrollCycleLoading" @click="loadPayrollCycles">
@@ -2324,6 +2407,9 @@
                   {{ tr('Cancel edit', '取消编辑') }}
                 </button>
               </div>
+              <small class="attendance__field-hint">
+                {{ payrollCycleTemplateTimezoneHint }}
+              </small>
 
               <details class="attendance__details">
                 <summary class="attendance__details-summary">{{ tr('Batch generate cycles', '批量生成周期') }}</summary>
@@ -2410,7 +2496,11 @@
                     {{ tr('Created', '已创建') }} {{ payrollCycleGenerateResult.created }}，{{ tr('skipped', '跳过') }} {{ payrollCycleGenerateResult.skipped }}。
                   </span>
                 </div>
+                <small class="attendance__field-hint">
+                  {{ payrollCycleGenerateTimezoneHint }}
+                </small>
               </details>
+              <div v-if="payrollCycleSummary" class="attendance__field-hint">{{ payrollCycleTemplateTimezoneHint }}</div>
               <div v-if="payrollCycleSummary" class="attendance__summary">
                 <div class="attendance__summary-item">
                   <span>{{ tr('Cycle total minutes', '周期总分钟数') }}</span>
@@ -2433,7 +2523,11 @@
                   <strong>{{ payrollCycleSummary.total_early_leave_minutes ?? 0 }}</strong>
                 </div>
               </div>
-              <div v-if="payrollCycles.length === 0" class="attendance__empty">{{ tr('No payroll cycles yet.', '暂无计薪周期。') }}</div>
+              <div v-if="payrollCycles.length === 0" class="attendance__empty-state">
+                <div class="attendance__empty">{{ tr('No payroll cycles yet.', '暂无计薪周期。') }}</div>
+                <div class="attendance__field-hint">{{ payrollCycleTemplateTimezoneHint }}</div>
+                <div class="attendance__field-hint">{{ payrollCycleGenerateTimezoneHint }}</div>
+              </div>
               <div v-else class="attendance__table-wrapper">
                 <table class="attendance__table">
                   <thead>
@@ -2465,7 +2559,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Leave Types', '请假类型') }}</h4>
                 <button class="attendance__btn" :disabled="leaveTypeLoading" @click="loadLeaveTypes">
@@ -2566,7 +2660,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Overtime Rules', '加班规则') }}</h4>
                 <button class="attendance__btn" :disabled="overtimeRuleLoading" @click="loadOvertimeRules">
@@ -2678,7 +2772,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Approval Flows', '审批流') }}</h4>
                 <button class="attendance__btn" :disabled="approvalFlowLoading" @click="loadApprovalFlows">
@@ -2772,7 +2866,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationRules)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rotation Rules', '轮班规则') }}</h4>
                 <button class="attendance__btn" :disabled="rotationRuleLoading" @click="loadRotationRules">
@@ -2791,12 +2885,16 @@
                 </label>
                 <label class="attendance__field" for="attendance-rotation-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <input
+                  <select
                     id="attendance-rotation-timezone"
                     name="rotationTimezone"
                     v-model="rotationRuleForm.timezone"
-                    type="text"
-                  />
+                  >
+                    <option v-for="option in timezoneOptions" :key="`rotation-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ rotationRuleTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-rotation-sequence">
                   <span>{{ tr('Shift sequence (IDs)', '班次序列（ID）') }}</span>
@@ -2850,7 +2948,7 @@
                   <tbody>
                     <tr v-for="rule in rotationRules" :key="rule.id">
                       <td>{{ rule.name }}</td>
-                      <td>{{ rule.timezone }}</td>
+                      <td>{{ displayTimezone(rule.timezone) }}</td>
                       <td>{{ rule.shiftSequence.join(', ') }}</td>
                       <td>{{ rule.isActive ? tr('Yes', '是') : tr('No', '否') }}</td>
                       <td class="attendance__table-actions">
@@ -2865,7 +2963,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rotation Assignments', '轮班分配') }}</h4>
                 <button class="attendance__btn" :disabled="rotationAssignmentLoading" @click="loadRotationAssignments">
@@ -2976,7 +3074,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.shifts)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Shifts', '班次') }}</h4>
                 <button class="attendance__btn" :disabled="shiftLoading" @click="loadShifts">
@@ -2990,12 +3088,16 @@
                 </label>
                 <label class="attendance__field" for="attendance-shift-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <input
+                  <select
                     id="attendance-shift-timezone"
                     name="shiftTimezone"
                     v-model="shiftForm.timezone"
-                    type="text"
-                  />
+                  >
+                    <option v-for="option in timezoneOptions" :key="`shift-${option.value}`" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ shiftTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-shift-start">
                   <span>{{ tr('Work start', '上班开始') }}</span>
@@ -3080,7 +3182,7 @@
                   <tbody>
                     <tr v-for="shift in shifts" :key="shift.id">
                       <td>{{ shift.name }}</td>
-                      <td>{{ shift.timezone }}</td>
+                      <td>{{ displayTimezone(shift.timezone) }}</td>
                       <td>{{ shift.workStartTime }}</td>
                       <td>{{ shift.workEndTime }}</td>
                       <td>{{ shift.workingDays.join(',') }}</td>
@@ -3096,7 +3198,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.assignments)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Assignments', '排班分配') }}</h4>
                 <button class="attendance__btn" :disabled="assignmentLoading" @click="loadAssignments">
@@ -3203,7 +3305,7 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section">
+            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidays)">
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Holidays', '节假日') }}</h4>
                 <button class="attendance__btn" :disabled="holidayLoading" @click="loadHolidays">
@@ -3280,6 +3382,7 @@
                 </table>
               </div>
             </div>
+            </div>
           </div>
         </div>
       </section>
@@ -3289,9 +3392,17 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
+import {
+  ATTENDANCE_ADMIN_SECTION_IDS,
+  useAttendanceAdminRail,
+} from './attendance/useAttendanceAdminRail'
+import { useAttendanceAdminRailNavigation } from './attendance/useAttendanceAdminRailNavigation'
 import { useLocale } from '../composables/useLocale'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
+import { readErrorMessage } from '../utils/error'
+import { buildTimezoneOptions, formatTimezoneLabel } from '../utils/timezones'
 
 type AttendancePageMode = 'overview' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
@@ -3322,8 +3433,6 @@ interface AttendanceStatusMeta {
   code?: string
   hint?: string
   action?: AttendanceStatusAction
-  context?: AttendanceStatusContext
-  sticky?: boolean
 }
 
 const props = withDefaults(
@@ -3337,6 +3446,40 @@ const props = withDefaults(
 
 const { locale, isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
+const CALENDAR_DISPLAY_PREFS_STORAGE_KEY = 'metasheet_attendance_calendar_display'
+
+interface AttendanceCalendarDisplayPrefs {
+  showLunar: boolean
+  showHoliday: boolean
+}
+
+function loadCalendarDisplayPrefs(): AttendanceCalendarDisplayPrefs {
+  const defaults: AttendanceCalendarDisplayPrefs = {
+    showLunar: true,
+    showHoliday: true,
+  }
+  if (typeof window === 'undefined') return defaults
+  try {
+    const raw = window.localStorage.getItem(CALENDAR_DISPLAY_PREFS_STORAGE_KEY)
+    if (!raw) return defaults
+    const parsed = JSON.parse(raw) as Partial<AttendanceCalendarDisplayPrefs>
+    return {
+      showLunar: parsed.showLunar !== false,
+      showHoliday: parsed.showHoliday !== false,
+    }
+  } catch {
+    return defaults
+  }
+}
+
+function persistCalendarDisplayPrefs(prefs: AttendanceCalendarDisplayPrefs): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(CALENDAR_DISPLAY_PREFS_STORAGE_KEY, JSON.stringify(prefs))
+  } catch {
+    // ignore storage write failures (private mode, quota).
+  }
+}
 
 interface AttendanceSummary {
   total_days: number
@@ -3667,6 +3810,17 @@ interface AttendanceImportItem {
   createdAt?: string
 }
 
+interface AttendanceImportBatchSnapshotContext {
+  userId: string | null
+  workDate: string | null
+  recordId: string | null
+}
+
+interface AttendanceImportBatchSnapshotState {
+  snapshot: Record<string, any>
+  context: AttendanceImportBatchSnapshotContext
+}
+
 interface AttendanceImportMappingProfile {
   id: string
   name: string
@@ -3690,7 +3844,6 @@ interface AttendanceImportJob {
   progress: number
   total: number
   engine?: 'standard' | 'bulk' | string | null
-  recordUpsertStrategy?: string | null
   processedRows?: number
   failedRows?: number
   elapsedMs?: number
@@ -4015,6 +4168,60 @@ const payrollCycleGenerateResult = ref<{ created: number; skipped: number } | nu
 const importLoading = ref(false)
 const adminForbidden = ref(false)
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+const timezoneOptions = computed(() =>
+  buildTimezoneOptions([defaultTimezone, 'UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York'])
+)
+const overviewTimezoneLabel = computed(() => displayTimezone(defaultTimezone))
+const overviewRefreshTimezoneContextHint = computed(() =>
+  `${tr('Overview timezone context', '总览时区上下文')}: ${overviewTimezoneLabel.value}`
+)
+const calendarTimezoneContextHint = computed(() =>
+  `${tr('Calendar timezone context', '日历时区上下文')}: ${overviewTimezoneLabel.value}`
+)
+const requestTimezoneContextHint = computed(() =>
+  `${tr('Request timezone context', '申请时区上下文')}: ${overviewTimezoneLabel.value}`
+)
+const summaryTimezoneContextHint = computed(() =>
+  `${tr('Summary timezone context', '汇总时区上下文')}: ${overviewTimezoneLabel.value}`
+)
+const anomaliesTimezoneContextHint = computed(() =>
+  `${tr('Anomalies timezone context', '异常时区上下文')}: ${overviewTimezoneLabel.value}`
+)
+const requestReportTimezoneContextHint = computed(() =>
+  `${tr('Request report timezone context', '申请报表时区上下文')}: ${overviewTimezoneLabel.value}`
+)
+const recordsTimezoneContextHint = computed(() =>
+  `${tr('Records timezone context', '记录时区上下文')}: ${overviewTimezoneLabel.value}`
+)
+const holidaySyncAutoTimezoneLabel = computed(() => displayTimezone(settingsForm.holidaySyncAutoTimezone))
+const ruleTimezoneLabel = computed(() => displayTimezone(ruleForm.timezone))
+const attendanceGroupTimezoneLabel = computed(() => displayTimezone(attendanceGroupForm.timezone))
+const importTimezoneLabel = computed(() => displayTimezone(importForm.timezone))
+const importGroupTimezoneLabel = computed(() =>
+  importGroupTimezone.value
+    ? displayTimezone(importGroupTimezone.value)
+    : `${tr('Use import timezone', '使用导入时区')} (${displayTimezone(importForm.timezone)})`
+)
+const importPreviewTimezoneHint = computed(() =>
+  `${tr('Preview timezone', '预览时区')}: ${importTimezoneLabel.value} · ${tr('Group timezone', '分组时区')}: ${importGroupTimezoneLabel.value}`
+)
+const importBatchSnapshotContextLabel = computed(() => {
+  const snapshot = importBatchSnapshot.value
+  if (!snapshot) return '--'
+  const context = snapshot.context && typeof snapshot.context === 'object'
+    ? snapshot.context
+    : null
+  return `userId: ${context?.userId || '--'} · workDate: ${context?.workDate || '--'} · recordId: ${context?.recordId || '--'}`
+})
+const payrollTemplateTimezoneLabel = computed(() => displayTimezone(payrollTemplateForm.timezone))
+const payrollCycleTemplateTimezoneHint = computed(() =>
+  `${tr('Cycle template timezone', '周期模板时区')}: ${resolvePayrollTemplateTimezoneLabel(payrollCycleForm.templateId, 'manual')}`
+)
+const payrollCycleGenerateTimezoneHint = computed(() =>
+  `${tr('Generate timezone context', '生成时区上下文')}: ${resolvePayrollTemplateTimezoneLabel(payrollCycleGenerateForm.templateId, 'default')}`
+)
+const rotationRuleTimezoneLabel = computed(() => displayTimezone(rotationRuleForm.timezone))
+const shiftTimezoneLabel = computed(() => displayTimezone(shiftForm.timezone))
 
 const provisionRolePermissions: Record<ProvisionRole, string[]> = {
   employee: ['attendance:read', 'attendance:write'],
@@ -4043,13 +4250,13 @@ const importPreview = ref<AttendanceImportPreviewItem[]>([])
 const importBatches = ref<AttendanceImportBatch[]>([])
 const importBatchItems = ref<AttendanceImportItem[]>([])
 const importBatchSelectedId = ref('')
-const importBatchSnapshot = ref<Record<string, any> | null>(null)
+const importBatchSnapshot = ref<AttendanceImportBatchSnapshotState | null>(null)
 const importCsvWarnings = ref<string[]>([])
 const importPreviewTask = ref<AttendanceImportPreviewTask | null>(null)
 const importAsyncJob = ref<AttendanceImportJob | null>(null)
 const importAsyncPolling = ref(false)
-const reconcileResult = ref<AttendanceReconcileResult | null>(null)
-const rulePreviewResult = ref<AttendanceRulePreviewItem | null>(null)
+const _reconcileResult = ref<AttendanceReconcileResult | null>(null)
+const _rulePreviewResult = ref<AttendanceRulePreviewItem | null>(null)
 
 function toNonNegativeNumber(value: unknown): number | null {
   const num = Number(value)
@@ -4156,16 +4363,53 @@ const pluginErrorMessage = computed(() => pluginsError.value)
 
 const showAdmin = computed(() => props.mode === 'admin')
 const showOverview = computed(() => props.mode === 'overview')
+const {
+  adminActiveSectionId,
+  adminCompactNavOpen,
+  adminNavDefaultStorageScope,
+  adminNavScopeFeedback,
+  adminNavStorageScope,
+  adminSectionFilter,
+  adminSectionFilterActive,
+  adminSectionNavCountLabel,
+  adminSectionNavItems,
+  allAdminSectionGroupsCollapsed,
+  allAdminSectionGroupsExpanded,
+  activeAdminSectionContextLabel,
+  clearRecentAdminSections,
+  copyCurrentAdminSectionLink,
+  expandAllAdminSectionGroups,
+  isCompactAdminNav,
+  isKnownAdminSectionId,
+  readLastAdminSection,
+  collapseAllAdminSectionGroups,
+  toggleAdminSectionGroup,
+  visibleAdminSectionNavGroups,
+  visibleRecentAdminSectionNavItems,
+} = useAttendanceAdminRail({
+  tr,
+  resolveStorageScope: normalizedOrgId,
+  showAdmin,
+  notify: (message, kind = 'info') => setStatus(message, kind),
+})
+
+const {
+  adminSectionBinding,
+  scrollToAdminSection,
+} = useAttendanceAdminRailNavigation({
+  showAdmin,
+  adminForbidden,
+  adminNavStorageScope,
+  adminActiveSectionId,
+  adminSectionNavItems,
+  isKnownAdminSectionId,
+  readLastAdminSection,
+  isCompactAdminNav,
+  adminCompactNavOpen,
+})
+
 const statusCode = computed(() => statusMeta.value?.code || '')
 const statusHint = computed(() => statusMeta.value?.hint || '')
-const importStatusVisible = computed(() => {
-  const context = statusMeta.value?.context
-  return Boolean(
-    statusKind.value === 'error'
-    && statusMessage.value
-    && (context === 'import-preview' || context === 'import-run')
-  )
-})
 const canResumeImportJobFromStatus = computed(() => {
   const action = statusMeta.value?.action
   if (action !== 'retry-run-import') return false
@@ -4218,6 +4462,9 @@ const recordsPage = ref(1)
 const recordsPageSize = 20
 const recordsTotal = ref(0)
 const recordsTotalPages = computed(() => Math.max(1, Math.ceil(recordsTotal.value / recordsPageSize)))
+const calendarDisplayPrefs = loadCalendarDisplayPrefs()
+const showLunarLabel = ref(calendarDisplayPrefs.showLunar)
+const showHolidayBadge = ref(calendarDisplayPrefs.showHoliday)
 
 const weekDays = computed(() => (
   isZh.value
@@ -4226,6 +4473,10 @@ const weekDays = computed(() => (
 ))
 const calendarLabel = computed(() => {
   return new Intl.DateTimeFormat(isZh.value ? 'zh-CN' : 'en-US', { year: 'numeric', month: 'long' }).format(calendarMonth.value)
+})
+
+watch([showLunarLabel, showHolidayBadge], ([showLunar, showHoliday]) => {
+  persistCalendarDisplayPrefs({ showLunar, showHoliday })
 })
 
 const recordMap = computed(() => {
@@ -4494,6 +4745,10 @@ function formatDateTime(value: string | null): string {
   return date.toLocaleString(locale.value)
 }
 
+function displayTimezone(value: string | null | undefined): string {
+  return formatTimezoneLabel(value)
+}
+
 function formatStatus(value: string): string {
   const raw = String(value || '').trim()
   if (!raw) return '--'
@@ -4631,12 +4886,23 @@ function formatWarningsShort(warnings: string[]): string {
 
 async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void> {
   if (item.state === 'pending') {
-    setStatus(tr('A pending request already exists for this work date.', '该工作日已存在待处理申请。'), 'error')
+    setStatus(
+      appendStatusContext(
+        tr('A pending request already exists for this work date.', '该工作日已存在待处理申请。'),
+        requestTimezoneContextHint.value,
+      ),
+      'error',
+    )
     return
   }
   requestForm.workDate = item.workDate
   requestForm.requestType = item.suggestedRequestType ?? 'time_correction'
-  setStatus(tr('Request form updated from anomaly.', '已根据异常记录填充申请表单。'))
+  setStatus(
+    appendStatusContext(
+      tr('Request form updated from anomaly.', '已根据异常记录填充申请表单。'),
+      requestTimezoneContextHint.value,
+    ),
+  )
   await nextTick()
   document.getElementById('attendance-request-work-date')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
@@ -5038,7 +5304,7 @@ function resolveImportJobProcessedRows(job: AttendanceImportJob | null): number 
   return Number.isFinite(fallback) ? Math.max(0, Math.floor(fallback)) : 0
 }
 
-function resolveImportJobFailedRows(job: AttendanceImportJob | null): number {
+function _resolveImportJobFailedRows(job: AttendanceImportJob | null): number {
   if (!job) return 0
   const direct = Number(job.failedRows)
   if (Number.isFinite(direct)) return Math.max(0, Math.floor(direct))
@@ -5050,7 +5316,7 @@ function resolveImportJobFailedRows(job: AttendanceImportJob | null): number {
   return 0
 }
 
-function formatImportElapsedMs(value: unknown): string {
+function _formatImportElapsedMs(value: unknown): string {
   const numeric = Number(value)
   if (!Number.isFinite(numeric) || numeric < 0) return '--'
   if (numeric < 1000) return `${Math.round(numeric)} ms`
@@ -5075,6 +5341,50 @@ function payrollTemplateName(templateId?: string | null): string {
   return found?.name ?? templateId
 }
 
+function resolvePayrollTemplateTimezoneLabel(
+  templateId: string | null | undefined,
+  fallback: 'manual' | 'default',
+): string {
+  if (templateId) {
+    const found = payrollTemplates.value.find(item => item.id === templateId)
+    if (found) return `${found.name} (${displayTimezone(found.timezone)})`
+    return `${templateId} (${tr('template unavailable', '模板不可用')})`
+  }
+
+  if (fallback === 'default') {
+    const found = payrollTemplates.value.find(item => item.isDefault) ?? payrollTemplates.value[0]
+    if (found) return `${tr('Default template', '默认模板')} · ${found.name} (${displayTimezone(found.timezone)})`
+    return tr('Default template unavailable', '默认模板不可用')
+  }
+
+  return tr('Manual dates (no template timezone)', '手工日期（无模板时区）')
+}
+
+function appendStatusContext(message: string, context: string): string {
+  return `${message} · ${context}`
+}
+
+function appendStatusHintContext(hint: string | undefined, context: string): string {
+  return hint ? `${hint} ${context}` : context
+}
+
+function setStatusFromErrorWithContext(
+  error: unknown,
+  fallbackMessage: string,
+  statusContext: string,
+  context: AttendanceStatusContext,
+) {
+  const { message, meta } = classifyStatusError(error, fallbackMessage, context)
+  setStatus(
+    message || fallbackMessage,
+    'error',
+    {
+      ...meta,
+      hint: appendStatusHintContext(meta.hint, statusContext),
+    },
+  )
+}
+
 async function loadImportTemplate() {
   clearImportPreviewTask()
   importLoading.value = true
@@ -5082,7 +5392,7 @@ async function loadImportTemplate() {
     const response = await apiFetch('/api/attendance/import/template')
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load import template', '加载导入模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load import template', '加载导入模板失败')))
     }
     const payloadExample = (data.data?.payloadExample ?? {}) as Record<string, any>
     importMode.value = payloadExample?.mode === 'merge' ? 'merge' : 'override'
@@ -5090,7 +5400,7 @@ async function loadImportTemplate() {
     importMappingProfiles.value = Array.isArray(data.data?.mappingProfiles) ? data.data.mappingProfiles : []
     setStatus(tr('Import template loaded.', '导入模板已加载。'))
   } catch (error) {
-    setStatus((error as Error).message || tr('Failed to load import template', '加载导入模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load import template', '加载导入模板失败')), 'error')
   } finally {
     importLoading.value = false
   }
@@ -5194,7 +5504,7 @@ async function handleImportUserMapChange(event: Event) {
     setStatus(tr(`User map loaded (${Object.keys(normalized).length} entries).`, `用户映射已加载（${Object.keys(normalized).length} 条）。`))
   } catch (error) {
     importUserMap.value = null
-    importUserMapError.value = (error as Error).message || tr('Failed to parse user map JSON', '解析用户映射 JSON 失败')
+    importUserMapError.value = readErrorMessage(error, tr('Failed to parse user map JSON', '解析用户映射 JSON 失败'))
     setStatus(importUserMapError.value, 'error')
   }
 }
@@ -5217,7 +5527,7 @@ async function uploadImportCsvFile(file: File): Promise<{ fileId: string; rowCou
 
   const data = await response.json().catch(() => ({} as any))
   if (!response.ok || !data?.ok) {
-    throw new Error(data?.error?.message || tr(`Failed to upload CSV (HTTP ${response.status})`, `上传 CSV 失败（HTTP ${response.status}）`))
+    throw new Error(readErrorMessage(data, tr(`Failed to upload CSV (HTTP ${response.status})`, `上传 CSV 失败（HTTP ${response.status}）`)))
   }
   const fileId = String(data.data?.fileId || '')
   if (!fileId) throw new Error(tr('Upload did not return fileId', '上传接口未返回 fileId'))
@@ -5310,13 +5620,13 @@ async function ensureImportCommitToken(options: { forceRefresh?: boolean } = {})
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to prepare import token', '准备导入令牌失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to prepare import token', '准备导入令牌失败')))
     }
     importCommitToken.value = data.data?.commitToken ?? ''
     importCommitTokenExpiresAt.value = data.data?.expiresAt ?? ''
     return Boolean(importCommitToken.value)
   } catch (error) {
-    setStatus((error as Error).message || tr('Failed to prepare import token', '准备导入令牌失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to prepare import token', '准备导入令牌失败')), 'error')
     return false
   }
 }
@@ -5363,10 +5673,10 @@ async function runChunkedImportPreview(payload: Record<string, any>, plan: Impor
     })
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || tr(
+      throw new Error(readErrorMessage(data, tr(
         `Failed to preview chunk ${chunkIndex + 1}/${plan.chunkCount}`,
         `预览分片 ${chunkIndex + 1}/${plan.chunkCount} 失败`
-      ))
+      )))
     }
 
     const chunkItems = Array.isArray(data.data?.items) ? data.data.items as AttendanceImportPreviewItem[] : []
@@ -5421,7 +5731,7 @@ async function runChunkedImportPreview(payload: Record<string, any>, plan: Impor
   const suffix = invalidCount || duplicateCount
     ? tr(` Invalid: ${invalidCount}. Duplicates: ${duplicateCount}.`, ` 无效：${invalidCount}。重复：${duplicateCount}。`)
     : ''
-  setStatus(`${message}${suffix}`)
+  setStatus(appendStatusContext(`${message}${suffix}`, importPreviewTimezoneHint.value))
 
   importPreviewTask.value = {
     mode: 'chunked',
@@ -5486,7 +5796,10 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
 
   adminForbidden.value = false
   importAsyncJob.value = job
-  setStatus(tr(`Preview job queued (${job.status}).`, `预览任务已排队（${job.status}）。`))
+  setStatus(appendStatusContext(
+    tr(`Preview job queued (${job.status}).`, `预览任务已排队（${job.status}）。`),
+    importPreviewTimezoneHint.value,
+  ))
 
   const finalJob = await pollImportJob(job.id)
   const previewData = finalJob.preview && typeof finalJob.preview === 'object' ? finalJob.preview : null
@@ -5514,7 +5827,7 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
   const suffix = invalidCount || dupCount
     ? tr(` Invalid: ${invalidCount}. Duplicates: ${dupCount}.`, ` 无效：${invalidCount}。重复：${dupCount}。`)
     : ''
-  setStatus(`${baseMsg}${suffix}`)
+  setStatus(appendStatusContext(`${baseMsg}${suffix}`, importPreviewTimezoneHint.value))
 
   importPreviewTask.value = {
     mode: 'single',
@@ -5534,11 +5847,12 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
 async function previewImport() {
   clearImportPreviewTask()
   clearImportAsyncJob()
-  importPreview.value = []
-  importCsvWarnings.value = []
   const payload = buildImportPayload()
   if (!payload) {
-    setStatus(tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'), 'error', {
+    setStatus(appendStatusContext(
+      tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'),
+      importPreviewTimezoneHint.value,
+    ), 'error', {
       hint: tr('Fix JSON syntax in payload and retry preview.', '请修复载荷 JSON 语法后重试预览。'),
       action: 'retry-preview-import',
     })
@@ -5607,7 +5921,7 @@ async function previewImport() {
     const suffix = invalidCount || dupCount
       ? tr(` Invalid: ${invalidCount}. Duplicates: ${dupCount}.`, ` 无效：${invalidCount}。重复：${dupCount}。`)
       : ''
-    setStatus(`${baseMsg}${suffix}`)
+    setStatus(appendStatusContext(`${baseMsg}${suffix}`, importPreviewTimezoneHint.value))
     importPreviewTask.value = {
       mode: 'single',
       status: 'completed',
@@ -5621,16 +5935,19 @@ async function previewImport() {
     importCommitToken.value = ''
     importCommitTokenExpiresAt.value = ''
   } catch (error) {
-    importPreview.value = []
-    importCsvWarnings.value = []
     if (importPreviewTask.value) {
       importPreviewTask.value = {
         ...importPreviewTask.value,
         status: 'failed',
-        message: (error as Error).message || tr('Preview failed', '预览失败'),
+        message: readErrorMessage(error, tr('Preview failed', '预览失败')),
       }
     }
-    setStatusFromError(error, tr('Failed to preview import', '预览导入失败'), 'import-preview')
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to preview import', '预览导入失败'),
+      importPreviewTimezoneHint.value,
+      'import-preview',
+    )
   } finally {
     importLoading.value = false
   }
@@ -5692,7 +6009,12 @@ async function refreshImportAsyncJob(options: { silent?: boolean } = {}) {
   try {
     const job = await fetchImportJob(jobId)
     importAsyncJob.value = job
-    if (!options.silent) setStatus(tr(`Import job ${jobId.slice(0, 8)} reloaded (${job.status}).`, `导入任务 ${jobId.slice(0, 8)} 已重载（${job.status}）。`))
+    if (!options.silent) {
+      setStatus(appendStatusContext(
+        tr(`Import job ${jobId.slice(0, 8)} reloaded (${job.status}).`, `导入任务 ${jobId.slice(0, 8)} 已重载（${job.status}）。`),
+        importPreviewTimezoneHint.value,
+      ))
+    }
   } catch (error) {
     if (!options.silent) {
       setStatusFromError(error, tr('Failed to reload import job', '重载导入任务失败'), 'import-run')
@@ -5713,33 +6035,34 @@ async function resumeImportAsyncJobPolling() {
       if (previewData) {
         importPreview.value = Array.isArray(previewData.items) ? previewData.items as AttendanceImportPreviewItem[] : []
       }
-      setStatus(tr(`Preview job completed (${jobId.slice(0, 8)}).`, `预览任务完成（${jobId.slice(0, 8)}）。`))
+      setStatus(appendStatusContext(
+        tr(`Preview job completed (${jobId.slice(0, 8)}).`, `预览任务完成（${jobId.slice(0, 8)}）。`),
+        importPreviewTimezoneHint.value,
+      ))
       return
     }
     const imported = Number(finalJob.progress ?? 0)
     const total = Number(finalJob.total ?? 0)
-    const perfSuffix = buildImportPerfSuffix({
-      engine: finalJob.engine,
-      recordUpsertStrategy: finalJob.recordUpsertStrategy,
-      processedRows: finalJob.processedRows ?? imported,
-      failedRows: finalJob.failedRows,
-      elapsedMs: finalJob.elapsedMs,
-    })
     if (total && imported !== total) {
-      setStatus(tr(
-        `Imported ${imported}/${total} rows (async job).${perfSuffix.en}`,
-        `已导入 ${imported}/${total} 行（异步任务）。${perfSuffix.zh}`,
+      setStatus(appendStatusContext(
+        tr(`Imported ${imported}/${total} rows (async job).`, `已导入 ${imported}/${total} 行（异步任务）。`),
+        importPreviewTimezoneHint.value,
       ))
     } else {
-      setStatus(tr(
-        `Imported ${imported} rows (async job).${perfSuffix.en}`,
-        `已导入 ${imported} 行（异步任务）。${perfSuffix.zh}`,
+      setStatus(appendStatusContext(
+        tr(`Imported ${imported} rows (async job).`, `已导入 ${imported} 行（异步任务）。`),
+        importPreviewTimezoneHint.value,
       ))
     }
     await loadRecords()
     await loadImportBatches()
   } catch (error) {
-    setStatusFromError(error, tr('Failed while polling import job', '轮询导入任务失败'), 'import-run')
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed while polling import job', '轮询导入任务失败'),
+      importPreviewTimezoneHint.value,
+      'import-run',
+    )
   }
 }
 
@@ -5750,47 +6073,14 @@ function clearImportAsyncJob() {
   importAsyncJob.value = null
 }
 
-function buildImportPerfSuffix(input: {
-  engine?: unknown
-  recordUpsertStrategy?: unknown
-  processedRows?: unknown
-  failedRows?: unknown
-  elapsedMs?: unknown
-}): { en: string; zh: string } {
-  const processedRows = toNonNegativeNumber(input.processedRows) ?? 0
-  const failedRows = toNonNegativeNumber(input.failedRows) ?? 0
-  const elapsedMs = toNonNegativeNumber(input.elapsedMs) ?? 0
-  const importEngine = String(input.engine ?? '').trim().toLowerCase()
-  const importStrategy = String(input.recordUpsertStrategy ?? '').trim().toLowerCase()
-
-  const perfBitsEn: string[] = []
-  const perfBitsZh: string[] = []
-  if (importEngine) {
-    perfBitsEn.push(`engine=${importEngine}`)
-    perfBitsZh.push(`引擎=${importEngine}`)
-  }
-  if (importStrategy) {
-    perfBitsEn.push(`strategy=${importStrategy}`)
-    perfBitsZh.push(`策略=${importStrategy}`)
-  }
-  perfBitsEn.push(`processed=${processedRows}`)
-  perfBitsZh.push(`处理=${processedRows}`)
-  perfBitsEn.push(`failed=${failedRows}`)
-  perfBitsZh.push(`失败=${failedRows}`)
-  perfBitsEn.push(`elapsedMs=${elapsedMs}`)
-  perfBitsZh.push(`耗时毫秒=${elapsedMs}`)
-
-  return {
-    en: perfBitsEn.length ? ` (${perfBitsEn.join(', ')})` : '',
-    zh: perfBitsZh.length ? `（${perfBitsZh.join('，')}）` : '',
-  }
-}
-
 async function runImport() {
   clearImportPreviewTask()
   const payload = buildImportPayload()
   if (!payload) {
-    setStatus(tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'), 'error', {
+    setStatus(appendStatusContext(
+      tr('Invalid JSON payload for import.', '导入载荷 JSON 无效。'),
+      importPreviewTimezoneHint.value,
+    ), 'error', {
       hint: tr('Fix JSON syntax in payload and retry import.', '请修复载荷 JSON 语法后重试导入。'),
       action: 'retry-run-import',
     })
@@ -5840,26 +6130,22 @@ async function runImport() {
         }
         adminForbidden.value = false
         importAsyncJob.value = job
-        setStatus(tr(`Import job queued (${job.status}).`, `导入任务已排队（${job.status}）。`))
+        setStatus(appendStatusContext(
+          tr(`Import job queued (${job.status}).`, `导入任务已排队（${job.status}）。`),
+          importPreviewTimezoneHint.value,
+        ))
 
         const finalJob = await pollImportJob(job.id)
         const imported = Number(finalJob.progress ?? 0)
         const total = Number(finalJob.total ?? 0)
-        const perfSuffix = buildImportPerfSuffix({
-          engine: finalJob.engine,
-          recordUpsertStrategy: finalJob.recordUpsertStrategy,
-          processedRows: finalJob.processedRows ?? imported,
-          failedRows: finalJob.failedRows,
-          elapsedMs: finalJob.elapsedMs,
-        })
-        setStatus(tr(
-          `Imported ${imported} rows (async job).${perfSuffix.en}`,
-          `已导入 ${imported} 行（异步任务）。${perfSuffix.zh}`,
+        setStatus(appendStatusContext(
+          tr(`Imported ${imported} rows (async job).`, `已导入 ${imported} 行（异步任务）。`),
+          importPreviewTimezoneHint.value,
         ))
         if (total && imported !== total) {
-          setStatus(tr(
-            `Imported ${imported}/${total} rows (async job).${perfSuffix.en}`,
-            `已导入 ${imported}/${total} 行（异步任务）。${perfSuffix.zh}`,
+          setStatus(appendStatusContext(
+            tr(`Imported ${imported}/${total} rows (async job).`, `已导入 ${imported}/${total} 行（异步任务）。`),
+            importPreviewTimezoneHint.value,
           ))
         }
 
@@ -5914,31 +6200,31 @@ async function runImport() {
       ...(Array.isArray(data.data?.groupWarnings) ? data.data.groupWarnings : []),
     ]
     importCsvWarnings.value = Array.from(new Set(importWarnings))
-    const count = Number(data.data?.imported ?? 0)
-    const processedRows = toNonNegativeNumber(data.data?.processedRows) ?? count
-    const perfSuffix = buildImportPerfSuffix({
-      engine: data.data?.engine,
-      recordUpsertStrategy: data.data?.recordUpsertStrategy,
-      processedRows,
-      failedRows: data.data?.failedRows,
-      elapsedMs: data.data?.elapsedMs,
-    })
+    const count = data.data?.imported ?? 0
     const groupCreated = data.data?.meta?.groupCreated ?? 0
     const groupMembersAdded = data.data?.meta?.groupMembersAdded ?? 0
     if (groupCreated || groupMembersAdded) {
-      setStatus(tr(
-        `Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.${perfSuffix.en}`,
-        `已导入 ${count} 行。新建分组：${groupCreated}。新增成员：${groupMembersAdded}。${perfSuffix.zh}`,
+      setStatus(appendStatusContext(
+        tr(`Imported ${count} rows. Groups created: ${groupCreated}. Members added: ${groupMembersAdded}.`, `已导入 ${count} 行。新建分组：${groupCreated}。新增成员：${groupMembersAdded}。`),
+        importPreviewTimezoneHint.value,
       ))
     } else {
-      setStatus(tr(`Imported ${count} rows.${perfSuffix.en}`, `已导入 ${count} 行。${perfSuffix.zh}`))
+      setStatus(appendStatusContext(
+        tr(`Imported ${count} rows.`, `已导入 ${count} 行。`),
+        importPreviewTimezoneHint.value,
+      ))
     }
     await loadRecords()
     await loadImportBatches()
     importCommitToken.value = ''
     importCommitTokenExpiresAt.value = ''
   } catch (error) {
-    setStatusFromError(error, tr('Failed to import attendance', '导入考勤失败'), 'import-run')
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to import attendance', '导入考勤失败'),
+      importPreviewTimezoneHint.value,
+      'import-run',
+    )
   } finally {
     importLoading.value = false
   }
@@ -5971,11 +6257,14 @@ async function loadImportBatches() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load import batches', '加载导入批次失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load import batches', '加载导入批次失败')))
     }
     importBatches.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load import batches', '加载导入批次失败'), 'error')
+    setStatus(appendStatusContext(
+      readErrorMessage(error, tr('Failed to load import batches', '加载导入批次失败')),
+      importPreviewTimezoneHint.value,
+    ), 'error')
   } finally {
     importLoading.value = false
   }
@@ -5992,13 +6281,20 @@ async function loadImportBatchItems(batchId: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load import batch items', '加载导入批次明细失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load import batch items', '加载导入批次明细失败')))
     }
     importBatchSelectedId.value = batchId
     importBatchItems.value = data.data?.items ?? []
     importBatchSnapshot.value = null
+    setStatus(appendStatusContext(
+      tr(`Batch items loaded (${importBatchItems.value.length} rows).`, `批次条目已加载（${importBatchItems.value.length} 行）。`),
+      importPreviewTimezoneHint.value,
+    ))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load import batch items', '加载导入批次明细失败'), 'error')
+    setStatus(appendStatusContext(
+      readErrorMessage(error, tr('Failed to load import batch items', '加载导入批次明细失败')),
+      importPreviewTimezoneHint.value,
+    ), 'error')
   } finally {
     importLoading.value = false
   }
@@ -6009,10 +6305,17 @@ function toggleImportBatchSnapshot(item: AttendanceImportItem) {
     importBatchSnapshot.value = null
     return
   }
-  if (importBatchSnapshot.value === item.previewSnapshot) {
+  if (importBatchSnapshot.value?.snapshot === item.previewSnapshot) {
     importBatchSnapshot.value = null
   } else {
-    importBatchSnapshot.value = item.previewSnapshot
+    importBatchSnapshot.value = {
+      snapshot: item.previewSnapshot,
+      context: {
+        userId: item.userId ?? null,
+        workDate: item.workDate ?? null,
+        recordId: item.recordId ?? null,
+      },
+    }
   }
 }
 
@@ -6027,7 +6330,7 @@ async function rollbackImportBatch(batchId: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to rollback import batch', '回滚导入批次失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to rollback import batch', '回滚导入批次失败')))
     }
     await loadImportBatches()
     if (importBatchSelectedId.value === batchId) {
@@ -6035,9 +6338,15 @@ async function rollbackImportBatch(batchId: string) {
       importBatchSnapshot.value = null
       importBatchSelectedId.value = ''
     }
-    setStatus(tr('Import batch rolled back.', '导入批次已回滚。'))
+    setStatus(appendStatusContext(
+      tr('Import batch rolled back.', '导入批次已回滚。'),
+      importPreviewTimezoneHint.value,
+    ))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to rollback import batch', '回滚导入批次失败'), 'error')
+    setStatus(appendStatusContext(
+      readErrorMessage(error, tr('Failed to rollback import batch', '回滚导入批次失败')),
+      importPreviewTimezoneHint.value,
+    ), 'error')
   } finally {
     importLoading.value = false
   }
@@ -6103,7 +6412,7 @@ async function fetchAllImportBatchItems(batchId: string): Promise<AttendanceImpo
     }
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load import items', '加载导入条目失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load import items', '加载导入条目失败')))
     }
     const pageItems = Array.isArray(data.data?.items) ? data.data.items : []
     items.push(...pageItems)
@@ -6120,7 +6429,10 @@ async function fetchAllImportBatchItems(batchId: string): Promise<AttendanceImpo
 async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
   const batchId = importBatchSelectedId.value
   if (!batchId) {
-    setStatus(tr('Select a batch first.', '请先选择批次。'), 'error')
+    setStatus(appendStatusContext(
+      tr('Select a batch first.', '请先选择批次。'),
+      importPreviewTimezoneHint.value,
+    ), 'error')
     return
   }
   importLoading.value = true
@@ -6143,7 +6455,10 @@ async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
       const stamp = new Date().toISOString().slice(0, 10)
       const filename = `attendance-import-${batchId.slice(0, 8)}-${exportType}-${stamp}.csv`
       downloadCsvText(filename, csvText)
-      setStatus(tr('CSV exported.', 'CSV 已导出。'))
+      setStatus(appendStatusContext(
+        tr('CSV exported.', 'CSV 已导出。'),
+        importPreviewTimezoneHint.value,
+      ))
       return
     }
 
@@ -6155,7 +6470,10 @@ async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
 
     const allItems = await fetchAllImportBatchItems(batchId)
     if (allItems.length === 0) {
-      setStatus(tr('No batch items found.', '未找到批次明细。'), 'error')
+      setStatus(appendStatusContext(
+        tr('No batch items found.', '未找到批次明细。'),
+        importPreviewTimezoneHint.value,
+      ), 'error')
       return
     }
     allItems.sort((a, b) => {
@@ -6237,9 +6555,15 @@ async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
     const stamp = new Date().toISOString().slice(0, 10)
     const filename = `attendance-import-${batchId.slice(0, 8)}-${onlyAnomalies ? 'anomalies' : 'items'}-${stamp}.csv`
     downloadCsvText(filename, lines.join('\n'))
-    setStatus(tr(`CSV exported (${rows.length}/${allItems.length}).`, `CSV 已导出（${rows.length}/${allItems.length}）。`))
+    setStatus(appendStatusContext(
+      tr(`CSV exported (${rows.length}/${allItems.length}).`, `CSV 已导出（${rows.length}/${allItems.length}）。`),
+      importPreviewTimezoneHint.value,
+    ))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to export CSV', '导出 CSV 失败'), 'error')
+    setStatus(appendStatusContext(
+      readErrorMessage(error, tr('Failed to export CSV', '导出 CSV 失败')),
+      importPreviewTimezoneHint.value,
+    ), 'error')
   } finally {
     importLoading.value = false
   }
@@ -6322,7 +6646,7 @@ function isAbortError(error: unknown): boolean {
   return name === 'aborterror'
 }
 
-async function apiFetchWithTimeout(path: string, options: RequestInit = {}, timeoutMs = ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS): Promise<Response> {
+async function apiFetchWithTimeout(path: string, options: globalThis.RequestInit = {}, timeoutMs = ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController()
   const parentSignal = options.signal
   let parentAbortHandler: (() => void) | null = null
@@ -6366,10 +6690,19 @@ function localizeRuntimeErrorMessage(rawMessage: string, fallbackMessage: string
   if (!isZh.value) return message
 
   const mappings: Array<[RegExp, string]> = [
+    [/^admin permissions required\b/i, '需要管理员权限'],
     [/^failed to load anomalies\b/i, '加载异常失败'],
     [/^failed to load requests\b/i, '加载申请失败'],
     [/^failed to load request report\b/i, '加载申请报表失败'],
     [/^failed to load admin data\b/i, '加载管理数据失败'],
+    [/^failed to load leave types\b/i, '加载请假类型失败'],
+    [/^failed to save leave type\b/i, '保存请假类型失败'],
+    [/^failed to delete leave type\b/i, '删除请假类型失败'],
+    [/^failed to load overtime rules\b/i, '加载加班规则失败'],
+    [/^failed to save overtime rule\b/i, '保存加班规则失败'],
+    [/^failed to delete overtime rule\b/i, '删除加班规则失败'],
+    [/^code and name are required\b/i, '编码和名称为必填项'],
+    [/^name is required\b/i, '名称为必填项'],
     [/^refresh failed\b/i, '刷新失败'],
     [/^request failed\b/i, '申请失败'],
     [/^request update failed\b/i, '申请处理失败'],
@@ -6506,6 +6839,12 @@ function classifyStatusError(
     meta.action = context === 'request-submit' || context === 'request-resolve' || context === 'request-cancel'
       ? 'reload-requests'
       : 'reload-admin'
+  } else if (status === 409 || code === 'DUPLICATE_REQUEST' || code === 'ALREADY_EXISTS') {
+    message = context === 'request-submit'
+      ? tr('A request for the same date and type already exists.', '同一天同类型的申请已存在。')
+      : rawMessage
+    meta.hint = tr('Refresh the request list and continue from the existing item.', '请刷新申请列表，并基于已有申请继续处理。')
+    meta.action = context === 'request-submit' ? 'reload-requests' : defaultAction
   } else if (status >= 500 || code === 'SERVICE_UNAVAILABLE' || code === 'DB_NOT_READY') {
     if (!message) message = fallbackMessage
     meta.hint = tr('Server may be warming up or temporarily unavailable. Retry in a moment.', '服务可能正在预热或临时不可用，请稍后重试。')
@@ -6519,12 +6858,7 @@ function classifyStatusError(
 
 function setStatusFromError(error: unknown, fallbackMessage: string, context: AttendanceStatusContext) {
   const { message, meta } = classifyStatusError(error, fallbackMessage, context)
-  const sticky = context === 'import-preview' || context === 'import-run'
-  setStatus(message || fallbackMessage, 'error', {
-    ...(meta || {}),
-    context,
-    sticky,
-  })
+  setStatus(message || fallbackMessage, 'error', meta)
 }
 
 async function runStatusAction() {
@@ -6582,23 +6916,25 @@ async function runStatusAction() {
 }
 
 function setStatus(message: string, kind: 'info' | 'error' = 'info', meta: AttendanceStatusMeta | null = null) {
+  const normalizedMessage = kind === 'error'
+    ? localizeRuntimeErrorMessage(message, message)
+    : message
   statusKind.value = kind
   statusMeta.value = kind === 'error' ? meta : null
-  if (statusMessage.value === message && message) {
+  if (statusMessage.value === normalizedMessage && normalizedMessage) {
     statusMessage.value = ''
     void nextTick(() => {
-      statusMessage.value = message
+      statusMessage.value = normalizedMessage
     })
   } else {
-    statusMessage.value = message
+    statusMessage.value = normalizedMessage
   }
-  if (!message) return
-  if (kind === 'error' && meta?.sticky) return
+  if (!normalizedMessage) return
   const timeoutMs = kind === 'error'
     ? (meta?.action || meta?.hint ? 10000 : 7000)
     : 4000
   window.setTimeout(() => {
-    if (statusMessage.value === message) {
+    if (statusMessage.value === normalizedMessage) {
       statusMessage.value = ''
       if (statusMeta.value === meta) {
         statusMeta.value = null
@@ -6782,14 +7118,14 @@ async function searchProvisionUsers(page: number) {
     }
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || tr('Failed to search users', '搜索用户失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to search users', '搜索用户失败')))
     }
     const items = Array.isArray(data.data?.items) ? data.data.items : []
     provisionSearchResults.value = items
     provisionSearchTotal.value = Number(data.data?.total ?? items.length) || 0
     provisionSearchPage.value = Number(data.data?.page ?? page) || page
   } catch (error: any) {
-    setProvisionStatus(error?.message || tr('Failed to search users', '搜索用户失败'), 'error')
+    setProvisionStatus(readErrorMessage(error, tr('Failed to search users', '搜索用户失败')), 'error')
   } finally {
     provisionSearchLoading.value = false
   }
@@ -6811,8 +7147,7 @@ async function fetchProvisioningUser(userId: string) {
   }
   const data: PermissionUserResponse = await response.json()
   if (!response.ok) {
-    const message = (data as any)?.error || (data as any)?.message || tr('Failed to load permissions', '加载权限失败')
-    throw new Error(message)
+    throw new Error(readErrorMessage(data, tr('Failed to load permissions', '加载权限失败')))
   }
   provisionPermissions.value = Array.isArray(data.permissions) ? data.permissions : []
   provisionUserIsAdmin.value = Boolean(data.isAdmin)
@@ -6831,7 +7166,7 @@ async function fetchProvisioningUserAccess(userId: string) {
   }
   const data = await response.json().catch(() => null)
   if (!response.ok || !data?.ok) {
-    throw new Error(data?.error?.message || tr('Failed to load user access', '加载用户访问权限失败'))
+    throw new Error(readErrorMessage(data, tr('Failed to load user access', '加载用户访问权限失败')))
   }
   applyProvisionAccessPayload(data.data, userId)
 }
@@ -6848,7 +7183,7 @@ async function loadProvisioningUser() {
     await fetchProvisioningUserAccess(userId)
     setProvisionStatus(tr(`Loaded ${provisionPermissions.value.length} permission(s).`, `已加载 ${provisionPermissions.value.length} 项权限。`))
   } catch (error: any) {
-    setProvisionStatus(error?.message || tr('Failed to load permissions', '加载权限失败'), 'error')
+    setProvisionStatus(readErrorMessage(error, tr('Failed to load permissions', '加载权限失败')), 'error')
   } finally {
     provisionLoading.value = false
   }
@@ -6876,7 +7211,7 @@ async function grantProvisioningRole() {
       }
       const modernData = await modern.json().catch(() => null)
       if (!modern.ok || !modernData?.ok) {
-        throw new Error(modernData?.error?.message || tr('Failed to assign role', '分配角色失败'))
+        throw new Error(readErrorMessage(modernData, tr('Failed to assign role', '分配角色失败')))
       }
       applyProvisionAccessPayload(modernData.data, userId)
       setProvisionStatus(tr(`Role '${role}' assigned.`, `角色 '${role}' 已分配。`))
@@ -6896,13 +7231,13 @@ async function grantProvisioningRole() {
       }
       const data = await response.json()
       if (!response.ok) {
-        throw new Error(data?.error || data?.message || tr(`Failed to grant ${permission}`, `授予权限 ${permission} 失败`))
+        throw new Error(readErrorMessage(data, tr(`Failed to grant ${permission}`, `授予权限 ${permission} 失败`)))
       }
     }
     await fetchProvisioningUser(userId)
     setProvisionStatus(tr(`Role '${role}' granted.`, `角色 '${role}' 已授权。`))
   } catch (error: any) {
-    setProvisionStatus(error?.message || tr('Failed to grant role', '授权角色失败'), 'error')
+    setProvisionStatus(readErrorMessage(error, tr('Failed to grant role', '授权角色失败')), 'error')
   } finally {
     provisionLoading.value = false
   }
@@ -6930,7 +7265,7 @@ async function revokeProvisioningRole() {
       }
       const modernData = await modern.json().catch(() => null)
       if (!modern.ok || !modernData?.ok) {
-        throw new Error(modernData?.error?.message || tr('Failed to remove role', '移除角色失败'))
+        throw new Error(readErrorMessage(modernData, tr('Failed to remove role', '移除角色失败')))
       }
       applyProvisionAccessPayload(modernData.data, userId)
       setProvisionStatus(tr(`Role '${role}' removed.`, `角色 '${role}' 已移除。`))
@@ -6951,13 +7286,13 @@ async function revokeProvisioningRole() {
       const data = await response.json()
       // 404 is fine for revokes (permission not present).
       if (!response.ok && response.status !== 404) {
-        throw new Error(data?.error || data?.message || tr(`Failed to revoke ${permission}`, `撤销权限 ${permission} 失败`))
+        throw new Error(readErrorMessage(data, tr(`Failed to revoke ${permission}`, `撤销权限 ${permission} 失败`)))
       }
     }
     await fetchProvisioningUser(userId)
     setProvisionStatus(tr(`Role '${role}' revoked.`, `角色 '${role}' 已撤销。`))
   } catch (error: any) {
-    setProvisionStatus(error?.message || tr('Failed to revoke role', '撤销角色失败'), 'error')
+    setProvisionStatus(readErrorMessage(error, tr('Failed to revoke role', '撤销角色失败')), 'error')
   } finally {
     provisionLoading.value = false
   }
@@ -6997,7 +7332,7 @@ async function previewProvisionBatchUsers() {
 
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || tr('Failed to preview batch users', '批量预览用户失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to preview batch users', '批量预览用户失败')))
     }
 
     applyProvisionBatchResolvePayload(data.data, valid)
@@ -7007,7 +7342,7 @@ async function previewProvisionBatchUsers() {
     const kind = missing > 0 ? 'error' : 'info'
     setProvisionBatchStatus(tr(`Preview ready: found ${found}/${valid.length}, missing ${missing}, inactive ${inactive}.`, `预览完成：找到 ${found}/${valid.length}，缺失 ${missing}，停用 ${inactive}。`), kind)
   } catch (error: any) {
-    setProvisionBatchStatus(error?.message || tr('Failed to preview batch users', '批量预览用户失败'), 'error')
+    setProvisionBatchStatus(readErrorMessage(error, tr('Failed to preview batch users', '批量预览用户失败')), 'error')
   } finally {
     provisionBatchPreviewLoading.value = false
   }
@@ -7039,7 +7374,7 @@ async function grantProvisioningRoleBatch() {
       }
       const batchData = await batch.json().catch(() => null)
       if (!batch.ok || !batchData?.ok) {
-        throw new Error(batchData?.error?.message || tr('Failed to batch assign role', '批量分配角色失败'))
+        throw new Error(readErrorMessage(batchData, tr('Failed to batch assign role', '批量分配角色失败')))
       }
       applyProvisionBatchResolvePayload(batchData.data, valid)
       const updated = Number(batchData.data?.updated ?? 0) || 0
@@ -7068,7 +7403,7 @@ async function grantProvisioningRoleBatch() {
           }
           const modernData = await modern.json().catch(() => null)
           if (!modern.ok || !modernData?.ok) {
-            throw new Error(modernData?.error?.message || tr('Failed to assign role', '分配角色失败'))
+            throw new Error(readErrorMessage(modernData, tr('Failed to assign role', '分配角色失败')))
           }
           updated += 1
           continue
@@ -7086,7 +7421,7 @@ async function grantProvisioningRoleBatch() {
           }
           const data = await response.json().catch(() => null)
           if (!response.ok) {
-            throw new Error(data?.error || data?.message || tr(`Failed to grant ${permission}`, `授予权限 ${permission} 失败`))
+            throw new Error(readErrorMessage(data, tr(`Failed to grant ${permission}`, `授予权限 ${permission} 失败`)))
           }
         }
         updated += 1
@@ -7100,7 +7435,7 @@ async function grantProvisioningRoleBatch() {
       : tr(`Role '${role}' assigned to ${updated}/${valid.length} user(s).`, `角色 '${role}' 已分配给 ${updated}/${valid.length} 个用户。`)
     setProvisionBatchStatus(message, failed.length ? 'error' : 'info')
   } catch (error: any) {
-    setProvisionBatchStatus(error?.message || tr('Failed to batch assign role', '批量分配角色失败'), 'error')
+    setProvisionBatchStatus(readErrorMessage(error, tr('Failed to batch assign role', '批量分配角色失败')), 'error')
   } finally {
     provisionBatchLoading.value = false
   }
@@ -7132,7 +7467,7 @@ async function revokeProvisioningRoleBatch() {
       }
       const batchData = await batch.json().catch(() => null)
       if (!batch.ok || !batchData?.ok) {
-        throw new Error(batchData?.error?.message || tr('Failed to batch remove role', '批量移除角色失败'))
+        throw new Error(readErrorMessage(batchData, tr('Failed to batch remove role', '批量移除角色失败')))
       }
       applyProvisionBatchResolvePayload(batchData.data, valid)
       const updated = Number(batchData.data?.updated ?? 0) || 0
@@ -7161,7 +7496,7 @@ async function revokeProvisioningRoleBatch() {
           }
           const modernData = await modern.json().catch(() => null)
           if (!modern.ok || !modernData?.ok) {
-            throw new Error(modernData?.error?.message || tr('Failed to remove role', '移除角色失败'))
+            throw new Error(readErrorMessage(modernData, tr('Failed to remove role', '移除角色失败')))
           }
           updated += 1
           continue
@@ -7179,7 +7514,7 @@ async function revokeProvisioningRoleBatch() {
           }
           const data = await response.json().catch(() => null)
           if (!response.ok && response.status !== 404) {
-            throw new Error(data?.error || data?.message || tr(`Failed to revoke ${permission}`, `撤销权限 ${permission} 失败`))
+            throw new Error(readErrorMessage(data, tr(`Failed to revoke ${permission}`, `撤销权限 ${permission} 失败`)))
           }
         }
         updated += 1
@@ -7193,7 +7528,7 @@ async function revokeProvisioningRoleBatch() {
       : tr(`Role '${role}' removed from ${updated}/${valid.length} user(s).`, `角色 '${role}' 已从 ${updated}/${valid.length} 个用户移除。`)
     setProvisionBatchStatus(message, failed.length ? 'error' : 'info')
   } catch (error: any) {
-    setProvisionBatchStatus(error?.message || tr('Failed to batch remove role', '批量移除角色失败'), 'error')
+    setProvisionBatchStatus(readErrorMessage(error, tr('Failed to batch remove role', '批量移除角色失败')), 'error')
   } finally {
     provisionBatchLoading.value = false
   }
@@ -7251,7 +7586,7 @@ async function loadAuditSummary() {
     }
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load audit summary', '加载审计汇总失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load audit summary', '加载审计汇总失败')))
     }
 
     const actionsRaw = Array.isArray(data.data?.actions) ? data.data.actions : []
@@ -7266,7 +7601,7 @@ async function loadAuditSummary() {
       total: Number(row?.total ?? 0) || 0,
     }))
   } catch (error: any) {
-    setAuditLogStatus(error?.message || tr('Failed to load audit summary', '加载审计汇总失败'), 'error')
+    setAuditLogStatus(readErrorMessage(error, tr('Failed to load audit summary', '加载审计汇总失败')), 'error')
   } finally {
     auditSummaryLoading.value = false
   }
@@ -7308,7 +7643,7 @@ async function exportAuditLogsCsv() {
     downloadCsvText(filename, csvText)
     setAuditLogStatus(tr('Audit logs exported.', '审计日志已导出。'))
   } catch (error: any) {
-    setAuditLogStatus(error?.message || tr('Failed to export audit logs', '导出审计日志失败'), 'error')
+    setAuditLogStatus(readErrorMessage(error, tr('Failed to export audit logs', '导出审计日志失败')), 'error')
   } finally {
     auditLogExporting.value = false
   }
@@ -7337,7 +7672,7 @@ async function loadAuditLogs(page: number) {
     }
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load audit logs', '加载审计日志失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load audit logs', '加载审计日志失败')))
     }
     const items = Array.isArray(data.data?.items) ? data.data.items : []
     auditLogs.value = items
@@ -7345,7 +7680,7 @@ async function loadAuditLogs(page: number) {
     auditLogPage.value = Number(data.data?.page ?? page) || page
     setAuditLogStatus(tr(`Loaded ${items.length} log(s).`, `已加载 ${items.length} 条日志。`))
   } catch (error: any) {
-    setAuditLogStatus(error?.message || tr('Failed to load audit logs', '加载审计日志失败'), 'error')
+    setAuditLogStatus(readErrorMessage(error, tr('Failed to load audit logs', '加载审计日志失败')), 'error')
   } finally {
     auditLogLoading.value = false
   }
@@ -7364,12 +7699,12 @@ async function punch(eventType: 'check_in' | 'check_out') {
     })
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Punch failed', '打卡失败'))
+      throw new Error(readErrorMessage(data, tr('Punch failed', '打卡失败')))
     }
     setStatus(tr(`${eventType === 'check_in' ? 'Check in' : 'Check out'} recorded.`, `${eventType === 'check_in' ? '上班打卡' : '下班打卡'}已记录。`))
     await refreshAll()
   } catch (error: any) {
-    setStatus(error?.message || tr('Punch failed', '打卡失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Punch failed', '打卡失败')), 'error')
   } finally {
     punching.value = false
   }
@@ -7385,7 +7720,7 @@ async function loadSummary() {
   const response = await apiFetch(`/api/attendance/summary?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
-    throw new Error(data?.error?.message || tr('Failed to load summary', '加载汇总失败'))
+    throw new Error(readErrorMessage(data, tr('Failed to load summary', '加载汇总失败')))
   }
   summary.value = data.data
 }
@@ -7402,7 +7737,7 @@ async function loadRecords() {
   const response = await apiFetch(`/api/attendance/records?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
-    throw new Error(data?.error?.message || tr('Failed to load records', '加载记录失败'))
+    throw new Error(readErrorMessage(data, tr('Failed to load records', '加载记录失败')))
   }
   records.value = data.data.items
   recordsTotal.value = data.data.total
@@ -7420,7 +7755,7 @@ async function loadRequests() {
   const response = await apiFetch(`/api/attendance/requests?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
-    throw new Error(data?.error?.message || tr('Failed to load requests', '加载申请失败'))
+    throw new Error(readErrorMessage(data, tr('Failed to load requests', '加载申请失败')))
   }
   requests.value = data.data.items
 }
@@ -7439,7 +7774,7 @@ async function loadAnomalies() {
     const response = await apiFetch(`/api/attendance/anomalies?${query.toString()}`)
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load anomalies', '加载异常失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load anomalies', '加载异常失败')))
     }
     anomalies.value = data.data?.items ?? []
   } finally {
@@ -7459,38 +7794,130 @@ async function loadRequestReport() {
     const response = await apiFetch(`/api/attendance/reports/requests?${query.toString()}`)
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load request report', '加载申请报表失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load request report', '加载申请报表失败')))
     }
     requestReport.value = data.data.items || []
-  } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load request report', '加载申请报表失败'), 'error')
   } finally {
     reportLoading.value = false
   }
 }
 
-async function refreshAll() {
-  if (!attendancePluginActive.value) return
+async function refreshAll(): Promise<boolean> {
+  if (!attendancePluginActive.value) return false
   loading.value = true
   recordsPage.value = 1
   calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
+  let success = true
   try {
     await Promise.all([loadSummary(), loadRecords(), loadRequests(), loadAnomalies(), loadRequestReport(), loadHolidays()])
   } catch (error: any) {
+    success = false
     setStatusFromError(error, tr('Refresh failed', '刷新失败'), 'refresh')
   } finally {
     loading.value = false
   }
+  return success
 }
 
-function shiftMonth(delta: number) {
+async function refreshOverviewWithStatus() {
+  const success = await refreshAll()
+  if (!success) return
+  setStatus(
+    appendStatusContext(tr('Overview refreshed.', '总览已刷新。'), overviewRefreshTimezoneContextHint.value),
+  )
+}
+
+async function reloadAnomaliesWithStatus() {
+  try {
+    await loadAnomalies()
+    setStatus(
+      appendStatusContext(
+        tr(`Anomalies loaded (${anomalies.value.length}).`, `异常已加载（${anomalies.value.length} 条）。`),
+        anomaliesTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load anomalies', '加载异常失败'),
+      anomaliesTimezoneContextHint.value,
+      'refresh',
+    )
+  }
+}
+
+async function reloadRequestReportWithStatus() {
+  try {
+    await loadRequestReport()
+    setStatus(
+      appendStatusContext(
+        tr(`Report loaded (${requestReport.value.length}).`, `报表已加载（${requestReport.value.length} 条）。`),
+        requestReportTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load request report', '加载申请报表失败'),
+      requestReportTimezoneContextHint.value,
+      'refresh',
+    )
+  }
+}
+
+async function reloadRecordsWithStatus() {
+  try {
+    await loadRecords()
+    setStatus(
+      appendStatusContext(
+        tr(`Records loaded (${records.value.length}).`, `记录已加载（${records.value.length} 条）。`),
+        recordsTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load records', '加载记录失败'),
+      recordsTimezoneContextHint.value,
+      'refresh',
+    )
+  }
+}
+
+async function reloadRequestsWithStatus() {
+  try {
+    await loadRequests()
+    setStatus(
+      appendStatusContext(
+        tr(`Requests loaded (${requests.value.length}).`, `申请已加载（${requests.value.length} 条）。`),
+        requestTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load requests', '加载申请失败'),
+      requestTimezoneContextHint.value,
+      'refresh',
+    )
+  }
+}
+
+async function shiftMonth(delta: number) {
   const next = new Date(calendarMonth.value)
   next.setMonth(next.getMonth() + delta, 1)
   const from = new Date(next.getFullYear(), next.getMonth(), 1)
   const to = new Date(next.getFullYear(), next.getMonth() + 1, 0)
   fromDate.value = toDateInput(from)
   toDate.value = toDateInput(to)
-  refreshAll()
+  const success = await refreshAll()
+  if (!success) return
+  setStatus(
+    appendStatusContext(
+      tr(`Calendar updated: ${calendarLabel.value}.`, `日历已切换：${calendarLabel.value}。`),
+      calendarTimezoneContextHint.value,
+    ),
+  )
 }
 
 function validateRequestForm(): string | null {
@@ -7541,11 +7968,12 @@ function validateRequestForm(): string | null {
 }
 
 async function submitRequest() {
+  if (requestSubmitting.value) return
   requestSubmitting.value = true
   try {
     const validationMessage = validateRequestForm()
     if (validationMessage) {
-      setStatus(validationMessage, 'error')
+      setStatus(appendStatusContext(validationMessage, requestTimezoneContextHint.value), 'error')
       return
     }
     const orgValue = normalizedOrgId()
@@ -7571,10 +7999,15 @@ async function submitRequest() {
     if (!response.ok || !data.ok) {
       throw createApiError(response, data, tr('Request failed', '申请失败'))
     }
-    setStatus(tr('Request submitted.', '申请已提交。'))
+    setStatus(appendStatusContext(tr('Request submitted.', '申请已提交。'), requestTimezoneContextHint.value))
     await loadRequests()
   } catch (error: any) {
-    setStatusFromError(error, tr('Request failed', '申请失败'), 'request-submit')
+    setStatusFromErrorWithContext(
+      error,
+      tr('Request failed', '申请失败'),
+      requestTimezoneContextHint.value,
+      'request-submit',
+    )
   } finally {
     requestSubmitting.value = false
   }
@@ -7590,13 +8023,22 @@ async function resolveRequest(id: string, action: 'approve' | 'reject') {
     if (!response.ok || !data.ok) {
       throw createApiError(response, data, tr('Request update failed', '申请处理失败'))
     }
-    const actionText = action === 'approve' ? tr('approved', '已批准') : tr('rejected', '已驳回')
-    setStatus(tr(`Request ${action}d.`, `申请${actionText}。`))
+    const actionLabel = action === 'approve'
+      ? tr('Request approved.', '申请已批准。')
+      : tr('Request rejected.', '申请已驳回。')
+    setStatus(
+      appendStatusContext(actionLabel, requestTimezoneContextHint.value),
+    )
     await loadRequests()
     await loadSummary()
     await loadRecords()
   } catch (error: any) {
-    setStatusFromError(error, tr('Request update failed', '申请处理失败'), 'request-resolve')
+    setStatusFromErrorWithContext(
+      error,
+      tr('Request update failed', '申请处理失败'),
+      requestTimezoneContextHint.value,
+      'request-resolve',
+    )
   }
 }
 
@@ -7610,10 +8052,15 @@ async function cancelRequest(id: string) {
     if (!response.ok || !data.ok) {
       throw createApiError(response, data, tr('Request cancel failed', '申请取消失败'))
     }
-    setStatus(tr('Request cancelled.', '申请已取消。'))
+    setStatus(appendStatusContext(tr('Request cancelled.', '申请已取消。'), requestTimezoneContextHint.value))
     await loadRequests()
   } catch (error: any) {
-    setStatusFromError(error, tr('Request cancel failed', '申请取消失败'), 'request-cancel')
+    setStatusFromErrorWithContext(
+      error,
+      tr('Request cancel failed', '申请取消失败'),
+      requestTimezoneContextHint.value,
+      'request-cancel',
+    )
   }
 }
 
@@ -7621,7 +8068,22 @@ async function changeRecordsPage(delta: number) {
   const next = recordsPage.value + delta
   if (next < 1 || next > recordsTotalPages.value) return
   recordsPage.value = next
-  await loadRecords()
+  try {
+    await loadRecords()
+    setStatus(
+      appendStatusContext(
+        tr(`Records page ${recordsPage.value}/${recordsTotalPages.value} loaded.`, `记录页 ${recordsPage.value}/${recordsTotalPages.value} 已加载。`),
+        recordsTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to load records', '加载记录失败'),
+      recordsTimezoneContextHint.value,
+      'refresh',
+    )
+  }
 }
 
 async function exportCsv() {
@@ -7639,14 +8101,14 @@ async function exportCsv() {
       let message = tr('Export failed', '导出失败')
       try {
         const parsed = JSON.parse(text)
-        message = parsed?.error?.message || message
+        message = readErrorMessage(parsed, message)
       } catch {
         message = text || message
       }
       throw new Error(message)
     }
     const disposition = response.headers.get('content-disposition')
-    const match = disposition?.match(/filename=\"?([^\";]+)\"?/)
+    const match = disposition?.match(/filename="?([^";]+)"?/)
     const filename = match?.[1] || 'attendance-export.csv'
     const blob = new Blob([text], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
@@ -7657,9 +8119,12 @@ async function exportCsv() {
     link.click()
     link.remove()
     URL.revokeObjectURL(url)
-    setStatus(tr('Export ready.', '导出完成。'))
+    setStatus(appendStatusContext(tr('Export ready.', '导出完成。'), recordsTimezoneContextHint.value))
   } catch (error: any) {
-    setStatus(error?.message || tr('Export failed', '导出失败'), 'error')
+    setStatus(
+      appendStatusContext(readErrorMessage(error, tr('Export failed', '导出失败')), recordsTimezoneContextHint.value),
+      'error',
+    )
   } finally {
     exporting.value = false
   }
@@ -7783,7 +8248,7 @@ async function loadSettings() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load settings', '加载设置失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load settings', '加载设置失败')))
     }
     adminForbidden.value = false
     applySettingsToForm(data.data || {})
@@ -7930,14 +8395,14 @@ async function syncHolidays() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Holiday sync failed', '节假日同步失败'))
+      throw new Error(readErrorMessage(data, tr('Holiday sync failed', '节假日同步失败')))
     }
     if (data?.data?.lastRun) {
       holidaySyncLastRun.value = data.data.lastRun
     }
     setStatus(tr(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`, `节假日同步完成（已应用 ${data.data?.totalApplied ?? 0} 条）。`))
   } catch (error: any) {
-    setStatus(error?.message || tr('Holiday sync failed', '节假日同步失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Holiday sync failed', '节假日同步失败')), 'error')
   } finally {
     holidaySyncLoading.value = false
   }
@@ -7984,14 +8449,14 @@ async function syncHolidaysForYears(years: number[]) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Holiday sync failed', '节假日同步失败'))
+      throw new Error(readErrorMessage(data, tr('Holiday sync failed', '节假日同步失败')))
     }
     if (data?.data?.lastRun) {
       holidaySyncLastRun.value = data.data.lastRun
     }
     setStatus(tr(`Holiday sync complete (${data.data?.totalApplied ?? 0} applied).`, `节假日同步完成（已应用 ${data.data?.totalApplied ?? 0} 条）。`))
   } catch (error: any) {
-    setStatus(error?.message || tr('Holiday sync failed', '节假日同步失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Holiday sync failed', '节假日同步失败')), 'error')
   } finally {
     holidaySyncLoading.value = false
   }
@@ -8004,7 +8469,7 @@ async function loadRule() {
     const response = await apiFetchWithTimeout(`/api/attendance/rules/default?${query.toString()}`, {}, ATTENDANCE_ADMIN_REQUEST_TIMEOUT_MS)
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load rule', '加载规则失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load rule', '加载规则失败')))
     }
     const rule: AttendanceRule = data.data
     ruleForm.name = rule.name || 'Default'
@@ -8096,7 +8561,7 @@ async function loadLeaveTypes() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw createApiError(response, data, tr('Failed to load leave types', '加载请假类型失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load leave types', '加载请假类型失败')))
     }
     adminForbidden.value = false
     leaveTypes.value = data.data.items || []
@@ -8104,7 +8569,7 @@ async function loadLeaveTypes() {
       requestForm.leaveTypeId = leaveTypes.value[0].id
     }
   } catch (error: any) {
-    setStatusFromError(error, tr('Failed to load leave types', '加载请假类型失败'), 'admin')
+    setStatus(readErrorMessage(error, tr('Failed to load leave types', '加载请假类型失败')), 'error')
   } finally {
     leaveTypeLoading.value = false
   }
@@ -8135,18 +8600,18 @@ async function saveLeaveType() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw createForbiddenError()
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw createApiError(response, data, tr('Failed to save leave type', '保存请假类型失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save leave type', '保存请假类型失败')))
     }
     adminForbidden.value = false
     await loadLeaveTypes()
     resetLeaveTypeForm()
     setStatus(isEditing ? tr('Leave type updated.', '请假类型已更新。') : tr('Leave type created.', '请假类型已创建。'))
   } catch (error: any) {
-    setStatusFromError(error, tr('Failed to save leave type', '保存请假类型失败'), 'admin')
+    setStatus(readErrorMessage(error, tr('Failed to save leave type', '保存请假类型失败')), 'error')
   } finally {
     leaveTypeSaving.value = false
   }
@@ -8158,17 +8623,17 @@ async function deleteLeaveType(id: string) {
     const response = await apiFetch(`/api/attendance/leave-types/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw createForbiddenError()
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw createApiError(response, data, tr('Failed to delete leave type', '删除请假类型失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete leave type', '删除请假类型失败')))
     }
     adminForbidden.value = false
     await loadLeaveTypes()
     setStatus(tr('Leave type deleted.', '请假类型已删除。'))
   } catch (error: any) {
-    setStatusFromError(error, tr('Failed to delete leave type', '删除请假类型失败'), 'admin')
+    setStatus(readErrorMessage(error, tr('Failed to delete leave type', '删除请假类型失败')), 'error')
   }
 }
 
@@ -8203,7 +8668,7 @@ async function loadOvertimeRules() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw createApiError(response, data, tr('Failed to load overtime rules', '加载加班规则失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load overtime rules', '加载加班规则失败')))
     }
     adminForbidden.value = false
     overtimeRules.value = data.data.items || []
@@ -8211,7 +8676,7 @@ async function loadOvertimeRules() {
       requestForm.overtimeRuleId = overtimeRules.value[0].id
     }
   } catch (error: any) {
-    setStatusFromError(error, tr('Failed to load overtime rules', '加载加班规则失败'), 'admin')
+    setStatus(readErrorMessage(error, tr('Failed to load overtime rules', '加载加班规则失败')), 'error')
   } finally {
     overtimeRuleLoading.value = false
   }
@@ -8242,11 +8707,11 @@ async function saveOvertimeRule() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw createForbiddenError()
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw createApiError(response, data, tr('Failed to save overtime rule', '保存加班规则失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save overtime rule', '保存加班规则失败')))
     }
     adminForbidden.value = false
     await loadOvertimeRules()
@@ -8257,7 +8722,7 @@ async function saveOvertimeRule() {
         : tr('Overtime rule created.', '加班规则已创建。')
     )
   } catch (error: any) {
-    setStatusFromError(error, tr('Failed to save overtime rule', '保存加班规则失败'), 'admin')
+    setStatus(readErrorMessage(error, tr('Failed to save overtime rule', '保存加班规则失败')), 'error')
   } finally {
     overtimeRuleSaving.value = false
   }
@@ -8269,17 +8734,17 @@ async function deleteOvertimeRule(id: string) {
     const response = await apiFetch(`/api/attendance/overtime-rules/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw createForbiddenError()
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw createApiError(response, data, tr('Failed to delete overtime rule', '删除加班规则失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete overtime rule', '删除加班规则失败')))
     }
     adminForbidden.value = false
     await loadOvertimeRules()
     setStatus(tr('Overtime rule deleted.', '加班规则已删除。'))
   } catch (error: any) {
-    setStatusFromError(error, tr('Failed to delete overtime rule', '删除加班规则失败'), 'admin')
+    setStatus(readErrorMessage(error, tr('Failed to delete overtime rule', '删除加班规则失败')), 'error')
   }
 }
 
@@ -8310,12 +8775,12 @@ async function loadApprovalFlows() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load approval flows', '加载审批流程失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load approval flows', '加载审批流程失败')))
     }
     adminForbidden.value = false
     approvalFlows.value = data.data.items || []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load approval flows', '加载审批流程失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load approval flows', '加载审批流程失败')), 'error')
   } finally {
     approvalFlowLoading.value = false
   }
@@ -8348,18 +8813,18 @@ async function saveApprovalFlow() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save approval flow', '保存审批流程失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save approval flow', '保存审批流程失败')))
     }
     adminForbidden.value = false
     await loadApprovalFlows()
     resetApprovalFlowForm()
     setStatus(isEditing ? tr('Approval flow updated.', '审批流程已更新。') : tr('Approval flow created.', '审批流程已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save approval flow', '保存审批流程失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save approval flow', '保存审批流程失败')), 'error')
   } finally {
     approvalFlowSaving.value = false
   }
@@ -8371,17 +8836,17 @@ async function deleteApprovalFlow(id: string) {
     const response = await apiFetch(`/api/attendance/approval-flows/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete approval flow', '删除审批流程失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete approval flow', '删除审批流程失败')))
     }
     adminForbidden.value = false
     await loadApprovalFlows()
     setStatus(tr('Approval flow deleted.', '审批流程已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete approval flow', '删除审批流程失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete approval flow', '删除审批流程失败')), 'error')
   }
 }
 
@@ -8412,7 +8877,7 @@ async function loadRotationRules() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load rotation rules', '加载轮班规则失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load rotation rules', '加载轮班规则失败')))
     }
     adminForbidden.value = false
     rotationRules.value = data.data.items || []
@@ -8420,7 +8885,7 @@ async function loadRotationRules() {
       rotationAssignmentForm.rotationRuleId = rotationRules.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load rotation rules', '加载轮班规则失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load rotation rules', '加载轮班规则失败')), 'error')
   } finally {
     rotationRuleLoading.value = false
   }
@@ -8453,18 +8918,18 @@ async function saveRotationRule() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save rotation rule', '保存轮班规则失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save rotation rule', '保存轮班规则失败')))
     }
     adminForbidden.value = false
     await loadRotationRules()
     resetRotationRuleForm()
     setStatus(isEditing ? tr('Rotation rule updated.', '轮班规则已更新。') : tr('Rotation rule created.', '轮班规则已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save rotation rule', '保存轮班规则失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save rotation rule', '保存轮班规则失败')), 'error')
   } finally {
     rotationRuleSaving.value = false
   }
@@ -8476,18 +8941,18 @@ async function deleteRotationRule(id: string) {
     const response = await apiFetch(`/api/attendance/rotation-rules/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete rotation rule', '删除轮班规则失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete rotation rule', '删除轮班规则失败')))
     }
     adminForbidden.value = false
     await loadRotationRules()
     await loadRotationAssignments()
     setStatus(tr('Rotation rule deleted.', '轮班规则已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete rotation rule', '删除轮班规则失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete rotation rule', '删除轮班规则失败')), 'error')
   }
 }
 
@@ -8520,12 +8985,12 @@ async function loadRotationAssignments() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load rotation assignments', '加载轮班分配失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load rotation assignments', '加载轮班分配失败')))
     }
     adminForbidden.value = false
     rotationAssignments.value = data.data.items || []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load rotation assignments', '加载轮班分配失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load rotation assignments', '加载轮班分配失败')), 'error')
   } finally {
     rotationAssignmentLoading.value = false
   }
@@ -8559,11 +9024,11 @@ async function saveRotationAssignment() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save rotation assignment', '保存轮班分配失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save rotation assignment', '保存轮班分配失败')))
     }
     adminForbidden.value = false
     await loadRotationAssignments()
@@ -8574,7 +9039,7 @@ async function saveRotationAssignment() {
         : tr('Rotation assignment created.', '轮班分配已创建。')
     )
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save rotation assignment', '保存轮班分配失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save rotation assignment', '保存轮班分配失败')), 'error')
   } finally {
     rotationAssignmentSaving.value = false
   }
@@ -8586,17 +9051,17 @@ async function deleteRotationAssignment(id: string) {
     const response = await apiFetch(`/api/attendance/rotation-assignments/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete rotation assignment', '删除轮班分配失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete rotation assignment', '删除轮班分配失败')))
     }
     adminForbidden.value = false
     await loadRotationAssignments()
     setStatus(tr('Rotation assignment deleted.', '轮班分配已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete rotation assignment', '删除轮班分配失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete rotation assignment', '删除轮班分配失败')), 'error')
   }
 }
 
@@ -8635,7 +9100,7 @@ async function loadShifts() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load shifts', '加载班次失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load shifts', '加载班次失败')))
     }
     adminForbidden.value = false
     shifts.value = data.data.items || []
@@ -8643,7 +9108,7 @@ async function loadShifts() {
       assignmentForm.shiftId = shifts.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load shifts', '加载班次失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load shifts', '加载班次失败')), 'error')
   } finally {
     shiftLoading.value = false
   }
@@ -8673,18 +9138,18 @@ async function saveShift() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save shift', '保存班次失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save shift', '保存班次失败')))
     }
     adminForbidden.value = false
     await loadShifts()
     resetShiftForm()
     setStatus(isEditing ? tr('Shift updated.', '班次已更新。') : tr('Shift created.', '班次已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save shift', '保存班次失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save shift', '保存班次失败')), 'error')
   } finally {
     shiftSaving.value = false
   }
@@ -8696,18 +9161,18 @@ async function deleteShift(id: string) {
     const response = await apiFetch(`/api/attendance/shifts/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete shift', '删除班次失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete shift', '删除班次失败')))
     }
     adminForbidden.value = false
     await loadShifts()
     await loadAssignments()
     setStatus(tr('Shift deleted.', '班次已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete shift', '删除班次失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete shift', '删除班次失败')), 'error')
   }
 }
 
@@ -8740,12 +9205,12 @@ async function loadAssignments() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load assignments', '加载分配失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load assignments', '加载分配失败')))
     }
     adminForbidden.value = false
     assignments.value = data.data.items || []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load assignments', '加载分配失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load assignments', '加载分配失败')), 'error')
   } finally {
     assignmentLoading.value = false
   }
@@ -8779,18 +9244,18 @@ async function saveAssignment() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save assignment', '保存分配失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save assignment', '保存分配失败')))
     }
     adminForbidden.value = false
     await loadAssignments()
     resetAssignmentForm()
     setStatus(isEditing ? tr('Assignment updated.', '分配已更新。') : tr('Assignment created.', '分配已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save assignment', '保存分配失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save assignment', '保存分配失败')), 'error')
   } finally {
     assignmentSaving.value = false
   }
@@ -8802,17 +9267,17 @@ async function deleteAssignment(id: string) {
     const response = await apiFetch(`/api/attendance/assignments/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete assignment', '删除分配失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete assignment', '删除分配失败')))
     }
     adminForbidden.value = false
     await loadAssignments()
     setStatus(tr('Assignment deleted.', '分配已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete assignment', '删除分配失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete assignment', '删除分配失败')), 'error')
   }
 }
 
@@ -8841,11 +9306,11 @@ async function loadHolidays() {
     const response = await apiFetch(`/api/attendance/holidays?${query.toString()}`)
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load holidays', '加载节假日失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load holidays', '加载节假日失败')))
     }
     holidays.value = data.data.items || []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load holidays', '加载节假日失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load holidays', '加载节假日失败')), 'error')
   } finally {
     holidayLoading.value = false
   }
@@ -8873,18 +9338,18 @@ async function saveHoliday() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save holiday', '保存节假日失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save holiday', '保存节假日失败')))
     }
     adminForbidden.value = false
     await loadHolidays()
     resetHolidayForm()
     setStatus(isEditing ? tr('Holiday updated.', '节假日已更新。') : tr('Holiday created.', '节假日已创建。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save holiday', '保存节假日失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save holiday', '保存节假日失败')), 'error')
   } finally {
     holidaySaving.value = false
   }
@@ -8896,17 +9361,17 @@ async function deleteHoliday(id: string) {
     const response = await apiFetch(`/api/attendance/holidays/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete holiday', '删除节假日失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete holiday', '删除节假日失败')))
     }
     adminForbidden.value = false
     await loadHolidays()
     setStatus(tr('Holiday deleted.', '节假日已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete holiday', '删除节假日失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete holiday', '删除节假日失败')), 'error')
   }
 }
 
@@ -8941,12 +9406,12 @@ async function loadRuleSets() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load rule sets', '加载规则集失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load rule sets', '加载规则集失败')))
     }
     adminForbidden.value = false
     ruleSets.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load rule sets', '加载规则集失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load rule sets', '加载规则集失败')), 'error')
   } finally {
     ruleSetLoading.value = false
   }
@@ -8979,18 +9444,18 @@ async function saveRuleSet() {
     )
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save rule set', '保存规则集失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save rule set', '保存规则集失败')))
     }
     adminForbidden.value = false
     resetRuleSetForm()
     await loadRuleSets()
     setStatus(tr('Rule set saved.', '规则集已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save rule set', '保存规则集失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save rule set', '保存规则集失败')), 'error')
   } finally {
     ruleSetSaving.value = false
   }
@@ -9002,17 +9467,17 @@ async function deleteRuleSet(id: string) {
     const response = await apiFetch(`/api/attendance/rule-sets/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete rule set', '删除规则集失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete rule set', '删除规则集失败')))
     }
     adminForbidden.value = false
     await loadRuleSets()
     setStatus(tr('Rule set deleted.', '规则集已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete rule set', '删除规则集失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete rule set', '删除规则集失败')), 'error')
   }
 }
 
@@ -9050,7 +9515,7 @@ async function loadAttendanceGroups() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load attendance groups', '加载考勤分组失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load attendance groups', '加载考勤分组失败')))
     }
     adminForbidden.value = false
     attendanceGroups.value = data.data?.items ?? []
@@ -9058,7 +9523,7 @@ async function loadAttendanceGroups() {
       attendanceGroupMemberGroupId.value = attendanceGroups.value[0].id
     }
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load attendance groups', '加载考勤分组失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load attendance groups', '加载考勤分组失败')), 'error')
   } finally {
     attendanceGroupLoading.value = false
   }
@@ -9089,18 +9554,18 @@ async function saveAttendanceGroup() {
     )
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save attendance group', '保存考勤分组失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save attendance group', '保存考勤分组失败')))
     }
     adminForbidden.value = false
     resetAttendanceGroupForm()
     await loadAttendanceGroups()
     setStatus(tr('Attendance group saved.', '考勤分组已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save attendance group', '保存考勤分组失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save attendance group', '保存考勤分组失败')), 'error')
   } finally {
     attendanceGroupSaving.value = false
   }
@@ -9121,12 +9586,12 @@ async function loadAttendanceGroupMembers() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load group members', '加载分组成员失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load group members', '加载分组成员失败')))
     }
     adminForbidden.value = false
     attendanceGroupMembers.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load group members', '加载分组成员失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load group members', '加载分组成员失败')), 'error')
   } finally {
     attendanceGroupMemberLoading.value = false
   }
@@ -9155,14 +9620,14 @@ async function addAttendanceGroupMembers() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to add group members', '添加分组成员失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to add group members', '添加分组成员失败')))
     }
     adminForbidden.value = false
     attendanceGroupMemberUserIds.value = ''
     await loadAttendanceGroupMembers()
     setStatus(tr('Group members added.', '分组成员已添加。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to add group members', '添加分组成员失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to add group members', '添加分组成员失败')), 'error')
   } finally {
     attendanceGroupMemberSaving.value = false
   }
@@ -9182,13 +9647,13 @@ async function removeAttendanceGroupMember(userId: string) {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to remove group member', '移除分组成员失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to remove group member', '移除分组成员失败')))
     }
     adminForbidden.value = false
     await loadAttendanceGroupMembers()
     setStatus(tr('Group member removed.', '分组成员已移除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to remove group member', '移除分组成员失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to remove group member', '移除分组成员失败')), 'error')
   } finally {
     attendanceGroupMemberSaving.value = false
   }
@@ -9200,17 +9665,17 @@ async function deleteAttendanceGroup(id: string) {
     const response = await apiFetch(`/api/attendance/groups/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete attendance group', '删除考勤分组失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete attendance group', '删除考勤分组失败')))
     }
     adminForbidden.value = false
     await loadAttendanceGroups()
     setStatus(tr('Attendance group deleted.', '考勤分组已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete attendance group', '删除考勤分组失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete attendance group', '删除考勤分组失败')), 'error')
   }
 }
 
@@ -9219,16 +9684,16 @@ async function loadRuleSetTemplate() {
     const response = await apiFetch('/api/attendance/rule-sets/template')
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load rule set template', '加载规则集模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load rule set template', '加载规则集模板失败')))
     }
     ruleSetForm.config = JSON.stringify(data.data ?? {}, null, 2)
     setStatus(tr('Rule set template loaded.', '规则集模板已加载。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load rule set template', '加载规则集模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load rule set template', '加载规则集模板失败')), 'error')
   }
 }
 
@@ -9242,7 +9707,7 @@ async function loadRuleTemplates() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load rule templates', '加载规则模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load rule templates', '加载规则模板失败')))
     }
     adminForbidden.value = false
     const systemTemplates = data.data?.system ?? []
@@ -9252,7 +9717,7 @@ async function loadRuleTemplates() {
     ruleTemplateLibraryText.value = JSON.stringify(libraryTemplates, null, 2)
     setStatus(tr('Rule templates loaded.', '规则模板已加载。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load rule templates', '加载规则模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load rule templates', '加载规则模板失败')), 'error')
   } finally {
     ruleTemplateLoading.value = false
   }
@@ -9276,17 +9741,17 @@ async function saveRuleTemplates() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save rule templates', '保存规则模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save rule templates', '保存规则模板失败')))
     }
     adminForbidden.value = false
     ruleTemplateLibraryText.value = JSON.stringify(data.data?.templates ?? templates, null, 2)
     setStatus(tr('Rule templates saved.', '规则模板已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save rule templates', '保存规则模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save rule templates', '保存规则模板失败')), 'error')
   } finally {
     ruleTemplateSaving.value = false
   }
@@ -9303,18 +9768,18 @@ async function restoreRuleTemplates(versionId: string) {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to restore rule templates', '恢复规则模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to restore rule templates', '恢复规则模板失败')))
     }
     adminForbidden.value = false
     ruleTemplateLibraryText.value = JSON.stringify(data.data?.templates ?? [], null, 2)
     await loadRuleTemplates()
     setStatus(tr('Rule templates restored.', '规则模板已恢复。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to restore rule templates', '恢复规则模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to restore rule templates', '恢复规则模板失败')), 'error')
   } finally {
     ruleTemplateRestoring.value = false
   }
@@ -9360,12 +9825,12 @@ async function loadPayrollTemplates() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load payroll templates', '加载计薪模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load payroll templates', '加载计薪模板失败')))
     }
     adminForbidden.value = false
     payrollTemplates.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load payroll templates', '加载计薪模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load payroll templates', '加载计薪模板失败')), 'error')
   } finally {
     payrollTemplateLoading.value = false
   }
@@ -9402,18 +9867,18 @@ async function savePayrollTemplate() {
     )
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save payroll template', '保存计薪模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save payroll template', '保存计薪模板失败')))
     }
     adminForbidden.value = false
     resetPayrollTemplateForm()
     await loadPayrollTemplates()
     setStatus(tr('Payroll template saved.', '计薪模板已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save payroll template', '保存计薪模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save payroll template', '保存计薪模板失败')), 'error')
   } finally {
     payrollTemplateSaving.value = false
   }
@@ -9425,17 +9890,17 @@ async function deletePayrollTemplate(id: string) {
     const response = await apiFetch(`/api/attendance/payroll-templates/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete payroll template', '删除计薪模板失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete payroll template', '删除计薪模板失败')))
     }
     adminForbidden.value = false
     await loadPayrollTemplates()
     setStatus(tr('Payroll template deleted.', '计薪模板已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete payroll template', '删除计薪模板失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete payroll template', '删除计薪模板失败')), 'error')
   }
 }
 
@@ -9482,12 +9947,12 @@ async function loadPayrollCycles() {
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load payroll cycles', '加载计薪周期失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load payroll cycles', '加载计薪周期失败')))
     }
     adminForbidden.value = false
     payrollCycles.value = data.data?.items ?? []
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load payroll cycles', '加载计薪周期失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to load payroll cycles', '加载计薪周期失败')), 'error')
   } finally {
     payrollCycleLoading.value = false
   }
@@ -9522,11 +9987,11 @@ async function generatePayrollCycles() {
     })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to generate payroll cycles', '生成计薪周期失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to generate payroll cycles', '生成计薪周期失败')))
     }
 
     const created = Array.isArray(data.data?.created) ? data.data.created.length : 0
@@ -9534,9 +9999,18 @@ async function generatePayrollCycles() {
     payrollCycleGenerateResult.value = { created, skipped }
     adminForbidden.value = false
     await loadPayrollCycles()
-    setStatus(tr('Payroll cycles generated.', '计薪周期已生成。'))
+    setStatus(appendStatusContext(
+      tr('Payroll cycles generated.', '计薪周期已生成。'),
+      payrollCycleGenerateTimezoneHint.value,
+    ))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to generate payroll cycles', '生成计薪周期失败'), 'error')
+    setStatus(
+      appendStatusContext(
+        readErrorMessage(error, tr('Failed to generate payroll cycles', '生成计薪周期失败')),
+        payrollCycleGenerateTimezoneHint.value,
+      ),
+      'error',
+    )
   } finally {
     payrollCycleGenerating.value = false
   }
@@ -9566,18 +10040,18 @@ async function savePayrollCycle() {
     )
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to save payroll cycle', '保存计薪周期失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to save payroll cycle', '保存计薪周期失败')))
     }
     adminForbidden.value = false
     resetPayrollCycleForm()
     await loadPayrollCycles()
     setStatus(tr('Payroll cycle saved.', '计薪周期已保存。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to save payroll cycle', '保存计薪周期失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to save payroll cycle', '保存计薪周期失败')), 'error')
   } finally {
     payrollCycleSaving.value = false
   }
@@ -9589,18 +10063,18 @@ async function deletePayrollCycle(id: string) {
     const response = await apiFetch(`/api/attendance/payroll-cycles/${id}`, { method: 'DELETE' })
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to delete payroll cycle', '删除计薪周期失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to delete payroll cycle', '删除计薪周期失败')))
     }
     adminForbidden.value = false
     await loadPayrollCycles()
     payrollCycleSummary.value = null
     setStatus(tr('Payroll cycle deleted.', '计薪周期已删除。'))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to delete payroll cycle', '删除计薪周期失败'), 'error')
+    setStatus(readErrorMessage(error, tr('Failed to delete payroll cycle', '删除计薪周期失败')), 'error')
   }
 }
 
@@ -9615,16 +10089,25 @@ async function loadPayrollCycleSummary() {
     const response = await apiFetch(`/api/attendance/payroll-cycles/${cycleId}/summary?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
-      throw new Error('Admin permissions required')
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
     const data = await response.json()
     if (!response.ok || !data.ok) {
-      throw new Error(data?.error?.message || tr('Failed to load payroll summary', '加载计薪汇总失败'))
+      throw new Error(readErrorMessage(data, tr('Failed to load payroll summary', '加载计薪汇总失败')))
     }
     payrollCycleSummary.value = data.data?.summary ?? null
-    setStatus(tr('Payroll summary loaded.', '计薪汇总已加载。'))
+    setStatus(appendStatusContext(
+      tr('Payroll summary loaded.', '计薪汇总已加载。'),
+      payrollCycleTemplateTimezoneHint.value,
+    ))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to load payroll summary', '加载计薪汇总失败'), 'error')
+    setStatus(
+      appendStatusContext(
+        readErrorMessage(error, tr('Failed to load payroll summary', '加载计薪汇总失败')),
+        payrollCycleTemplateTimezoneHint.value,
+      ),
+      'error',
+    )
   }
 }
 
@@ -9650,9 +10133,18 @@ async function exportPayrollCycleSummary() {
     link.click()
     link.remove()
     URL.revokeObjectURL(url)
-    setStatus(tr('Payroll summary exported.', '计薪汇总已导出。'))
+    setStatus(appendStatusContext(
+      tr('Payroll summary exported.', '计薪汇总已导出。'),
+      payrollCycleTemplateTimezoneHint.value,
+    ))
   } catch (error: any) {
-    setStatus(error?.message || tr('Failed to export payroll summary', '导出计薪汇总失败'), 'error')
+    setStatus(
+      appendStatusContext(
+        readErrorMessage(error, tr('Failed to export payroll summary', '导出计薪汇总失败')),
+        payrollCycleTemplateTimezoneHint.value,
+      ),
+      'error',
+    )
   }
 }
 
@@ -9916,6 +10408,20 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.attendance__calendar-flags {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.attendance__calendar-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #4b5563;
+  font-size: 12px;
 }
 
 .attendance__calendar-label {
@@ -10222,12 +10728,39 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   margin-top: 8px;
 }
 
+.attendance__empty-state {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attendance__snapshot-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .attendance__admin-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
   margin-bottom: 12px;
+}
+
+.attendance__admin-shell {
+  display: grid;
+  grid-template-columns: minmax(220px, 250px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.attendance__admin-content {
+  min-width: 0;
+}
+
+[data-admin-section] {
+  scroll-margin-top: 96px;
 }
 
 .attendance__admin-section {
@@ -10321,6 +10854,20 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   .attendance__calendar-cell {
     min-height: 60px;
     padding: 6px;
+  }
+
+  .attendance__calendar-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .attendance__calendar-nav,
+  .attendance__calendar-flags {
+    flex-wrap: wrap;
+  }
+
+  .attendance__admin-shell {
+    grid-template-columns: 1fr;
   }
 
   .attendance__request-meta {

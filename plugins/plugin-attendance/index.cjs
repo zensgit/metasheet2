@@ -4,6 +4,7 @@ const fsp = require('fs/promises')
 const path = require('path')
 const { Transform, Readable } = require('stream')
 const { pipeline } = require('stream/promises')
+const { StringDecoder } = require('string_decoder')
 const { z } = require('zod')
 const { createRuleEngine } = require('./engine/index.cjs')
 const { validateConfig: validateEngineConfig } = require('./engine/schema.cjs')
@@ -28,6 +29,7 @@ const DEFAULT_SHIFT = {
   timezone: DEFAULT_RULE.timezone,
   workStartTime: DEFAULT_RULE.workStartTime,
   workEndTime: DEFAULT_RULE.workEndTime,
+  isOvernight: false,
   lateGraceMinutes: DEFAULT_RULE.lateGraceMinutes,
   earlyGraceMinutes: DEFAULT_RULE.earlyGraceMinutes,
   roundingMinutes: DEFAULT_RULE.roundingMinutes,
@@ -194,6 +196,7 @@ const IMPORT_MAPPING_COLUMNS = [
 
 const DEFAULT_REQUIRED_FIELDS = ['日期']
 const DEFAULT_PUNCH_REQUIRED_FIELDS = ['上班1打卡时间', '下班1打卡时间']
+const DEFAULT_IMPORT_TEMPLATE_PROFILE_ID = 'dingtalk_csv_daily_summary'
 
 const IMPORT_MAPPING_PROFILES = [
   {
@@ -206,6 +209,8 @@ const IMPORT_MAPPING_PROFILES = [
     userMapSourceFields: ['empNo', '工号', '姓名'],
     requiredFields: DEFAULT_REQUIRED_FIELDS,
     punchRequiredFields: DEFAULT_PUNCH_REQUIRED_FIELDS,
+    templateColumns: ['日期', '工号', '姓名', '考勤组', '上班1打卡时间', '下班1打卡时间', '考勤结果', '异常原因'],
+    templateSampleRow: ['2026-03-23', 'EMP001', '张三', '总部日班', '2026-03-23 09:00', '2026-03-23 18:00', '正常', ''],
   },
   {
     id: 'dingtalk_api_columns',
@@ -214,6 +219,8 @@ const IMPORT_MAPPING_PROFILES = [
     source: 'dingtalk',
     mapping: { columns: IMPORT_MAPPING_COLUMNS },
     requiredFields: ['workDate'],
+    templateColumns: ['workDate', 'userId', '1_on_duty_user_check_time', '1_off_duty_user_check_time', 'attend_result'],
+    templateSampleRow: ['2026-03-23', 'user-001', '2026-03-23T09:00:00+08:00', '2026-03-23T18:00:00+08:00', 'Normal'],
   },
   {
     id: 'manual_rows',
@@ -222,12 +229,139 @@ const IMPORT_MAPPING_PROFILES = [
     source: 'manual',
     mapping: { columns: IMPORT_MAPPING_COLUMNS },
     requiredFields: ['workDate'],
+    templateColumns: ['workDate', 'userId', 'firstInAt', 'lastOutAt', 'status'],
+    templateSampleRow: ['2026-03-23', 'user-001', '2026-03-23T09:00:00+08:00', '2026-03-23T18:00:00+08:00', 'normal'],
   },
 ]
 
 function findImportProfile(profileId) {
   if (!profileId) return null
   return IMPORT_MAPPING_PROFILES.find((profile) => profile.id === profileId) ?? null
+}
+
+function uniqueImportTemplateStrings(values) {
+  if (!Array.isArray(values)) return []
+  const normalized = values
+    .map((value) => String(value ?? '').trim())
+    .filter(Boolean)
+  return Array.from(new Set(normalized))
+}
+
+function extractImportTemplateColumns(columns) {
+  if (!Array.isArray(columns)) return []
+  const values = []
+  for (const column of columns) {
+    if (typeof column === 'string') {
+      const text = column.trim()
+      if (text) values.push(text)
+      continue
+    }
+    if (!column || typeof column !== 'object') continue
+    const candidate = column.header
+      ?? column.sourceField
+      ?? column.source
+      ?? column.name
+      ?? column.field
+      ?? column.key
+      ?? column.targetField
+      ?? column.label
+    if (typeof candidate === 'string') {
+      const text = candidate.trim()
+      if (text) values.push(text)
+    }
+  }
+  return Array.from(new Set(values))
+}
+
+function getDefaultImportTemplateProfile() {
+  return findImportProfile(DEFAULT_IMPORT_TEMPLATE_PROFILE_ID)
+    ?? IMPORT_MAPPING_PROFILES[0]
+    ?? null
+}
+
+function resolveImportTemplateProfile(profileId) {
+  const normalized = typeof profileId === 'string' ? profileId.trim() : ''
+  if (!normalized) return { profile: getDefaultImportTemplateProfile(), error: null }
+  const profile = findImportProfile(normalized)
+  if (profile) return { profile, error: null }
+  return {
+    profile: null,
+    error: `Unknown import template profile: ${normalized}`,
+  }
+}
+
+function resolveImportTemplateColumns(profile) {
+  const templateColumns = uniqueImportTemplateStrings(profile?.templateColumns)
+  if (templateColumns.length > 0) return templateColumns
+  return extractImportTemplateColumns(profile?.mapping?.columns)
+}
+
+function resolveImportTemplateRequiredFields(profile) {
+  return uniqueImportTemplateStrings(profile?.requiredFields)
+}
+
+function buildImportTemplatePayloadExample(profile) {
+  const columns = resolveImportTemplateColumns(profile)
+  const requiredFields = resolveImportTemplateRequiredFields(profile)
+  const source = typeof profile?.source === 'string' && profile.source.trim()
+    ? profile.source.trim()
+    : 'dingtalk_csv'
+
+  return {
+    source,
+    mode: 'override',
+    columns,
+    requiredFields,
+    // Keep the template payload valid out-of-the-box: ruleSetId is optional.
+    userMapKeyField: typeof profile?.userMapKeyField === 'string' && profile.userMapKeyField.trim()
+      ? profile.userMapKeyField.trim()
+      : '工号',
+    userMapSourceFields: uniqueImportTemplateStrings(profile?.userMapSourceFields).length > 0
+      ? uniqueImportTemplateStrings(profile.userMapSourceFields)
+      : ['empNo', '工号', '姓名'],
+    userMap: {},
+    entries: [],
+  }
+}
+
+function buildAttendanceImportTemplateData(profile) {
+  return {
+    source: typeof profile?.source === 'string' && profile.source.trim()
+      ? profile.source.trim()
+      : 'dingtalk',
+    mapping: {
+      columns: IMPORT_MAPPING_COLUMNS,
+    },
+    mappingProfiles: IMPORT_MAPPING_PROFILES,
+    payloadExample: buildImportTemplatePayloadExample(profile),
+  }
+}
+
+function escapeImportTemplateCsvCell(value) {
+  const text = String(value ?? '')
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`
+  }
+  return text
+}
+
+function buildImportTemplateCsv(profile) {
+  const columns = resolveImportTemplateColumns(profile)
+  if (columns.length === 0) return ''
+  const sampleRow = Array.isArray(profile?.templateSampleRow) ? profile.templateSampleRow : []
+  const normalizedSampleRow = columns.map((_, index) => sampleRow[index] ?? '')
+  const header = columns.map(escapeImportTemplateCsvCell).join(',')
+  const row = normalizedSampleRow.map(escapeImportTemplateCsvCell).join(',')
+  return `${header}\n${row}\n`
+}
+
+function buildImportTemplateFilename(profile) {
+  const seed = String(profile?.id || profile?.source || 'attendance')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return `attendance-import-template-${seed || 'attendance'}.csv`
 }
 
 const IMPORT_COMMIT_TOKEN_TTL_MS = 10 * 60 * 1000
@@ -622,6 +756,136 @@ function parseDateInput(value) {
   return date
 }
 
+function normalizeDateOnlyStrict(value) {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return null
+  const date = new Date(`${normalized}T00:00:00.000Z`)
+  if (Number.isNaN(date.getTime())) return null
+  return date.toISOString().slice(0, 10) === normalized ? normalized : null
+}
+
+function normalizeUuidString(value) {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  if (!normalized) return null
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(normalized)
+    ? normalized
+    : null
+}
+
+function respondInvalidUuid(res, fieldName = 'id') {
+  res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `${fieldName} must be a UUID` } })
+}
+
+function isValidTimeZoneIdentifier(value) {
+  const zone = typeof value === 'string' ? value.trim() : ''
+  if (!zone) return false
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone }).format(new Date())
+    return true
+  } catch {
+    return false
+  }
+}
+
+function resolveExplicitTimeZoneOrThrow(value, fallback, fieldName = 'timezone') {
+  if (value === undefined || value === null) return fallback
+  const zone = typeof value === 'string' ? value.trim() : ''
+  if (!zone) {
+    throw new HttpError(400, 'VALIDATION_ERROR', `${fieldName} is required`)
+  }
+  if (!isValidTimeZoneIdentifier(zone)) {
+    throw new HttpError(400, 'VALIDATION_ERROR', `${fieldName} must be a valid IANA time zone`)
+  }
+  return zone
+}
+
+function normalizeSafeDisplayName(fieldName, value) {
+  const normalized = typeof value === 'string' ? value.trim() : ''
+  if (!normalized) {
+    throw new HttpError(400, 'VALIDATION_ERROR', `${fieldName} is required`)
+  }
+  if (
+    /[<>]/.test(normalized)
+    || /<\/?[a-z][^>]*>/i.test(normalized)
+    || /["'`]/.test(normalized)
+    || /\bjavascript\s*:/i.test(normalized)
+    || /\bon[a-z]+\s*=/i.test(normalized)
+  ) {
+    throw new HttpError(400, 'VALIDATION_ERROR', `${fieldName} contains unsafe characters`)
+  }
+  return normalized
+}
+
+function resolveAttendanceDateRange(fromValue, toValue, fallbackDays = 30) {
+  const fallbackFrom = new Date(Date.now() - 1000 * 60 * 60 * 24 * fallbackDays).toISOString().slice(0, 10)
+  const fallbackTo = new Date().toISOString().slice(0, 10)
+  const from = fromValue === undefined ? fallbackFrom : normalizeDateOnlyStrict(fromValue)
+  if (fromValue !== undefined && !from) {
+    return { ok: false, message: 'Invalid "from" date. Use YYYY-MM-DD.' }
+  }
+  const to = toValue === undefined ? fallbackTo : normalizeDateOnlyStrict(toValue)
+  if (toValue !== undefined && !to) {
+    return { ok: false, message: 'Invalid "to" date. Use YYYY-MM-DD.' }
+  }
+  if (from > to) {
+    return { ok: false, message: '"from" date must be on or before "to" date.' }
+  }
+  return { ok: true, from, to }
+}
+
+function normalizeOptionalText(value) {
+  if (value === null || value === undefined) return null
+  const normalized = String(value).trim()
+  return normalized || null
+}
+
+function normalizeDuplicateRequestTimestamp(value) {
+  const parsed = value instanceof Date ? value : parseDateInput(value)
+  return parsed ? parsed.toISOString() : null
+}
+
+function buildAttendanceRequestFingerprint(input) {
+  return {
+    requestedInAt: normalizeDuplicateRequestTimestamp(input.requestedInAt),
+    requestedOutAt: normalizeDuplicateRequestTimestamp(input.requestedOutAt),
+    reason: normalizeOptionalText(input.reason),
+    minutes: Number.isFinite(Number(input.minutes)) ? Number(input.minutes) : null,
+    attachmentUrl: normalizeOptionalText(input.attachmentUrl),
+    leaveTypeId: normalizeOptionalText(input.leaveTypeId),
+    leaveTypeCode: normalizeOptionalText(input.leaveTypeCode),
+    overtimeRuleId: normalizeOptionalText(input.overtimeRuleId),
+    overtimeRuleName: normalizeOptionalText(input.overtimeRuleName),
+  }
+}
+
+function matchesAttendanceRequestFingerprint(row, fingerprint) {
+  const metadata = normalizeMetadata(row.metadata)
+  const rowFingerprint = buildAttendanceRequestFingerprint({
+    requestedInAt: row.requested_in_at,
+    requestedOutAt: row.requested_out_at,
+    reason: row.reason,
+    minutes: metadata.minutes,
+    attachmentUrl: metadata.attachmentUrl,
+    leaveTypeId: metadata.leaveType?.id,
+    leaveTypeCode: metadata.leaveType?.code,
+    overtimeRuleId: metadata.overtimeRule?.id,
+    overtimeRuleName: metadata.overtimeRule?.name,
+  })
+  return (
+    rowFingerprint.requestedInAt === fingerprint.requestedInAt
+    && rowFingerprint.requestedOutAt === fingerprint.requestedOutAt
+    && rowFingerprint.reason === fingerprint.reason
+    && rowFingerprint.minutes === fingerprint.minutes
+    && rowFingerprint.attachmentUrl === fingerprint.attachmentUrl
+    && rowFingerprint.leaveTypeId === fingerprint.leaveTypeId
+    && rowFingerprint.leaveTypeCode === fingerprint.leaveTypeCode
+    && rowFingerprint.overtimeRuleId === fingerprint.overtimeRuleId
+    && rowFingerprint.overtimeRuleName === fingerprint.overtimeRuleName
+  )
+}
+
 function normalizeStatusLabel(value) {
   if (value === null || value === undefined) return null
   const text = String(value).trim()
@@ -721,7 +985,7 @@ function parseImportedDateTime(value, workDate, timeZone) {
 
 function normalizeTimeString(value) {
   if (!value || typeof value !== 'string') return null
-  const match = value.trim().match(/^(\d{1,2}):(\d{2})$/)
+  const match = value.trim().match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/)
   if (!match) return null
   const hours = Number(match[1])
   const minutes = Number(match[2])
@@ -730,6 +994,47 @@ function normalizeTimeString(value) {
   const hh = String(hours).padStart(2, '0')
   const mm = String(minutes).padStart(2, '0')
   return `${hh}:${mm}`
+}
+
+function addDaysToDateKey(dateKey, days) {
+  const normalized = normalizeDateOnly(dateKey)
+  if (!normalized) return null
+  const date = new Date(`${normalized}T00:00:00Z`)
+  if (Number.isNaN(date.getTime())) return null
+  date.setUTCDate(date.getUTCDate() + Number(days || 0))
+  return date.toISOString().slice(0, 10)
+}
+
+function inferOvernightFlag(workStartTime, workEndTime) {
+  const normalizedStart = normalizeTimeString(workStartTime)
+  const normalizedEnd = normalizeTimeString(workEndTime)
+  if (!normalizedStart || !normalizedEnd || normalizedStart === normalizedEnd) return false
+  return parseTimeToMinutes(normalizedStart, 0) > parseTimeToMinutes(normalizedEnd, 0)
+}
+
+function resolveOvernightFlag(explicitValue, workStartTime, workEndTime) {
+  if (typeof explicitValue === 'boolean') return explicitValue
+  return inferOvernightFlag(workStartTime, workEndTime)
+}
+
+function resolveShiftTiming({ workStartTime: rawWorkStartTime, workEndTime: rawWorkEndTime, explicitOvernight, fallbackOvernight }) {
+  const workStartTime = normalizeTimeString(rawWorkStartTime)
+  const workEndTime = normalizeTimeString(rawWorkEndTime)
+  if (!workStartTime || !workEndTime) {
+    return { error: 'Shift times must use HH:MM format' }
+  }
+  const inferredOvernight = inferOvernightFlag(workStartTime, workEndTime)
+  if (explicitOvernight === false && inferredOvernight) {
+    return { error: 'Set isOvernight=true when shift end is earlier than shift start' }
+  }
+  if (explicitOvernight === true && !inferredOvernight) {
+    return { error: 'Overnight shifts must end after midnight' }
+  }
+  return {
+    workStartTime,
+    workEndTime,
+    isOvernight: resolveOvernightFlag(firstDefinedValue(explicitOvernight, fallbackOvernight), workStartTime, workEndTime),
+  }
 }
 
 function resolveShiftTimeRange(shiftName) {
@@ -848,6 +1153,15 @@ const ATTENDANCE_IMPORT_CSV_MAX_ROWS = resolvePositiveIntEnv('ATTENDANCE_IMPORT_
   min: 1000,
 })
 
+const ATTENDANCE_IMPORT_SYNC_ASYNC_ROW_THRESHOLD = resolvePositiveIntEnv(
+  'ATTENDANCE_IMPORT_SYNC_ASYNC_ROW_THRESHOLD',
+  50000,
+  {
+    min: 10,
+    max: ATTENDANCE_IMPORT_CSV_MAX_ROWS,
+  }
+)
+
 const ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD = resolvePositiveIntEnv('ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD', 50000, {
   min: 1000,
   max: ATTENDANCE_IMPORT_CSV_MAX_ROWS,
@@ -903,7 +1217,7 @@ const ATTENDANCE_IMPORT_RECORD_UPSERT_MODE = resolveEnumEnv(
 const ATTENDANCE_IMPORT_ITEMS_INSERT_MODE = resolveEnumEnv(
   'ATTENDANCE_IMPORT_ITEMS_INSERT_MODE',
   'unnest',
-  ['values', 'unnest']
+  ['values', 'unnest', 'staging']
 )
 
 const ATTENDANCE_IMPORT_COPY_ENABLED = resolveEnumEnv(
@@ -1008,6 +1322,173 @@ function iterateCsvRows(csvText, delimiter = ',', onRow) {
 
   if (!stoppedEarly) {
     emitRow()
+  }
+
+  return { rowCount, stoppedEarly }
+}
+
+async function iterateCsvRowsAsync(csvText, delimiter = ',', onRow) {
+  if (typeof csvText !== 'string' || !csvText.trim()) return { rowCount: 0, stoppedEarly: false }
+  const sep = typeof delimiter === 'string' && delimiter.length > 0 ? delimiter[0] : ','
+  let row = []
+  let field = ''
+  let inQuotes = false
+  let rowCount = 0
+  let stoppedEarly = false
+
+  const emitRow = async () => {
+    row.push(field)
+    field = ''
+    const keepRow = row.length > 1 || row[0]?.trim()
+    if (!keepRow) {
+      row = []
+      return true
+    }
+    const shouldContinue = typeof onRow === 'function'
+      ? await onRow(row, rowCount) !== false
+      : true
+    rowCount += 1
+    row = []
+    if (!shouldContinue) {
+      stoppedEarly = true
+      return false
+    }
+    return true
+  }
+
+  for (let i = 0; i < csvText.length; i += 1) {
+    const ch = csvText[i]
+    if (inQuotes) {
+      if (ch === '"') {
+        const next = csvText[i + 1]
+        if (next === '"') {
+          field += '"'
+          i += 1
+        } else {
+          inQuotes = false
+        }
+      } else if (ch === '\r') {
+        if (csvText[i + 1] === '\n') i += 1
+        field += '\n'
+      } else {
+        field += ch
+      }
+      continue
+    }
+
+    if (ch === '"') {
+      inQuotes = true
+      continue
+    }
+    if (ch === sep) {
+      row.push(field)
+      field = ''
+      continue
+    }
+    if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && csvText[i + 1] === '\n') i += 1
+      if (!await emitRow()) break
+      continue
+    }
+    field += ch
+  }
+
+  if (!stoppedEarly) {
+    await emitRow()
+  }
+
+  return { rowCount, stoppedEarly }
+}
+
+async function iterateCsvRowsStreamAsync(readable, delimiter = ',', onRow) {
+  if (!readable || typeof readable[Symbol.asyncIterator] !== 'function') {
+    return { rowCount: 0, stoppedEarly: false }
+  }
+  const sep = typeof delimiter === 'string' && delimiter.length > 0 ? delimiter[0] : ','
+  const decoder = new StringDecoder('utf8')
+  let row = []
+  let field = ''
+  let inQuotes = false
+  let rowCount = 0
+  let stoppedEarly = false
+
+  const emitRow = async () => {
+    row.push(field)
+    field = ''
+    const keepRow = row.length > 1 || row[0]?.trim()
+    if (!keepRow) {
+      row = []
+      return true
+    }
+    const shouldContinue = typeof onRow === 'function'
+      ? await onRow(row, rowCount) !== false
+      : true
+    rowCount += 1
+    row = []
+    if (!shouldContinue) {
+      stoppedEarly = true
+      return false
+    }
+    return true
+  }
+
+  const processChunk = async (text) => {
+    for (let i = 0; i < text.length; i += 1) {
+      const ch = text[i]
+      if (inQuotes) {
+        if (ch === '"') {
+          const next = text[i + 1]
+          if (next === '"') {
+            field += '"'
+            i += 1
+          } else {
+            inQuotes = false
+          }
+        } else if (ch === '\r') {
+          if (text[i + 1] === '\n') i += 1
+          field += '\n'
+        } else {
+          field += ch
+        }
+        continue
+      }
+
+      if (ch === '"') {
+        inQuotes = true
+        continue
+      }
+      if (ch === sep) {
+        row.push(field)
+        field = ''
+        continue
+      }
+      if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && text[i + 1] === '\n') i += 1
+        if (!await emitRow()) return false
+        continue
+      }
+      field += ch
+    }
+    return true
+  }
+
+  for await (const chunk of readable) {
+    const text = typeof chunk === 'string' ? chunk : decoder.write(chunk)
+    if (!text) continue
+    if (!await processChunk(text)) break
+  }
+
+  if (!stoppedEarly) {
+    const tail = decoder.end()
+    if (tail) {
+      await processChunk(tail)
+    }
+  } else {
+    decoder.end()
+  }
+
+  if (!stoppedEarly) {
+    await emitRow()
   }
 
   return { rowCount, stoppedEarly }
@@ -1158,24 +1639,66 @@ function shouldEnforcePunchRequired(row) {
   return true
 }
 
-function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
+function resolveImportCsvIterationOptions({ csvText, csvOptions, maxRows }) {
   const delimiter = csvOptions?.delimiter || ','
   const resolvedMaxRowsRaw = Number(maxRows ?? ATTENDANCE_IMPORT_CSV_MAX_ROWS)
   const resolvedMaxRows = Number.isFinite(resolvedMaxRowsRaw) && resolvedMaxRowsRaw > 0
     ? Math.floor(resolvedMaxRowsRaw)
     : ATTENDANCE_IMPORT_CSV_MAX_ROWS
+  return {
+    csvText,
+    delimiter,
+    resolvedMaxRows,
+    headerRowIndex: Number.isFinite(csvOptions?.headerRowIndex)
+      ? Math.max(0, Number(csvOptions.headerRowIndex))
+      : detectCsvHeaderIndex(csvText, delimiter),
+  }
+}
 
-  if (typeof csvText !== 'string' || !csvText.trim()) {
-    return { rows: [], warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
+function buildImportRowFromCsvRawRow(header, rawRow) {
+  const fields = {}
+  let hasValue = false
+  header.forEach((key, index) => {
+    if (!key) return
+    const value = rawRow[index] ?? ''
+    if (value !== '') hasValue = true
+    fields[key] = value
+  })
+  if (!hasValue) return null
+
+  const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.date)
+  const userId = fields.UserId ?? fields.userId ?? fields['用户ID']
+  return {
+    workDate: workDate ?? '',
+    fields,
+    userId: userId ? String(userId).trim() : undefined,
+  }
+}
+
+function finalizeImportCsvIteration({ seenRows, header, rowCount, limitExceeded, maxRows }) {
+  if (seenRows === 0) {
+    return { rowCount: 0, warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows }
+  }
+  if (!header.length || header.every((value) => !value)) {
+    return { rowCount: 0, warnings: ['CSV header row not found'], limitExceeded: false, maxRows }
   }
 
-  const headerRowIndex = Number.isFinite(csvOptions?.headerRowIndex)
-    ? Math.max(0, Number(csvOptions.headerRowIndex))
-    : detectCsvHeaderIndex(csvText, delimiter)
+  const warnings = []
+  if (limitExceeded) {
+    warnings.push(`CSV exceeds max rows (${maxRows}); only the first ${maxRows} rows were parsed.`)
+  }
+  return { rowCount, warnings, limitExceeded, maxRows }
+}
+
+function iterateImportRowsFromCsv({ csvText, csvOptions, maxRows, onRow }) {
+  const { delimiter, resolvedMaxRows, headerRowIndex } = resolveImportCsvIterationOptions({ csvText, csvOptions, maxRows })
+  if (typeof csvText !== 'string' || !csvText.trim()) {
+    return { rowCount: 0, warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
+  }
 
   let seenRows = 0
   let header = []
-  const rows = []
+  let rowCount = 0
   let limitExceeded = false
 
   iterateCsvRows(csvText, delimiter, (rawRow, rowIndex) => {
@@ -1186,46 +1709,225 @@ function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
       return true
     }
     if (!header.length) return true
-    if (rows.length >= resolvedMaxRows) {
+    if (rowCount >= resolvedMaxRows) {
       limitExceeded = true
       return false
     }
-    const fields = {}
-    let hasValue = false
-    header.forEach((key, index) => {
-      if (!key) return
-      const value = rawRow[index] ?? ''
-      if (value !== '') hasValue = true
-      fields[key] = value
-    })
-    if (!hasValue) return true
-    const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.date)
-    const userId = fields.UserId ?? fields.userId ?? fields['用户ID']
-    rows.push({
-      workDate: workDate ?? '',
-      fields,
-      userId: userId ? String(userId).trim() : undefined,
-    })
+    const row = buildImportRowFromCsvRawRow(header, rawRow)
+    if (!row) return true
+    const nextIndex = rowCount
+    rowCount += 1
+    if (typeof onRow === 'function') return onRow(row, nextIndex) !== false
     return true
   })
 
-  if (seenRows === 0) {
-    return { rows: [], warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
-  }
-  if (!header.length || header.every((value) => !value)) {
-    return { rows: [], warnings: ['CSV header row not found'], limitExceeded: false, maxRows: resolvedMaxRows }
+  return finalizeImportCsvIteration({
+    seenRows,
+    header,
+    rowCount,
+    limitExceeded,
+    maxRows: resolvedMaxRows,
+  })
+}
+
+async function iterateImportRowsFromCsvAsync({ csvText, csvOptions, maxRows, onRow }) {
+  const { delimiter, resolvedMaxRows, headerRowIndex } = resolveImportCsvIterationOptions({ csvText, csvOptions, maxRows })
+  if (typeof csvText !== 'string' || !csvText.trim()) {
+    return { rowCount: 0, warnings: ['CSV empty or unreadable'], limitExceeded: false, maxRows: resolvedMaxRows }
   }
 
-  const warnings = []
-  if (limitExceeded) {
-    warnings.push(`CSV exceeds max rows (${resolvedMaxRows}); only the first ${resolvedMaxRows} rows were parsed.`)
+  let seenRows = 0
+  let header = []
+  let rowCount = 0
+  let limitExceeded = false
+
+  await iterateCsvRowsAsync(csvText, delimiter, async (rawRow, rowIndex) => {
+    seenRows += 1
+    if (rowIndex < headerRowIndex) return true
+    if (rowIndex === headerRowIndex) {
+      header = rawRow.map(normalizeCsvHeaderValue)
+      return true
+    }
+    if (!header.length) return true
+    if (rowCount >= resolvedMaxRows) {
+      limitExceeded = true
+      return false
+    }
+    const row = buildImportRowFromCsvRawRow(header, rawRow)
+    if (!row) return true
+    const nextIndex = rowCount
+    rowCount += 1
+    if (typeof onRow === 'function') return await onRow(row, nextIndex) !== false
+    return true
+  })
+
+  return finalizeImportCsvIteration({
+    seenRows,
+    header,
+    rowCount,
+    limitExceeded,
+    maxRows: resolvedMaxRows,
+  })
+}
+
+async function iterateImportRowsFromCsvFileAsync({ csvPath, csvOptions, maxRows, onRow }) {
+  const delimiter = csvOptions?.delimiter || ','
+  const resolvedMaxRowsRaw = Number(maxRows ?? ATTENDANCE_IMPORT_CSV_MAX_ROWS)
+  const resolvedMaxRows = Number.isFinite(resolvedMaxRowsRaw) && resolvedMaxRowsRaw > 0
+    ? Math.floor(resolvedMaxRowsRaw)
+    : ATTENDANCE_IMPORT_CSV_MAX_ROWS
+  const explicitHeaderRowIndex = Number.isFinite(csvOptions?.headerRowIndex)
+    ? Math.max(0, Number(csvOptions.headerRowIndex))
+    : null
+
+  let seenRows = 0
+  let header = []
+  let rowCount = 0
+  let limitExceeded = false
+  let resolvedHeaderRowIndex = explicitHeaderRowIndex
+
+  const csvStream = fs.createReadStream(csvPath, { encoding: 'utf8' })
+  await iterateCsvRowsStreamAsync(csvStream, delimiter, async (rawRow, rowIndex) => {
+    seenRows += 1
+    if (resolvedHeaderRowIndex === null) {
+      const normalized = rawRow.map(normalizeCsvHeaderValue).filter(Boolean)
+      if (normalized.length > 0) {
+        const hasName = normalized.some((cell) => cell === '姓名' || cell.toLowerCase() === 'name')
+        const hasDate = normalized.some((cell) => ['日期', 'date', 'workdate', 'work_date'].includes(cell.toLowerCase()))
+        if (rowIndex === 0 || (hasName && hasDate)) {
+          resolvedHeaderRowIndex = rowIndex
+          header = rawRow.map(normalizeCsvHeaderValue)
+          return true
+        }
+      }
+      return true
+    }
+    if (rowIndex < resolvedHeaderRowIndex) return true
+    if (rowIndex === resolvedHeaderRowIndex) {
+      if (!header.length) header = rawRow.map(normalizeCsvHeaderValue)
+      return true
+    }
+    if (!header.length) return true
+    if (rowCount >= resolvedMaxRows) {
+      limitExceeded = true
+      return false
+    }
+    const row = buildImportRowFromCsvRawRow(header, rawRow)
+    if (!row) return true
+    const nextIndex = rowCount
+    rowCount += 1
+    if (typeof onRow === 'function') return await onRow(row, nextIndex) !== false
+    return true
+  })
+
+  return finalizeImportCsvIteration({
+    seenRows,
+    header,
+    rowCount,
+    limitExceeded,
+    maxRows: resolvedMaxRows,
+  })
+}
+
+const IMPORT_HEADER_DATE_KEYS = new Set(['日期', 'date', 'workdate'])
+const IMPORT_HEADER_CONTEXT_KEYS = new Set([
+  'userid',
+  '用户id',
+  'name',
+  '姓名',
+  '工号',
+  'empno',
+  'firstinat',
+  'lastoutat',
+  'status',
+  'attendancegroup',
+  'attendanceclass',
+  'shiftname',
+  '上班1打卡时间',
+  '下班1打卡时间',
+  '考勤结果',
+  '考勤组',
+  '班次',
+])
+
+function normalizeImportHeaderLookupKey(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, '')
+}
+
+async function readImportCsvHeaderFromFile(csvPath, delimiter = ',') {
+  let header = []
+  const csvStream = fs.createReadStream(csvPath, { encoding: 'utf8' })
+  await iterateCsvRowsStreamAsync(csvStream, delimiter, async (rawRow) => {
+    const normalized = rawRow.map(normalizeCsvHeaderValue)
+    if (normalized.some((cell) => cell && String(cell).trim().length > 0)) {
+      header = normalized
+      return false
+    }
+    return true
+  })
+  return header
+}
+
+async function validateImportUploadCsvOrThrow({ csvPath, csvOptions }) {
+  const delimiter = csvOptions?.delimiter || ','
+  const header = await readImportCsvHeaderFromFile(csvPath, delimiter)
+  if (!header.length || header.every((value) => !value)) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'CSV header row not found')
   }
-  return { rows, warnings, limitExceeded, maxRows: resolvedMaxRows }
+  const normalized = header.map(normalizeImportHeaderLookupKey).filter(Boolean)
+  const hasDateColumn = normalized.some((key) => IMPORT_HEADER_DATE_KEYS.has(key))
+  const hasContextColumn = normalized.some((key) => IMPORT_HEADER_CONTEXT_KEYS.has(key))
+  if (!hasDateColumn || !hasContextColumn) {
+    throw new HttpError(
+      400,
+      'VALIDATION_ERROR',
+      'CSV header must include a work date column and at least one user or attendance column'
+    )
+  }
+}
+
+function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
+  const rows = []
+  const result = iterateImportRowsFromCsv({
+    csvText,
+    csvOptions,
+    maxRows,
+    onRow: (row) => {
+      rows.push(row)
+      return true
+    },
+  })
+  return { rows, warnings: result.warnings, limitExceeded: result.limitExceeded, maxRows: result.maxRows }
 }
 
 function ensureCsvRowsWithinLimit(result) {
   if (!result?.limitExceeded) return
   throw new HttpError(400, 'CSV_TOO_LARGE', `CSV exceeds max rows (${result.maxRows})`)
+}
+
+function createSyncImportTooLargeError({ rowCount, operation }) {
+  const route = operation === 'preview' ? '/api/attendance/import/preview-async' : '/api/attendance/import/commit-async'
+  const normalizedRowCount = Number.isFinite(Number(rowCount)) ? Math.max(0, Math.floor(Number(rowCount))) : 0
+  return new HttpError(
+    400,
+    'IMPORT_TOO_LARGE_FOR_SYNC',
+    `Large imports (${normalizedRowCount} rows) must use ${route}`
+  )
+}
+
+function assertSyncImportWithinScale({ rowCount, operation }) {
+  const numeric = Number(rowCount ?? 0)
+  if (!Number.isFinite(numeric) || numeric <= 0) return
+  const normalizedRowCount = Math.max(0, Math.floor(numeric))
+  if (normalizedRowCount > ATTENDANCE_IMPORT_CSV_MAX_ROWS) {
+    throw new HttpError(400, 'CSV_TOO_LARGE', `CSV exceeds max rows (${ATTENDANCE_IMPORT_CSV_MAX_ROWS})`)
+  }
+  if (normalizedRowCount > ATTENDANCE_IMPORT_SYNC_ASYNC_ROW_THRESHOLD) {
+    throw createSyncImportTooLargeError({ rowCount: normalizedRowCount, operation })
+  }
 }
 
 function releaseImportRowMemory(row) {
@@ -1534,17 +2236,29 @@ function mapRuleRow(row) {
 }
 
 function mapShiftRow(row) {
+  const workStartTime = row.work_start_time ?? DEFAULT_SHIFT.workStartTime
+  const workEndTime = row.work_end_time ?? DEFAULT_SHIFT.workEndTime
+  const isOvernight = resolveOvernightFlag(row.is_overnight, workStartTime, workEndTime)
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
+    org_id: row.org_id ?? DEFAULT_ORG_ID,
     name: row.name ?? DEFAULT_SHIFT.name,
     timezone: row.timezone ?? DEFAULT_SHIFT.timezone,
-    workStartTime: row.work_start_time ?? DEFAULT_SHIFT.workStartTime,
-    workEndTime: row.work_end_time ?? DEFAULT_SHIFT.workEndTime,
+    workStartTime,
+    work_start_time: workStartTime,
+    workEndTime,
+    work_end_time: workEndTime,
+    isOvernight,
+    is_overnight: isOvernight,
     lateGraceMinutes: Number(row.late_grace_minutes ?? DEFAULT_SHIFT.lateGraceMinutes),
+    late_grace_minutes: Number(row.late_grace_minutes ?? DEFAULT_SHIFT.lateGraceMinutes),
     earlyGraceMinutes: Number(row.early_grace_minutes ?? DEFAULT_SHIFT.earlyGraceMinutes),
+    early_grace_minutes: Number(row.early_grace_minutes ?? DEFAULT_SHIFT.earlyGraceMinutes),
     roundingMinutes: Number(row.rounding_minutes ?? DEFAULT_SHIFT.roundingMinutes),
+    rounding_minutes: Number(row.rounding_minutes ?? DEFAULT_SHIFT.roundingMinutes),
     workingDays: normalizeWorkingDays(row.working_days),
+    working_days: normalizeWorkingDays(row.working_days),
   }
 }
 
@@ -1693,11 +2407,19 @@ function collectAttendanceGroupNames(rows) {
   const names = new Map()
   if (!Array.isArray(rows)) return names
   for (const row of rows) {
-    const name = resolveAttendanceGroupName(row)
-    const key = normalizeAttendanceGroupValue(name)
-    if (!key || !name) continue
-    if (!names.has(key)) names.set(key, name)
+    appendAttendanceGroupName(names, row)
   }
+  return names
+}
+
+function appendAttendanceGroupName(names, row) {
+  if (!(names instanceof Map)) return names
+  const name = resolveAttendanceGroupName(row)
+  const key = normalizeAttendanceGroupValue(name)
+  if (!key || !name) return names
+  // Avoid auto-creating placeholder-like numeric groups such as "1" from raw imports.
+  if (/^\d+$/.test(name)) return names
+  if (!names.has(key)) names.set(key, name)
   return names
 }
 
@@ -1724,11 +2446,17 @@ function mapAssignmentRow(row) {
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
+    org_id: row.org_id ?? DEFAULT_ORG_ID,
     userId: row.user_id,
+    user_id: row.user_id,
     shiftId: row.shift_id,
-    startDate: row.start_date,
-    endDate: row.end_date ?? null,
+    shift_id: row.shift_id,
+    startDate: normalizeDateOnly(row.start_date) ?? row.start_date,
+    start_date: normalizeDateOnly(row.start_date) ?? row.start_date,
+    endDate: normalizeDateOnly(row.end_date) ?? row.end_date ?? null,
+    end_date: normalizeDateOnly(row.end_date) ?? row.end_date ?? null,
     isActive: row.is_active ?? true,
+    is_active: row.is_active ?? true,
   }
 }
 
@@ -1740,6 +2468,7 @@ function mapShiftFromAssignmentRow(row) {
     timezone: row.shift_timezone,
     work_start_time: row.shift_work_start_time,
     work_end_time: row.shift_work_end_time,
+    is_overnight: row.shift_is_overnight,
     late_grace_minutes: row.shift_late_grace_minutes,
     early_grace_minutes: row.shift_early_grace_minutes,
     rounding_minutes: row.shift_rounding_minutes,
@@ -1748,12 +2477,15 @@ function mapShiftFromAssignmentRow(row) {
 }
 
 function mapHolidayRow(row) {
+  const holidayType = row.is_working_day === true ? 'working_day_override' : 'holiday'
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
-    date: row.holiday_date,
+    date: normalizeDateOnly(row.holiday_date) ?? row.holiday_date,
     name: row.name ?? null,
     isWorkingDay: row.is_working_day ?? false,
+    type: holidayType,
+    holidayType,
   }
 }
 
@@ -1868,7 +2600,7 @@ function mapImportBatchRow(row) {
 	  }
 	  if (row && typeof row === 'object') {
 	    snapshot.row = {
-	      workDate: row.workDate ?? null,
+      workDate: normalizeImportWorkDateForStorage(row.workDate),
 	      userId: row.userId ?? row.user_id ?? null,
 	      fields: row.fields ?? {},
 	    }
@@ -1912,9 +2644,9 @@ function mapImportBatchRow(row) {
 	  }
 	}
 
-	async function acquireImportIdempotencyLock(client, orgId, idempotencyKey) {
-	  const clean = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
-	  if (!clean) return
+		async function acquireImportIdempotencyLock(client, orgId, idempotencyKey) {
+		  const clean = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
+		  if (!clean) return
 	  try {
 	    await client.query(
 	      'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
@@ -1922,10 +2654,37 @@ function mapImportBatchRow(row) {
 	    )
 	  } catch (_error) {
 	    // Best-effort: keep functional behavior even if advisory locks are unavailable.
-	  }
-	}
+		  }
+		}
 
-function mapIntegrationRow(row) {
+		async function acquireAttendanceRequestLock(client, orgId, userId, workDate, requestType) {
+		  try {
+		    await client.query(
+		      'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))',
+		      [String(orgId ?? '') + ':' + String(userId ?? ''), `${String(workDate ?? '')}:${String(requestType ?? '')}`]
+		    )
+		  } catch (_error) {
+		    // Best-effort: preserve functional behavior if advisory locks are unavailable.
+		  }
+		}
+
+		async function findDuplicateAttendanceRequest(client, { orgId, userId, workDate, requestType }) {
+		  const rows = await client.query(
+		    `SELECT id, requested_in_at, requested_out_at, reason, status, metadata
+		     FROM attendance_requests
+		     WHERE org_id = $1
+		       AND user_id = $2
+		       AND work_date = $3
+		       AND request_type = $4
+		       AND status IN ('pending', 'approved')
+		     ORDER BY created_at DESC
+		     LIMIT 20`,
+		    [orgId, userId, workDate, requestType]
+		  )
+		  return rows[0] ?? null
+		}
+
+	function mapIntegrationRow(row) {
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -2011,12 +2770,107 @@ function normalizeMetadata(value) {
   return typeof value === 'object' ? value : {}
 }
 
+function normalizeObjectPayload(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+}
+
+function firstDefinedValue(...values) {
+  for (const value of values) {
+    if (value !== undefined) return value
+  }
+  return undefined
+}
+
+function normalizeGroupMembersPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    userId: firstDefinedValue(payload.userId, payload.user_id),
+    userIds: firstDefinedValue(payload.userIds, payload.user_ids),
+  }
+}
+
+function normalizeAssignmentPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    userId: firstDefinedValue(payload.userId, payload.user_id),
+    shiftId: firstDefinedValue(payload.shiftId, payload.shift_id),
+    startDate: firstDefinedValue(payload.startDate, payload.start_date),
+    endDate: firstDefinedValue(payload.endDate, payload.end_date),
+    isActive: firstDefinedValue(payload.isActive, payload.is_active),
+  }
+}
+
+function normalizeShiftPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    workStartTime: firstDefinedValue(payload.workStartTime, payload.work_start_time, payload.startTime, payload.start_time),
+    workEndTime: firstDefinedValue(payload.workEndTime, payload.work_end_time, payload.endTime, payload.end_time),
+    isOvernight: firstDefinedValue(payload.isOvernight, payload.is_overnight),
+    lateGraceMinutes: firstDefinedValue(payload.lateGraceMinutes, payload.late_grace_minutes),
+    earlyGraceMinutes: firstDefinedValue(payload.earlyGraceMinutes, payload.early_grace_minutes),
+    roundingMinutes: firstDefinedValue(payload.roundingMinutes, payload.rounding_minutes),
+    workingDays: firstDefinedValue(payload.workingDays, payload.working_days),
+  }
+}
+
+function normalizeApprovalStepPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    approverUserIds: firstDefinedValue(payload.approverUserIds, payload.approver_user_ids),
+    approverRoleIds: firstDefinedValue(payload.approverRoleIds, payload.approver_role_ids),
+  }
+}
+
+function normalizeApprovalFlowPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    requestType: firstDefinedValue(payload.requestType, payload.request_type),
+    steps: Array.isArray(payload.steps) ? payload.steps.map(normalizeApprovalStepPayload) : payload.steps,
+    isActive: firstDefinedValue(payload.isActive, payload.is_active),
+  }
+}
+
+function normalizeRotationRulePayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    shiftSequence: firstDefinedValue(payload.shiftSequence, payload.shift_sequence),
+    isActive: firstDefinedValue(payload.isActive, payload.is_active),
+  }
+}
+
+function normalizeRotationAssignmentPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    userId: firstDefinedValue(payload.userId, payload.user_id),
+    rotationRuleId: firstDefinedValue(payload.rotationRuleId, payload.rotation_rule_id),
+    startDate: firstDefinedValue(payload.startDate, payload.start_date),
+    endDate: firstDefinedValue(payload.endDate, payload.end_date),
+    isActive: firstDefinedValue(payload.isActive, payload.is_active),
+  }
+}
+
+function normalizeRuleSetPayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    isDefault: firstDefinedValue(payload.isDefault, payload.is_default),
+  }
+}
+
 function mapLeaveTypeRow(row) {
   return {
     id: row.id,
     orgId: row.org_id ?? DEFAULT_ORG_ID,
     code: row.code,
     name: row.name,
+    paid: row.paid ?? true,
     requiresApproval: row.requires_approval ?? true,
     requiresAttachment: row.requires_attachment ?? false,
     defaultMinutesPerDay: Number(row.default_minutes_per_day ?? 480),
@@ -2065,8 +2919,8 @@ function mapRotationAssignmentRow(row) {
     orgId: row.org_id ?? DEFAULT_ORG_ID,
     userId: row.user_id,
     rotationRuleId: row.rotation_rule_id,
-    startDate: row.start_date,
-    endDate: row.end_date ?? null,
+    startDate: normalizeDateOnly(row.start_date) ?? row.start_date,
+    endDate: normalizeDateOnly(row.end_date) ?? row.end_date ?? null,
     isActive: row.is_active ?? true,
   }
 }
@@ -2175,7 +3029,7 @@ function diffDays(fromDate, toDate) {
 }
 
 function computeMetrics(options) {
-  const { rule, firstInAt, lastOutAt, isWorkingDay, leaveMinutes, overtimeMinutes } = options
+  const { rule, firstInAt, lastOutAt, isWorkingDay, leaveMinutes, overtimeMinutes, workDate } = options
 
   if (!isWorkingDay) {
     if (!firstInAt && !lastOutAt) {
@@ -2203,16 +3057,20 @@ function computeMetrics(options) {
   const rawMinutes = Math.max(0, Math.floor((lastOutAt.getTime() - firstInAt.getTime()) / 60000))
   const workMinutes = roundMinutes(rawMinutes, rule.roundingMinutes)
 
-  const startMinutes = parseTimeToMinutes(rule.workStartTime, 9 * 60)
-  const endMinutes = parseTimeToMinutes(rule.workEndTime, 18 * 60)
-  const firstInMinutes = getZonedMinutes(firstInAt, rule.timezone)
-  const lastOutMinutes = getZonedMinutes(lastOutAt, rule.timezone)
+  const normalizedWorkDate = normalizeDateOnly(workDate)
+    ?? toWorkDate(firstInAt ?? lastOutAt ?? new Date(), rule.timezone ?? DEFAULT_RULE.timezone)
+  const normalizedStartTime = normalizeTimeString(rule.workStartTime) ?? DEFAULT_RULE.workStartTime
+  const normalizedEndTime = normalizeTimeString(rule.workEndTime) ?? DEFAULT_RULE.workEndTime
+  const isOvernight = resolveOvernightFlag(rule?.isOvernight, normalizedStartTime, normalizedEndTime)
+  const shiftEndDate = isOvernight ? (addDaysToDateKey(normalizedWorkDate, 1) ?? normalizedWorkDate) : normalizedWorkDate
+  const shiftStartAt = buildZonedDate(normalizedWorkDate, normalizedStartTime, rule.timezone ?? DEFAULT_RULE.timezone)
+  const shiftEndAt = buildZonedDate(shiftEndDate, normalizedEndTime, rule.timezone ?? DEFAULT_RULE.timezone)
 
-  const lateThreshold = startMinutes + Math.max(0, rule.lateGraceMinutes)
-  const earlyThreshold = endMinutes - Math.max(0, rule.earlyGraceMinutes)
+  const lateThresholdAt = new Date(shiftStartAt.getTime() + Math.max(0, rule.lateGraceMinutes) * 60000)
+  const earlyThresholdAt = new Date(shiftEndAt.getTime() - Math.max(0, rule.earlyGraceMinutes) * 60000)
 
-  const lateMinutes = Math.max(0, firstInMinutes - lateThreshold)
-  const earlyLeaveMinutes = Math.max(0, earlyThreshold - lastOutMinutes)
+  const lateMinutes = Math.max(0, Math.floor((firstInAt.getTime() - lateThresholdAt.getTime()) / 60000))
+  const earlyLeaveMinutes = Math.max(0, Math.floor((earlyThresholdAt.getTime() - lastOutAt.getTime()) / 60000))
 
   let status = 'normal'
   if (lateMinutes > 0 && earlyLeaveMinutes > 0) status = 'late_early'
@@ -2297,7 +3155,10 @@ function normalizeNumber(value) {
 function normalizeDateOnly(value) {
   if (!value) return null
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return value.toISOString().slice(0, 10)
+    const year = value.getFullYear()
+    const month = String(value.getMonth() + 1).padStart(2, '0')
+    const day = String(value.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
   }
   const raw = String(value).trim()
   if (!raw) return null
@@ -2342,6 +3203,10 @@ function augmentFieldValuesWithDates(fieldValues, workDate) {
   return fieldValues
 }
 
+function normalizeImportWorkDateForStorage(value) {
+  return normalizeDateOnly(value) ?? null
+}
+
 function parseHolidayDayIndex(name) {
   if (!name) return null
   const trimmed = String(name).trim()
@@ -2365,12 +3230,7 @@ function parseHolidayDayIndex(name) {
 function resolveTimeZone(timeZone, fallback) {
   const zone = typeof timeZone === 'string' ? timeZone.trim() : ''
   if (!zone) return fallback
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: zone }).format(new Date())
-    return zone
-  } catch (error) {
-    return fallback
-  }
+  return isValidTimeZoneIdentifier(zone) ? zone : fallback
 }
 
 function resolveHolidayMeta(holiday) {
@@ -3565,7 +4425,16 @@ async function getTemplateLibraryVersionPayload(db, orgId, versionId, versionNum
     if (!rows.length) return null
     const row = rows[0]
     const templates = normalizeTemplateLibrary(row.templates ?? [])
-    return { id: row.id, version: Number(row.version ?? 0), templates }
+    const version = mapTemplateLibraryVersionRow(row)
+    return {
+      id: row.id,
+      version: version?.version ?? Number(row.version ?? 0),
+      createdAt: version?.createdAt ?? row.created_at ?? null,
+      createdBy: version?.createdBy ?? row.created_by ?? null,
+      sourceVersionId: version?.sourceVersionId ?? row.source_version_id ?? null,
+      itemCount: templates.length,
+      templates,
+    }
   } catch (error) {
     if (isDatabaseSchemaError(error)) return null
     throw error
@@ -3681,7 +4550,7 @@ async function loadShiftAssignment(db, orgId, userId, workDate) {
     const rows = await db.query(
       `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
               s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
-              s.work_end_time AS shift_work_end_time, s.late_grace_minutes AS shift_late_grace_minutes,
+              s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
               s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
               s.working_days AS shift_working_days
        FROM attendance_shift_assignments a
@@ -3881,7 +4750,7 @@ async function loadShiftAssignmentMapForUsersRange(db, orgId, userIds, fromDate,
     const rows = await db.query(
       `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
               s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
-              s.work_end_time AS shift_work_end_time, s.late_grace_minutes AS shift_late_grace_minutes,
+              s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
               s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
               s.working_days AS shift_working_days
        FROM attendance_shift_assignments a
@@ -4032,6 +4901,79 @@ function resolveWorkContextFromPrefetch(options) {
   }
 }
 
+async function buildWorkContextPrefetch(db, options) {
+  const { orgId, userIds, workDates, defaultRule } = options
+  const normalizedUserIds = Array.from(new Set((Array.isArray(userIds) ? userIds : []).filter(Boolean)))
+  const normalizedWorkDates = Array.from(
+    new Set(
+      (Array.isArray(workDates) ? workDates : [])
+        .map((value) => normalizeDateOnly(value) ?? (typeof value === 'string' ? value.slice(0, 10) : null))
+        .filter(Boolean)
+    )
+  ).sort()
+
+  const resolvedDefaultRule = defaultRule ?? await loadDefaultRule(db, orgId)
+  if (!normalizedWorkDates.length || !normalizedUserIds.length) {
+    return {
+      defaultRule: resolvedDefaultRule,
+      prefetched: {
+        holidaysByDate: new Map(),
+        shiftAssignmentsByUser: new Map(),
+        rotationAssignmentsByUser: new Map(),
+        rotationShiftsById: new Map(),
+      },
+    }
+  }
+
+  const fromDate = normalizedWorkDates[0]
+  const toDate = normalizedWorkDates[normalizedWorkDates.length - 1]
+  const [holidaysByDate, shiftAssignmentsByUser, rotationPrefetch] = await Promise.all([
+    loadHolidayMapByDates(db, orgId, normalizedWorkDates),
+    loadShiftAssignmentMapForUsersRange(db, orgId, normalizedUserIds, fromDate, toDate),
+    loadRotationAssignmentMapForUsersRange(db, orgId, normalizedUserIds, fromDate, toDate),
+  ])
+
+  return {
+    defaultRule: resolvedDefaultRule,
+    prefetched: {
+      holidaysByDate,
+      shiftAssignmentsByUser,
+      rotationAssignmentsByUser: rotationPrefetch.assignmentsByUser,
+      rotationShiftsById: rotationPrefetch.shiftsById,
+    },
+  }
+}
+
+function buildWorkdayContextSummary(options) {
+  const { workDate, storedIsWorkday, resolvedContext } = options
+  if (!resolvedContext || !workDate) return null
+
+  const sourceName = resolvedContext.source === 'rotation'
+    ? resolvedContext.rotation?.name ?? resolvedContext.rule?.name ?? null
+    : resolvedContext.rule?.name ?? null
+  const holiday = resolvedContext.holiday
+    ? {
+        id: resolvedContext.holiday.id ?? null,
+        name: resolvedContext.holiday.name ?? null,
+        isWorkingDay: resolvedContext.holiday.isWorkingDay === true,
+        type: resolvedContext.holiday.type ?? (resolvedContext.holiday.isWorkingDay === true ? 'working_day_override' : 'holiday'),
+      }
+    : null
+  const normalizedStored = storedIsWorkday !== false
+  const normalizedResolved = resolvedContext.isWorkingDay !== false
+
+  return {
+    storedIsWorkday: normalizedStored,
+    resolvedIsWorkday: normalizedResolved,
+    matchesStored: normalizedStored === normalizedResolved,
+    source: resolvedContext.source ?? 'rule',
+    sourceName,
+    weekday: getWeekdayFromDateKey(workDate),
+    workingDays: Array.isArray(resolvedContext.rule?.workingDays) ? [...resolvedContext.rule.workingDays] : [...DEFAULT_RULE.workingDays],
+    holiday,
+  }
+}
+
 async function loadApprovedMinutes(db, orgId, userId, workDate) {
   const rows = await db.query(
     `SELECT request_type,
@@ -4142,6 +5084,7 @@ async function upsertAttendanceRecord(options) {
     existingRow: existing[0] ?? null,
     updateFirstInAt,
     updateLastOutAt,
+    workDate,
     mode,
     statusOverride,
     overrideMetrics,
@@ -4197,6 +5140,7 @@ function computeAttendanceRecordUpsertValues(options) {
     existingRow,
     updateFirstInAt,
     updateLastOutAt,
+    workDate,
     mode,
     statusOverride,
     overrideMetrics,
@@ -4237,6 +5181,7 @@ function computeAttendanceRecordUpsertValues(options) {
     rule,
     firstInAt,
     lastOutAt,
+    workDate,
     isWorkingDay: isWorkday !== false,
     leaveMinutes,
     overtimeMinutes,
@@ -4475,7 +5420,7 @@ function shouldUseAttendanceImportCopyStdin({ client, totalRows }) {
 
 function encodeAttendanceImportCsvValue(value) {
   if (value === null || value === undefined) return '\\N'
-  const text = String(value)
+  const text = value instanceof Date ? value.toISOString() : String(value)
   if (text === '\\N') return '"\\N"'
   if (text.includes('"') || text.includes(',') || text.includes('\n') || text.includes('\r')) {
     return `"${text.replace(/"/g, '""')}"`
@@ -4522,6 +5467,42 @@ async function copyAttendanceImportRowsToStage(client, rows) {
   return true
 }
 
+function* iterAttendanceImportItemsStageCsvLines({ batchId, orgId, items }) {
+  for (const item of items) {
+    const snapshotValue = typeof item?.previewSnapshot === 'string'
+      ? item.previewSnapshot
+      : JSON.stringify(item?.previewSnapshot ?? {})
+    const values = [
+      item?.id ?? null,
+      batchId ?? null,
+      orgId ?? null,
+      item?.userId ?? null,
+      normalizeImportWorkDateForStorage(item?.workDate),
+      item?.recordId ?? null,
+      snapshotValue,
+    ]
+    yield `${values.map((value) => encodeAttendanceImportCsvValue(value)).join(',')}\n`
+  }
+}
+
+async function copyAttendanceImportItemsToStage(client, { batchId, orgId, items }) {
+  const rawClient = resolveAttendanceImportRawClient(client)
+  const copyFromFactory = resolveAttendanceCopyFromFactory()
+  if (!rawClient || !copyFromFactory) return false
+  const copyStream = rawClient.query(
+    copyFromFactory(
+      `COPY attendance_import_items_stage
+        (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot)
+       FROM STDIN WITH (FORMAT csv, NULL '\\N')`
+    )
+  )
+  await pipeline(
+    Readable.from(iterAttendanceImportItemsStageCsvLines({ batchId, orgId, items })),
+    copyStream
+  )
+  return true
+}
+
 async function ensureAttendanceImportRecordsStageTable(client) {
   if (client && client.__attendanceImportStageReady === true) return
   await queryImportHeavy(
@@ -4544,6 +5525,24 @@ async function ensureAttendanceImportRecordsStageTable(client) {
     []
   )
   if (client) client.__attendanceImportStageReady = true
+}
+
+async function ensureAttendanceImportItemsStageTable(client) {
+  if (client && client.__attendanceImportItemsStageReady === true) return
+  await queryImportHeavy(
+    client,
+    `CREATE TEMP TABLE IF NOT EXISTS attendance_import_items_stage (
+       id uuid NOT NULL,
+       batch_id uuid NOT NULL,
+       org_id text NOT NULL,
+       user_id text,
+       work_date date,
+       record_id uuid,
+       preview_snapshot jsonb
+     ) ON COMMIT DROP`,
+    []
+  )
+  if (client) client.__attendanceImportItemsStageReady = true
 }
 
 async function batchUpsertAttendanceRecordsStaging(client, rows, options = {}) {
@@ -4588,9 +5587,17 @@ async function batchUpsertAttendanceRecordsStaging(client, rows, options = {}) {
   let stagedByCopy = false
   if (allowCopyStdin) {
     try {
+      await queryImportHeavy(client, 'SAVEPOINT attendance_import_records_stage_copy', [])
       stagedByCopy = await copyAttendanceImportRowsToStage(client, rows)
+      await queryImportHeavy(client, 'RELEASE SAVEPOINT attendance_import_records_stage_copy', [])
     } catch (error) {
       const message = error && error.message ? error.message : String(error)
+      try {
+        await queryImportHeavy(client, 'ROLLBACK TO SAVEPOINT attendance_import_records_stage_copy', [])
+        await queryImportHeavy(client, 'RELEASE SAVEPOINT attendance_import_records_stage_copy', [])
+      } catch (_rollbackError) {
+        // Ignore savepoint cleanup failures and let the outer transaction handler deal with them.
+      }
       console.warn(`[attendance-import] COPY FROM STDIN stage load failed, fallback to unnest: ${message}`)
       await queryImportHeavy(client, 'TRUNCATE attendance_import_records_stage', [])
       stagedByCopy = false
@@ -4729,29 +5736,136 @@ async function batchUpsertAttendanceRecords(client, rows, options = {}) {
   return batchUpsertAttendanceRecordsUnnest(client, rows)
 }
 
-async function batchInsertAttendanceImportItems(client, { batchId, orgId, items }) {
+async function batchInsertAttendanceImportItemsValues(client, { batchId, orgId, items }) {
+  const values = items
+    .map((_, idx) => {
+      const base = idx * 7
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}::jsonb, now())`
+    })
+    .join(', ')
+  const params = []
+  for (const item of items) {
+    params.push(
+      item.id,
+      batchId,
+      orgId,
+      item.userId,
+      normalizeImportWorkDateForStorage(item.workDate),
+      item.recordId,
+      item.previewSnapshot
+    )
+  }
+  await queryImportHeavy(
+    client,
+    `INSERT INTO attendance_import_items
+     (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+     VALUES ${values}`,
+    params
+  )
+}
+
+async function batchInsertAttendanceImportItemsStaging(client, { batchId, orgId, items, totalRows }) {
   if (!Array.isArray(items) || items.length === 0) return
 
-  if (ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'values') {
-    const values = items
-      .map((_, idx) => {
-        const base = idx * 7
-        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}::jsonb, now())`
-      })
-      .join(', ')
-    const params = []
-    for (const item of items) {
-      params.push(item.id, batchId, orgId, item.userId, item.workDate, item.recordId, item.previewSnapshot)
+  await ensureAttendanceImportItemsStageTable(client)
+  const numericTotalRows = Number.isFinite(Number(totalRows))
+    ? Math.max(0, Math.floor(Number(totalRows)))
+    : items.length
+  const allowCopyStdin = shouldUseAttendanceImportCopyStdin({ client, totalRows: numericTotalRows })
+
+  const ids = []
+  const batchIds = []
+  const orgIds = []
+  const userIds = []
+  const workDates = []
+  const recordIds = []
+  const snapshots = []
+
+  for (const item of items) {
+    ids.push(item.id ?? null)
+    batchIds.push(batchId ?? null)
+    orgIds.push(orgId ?? null)
+    userIds.push(item.userId ?? null)
+    workDates.push(normalizeImportWorkDateForStorage(item.workDate))
+    recordIds.push(item.recordId ?? null)
+    snapshots.push(item.previewSnapshot ?? '{}')
+  }
+
+  await queryImportHeavy(client, 'TRUNCATE attendance_import_items_stage', [])
+  let stagedByCopy = false
+  if (allowCopyStdin) {
+    try {
+      await queryImportHeavy(client, 'SAVEPOINT attendance_import_items_stage_copy', [])
+      stagedByCopy = await copyAttendanceImportItemsToStage(client, { batchId, orgId, items })
+      await queryImportHeavy(client, 'RELEASE SAVEPOINT attendance_import_items_stage_copy', [])
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error)
+      try {
+        await queryImportHeavy(client, 'ROLLBACK TO SAVEPOINT attendance_import_items_stage_copy', [])
+        await queryImportHeavy(client, 'RELEASE SAVEPOINT attendance_import_items_stage_copy', [])
+      } catch (_rollbackError) {
+        // Ignore savepoint cleanup failures and let the outer transaction handler deal with them.
+      }
+      console.warn(`[attendance-import] COPY FROM STDIN items stage load failed, fallback to unnest: ${message}`)
+      await queryImportHeavy(client, 'TRUNCATE attendance_import_items_stage', [])
+      stagedByCopy = false
     }
+  }
+  if (!stagedByCopy) {
     await queryImportHeavy(
       client,
-      `INSERT INTO attendance_import_items
-       (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
-       VALUES ${values}`,
-      params
+      `INSERT INTO attendance_import_items_stage
+        (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot)
+       SELECT
+         t.id,
+         t.batch_id,
+         t.org_id,
+         t.user_id,
+         t.work_date,
+         t.record_id,
+         t.preview_snapshot::jsonb
+       FROM unnest(
+         $1::uuid[],
+         $2::uuid[],
+         $3::text[],
+         $4::text[],
+         $5::date[],
+         $6::uuid[],
+         $7::text[]
+       ) AS t(
+         id,
+         batch_id,
+         org_id,
+         user_id,
+         work_date,
+         record_id,
+         preview_snapshot
+       )`,
+      [ids, batchIds, orgIds, userIds, workDates, recordIds, snapshots]
     )
-    return
   }
+
+  await queryImportHeavy(
+    client,
+    `INSERT INTO attendance_import_items
+      (id, batch_id, org_id, user_id, work_date, record_id, preview_snapshot, created_at)
+     SELECT
+       s.id,
+       s.batch_id,
+       s.org_id,
+       s.user_id,
+       s.work_date,
+       s.record_id,
+       s.preview_snapshot,
+       now()
+     FROM attendance_import_items_stage s`,
+    []
+  )
+  await queryImportHeavy(client, 'TRUNCATE attendance_import_items_stage', [])
+}
+
+async function batchInsertAttendanceImportItemsUnnest(client, { batchId, orgId, items }) {
+  if (!Array.isArray(items) || items.length === 0) return
 
   const ids = []
   const userIds = []
@@ -4762,7 +5876,7 @@ async function batchInsertAttendanceImportItems(client, { batchId, orgId, items 
   for (const item of items) {
     ids.push(item.id ?? null)
     userIds.push(item.userId ?? null)
-    workDates.push(item.workDate ?? null)
+    workDates.push(normalizeImportWorkDateForStorage(item.workDate))
     recordIds.push(item.recordId ?? null)
     snapshots.push(item.previewSnapshot ?? '{}')
   }
@@ -4797,9 +5911,71 @@ async function batchInsertAttendanceImportItems(client, { batchId, orgId, items 
   )
 }
 
+async function batchInsertAttendanceImportItems(client, { batchId, orgId, items, totalRows, strategy }) {
+  if (!Array.isArray(items) || items.length === 0) return
+  const normalizedStrategy = typeof strategy === 'string'
+    ? strategy.trim().toLowerCase()
+    : resolveImportItemsInsertStrategy({
+        rowCount: totalRows,
+        engine: resolveImportEngineByRowCount(totalRows),
+      })
+
+  if (normalizedStrategy === 'values') {
+    return batchInsertAttendanceImportItemsValues(client, { batchId, orgId, items })
+  }
+  if (normalizedStrategy === 'staging') {
+    return batchInsertAttendanceImportItemsStaging(client, {
+      batchId,
+      orgId,
+      items,
+      totalRows,
+    })
+  }
+  return batchInsertAttendanceImportItemsUnnest(client, { batchId, orgId, items })
+}
+
 function getWeekdayFromDateKey(dateKey) {
   const date = new Date(`${dateKey}T00:00:00Z`)
   return date.getUTCDay()
+}
+
+function formatDateOnlyForCsv(value) {
+  if (value === null || value === undefined || value === '') return ''
+  if (typeof value === 'string') {
+    const match = value.match(/^(\d{4}-\d{2}-\d{2})/)
+    if (match?.[1]) return match[1]
+  }
+  if (value instanceof Date) {
+    const year = value.getFullYear()
+    const month = String(value.getMonth() + 1).padStart(2, '0')
+    const day = String(value.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  return date.toISOString().slice(0, 10)
+}
+
+function formatTimeZoneOffsetForCsv(offsetMinutes) {
+  const safeOffset = Number.isFinite(offsetMinutes) ? Math.round(Number(offsetMinutes)) : 0
+  const sign = safeOffset >= 0 ? '+' : '-'
+  const absolute = Math.abs(safeOffset)
+  const hours = String(Math.floor(absolute / 60)).padStart(2, '0')
+  const minutes = String(absolute % 60).padStart(2, '0')
+  return `${sign}${hours}:${minutes}`
+}
+
+function formatDateTimeForCsv(value, timeZone) {
+  if (value === null || value === undefined || value === '') return ''
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  const zone = resolveTimeZone(timeZone, null)
+  if (!zone) return date.toISOString()
+  const parts = getZonedParts(date, zone)
+  const offsetMinutes = getTimeZoneOffset(date, zone)
+  const datePart = `${String(parts.year).padStart(4, '0')}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`
+  const timePart = `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}:${String(parts.second).padStart(2, '0')}`
+  return `${datePart}T${timePart}${formatTimeZoneOffsetForCsv(offsetMinutes)}`
 }
 
 function formatCsvValue(value) {
@@ -4809,6 +5985,28 @@ function formatCsvValue(value) {
     return `"${text.replace(/"/g, '""')}"`
   }
   return text
+}
+
+function normalizeCodeSegment(value) {
+  const text = String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return text.slice(0, 32)
+}
+
+function generateAttendanceCode(prefix, name) {
+  const base = normalizeCodeSegment(name) || normalizeCodeSegment(prefix) || 'attendance'
+  return `${base}-${randomUUID().slice(0, 8)}`
+}
+
+function resolveAttendanceCode({ explicitCode, existingCode, prefix, name }) {
+  const normalizedExplicit = typeof explicitCode === 'string' ? explicitCode.trim() : ''
+  if (normalizedExplicit) return normalizedExplicit
+  const normalizedExisting = typeof existingCode === 'string' ? existingCode.trim() : ''
+  if (normalizedExisting) return normalizedExisting
+  return generateAttendanceCode(prefix, name)
 }
 
 function buildCsv(rows, headers) {
@@ -4849,7 +6047,7 @@ function buildPayrollSummaryCsv(summary, cycle) {
   return buildCsv(csvRows, headers)
 }
 
-async function enforcePunchConstraints({ db, userId, orgId, occurredAt, settings, req }) {
+async function enforcePunchConstraints({ db, userId, orgId, occurredAt, eventType, settings, req }) {
   if (settings.ipAllowlist && settings.ipAllowlist.length > 0) {
     const ip = getClientIp(req)
     if (!isIpAllowed(ip, settings.ipAllowlist)) {
@@ -4864,9 +6062,13 @@ async function enforcePunchConstraints({ db, userId, orgId, occurredAt, settings
     }
   }
 
+  if (occurredAt.getTime() > Date.now() + 5 * 60 * 1000) {
+    throw new HttpError(400, 'FUTURE_PUNCH_NOT_ALLOWED', 'Punch time cannot be in the future')
+  }
+
   if (settings.minPunchIntervalMinutes > 0) {
     const rows = await db.query(
-      `SELECT occurred_at
+      `SELECT occurred_at, event_type
        FROM attendance_events
        WHERE user_id = $1 AND org_id = $2
        ORDER BY occurred_at DESC
@@ -4874,6 +6076,9 @@ async function enforcePunchConstraints({ db, userId, orgId, occurredAt, settings
       [userId, orgId]
     )
     if (rows.length > 0 && rows[0].occurred_at) {
+      if (rows[0].event_type && rows[0].event_type !== eventType) {
+        return
+      }
       const last = new Date(rows[0].occurred_at)
       const diffMinutes = (occurredAt.getTime() - last.getTime()) / 60000
       if (diffMinutes < settings.minPunchIntervalMinutes) {
@@ -5262,7 +6467,7 @@ module.exports = {
           totalFetched: z.number().optional(),
           totalApplied: z.number().optional(),
           error: z.string().optional(),
-        }).optional(),
+        }).nullable().optional(),
       }).optional(),
       ipAllowlist: z.array(z.string()).optional(),
       geoFence: z.object({
@@ -5276,6 +6481,7 @@ module.exports = {
     const punchSchema = z.object({
       eventType: z.enum(['check_in', 'check_out']),
       occurredAt: z.string().optional(),
+      occurred_at: z.string().optional(),
       timezone: z.string().optional(),
       source: z.string().optional(),
       location: z.record(z.unknown()).optional(),
@@ -5288,6 +6494,7 @@ module.exports = {
       timezone: z.string().optional(),
       workStartTime: z.string().optional(),
       workEndTime: z.string().optional(),
+      isOvernight: z.boolean().optional(),
       lateGraceMinutes: z.number().int().min(0).optional(),
       earlyGraceMinutes: z.number().int().min(0).optional(),
       roundingMinutes: z.number().int().min(0).optional(),
@@ -5308,7 +6515,7 @@ module.exports = {
 
     const holidayCreateSchema = z.object({
       date: z.string().min(1),
-      name: z.string().nullable().optional(),
+      name: z.string().trim().min(1),
       isWorkingDay: z.boolean().optional(),
       orgId: z.string().optional(),
     })
@@ -5325,11 +6532,13 @@ module.exports = {
     })
 
     const leaveTypeCreateSchema = z.object({
-      code: z.string().min(1),
+      code: z.string().trim().optional().nullable(),
       name: z.string().min(1),
+      paid: z.boolean().optional(),
       requiresApproval: z.boolean().optional(),
       requiresAttachment: z.boolean().optional(),
       defaultMinutesPerDay: z.number().int().min(0).optional(),
+      daily_minutes: z.number().int().min(0).optional(),
       isActive: z.boolean().optional(),
       orgId: z.string().optional(),
     })
@@ -5667,7 +6876,7 @@ module.exports = {
 		      return Date.now() - createdAt > ATTENDANCE_IMPORT_UPLOAD_TTL_MS
 		    }
 
-		    const readImportUploadCsvText = async ({ orgId, fileId }) => {
+		    const loadImportUploadMetaOrThrow = async ({ orgId, fileId }) => {
 		      if (!isUuidLike(fileId)) {
 		        throw new HttpError(400, 'VALIDATION_ERROR', 'csvFileId must be a UUID')
 		      }
@@ -5678,6 +6887,11 @@ module.exports = {
 		      if (isImportUploadExpired(meta)) {
 		        throw new HttpError(410, 'EXPIRED', 'Import upload expired')
 		      }
+		      return meta
+		    }
+
+		    const readImportUploadCsvText = async ({ orgId, fileId }) => {
+		      const meta = await loadImportUploadMetaOrThrow({ orgId, fileId })
 		      const paths = getImportUploadPaths({ orgId, fileId })
 		      const csvText = await fsp.readFile(paths.csvPath, 'utf8')
 		      return { csvText, meta }
@@ -5742,9 +6956,9 @@ module.exports = {
 		      importUploadCleanupInterval = null
 		    }
 
-		    const resolveImportRows = async ({ payload, orgId, fallbackUserId }) => {
-		      let csvWarnings = []
-		      let csvFileId = null
+	    const resolveImportRows = async ({ payload, orgId, fallbackUserId }) => {
+	      let csvWarnings = []
+	      let csvFileId = null
 		      if (Array.isArray(payload.rows)) return { rows: payload.rows, csvWarnings, csvFileId }
 		      if (typeof payload.csvFileId === 'string' && payload.csvFileId.trim()) {
 		        csvFileId = payload.csvFileId.trim()
@@ -5761,37 +6975,99 @@ module.exports = {
 		        return { rows: result.rows, csvWarnings, csvFileId }
 		      }
 		      if (Array.isArray(payload.entries)) return { rows: buildRowsFromEntries({ entries: payload.entries }), csvWarnings, csvFileId }
-		      return {
-		        rows: buildRowsFromDingTalk({
-		          columns: payload.columns,
+	      return {
+	        rows: buildRowsFromDingTalk({
+	          columns: payload.columns,
 		          data: payload.data,
 		          userId: payload.userId ?? fallbackUserId,
 		        }),
 		        csvWarnings,
-		        csvFileId,
+	        csvFileId,
+	      }
+	    }
+
+	    const createMaterializedImportRowSource = ({ rows, csvWarnings, csvFileId }) => ({
+	      csvFileId: csvFileId ?? null,
+	      iterateRows: async (onRow) => {
+	        let rowCount = 0
+	        for (const row of Array.isArray(rows) ? rows : []) {
+	          const nextIndex = rowCount
+	          rowCount += 1
+	          if (typeof onRow === 'function') {
+	            const shouldContinue = await onRow(row, nextIndex)
+	            if (shouldContinue === false) break
+	          }
+	        }
+	        return {
+	          rowCount,
+	          warnings: Array.isArray(csvWarnings) ? csvWarnings : [],
+	          limitExceeded: false,
+	          maxRows: rowCount,
+	        }
+	      },
+	    })
+
+	    const resolveAsyncImportRowSource = async ({ payload, orgId, fallbackUserId }) => {
+	      if (typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()) {
+	        const csvFileId = payload.csvFileId.trim()
+	        await loadImportUploadMetaOrThrow({ orgId, fileId: csvFileId })
+	        const { csvPath } = getImportUploadPaths({ orgId, fileId: csvFileId })
+	        return {
+	          csvFileId,
+	          iterateRows: async (onRow) => {
+	            const result = await iterateImportRowsFromCsvFileAsync({
+	              csvPath,
+	              csvOptions: payload.csvOptions,
+	              onRow,
+	            })
+	            ensureCsvRowsWithinLimit(result)
+	            return result
+	          },
+	        }
+	      }
+	      const { rows, csvWarnings, csvFileId } = await resolveImportRows({
+	        payload,
+	        orgId,
+	        fallbackUserId,
+	      })
+	      return createMaterializedImportRowSource({ rows, csvWarnings, csvFileId })
+	    }
+
+	    // ============================================================
+	    // Async Import Commit (large payloads)
+		    // ============================================================
+
+		    const ATTENDANCE_IMPORT_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED !== 'false'
+		    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED !== 'false'
+		    const ATTENDANCE_IMPORT_ASYNC_QUEUE = 'attendance-import'
+		    const ATTENDANCE_IMPORT_ASYNC_JOB = 'attendance-import-commit-async'
+		    const ATTENDANCE_IMPORT_ASYNC_PROGRESS_MIN_INTERVAL_MS = 1000
+		    const ATTENDANCE_IMPORT_ASYNC_SKIPPED_SAMPLE_LIMIT = resolvePositiveIntEnv(
+		      'ATTENDANCE_IMPORT_ASYNC_SKIPPED_SAMPLE_LIMIT',
+		      50,
+		      {
+		        min: 1,
+		        max: 500,
 		      }
+		    )
+		    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT = (() => {
+		      const raw = Number(process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT ?? 300)
+		      if (!Number.isFinite(raw)) return 300
+		      return Math.max(1, Math.min(1000, Math.floor(raw)))
+		    })()
+
+		    const normalizePreviewAsyncLimit = (value) => {
+		      const numeric = Number(value)
+		      if (!Number.isFinite(numeric)) return ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT
+		      return Math.max(1, Math.min(1000, Math.floor(numeric)))
 		    }
 
-		    // ============================================================
-		    // Async Import Commit (large payloads)
-		    // ============================================================
-
-	    const ATTENDANCE_IMPORT_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED !== 'false'
-	    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED = process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_ENABLED !== 'false'
-	    const ATTENDANCE_IMPORT_ASYNC_QUEUE = 'attendance-import'
-	    const ATTENDANCE_IMPORT_ASYNC_JOB = 'attendance-import-commit-async'
-	    const ATTENDANCE_IMPORT_ASYNC_PROGRESS_MIN_INTERVAL_MS = 1000
-	    const ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT = (() => {
-	      const raw = Number(process.env.ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT ?? 300)
-	      if (!Number.isFinite(raw)) return 300
-	      return Math.max(1, Math.min(1000, Math.floor(raw)))
-	    })()
-
-	    const normalizePreviewAsyncLimit = (value) => {
-	      const numeric = Number(value)
-	      if (!Number.isFinite(numeric)) return ATTENDANCE_IMPORT_PREVIEW_ASYNC_DEFAULT_LIMIT
-	      return Math.max(1, Math.min(1000, Math.floor(numeric)))
-	    }
+		    const normalizeImportSkippedSampleLimit = (value) => {
+		      if (value === undefined || value === null || value === '') return null
+		      const numeric = Number(value)
+		      if (!Number.isFinite(numeric)) return null
+		      return Math.max(0, Math.min(500, Math.floor(numeric)))
+		    }
 
 	    const toPreviewJobIdempotencyKey = (idempotencyKey) => {
 	      const clean = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
@@ -5818,6 +7094,10 @@ module.exports = {
 		        if (Array.isArray(next.entries) && next.entries.length > 30000 && typeof next.csvText === 'string') delete next.entries
 		        return next
 		      }
+	      next.returnItems = false
+	      next.skippedSampleLimit = normalizeImportSkippedSampleLimit(next.skippedSampleLimit)
+	        ?? ATTENDANCE_IMPORT_ASYNC_SKIPPED_SAMPLE_LIMIT
+	      delete next.itemsLimit
 	      // Prefer csvText over expanded rows/entries for large jobs to avoid DB bloat.
 	      // Keep rows/entries when they are the only payload source (no csvText/csvFileId),
 	      // otherwise commit-async workers can fail with "No rows to import".
@@ -5831,7 +7111,9 @@ module.exports = {
 	      const thresholdReached = Number.isFinite(numeric) && numeric >= ATTENDANCE_IMPORT_BULK_ENGINE_THRESHOLD
 	      const supportsRecordBulkPath = ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'unnest'
 	        || ATTENDANCE_IMPORT_RECORD_UPSERT_MODE === 'staging'
-	      const supportsBulkPath = supportsRecordBulkPath && ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'unnest'
+	      const supportsItemsBulkPath = ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'unnest'
+	        || ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'staging'
+	      const supportsBulkPath = supportsRecordBulkPath && supportsItemsBulkPath
 	      if (!supportsBulkPath) return 'standard'
 	      if (ATTENDANCE_IMPORT_BULK_ENGINE_MODE === 'off') return 'standard'
 	      if (ATTENDANCE_IMPORT_BULK_ENGINE_MODE === 'force') return 'bulk'
@@ -5858,6 +7140,30 @@ module.exports = {
 	        : ''
 	      if (['values', 'unnest', 'staging'].includes(explicit)) return explicit
 	      return resolveImportRecordUpsertStrategy({
+	        rowCount: rowCountHint,
+	        engine: engineHint,
+	      })
+	    }
+
+	    const resolveImportItemsInsertStrategy = ({ rowCount, engine }) => {
+	      if (ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'values') return 'values'
+	      if (ATTENDANCE_IMPORT_ITEMS_INSERT_MODE === 'staging') return 'staging'
+	      const numeric = Number(rowCount ?? 0)
+	      const thresholdReached = Number.isFinite(numeric) && numeric >= ATTENDANCE_IMPORT_COPY_THRESHOLD_ROWS
+	      const isBulkEngine = String(engine ?? '').trim().toLowerCase() === 'bulk'
+	      if (ATTENDANCE_IMPORT_COPY_ENABLED && thresholdReached && isBulkEngine) {
+	        return 'staging'
+	      }
+	      return 'unnest'
+	    }
+
+	    const resolveImportItemsInsertStrategyFromMeta = (meta, rowCountHint, engineHint) => {
+	      const payload = normalizeMetadata(meta)
+	      const explicit = typeof payload?.itemsInsertStrategy === 'string'
+	        ? payload.itemsInsertStrategy.trim().toLowerCase()
+	        : ''
+	      if (['values', 'unnest', 'staging'].includes(explicit)) return explicit
+	      return resolveImportItemsInsertStrategy({
 	        rowCount: rowCountHint,
 	        engine: engineHint,
 	      })
@@ -5906,14 +7212,89 @@ module.exports = {
 	      return Math.max(0, Math.floor(endMs - startMs))
 	    }
 
+	    const normalizeImportJobSkippedRows = (value, limit = 50) => {
+	      if (!Array.isArray(value) || limit <= 0) return []
+	      return value
+	        .map((entry) => normalizeMetadata(entry))
+	        .filter((entry) => entry && typeof entry === 'object' && Object.keys(entry).length > 0)
+	        .slice(0, limit)
+	    }
+
+	    const extractImportJobSkippedSummary = (...sources) => {
+	      let skippedCount = 0
+	      let skippedRows = []
+	      for (const source of sources) {
+	        const normalized = normalizeMetadata(source)
+	        if (!skippedRows.length) {
+	          skippedRows = normalizeImportJobSkippedRows(normalized?.skippedRows)
+	        }
+	        const rawCount = Number(normalized?.skippedCount)
+	        if (Number.isFinite(rawCount) && rawCount >= 0) {
+	          skippedCount = Math.max(skippedCount, Math.floor(rawCount))
+	        }
+	      }
+	      if (!skippedCount && skippedRows.length) skippedCount = skippedRows.length
+	      return { skippedCount, skippedRows }
+	    }
+
+	    const buildAsyncCommitJobSummaryPayload = ({
+	      basePayload,
+	      rowCount,
+	      processedRows,
+	      failedRows,
+	      elapsedMs,
+	      engine,
+	      recordUpsertStrategy,
+	      itemsInsertStrategy,
+	      chunkConfig,
+	      skippedCount,
+	      skippedRows,
+	      idempotencyKey,
+	    }) => {
+	      const compactSummary = {
+	        processedRows: Math.max(0, Math.floor(Number(processedRows ?? rowCount ?? 0) || 0)),
+	        failedRows: Math.max(0, Math.floor(Number(failedRows ?? skippedCount ?? 0) || 0)),
+	        elapsedMs: Math.max(0, Math.floor(Number(elapsedMs ?? 0) || 0)),
+	        chunkConfig: chunkConfig ?? resolveImportChunkConfig(engine),
+	      }
+	      const normalizedSkippedCount = Math.max(0, Math.floor(Number(skippedCount ?? 0) || 0))
+	      const normalizedSkippedRows = normalizeImportJobSkippedRows(skippedRows)
+	      if (normalizedSkippedCount > 0) compactSummary.skippedCount = normalizedSkippedCount
+	      if (normalizedSkippedRows.length) compactSummary.skippedRows = normalizedSkippedRows
+	      return {
+	        __jobType: 'commit',
+	        idempotencyKey: basePayload?.idempotencyKey ?? idempotencyKey ?? null,
+	        __importEngine: engine ?? resolveImportEngineFromMeta(basePayload, rowCount ?? processedRows ?? 0),
+	        recordUpsertStrategy:
+	          recordUpsertStrategy
+	          ?? resolveImportRecordUpsertStrategyFromMeta(
+	            basePayload,
+	            rowCount ?? processedRows ?? 0,
+	            engine ?? resolveImportEngineFromMeta(basePayload, rowCount ?? processedRows ?? 0)
+	          ),
+	        itemsInsertStrategy:
+	          itemsInsertStrategy
+	          ?? resolveImportItemsInsertStrategyFromMeta(
+	            basePayload,
+	            rowCount ?? processedRows ?? 0,
+	            engine ?? resolveImportEngineFromMeta(basePayload, rowCount ?? processedRows ?? 0)
+	          ),
+	        summary: compactSummary,
+	      }
+	    }
+
 	    const mapImportJobRow = (row) => {
 	      const payload = normalizeMetadata(row.payload)
 	      const kind = payload?.__jobType === 'preview' ? 'preview' : 'commit'
 	      const status = normalizeImportJobStatus(row.status)
 	      const progress = Number(row.progress ?? 0)
 	      const total = Number(row.total ?? 0)
-	      const processedRowsRaw = Number(payload?.summary?.processedRows)
-	      const failedRowsRaw = Number(payload?.summary?.failedRows)
+	      const summary = normalizeMetadata(payload?.summary)
+	      const processedRowsRaw = Number(summary?.processedRows)
+	      const failedRowsRaw = Number(summary?.failedRows)
+	      const { skippedCount, skippedRows } = kind === 'commit'
+	        ? extractImportJobSkippedSummary(summary, payload)
+	        : { skippedCount: 0, skippedRows: [] }
 	      const processedRows = Number.isFinite(processedRowsRaw)
 	        ? Math.max(0, Math.floor(processedRowsRaw))
 	        : (status === 'completed' ? Math.max(0, Math.floor(total)) : Math.max(0, Math.floor(progress)))
@@ -5941,6 +7322,7 @@ module.exports = {
 	      const engine = resolveImportEngineFromMeta(payload, total)
 	      const chunkConfig = resolveImportChunkConfigFromMeta(payload, engine)
 	      const recordUpsertStrategy = resolveImportRecordUpsertStrategyFromMeta(payload, total, engine)
+	      const itemsInsertStrategy = resolveImportItemsInsertStrategyFromMeta(payload, total, engine)
 	      return {
 	        id: row.id,
 	        orgId: row.org_id ?? DEFAULT_ORG_ID,
@@ -5952,11 +7334,14 @@ module.exports = {
 	        engine,
 	        chunkConfig,
 	        recordUpsertStrategy,
+	        itemsInsertStrategy,
 	        progress,
 	        total,
 	        progressPercent,
 	        processedRows,
 	        failedRows,
+	        skippedCount,
+	        skippedRows,
 	        elapsedMs,
 	        throughputRowsPerSec,
 	        error: row.error ?? null,
@@ -5968,16 +7353,28 @@ module.exports = {
 	      }
 	    }
 
-	    const estimateCsvRowCount = (csvText) => {
-	      if (typeof csvText !== 'string' || csvText.length === 0) return 0
-	      // Count '\n' without splitting to reduce memory.
-	      let lines = 1
+		    const estimateCsvRowCount = (csvText) => {
+		      if (typeof csvText !== 'string' || csvText.length === 0) return 0
+		      // Count '\n' without splitting to reduce memory.
+		      let lines = 1
 	      for (let i = 0; i < csvText.length; i++) {
 	        if (csvText.charCodeAt(i) === 10) lines += 1
 	      }
-	      // Assume first line is header for CSV imports.
-	      return Math.max(0, lines - 1)
-	    }
+		      // Assume first line is header for CSV imports.
+		      return Math.max(0, lines - 1)
+		    }
+
+		    const estimateImportPayloadRowCount = async ({ payload, orgId }) => {
+		      if (Array.isArray(payload?.rows)) return payload.rows.length
+		      if (Array.isArray(payload?.entries)) return payload.entries.length
+		      if (typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()) {
+		        const meta = await loadImportUploadMetaOrThrow({ orgId, fileId: payload.csvFileId.trim() })
+		        const hint = Number(meta?.rowCount ?? 0)
+		        return Number.isFinite(hint) && hint > 0 ? hint : 0
+		      }
+		      if (typeof payload?.csvText === 'string') return estimateCsvRowCount(payload.csvText)
+		      return 0
+		    }
 
 	    const getQueueService = () => context?.services?.queue
 
@@ -6066,29 +7463,26 @@ module.exports = {
 	      return 'queued'
 	    }
 
-		    const buildAsyncPreviewResult = async ({ payload, requesterId, orgId }) => {
-		      const profile = findImportProfile(payload.mappingProfileId)
-		      const requiredFields = profile?.requiredFields ?? []
-		      const punchRequiredFields = profile?.punchRequiredFields ?? []
-		      const { rows, csvWarnings } = await resolveImportRows({
-		        payload,
-		        orgId,
-		        fallbackUserId: payload.userId ?? requesterId,
-		      })
-		      if (!rows.length) {
-		        throw new Error('No rows to preview')
-		      }
+	    const buildAsyncPreviewResult = async ({ payload, requesterId, orgId }) => {
+	      const profile = findImportProfile(payload.mappingProfileId)
+	      const requiredFields = profile?.requiredFields ?? []
+	      const punchRequiredFields = profile?.punchRequiredFields ?? []
+	      const rowSource = await resolveAsyncImportRowSource({
+	        payload,
+	        orgId,
+	        fallbackUserId: payload.userId ?? requesterId,
+	      })
 
 	      const previewLimit = normalizePreviewAsyncLimit(payload.previewLimit)
 	      const preview = []
 	      const previewStats = {
-	        rowCount: rows.length,
+	        rowCount: 0,
 	        invalid: 0,
 	        duplicates: 0,
 	      }
 	      const seenKeys = new Set()
-
-	      for (const row of rows) {
+	      const rowScan = await rowSource.iterateRows((row) => {
+	        previewStats.rowCount += 1
 	        const shouldRender = preview.length < previewLimit
 	        const workDate = row.workDate
 	        const rowUserId = resolveRowUserId({
@@ -6115,9 +7509,9 @@ module.exports = {
 	          })
 	          if (missingPunch.length) warnings.push(`Missing required: ${missingPunch.join(', ')}`)
 	        }
-	        if (warnings.length) {
-	          previewStats.invalid += 1
-	          if (shouldRender) {
+	          if (warnings.length) {
+	            previewStats.invalid += 1
+	            if (shouldRender) {
 	            preview.push({
 	              userId: rowUserId ?? 'unknown',
 	              workDate: workDate ?? '',
@@ -6135,7 +7529,7 @@ module.exports = {
 	              userGroups: [],
 	            })
 	          }
-	          continue
+	          return true
 	        }
 
 	        const dedupKey = `${rowUserId}:${workDate}`
@@ -6159,11 +7553,11 @@ module.exports = {
 	              userGroups: [],
 	            })
 	          }
-	          continue
+	          return true
 	        }
 	        seenKeys.add(dedupKey)
 
-	        if (!shouldRender) continue
+	        if (!shouldRender) return true
 
 	        preview.push({
 	          userId: rowUserId,
@@ -6181,9 +7575,14 @@ module.exports = {
 	          appliedPolicies: [],
 	          userGroups: [],
 	        })
+	        return true
+	      })
+	      if (!rowScan.rowCount) {
+	        throw new Error('No rows to preview')
 	      }
+	      const csvWarnings = rowScan.warnings
 
-	      const asyncPreviewEngine = resolveImportEngineFromMeta(payload, rows.length)
+	      const asyncPreviewEngine = resolveImportEngineFromMeta(payload, rowScan.rowCount)
 	      const asyncPreviewFailedRows = Math.max(
 	        0,
 	        Number(previewStats.invalid ?? 0) + Number(previewStats.duplicates ?? 0)
@@ -6191,16 +7590,16 @@ module.exports = {
 	      return {
 	        items: preview,
 	        total: preview.length,
-	        rowCount: rows.length,
+	        rowCount: rowScan.rowCount,
 	        engine: asyncPreviewEngine,
-	        processedRows: rows.length,
+	        processedRows: rowScan.rowCount,
 	        failedRows: asyncPreviewFailedRows,
 	        elapsedMs: 0,
 	        recordUpsertStrategy: resolveImportRecordUpsertStrategy({
-	          rowCount: rows.length,
+	          rowCount: rowScan.rowCount,
 	          engine: asyncPreviewEngine,
 	        }),
-	        truncated: rows.length > previewLimit,
+	        truncated: rowScan.rowCount > previewLimit,
 	        previewLimit,
 	        stats: previewStats,
 	        csvWarnings,
@@ -6262,25 +7661,63 @@ module.exports = {
 	      const payload = normalizeMetadata(jobRow.payload)
 	      const isPreviewJob = payload?.__jobType === 'preview'
 	      const status = normalizeImportJobStatus(jobRow.status)
+	      const idempotencyKey = typeof jobRow.idempotency_key === 'string' ? jobRow.idempotency_key : null
 	      if (status === 'completed') return
 
 	      if (!isPreviewJob) {
 	        // If the batch already exists, treat the job as complete (idempotent re-run).
 	        try {
 	          const batchRows = await db.query(
-	            'SELECT id, status, meta FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
+	            'SELECT id, status, meta, row_count FROM attendance_import_batches WHERE id = $1 AND org_id = $2',
 	            [batchId, orgId]
 	          )
 	          if (batchRows.length && String(batchRows[0].status ?? '').toLowerCase() === 'committed') {
+	            const batchMeta = normalizeMetadata(batchRows[0].meta)
+	            const rowCount = Math.max(0, Number(batchRows[0].row_count ?? jobRow.total ?? 0))
+	            const { skippedCount, skippedRows } = extractImportJobSkippedSummary(batchMeta)
+	            const processedRows = Math.max(0, rowCount - skippedCount)
 	            await updateImportJobProgress({
 	              jobId: rowId,
 	              orgId,
 	              status: 'completed',
-	              progress: jobRow.total ?? 0,
-	              total: jobRow.total ?? 0,
+	              progress: rowCount,
+	              total: rowCount,
 	              error: null,
 	              finishedAt: true,
 	            })
+	            await db.query(
+	              'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
+	              [
+	                rowId,
+	                orgId,
+	                JSON.stringify(
+	                  buildAsyncCommitJobSummaryPayload({
+	                    basePayload: payload,
+	                    rowCount,
+	                    processedRows,
+	                    failedRows: skippedCount,
+	                    elapsedMs: 0,
+	                    engine: resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount),
+	                    recordUpsertStrategy: resolveImportRecordUpsertStrategyFromMeta(
+	                      batchMeta,
+	                      rowCount,
+	                      resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
+	                    ),
+	                    itemsInsertStrategy: resolveImportItemsInsertStrategyFromMeta(
+	                      batchMeta,
+	                      rowCount,
+	                      resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
+	                    ),
+	                    chunkConfig: batchMeta?.chunkConfig ?? resolveImportChunkConfig(
+	                      resolveImportEngineFromMeta(batchMeta, rowCount) || resolveImportEngineFromMeta(payload, rowCount)
+	                    ),
+	                    skippedCount,
+	                    skippedRows,
+	                    idempotencyKey,
+	                  })
+	                ),
+	              ]
+	            )
 	            return
 	          }
 	        } catch (_error) {
@@ -6289,7 +7726,6 @@ module.exports = {
 	      }
 
 	      await updateImportJobProgress({ jobId: rowId, orgId, status: 'running', startedAt: true })
-	      const idempotencyKey = typeof jobRow.idempotency_key === 'string' ? jobRow.idempotency_key : null
 
 	      if (isPreviewJob) {
 	        try {
@@ -6353,11 +7789,19 @@ module.exports = {
 	          finishedAt: true,
 	        })
 
+	        const { skippedCount, skippedRows } = extractImportJobSkippedSummary(
+	          commitResult,
+	          commitResult?.meta,
+	          commitResult?.summary
+	        )
 	        // Drop large payload after completion while preserving compact progress metadata.
-		        const summaryPayload = {
-		          __jobType: 'commit',
-		          idempotencyKey: payload.idempotencyKey ?? idempotencyKey ?? null,
-		          __importEngine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
+		        const summaryPayload = buildAsyncCommitJobSummaryPayload({
+		          basePayload: payload,
+		          rowCount: commitResult.rowCount ?? commitResult.imported ?? 0,
+		          processedRows: commitResult.processedRows ?? commitResult.rowCount ?? 0,
+		          failedRows: Math.max(0, Number(commitResult.failedRows ?? skippedCount ?? 0)),
+		          elapsedMs: Number(commitResult.elapsedMs ?? 0),
+		          engine: commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0),
 		          recordUpsertStrategy:
 		            commitResult.recordUpsertStrategy
 		            ?? commitResult?.meta?.recordUpsertStrategy
@@ -6366,15 +7810,21 @@ module.exports = {
 		              commitResult.rowCount ?? commitResult.imported ?? 0,
 		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
 		            ),
-		          summary: {
-		            processedRows: Number(commitResult.processedRows ?? commitResult.rowCount ?? 0),
-		            failedRows: Math.max(0, Number(commitResult.failedRows ?? commitResult.skippedCount ?? 0)),
-		            elapsedMs: Number(commitResult.elapsedMs ?? 0),
-		            chunkConfig: commitResult?.meta?.chunkConfig ?? resolveImportChunkConfig(
+		          itemsInsertStrategy:
+		            commitResult.itemsInsertStrategy
+		            ?? commitResult?.meta?.itemsInsertStrategy
+		            ?? resolveImportItemsInsertStrategyFromMeta(
+		              payload,
+		              commitResult.rowCount ?? commitResult.imported ?? 0,
 		              commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
 		            ),
-		          },
-		        }
+		          chunkConfig: commitResult?.meta?.chunkConfig ?? resolveImportChunkConfig(
+		            commitResult.engine ?? resolveImportEngineFromMeta(payload, commitResult.rowCount ?? 0)
+		          ),
+		          skippedCount,
+		          skippedRows,
+		          idempotencyKey,
+		        })
 	        await db.query(
 	          'UPDATE attendance_import_jobs SET payload = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
 	          [rowId, orgId, JSON.stringify(summaryPayload)]
@@ -6395,7 +7845,7 @@ module.exports = {
 	    // Shared background commit implementation. Intentionally mirrors the sync commit logic but:
 	    // - uses a stable batchId (job.batch_id)
 	    // - does NOT consume commit tokens (token is consumed when the job is enqueued)
-	    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress }) => {
+		    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress }) => {
 	      const cleanIdempotency = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
 	      const commitStartedAtMs = Date.now()
 	      if (cleanIdempotency) {
@@ -6442,28 +7892,50 @@ module.exports = {
 	        ?? []
 	      const requiredFields = profile?.requiredFields ?? []
 	      const punchRequiredFields = profile?.punchRequiredFields ?? []
+	      const rowSource = await resolveAsyncImportRowSource({
+	        payload,
+	        orgId,
+	        fallbackUserId: payload.userId ?? requesterId,
+	      })
+	      const groupSync = normalizeGroupSyncOptions(payload.groupSync, payload.ruleSetId, payload.timezone)
+	      const groupNames = new Map()
+	      const scopeWorkDates = new Set()
+	      const scopeUserIds = new Set()
+	      const rowScan = await rowSource.iterateRows((row) => {
+	        const workDate = row?.workDate
+	        if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
+	        const rowUserId = resolveRowUserId({
+	          row,
+	          fallbackUserId: requesterId,
+	          userMap: payload.userMap,
+	          userMapKeyField: payload.userMapKeyField,
+	          userMapSourceFields: payload.userMapSourceFields,
+	        })
+	        if (rowUserId) scopeUserIds.add(rowUserId)
+	        if (groupSync) appendAttendanceGroupName(groupNames, row)
+	        return true
+	      })
+	      const rowCount = rowScan.rowCount
+	      const csvWarnings = rowScan.warnings
+	      const csvFileId = rowSource.csvFileId ?? null
 
-		      const { rows, csvWarnings, csvFileId } = await resolveImportRows({
-		        payload,
-		        orgId,
-		        fallbackUserId: payload.userId ?? requesterId,
-		      })
-
-	      if (rows.length === 0) {
+	      if (rowCount === 0) {
 	        throw new Error('No rows to import')
 	      }
-	      const importEngine = resolveImportEngineByRowCount(rows.length)
+	      const importEngine = resolveImportEngineByRowCount(rowCount)
 	      const importChunkConfig = resolveImportChunkConfig(importEngine)
 	      const importRecordUpsertStrategy = resolveImportRecordUpsertStrategy({
-	        rowCount: rows.length,
+	        rowCount,
+	        engine: importEngine,
+	      })
+	      const importItemsInsertStrategy = resolveImportItemsInsertStrategy({
+	        rowCount,
 	        engine: importEngine,
 	      })
 
 	      const baseRule = await loadDefaultRule(db, orgId)
 	      const settings = await getSettings(db)
 	      const groupRuleSetMap = payload.ruleSetId ? new Map() : await loadAttendanceGroupRuleSetMap(db, orgId)
-	      const groupSync = normalizeGroupSyncOptions(payload.groupSync, payload.ruleSetId, payload.timezone)
-	      const groupNames = groupSync ? collectAttendanceGroupNames(rows) : new Map()
 	      const groupWarnings = []
 	      if (groupNames.size && !groupSync?.autoCreate) {
 	        const groupIdMap = await loadAttendanceGroupIdMap(db, orgId)
@@ -6490,13 +7962,19 @@ module.exports = {
 	        }
 	      }
 
-	      const statusMap = payload.statusMap ?? {}
-	      const returnItems = payload.returnItems !== false
-	      const itemsLimit = returnItems && typeof payload.itemsLimit === 'number' ? payload.itemsLimit : null
-	      const results = []
-	      let importedCount = 0
-	      const skipped = []
-	      const idempotencyEnabled = Boolean(cleanIdempotency) && await hasImportBatchIdempotencyColumn(db)
+		      const statusMap = payload.statusMap ?? {}
+		      const returnItems = payload.returnItems !== false
+		      const itemsLimit = returnItems && typeof payload.itemsLimit === 'number' ? payload.itemsLimit : null
+	      const skippedSampleLimit = normalizeImportSkippedSampleLimit(payload.skippedSampleLimit)
+		      const results = []
+		      let importedCount = 0
+		      const skipped = []
+	      let skippedCount = 0
+	      const appendSkipped = (entry) => {
+	        skippedCount += 1
+	        if (skippedSampleLimit === null || skipped.length < skippedSampleLimit) skipped.push(entry)
+	      }
+		      const idempotencyEnabled = Boolean(cleanIdempotency) && await hasImportBatchIdempotencyColumn(db)
 	      const resolvedBatchId = batchId || randomUUID()
 	      let batchMeta = null
 	      let idempotentInTransaction = null
@@ -6532,6 +8010,7 @@ module.exports = {
 		          engine: importEngine,
 		          chunkConfig: importChunkConfig,
 		          recordUpsertStrategy: importRecordUpsertStrategy,
+		          itemsInsertStrategy: importItemsInsertStrategy,
 		          mappingProfileId: payload.mappingProfileId ?? null,
 		          groupSync: groupSync
 		            ? {
@@ -6558,7 +8037,7 @@ module.exports = {
 	                payload.source ?? null,
 	                payload.ruleSetId ?? null,
 	                JSON.stringify(mapping),
-	                rows.length,
+	                rowCount,
 	                'committed',
 	                JSON.stringify(batchMeta),
 	              ],
@@ -6574,7 +8053,7 @@ module.exports = {
 	                payload.source ?? null,
 	                payload.ruleSetId ?? null,
 	                JSON.stringify(mapping),
-	                rows.length,
+	                rowCount,
 	                'committed',
 	                JSON.stringify(batchMeta),
 	              ],
@@ -6589,6 +8068,8 @@ module.exports = {
 		            batchId: resolvedBatchId,
 		            orgId,
 		            items: chunk,
+		            totalRows: rowCount,
+		            strategy: importItemsInsertStrategy,
 		          })
 		        }
 		        const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
@@ -6605,20 +8086,6 @@ module.exports = {
 	        }
 
 	        // Prefetch holidays + scheduling assignments for the import scope to reduce per-row DB roundtrips.
-	        const scopeWorkDates = new Set()
-	        const scopeUserIds = new Set()
-	        for (const row of rows) {
-	          const workDate = row?.workDate
-	          if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
-	          const rowUserId = resolveRowUserId({
-	            row,
-	            fallbackUserId: requesterId,
-	            userMap: payload.userMap,
-	            userMapKeyField: payload.userMapKeyField,
-	            userMapSourceFields: payload.userMapSourceFields,
-	          })
-	          if (rowUserId) scopeUserIds.add(rowUserId)
-	        }
 	        const scopeWorkDateList = Array.from(scopeWorkDates)
 	        const scopeUserIdList = Array.from(scopeUserIds)
 	        let scopeFromDate = null
@@ -6702,6 +8169,7 @@ module.exports = {
 	              existingRow,
 	              updateFirstInAt: item.updateFirstInAt,
 	              updateLastOutAt: item.updateLastOutAt,
+	              workDate: item.workDate,
 	              mode: item.mode,
 	              statusOverride: item.statusOverride,
 	              overrideMetrics: item.overrideMetrics,
@@ -6731,7 +8199,7 @@ module.exports = {
 
 	          const upserted = await batchUpsertAttendanceRecords(trx, upsertRows, {
 	            strategy: importRecordUpsertStrategy,
-            totalRows: rows.length,
+            totalRows: rowCount,
 	          })
 
 		          for (const item of chunk) {
@@ -6773,7 +8241,7 @@ module.exports = {
 	          }
 
 	          if (typeof onProgress === 'function') {
-	            await onProgress({ imported: importedCount, total: rows.length })
+	            await onProgress({ imported: importedCount, total: rowCount })
 	          }
 	        }
 	        const enqueueRecordUpsert = async (item) => {
@@ -6784,7 +8252,7 @@ module.exports = {
 	        }
 
 	        const seenRowKeys = new Set()
-	        for (const row of rows) {
+	        await rowSource.iterateRows(async (row) => {
 	          const workDate = row.workDate
 	          const groupKey = resolveAttendanceGroupKey(row)
 	          const rowUserId = resolveRowUserId({
@@ -6822,37 +8290,37 @@ module.exports = {
 	              importWarnings.push(`Missing required: ${missingPunch.join(', ')}`)
 	            }
 	          }
-	          if (importWarnings.length) {
-	            const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
-	            await enqueueImportItem({
+		          if (importWarnings.length) {
+		            const snapshot = buildSkippedImportSnapshot({ warnings: importWarnings, row, reason: 'validation' })
+		            await enqueueImportItem({
 	              userId: rowUserId ?? null,
 	              workDate: workDate ?? null,
-	              recordId: null,
-	              previewSnapshot: snapshot,
-	            })
-	            skipped.push({
-	              userId: rowUserId ?? null,
-	              workDate: workDate ?? null,
-	              warnings: importWarnings,
-	            })
-	            releaseImportRowMemory(row)
-	            continue
-	          }
+		              recordId: null,
+		              previewSnapshot: snapshot,
+		            })
+		            appendSkipped({
+		              userId: rowUserId ?? null,
+		              workDate: workDate ?? null,
+		              warnings: importWarnings,
+		            })
+		            releaseImportRowMemory(row)
+		            return true
+		          }
 
 	          const dedupKey = `${rowUserId}:${workDate}`
 	          if (seenRowKeys.has(dedupKey)) {
 	            const warnings = ['Duplicate row in payload (same userId + workDate)']
 	            const snapshot = buildSkippedImportSnapshot({ warnings, row, reason: 'duplicate' })
-	            await enqueueImportItem({
-	              userId: rowUserId,
-	              workDate,
-	              recordId: null,
-	              previewSnapshot: snapshot,
-	            })
-	            skipped.push({ userId: rowUserId, workDate, warnings })
-	            releaseImportRowMemory(row)
-	            continue
-	          }
+		            await enqueueImportItem({
+		              userId: rowUserId,
+		              workDate,
+		              recordId: null,
+		              previewSnapshot: snapshot,
+		            })
+		            appendSkipped({ userId: rowUserId, workDate, warnings })
+		            releaseImportRowMemory(row)
+		            return true
+		          }
 	          seenRowKeys.add(dedupKey)
 	          if (groupSync?.autoAssignMembers && groupKey && rowUserId && groupIdMap && groupIdMap.has(groupKey)) {
 	            const groupEntry = groupIdMap.get(groupKey)
@@ -6966,6 +8434,7 @@ module.exports = {
 	            rule: ruleForMetrics,
 	            firstInAt,
 	            lastOutAt,
+	            workDate,
 	            isWorkingDay: context.isWorkingDay,
 	            leaveMinutes,
 	            overtimeMinutes,
@@ -7143,7 +8612,8 @@ module.exports = {
 	              : null,
 	          })
 	          releaseImportRowMemory(row)
-	        }
+	          return true
+	        })
 
 	        await flushRecordUpserts()
 	        await flushImportItems()
@@ -7158,14 +8628,14 @@ module.exports = {
 	            )
 	          }
 	        }
-	        if (skipped.length) {
-	          const updatedMeta = {
-	            ...(batchMeta ?? {}),
-	            skippedCount: skipped.length,
-	            skippedRows: skipped.slice(0, 50),
-	          }
-	          await trx.query(
-	            'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
+		        if (skippedCount) {
+		          const updatedMeta = {
+		            ...(batchMeta ?? {}),
+		            skippedCount,
+		            skippedRows: skipped.slice(0, 50),
+		          }
+		          await trx.query(
+		            'UPDATE attendance_import_batches SET meta = $3::jsonb, updated_at = now() WHERE id = $1 AND org_id = $2',
 	            [resolvedBatchId, orgId, JSON.stringify(updatedMeta)]
 	          )
 			          batchMeta = updatedMeta
@@ -7205,18 +8675,18 @@ module.exports = {
 	        }
 	      }
 
-	      return {
-	        batchId: resolvedBatchId,
-	        imported: importedCount,
-	        rowCount: rows.length,
-	        processedRows: importedCount,
-	        failedRows: skipped.length,
-	        elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
-	        skippedCount: skipped.length,
-	        engine: importEngine,
-	        recordUpsertStrategy: importRecordUpsertStrategy,
-	        items: returnItems ? results : [],
-		        itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
+		      return {
+		        batchId: resolvedBatchId,
+		        imported: importedCount,
+		        rowCount,
+		        processedRows: importedCount,
+		        failedRows: skippedCount,
+		        elapsedMs: Math.max(0, Date.now() - commitStartedAtMs),
+		        skippedCount,
+		        engine: importEngine,
+		        recordUpsertStrategy: importRecordUpsertStrategy,
+		        items: returnItems ? results : [],
+			        itemsTruncated: Boolean(returnItems && itemsLimit && importedCount > results.length),
 		        skipped,
 	        csvWarnings: [...csvWarnings, ...groupWarnings],
 	        groupWarnings,
@@ -7351,14 +8821,27 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const occurredAt = parseDateInput(parsed.data.occurredAt) ?? new Date()
+        const rawOccurredAt = parsed.data.occurredAt ?? parsed.data.occurred_at
+        const occurredAt = rawOccurredAt ? parseDateInput(rawOccurredAt) : new Date()
+        if (rawOccurredAt && !occurredAt) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'occurredAt must be a valid date-time' } })
+          return
+        }
 
         try {
           const settings = await getSettings(db)
-          await enforcePunchConstraints({ db, userId, orgId, occurredAt, settings, req })
+          await enforcePunchConstraints({
+            db,
+            userId,
+            orgId,
+            occurredAt,
+            eventType: parsed.data.eventType,
+            settings,
+            req,
+          })
 
           const baseRule = await loadDefaultRule(db, orgId)
-          const baseTimezone = parsed.data.timezone ?? baseRule.timezone
+          const baseTimezone = resolveExplicitTimeZoneOrThrow(parsed.data.timezone, baseRule.timezone)
           let workDate = toWorkDate(occurredAt, baseTimezone)
           let context = await resolveWorkContext({
             db,
@@ -7367,7 +8850,7 @@ module.exports = {
             workDate,
             defaultRule: baseRule,
           })
-          let timezone = parsed.data.timezone ?? context.rule.timezone
+          let timezone = resolveExplicitTimeZoneOrThrow(parsed.data.timezone, context.rule.timezone)
           if (timezone !== baseTimezone) {
             const recalculated = toWorkDate(occurredAt, timezone)
             if (recalculated !== workDate) {
@@ -7444,10 +8927,7 @@ module.exports = {
       })
     )
 
-	    context.api.http.addRoute(
-	      'GET',
-	      '/api/attendance/records',
-	      withPermission('attendance:read', async (req, res) => {
+      const handleAttendanceRecordsGet = withPermission('attendance:read', async (req, res) => {
         const schema = z.object({
           userId: z.string().optional(),
           orgId: z.string().optional(),
@@ -7483,9 +8963,13 @@ module.exports = {
           }
         }
 
-        const { page, pageSize, offset } = parsePagination(req.query)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+		        const { page, pageSize, offset } = parsePagination(req.query)
+		        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+		        if (!dateRange.ok) {
+		          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+		          return
+		        }
+		        const { from, to } = dateRange
 
         try {
           const countRows = await db.query(
@@ -7504,12 +8988,31 @@ module.exports = {
             [targetUserId, orgId, from, to, pageSize, offset]
           )
 
+          const workContextPrefetch = await buildWorkContextPrefetch(db, {
+            orgId,
+            userIds: [targetUserId],
+            workDates: rows.map((row) => row.work_date),
+          })
           const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
           const records = rows.map((row) => {
+            const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
             const meta = normalizeMetadata(row.meta)
-            const approved = approvedMap.get(row.work_date) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
+            const approved = approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
+            const resolvedContext = resolveWorkContextFromPrefetch({
+              orgId,
+              userId: targetUserId,
+              workDate,
+              defaultRule: workContextPrefetch.defaultRule,
+              prefetched: workContextPrefetch.prefetched,
+            })
             return {
               ...row,
+              work_date: workDate,
+              workday_context: buildWorkdayContextSummary({
+                workDate,
+                storedIsWorkday: row.is_workday,
+                resolvedContext,
+              }),
               meta: {
                 ...meta,
                 leave_minutes: approved.leaveMinutes,
@@ -7518,9 +9021,10 @@ module.exports = {
             }
           })
 
-          res.json({
-            ok: true,
-            data: {
+			          res.json({
+			            ok: true,
+			            success: true,
+		            data: {
               items: records,
               total,
               page,
@@ -7534,8 +9038,19 @@ module.exports = {
           }
           logger.error('Attendance records query failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load records' } })
-	        }
-	      })
+        }
+      })
+
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/records',
+	      handleAttendanceRecordsGet
+	    )
+
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/calendar',
+	      handleAttendanceRecordsGet
 	    )
 
 	    context.api.http.addRoute(
@@ -7578,8 +9093,12 @@ module.exports = {
 	        }
 
 	        const { page, pageSize, offset } = parsePagination(req.query)
-	        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-	        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
 	        const excludedStatuses = ['normal', 'off', 'adjusted']
 
@@ -7633,6 +9152,12 @@ module.exports = {
 	            [targetUserId, orgId, from, to, excludedStatuses, pageSize, offset]
 	          )
 
+	          const workContextPrefetch = await buildWorkContextPrefetch(db, {
+	            orgId,
+	            userIds: [targetUserId],
+	            workDates: rows.map((row) => row.work_date),
+	          })
+
 	          const requestRows = await db.query(
 	            `SELECT id, work_date, request_type, status
 	             FROM attendance_requests
@@ -7642,7 +9167,7 @@ module.exports = {
 	          )
 	          const requestByDate = new Map()
 	          for (const row of requestRows) {
-	            const workDate = row.work_date
+	            const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
 	            const entry = requestByDate.get(workDate) ?? {
 	              hasPending: false,
 	              pending: null,
@@ -7663,16 +9188,24 @@ module.exports = {
 
 	          const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
 	          const items = rows.map((row) => {
+	            const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
 	            const meta = normalizeMetadata(row.meta)
-	            const approved = approvedMap.get(row.work_date) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
+	            const approved = approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0 }
 	            const warnings = extractWarnings(meta)
-	            const requestSummary = requestByDate.get(row.work_date) ?? { hasPending: false, pending: null, latest: null }
+	            const requestSummary = requestByDate.get(workDate) ?? { hasPending: false, pending: null, latest: null }
 	            const suggestedRequestType = suggestRequestType(row)
 	            const state = requestSummary.hasPending ? 'pending' : 'open'
+	            const resolvedContext = resolveWorkContextFromPrefetch({
+	              orgId,
+	              userId: targetUserId,
+	              workDate,
+	              defaultRule: workContextPrefetch.defaultRule,
+	              prefetched: workContextPrefetch.prefetched,
+	            })
 
 	            return {
 	              recordId: row.id,
-	              workDate: row.work_date,
+	              workDate,
 	              status: row.status,
 	              isWorkday: row.is_workday,
 	              firstInAt: row.first_in_at,
@@ -7683,6 +9216,11 @@ module.exports = {
 	              leaveMinutes: approved.leaveMinutes,
 	              overtimeMinutes: approved.overtimeMinutes,
 	              warnings,
+	              workdayContext: buildWorkdayContextSummary({
+	                workDate,
+	                storedIsWorkday: row.is_workday,
+	                resolvedContext,
+	              }),
 	              state,
 	              request: requestSummary.pending ?? requestSummary.latest,
 	              suggestedRequestType,
@@ -7753,13 +9291,17 @@ module.exports = {
           }
         }
 
-        const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const orgId = getOrgId(req)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
-        try {
-          const summary = await loadAttendanceSummary(db, orgId, targetUserId, from, to)
-          res.json({ ok: true, data: summary })
+	        try {
+	          const summary = await loadAttendanceSummary(db, orgId, targetUserId, from, to)
+	          res.json({ ok: true, success: true, data: summary })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -7809,9 +9351,13 @@ module.exports = {
           }
         }
 
-        const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const orgId = getOrgId(req)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
         try {
           const rows = await db.query(
@@ -7832,7 +9378,7 @@ module.exports = {
             minutes: Number(row.total_minutes ?? 0),
           }))
 
-          res.json({ ok: true, data: { items, from, to } })
+	          res.json({ ok: true, success: true, data: { items, from, to } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -7849,10 +9395,16 @@ module.exports = {
       '/api/attendance/requests',
       withPermission('attendance:write', async (req, res) => {
         const schema = z.object({
-          workDate: z.string(),
-          requestType: z.enum(REQUEST_TYPES),
+          workDate: z.string().optional(),
+          date: z.string().optional(),
+          requestType: z.string().optional(),
+          type: z.string().optional(),
           requestedInAt: z.string().optional(),
+          requested_in_at: z.string().optional(),
+          clockIn: z.string().optional(),
           requestedOutAt: z.string().optional(),
+          requested_out_at: z.string().optional(),
+          clockOut: z.string().optional(),
           reason: z.string().optional(),
           leaveTypeId: z.string().optional(),
           leaveTypeCode: z.string().optional(),
@@ -7870,21 +9422,30 @@ module.exports = {
           return
         }
 
-        const userId = getUserId(req)
-        if (!userId) {
-          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-          return
-        }
+		        const userId = getUserId(req)
+		        if (!userId) {
+		          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+		          return
+		        }
 
-        const orgId = getOrgId(req)
-        const requestedInAt = parseDateInput(parsed.data.requestedInAt)
-        const requestedOutAt = parseDateInput(parsed.data.requestedOutAt)
+		        const orgId = getOrgId(req)
+		        const workDate = normalizeDateOnlyStrict(parsed.data.workDate ?? parsed.data.date)
+		        if (!workDate) {
+		          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'workDate must use YYYY-MM-DD format' } })
+		          return
+		        }
+		        const requestedInAt = parseDateInput(parsed.data.requestedInAt ?? parsed.data.requested_in_at ?? parsed.data.clockIn)
+		        const requestedOutAt = parseDateInput(parsed.data.requestedOutAt ?? parsed.data.requested_out_at ?? parsed.data.clockOut)
         if (requestedInAt && requestedOutAt && requestedOutAt <= requestedInAt) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedOutAt must be after requestedInAt' } })
           return
         }
 
-        const requestType = parsed.data.requestType
+        const requestType = parsed.data.requestType ?? parsed.data.type
+        if (!REQUEST_TYPES.includes(requestType)) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `requestType must be one of: ${REQUEST_TYPES.join(', ')}` } })
+          return
+        }
         if (requestType === 'missed_check_in' && !requestedInAt) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedInAt required' } })
           return
@@ -7946,17 +9507,18 @@ module.exports = {
           return
         }
 
-        const approvalFlow = await loadApprovalFlow(db, orgId, {
-          requestType,
-          flowId: parsed.data.approvalFlowId,
-        })
-        const metadata = {}
+	        const approvalFlow = await loadApprovalFlow(db, orgId, {
+	          requestType,
+	          flowId: parsed.data.approvalFlowId,
+	        })
+	        const metadata = {}
         if (durationMinutes) metadata.minutes = durationMinutes
         if (leaveType) {
           metadata.leaveType = {
             id: leaveType.id,
             code: leaveType.code,
             name: leaveType.name,
+            paid: leaveType.paid,
             requiresApproval: leaveType.requiresApproval,
             requiresAttachment: leaveType.requiresAttachment,
             defaultMinutesPerDay: leaveType.defaultMinutesPerDay,
@@ -7986,10 +9548,20 @@ module.exports = {
 
         const approvalId = `apv_${randomUUID()}`
 
-        try {
-          const request = await db.transaction(async (trx) => {
-            await trx.query(
-              'INSERT INTO approval_instances (id, status, version) VALUES ($1, $2, $3)',
+	        try {
+	          const request = await db.transaction(async (trx) => {
+	            await acquireAttendanceRequestLock(trx, orgId, userId, workDate, requestType)
+	            const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
+	              orgId,
+	              userId,
+	              workDate,
+	              requestType,
+	            })
+	            if (duplicateRequest) {
+	              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+	            }
+	            await trx.query(
+	              'INSERT INTO approval_instances (id, status, version) VALUES ($1, $2, $3)',
               [approvalId, 'pending', 0]
             )
 
@@ -7998,13 +9570,13 @@ module.exports = {
                (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
                RETURNING *`,
-              [
-                randomUUID(),
-                userId,
-                orgId,
-                parsed.data.workDate,
-                requestType,
-                requestedInAt,
+	              [
+	                randomUUID(),
+	                userId,
+	                orgId,
+	                workDate,
+	                requestType,
+	                requestedInAt,
                 requestedOutAt,
                 parsed.data.reason ?? null,
                 'pending',
@@ -8016,17 +9588,21 @@ module.exports = {
             return rows[0]
           })
 
-          emitEvent('attendance.requested', {
-            orgId,
-            userId,
-            workDate: parsed.data.workDate,
-            requestType,
-          })
-          res.status(201).json({ ok: true, data: { request } })
-        } catch (error) {
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-            return
+	          emitEvent('attendance.requested', {
+	            orgId,
+	            userId,
+	            workDate,
+	            requestType,
+	          })
+	          res.status(201).json({ ok: true, data: { request } })
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          if (isDatabaseSchemaError(error)) {
+	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+	            return
           }
           logger.error('Attendance request creation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create request' } })
@@ -8074,10 +9650,14 @@ module.exports = {
           }
         }
 
-        const { page, pageSize, offset } = parsePagination(req.query)
-        const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const { page, pageSize, offset } = parsePagination(req.query)
+	        const orgId = getOrgId(req)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
         try {
           const params = [targetUserId, orgId, from, to]
@@ -8104,7 +9684,7 @@ module.exports = {
             params
           )
 
-          res.json({ ok: true, data: { items: rows, total, page, pageSize } })
+	          res.json({ ok: true, success: true, data: { items: rows, total, page, pageSize } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -8565,6 +10145,38 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/leave-types/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const leaveTypeId = normalizeUuidString(req.params.id)
+        if (!leaveTypeId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_leave_types WHERE id = $1 AND org_id = $2',
+            [leaveTypeId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Leave type not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapLeaveTypeRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance leave type lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load leave type' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/leave-types',
       withPermission('attendance:admin', async (req, res) => {
@@ -8576,25 +10188,32 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const payload = {
-          code: parsed.data.code,
+          code: resolveAttendanceCode({
+            explicitCode: parsed.data.code,
+            existingCode: null,
+            prefix: 'leave',
+            name: parsed.data.name,
+          }),
           name: parsed.data.name,
+          paid: parsed.data.paid ?? true,
           requiresApproval: parsed.data.requiresApproval ?? true,
           requiresAttachment: parsed.data.requiresAttachment ?? false,
-          defaultMinutesPerDay: parsed.data.defaultMinutesPerDay ?? 480,
+          defaultMinutesPerDay: parsed.data.defaultMinutesPerDay ?? parsed.data.daily_minutes ?? 480,
           isActive: parsed.data.isActive ?? true,
         }
 
         try {
           const rows = await db.query(
             `INSERT INTO attendance_leave_types
-             (id, org_id, code, name, requires_approval, requires_attachment, default_minutes_per_day, is_active)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             (id, org_id, code, name, paid, requires_approval, requires_attachment, default_minutes_per_day, is_active)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              RETURNING *`,
             [
               randomUUID(),
               orgId,
               payload.code,
               payload.name,
+              payload.paid,
               payload.requiresApproval,
               payload.requiresAttachment,
               payload.defaultMinutesPerDay,
@@ -8631,7 +10250,11 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const leaveTypeId = req.params.id
+        const leaveTypeId = normalizeUuidString(req.params.id)
+        if (!leaveTypeId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -8645,11 +10268,17 @@ module.exports = {
 
           const existing = existingRows[0]
           const payload = {
-            code: parsed.data.code ?? existing.code,
+            code: resolveAttendanceCode({
+              explicitCode: parsed.data.code,
+              existingCode: existing.code,
+              prefix: 'leave',
+              name: parsed.data.name ?? existing.name,
+            }),
             name: parsed.data.name ?? existing.name,
+            paid: parsed.data.paid ?? existing.paid ?? true,
             requiresApproval: parsed.data.requiresApproval ?? existing.requires_approval,
             requiresAttachment: parsed.data.requiresAttachment ?? existing.requires_attachment,
-            defaultMinutesPerDay: parsed.data.defaultMinutesPerDay ?? existing.default_minutes_per_day,
+            defaultMinutesPerDay: parsed.data.defaultMinutesPerDay ?? parsed.data.daily_minutes ?? existing.default_minutes_per_day,
             isActive: parsed.data.isActive ?? existing.is_active,
           }
 
@@ -8657,10 +10286,11 @@ module.exports = {
             `UPDATE attendance_leave_types
              SET code = $3,
                  name = $4,
-                 requires_approval = $5,
-                 requires_attachment = $6,
-                 default_minutes_per_day = $7,
-                 is_active = $8,
+                 paid = $5,
+                 requires_approval = $6,
+                 requires_attachment = $7,
+                 default_minutes_per_day = $8,
+                 is_active = $9,
                  updated_at = now()
              WHERE id = $1 AND org_id = $2
              RETURNING *`,
@@ -8669,6 +10299,7 @@ module.exports = {
               orgId,
               payload.code,
               payload.name,
+              payload.paid,
               payload.requiresApproval,
               payload.requiresAttachment,
               payload.defaultMinutesPerDay,
@@ -8699,7 +10330,11 @@ module.exports = {
       '/api/attendance/leave-types/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const leaveTypeId = req.params.id
+        const leaveTypeId = normalizeUuidString(req.params.id)
+        if (!leaveTypeId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -8790,6 +10425,35 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/overtime-rules/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const overtimeRuleId = normalizeUuidString(req.params.id)
+        if (!overtimeRuleId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const rule = await loadOvertimeRule(db, orgId, { id: overtimeRuleId })
+          if (!rule) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Overtime rule not found' } })
+            return
+          }
+          res.json({ ok: true, data: rule })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance overtime rule lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load overtime rule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/overtime-rules',
       withPermission('attendance:admin', async (req, res) => {
@@ -8856,7 +10520,11 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const overtimeRuleId = req.params.id
+        const overtimeRuleId = normalizeUuidString(req.params.id)
+        if (!overtimeRuleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -8924,7 +10592,11 @@ module.exports = {
       '/api/attendance/overtime-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const overtimeRuleId = req.params.id
+        const overtimeRuleId = normalizeUuidString(req.params.id)
+        if (!overtimeRuleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -9024,7 +10696,7 @@ module.exports = {
       'POST',
       '/api/attendance/approval-flows',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = approvalFlowCreateSchema.safeParse(req.body)
+        const parsed = approvalFlowCreateSchema.safeParse(normalizeApprovalFlowPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -9077,14 +10749,18 @@ module.exports = {
       'PUT',
       '/api/attendance/approval-flows/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = approvalFlowUpdateSchema.safeParse(req.body ?? {})
+        const parsed = approvalFlowUpdateSchema.safeParse(normalizeApprovalFlowPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
-        const flowId = req.params.id
+        const flowId = normalizeUuidString(req.params.id)
+        if (!flowId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -9147,7 +10823,11 @@ module.exports = {
       '/api/attendance/approval-flows/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const flowId = req.params.id
+        const flowId = normalizeUuidString(req.params.id)
+        if (!flowId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -9241,7 +10921,7 @@ module.exports = {
       'POST',
       '/api/attendance/rotation-rules',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = rotationRuleCreateSchema.safeParse(req.body)
+        const parsed = rotationRuleCreateSchema.safeParse(normalizeRotationRulePayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -9294,14 +10974,18 @@ module.exports = {
       'PUT',
       '/api/attendance/rotation-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = rotationRuleUpdateSchema.safeParse(req.body ?? {})
+        const parsed = rotationRuleUpdateSchema.safeParse(normalizeRotationRulePayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
-        const ruleId = req.params.id
+        const ruleId = normalizeUuidString(req.params.id)
+        if (!ruleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -9366,7 +11050,11 @@ module.exports = {
       '/api/attendance/rotation-rules/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const ruleId = req.params.id
+        const ruleId = normalizeUuidString(req.params.id)
+        if (!ruleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -9460,16 +11148,21 @@ module.exports = {
       'POST',
       '/api/attendance/rotation-assignments',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = rotationAssignmentCreateSchema.safeParse(req.body)
+        const parsed = rotationAssignmentCreateSchema.safeParse(normalizeRotationAssignmentPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
+        const rotationRuleId = normalizeUuidString(parsed.data.rotationRuleId)
+        if (!rotationRuleId) {
+          respondInvalidUuid(res, 'rotationRuleId')
+          return
+        }
         const payload = {
           userId: parsed.data.userId,
-          rotationRuleId: parsed.data.rotationRuleId,
+          rotationRuleId,
           startDate: parsed.data.startDate,
           endDate: parsed.data.endDate ?? null,
           isActive: parsed.data.isActive ?? true,
@@ -9520,14 +11213,18 @@ module.exports = {
       'PUT',
       '/api/attendance/rotation-assignments/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = rotationAssignmentUpdateSchema.safeParse(req.body ?? {})
+        const parsed = rotationAssignmentUpdateSchema.safeParse(normalizeRotationAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
-        const assignmentId = req.params.id
+        const assignmentId = normalizeUuidString(req.params.id)
+        if (!assignmentId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -9540,9 +11237,16 @@ module.exports = {
           }
 
           const existing = existingRows[0]
+          const nextRotationRuleId = parsed.data.rotationRuleId !== undefined
+            ? normalizeUuidString(parsed.data.rotationRuleId)
+            : existing.rotation_rule_id
+          if (!nextRotationRuleId) {
+            respondInvalidUuid(res, 'rotationRuleId')
+            return
+          }
           const payload = {
             userId: parsed.data.userId ?? existing.user_id,
-            rotationRuleId: parsed.data.rotationRuleId ?? existing.rotation_rule_id,
+            rotationRuleId: nextRotationRuleId,
             startDate: parsed.data.startDate ?? existing.start_date,
             endDate: parsed.data.endDate ?? existing.end_date,
             isActive: parsed.data.isActive ?? existing.is_active,
@@ -9598,7 +11302,11 @@ module.exports = {
       '/api/attendance/rotation-assignments/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const assignmentId = req.params.id
+        const assignmentId = normalizeUuidString(req.params.id)
+        if (!assignmentId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -9772,6 +11480,23 @@ module.exports = {
             library,
             versions,
           },
+        })
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/rule-templates/versions/:versionId',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const target = await getTemplateLibraryVersionPayload(db, orgId, req.params.versionId, null)
+        if (!target) {
+          res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Template version not found' } })
+          return
+        }
+        res.json({
+          ok: true,
+          data: target,
         })
       })
     )
@@ -9975,7 +11700,7 @@ module.exports = {
       'POST',
       '/api/attendance/rule-sets',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = ruleSetCreateSchema.safeParse(req.body)
+        const parsed = ruleSetCreateSchema.safeParse(normalizeRuleSetPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -10053,14 +11778,18 @@ module.exports = {
       'PUT',
       '/api/attendance/rule-sets/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = ruleSetUpdateSchema.safeParse(req.body ?? {})
+        const parsed = ruleSetUpdateSchema.safeParse(normalizeRuleSetPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
-        const ruleSetId = req.params.id
+        const ruleSetId = normalizeUuidString(req.params.id)
+        if (!ruleSetId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -10145,7 +11874,11 @@ module.exports = {
       '/api/attendance/rule-sets/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const ruleSetId = req.params.id
+        const ruleSetId = normalizeUuidString(req.params.id)
+        if (!ruleSetId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -10253,6 +11986,7 @@ module.exports = {
               rule: context.rule,
               firstInAt: entry.firstInAt,
               lastOutAt: entry.lastOutAt,
+              workDate: entry.workDate,
               isWorkingDay: context.isWorkingDay,
             })
             preview.push({
@@ -10293,26 +12027,38 @@ module.exports = {
 	    context.api.http.addRoute(
 	      'GET',
 	      '/api/attendance/import/template',
-	      withPermission('attendance:admin', async (_req, res) => {
+	      withPermission('attendance:admin', async (req, res) => {
+        const { profile, error } = resolveImportTemplateProfile(req.query?.profileId)
+        if (error) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error } })
+          return
+        }
         res.json({
           ok: true,
-          data: {
-            source: 'dingtalk',
-            mapping: {
-              columns: IMPORT_MAPPING_COLUMNS,
-            },
-            mappingProfiles: IMPORT_MAPPING_PROFILES,
-            payloadExample: {
-              source: 'dingtalk_csv',
-              mode: 'override',
-              // Keep the template payload valid out-of-the-box: ruleSetId is optional.
-              userMapKeyField: '工号',
-              userMapSourceFields: ['empNo', '工号', '姓名'],
-              userMap: {},
-              entries: [],
-            },
-          },
+          data: buildAttendanceImportTemplateData(profile),
         })
+	      })
+	    )
+
+	    context.api.http.addRoute(
+	      'GET',
+	      '/api/attendance/import/template.csv',
+	      withPermission('attendance:admin', async (req, res) => {
+        const { profile, error } = resolveImportTemplateProfile(req.query?.profileId)
+        if (error) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error } })
+          return
+        }
+
+        const csvText = buildImportTemplateCsv(profile)
+        if (!csvText) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Import template has no CSV columns' } })
+          return
+        }
+
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+        res.setHeader('Content-Disposition', `attachment; filename="${buildImportTemplateFilename(profile)}"`)
+        res.send(csvText)
 	      })
 	    )
 
@@ -10355,6 +12101,8 @@ module.exports = {
 	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'CSV must include at least 1 data row' } })
 	            return
 	          }
+
+	          await validateImportUploadCsvOrThrow({ csvPath: paths.csvPath })
 
 	          const meta = {
 	            fileId,
@@ -10436,13 +12184,25 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const requesterId = getUserId(req)
-        const userId = parsed.data.userId ?? requesterId
-        if (!userId) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
-          return
-        }
-        const previewStartedAtMs = Date.now()
-        if (requireImportCommitToken) {
+	        const userId = parsed.data.userId ?? requesterId
+	        if (!userId) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
+	          return
+	        }
+	        try {
+	          const rowCountHint = await estimateImportPayloadRowCount({ payload: parsed.data, orgId })
+	          assertSyncImportWithinScale({ rowCount: rowCountHint, operation: 'preview' })
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          logger.error('Attendance import preview preflight failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate preview size' } })
+	          return
+	        }
+	        const previewStartedAtMs = Date.now()
+	        if (requireImportCommitToken) {
           if (!requesterId) {
             res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
             return
@@ -10741,6 +12501,7 @@ module.exports = {
               rule: ruleForMetrics,
               firstInAt,
               lastOutAt,
+              workDate,
               isWorkingDay: context.isWorkingDay,
               leaveMinutes,
               overtimeMinutes,
@@ -10926,9 +12687,9 @@ module.exports = {
 	          return
 	        }
 
-	        const idempotencyKey = typeof parsed.data.idempotencyKey === 'string'
-	          ? parsed.data.idempotencyKey.trim()
-	          : ''
+		        const idempotencyKey = typeof parsed.data.idempotencyKey === 'string'
+		          ? parsed.data.idempotencyKey.trim()
+		          : ''
 	        if (idempotencyKey) {
 	          const existing = await loadIdempotentImportBatch(db, orgId, idempotencyKey)
 	          if (existing) {
@@ -10956,12 +12717,25 @@ module.exports = {
 	                idempotent: true,
 	              },
 	            })
-	            return
-	          }
-	        }
+		            return
+		          }
+		        }
 
-	        const commitToken = parsed.data.commitToken
-	        if (!commitToken && requireImportCommitToken) {
+		        try {
+		          const rowCountHint = await estimateImportPayloadRowCount({ payload: parsed.data, orgId })
+		          assertSyncImportWithinScale({ rowCount: rowCountHint, operation: 'commit' })
+		        } catch (error) {
+		          if (error instanceof HttpError) {
+		            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+		            return
+		          }
+		          logger.error('Attendance import commit preflight failed', error)
+		          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate import size' } })
+		          return
+		        }
+
+		        const commitToken = parsed.data.commitToken
+		        if (!commitToken && requireImportCommitToken) {
 	          res.status(400).json({ ok: false, error: { code: 'COMMIT_TOKEN_REQUIRED', message: 'commitToken is required' } })
 	          return
         }
@@ -11022,6 +12796,10 @@ module.exports = {
 	          const importEngine = resolveImportEngineByRowCount(rows.length)
 	          const importChunkConfig = resolveImportChunkConfig(importEngine)
 	          const importRecordUpsertStrategy = resolveImportRecordUpsertStrategy({
+	            rowCount: rows.length,
+	            engine: importEngine,
+	          })
+	          const importItemsInsertStrategy = resolveImportItemsInsertStrategy({
 	            rowCount: rows.length,
 	            engine: importEngine,
 	          })
@@ -11105,6 +12883,7 @@ module.exports = {
 	              engine: importEngine,
 	              chunkConfig: importChunkConfig,
 	              recordUpsertStrategy: importRecordUpsertStrategy,
+	              itemsInsertStrategy: importItemsInsertStrategy,
 	              mappingProfileId: parsed.data.mappingProfileId ?? null,
 	              groupSync: groupSync
 	                ? {
@@ -11160,6 +12939,8 @@ module.exports = {
 			                batchId,
 			                orgId,
 			                items: chunk,
+			                totalRows: rows.length,
+			                strategy: importItemsInsertStrategy,
 			              })
 			            }
 				            const enqueueImportItem = async ({ userId, workDate, recordId, previewSnapshot }) => {
@@ -11274,6 +13055,7 @@ module.exports = {
 				                  existingRow,
 				                  updateFirstInAt: item.updateFirstInAt,
 				                  updateLastOutAt: item.updateLastOutAt,
+				                  workDate: workDateKey,
 				                  mode: item.mode,
 				                  statusOverride: item.statusOverride,
 				                  overrideMetrics: item.overrideMetrics,
@@ -11536,6 +13318,7 @@ module.exports = {
                 rule: ruleForMetrics,
                 firstInAt,
                 lastOutAt,
+                workDate,
                 isWorkingDay: context.isWorkingDay,
                 leaveMinutes,
                 overtimeMinutes,
@@ -11791,6 +13574,7 @@ module.exports = {
 
 	          res.json({
 	            ok: true,
+	            success: true,
 	            data: {
 	              batchId,
 	              imported: importedCount,
@@ -12208,12 +13992,24 @@ module.exports = {
 
         const orgId = getOrgId(req)
         const requesterId = getUserId(req)
-        const userId = parsed.data.userId ?? requesterId
-        if (!userId) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
-          return
-        }
-        if (requireImportCommitToken) {
+		        const userId = parsed.data.userId ?? requesterId
+		        if (!userId) {
+		          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'userId is required' } })
+		          return
+		        }
+	        try {
+	          const rowCountHint = await estimateImportPayloadRowCount({ payload: parsed.data, orgId })
+	          assertSyncImportWithinScale({ rowCount: rowCountHint, operation: 'commit' })
+	        } catch (error) {
+	          if (error instanceof HttpError) {
+	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+	            return
+	          }
+	          logger.error('Attendance legacy import preflight failed', error)
+	          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to validate import size' } })
+	          return
+	        }
+	        if (requireImportCommitToken) {
           if (!requesterId) {
             res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
             return
@@ -12489,6 +14285,7 @@ module.exports = {
                 rule: ruleForMetrics,
                 firstInAt,
                 lastOutAt,
+                workDate,
                 isWorkingDay: context.isWorkingDay,
                 leaveMinutes,
                 overtimeMinutes,
@@ -13199,6 +14996,7 @@ module.exports = {
                       rule: ruleForMetrics,
                       firstInAt,
                       lastOutAt,
+                      workDate,
                       isWorkingDay: context.isWorkingDay,
                       leaveMinutes,
                       overtimeMinutes,
@@ -13722,6 +15520,38 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/payroll-templates/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const templateId = normalizeUuidString(req.params.id)
+        if (!templateId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_payroll_templates WHERE id = $1 AND org_id = $2',
+            [templateId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll template not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapPayrollTemplateRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll template lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load payroll template' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/payroll-templates',
       withPermission('attendance:admin', async (req, res) => {
@@ -13732,15 +15562,24 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const payload = {
-          name: parsed.data.name,
-          timezone: parsed.data.timezone ?? 'UTC',
-          startDay: parsed.data.startDay ?? 1,
-          endDay: parsed.data.endDay ?? 30,
-          endMonthOffset: parsed.data.endMonthOffset ?? 0,
-          autoGenerate: parsed.data.autoGenerate ?? true,
-          config: parsed.data.config ?? {},
-          isDefault: parsed.data.isDefault ?? false,
+        let payload
+        try {
+          payload = {
+            name: parsed.data.name,
+            timezone: resolveExplicitTimeZoneOrThrow(parsed.data.timezone, 'UTC'),
+            startDay: parsed.data.startDay ?? 1,
+            endDay: parsed.data.endDay ?? 30,
+            endMonthOffset: parsed.data.endMonthOffset ?? 0,
+            autoGenerate: parsed.data.autoGenerate ?? true,
+            config: parsed.data.config ?? {},
+            isDefault: parsed.data.isDefault ?? false,
+          }
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          throw error
         }
 
         try {
@@ -13798,7 +15637,11 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const templateId = req.params.id
+        const templateId = normalizeUuidString(req.params.id)
+        if (!templateId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -13810,15 +15653,24 @@ module.exports = {
             return
           }
           const existing = existingRows[0]
-          const payload = {
-            name: parsed.data.name ?? existing.name,
-            timezone: parsed.data.timezone ?? existing.timezone ?? 'UTC',
-            startDay: parsed.data.startDay ?? existing.start_day ?? 1,
-            endDay: parsed.data.endDay ?? existing.end_day ?? 30,
-            endMonthOffset: parsed.data.endMonthOffset ?? existing.end_month_offset ?? 0,
-            autoGenerate: parsed.data.autoGenerate ?? existing.auto_generate ?? true,
-            config: parsed.data.config ?? normalizeMetadata(existing.config),
-            isDefault: parsed.data.isDefault ?? existing.is_default ?? false,
+          let payload
+          try {
+            payload = {
+              name: parsed.data.name ?? existing.name,
+              timezone: resolveExplicitTimeZoneOrThrow(parsed.data.timezone, existing.timezone ?? 'UTC'),
+              startDay: parsed.data.startDay ?? existing.start_day ?? 1,
+              endDay: parsed.data.endDay ?? existing.end_day ?? 30,
+              endMonthOffset: parsed.data.endMonthOffset ?? existing.end_month_offset ?? 0,
+              autoGenerate: parsed.data.autoGenerate ?? existing.auto_generate ?? true,
+              config: parsed.data.config ?? normalizeMetadata(existing.config),
+              isDefault: parsed.data.isDefault ?? existing.is_default ?? false,
+            }
+          } catch (error) {
+            if (error instanceof HttpError) {
+              res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+              return
+            }
+            throw error
           }
 
           const updated = await db.transaction(async (trx) => {
@@ -13873,7 +15725,11 @@ module.exports = {
       '/api/attendance/payroll-templates/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const templateId = req.params.id
+        const templateId = normalizeUuidString(req.params.id)
+        if (!templateId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -14506,12 +16362,44 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/groups/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_groups WHERE id = $1 AND org_id = $2',
+            [groupId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapAttendanceGroupRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance group lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load group' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/groups',
       withPermission('attendance:admin', async (req, res) => {
         const schema = z.object({
           name: z.string().min(1),
-          code: z.string().optional().nullable(),
+          code: z.string().trim().optional().nullable(),
           timezone: z.string().optional().nullable(),
           ruleSetId: z.string().uuid().optional().nullable(),
           description: z.string().optional().nullable(),
@@ -14524,9 +16412,24 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const name = parsed.data.name.trim()
-        const code = parsed.data.code?.trim() || null
-        const timezone = parsed.data.timezone?.trim() || DEFAULT_RULE.timezone
+        let name
+        let timezone
+        try {
+          name = normalizeSafeDisplayName('name', parsed.data.name)
+          timezone = resolveExplicitTimeZoneOrThrow(parsed.data.timezone, DEFAULT_RULE.timezone)
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          throw error
+        }
+        const code = resolveAttendanceCode({
+          explicitCode: parsed.data.code,
+          existingCode: null,
+          prefix: 'group',
+          name,
+        })
         const ruleSetId = parsed.data.ruleSetId ?? null
         const description = parsed.data.description?.trim() || null
 
@@ -14539,6 +16442,10 @@ module.exports = {
           )
           res.json({ ok: true, data: mapAttendanceGroupRow(rows[0]) })
         } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Group name or code already exists' } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -14555,7 +16462,7 @@ module.exports = {
       withPermission('attendance:admin', async (req, res) => {
         const schema = z.object({
           name: z.string().min(1),
-          code: z.string().optional().nullable(),
+          code: z.string().trim().optional().nullable(),
           timezone: z.string().optional().nullable(),
           ruleSetId: z.string().uuid().optional().nullable(),
           description: z.string().optional().nullable(),
@@ -14568,10 +16475,39 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const groupId = req.params.id
-        const name = parsed.data.name.trim()
-        const code = parsed.data.code?.trim() || null
-        const timezone = parsed.data.timezone?.trim() || DEFAULT_RULE.timezone
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
+        const existingRows = await db.query(
+          'SELECT * FROM attendance_groups WHERE id = $1 AND org_id = $2',
+          [groupId, orgId]
+        )
+        if (!existingRows.length) {
+          res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
+          return
+        }
+
+        const existing = existingRows[0]
+        let name
+        let timezone
+        try {
+          name = normalizeSafeDisplayName('name', parsed.data.name)
+          timezone = resolveExplicitTimeZoneOrThrow(parsed.data.timezone, DEFAULT_RULE.timezone)
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          throw error
+        }
+        const code = resolveAttendanceCode({
+          explicitCode: parsed.data.code,
+          existingCode: existing.code,
+          prefix: 'group',
+          name: parsed.data.name ?? existing.name,
+        })
         const ruleSetId = parsed.data.ruleSetId ?? null
         const description = parsed.data.description?.trim() || null
 
@@ -14594,6 +16530,10 @@ module.exports = {
           }
           res.json({ ok: true, data: mapAttendanceGroupRow(rows[0]) })
         } catch (error) {
+          if (error?.code === '23505') {
+            res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Group name or code already exists' } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -14609,7 +16549,11 @@ module.exports = {
       '/api/attendance/groups/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const groupId = req.params.id
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
         try {
           const rows = await db.query(
             'DELETE FROM attendance_groups WHERE id = $1 AND org_id = $2 RETURNING id',
@@ -14636,7 +16580,11 @@ module.exports = {
       '/api/attendance/groups/:id/members',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const groupId = req.params.id
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
@@ -14681,14 +16629,18 @@ module.exports = {
           userIds: z.array(z.string()).optional(),
         })
 
-        const parsed = schema.safeParse(req.body ?? {})
+        const parsed = schema.safeParse(normalizeGroupMembersPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
-        const groupId = req.params.id
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
         const list = Array.isArray(parsed.data.userIds) ? parsed.data.userIds : []
         const userIds = [
           ...list,
@@ -14731,7 +16683,11 @@ module.exports = {
       '/api/attendance/groups/:id/members/:userId',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const groupId = req.params.id
+        const groupId = normalizeUuidString(req.params.id)
+        if (!groupId) {
+          respondInvalidUuid(res)
+          return
+        }
         const userId = req.params.userId
         try {
           const rows = await db.query(
@@ -14810,21 +16766,60 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/shifts/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const shiftId = normalizeUuidString(req.params.id)
+        if (!shiftId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const shift = await loadShiftById(db, orgId, shiftId)
+          if (!shift) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
+            return
+          }
+          res.json({ ok: true, data: shift })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance shift lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load shift' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/shifts',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = shiftCreateSchema.safeParse(req.body)
+        const parsed = shiftCreateSchema.safeParse(normalizeShiftPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
+        const shiftTiming = resolveShiftTiming({
+          workStartTime: parsed.data.workStartTime ?? DEFAULT_SHIFT.workStartTime,
+          workEndTime: parsed.data.workEndTime ?? DEFAULT_SHIFT.workEndTime,
+          explicitOvernight: parsed.data.isOvernight,
+        })
+        if (shiftTiming.error) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: shiftTiming.error } })
+          return
+        }
         const payload = {
           name: parsed.data.name ?? DEFAULT_SHIFT.name,
           timezone: parsed.data.timezone ?? DEFAULT_SHIFT.timezone,
-          workStartTime: parsed.data.workStartTime ?? DEFAULT_SHIFT.workStartTime,
-          workEndTime: parsed.data.workEndTime ?? DEFAULT_SHIFT.workEndTime,
+          workStartTime: shiftTiming.workStartTime,
+          workEndTime: shiftTiming.workEndTime,
+          isOvernight: shiftTiming.isOvernight,
           lateGraceMinutes: parsed.data.lateGraceMinutes ?? DEFAULT_SHIFT.lateGraceMinutes,
           earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? DEFAULT_SHIFT.earlyGraceMinutes,
           roundingMinutes: parsed.data.roundingMinutes ?? DEFAULT_SHIFT.roundingMinutes,
@@ -14834,8 +16829,8 @@ module.exports = {
         try {
           const rows = await db.query(
             `INSERT INTO attendance_shifts
-             (id, org_id, name, timezone, work_start_time, work_end_time, late_grace_minutes, early_grace_minutes, rounding_minutes, working_days)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+             (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, late_grace_minutes, early_grace_minutes, rounding_minutes, working_days)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
              RETURNING *`,
             [
               randomUUID(),
@@ -14844,6 +16839,7 @@ module.exports = {
               payload.timezone,
               payload.workStartTime,
               payload.workEndTime,
+              payload.isOvernight,
               payload.lateGraceMinutes,
               payload.earlyGraceMinutes,
               payload.roundingMinutes,
@@ -14868,14 +16864,18 @@ module.exports = {
       'PUT',
       '/api/attendance/shifts/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = shiftUpdateSchema.safeParse(req.body ?? {})
+        const parsed = shiftUpdateSchema.safeParse(normalizeShiftPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
-        const shiftId = req.params.id
+        const shiftId = normalizeUuidString(req.params.id)
+        if (!shiftId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -14891,12 +16891,23 @@ module.exports = {
           const workingDays = parsed.data.workingDays
             ? normalizeWorkingDays(parsed.data.workingDays)
             : normalizeWorkingDays(existing.working_days)
+          const shiftTiming = resolveShiftTiming({
+            workStartTime: parsed.data.workStartTime ?? existing.work_start_time,
+            workEndTime: parsed.data.workEndTime ?? existing.work_end_time,
+            explicitOvernight: parsed.data.isOvernight,
+            fallbackOvernight: existing.is_overnight,
+          })
+          if (shiftTiming.error) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: shiftTiming.error } })
+            return
+          }
 
           const payload = {
             name: parsed.data.name ?? existing.name,
             timezone: parsed.data.timezone ?? existing.timezone,
-            workStartTime: parsed.data.workStartTime ?? existing.work_start_time,
-            workEndTime: parsed.data.workEndTime ?? existing.work_end_time,
+            workStartTime: shiftTiming.workStartTime,
+            workEndTime: shiftTiming.workEndTime,
+            isOvernight: shiftTiming.isOvernight,
             lateGraceMinutes: parsed.data.lateGraceMinutes ?? existing.late_grace_minutes,
             earlyGraceMinutes: parsed.data.earlyGraceMinutes ?? existing.early_grace_minutes,
             roundingMinutes: parsed.data.roundingMinutes ?? existing.rounding_minutes,
@@ -14909,10 +16920,11 @@ module.exports = {
                  timezone = $4,
                  work_start_time = $5,
                  work_end_time = $6,
-                 late_grace_minutes = $7,
-                 early_grace_minutes = $8,
-                 rounding_minutes = $9,
-                 working_days = $10::jsonb,
+                 is_overnight = $7,
+                 late_grace_minutes = $8,
+                 early_grace_minutes = $9,
+                 rounding_minutes = $10,
+                 working_days = $11::jsonb,
                  updated_at = now()
              WHERE id = $1 AND org_id = $2
              RETURNING *`,
@@ -14923,6 +16935,7 @@ module.exports = {
               payload.timezone,
               payload.workStartTime,
               payload.workEndTime,
+              payload.isOvernight,
               payload.lateGraceMinutes,
               payload.earlyGraceMinutes,
               payload.roundingMinutes,
@@ -14949,7 +16962,11 @@ module.exports = {
       '/api/attendance/shifts/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const shiftId = req.params.id
+        const shiftId = normalizeUuidString(req.params.id)
+        if (!shiftId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -14984,7 +17001,9 @@ module.exports = {
 
         const parsed = schema.safeParse({
           orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
-          userId: typeof req.query.userId === 'string' ? req.query.userId : undefined,
+          userId: typeof req.query.userId === 'string'
+            ? req.query.userId
+            : (typeof req.query.user_id === 'string' ? req.query.user_id : undefined),
         })
 
         if (!parsed.success) {
@@ -15015,7 +17034,7 @@ module.exports = {
           const rows = await db.query(
             `SELECT a.id, a.org_id, a.user_id, a.shift_id, a.start_date, a.end_date, a.is_active,
                     s.name AS shift_name, s.timezone AS shift_timezone, s.work_start_time AS shift_work_start_time,
-                    s.work_end_time AS shift_work_end_time, s.late_grace_minutes AS shift_late_grace_minutes,
+                    s.work_end_time AS shift_work_end_time, s.is_overnight AS shift_is_overnight, s.late_grace_minutes AS shift_late_grace_minutes,
                     s.early_grace_minutes AS shift_early_grace_minutes, s.rounding_minutes AS shift_rounding_minutes,
                     s.working_days AS shift_working_days
              FROM attendance_shift_assignments a
@@ -15053,20 +17072,25 @@ module.exports = {
       'POST',
       '/api/attendance/assignments',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = assignmentCreateSchema.safeParse(req.body)
+        const parsed = assignmentCreateSchema.safeParse(normalizeAssignmentPayload(req.body))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
+        const shiftId = normalizeUuidString(parsed.data.shiftId)
+        if (!shiftId) {
+          respondInvalidUuid(res, 'shiftId')
+          return
+        }
         const normalizedEndDate = typeof parsed.data.endDate === 'string' && parsed.data.endDate.trim().length > 0
           ? parsed.data.endDate
           : null
 
         const payload = {
           userId: parsed.data.userId,
-          shiftId: parsed.data.shiftId,
+          shiftId,
           startDate: parsed.data.startDate,
           endDate: normalizedEndDate,
           isActive: parsed.data.isActive ?? true,
@@ -15122,14 +17146,18 @@ module.exports = {
       'PUT',
       '/api/attendance/assignments/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = assignmentUpdateSchema.safeParse(req.body ?? {})
+        const parsed = assignmentUpdateSchema.safeParse(normalizeAssignmentPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
         const orgId = getOrgId(req)
-        const assignmentId = req.params.id
+        const assignmentId = normalizeUuidString(req.params.id)
+        if (!assignmentId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -15142,13 +17170,20 @@ module.exports = {
           }
 
           const existing = existingRows[0]
+          const nextShiftId = parsed.data.shiftId !== undefined
+            ? normalizeUuidString(parsed.data.shiftId)
+            : existing.shift_id
+          if (!nextShiftId) {
+            respondInvalidUuid(res, 'shiftId')
+            return
+          }
           const normalizedEndDate = typeof parsed.data.endDate === 'string'
             ? (parsed.data.endDate.trim().length > 0 ? parsed.data.endDate : null)
             : parsed.data.endDate
 
           const payload = {
             userId: parsed.data.userId ?? existing.user_id,
-            shiftId: parsed.data.shiftId ?? existing.shift_id,
+            shiftId: nextShiftId,
             startDate: parsed.data.startDate ?? existing.start_date,
             endDate: normalizedEndDate ?? existing.end_date,
             isActive: parsed.data.isActive ?? existing.is_active,
@@ -15209,7 +17244,11 @@ module.exports = {
       '/api/attendance/assignments/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const assignmentId = req.params.id
+        const assignmentId = normalizeUuidString(req.params.id)
+        if (!assignmentId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -15254,9 +17293,13 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const orgId = getOrgId(req)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
 
         try {
           const countRows = await db.query(
@@ -15275,7 +17318,7 @@ module.exports = {
             [orgId, from, to]
           )
 
-          res.json({ ok: true, data: { items: rows.map(mapHolidayRow), total } })
+	          res.json({ ok: true, success: true, data: { items: rows.map(mapHolidayRow), total } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -15363,13 +17406,9 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const normalizedName = typeof parsed.data.name === 'string' && parsed.data.name.trim().length === 0
-          ? null
-          : parsed.data.name ?? null
-
         const payload = {
           date: parsed.data.date,
-          name: normalizedName,
+          name: parsed.data.name.trim(),
           isWorkingDay: parsed.data.isWorkingDay ?? false,
         }
 
@@ -15429,13 +17468,9 @@ module.exports = {
           }
 
           const existing = existingRows[0]
-          const normalizedName = typeof parsed.data.name === 'string' && parsed.data.name.trim().length === 0
-            ? null
-            : parsed.data.name
-
           const payload = {
             date: parsed.data.date ?? existing.holiday_date,
-            name: normalizedName ?? existing.name,
+            name: parsed.data.name ?? existing.name,
             isWorkingDay: parsed.data.isWorkingDay ?? existing.is_working_day,
           }
 
@@ -15556,6 +17591,7 @@ module.exports = {
           from: z.string().optional(),
           to: z.string().optional(),
           limit: z.string().optional(),
+          format: z.enum(['csv', 'json']).optional(),
         })
 
         const parsed = schema.safeParse({
@@ -15564,6 +17600,7 @@ module.exports = {
           from: typeof req.query.from === 'string' ? req.query.from : undefined,
           to: typeof req.query.to === 'string' ? req.query.to : undefined,
           limit: typeof req.query.limit === 'string' ? req.query.limit : undefined,
+          format: typeof req.query.format === 'string' ? req.query.format.toLowerCase() : undefined,
         })
 
         if (!parsed.success) {
@@ -15587,8 +17624,12 @@ module.exports = {
           }
         }
 
-        const from = parsed.data.from ?? new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10)
-        const to = parsed.data.to ?? new Date().toISOString().slice(0, 10)
+	        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+	        if (!dateRange.ok) {
+	          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+	          return
+	        }
+	        const { from, to } = dateRange
         const requestedLimit = parseNumber(parsed.data.limit, 1000)
         const limit = Math.min(Math.max(requestedLimit, 1), 5000)
 
@@ -15616,7 +17657,42 @@ module.exports = {
             'status',
             'is_workday',
           ]
-          const csv = buildCsv(rows, headers)
+          const exportItems = rows.map((row) => ({
+            user_id: row.user_id ?? '',
+            org_id: row.org_id ?? '',
+            work_date: formatDateOnlyForCsv(row.work_date),
+            timezone: row.timezone ?? '',
+            first_in_at: formatDateTimeForCsv(row.first_in_at, row.timezone),
+            last_out_at: formatDateTimeForCsv(row.last_out_at, row.timezone),
+            work_minutes: row.work_minutes ?? 0,
+            late_minutes: row.late_minutes ?? 0,
+            early_leave_minutes: row.early_leave_minutes ?? 0,
+            status: row.status ?? '',
+            is_workday: row.is_workday ?? '',
+          }))
+          if (parsed.data.format === 'json') {
+            emitEvent('attendance.exported', {
+              orgId,
+              userId: targetUserId,
+              from,
+              to,
+              total: rows.length,
+              format: 'json',
+            })
+            res.json({
+              ok: true,
+              success: true,
+              data: {
+                items: exportItems,
+                total: rows.length,
+                from,
+                to,
+                format: 'json',
+              },
+            })
+            return
+          }
+          const csv = buildCsv(exportItems, headers)
           const filename = `attendance-${orgId}-${from}-to-${to}.csv`
 
           emitEvent('attendance.exported', {
