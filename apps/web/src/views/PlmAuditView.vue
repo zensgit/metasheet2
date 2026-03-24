@@ -450,7 +450,7 @@
               >
                 {{ view.primaryActionLabel }}
               </button>
-              <button class="plm-audit__button" type="button" :disabled="auditTeamViewsLoading" @click="runRecommendedAuditTeamViewSecondaryAction(view)">
+              <button class="plm-audit__button" type="button" :disabled="auditTeamViewsLoading || view.secondaryActionDisabled" @click="runRecommendedAuditTeamViewSecondaryAction(view)">
                 {{ view.secondaryActionLabel }}
               </button>
               <button class="plm-audit__button" type="button" :disabled="auditTeamViewsLoading" @click="focusAuditTeamViewManagement(view)">
@@ -2512,10 +2512,12 @@ async function runRecommendedAuditTeamViewSecondaryAction(view: PlmRecommendedAu
   if (!target || target.isArchived) return
 
   if (view.secondaryActionKind === 'set-default') {
+    if (!canSetDefaultPlmCollaborativeEntry(target)) return
     await setAuditTeamViewDefaultEntry(target, 'recommendation')
     return
   }
 
+  if (!canSharePlmCollaborativeEntry(target)) return
   await shareAuditTeamViewEntry(target, 'recommendation')
 }
 

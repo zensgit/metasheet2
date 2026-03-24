@@ -1,5 +1,6 @@
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
 import { canApplyPlmAuditTeamView } from './plmAuditTeamViewManagement'
+import { canSharePlmCollaborativeEntry } from './plm/usePlmCollaborativePermissions'
 
 export type PlmRecommendedAuditTeamViewReason = 'default' | 'recent-default' | 'recent-update'
 export type PlmRecommendedAuditTeamViewFilter = '' | PlmRecommendedAuditTeamViewReason
@@ -18,6 +19,7 @@ export type PlmRecommendedAuditTeamView = {
   primaryActionDisabled: boolean
   secondaryActionKind: 'copy-link' | 'set-default'
   secondaryActionLabel: string
+  secondaryActionDisabled: boolean
   managementActionKind: 'focus-management'
   managementActionLabel: string
   actionNote: string
@@ -116,7 +118,9 @@ function getRecommendationActions(
   recommendationReason: PlmRecommendedAuditTeamViewReason,
 ) {
   const canSetDefault = canRecommendAsDefault(view)
+  const canShare = canSharePlmCollaborativeEntry(view)
   const recommendSetDefaultKind: 'set-default' | 'copy-link' = canSetDefault ? 'set-default' : 'copy-link'
+  const secondaryActionDisabled = recommendSetDefaultKind === 'copy-link' ? !canShare : false
 
   if (recommendationReason === 'default') {
     return {
@@ -124,6 +128,7 @@ function getRecommendationActions(
       primaryActionLabel: '进入默认视图',
       secondaryActionKind: 'copy-link' as const,
       secondaryActionLabel: '复制默认链接',
+      secondaryActionDisabled: !canShare,
       managementActionLabel: '管理默认视图',
       actionNote: '当前默认审计视图更适合作为稳定入口，可直接复制链接分享给团队。',
     }
@@ -135,6 +140,7 @@ function getRecommendationActions(
       primaryActionLabel: '查看近期默认',
       secondaryActionKind: recommendSetDefaultKind,
       secondaryActionLabel: canSetDefault ? '重新设为默认' : '复制视图链接',
+      secondaryActionDisabled,
       managementActionLabel: '管理近期默认',
       actionNote: canSetDefault
         ? '该视图近期被设为默认，可直接重新提升为团队默认入口。'
@@ -147,6 +153,7 @@ function getRecommendationActions(
     primaryActionLabel: '查看最新更新',
     secondaryActionKind: recommendSetDefaultKind,
     secondaryActionLabel: canSetDefault ? '设为默认' : '复制视图链接',
+    secondaryActionDisabled,
     managementActionLabel: '管理最新更新',
     actionNote: canSetDefault
       ? '该视图近期更新且可直接提升为默认，适合快速切换团队审计入口。'
@@ -210,6 +217,7 @@ export function buildRecommendedAuditTeamViews(
         primaryActionDisabled,
         secondaryActionKind: recommendationActions.secondaryActionKind,
         secondaryActionLabel: recommendationActions.secondaryActionLabel,
+        secondaryActionDisabled: recommendationActions.secondaryActionDisabled,
         managementActionKind: 'focus-management',
         managementActionLabel: recommendationActions.managementActionLabel,
         actionNote: recommendationActions.actionNote,

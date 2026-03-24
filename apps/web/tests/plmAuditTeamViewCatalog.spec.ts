@@ -131,6 +131,28 @@ describe('plmAuditTeamViewCatalog', () => {
     expect(view).toMatchObject({
       secondaryActionKind: 'copy-link',
       secondaryActionLabel: '复制视图链接',
+      secondaryActionDisabled: false,
+    })
+  })
+
+  it('disables recommended copy-link actions when the underlying team view cannot be shared', () => {
+    const [view] = buildRecommendedAuditTeamViews([
+      createAuditTeamView({
+        id: 'default',
+        isDefault: true,
+        permissions: {
+          ...createAuditTeamView().permissions,
+          canShare: false,
+          canSetDefault: false,
+          canClearDefault: false,
+        },
+      }),
+    ])
+
+    expect(view).toMatchObject({
+      secondaryActionKind: 'copy-link',
+      secondaryActionLabel: '复制默认链接',
+      secondaryActionDisabled: true,
     })
   })
 
