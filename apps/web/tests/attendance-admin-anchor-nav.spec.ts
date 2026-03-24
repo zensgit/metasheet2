@@ -42,6 +42,15 @@ async function flushUi(cycles = 6): Promise<void> {
   }
 }
 
+function setViewportWidth(width: number): void {
+  Object.defineProperty(window, 'innerWidth', {
+    configurable: true,
+    writable: true,
+    value: width,
+  })
+  window.dispatchEvent(new Event('resize'))
+}
+
 describe('Attendance admin anchor navigation', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -53,6 +62,7 @@ describe('Attendance admin anchor navigation', () => {
     window.localStorage.setItem('metasheet_locale', 'en')
     window.localStorage.removeItem(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY)
     window.history.replaceState({}, '', '/attendance')
+    setViewportWidth(1280)
     vi.mocked(apiFetch).mockResolvedValue(
       jsonResponse(200, {
         ok: true,
@@ -234,5 +244,47 @@ describe('Attendance admin anchor navigation', () => {
     await flushUi(2)
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeTruthy()
     expect(container!.querySelector('[data-admin-anchor-group="policies"] [aria-expanded="true"]')).toBeTruthy()
+  })
+
+  it('collapses the grouped rail behind a toggle on narrow screens', async () => {
+    setViewportWidth(640)
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const toggle = container!.querySelector<HTMLButtonElement>('.attendance__admin-nav-toggle')
+    expect(toggle).toBeTruthy()
+    expect(container!.querySelector('.attendance__admin-nav')).toBeNull()
+
+    toggle!.click()
+    await flushUi(2)
+    expect(container!.querySelector('.attendance__admin-nav')).toBeTruthy()
+
+    const importBatches = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-import-batches"]')
+    expect(importBatches).toBeTruthy()
+    importBatches!.click()
+    await flushUi(2)
+    expect(container!.querySelector('.attendance__admin-nav')).toBeNull()
+    expect(window.location.hash).toBe('#attendance-admin-import-batches')
+  })
+
+  it('surfaces the active group first in compact mode', async () => {
+    setViewportWidth(640)
+    window.history.replaceState({}, '', '/attendance#attendance-admin-approval-flows')
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const toggle = container!.querySelector<HTMLButtonElement>('.attendance__admin-nav-toggle')
+    expect(toggle?.textContent).toContain('Policies')
+
+    toggle!.click()
+    await flushUi(2)
+
+    const groupLabels = Array.from(container!.querySelectorAll('.attendance__admin-nav-group-title')).map(
+      item => item.textContent?.trim() || '',
+    )
+    expect(groupLabels[0]).toBe('Policies')
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeTruthy()
   })
 })

@@ -1,14 +1,15 @@
-# Attendance Admin Anchor Deeplink, Grouped Rail, And Collapse Persistence Design 2026-03-24
+# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, And Compact Rail UX Design 2026-03-24
 
 ## Context
 
-`AttendanceView.vue` already carries the attendance admin console as a single long page with 22 top-level sections. The first-stage root-admin stabilization added a sticky left anchor rail, active-section tracking, and section-level refs. The second stage added quick-find and hash deep links. The third stage grouped the rail by business domain. This follow-up makes the grouped rail durable and faster to control by persisting collapsed groups and adding bulk expand/collapse actions.
+`AttendanceView.vue` already carries the attendance admin console as a single long page with 22 top-level sections. The first-stage root-admin stabilization added a sticky left anchor rail, active-section tracking, and section-level refs. The second stage added quick-find and hash deep links. The third stage grouped the rail by business domain. The fourth stage added collapse persistence and bulk expand/collapse actions. This follow-up makes the compact mobile rail feel deliberate instead of just functional.
 
 ## Goals
 
 - Reduce scroll cost inside the attendance admin console.
 - Reduce cognitive load in the left rail itself.
 - Preserve the operator's preferred left-rail state across reloads.
+- Reduce compact-mode height and keep the current domain prominent on narrow screens.
 - Allow users to share or restore a concrete admin section via URL hash.
 - Keep the implementation local to attendance until a second real long-form admin page appears.
 
@@ -83,7 +84,23 @@ The rail also adds `Expand all` and `Collapse all` controls:
 - both are disabled while quick-find filtering is active
 - `Collapse all` still leaves the active group's items visible through the existing active-group expansion rule
 
-### 4. Hash-based deep links
+### 4. Compact rail UX
+
+The rail already had a compact-mode toggle, but once opened it still rendered as a wrapped card flow. That made narrow screens feel closer to a block of filter cards than a navigation control.
+
+The compact rail now adds three presentation rules:
+
+- when compact navigation is opened, the rail renders as a single-column accordion instead of a wrapped multi-card flow
+- the active group is promoted to the first visible group in compact mode
+- compact rail action buttons opt out of the global mobile `width: 100%` rule so they do not dominate the panel height
+
+These are deliberately render-layer changes only:
+
+- no new route state
+- no new persistence model
+- no rewrite of hash or observer logic
+
+### 5. Hash-based deep links
 
 The admin rail now treats each known section id as a valid deep-link target.
 
@@ -91,9 +108,9 @@ The admin rail now treats each known section id as a valid deep-link target.
 - First load reads the hash, restores the matching section, and marks the correct rail item active.
 - Active-section changes continue to keep the hash in sync after the initial restore.
 
-The restore path uses a bounded next-tick retry loop plus a non-reentrant guard. This makes the first-load hash restore resilient to mount timing without introducing duplicate scrolls, scroll polling, or route-level state. The same rule also guarantees that a hashed target remains visible when its group would otherwise be collapsed by persisted state.
+The restore path uses a bounded next-tick retry loop plus a non-reentrant guard. This makes the first-load hash restore resilient to mount timing without introducing duplicate scrolls, scroll polling, or route-level state. The same rule also guarantees that a hashed target remains visible when its group would otherwise be collapsed by persisted state, including in compact mode.
 
-### 5. Branch hygiene for timezone helpers
+### 6. Branch hygiene for timezone helpers
 
 This clean branch already depended on `apps/web/src/utils/timezones.ts` through `AttendanceView.vue`, but the file was missing from the branch itself. The follow-up includes it so the branch can build and type-check independently instead of relying on unrelated local dirt from another worktree.
 

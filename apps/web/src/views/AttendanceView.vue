@@ -491,6 +491,17 @@
                 <strong>{{ tr('Sections', '区块') }}</strong>
                 <span>{{ adminSectionNavCountLabel }}</span>
               </div>
+              <button
+                v-if="isCompactAdminNav"
+                class="attendance__admin-nav-toggle"
+                type="button"
+                :aria-expanded="adminCompactNavOpen ? 'true' : 'false'"
+                @click="adminCompactNavOpen = !adminCompactNavOpen"
+              >
+                <span>{{ adminCompactNavOpen ? tr('Hide navigation', '收起导航') : tr('Show navigation', '展开导航') }}</span>
+                <small>{{ activeAdminSectionGroupLabel }}</small>
+              </button>
+              <template v-if="!isCompactAdminNav || adminCompactNavOpen">
               <label class="attendance__field attendance__field--compact" for="attendance-admin-nav-filter">
                 <span>{{ tr('Quick find', '快速查找') }}</span>
                 <input
@@ -556,6 +567,7 @@
                   {{ tr('No sections match the current filter.', '当前筛选没有匹配区块。') }}
                 </p>
               </nav>
+              </template>
             </aside>
             <div class="attendance__admin-content">
             <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.settings)">
@@ -4544,6 +4556,8 @@ const adminSectionFilter = ref('')
 const adminSectionFilterQuery = computed(() => adminSectionFilter.value.trim().toLowerCase())
 const adminSectionFilterActive = computed(() => adminSectionFilterQuery.value.length > 0)
 const adminCollapsedGroupIds = ref<string[]>(loadAdminNavCollapsedGroups())
+const isCompactAdminNav = ref(false)
+const adminCompactNavOpen = ref(false)
 function isAdminSectionGroupExpanded(groupId: string, items: AdminSectionNavItem[]): boolean {
   if (adminSectionFilterActive.value) return true
   if (items.some(item => item.id === adminActiveSectionId.value)) return true
@@ -4569,7 +4583,7 @@ function collapseAllAdminSectionGroups(): void {
 
 const visibleAdminSectionNavGroups = computed(() => {
   const query = adminSectionFilterQuery.value
-  return adminSectionNavGroups.value
+  const groups = adminSectionNavGroups.value
     .map(group => {
       const allItems = group.itemIds
         .map(id => adminSectionItemMap.value.get(id))
@@ -4589,10 +4603,20 @@ const visibleAdminSectionNavGroups = computed(() => {
       }
     })
     .filter((group): group is AdminSectionNavGroup & { items: AdminSectionNavItem[]; countLabel: string; expanded: boolean } => Boolean(group))
+  if (!isCompactAdminNav.value || query) return groups
+  const activeIndex = groups.findIndex(group => group.items.some(item => item.id === adminActiveSectionId.value))
+  if (activeIndex <= 0) return groups
+  const activeGroup = groups[activeIndex]
+  return [activeGroup, ...groups.slice(0, activeIndex), ...groups.slice(activeIndex + 1)]
 })
 
 const visibleAdminSectionNavItems = computed(() => visibleAdminSectionNavGroups.value.flatMap(group => group.items))
 const knownAdminSectionGroupIds = computed(() => adminSectionNavGroups.value.map(group => group.id))
+const activeAdminSectionGroupLabel = computed(() => {
+  const activeId = adminActiveSectionId.value
+  const group = adminSectionNavGroups.value.find(candidate => candidate.itemIds.includes(activeId))
+  return group?.label ?? tr('Sections', '区块')
+})
 const allAdminSectionGroupsExpanded = computed(() => adminCollapsedGroupIds.value.length === 0)
 const allAdminSectionGroupsCollapsed = computed(() => {
   const allGroupIds = knownAdminSectionGroupIds.value
@@ -5210,7 +5234,24 @@ function scrollToAdminSection(id: string): void {
   adminActiveSectionId.value = id
   adminHashSyncReady = true
   syncAdminSectionHash(id)
+  if (isCompactAdminNav.value) {
+    adminCompactNavOpen.value = false
+  }
   target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+function syncAdminNavViewportState(): void {
+  if (typeof window === 'undefined') return
+  const compact = window.innerWidth <= 768
+  const wasCompact = isCompactAdminNav.value
+  isCompactAdminNav.value = compact
+  if (!compact) {
+    adminCompactNavOpen.value = false
+    return
+  }
+  if (!wasCompact) {
+    adminCompactNavOpen.value = false
+  }
 }
 
 async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void> {
@@ -10525,9 +10566,16 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   disconnectAdminSectionObserver()
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('resize', syncAdminNavViewportState)
+  }
 })
 
 onMounted(async () => {
+  syncAdminNavViewportState()
+  if (typeof window !== 'undefined') {
+    window.addEventListener('resize', syncAdminNavViewportState)
+  }
   if (!showAdmin.value || adminForbidden.value) return
   await syncAdminSectionNavigationState()
 })
@@ -11149,6 +11197,26 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   flex-wrap: wrap;
 }
 
+.attendance__admin-nav-toggle {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attendance__admin-nav-toggle small {
+  color: #6b7280;
+  font-size: 11px;
+}
+
 .attendance__admin-nav {
   display: flex;
   flex-direction: column;
@@ -11364,14 +11432,19 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   }
 
   .attendance__admin-nav {
-    flex-direction: row;
-    flex-wrap: wrap;
-    max-height: none;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    max-height: min(50vh, 420px);
   }
 
   .attendance__admin-nav-group {
-    flex: 1 1 220px;
-    min-width: min(100%, 220px);
+    flex: none;
+    min-width: 0;
+  }
+
+  .attendance__admin-nav-actions .attendance__btn {
+    width: auto;
+    flex: 1 1 0;
   }
 
   .attendance__admin-nav-link {
