@@ -71,6 +71,7 @@ export function trimPlmAuditExistingTeamViewUiState<T extends { id: string }>(
   options?: {
     isApplicableView?: (view: T) => boolean
     isSelectableView?: (view: T) => boolean
+    isManageableView?: (view: T) => boolean
   },
 ): PlmAuditTeamViewListUiState {
   const viewsById = new Map(views.map((view) => [view.id, view]))
@@ -83,10 +84,21 @@ export function trimPlmAuditExistingTeamViewUiState<T extends { id: string }>(
     && (options?.isApplicableView ? options.isApplicableView(selectedTeamView) : true),
   )
   const managedTeamViewStillExists = !managedTeamViewId || Boolean(managedTeamView)
+  const managedTeamViewStillManageable = !managedTeamViewId || Boolean(
+    managedTeamView
+    && (options?.isManageableView ? options.isManageableView(managedTeamView) : true),
+  )
   const nextSelectedTeamViewId = selectedTeamViewStillAvailable ? state.selectedTeamViewId : ''
-  const shouldPreserveDrafts = nextSelectedTeamViewId.trim()
-    ? true
-    : managedTeamViewStillExists
+  const hasManagedDraftOwner = Boolean(state.draftTeamViewNameOwnerId.trim())
+  const selectedTeamViewOwnsDraft = Boolean(
+    nextSelectedTeamViewId.trim()
+    && state.draftTeamViewNameOwnerId.trim() === nextSelectedTeamViewId.trim(),
+  )
+  const shouldPreserveNameDraft = hasManagedDraftOwner
+    ? Boolean(nextSelectedTeamViewId.trim()) || managedTeamViewStillExists
+    : true
+  const shouldPreserveManagedDraftBinding = hasManagedDraftOwner
+    && (selectedTeamViewOwnsDraft || managedTeamViewStillManageable)
 
   return {
     selectedTeamViewId: nextSelectedTeamViewId,
@@ -99,9 +111,13 @@ export function trimPlmAuditExistingTeamViewUiState<T extends { id: string }>(
     focusedRecommendedTeamViewId: viewsById.has(state.focusedRecommendedTeamViewId)
       ? state.focusedRecommendedTeamViewId
       : '',
-    draftTeamViewName: shouldPreserveDrafts ? state.draftTeamViewName : '',
-    draftTeamViewNameOwnerId: shouldPreserveDrafts ? state.draftTeamViewNameOwnerId : '',
-    draftOwnerUserId: shouldPreserveDrafts ? state.draftOwnerUserId : '',
+    draftTeamViewName: shouldPreserveNameDraft ? state.draftTeamViewName : '',
+    draftTeamViewNameOwnerId: shouldPreserveManagedDraftBinding ? state.draftTeamViewNameOwnerId : '',
+    draftOwnerUserId: hasManagedDraftOwner
+      ? shouldPreserveManagedDraftBinding
+        ? state.draftOwnerUserId
+        : ''
+      : state.draftOwnerUserId,
   }
 }
 

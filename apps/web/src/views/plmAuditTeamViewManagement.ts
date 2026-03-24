@@ -38,6 +38,15 @@ export type PlmAuditTeamViewManagementModel = {
   selectableCount: number
 }
 
+export function canManagePlmAuditTeamView(
+  view: Pick<PlmWorkbenchTeamView<'audit'>, 'canManage' | 'permissions'>,
+) {
+  if (typeof view.permissions?.canManage === 'boolean') {
+    return view.permissions.canManage
+  }
+  return Boolean(view.canManage)
+}
+
 function canArchiveAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
   if (view.isArchived) return false
   return view.permissions?.canArchive ?? view.canManage

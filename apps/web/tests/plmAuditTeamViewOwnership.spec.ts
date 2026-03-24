@@ -219,6 +219,33 @@ describe('plmAuditTeamViewOwnership', () => {
     })
   })
 
+  it('downgrades management-owned name drafts into create-mode drafts when the canonical owner becomes read-only', () => {
+    expect(trimPlmAuditExistingTeamViewUiState({
+      selectedTeamViewId: '',
+      managedTeamViewId: 'audit-view-2',
+      selectedIds: [],
+      focusedTeamViewId: '',
+      focusedRecommendedTeamViewId: '',
+      draftTeamViewName: '原重命名草稿',
+      draftTeamViewNameOwnerId: 'audit-view-2',
+      draftOwnerUserId: 'owner-g',
+    }, [
+      { id: 'audit-view-2', applicable: true, selectable: false, manageable: false },
+    ], {
+      isApplicableView: (view) => view.applicable,
+      isSelectableView: (view) => view.selectable,
+      isManageableView: (view) => view.manageable,
+    })).toEqual({
+      selectedTeamViewId: '',
+      selectedIds: [],
+      focusedTeamViewId: '',
+      focusedRecommendedTeamViewId: '',
+      draftTeamViewName: '原重命名草稿',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: '',
+    })
+  })
+
   it('preserves team-view name drafts while clearing owner drafts when the canonical management target changes', () => {
     expect(resolvePlmAuditCanonicalTeamViewFormDraftState({
       previousCanonicalTeamViewId: 'audit-view-1',

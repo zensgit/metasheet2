@@ -924,6 +924,7 @@ import {
 import {
   buildPlmAuditTeamViewManagement,
   canApplyPlmAuditTeamView,
+  canManagePlmAuditTeamView,
   isSelectablePlmAuditTeamView,
   type PlmAuditTeamViewLifecycleActionKind,
 } from './plmAuditTeamViewManagement'
@@ -1979,6 +1980,7 @@ function trimAuditTeamViewSelection(managedTeamViewId = canonicalAuditTeamViewMa
     auditTeamViews.value,
     {
       isApplicableView: canApplyPlmAuditTeamView,
+      isManageableView: canManagePlmAuditTeamView,
       isSelectableView: isSelectablePlmAuditTeamView,
     },
   )
