@@ -614,7 +614,7 @@ describe('usePlmTeamViews', () => {
     model.applyTeamView()
 
     expect(applyViewState).not.toHaveBeenCalled()
-    expect(setMessage).toHaveBeenLastCalledWith('请先恢复工作台团队视角，再执行应用。', true)
+    expect(setMessage).toHaveBeenLastCalledWith('当前工作台团队视角不可应用。', true)
   })
 
   it('syncs workbench URL identity after save and set-default actions', async () => {
@@ -1241,6 +1241,57 @@ describe('usePlmTeamViews', () => {
     expect(transferPlmWorkbenchTeamView).not.toHaveBeenCalled()
     expect(setMessage).toHaveBeenNthCalledWith(1, '仅创建者可分享工作台团队视角。', true)
     expect(setMessage).toHaveBeenNthCalledWith(2, '仅创建者可转移工作台团队视角。', true)
+  })
+
+  it('reports share gating precisely when the current workbench team view is manageable but not shareable', async () => {
+    const buildShareUrl = vi.fn(() => 'http://example.test/plm?workbenchTeamView=workbench-share-locked')
+    const copyShareUrl = vi.fn().mockResolvedValue(true)
+
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-share-locked',
+          kind: 'workbench',
+          scope: 'team',
+          name: '受限分享工作台视角',
+          ownerUserId: 'owner-2',
+          canManage: false,
+          isDefault: false,
+          permissions: {
+            canManage: true,
+            canApply: true,
+            canShare: false,
+          },
+          state: {
+            query: {
+              documentFilter: 'share-locked-doc',
+            },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+      buildShareUrl,
+      copyShareUrl,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-share-locked'
+
+    await model.shareTeamView()
+
+    expect(copyShareUrl).not.toHaveBeenCalled()
+    expect(buildShareUrl).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenLastCalledWith('当前工作台团队视角不可分享。', true)
   })
 
   it('blocks granular management handlers when explicit permissions disable the current workbench team view action', async () => {

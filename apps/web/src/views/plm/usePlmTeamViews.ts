@@ -254,7 +254,12 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       return
     }
     if (!canApplyPlmCollaborativeEntry(view)) {
-      options.setMessage(`请先恢复${options.label}团队视角，再执行应用。`, true)
+      options.setMessage(
+        view.isArchived
+          ? `请先恢复${options.label}团队视角，再执行应用。`
+          : `当前${options.label}团队视角不可应用。`,
+        true,
+      )
       return
     }
 
@@ -420,7 +425,12 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       return
     }
     if (!canShareTeamView.value) {
-      options.setMessage(`仅创建者可分享${options.label}团队视角。`, true)
+      options.setMessage(
+        canManageSelectedTeamView.value
+          ? `当前${options.label}团队视角不可分享。`
+          : `仅创建者可分享${options.label}团队视角。`,
+        true,
+      )
       return
     }
     if (!options.buildShareUrl || !options.copyShareUrl) {
