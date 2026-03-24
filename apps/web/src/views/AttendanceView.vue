@@ -536,6 +536,26 @@
                   {{ tr('Copy current link', '复制当前链接') }}
                 </button>
               </div>
+              <section v-if="visibleRecentAdminSectionNavItems.length > 0" class="attendance__admin-nav-recents">
+                <div class="attendance__admin-nav-recents-header">
+                  <strong>{{ tr('Recent', '最近访问') }}</strong>
+                  <span>{{ `${visibleRecentAdminSectionNavItems.length}` }}</span>
+                </div>
+                <div class="attendance__admin-nav-recents-items">
+                  <button
+                    v-for="item in visibleRecentAdminSectionNavItems"
+                    :key="`recent-${item.id}`"
+                    class="attendance__admin-nav-link attendance__admin-nav-link--recent"
+                    :class="{ 'attendance__admin-nav-link--active': adminActiveSectionId === item.id }"
+                    :aria-current="adminActiveSectionId === item.id ? 'true' : undefined"
+                    :data-admin-anchor-recent="item.id"
+                    type="button"
+                    @click="scrollToAdminSection(item.id)"
+                  >
+                    {{ item.label }}
+                  </button>
+                </div>
+              </section>
               <nav class="attendance__admin-nav" :aria-label="tr('Attendance admin sections', '考勤管理区块')">
                 <section
                   v-for="group in visibleAdminSectionNavGroups"
@@ -3507,6 +3527,8 @@ const { locale, isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 const CALENDAR_DISPLAY_PREFS_STORAGE_KEY = 'metasheet_attendance_calendar_display'
 const ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY = 'metasheet_attendance_admin_nav_collapsed_groups'
+const ADMIN_NAV_RECENTS_STORAGE_KEY = 'metasheet_attendance_admin_nav_recent_sections'
+const ADMIN_NAV_RECENT_LIMIT = 5
 
 interface AttendanceCalendarDisplayPrefs {
   showLunar: boolean
@@ -3557,6 +3579,27 @@ function persistAdminNavCollapsedGroups(groupIds: string[]): void {
   if (typeof window === 'undefined') return
   try {
     window.localStorage.setItem(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY, JSON.stringify(groupIds))
+  } catch {
+    // ignore storage write failures (private mode, quota).
+  }
+}
+
+function loadAdminNavRecentSections(): string[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(ADMIN_NAV_RECENTS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function persistAdminNavRecentSections(sectionIds: string[]): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(ADMIN_NAV_RECENTS_STORAGE_KEY, JSON.stringify(sectionIds))
   } catch {
     // ignore storage write failures (private mode, quota).
   }
@@ -4563,6 +4606,7 @@ const adminSectionFilter = ref('')
 const adminSectionFilterQuery = computed(() => adminSectionFilter.value.trim().toLowerCase())
 const adminSectionFilterActive = computed(() => adminSectionFilterQuery.value.length > 0)
 const adminCollapsedGroupIds = ref<string[]>(loadAdminNavCollapsedGroups())
+const adminRecentSectionIds = ref<string[]>(loadAdminNavRecentSections())
 const isCompactAdminNav = ref(false)
 const adminCompactNavOpen = ref(false)
 function isAdminSectionGroupExpanded(groupId: string, items: AdminSectionNavItem[]): boolean {
@@ -4592,6 +4636,15 @@ function buildCurrentAdminSectionLink(): string | null {
   if (typeof window === 'undefined' || !isKnownAdminSectionId(adminActiveSectionId.value)) return null
   const { origin, pathname, search } = window.location
   return `${origin}${pathname}${search}#${adminActiveSectionId.value}`
+}
+
+function trackRecentAdminSection(id: string): void {
+  if (!isKnownAdminSectionId(id)) return
+  const nextIds = [id, ...adminRecentSectionIds.value.filter(candidate => candidate !== id)].slice(0, ADMIN_NAV_RECENT_LIMIT)
+  if (nextIds.length === adminRecentSectionIds.value.length && nextIds.every((candidate, index) => candidate === adminRecentSectionIds.value[index])) {
+    return
+  }
+  adminRecentSectionIds.value = nextIds
 }
 
 async function copyCurrentAdminSectionLink(): Promise<void> {
@@ -4641,6 +4694,14 @@ const visibleAdminSectionNavGroups = computed(() => {
 })
 
 const visibleAdminSectionNavItems = computed(() => visibleAdminSectionNavGroups.value.flatMap(group => group.items))
+const visibleRecentAdminSectionNavItems = computed(() => {
+  const query = adminSectionFilterQuery.value
+  return adminRecentSectionIds.value
+    .map(id => adminSectionItemMap.value.get(id))
+    .filter((item): item is AdminSectionNavItem => Boolean(item))
+    .filter(item => !query || item.label.toLowerCase().includes(query))
+})
+const knownAdminSectionIds = computed(() => adminSectionNavItems.value.map(item => item.id))
 const knownAdminSectionGroupIds = computed(() => adminSectionNavGroups.value.map(group => group.id))
 const activeAdminSectionGroupLabel = computed(() => {
   const activeId = adminActiveSectionId.value
@@ -4666,6 +4727,12 @@ let adminSectionObserver: IntersectionObserver | null = null
 let adminHashSyncReady = false
 let adminHashRestoreCompleted = false
 let adminHashRestorePending = false
+
+watch(adminActiveSectionId, (id) => {
+  if (!showAdmin.value || !isKnownAdminSectionId(id)) return
+  trackRecentAdminSection(id)
+})
+
 const statusCode = computed(() => statusMeta.value?.code || '')
 const statusHint = computed(() => statusMeta.value?.hint || '')
 const canResumeImportJobFromStatus = computed(() => {
@@ -4747,6 +4814,18 @@ watch(knownAdminSectionGroupIds, (groupIds) => {
 
 watch(adminCollapsedGroupIds, (groupIds) => {
   persistAdminNavCollapsedGroups(Array.from(new Set(groupIds)))
+})
+
+watch(knownAdminSectionIds, (sectionIds) => {
+  const known = new Set(sectionIds)
+  const nextIds = Array.from(new Set(adminRecentSectionIds.value.filter(id => known.has(id)))).slice(0, ADMIN_NAV_RECENT_LIMIT)
+  if (nextIds.length !== adminRecentSectionIds.value.length || nextIds.some((id, index) => id !== adminRecentSectionIds.value[index])) {
+    adminRecentSectionIds.value = nextIds
+  }
+}, { immediate: true })
+
+watch(adminRecentSectionIds, (sectionIds) => {
+  persistAdminNavRecentSections(Array.from(new Set(sectionIds)).slice(0, ADMIN_NAV_RECENT_LIMIT))
 })
 
 const recordMap = computed(() => {
@@ -11225,6 +11304,35 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.attendance__admin-nav-recents {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+
+.attendance__admin-nav-recents-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #1e3a8a;
+  font-size: 12px;
+}
+
+.attendance__admin-nav-recents-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attendance__admin-nav-link--recent {
+  background: #ffffff;
 }
 
 .attendance__admin-nav-toggle {

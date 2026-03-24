@@ -1,8 +1,8 @@
-# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, And Share Links Design 2026-03-24
+# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, And Recent Shortcuts Design 2026-03-24
 
 ## Context
 
-`AttendanceView.vue` already carries the attendance admin console as a single long page with 22 top-level sections. The first-stage root-admin stabilization added a sticky left anchor rail, active-section tracking, and section-level refs. The second stage added quick-find and hash deep links. The third stage grouped the rail by business domain. The fourth stage added collapse persistence and bulk expand/collapse actions. The fifth stage made the compact mobile rail deliberate instead of just functional. This follow-up turns the existing deep-link model into a user-facing share action.
+`AttendanceView.vue` already carries the attendance admin console as a single long page with 22 top-level sections. The first-stage root-admin stabilization added a sticky left anchor rail, active-section tracking, and section-level refs. The second stage added quick-find and hash deep links. The third stage grouped the rail by business domain. The fourth stage added collapse persistence and bulk expand/collapse actions. The fifth stage made the compact mobile rail deliberate instead of just functional. The sixth stage turned the existing deep-link model into a user-facing share action. This follow-up adds a recent-shortcuts layer on top of the same active-section state.
 
 ## Goals
 
@@ -11,6 +11,7 @@
 - Preserve the operator's preferred left-rail state across reloads.
 - Reduce compact-mode height and keep the current domain prominent on narrow screens.
 - Make the current admin section shareable without editing the URL manually.
+- Make repeated jumps between a handful of admin sections faster than re-scanning all groups.
 - Allow users to share or restore a concrete admin section via URL hash.
 - Keep the implementation local to attendance until a second real long-form admin page appears.
 
@@ -118,7 +119,26 @@ This keeps the share action aligned with the already-tested hash deep-link model
 - hash stays in sync
 - copy action exports the same target
 
-### 6. Hash-based deep links
+### 6. Recent admin section shortcuts
+
+The rail now keeps a short `Recent` strip above the grouped navigation.
+
+Design choices:
+
+- the source of truth is still `adminActiveSectionId`
+- recent ids are persisted separately from group collapse state
+- the list is deduplicated, bounded to five items, and sanitized against the current known section ids
+- recent items reuse the same button styling and `scrollToAdminSection()` handler as grouped items
+- quick-find filtering also filters the recent strip, so the rail stays internally consistent while searching
+
+This avoids introducing a second navigation model. The recent strip is only a faster entry point into the same section ids that already drive:
+
+- observer tracking
+- hash deep links
+- compact-mode promotion
+- current-link copying
+
+### 7. Hash-based deep links
 
 The admin rail now treats each known section id as a valid deep-link target.
 
@@ -128,7 +148,7 @@ The admin rail now treats each known section id as a valid deep-link target.
 
 The restore path uses a bounded next-tick retry loop plus a non-reentrant guard. This makes the first-load hash restore resilient to mount timing without introducing duplicate scrolls, scroll polling, or route-level state. The same rule also guarantees that a hashed target remains visible when its group would otherwise be collapsed by persisted state, including in compact mode.
 
-### 7. Branch hygiene for timezone helpers
+### 8. Branch hygiene for timezone helpers
 
 This clean branch already depended on `apps/web/src/utils/timezones.ts` through `AttendanceView.vue`, but the file was missing from the branch itself. The follow-up includes it so the branch can build and type-check independently instead of relying on unrelated local dirt from another worktree.
 
@@ -154,3 +174,4 @@ If a second admin surface later needs the same behavior, the right extraction ta
 - No router-level nested admin navigation model.
 - No backend changes in this follow-up.
 - No change to how nested subsections are modeled; only top-level attendance admin blocks stay anchorable.
+- No server-side preference store or cross-user sharing model for recent shortcuts.

@@ -4,6 +4,7 @@ import AttendanceView from '../src/views/AttendanceView.vue'
 import { apiFetch } from '../src/utils/api'
 
 const ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY = 'metasheet_attendance_admin_nav_collapsed_groups'
+const ADMIN_NAV_RECENTS_STORAGE_KEY = 'metasheet_attendance_admin_nav_recent_sections'
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
@@ -62,6 +63,7 @@ describe('Attendance admin anchor navigation', () => {
     vi.clearAllMocks()
     window.localStorage.setItem('metasheet_locale', 'en')
     window.localStorage.removeItem(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY)
+    window.localStorage.removeItem(ADMIN_NAV_RECENTS_STORAGE_KEY)
     window.history.replaceState({}, '', '/attendance')
     setViewportWidth(1280)
     vi.mocked(apiFetch).mockResolvedValue(
@@ -272,6 +274,53 @@ describe('Attendance admin anchor navigation', () => {
     expect(clipboardWriteTextSpy).toHaveBeenCalledTimes(1)
     expect(clipboardWriteTextSpy.mock.calls[0]?.[0]).toContain('#attendance-admin-import-batches')
     expect(container!.textContent).toContain('Current admin section link copied.')
+  })
+
+  it('tracks recent admin sections as operators move across the console', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const importBatches = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-import-batches"]')
+    const approvalFlows = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-approval-flows"]')
+    expect(importBatches).toBeTruthy()
+    expect(approvalFlows).toBeTruthy()
+
+    importBatches!.click()
+    await flushUi(2)
+    approvalFlows!.click()
+    await flushUi(2)
+
+    const labels = Array.from(container!.querySelectorAll('[data-admin-anchor-recent]')).map(
+      item => item.textContent?.trim() || '',
+    )
+    expect(labels).toEqual(['Approval Flows', 'Import batches'])
+    expect(window.localStorage.getItem(ADMIN_NAV_RECENTS_STORAGE_KEY)).toContain('attendance-admin-approval-flows')
+  })
+
+  it('restores recent admin sections across remounts', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const importBatches = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-import-batches"]')
+    const approvalFlows = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-approval-flows"]')
+    importBatches!.click()
+    await flushUi(2)
+    approvalFlows!.click()
+    await flushUi(2)
+
+    app.unmount()
+    container!.innerHTML = ''
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const labels = Array.from(container!.querySelectorAll('[data-admin-anchor-recent]')).map(
+      item => item.textContent?.trim() || '',
+    )
+    expect(labels).toEqual(['Approval Flows', 'Import batches'])
   })
 
   it('collapses the grouped rail behind a toggle on narrow screens', async () => {
