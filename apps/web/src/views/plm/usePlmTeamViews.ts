@@ -160,7 +160,12 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     if (teamViewKey.value) return
     const requestedViewId = options.requestedViewId?.value.trim() || ''
     if (requestedViewId) {
-      const requestedView = items.find((entry) => entry.id === requestedViewId && !entry.isArchived)
+      const requestedView = items.find(
+        (entry) =>
+          entry.id === requestedViewId &&
+          !entry.isArchived &&
+          canApplyPlmCollaborativeEntry(entry),
+      )
       if (requestedView) {
         applyView(requestedView)
         return
@@ -169,7 +174,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     }
     if (!options.shouldAutoApplyDefault?.()) return
 
-    const view = items.find((entry) => entry.isDefault)
+    const view = items.find(
+      (entry) => entry.isDefault && !entry.isArchived && canApplyPlmCollaborativeEntry(entry),
+    )
     if (!view) return
     if (lastAutoAppliedDefaultId.value === view.id) return
 

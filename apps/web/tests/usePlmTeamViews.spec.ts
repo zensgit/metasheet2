@@ -170,6 +170,130 @@ describe('usePlmTeamViews', () => {
     expect(syncRequestedViewId).toHaveBeenCalledWith('view-explicit')
   })
 
+  it('falls back to an applyable default when the requested team view cannot be applied', async () => {
+    const requestedViewId = ref('view-explicit')
+    const syncRequestedViewId = vi.fn((value?: string) => {
+      requestedViewId.value = value || ''
+    })
+
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'view-default',
+          kind: 'documents',
+          scope: 'team',
+          name: '默认文档视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: true,
+          state: {
+            role: 'secondary',
+            filter: 'motor',
+            sortKey: 'updated',
+            sortDir: 'desc',
+            columns: { mime: true },
+          },
+        },
+        {
+          id: 'view-explicit',
+          kind: 'documents',
+          scope: 'team',
+          name: '只读显式视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: false,
+          },
+          state: {
+            role: 'primary',
+            filter: 'gear',
+            sortKey: 'name',
+            sortDir: 'asc',
+            columns: { role: true },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'documents',
+      label: '文档',
+      getCurrentViewState: () => ({
+        role: '',
+        filter: '',
+        sortKey: 'updated',
+        sortDir: 'desc',
+        columns: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => true,
+      requestedViewId,
+      syncRequestedViewId,
+    })
+
+    await model.refreshTeamViews()
+
+    expect(applyViewState).toHaveBeenCalledWith({
+      role: 'secondary',
+      filter: 'motor',
+      sortKey: 'updated',
+      sortDir: 'desc',
+      columns: { mime: true },
+    })
+    expect(model.teamViewKey.value).toBe('view-default')
+    expect(requestedViewId.value).toBe('view-default')
+    expect(setMessage).toHaveBeenLastCalledWith('已应用文档默认团队视角：默认文档视角')
+  })
+
+  it('does not auto-apply a default team view that fails canApply gating', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'view-default',
+          kind: 'documents',
+          scope: 'team',
+          name: '只读默认文档视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: true,
+          permissions: {
+            canApply: false,
+          },
+          state: {
+            role: 'primary',
+            filter: 'gear',
+            sortKey: 'updated',
+            sortDir: 'desc',
+            columns: { mime: true },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'documents',
+      label: '文档',
+      getCurrentViewState: () => ({
+        role: '',
+        filter: '',
+        sortKey: 'updated',
+        sortDir: 'desc',
+        columns: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => true,
+    })
+
+    await model.refreshTeamViews()
+
+    expect(applyViewState).not.toHaveBeenCalled()
+    expect(model.teamViewKey.value).toBe('')
+    expect(setMessage).not.toHaveBeenCalled()
+  })
+
   it('syncs requested workbench view id before applying workbench state', async () => {
     const requestedViewId = ref('')
     const syncRequestedViewId = vi.fn((value?: string) => {
