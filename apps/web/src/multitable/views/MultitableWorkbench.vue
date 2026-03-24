@@ -182,7 +182,7 @@ import { bulkImportRecords } from '../import/bulk-import'
 const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; mode?: string; role?: MultitableRole }>()
 
 const role = ref<MultitableRole>(props.role ?? 'editor')
-const workbench = useMultitableWorkbench({ initialSheetId: props.sheetId, initialViewId: props.viewId })
+const workbench = useMultitableWorkbench({ initialBaseId: props.baseId, initialSheetId: props.sheetId, initialViewId: props.viewId })
 const capabilitySource = computed(() => workbench.capabilities.value ?? role.value)
 const caps = useMultitableCapabilities(capabilitySource)
 const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workbench.activeViewId })
@@ -197,7 +197,7 @@ const linkPickerCurrentValue = ref<unknown>(null)
 const showFieldManager = ref(false)
 const showViewManager = ref(false)
 const bases = ref<MetaBase[]>([])
-const activeBaseId = ref(props.baseId ?? '')
+const activeBaseId = computed(() => workbench.activeBaseId.value)
 const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
 const commentDraft = ref('')
 const searchText = ref('')
@@ -537,8 +537,12 @@ async function onDeleteView(viewId: string) {
 // --- Sheet management ---
 async function onCreateSheet(name: string) {
   try {
-    const res = await workbench.client.createSheet({ name, baseId: activeBaseId.value || undefined, seed: true })
-    await workbench.loadSheets()
+    const res = await workbench.client.createSheet({ name, baseId: workbench.activeBaseId.value || undefined, seed: true })
+    if (workbench.activeBaseId.value) {
+      await workbench.loadBaseContext(workbench.activeBaseId.value)
+    } else {
+      await workbench.loadSheets()
+    }
     workbench.selectSheet(res.sheet.id)
   } catch (e: any) { showError(e.message ?? 'Failed to create sheet') }
 }
@@ -548,18 +552,14 @@ async function loadBases() {
   try {
     const data = await workbench.client.listBases()
     bases.value = data.bases ?? []
-    if (!activeBaseId.value && bases.value.length) activeBaseId.value = bases.value[0].id
+    if (!workbench.activeBaseId.value && bases.value.length) workbench.selectBase(bases.value[0].id)
   } catch { /* silent */ }
 }
 
 async function onSelectBase(baseId: string) {
-  activeBaseId.value = baseId
+  workbench.selectBase(baseId)
   try {
-    const ctx = await workbench.client.loadContext({ baseId })
-    workbench.sheets.value = ctx.sheets ?? []
-    workbench.views.value = ctx.views ?? []
-    if (ctx.sheet) workbench.selectSheet(ctx.sheet.id)
-    else if (workbench.sheets.value.length) workbench.selectSheet(workbench.sheets.value[0].id)
+    await workbench.loadBaseContext(baseId)
   } catch (e: any) { showError(e.message ?? 'Failed to load base') }
 }
 
@@ -776,8 +776,15 @@ watch(
 onMounted(async () => {
   window.addEventListener('beforeunload', onBeforeUnload)
   try {
-    loadBases()
-    await workbench.loadSheets()
+    await loadBases()
+    if (workbench.activeBaseId.value) {
+      await workbench.loadBaseContext(workbench.activeBaseId.value, {
+        sheetId: props.sheetId,
+        viewId: props.viewId,
+      })
+    } else {
+      await workbench.loadSheets()
+    }
     const deepRecordId = props.recordId ?? parseDeepLink()
     if (deepRecordId) await resolveDeepLink(deepRecordId)
     if (activeViewType.value === 'form') loadStandaloneForm()
