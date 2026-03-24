@@ -81,6 +81,10 @@ function normalizeViewName(name: string) {
   return name.trim().toLocaleLowerCase()
 }
 
+export function canSavePlmAuditSavedViewName(name: string) {
+  return Boolean(name.trim())
+}
+
 function generateSavedViewId() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return `plm-audit-view-${crypto.randomUUID()}`
@@ -118,10 +122,10 @@ export function readPlmAuditSavedViews(storage?: Storage | null): PlmAuditSavedV
 }
 
 export function savePlmAuditSavedView(name: string, state: PlmAuditRouteState, storage?: Storage | null): PlmAuditSavedView[] {
-  const trimmedName = name.trim()
-  if (!trimmedName) {
+  if (!canSavePlmAuditSavedViewName(name)) {
     return readPlmAuditSavedViews(storage)
   }
+  const trimmedName = name.trim()
 
   const now = new Date().toISOString()
   const current = readPlmAuditSavedViews(storage)

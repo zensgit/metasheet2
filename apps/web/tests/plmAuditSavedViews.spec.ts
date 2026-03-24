@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  canSavePlmAuditSavedViewName,
   deletePlmAuditSavedView,
   readPlmAuditSavedViews,
   restorePlmAuditSavedViewState,
@@ -51,6 +52,26 @@ const sampleState: PlmAuditRouteState = {
 }
 
 describe('plmAuditSavedViews', () => {
+  it('only allows saving local saved views with a non-empty trimmed name', () => {
+    expect(canSavePlmAuditSavedViewName('')).toBe(false)
+    expect(canSavePlmAuditSavedViewName('   ')).toBe(false)
+    expect(canSavePlmAuditSavedViewName('  Team Snapshot  ')).toBe(true)
+  })
+
+  it('does not write local saved views when the name is empty after trimming', () => {
+    const storage = createMemoryStorage()
+
+    savePlmAuditSavedView('Documents Archive', sampleState, storage)
+    const next = savePlmAuditSavedView('   ', {
+      ...sampleState,
+      q: 'ignored',
+    }, storage)
+
+    expect(next).toHaveLength(1)
+    expect(next[0]?.name).toBe('Documents Archive')
+    expect(next[0]?.state.q).toBe('documents')
+  })
+
   it('stores and sorts saved views by updated time', () => {
     const storage = createMemoryStorage()
 

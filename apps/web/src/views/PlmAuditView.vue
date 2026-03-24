@@ -609,9 +609,9 @@
             class="plm-audit__saved-view-input"
             type="text"
             :placeholder="tr('View name', '视图名称')"
-            @keydown.enter.prevent="saveCurrentView"
+            @keydown.enter.prevent="canSaveCurrentAuditView && saveCurrentView()"
           />
-          <button class="plm-audit__button plm-audit__button--primary" type="button" @click="saveCurrentView">
+          <button class="plm-audit__button plm-audit__button--primary" type="button" :disabled="!canSaveCurrentAuditView" @click="saveCurrentView">
             {{ tr('Save current view', '保存当前视图') }}
           </button>
         </div>
@@ -820,6 +820,7 @@ import {
   type PlmAuditSavedViewAttentionAction,
 } from './plmAuditSavedViewAttention'
 import {
+  canSavePlmAuditSavedViewName,
   deletePlmAuditSavedView,
   readPlmAuditSavedViews,
   restorePlmAuditSavedViewState,
@@ -1087,6 +1088,7 @@ const allSelectableAuditTeamViewsSelected = computed(() => (
   && selectedAuditTeamViewCount.value === selectableAuditTeamViewCount.value
 ))
 const canSaveAuditTeamView = computed(() => Boolean(auditTeamViewName.value.trim()))
+const canSaveCurrentAuditView = computed(() => canSavePlmAuditSavedViewName(savedViewName.value))
 const auditSceneContext = computed(() => {
   return buildPlmAuditSceneContextBanner({
     sceneId: auditSceneId.value,
@@ -2939,10 +2941,12 @@ async function exportCsv() {
 }
 
 function saveCurrentView() {
+  if (!canSaveCurrentAuditView.value) return
   void saveCurrentAuditView()
 }
 
 async function saveCurrentAuditView() {
+  if (!canSaveCurrentAuditView.value) return
   const currentRouteState = readCurrentRouteState()
   const canonicalRouteState = parsePlmAuditRouteState(route.query)
   const followupSource = resolvePlmAuditSavedViewLocalSaveFollowupSource({
