@@ -269,6 +269,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`仅创建者可删除${options.label}团队视角。`, true)
       return
     }
+    if (!canDeleteTeamView.value) {
+      options.setMessage(`当前${options.label}团队视角不可删除。`, true)
+      return
+    }
 
     teamViewsLoading.value = true
     teamViewsError.value = ''
@@ -309,6 +313,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`${options.label}团队视角已归档。`)
       return
     }
+    if (!canArchiveTeamView.value) {
+      options.setMessage(`当前${options.label}团队视角不可归档。`, true)
+      return
+    }
 
     teamViewsLoading.value = true
     teamViewsError.value = ''
@@ -347,6 +355,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     }
     if (!view.isArchived) {
       options.setMessage(`${options.label}团队视角无需恢复。`)
+      return
+    }
+    if (!canRestoreTeamView.value) {
+      options.setMessage(`当前${options.label}团队视角不可恢复。`, true)
       return
     }
 
@@ -438,6 +450,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`请输入${options.label}团队视角名称。`, true)
       return
     }
+    if (!canRenameTeamView.value) {
+      options.setMessage(`当前${options.label}团队视角不可重命名。`, true)
+      return
+    }
 
     teamViewsLoading.value = true
     teamViewsError.value = ''
@@ -471,6 +487,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     }
     if (view.isArchived) {
       options.setMessage(`请先恢复${options.label}团队视角，再设为默认。`, true)
+      return
+    }
+    if (!canSetTeamViewDefault.value) {
+      options.setMessage(`当前${options.label}团队视角不可设为默认。`, true)
       return
     }
 
@@ -513,6 +533,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`仅创建者可转移${options.label}团队视角。`, true)
       return
     }
+    if (!canTransferTeamView.value) {
+      options.setMessage(`当前${options.label}团队视角不可转移所有者。`, true)
+      return
+    }
 
     teamViewsLoading.value = true
     teamViewsError.value = ''
@@ -542,6 +566,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     }
     if (view.isArchived) {
       options.setMessage(`请先恢复${options.label}团队视角，再取消默认。`, true)
+      return
+    }
+    if (!canClearTeamViewDefault.value) {
+      options.setMessage(`当前${options.label}团队视角不可取消默认。`, true)
       return
     }
 

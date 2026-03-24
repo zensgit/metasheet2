@@ -1243,6 +1243,131 @@ describe('usePlmTeamViews', () => {
     expect(setMessage).toHaveBeenNthCalledWith(2, '仅创建者可转移工作台团队视角。', true)
   })
 
+  it('blocks granular management handlers when explicit permissions disable the current workbench team view action', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-locked',
+          kind: 'workbench',
+          scope: 'team',
+          name: '受限工作台视角',
+          ownerUserId: 'owner-2',
+          canManage: false,
+          isDefault: false,
+          permissions: {
+            canManage: true,
+            canApply: true,
+            canDelete: false,
+            canArchive: false,
+            canRename: false,
+            canTransfer: false,
+            canSetDefault: false,
+          },
+          state: {
+            query: {
+              documentFilter: 'locked-doc',
+            },
+          },
+        },
+        {
+          id: 'workbench-default-locked',
+          kind: 'workbench',
+          scope: 'team',
+          name: '受限默认工作台视角',
+          ownerUserId: 'owner-2',
+          canManage: false,
+          isDefault: true,
+          permissions: {
+            canManage: true,
+            canApply: true,
+            canClearDefault: false,
+          },
+          state: {
+            query: {
+              documentFilter: 'default-doc',
+            },
+          },
+        },
+        {
+          id: 'workbench-restore-locked',
+          kind: 'workbench',
+          scope: 'team',
+          name: '受限归档工作台视角',
+          ownerUserId: 'owner-2',
+          canManage: false,
+          isDefault: false,
+          isArchived: true,
+          permissions: {
+            canManage: true,
+            canApply: false,
+            canRestore: false,
+          },
+          state: {
+            query: {
+              documentFilter: 'archived-doc',
+            },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-locked'
+    model.teamViewName.value = '想重命名'
+    model.teamViewOwnerUserId.value = 'owner-3'
+    await nextTick()
+
+    expect(model.canDeleteTeamView.value).toBe(false)
+    expect(model.canArchiveTeamView.value).toBe(false)
+    expect(model.canRenameTeamView.value).toBe(false)
+    expect(model.canTransferTeamView.value).toBe(false)
+    expect(model.canSetTeamViewDefault.value).toBe(false)
+
+    await model.deleteTeamView()
+    await model.archiveTeamView()
+    await model.renameTeamView()
+    await model.transferTeamView()
+    await model.setTeamViewDefault()
+
+    model.teamViewKey.value = 'workbench-default-locked'
+    await nextTick()
+
+    expect(model.canClearTeamViewDefault.value).toBe(false)
+    await model.clearTeamViewDefault()
+
+    model.teamViewKey.value = 'workbench-restore-locked'
+    await nextTick()
+
+    expect(model.canRestoreTeamView.value).toBe(false)
+    await model.restoreTeamView()
+
+    expect(deletePlmWorkbenchTeamView).not.toHaveBeenCalled()
+    expect(archivePlmWorkbenchTeamView).not.toHaveBeenCalled()
+    expect(renamePlmWorkbenchTeamView).not.toHaveBeenCalled()
+    expect(transferPlmWorkbenchTeamView).not.toHaveBeenCalled()
+    expect(setPlmWorkbenchTeamViewDefault).not.toHaveBeenCalled()
+    expect(clearPlmWorkbenchTeamViewDefault).not.toHaveBeenCalled()
+    expect(restorePlmWorkbenchTeamView).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenNthCalledWith(1, '当前工作台团队视角不可删除。', true)
+    expect(setMessage).toHaveBeenNthCalledWith(2, '当前工作台团队视角不可归档。', true)
+    expect(setMessage).toHaveBeenNthCalledWith(3, '当前工作台团队视角不可重命名。', true)
+    expect(setMessage).toHaveBeenNthCalledWith(4, '当前工作台团队视角不可转移所有者。', true)
+    expect(setMessage).toHaveBeenNthCalledWith(5, '当前工作台团队视角不可设为默认。', true)
+    expect(setMessage).toHaveBeenNthCalledWith(6, '当前工作台团队视角不可取消默认。', true)
+    expect(setMessage).toHaveBeenNthCalledWith(7, '当前工作台团队视角不可恢复。', true)
+  })
+
   it('allows rename, set-default, and clear-default when permissions.canManage overrides legacy false', async () => {
     vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
       items: [
