@@ -1,8 +1,8 @@
-# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, Recent Shortcuts, Active-Link Visibility, Last-Section Restore, And Org-Scoped Rail State Design 2026-03-24
+# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, Recent Shortcuts, Active-Link Visibility, Last-Section Restore, Org-Scoped Rail State, And Scope Badge Design 2026-03-24
 
 ## Context
 
-`AttendanceView.vue` already carries the attendance admin console as a single long page with 22 top-level sections. The first-stage root-admin stabilization added a sticky left anchor rail, active-section tracking, and section-level refs. The second stage added quick-find and hash deep links. The third stage grouped the rail by business domain. The fourth stage added collapse persistence and bulk expand/collapse actions. The fifth stage made the compact mobile rail deliberate instead of just functional. The sixth stage turned the existing deep-link model into a user-facing share action. The seventh stage added recent shortcuts. The eighth stage kept the active rail link visible while the operator scrolls through the long page. The ninth stage added startup fallback to the last meaningful section when there is no explicit hash. This follow-up scopes all persisted rail state by org id so one org does not reopen with another org's navigation memory.
+`AttendanceView.vue` already carries the attendance admin console as a single long page with 22 top-level sections. The first-stage root-admin stabilization added a sticky left anchor rail, active-section tracking, and section-level refs. The second stage added quick-find and hash deep links. The third stage grouped the rail by business domain. The fourth stage added collapse persistence and bulk expand/collapse actions. The fifth stage made the compact mobile rail deliberate instead of just functional. The sixth stage turned the existing deep-link model into a user-facing share action. The seventh stage added recent shortcuts. The eighth stage kept the active rail link visible while the operator scrolls through the long page. The ninth stage added startup fallback to the last meaningful section when there is no explicit hash. The tenth stage scoped all persisted rail state by org id so one org does not reopen with another org's navigation memory. This follow-up makes that scoping visible with a lightweight badge in the rail header.
 
 ## Goals
 
@@ -15,6 +15,7 @@
 - Keep the left rail spatially in sync with the long-page active section.
 - Reopen the admin console at the operator's last meaningful section when no deep link is present.
 - Prevent persisted rail state from bleeding across organizations.
+- Make the current org-scoped rail memory visible without adding a new panel or warning banner.
 - Allow users to share or restore a concrete admin section via URL hash.
 - Keep the implementation local to attendance until a second real long-form admin page appears.
 
@@ -193,7 +194,24 @@ This keeps the persistence semantics predictable:
 - rail memory is local to the working org
 - changing orgs swaps rail state without needing a full remount
 
-### 10. Hash-based deep links
+### 10. Visible org scope badge
+
+The rail header now shows a compact org-scope badge when the admin console is using a non-default org bucket.
+
+Design choices:
+
+- the default bucket stays visually silent, so the common single-org case does not get extra chrome
+- the badge lives in the existing header row instead of adding a separate hint block or banner
+- the badge displays the effective `adminNavStorageScope`, which already drives the storage key resolution
+- long org ids truncate with ellipsis so the sticky rail width stays stable
+
+This keeps the signal lightweight:
+
+- no new interactions
+- no extra persistence
+- no mismatch between what is shown and what the storage helpers actually use
+
+### 11. Hash-based deep links
 
 The admin rail now treats each known section id as a valid deep-link target.
 
@@ -203,7 +221,7 @@ The admin rail now treats each known section id as a valid deep-link target.
 
 The restore path uses a bounded next-tick retry loop plus a non-reentrant guard. This makes the first-load hash restore resilient to mount timing without introducing duplicate scrolls, scroll polling, or route-level state. The same rule also guarantees that a hashed target remains visible when its group would otherwise be collapsed by persisted state, including in compact mode.
 
-### 11. Branch hygiene for timezone helpers
+### 12. Branch hygiene for timezone helpers
 
 This clean branch already depended on `apps/web/src/utils/timezones.ts` through `AttendanceView.vue`, but the file was missing from the branch itself. The follow-up includes it so the branch can build and type-check independently instead of relying on unrelated local dirt from another worktree.
 

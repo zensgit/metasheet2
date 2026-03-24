@@ -489,7 +489,16 @@
             <aside class="attendance__admin-nav-panel">
               <div class="attendance__admin-nav-header">
                 <strong>{{ tr('Sections', '区块') }}</strong>
-                <span>{{ adminSectionNavCountLabel }}</span>
+                <div class="attendance__admin-nav-header-meta">
+                  <span>{{ adminSectionNavCountLabel }}</span>
+                  <span
+                    v-if="adminNavStorageScope !== ADMIN_NAV_DEFAULT_STORAGE_SCOPE"
+                    class="attendance__admin-nav-scope-badge"
+                    :title="tr('Navigation memory scoped to this org.', '当前导航记忆已关联到此组织。')"
+                  >
+                    {{ adminNavStorageScope }}
+                  </span>
+                </div>
               </div>
               <button
                 v-if="isCompactAdminNav"
@@ -11355,6 +11364,26 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   gap: 12px;
   font-size: 12px;
   color: #6b7280;
+}
+
+.attendance__admin-nav-header-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.attendance__admin-nav-scope-badge {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #e0e7ff;
+  color: #3730a3;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .attendance__field--compact {

@@ -137,6 +137,7 @@ describe('Attendance admin anchor navigation', () => {
     )
     expect(labels).not.toContain('Holiday overrides')
     expect(labels).not.toContain('Template Versions')
+    expect(container!.querySelector('.attendance__admin-nav-scope-badge')).toBeNull()
   })
 
   it('collapses and expands admin anchor groups', async () => {
@@ -374,6 +375,7 @@ describe('Attendance admin anchor navigation', () => {
       item => item.textContent?.trim() || '',
     )
     expect(labels).toEqual(['Payroll Cycles', 'Import batches'])
+    expect(container!.querySelector('.attendance__admin-nav-scope-badge')?.textContent?.trim()).toBe('org-b')
     expect(scrollIntoViewSpy).toHaveBeenCalled()
     const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
     expect(scrolledTargets.some(target => target.id === 'attendance-admin-payroll-cycles')).toBe(true)
