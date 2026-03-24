@@ -1,8 +1,8 @@
-# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, Recent Shortcuts, And Active-Link Visibility Design 2026-03-24
+# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, Recent Shortcuts, Active-Link Visibility, And Last-Section Restore Design 2026-03-24
 
 ## Context
 
-`AttendanceView.vue` already carries the attendance admin console as a single long page with 22 top-level sections. The first-stage root-admin stabilization added a sticky left anchor rail, active-section tracking, and section-level refs. The second stage added quick-find and hash deep links. The third stage grouped the rail by business domain. The fourth stage added collapse persistence and bulk expand/collapse actions. The fifth stage made the compact mobile rail deliberate instead of just functional. The sixth stage turned the existing deep-link model into a user-facing share action. The seventh stage added recent shortcuts. This follow-up makes the active rail link keep itself visible while the operator scrolls through the long page.
+`AttendanceView.vue` already carries the attendance admin console as a single long page with 22 top-level sections. The first-stage root-admin stabilization added a sticky left anchor rail, active-section tracking, and section-level refs. The second stage added quick-find and hash deep links. The third stage grouped the rail by business domain. The fourth stage added collapse persistence and bulk expand/collapse actions. The fifth stage made the compact mobile rail deliberate instead of just functional. The sixth stage turned the existing deep-link model into a user-facing share action. The seventh stage added recent shortcuts. The eighth stage kept the active rail link visible while the operator scrolls through the long page. This follow-up adds a startup fallback so the admin console reopens on the last meaningful section when there is no explicit hash.
 
 ## Goals
 
@@ -13,6 +13,7 @@
 - Make the current admin section shareable without editing the URL manually.
 - Make repeated jumps between a handful of admin sections faster than re-scanning all groups.
 - Keep the left rail spatially in sync with the long-page active section.
+- Reopen the admin console at the operator's last meaningful section when no deep link is present.
 - Allow users to share or restore a concrete admin section via URL hash.
 - Keep the implementation local to attendance until a second real long-form admin page appears.
 
@@ -152,7 +153,25 @@ Design choices:
 
 This is the missing last mile after active-section tracking. Without it, the correct item can be active in state but still be physically out of view inside the sticky rail once the operator has moved far enough down the page.
 
-### 8. Hash-based deep links
+### 8. Last-section restore without a hash
+
+The admin console now stores the last known active section id separately from the recent-shortcuts list.
+
+Design choices:
+
+- explicit `#section-id` deep links remain highest priority
+- if there is no valid hash, startup falls back to the stored last section id
+- if the stored id is stale or unknown, the console still falls through to the current default first section
+- restoring the last section reuses the same bounded restore loop as hash-based restore, so the mount-time scroll behavior stays in one place
+- once the stored section becomes the active section, it flows through the existing active-section synchronization and can materialize the matching hash in the address bar
+
+This keeps the persistence model layered and predictable:
+
+- `hash` controls shareable deep links
+- `last section` controls return-to-work continuity
+- `recents` controls fast in-session and cross-session jumps between a few common sections
+
+### 9. Hash-based deep links
 
 The admin rail now treats each known section id as a valid deep-link target.
 
@@ -162,7 +181,7 @@ The admin rail now treats each known section id as a valid deep-link target.
 
 The restore path uses a bounded next-tick retry loop plus a non-reentrant guard. This makes the first-load hash restore resilient to mount timing without introducing duplicate scrolls, scroll polling, or route-level state. The same rule also guarantees that a hashed target remains visible when its group would otherwise be collapsed by persisted state, including in compact mode.
 
-### 9. Branch hygiene for timezone helpers
+### 10. Branch hygiene for timezone helpers
 
 This clean branch already depended on `apps/web/src/utils/timezones.ts` through `AttendanceView.vue`, but the file was missing from the branch itself. The follow-up includes it so the branch can build and type-check independently instead of relying on unrelated local dirt from another worktree.
 

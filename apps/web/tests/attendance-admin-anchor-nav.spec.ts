@@ -5,6 +5,7 @@ import { apiFetch } from '../src/utils/api'
 
 const ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY = 'metasheet_attendance_admin_nav_collapsed_groups'
 const ADMIN_NAV_RECENTS_STORAGE_KEY = 'metasheet_attendance_admin_nav_recent_sections'
+const ADMIN_NAV_LAST_SECTION_STORAGE_KEY = 'metasheet_attendance_admin_nav_last_section'
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
@@ -64,6 +65,7 @@ describe('Attendance admin anchor navigation', () => {
     window.localStorage.setItem('metasheet_locale', 'en')
     window.localStorage.removeItem(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY)
     window.localStorage.removeItem(ADMIN_NAV_RECENTS_STORAGE_KEY)
+    window.localStorage.removeItem(ADMIN_NAV_LAST_SECTION_STORAGE_KEY)
     window.history.replaceState({}, '', '/attendance')
     setViewportWidth(1280)
     vi.mocked(apiFetch).mockResolvedValue(
@@ -323,6 +325,23 @@ describe('Attendance admin anchor navigation', () => {
       item => item.textContent?.trim() || '',
     )
     expect(labels).toEqual(['Approval Flows', 'Import batches'])
+  })
+
+  it('restores the last active admin section when no hash is present', async () => {
+    window.localStorage.setItem(ADMIN_NAV_LAST_SECTION_STORAGE_KEY, 'attendance-admin-approval-flows')
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    expect(scrollIntoViewSpy).toHaveBeenCalled()
+    const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
+    expect(scrolledTargets.some(target => target.id === 'attendance-admin-approval-flows')).toBe(true)
+    expect(scrolledTargets.some(target => target.dataset.adminAnchor === 'attendance-admin-approval-flows')).toBe(true)
+
+    const button = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-approval-flows"]')
+    expect(button?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
+    expect(button?.getAttribute('aria-current')).toBe('true')
+    expect(window.location.hash).toBe('#attendance-admin-approval-flows')
   })
 
   it('collapses the grouped rail behind a toggle on narrow screens', async () => {

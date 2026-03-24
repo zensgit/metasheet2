@@ -3528,6 +3528,7 @@ const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 const CALENDAR_DISPLAY_PREFS_STORAGE_KEY = 'metasheet_attendance_calendar_display'
 const ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY = 'metasheet_attendance_admin_nav_collapsed_groups'
 const ADMIN_NAV_RECENTS_STORAGE_KEY = 'metasheet_attendance_admin_nav_recent_sections'
+const ADMIN_NAV_LAST_SECTION_STORAGE_KEY = 'metasheet_attendance_admin_nav_last_section'
 const ADMIN_NAV_RECENT_LIMIT = 5
 
 interface AttendanceCalendarDisplayPrefs {
@@ -3600,6 +3601,25 @@ function persistAdminNavRecentSections(sectionIds: string[]): void {
   if (typeof window === 'undefined') return
   try {
     window.localStorage.setItem(ADMIN_NAV_RECENTS_STORAGE_KEY, JSON.stringify(sectionIds))
+  } catch {
+    // ignore storage write failures (private mode, quota).
+  }
+}
+
+function readLastAdminSection(): string | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(ADMIN_NAV_LAST_SECTION_STORAGE_KEY)
+    return raw && raw.trim().length > 0 ? raw.trim() : null
+  } catch {
+    return null
+  }
+}
+
+function persistLastAdminSection(id: string): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(ADMIN_NAV_LAST_SECTION_STORAGE_KEY, id)
   } catch {
     // ignore storage write failures (private mode, quota).
   }
@@ -4747,6 +4767,7 @@ let adminHashRestorePending = false
 watch(adminActiveSectionId, (id) => {
   if (!showAdmin.value || !isKnownAdminSectionId(id)) return
   trackRecentAdminSection(id)
+  persistLastAdminSection(id)
 })
 
 const statusCode = computed(() => statusMeta.value?.code || '')
@@ -5288,6 +5309,11 @@ function readAdminSectionHash(): string | null {
   return isKnownAdminSectionId(hash) ? hash : null
 }
 
+function readLastKnownAdminSection(): string | null {
+  const id = readLastAdminSection()
+  return isKnownAdminSectionId(id) ? id : null
+}
+
 function syncAdminSectionHash(id: string): void {
   if (typeof window === 'undefined' || !isKnownAdminSectionId(id)) return
   const nextHash = `#${id}`
@@ -5297,15 +5323,15 @@ function syncAdminSectionHash(id: string): void {
 
 async function restoreAdminSectionFromHash(maxAttempts = 4): Promise<boolean> {
   if (adminHashRestoreCompleted || adminHashRestorePending) return false
-  const hashedId = readAdminSectionHash()
-  if (!hashedId) return false
+  const restoreId = readAdminSectionHash() ?? readLastKnownAdminSection()
+  if (!restoreId) return false
   adminHashRestorePending = true
   try {
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      const target = adminSectionElements.get(hashedId) ?? document.getElementById(hashedId)
+      const target = adminSectionElements.get(restoreId) ?? document.getElementById(restoreId)
       if (target instanceof HTMLElement) {
         target.scrollIntoView({ behavior: 'auto', block: 'start' })
-        adminActiveSectionId.value = hashedId
+        adminActiveSectionId.value = restoreId
         adminHashRestoreCompleted = true
         return true
       }
@@ -5329,7 +5355,7 @@ function syncAdminSectionObserver(): void {
   if (typeof window === 'undefined' || adminForbidden.value || !showAdmin.value) return
   const elements = resolveAdminSectionElements()
   if (elements.length === 0) return
-  const initialId = readAdminSectionHash() ?? elements[0].id
+  const initialId = readAdminSectionHash() ?? readLastKnownAdminSection() ?? elements[0].id
   adminActiveSectionId.value = initialId
   if (typeof window.IntersectionObserver === 'undefined') return
   adminSectionObserver = new window.IntersectionObserver(
