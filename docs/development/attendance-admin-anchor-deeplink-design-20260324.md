@@ -1,8 +1,8 @@
-# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, And Recent Shortcuts Design 2026-03-24
+# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, Recent Shortcuts, And Active-Link Visibility Design 2026-03-24
 
 ## Context
 
-`AttendanceView.vue` already carries the attendance admin console as a single long page with 22 top-level sections. The first-stage root-admin stabilization added a sticky left anchor rail, active-section tracking, and section-level refs. The second stage added quick-find and hash deep links. The third stage grouped the rail by business domain. The fourth stage added collapse persistence and bulk expand/collapse actions. The fifth stage made the compact mobile rail deliberate instead of just functional. The sixth stage turned the existing deep-link model into a user-facing share action. This follow-up adds a recent-shortcuts layer on top of the same active-section state.
+`AttendanceView.vue` already carries the attendance admin console as a single long page with 22 top-level sections. The first-stage root-admin stabilization added a sticky left anchor rail, active-section tracking, and section-level refs. The second stage added quick-find and hash deep links. The third stage grouped the rail by business domain. The fourth stage added collapse persistence and bulk expand/collapse actions. The fifth stage made the compact mobile rail deliberate instead of just functional. The sixth stage turned the existing deep-link model into a user-facing share action. The seventh stage added recent shortcuts. This follow-up makes the active rail link keep itself visible while the operator scrolls through the long page.
 
 ## Goals
 
@@ -12,6 +12,7 @@
 - Reduce compact-mode height and keep the current domain prominent on narrow screens.
 - Make the current admin section shareable without editing the URL manually.
 - Make repeated jumps between a handful of admin sections faster than re-scanning all groups.
+- Keep the left rail spatially in sync with the long-page active section.
 - Allow users to share or restore a concrete admin section via URL hash.
 - Keep the implementation local to attendance until a second real long-form admin page appears.
 
@@ -138,7 +139,20 @@ This avoids introducing a second navigation model. The recent strip is only a fa
 - compact-mode promotion
 - current-link copying
 
-### 7. Hash-based deep links
+### 7. Active-link visibility inside the rail
+
+The rail now actively keeps the current section button in view when `adminActiveSectionId` changes.
+
+Design choices:
+
+- this is implemented as a separate render-layer sync step, not folded into the content scroll logic
+- grouped rail links remain the primary target; recent shortcuts are only a fallback if the grouped button is temporarily absent
+- the sync uses `scrollIntoView({ block: 'nearest', inline: 'nearest' })` so it minimally adjusts the rail instead of snapping it to the top
+- the existing deep-link and observer pipeline stays unchanged; this layer only mirrors their result inside the left rail
+
+This is the missing last mile after active-section tracking. Without it, the correct item can be active in state but still be physically out of view inside the sticky rail once the operator has moved far enough down the page.
+
+### 8. Hash-based deep links
 
 The admin rail now treats each known section id as a valid deep-link target.
 
@@ -148,7 +162,7 @@ The admin rail now treats each known section id as a valid deep-link target.
 
 The restore path uses a bounded next-tick retry loop plus a non-reentrant guard. This makes the first-load hash restore resilient to mount timing without introducing duplicate scrolls, scroll polling, or route-level state. The same rule also guarantees that a hashed target remains visible when its group would otherwise be collapsed by persisted state, including in compact mode.
 
-### 8. Branch hygiene for timezone helpers
+### 9. Branch hygiene for timezone helpers
 
 This clean branch already depended on `apps/web/src/utils/timezones.ts` through `AttendanceView.vue`, but the file was missing from the branch itself. The follow-up includes it so the branch can build and type-check independently instead of relying on unrelated local dirt from another worktree.
 

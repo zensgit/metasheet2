@@ -1,8 +1,8 @@
-# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, And Recent Shortcuts Verification 2026-03-24
+# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, Recent Shortcuts, And Active-Link Visibility Verification 2026-03-24
 
 ## Scope Verified
 
-This verification covers the seventh-stage attendance admin navigation follow-up on top of the prior root-admin stabilization branch.
+This verification covers the eighth-stage attendance admin navigation follow-up on top of the prior root-admin stabilization branch.
 
 Verified behaviors:
 
@@ -15,6 +15,7 @@ Verified behaviors:
 - the rail can copy the current admin section link through the clipboard API
 - the rail surfaces recent admin sections and keeps them ordered by last visit
 - recent admin sections persist across remounts through `localStorage`
+- the active grouped rail link scrolls back into view when the active admin section changes
 - quick-find filters the left anchor rail
 - count label changes from total-only to visible/total when filtered
 - empty-state copy renders when the filter produces no matches
@@ -75,5 +76,6 @@ Prior result on the parent clean branch:
 - Compact mode stays intentionally attendance-local. It is only a presentation layer over the same grouped rail model and does not create a new navigation contract for the rest of MetaSheet.
 - The share action deliberately depends on the existing active-section state and clipboard API; it does not introduce a parallel deep-link registry.
 - The recent strip deliberately uses the same section ids and click handler as the grouped rail, so it stays a shortcut layer rather than becoming a second navigation tree.
+- Active-link visibility is implemented as a separate rail-only scroll sync. The content section scroll and the rail visibility scroll are both expected and verified in the targeted harness.
 - The initial hash-restore implementation still double-fired in the unit harness because mount-time restore and later admin-state synchronization could overlap. The final version keeps the bounded next-tick retry helper and adds a non-reentrant restore gate so first-load deep links scroll exactly once.
 - `apps/web/src/utils/timezones.ts` is included in this follow-up because `AttendanceView.vue` already imports it. Without the file, the clean branch cannot pass `vue-tsc` or `build` on its own.

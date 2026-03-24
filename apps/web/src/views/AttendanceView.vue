@@ -4664,6 +4664,22 @@ async function copyCurrentAdminSectionLink(): Promise<void> {
   }
 }
 
+function resolveActiveAdminNavLink(id: string): HTMLElement | null {
+  if (typeof document === 'undefined' || !isKnownAdminSectionId(id)) return null
+  const groupedLink = document.querySelector<HTMLElement>(`[data-admin-anchor="${id}"]`)
+  if (groupedLink instanceof HTMLElement) return groupedLink
+  const recentLink = document.querySelector<HTMLElement>(`[data-admin-anchor-recent="${id}"]`)
+  return recentLink instanceof HTMLElement ? recentLink : null
+}
+
+async function syncActiveAdminNavLinkIntoView(id: string): Promise<void> {
+  if (typeof window === 'undefined' || !showAdmin.value || !isKnownAdminSectionId(id)) return
+  await nextTick()
+  const link = resolveActiveAdminNavLink(id)
+  if (!(link instanceof HTMLElement)) return
+  link.scrollIntoView({ behavior: 'auto', block: 'nearest', inline: 'nearest' })
+}
+
 const visibleAdminSectionNavGroups = computed(() => {
   const query = adminSectionFilterQuery.value
   const groups = adminSectionNavGroups.value
@@ -10710,6 +10726,11 @@ watch([showAdmin, adminForbidden], async ([isAdminView, forbidden]) => {
 watch(adminActiveSectionId, (id) => {
   if (!showAdmin.value || !adminHashSyncReady || !isKnownAdminSectionId(id)) return
   syncAdminSectionHash(id)
+})
+
+watch(adminActiveSectionId, (id) => {
+  if (!showAdmin.value || !isKnownAdminSectionId(id)) return
+  void syncActiveAdminNavLinkIntoView(id)
 })
 
 watch(attendanceGroupMemberGroupId, () => {

@@ -176,7 +176,7 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeNull()
   })
 
-  it('scrolls to the selected anchor target and marks it active', async () => {
+  it('scrolls to the selected anchor target, keeps the rail item visible, and marks it active', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
@@ -188,9 +188,10 @@ describe('Attendance admin anchor navigation', () => {
     button!.click()
     await flushUi(2)
 
-    expect(scrollIntoViewSpy).toHaveBeenCalledTimes(1)
-    const target = scrollIntoViewSpy.mock.instances[0] as HTMLElement
-    expect(target.id).toBe('attendance-admin-import-batches')
+    expect(scrollIntoViewSpy).toHaveBeenCalled()
+    const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
+    expect(scrolledTargets.some(target => target.id === 'attendance-admin-import-batches')).toBe(true)
+    expect(scrolledTargets.some(target => target.dataset.adminAnchor === 'attendance-admin-import-batches')).toBe(true)
     expect(window.location.hash).toBe('#attendance-admin-import-batches')
     expect(button?.getAttribute('aria-current')).toBe('true')
     expect(button?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
@@ -225,9 +226,10 @@ describe('Attendance admin anchor navigation', () => {
     app.mount(container!)
     await flushUi()
 
-    expect(scrollIntoViewSpy).toHaveBeenCalledTimes(1)
-    const target = scrollIntoViewSpy.mock.instances[0] as HTMLElement
-    expect(target.id).toBe('attendance-admin-approval-flows')
+    expect(scrollIntoViewSpy).toHaveBeenCalled()
+    const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
+    expect(scrolledTargets.some(target => target.id === 'attendance-admin-approval-flows')).toBe(true)
+    expect(scrolledTargets.some(target => target.dataset.adminAnchor === 'attendance-admin-approval-flows')).toBe(true)
     const button = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-approval-flows"]')
     expect(button?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
     expect(button?.getAttribute('aria-current')).toBe('true')
