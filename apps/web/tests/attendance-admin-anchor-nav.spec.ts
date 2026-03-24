@@ -55,6 +55,7 @@ describe('Attendance admin anchor navigation', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
   let scrollIntoViewSpy: ReturnType<typeof vi.fn>
+  let clipboardWriteTextSpy: ReturnType<typeof vi.fn>
   let originalScrollIntoView: typeof HTMLElement.prototype.scrollIntoView | undefined
 
   beforeEach(() => {
@@ -75,10 +76,17 @@ describe('Attendance admin anchor navigation', () => {
     container = document.createElement('div')
     document.body.appendChild(container)
     scrollIntoViewSpy = vi.fn()
+    clipboardWriteTextSpy = vi.fn().mockResolvedValue(undefined)
     originalScrollIntoView = HTMLElement.prototype.scrollIntoView
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
       value: scrollIntoViewSpy,
+    })
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: clipboardWriteTextSpy,
+      },
     })
   })
 
@@ -244,6 +252,26 @@ describe('Attendance admin anchor navigation', () => {
     await flushUi(2)
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeTruthy()
     expect(container!.querySelector('[data-admin-anchor-group="policies"] [aria-expanded="true"]')).toBeTruthy()
+  })
+
+  it('copies the current admin section deep link', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const target = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-import-batches"]')
+    target!.click()
+    await flushUi(2)
+
+    const copyButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-nav-actions .attendance__btn'))
+      .find(button => button.textContent?.includes('Copy current link'))
+    expect(copyButton).toBeTruthy()
+    copyButton!.click()
+    await flushUi(2)
+
+    expect(clipboardWriteTextSpy).toHaveBeenCalledTimes(1)
+    expect(clipboardWriteTextSpy.mock.calls[0]?.[0]).toContain('#attendance-admin-import-batches')
+    expect(container!.textContent).toContain('Current admin section link copied.')
   })
 
   it('collapses the grouped rail behind a toggle on narrow screens', async () => {

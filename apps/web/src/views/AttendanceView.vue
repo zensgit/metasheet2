@@ -528,6 +528,13 @@
                 >
                   {{ tr('Collapse all', '收起全部') }}
                 </button>
+                <button
+                  class="attendance__btn attendance__btn--inline"
+                  type="button"
+                  @click="copyCurrentAdminSectionLink"
+                >
+                  {{ tr('Copy current link', '复制当前链接') }}
+                </button>
               </div>
               <nav class="attendance__admin-nav" :aria-label="tr('Attendance admin sections', '考勤管理区块')">
                 <section
@@ -4579,6 +4586,29 @@ function expandAllAdminSectionGroups(): void {
 
 function collapseAllAdminSectionGroups(): void {
   adminCollapsedGroupIds.value = adminSectionNavGroups.value.map(group => group.id)
+}
+
+function buildCurrentAdminSectionLink(): string | null {
+  if (typeof window === 'undefined' || !isKnownAdminSectionId(adminActiveSectionId.value)) return null
+  const { origin, pathname, search } = window.location
+  return `${origin}${pathname}${search}#${adminActiveSectionId.value}`
+}
+
+async function copyCurrentAdminSectionLink(): Promise<void> {
+  const link = buildCurrentAdminSectionLink()
+  if (!link) {
+    setStatus(tr('No admin section is active yet.', '当前还没有激活的管理区块。'), 'error')
+    return
+  }
+  try {
+    if (!navigator.clipboard?.writeText) {
+      throw new Error('Clipboard unavailable')
+    }
+    await navigator.clipboard.writeText(link)
+    setStatus(tr('Current admin section link copied.', '当前管理区块链接已复制。'))
+  } catch {
+    setStatus(tr('Failed to copy current admin section link.', '复制当前管理区块链接失败。'), 'error')
+  }
 }
 
 const visibleAdminSectionNavGroups = computed(() => {
