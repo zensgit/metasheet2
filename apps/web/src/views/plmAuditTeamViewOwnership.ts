@@ -138,3 +138,11 @@ export function resolvePlmAuditTakeoverTeamViewFormDraftState(options: {
     draftOwnerUserId: '',
   }
 }
+
+export function resolvePlmAuditLogRouteTakeoverFormDraftState(options: {
+  draftTeamViewName: string
+  draftTeamViewNameOwnerId: string
+  draftOwnerUserId: string
+}): PlmAuditTeamViewFormDraftState {
+  return resolvePlmAuditTakeoverTeamViewFormDraftState(options)
+}
