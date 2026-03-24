@@ -6,6 +6,11 @@ import { apiFetch } from '../src/utils/api'
 const ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY = 'metasheet_attendance_admin_nav_collapsed_groups'
 const ADMIN_NAV_RECENTS_STORAGE_KEY = 'metasheet_attendance_admin_nav_recent_sections'
 const ADMIN_NAV_LAST_SECTION_STORAGE_KEY = 'metasheet_attendance_admin_nav_last_section'
+const ADMIN_NAV_DEFAULT_STORAGE_SCOPE = 'default'
+
+function scopedAdminNavStorageKey(baseKey: string, scope = ADMIN_NAV_DEFAULT_STORAGE_SCOPE): string {
+  return `${baseKey}:${scope}`
+}
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
@@ -62,10 +67,8 @@ describe('Attendance admin anchor navigation', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    window.localStorage.clear()
     window.localStorage.setItem('metasheet_locale', 'en')
-    window.localStorage.removeItem(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY)
-    window.localStorage.removeItem(ADMIN_NAV_RECENTS_STORAGE_KEY)
-    window.localStorage.removeItem(ADMIN_NAV_LAST_SECTION_STORAGE_KEY)
     window.history.replaceState({}, '', '/attendance')
     setViewportWidth(1280)
     vi.mocked(apiFetch).mockResolvedValue(
@@ -167,7 +170,7 @@ describe('Attendance admin anchor navigation', () => {
     policiesHeader!.click()
     await flushUi(2)
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeNull()
-    expect(window.localStorage.getItem(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY)).toContain('policies')
+    expect(window.localStorage.getItem(scopedAdminNavStorageKey(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY))).toContain('policies')
 
     app.unmount()
     container!.innerHTML = ''
@@ -299,7 +302,7 @@ describe('Attendance admin anchor navigation', () => {
       item => item.textContent?.trim() || '',
     )
     expect(labels).toEqual(['Approval Flows', 'Import batches'])
-    expect(window.localStorage.getItem(ADMIN_NAV_RECENTS_STORAGE_KEY)).toContain('attendance-admin-approval-flows')
+    expect(window.localStorage.getItem(scopedAdminNavStorageKey(ADMIN_NAV_RECENTS_STORAGE_KEY))).toContain('attendance-admin-approval-flows')
   })
 
   it('restores recent admin sections across remounts', async () => {
@@ -328,7 +331,7 @@ describe('Attendance admin anchor navigation', () => {
   })
 
   it('restores the last active admin section when no hash is present', async () => {
-    window.localStorage.setItem(ADMIN_NAV_LAST_SECTION_STORAGE_KEY, 'attendance-admin-approval-flows')
+    window.localStorage.setItem(scopedAdminNavStorageKey(ADMIN_NAV_LAST_SECTION_STORAGE_KEY), 'attendance-admin-approval-flows')
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
@@ -342,6 +345,38 @@ describe('Attendance admin anchor navigation', () => {
     expect(button?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
     expect(button?.getAttribute('aria-current')).toBe('true')
     expect(window.location.hash).toBe('#attendance-admin-approval-flows')
+  })
+
+  it('isolates admin rail persistence by org id', async () => {
+    window.localStorage.setItem(scopedAdminNavStorageKey(ADMIN_NAV_LAST_SECTION_STORAGE_KEY, 'org-b'), 'attendance-admin-payroll-cycles')
+    window.localStorage.setItem(
+      scopedAdminNavStorageKey(ADMIN_NAV_RECENTS_STORAGE_KEY, 'org-b'),
+      JSON.stringify(['attendance-admin-payroll-cycles', 'attendance-admin-import-batches']),
+    )
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!) as any
+    await flushUi()
+    if (vm?.$?.ctx && 'orgId' in vm.$.ctx) {
+      const rawCtxOrgId = vm.$.ctx.orgId
+      vm.$.ctx.orgId = 'org-b'
+      if (rawCtxOrgId && typeof rawCtxOrgId === 'object' && 'value' in rawCtxOrgId) {
+        rawCtxOrgId.value = 'org-b'
+      }
+    }
+    const rawSetupOrgId = vm?.$?.devtoolsRawSetupState?.orgId
+    if (rawSetupOrgId && typeof rawSetupOrgId === 'object' && 'value' in rawSetupOrgId) {
+      rawSetupOrgId.value = 'org-b'
+    }
+    vm.orgId = 'org-b'
+    await flushUi(3)
+
+    const labels = Array.from(container!.querySelectorAll('[data-admin-anchor-recent]')).map(
+      item => item.textContent?.trim() || '',
+    )
+    expect(labels).toEqual(['Payroll Cycles', 'Import batches'])
+    expect(scrollIntoViewSpy).toHaveBeenCalled()
+    const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
+    expect(scrolledTargets.some(target => target.id === 'attendance-admin-payroll-cycles')).toBe(true)
   })
 
   it('collapses the grouped rail behind a toggle on narrow screens', async () => {

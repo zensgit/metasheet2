@@ -3529,6 +3529,7 @@ const CALENDAR_DISPLAY_PREFS_STORAGE_KEY = 'metasheet_attendance_calendar_displa
 const ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY = 'metasheet_attendance_admin_nav_collapsed_groups'
 const ADMIN_NAV_RECENTS_STORAGE_KEY = 'metasheet_attendance_admin_nav_recent_sections'
 const ADMIN_NAV_LAST_SECTION_STORAGE_KEY = 'metasheet_attendance_admin_nav_last_section'
+const ADMIN_NAV_DEFAULT_STORAGE_SCOPE = 'default'
 const ADMIN_NAV_RECENT_LIMIT = 5
 
 interface AttendanceCalendarDisplayPrefs {
@@ -3564,10 +3565,15 @@ function persistCalendarDisplayPrefs(prefs: AttendanceCalendarDisplayPrefs): voi
   }
 }
 
-function loadAdminNavCollapsedGroups(): string[] {
+function resolveAdminNavStorageKey(baseKey: string, scope: string): string {
+  const normalizedScope = scope.trim().length > 0 ? scope.trim() : ADMIN_NAV_DEFAULT_STORAGE_SCOPE
+  return `${baseKey}:${normalizedScope}`
+}
+
+function loadAdminNavCollapsedGroups(scope: string): string[] {
   if (typeof window === 'undefined') return []
   try {
-    const raw = window.localStorage.getItem(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY)
+    const raw = window.localStorage.getItem(resolveAdminNavStorageKey(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY, scope))
     if (!raw) return []
     const parsed = JSON.parse(raw)
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
@@ -3576,19 +3582,19 @@ function loadAdminNavCollapsedGroups(): string[] {
   }
 }
 
-function persistAdminNavCollapsedGroups(groupIds: string[]): void {
+function persistAdminNavCollapsedGroups(scope: string, groupIds: string[]): void {
   if (typeof window === 'undefined') return
   try {
-    window.localStorage.setItem(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY, JSON.stringify(groupIds))
+    window.localStorage.setItem(resolveAdminNavStorageKey(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY, scope), JSON.stringify(groupIds))
   } catch {
     // ignore storage write failures (private mode, quota).
   }
 }
 
-function loadAdminNavRecentSections(): string[] {
+function loadAdminNavRecentSections(scope: string): string[] {
   if (typeof window === 'undefined') return []
   try {
-    const raw = window.localStorage.getItem(ADMIN_NAV_RECENTS_STORAGE_KEY)
+    const raw = window.localStorage.getItem(resolveAdminNavStorageKey(ADMIN_NAV_RECENTS_STORAGE_KEY, scope))
     if (!raw) return []
     const parsed = JSON.parse(raw)
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
@@ -3597,29 +3603,29 @@ function loadAdminNavRecentSections(): string[] {
   }
 }
 
-function persistAdminNavRecentSections(sectionIds: string[]): void {
+function persistAdminNavRecentSections(scope: string, sectionIds: string[]): void {
   if (typeof window === 'undefined') return
   try {
-    window.localStorage.setItem(ADMIN_NAV_RECENTS_STORAGE_KEY, JSON.stringify(sectionIds))
+    window.localStorage.setItem(resolveAdminNavStorageKey(ADMIN_NAV_RECENTS_STORAGE_KEY, scope), JSON.stringify(sectionIds))
   } catch {
     // ignore storage write failures (private mode, quota).
   }
 }
 
-function readLastAdminSection(): string | null {
+function readLastAdminSection(scope: string): string | null {
   if (typeof window === 'undefined') return null
   try {
-    const raw = window.localStorage.getItem(ADMIN_NAV_LAST_SECTION_STORAGE_KEY)
+    const raw = window.localStorage.getItem(resolveAdminNavStorageKey(ADMIN_NAV_LAST_SECTION_STORAGE_KEY, scope))
     return raw && raw.trim().length > 0 ? raw.trim() : null
   } catch {
     return null
   }
 }
 
-function persistLastAdminSection(id: string): void {
+function persistLastAdminSection(scope: string, id: string): void {
   if (typeof window === 'undefined') return
   try {
-    window.localStorage.setItem(ADMIN_NAV_LAST_SECTION_STORAGE_KEY, id)
+    window.localStorage.setItem(resolveAdminNavStorageKey(ADMIN_NAV_LAST_SECTION_STORAGE_KEY, scope), id)
   } catch {
     // ignore storage write failures (private mode, quota).
   }
@@ -4625,8 +4631,9 @@ const adminSectionNavGroups = computed<AdminSectionNavGroup[]>(() => [
 const adminSectionFilter = ref('')
 const adminSectionFilterQuery = computed(() => adminSectionFilter.value.trim().toLowerCase())
 const adminSectionFilterActive = computed(() => adminSectionFilterQuery.value.length > 0)
-const adminCollapsedGroupIds = ref<string[]>(loadAdminNavCollapsedGroups())
-const adminRecentSectionIds = ref<string[]>(loadAdminNavRecentSections())
+const adminNavStorageScope = computed(() => normalizedOrgId() ?? ADMIN_NAV_DEFAULT_STORAGE_SCOPE)
+const adminCollapsedGroupIds = ref<string[]>(loadAdminNavCollapsedGroups(adminNavStorageScope.value))
+const adminRecentSectionIds = ref<string[]>(loadAdminNavRecentSections(adminNavStorageScope.value))
 const isCompactAdminNav = ref(false)
 const adminCompactNavOpen = ref(false)
 function isAdminSectionGroupExpanded(groupId: string, items: AdminSectionNavItem[]): boolean {
@@ -4767,7 +4774,7 @@ let adminHashRestorePending = false
 watch(adminActiveSectionId, (id) => {
   if (!showAdmin.value || !isKnownAdminSectionId(id)) return
   trackRecentAdminSection(id)
-  persistLastAdminSection(id)
+  persistLastAdminSection(adminNavStorageScope.value, id)
 })
 
 const statusCode = computed(() => statusMeta.value?.code || '')
@@ -4850,7 +4857,7 @@ watch(knownAdminSectionGroupIds, (groupIds) => {
 }, { immediate: true })
 
 watch(adminCollapsedGroupIds, (groupIds) => {
-  persistAdminNavCollapsedGroups(Array.from(new Set(groupIds)))
+  persistAdminNavCollapsedGroups(adminNavStorageScope.value, Array.from(new Set(groupIds)))
 })
 
 watch(knownAdminSectionIds, (sectionIds) => {
@@ -4862,7 +4869,7 @@ watch(knownAdminSectionIds, (sectionIds) => {
 }, { immediate: true })
 
 watch(adminRecentSectionIds, (sectionIds) => {
-  persistAdminNavRecentSections(Array.from(new Set(sectionIds)).slice(0, ADMIN_NAV_RECENT_LIMIT))
+  persistAdminNavRecentSections(adminNavStorageScope.value, Array.from(new Set(sectionIds)).slice(0, ADMIN_NAV_RECENT_LIMIT))
 })
 
 const recordMap = computed(() => {
@@ -5310,7 +5317,7 @@ function readAdminSectionHash(): string | null {
 }
 
 function readLastKnownAdminSection(): string | null {
-  const id = readLastAdminSection()
+  const id = readLastAdminSection(adminNavStorageScope.value)
   return isKnownAdminSectionId(id) ? id : null
 }
 
@@ -10746,6 +10753,17 @@ watch([showAdmin, adminForbidden], async ([isAdminView, forbidden]) => {
     adminHashRestorePending = false
     return
   }
+  await syncAdminSectionNavigationState()
+})
+
+watch(adminNavStorageScope, async (scope, previousScope) => {
+  if (scope === previousScope) return
+  adminCollapsedGroupIds.value = loadAdminNavCollapsedGroups(scope)
+  adminRecentSectionIds.value = loadAdminNavRecentSections(scope)
+  if (!showAdmin.value || adminForbidden.value) return
+  adminHashSyncReady = false
+  adminHashRestoreCompleted = false
+  adminHashRestorePending = false
   await syncAdminSectionNavigationState()
 })
 

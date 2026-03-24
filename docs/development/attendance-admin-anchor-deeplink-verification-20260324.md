@@ -1,8 +1,8 @@
-# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, Recent Shortcuts, Active-Link Visibility, And Last-Section Restore Verification 2026-03-24
+# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, Recent Shortcuts, Active-Link Visibility, Last-Section Restore, And Org-Scoped Rail State Verification 2026-03-24
 
 ## Scope Verified
 
-This verification covers the ninth-stage attendance admin navigation follow-up on top of the prior root-admin stabilization branch.
+This verification covers the tenth-stage attendance admin navigation follow-up on top of the prior root-admin stabilization branch.
 
 Verified behaviors:
 
@@ -17,6 +17,7 @@ Verified behaviors:
 - recent admin sections persist across remounts through `localStorage`
 - the active grouped rail link scrolls back into view when the active admin section changes
 - the admin console restores the last active section when the page is reopened without a hash
+- collapsed groups, recents, and last-section restore switch buckets when org id changes
 - quick-find filters the left anchor rail
 - count label changes from total-only to visible/total when filtered
 - empty-state copy renders when the filter produces no matches
@@ -36,7 +37,7 @@ pnpm --filter @metasheet/web exec vitest run tests/attendance-admin-anchor-nav.s
 Result:
 
 - `2` files passed
-- `18` tests passed
+- `19` tests passed
 
 ### Frontend type-check
 
@@ -79,5 +80,6 @@ Prior result on the parent clean branch:
 - The recent strip deliberately uses the same section ids and click handler as the grouped rail, so it stays a shortcut layer rather than becoming a second navigation tree.
 - Active-link visibility is implemented as a separate rail-only scroll sync. The content section scroll and the rail visibility scroll are both expected and verified in the targeted harness.
 - Last-section restore is intentionally lower priority than a valid hash. Once restored, it reuses the existing active-section synchronization and therefore surfaces the matching hash as part of the normal rail state model.
+- Org-scoped persistence uses the existing `orgId` state as the bucket selector with `default` fallback, so the behavior can be exercised without adding a new admin-only org switcher.
 - The initial hash-restore implementation still double-fired in the unit harness because mount-time restore and later admin-state synchronization could overlap. The final version keeps the bounded next-tick retry helper and adds a non-reentrant restore gate so first-load deep links scroll exactly once.
 - `apps/web/src/utils/timezones.ts` is included in this follow-up because `AttendanceView.vue` already imports it. Without the file, the clean branch cannot pass `vue-tsc` or `build` on its own.
