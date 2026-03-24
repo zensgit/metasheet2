@@ -82,6 +82,7 @@ import { usePlmSearchPanel } from './plm/usePlmSearchPanel'
 import { usePlmSubstitutesPanel } from './plm/usePlmSubstitutesPanel'
 import { usePlmTeamFilterPresets } from './plm/usePlmTeamFilterPresets'
 import { usePlmTeamViews } from './plm/usePlmTeamViews'
+import { canSharePlmCollaborativeEntry } from './plm/usePlmCollaborativePermissions'
 import { usePlmWhereUsedPanel } from './plm/usePlmWhereUsedPanel'
 import { usePlmWhereUsedState } from './plm/usePlmWhereUsedState'
 import {
@@ -4315,6 +4316,10 @@ async function copyRecommendedWorkbenchSceneLink(viewId: string) {
   const view = workbenchTeamViews.value.find((entry) => entry.id === viewId)
   if (!view) {
     setDeepLinkMessage('未找到团队场景。', true)
+    return
+  }
+  if (!canSharePlmCollaborativeEntry(view)) {
+    setDeepLinkMessage(`当前账号无权分享团队场景：${view.name}`, true)
     return
   }
   const copied = await copyToClipboard(

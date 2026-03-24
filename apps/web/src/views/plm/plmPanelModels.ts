@@ -580,6 +580,7 @@ export type PlmRecommendedWorkbenchScene = {
   primaryActionLabel: string
   secondaryActionKind: 'copy-link' | 'open-audit'
   secondaryActionLabel: string
+  secondaryActionDisabled: boolean
   actionNote: string
   updatedAt?: string
 }

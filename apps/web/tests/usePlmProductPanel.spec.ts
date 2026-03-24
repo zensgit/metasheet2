@@ -155,6 +155,7 @@ describe('usePlmProductPanel', () => {
           primaryActionLabel: '进入默认场景',
           secondaryActionKind: 'copy-link',
           secondaryActionLabel: '复制默认链接',
+          secondaryActionDisabled: false,
           actionNote: '当前默认场景更适合作为稳定入口，可直接复制链接发给团队成员。',
           updatedAt: '2026-03-13T08:00:00.000Z',
         },
@@ -303,6 +304,7 @@ describe('usePlmProductPanel', () => {
       primaryActionLabel: '进入默认场景',
       secondaryActionKind: 'copy-link',
       secondaryActionLabel: '复制默认链接',
+      secondaryActionDisabled: false,
       actionNote: '当前默认场景更适合作为稳定入口，可直接复制链接发给团队成员。',
     })
 

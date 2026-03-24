@@ -307,7 +307,7 @@
             >
               {{ scene.primaryActionLabel }}
             </button>
-            <button class="btn ghost mini" @click="handleSceneSecondaryAction(scene)">
+            <button class="btn ghost mini" :disabled="scene.secondaryActionDisabled" @click="handleSceneSecondaryAction(scene)">
               {{ scene.secondaryActionLabel }}
             </button>
           </div>

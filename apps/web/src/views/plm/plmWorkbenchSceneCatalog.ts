@@ -6,6 +6,7 @@ import type {
   PlmWorkbenchSceneRecommendationFilter,
   PlmWorkbenchTeamView,
 } from './plmPanelModels'
+import { canSharePlmCollaborativeEntry } from '../plm/usePlmCollaborativePermissions'
 
 export const WORKBENCH_SCENE_RECOMMENDATION_OPTIONS: FilterFieldOption[] = [
   { value: '', label: '全部推荐' },
@@ -58,14 +59,17 @@ function getRecommendationSource(
 }
 
 function getRecommendationActions(
+  view: PlmWorkbenchTeamView<'workbench'>,
   recommendationReason: PlmRecommendedWorkbenchScene['recommendationReason'],
 ) {
+  const canShare = canSharePlmCollaborativeEntry(view)
   if (recommendationReason === 'default') {
     return {
       primaryActionKind: 'apply-scene' as const,
       primaryActionLabel: '进入默认场景',
       secondaryActionKind: 'copy-link' as const,
       secondaryActionLabel: '复制默认链接',
+      secondaryActionDisabled: !canShare,
       actionNote: '当前默认场景更适合作为稳定入口，可直接复制链接发给团队成员。',
     }
   }
@@ -76,6 +80,7 @@ function getRecommendationActions(
       primaryActionLabel: '查看近期默认',
       secondaryActionKind: 'open-audit' as const,
       secondaryActionLabel: '查看近期默认变更',
+      secondaryActionDisabled: false,
       actionNote: '该场景近期被提升为默认入口，建议先查看默认变更再继续扩散。',
     }
   }
@@ -85,6 +90,7 @@ function getRecommendationActions(
     primaryActionLabel: '查看最新更新',
     secondaryActionKind: 'open-audit' as const,
     secondaryActionLabel: '查看更新记录',
+    secondaryActionDisabled: false,
     actionNote: '该场景因近期更新被推荐，建议先核对更新记录再决定是否复用。',
   }
 }
@@ -149,7 +155,7 @@ export function buildRecommendedWorkbenchScenes(
     .slice(0, 6)
     .map(({ view, recommendationReason }) => {
       const recommendationSource = getRecommendationSource(view, recommendationReason)
-      const recommendationActions = getRecommendationActions(recommendationReason)
+      const recommendationActions = getRecommendationActions(view, recommendationReason)
       return {
         id: view.id,
         name: view.name,
@@ -163,6 +169,7 @@ export function buildRecommendedWorkbenchScenes(
         primaryActionLabel: recommendationActions.primaryActionLabel,
         secondaryActionKind: recommendationActions.secondaryActionKind,
         secondaryActionLabel: recommendationActions.secondaryActionLabel,
+        secondaryActionDisabled: recommendationActions.secondaryActionDisabled,
         actionNote: recommendationActions.actionNote,
         updatedAt: view.updatedAt,
       }

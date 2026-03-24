@@ -93,6 +93,7 @@ describe('plmWorkbenchSceneCatalog', () => {
     expect(scenes[0].primaryActionLabel).toBe('进入默认场景')
     expect(scenes[0].secondaryActionKind).toBe('copy-link')
     expect(scenes[0].secondaryActionLabel).toBe('复制默认链接')
+    expect(scenes[0].secondaryActionDisabled).toBe(false)
     expect(scenes[0].actionNote).toContain('稳定入口')
     expect(scenes[1].primaryActionLabel).toBe('查看近期默认')
     expect(scenes[1].secondaryActionKind).toBe('open-audit')
@@ -200,6 +201,25 @@ describe('plmWorkbenchSceneCatalog', () => {
       label: '当前默认',
       count: 2,
       description: '只看当前团队默认场景，适合快速进入标准作业入口。',
+    })
+  })
+
+  it('disables default-scene copy-link when the underlying team view cannot be shared', () => {
+    const [scene] = buildRecommendedWorkbenchScenes([
+      createView({
+        id: 'default-scene',
+        isDefault: true,
+        permissions: {
+          ...createView({}).permissions,
+          canShare: false,
+        },
+      }),
+    ])
+
+    expect(scene).toMatchObject({
+      secondaryActionKind: 'copy-link',
+      secondaryActionLabel: '复制默认链接',
+      secondaryActionDisabled: true,
     })
   })
 })
