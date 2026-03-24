@@ -201,11 +201,13 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       if (teamViewKey.value && !items.some((view) => view.id === teamViewKey.value)) {
         teamViewKey.value = ''
         teamViewName.value = ''
+        teamViewOwnerUserId.value = ''
       } else if (teamViewKey.value) {
         const activeView = items.find((view) => view.id === teamViewKey.value)
         if (activeView && !canApplyPlmCollaborativeEntry(activeView)) {
           teamViewKey.value = ''
           teamViewName.value = ''
+          teamViewOwnerUserId.value = ''
         }
       }
       if (options.requestedViewId?.value && !items.some((view) => view.id === options.requestedViewId?.value)) {
@@ -276,6 +278,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       if (teamViewKey.value === view.id) {
         teamViewKey.value = ''
         teamViewName.value = ''
+        teamViewOwnerUserId.value = ''
       }
       if (options.requestedViewId?.value === view.id) {
         options.syncRequestedViewId?.(undefined)
@@ -315,6 +318,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       if (teamViewKey.value === view.id) {
         teamViewKey.value = ''
         teamViewName.value = ''
+        teamViewOwnerUserId.value = ''
       }
       if (options.requestedViewId?.value === view.id) {
         options.syncRequestedViewId?.(undefined)
@@ -595,6 +599,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
         } else {
           teamViewKey.value = ''
           teamViewName.value = ''
+          teamViewOwnerUserId.value = ''
           options.syncRequestedViewId?.(undefined)
         }
       }
