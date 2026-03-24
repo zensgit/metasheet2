@@ -1,4 +1,4 @@
-# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, Recent Shortcuts, Active-Link Visibility, Last-Section Restore, Org-Scoped Rail State, Scope Badge, Scope-Change Feedback, And Group-Context Labels Design 2026-03-24
+# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, Recent Shortcuts, Recent-Clear Control, Active-Link Visibility, Last-Section Restore, Org-Scoped Rail State, Scope Badge, Scope-Change Feedback, And Group-Context Labels Design 2026-03-24
 
 ## Context
 
@@ -246,7 +246,24 @@ This keeps the change presentation-only while lowering scan cost:
 - recent shortcuts no longer rely on the operator remembering which domain a section belongs to
 - the grouped rail structure remains unchanged
 
-### 13. Hash-based deep links
+### 13. Explicit recent-shortcut reset
+
+The `Recent` block now exposes a lightweight `Clear` action in its own header.
+
+Design choices:
+
+- the action only resets the attendance-admin recent bucket for the current org scope
+- it reuses the existing recent persistence model instead of adding a second “pinned” or “favorite” concept
+- clearing recents leaves collapse state, current-section summary, and last-section restore untouched
+- confirmation reuses the existing attendance status surface instead of adding a dedicated toast just for rail state
+
+This keeps the shortcut strip user-controlled:
+
+- operators can flush stale recents after task switching
+- org-scoped rail memory stays predictable instead of accreting old shortcuts forever
+- the action remains local to attendance and does not require backend preferences
+
+### 14. Hash-based deep links
 
 The admin rail now treats each known section id as a valid deep-link target.
 
@@ -256,7 +273,7 @@ The admin rail now treats each known section id as a valid deep-link target.
 
 The restore path uses a bounded next-tick retry loop plus a non-reentrant guard. This makes the first-load hash restore resilient to mount timing without introducing duplicate scrolls, scroll polling, or route-level state. The same rule also guarantees that a hashed target remains visible when its group would otherwise be collapsed by persisted state, including in compact mode.
 
-### 14. Branch hygiene for timezone helpers
+### 15. Branch hygiene for timezone helpers
 
 This clean branch already depended on `apps/web/src/utils/timezones.ts` through `AttendanceView.vue`, but the file was missing from the branch itself. The follow-up includes it so the branch can build and type-check independently instead of relying on unrelated local dirt from another worktree.
 

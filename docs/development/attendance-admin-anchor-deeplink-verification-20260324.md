@@ -1,4 +1,4 @@
-# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, Recent Shortcuts, Active-Link Visibility, Last-Section Restore, Org-Scoped Rail State, Scope Badge, Scope-Change Feedback, And Group-Context Labels Verification 2026-03-24
+# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, Recent Shortcuts, Recent-Clear Control, Active-Link Visibility, Last-Section Restore, Org-Scoped Rail State, Scope Badge, Scope-Change Feedback, And Group-Context Labels Verification 2026-03-24
 
 ## Scope Verified
 
@@ -22,6 +22,7 @@ Verified behaviors:
 - switching org scope shows a short-lived confirmation note inside the rail panel
 - the rail header shows the active section as a `Group · Section` summary
 - recent shortcuts also show `Group · Section` labels instead of section-only labels
+- recent shortcuts can be cleared without disturbing other persisted rail state
 - quick-find filters the left anchor rail
 - count label changes from total-only to visible/total when filtered
 - empty-state copy renders when the filter produces no matches
@@ -41,7 +42,7 @@ pnpm --filter @metasheet/web exec vitest run tests/attendance-admin-anchor-nav.s
 Result:
 
 - `2` files passed
-- `19` tests passed
+- `20` tests passed
 
 ### Frontend type-check
 
@@ -88,5 +89,6 @@ Prior result on the parent clean branch:
 - The scope badge is intentionally absent for the `default` bucket. It is meant to explain cross-org state changes, not add noise to the default case.
 - The scope-change note is intentionally local to the rail panel, not the shared admin status block. It confirms the bucket switch without competing with save/load/error feedback.
 - Group-context labels intentionally stay out of the grouped rail buttons themselves. Group headers already provide that context there; the extra label is reserved for the header summary and recents where the group would otherwise be ambiguous.
+- The `Clear` action intentionally resets only the recents bucket. It does not clear last-section restore or collapse memory because those solve different operator tasks.
 - The initial hash-restore implementation still double-fired in the unit harness because mount-time restore and later admin-state synchronization could overlap. The final version keeps the bounded next-tick retry helper and adds a non-reentrant restore gate so first-load deep links scroll exactly once.
 - `apps/web/src/utils/timezones.ts` is included in this follow-up because `AttendanceView.vue` already imports it. Without the file, the clean branch cannot pass `vue-tsc` or `build` on its own.

@@ -333,6 +333,28 @@ describe('Attendance admin anchor navigation', () => {
     expect(labels).toEqual(['Policies · Approval Flows', 'Data & Payroll · Import batches'])
   })
 
+  it('clears recent admin sections on demand', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const importBatches = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-import-batches"]')
+    const approvalFlows = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-approval-flows"]')
+    importBatches!.click()
+    await flushUi(2)
+    approvalFlows!.click()
+    await flushUi(2)
+
+    const clearButton = container!.querySelector<HTMLButtonElement>('[data-admin-recents-clear="true"]')
+    expect(clearButton).toBeTruthy()
+    clearButton!.click()
+    await flushUi(2)
+
+    expect(container!.querySelector('[data-admin-anchor-recent]')).toBeNull()
+    expect(window.localStorage.getItem(scopedAdminNavStorageKey(ADMIN_NAV_RECENTS_STORAGE_KEY))).toBe('[]')
+    expect(container!.textContent).toContain('Recent admin shortcuts cleared.')
+  })
+
   it('restores the last active admin section when no hash is present', async () => {
     window.localStorage.setItem(scopedAdminNavStorageKey(ADMIN_NAV_LAST_SECTION_STORAGE_KEY), 'attendance-admin-approval-flows')
     app = createApp(AttendanceView, { mode: 'admin' })

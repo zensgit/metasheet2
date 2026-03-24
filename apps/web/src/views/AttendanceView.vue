@@ -555,7 +555,17 @@
               <section v-if="visibleRecentAdminSectionNavItems.length > 0" class="attendance__admin-nav-recents">
                 <div class="attendance__admin-nav-recents-header">
                   <strong>{{ tr('Recent', '最近访问') }}</strong>
-                  <span>{{ `${visibleRecentAdminSectionNavItems.length}` }}</span>
+                  <div class="attendance__admin-nav-recents-meta">
+                    <span>{{ `${visibleRecentAdminSectionNavItems.length}` }}</span>
+                    <button
+                      class="attendance__btn attendance__btn--inline"
+                      type="button"
+                      data-admin-recents-clear="true"
+                      @click="clearRecentAdminSections"
+                    >
+                      {{ tr('Clear', '清空') }}
+                    </button>
+                  </div>
                 </div>
                 <div class="attendance__admin-nav-recents-items">
                   <button
@@ -4702,6 +4712,12 @@ function trackRecentAdminSection(id: string): void {
     return
   }
   adminRecentSectionIds.value = nextIds
+}
+
+function clearRecentAdminSections(): void {
+  if (adminRecentSectionIds.value.length === 0) return
+  adminRecentSectionIds.value = []
+  setStatus(tr('Recent admin shortcuts cleared.', '已清空最近访问快捷入口。'))
 }
 
 async function copyCurrentAdminSectionLink(): Promise<void> {
@@ -11505,6 +11521,12 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   gap: 8px;
   color: #1e3a8a;
   font-size: 12px;
+}
+
+.attendance__admin-nav-recents-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .attendance__admin-nav-recents-items {
