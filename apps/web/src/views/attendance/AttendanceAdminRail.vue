@@ -139,25 +139,11 @@
 </template>
 
 <script setup lang="ts">
-type TranslateFn = (en: string, zh: string) => string
-
-type AdminSectionNavItem = {
-  id: string
-  label: string
-}
-
-type AdminSectionNavDisplayItem = AdminSectionNavItem & {
-  groupLabel: string | null
-  contextLabel: string
-}
-
-type AdminSectionNavGroup = {
-  id: string
-  label: string
-  countLabel: string
-  expanded: boolean
-  items: AdminSectionNavItem[]
-}
+import type {
+  AdminSectionNavDisplayItem,
+  AdminSectionNavGroup,
+  TranslateFn,
+} from './useAttendanceAdminRail'
 
 defineProps<{
   tr: TranslateFn
