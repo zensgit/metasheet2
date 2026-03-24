@@ -1128,6 +1128,50 @@ describe('usePlmTeamViews', () => {
     expect(workbenchApply).toHaveLastReturnedWith('workbench-copy')
   })
 
+  it('blocks duplicate when permissions.canDuplicate disables the current workbench team view', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-readonly-duplicate',
+          kind: 'workbench',
+          scope: 'team',
+          name: '受限工作台视角',
+          ownerUserId: 'owner-2',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canDuplicate: false,
+          },
+          state: {
+            query: {
+              documentFilter: 'gear',
+            },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-readonly-duplicate'
+
+    await model.duplicateTeamView()
+
+    expect(duplicatePlmWorkbenchTeamView).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenLastCalledWith('当前工作台团队视角不可复制。', true)
+  })
+
   it('blocks sharing and transfer for readonly workbench views when permissions override legacy flags', async () => {
     const buildShareUrl = vi.fn(() => 'http://example.test/plm?workbenchTeamView=workbench-readonly')
     const copyShareUrl = vi.fn().mockResolvedValue(true)

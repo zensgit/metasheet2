@@ -372,6 +372,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
+    if (!canDuplicateTeamView.value) {
+      options.setMessage(`当前${options.label}团队视角不可复制。`, true)
+      return
+    }
 
     teamViewsLoading.value = true
     teamViewsError.value = ''
