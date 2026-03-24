@@ -373,6 +373,7 @@ describe('usePlmTeamViews', () => {
     await model.refreshTeamViews()
     model.teamViewKey.value = 'workbench-stale'
     requestedViewId.value = 'workbench-stale'
+    model.teamViewName.value = '过期命名草稿'
     autoApplyDefault = true
     workbenchApply.mockClear()
     syncRequestedViewId.mockClear()
@@ -380,6 +381,7 @@ describe('usePlmTeamViews', () => {
     await model.refreshTeamViews()
 
     expect(model.teamViewKey.value).toBe('workbench-default')
+    expect(model.teamViewName.value).toBe('')
     expect(requestedViewId.value).toBe('workbench-default')
     expect(syncRequestedViewId).toHaveBeenLastCalledWith('workbench-default')
     expect(workbenchApply).toHaveBeenCalledWith({
@@ -388,6 +390,75 @@ describe('usePlmTeamViews', () => {
       },
     })
     expect(setMessage).toHaveBeenLastCalledWith('已应用工作台默认团队视角：默认工作台视角')
+  })
+
+  it('clears a stale team-view name draft when refresh removes the selected view', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews)
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: 'workbench-removed',
+            kind: 'workbench',
+            scope: 'team',
+            name: '将被移除的工作台视角',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            isDefault: false,
+            state: {
+              query: {
+                documentFilter: 'gear',
+              },
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        items: [],
+      })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-removed'
+    model.teamViewName.value = '待清理命名草稿'
+
+    await model.refreshTeamViews()
+
+    expect(model.teamViewKey.value).toBe('')
+    expect(model.teamViewName.value).toBe('')
+  })
+
+  it('preserves a create-mode team-view name draft when refresh runs without an active selection', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    model.teamViewName.value = '待保存工作台草稿'
+
+    await model.refreshTeamViews()
+
+    expect(model.teamViewKey.value).toBe('')
+    expect(model.teamViewName.value).toBe('待保存工作台草稿')
   })
 
   it('clears batch selection entries that become readonly after refresh', async () => {

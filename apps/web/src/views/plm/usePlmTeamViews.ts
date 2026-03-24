@@ -198,12 +198,14 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
         const selectedView = items.find((view) => view.id === id)
         return Boolean(selectedView?.permissions?.canManage ?? selectedView?.canManage)
       })
-      if (!items.some((view) => view.id === teamViewKey.value)) {
+      if (teamViewKey.value && !items.some((view) => view.id === teamViewKey.value)) {
         teamViewKey.value = ''
+        teamViewName.value = ''
       } else if (teamViewKey.value) {
         const activeView = items.find((view) => view.id === teamViewKey.value)
         if (activeView && !canApplyPlmCollaborativeEntry(activeView)) {
           teamViewKey.value = ''
+          teamViewName.value = ''
         }
       }
       if (options.requestedViewId?.value && !items.some((view) => view.id === options.requestedViewId?.value)) {
