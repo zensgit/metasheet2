@@ -138,6 +138,7 @@ describe('Attendance admin anchor navigation', () => {
     expect(labels).not.toContain('Holiday overrides')
     expect(labels).not.toContain('Template Versions')
     expect(container!.querySelector('.attendance__admin-nav-scope-badge')).toBeNull()
+    expect(container!.querySelector('.attendance__admin-nav-current')?.textContent).toContain('Workspace · Settings')
   })
 
   it('collapses and expands admin anchor groups', async () => {
@@ -201,6 +202,7 @@ describe('Attendance admin anchor navigation', () => {
     expect(window.location.hash).toBe('#attendance-admin-import-batches')
     expect(button?.getAttribute('aria-current')).toBe('true')
     expect(button?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
+    expect(container!.querySelector('.attendance__admin-nav-current')?.textContent).toContain('Data & Payroll · Import batches')
   })
 
   it('filters anchor items with the quick-find input', async () => {
@@ -302,7 +304,7 @@ describe('Attendance admin anchor navigation', () => {
     const labels = Array.from(container!.querySelectorAll('[data-admin-anchor-recent]')).map(
       item => item.textContent?.trim() || '',
     )
-    expect(labels).toEqual(['Approval Flows', 'Import batches'])
+    expect(labels).toEqual(['Policies · Approval Flows', 'Data & Payroll · Import batches'])
     expect(window.localStorage.getItem(scopedAdminNavStorageKey(ADMIN_NAV_RECENTS_STORAGE_KEY))).toContain('attendance-admin-approval-flows')
   })
 
@@ -328,7 +330,7 @@ describe('Attendance admin anchor navigation', () => {
     const labels = Array.from(container!.querySelectorAll('[data-admin-anchor-recent]')).map(
       item => item.textContent?.trim() || '',
     )
-    expect(labels).toEqual(['Approval Flows', 'Import batches'])
+    expect(labels).toEqual(['Policies · Approval Flows', 'Data & Payroll · Import batches'])
   })
 
   it('restores the last active admin section when no hash is present', async () => {
@@ -374,12 +376,13 @@ describe('Attendance admin anchor navigation', () => {
     const labels = Array.from(container!.querySelectorAll('[data-admin-anchor-recent]')).map(
       item => item.textContent?.trim() || '',
     )
-    expect(labels).toEqual(['Payroll Cycles', 'Import batches'])
+    expect(labels).toEqual(['Data & Payroll · Payroll Cycles', 'Data & Payroll · Import batches'])
     expect(container!.querySelector('.attendance__admin-nav-scope-badge')?.textContent?.trim()).toBe('org-b')
     expect(container!.textContent).toContain('Switched to navigation memory for org-b.')
     expect(scrollIntoViewSpy).toHaveBeenCalled()
     const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
     expect(scrolledTargets.some(target => target.id === 'attendance-admin-payroll-cycles')).toBe(true)
+    expect(container!.querySelector('.attendance__admin-nav-current')?.textContent).toContain('Data & Payroll · Payroll Cycles')
   })
 
   it('collapses the grouped rail behind a toggle on narrow screens', async () => {

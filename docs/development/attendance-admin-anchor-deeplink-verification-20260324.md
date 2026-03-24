@@ -1,8 +1,8 @@
-# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, Recent Shortcuts, Active-Link Visibility, Last-Section Restore, Org-Scoped Rail State, Scope Badge, And Scope-Change Feedback Verification 2026-03-24
+# Attendance Admin Anchor Deeplink, Grouped Rail, Collapse Persistence, Compact Rail UX, Share Links, Recent Shortcuts, Active-Link Visibility, Last-Section Restore, Org-Scoped Rail State, Scope Badge, Scope-Change Feedback, And Group-Context Labels Verification 2026-03-24
 
 ## Scope Verified
 
-This verification covers the twelfth-stage attendance admin navigation follow-up on top of the prior root-admin stabilization branch.
+This verification covers the thirteenth-stage attendance admin navigation follow-up on top of the prior root-admin stabilization branch.
 
 Verified behaviors:
 
@@ -20,6 +20,8 @@ Verified behaviors:
 - collapsed groups, recents, and last-section restore switch buckets when org id changes
 - the rail header exposes a scope badge only when the effective org bucket is non-default
 - switching org scope shows a short-lived confirmation note inside the rail panel
+- the rail header shows the active section as a `Group · Section` summary
+- recent shortcuts also show `Group · Section` labels instead of section-only labels
 - quick-find filters the left anchor rail
 - count label changes from total-only to visible/total when filtered
 - empty-state copy renders when the filter produces no matches
@@ -85,5 +87,6 @@ Prior result on the parent clean branch:
 - Org-scoped persistence uses the existing `orgId` state as the bucket selector with `default` fallback, so the behavior can be exercised without adding a new admin-only org switcher.
 - The scope badge is intentionally absent for the `default` bucket. It is meant to explain cross-org state changes, not add noise to the default case.
 - The scope-change note is intentionally local to the rail panel, not the shared admin status block. It confirms the bucket switch without competing with save/load/error feedback.
+- Group-context labels intentionally stay out of the grouped rail buttons themselves. Group headers already provide that context there; the extra label is reserved for the header summary and recents where the group would otherwise be ambiguous.
 - The initial hash-restore implementation still double-fired in the unit harness because mount-time restore and later admin-state synchronization could overlap. The final version keeps the bounded next-tick retry helper and adds a non-reentrant restore gate so first-load deep links scroll exactly once.
 - `apps/web/src/utils/timezones.ts` is included in this follow-up because `AttendanceView.vue` already imports it. Without the file, the clean branch cannot pass `vue-tsc` or `build` on its own.

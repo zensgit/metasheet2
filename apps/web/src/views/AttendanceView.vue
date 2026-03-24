@@ -503,6 +503,10 @@
               <div v-if="adminNavScopeFeedback" class="attendance__admin-nav-scope-note">
                 {{ adminNavScopeFeedback }}
               </div>
+              <div class="attendance__admin-nav-current" :title="activeAdminSectionContextLabel">
+                <span>{{ tr('Current', '当前') }}</span>
+                <strong>{{ activeAdminSectionContextLabel }}</strong>
+              </div>
               <button
                 v-if="isCompactAdminNav"
                 class="attendance__admin-nav-toggle"
@@ -511,7 +515,7 @@
                 @click="adminCompactNavOpen = !adminCompactNavOpen"
               >
                 <span>{{ adminCompactNavOpen ? tr('Hide navigation', '收起导航') : tr('Show navigation', '展开导航') }}</span>
-                <small>{{ activeAdminSectionGroupLabel }}</small>
+                <small>{{ activeAdminSectionContextLabel }}</small>
               </button>
               <template v-if="!isCompactAdminNav || adminCompactNavOpen">
               <label class="attendance__field attendance__field--compact" for="attendance-admin-nav-filter">
@@ -559,12 +563,12 @@
                     :key="`recent-${item.id}`"
                     class="attendance__admin-nav-link attendance__admin-nav-link--recent"
                     :class="{ 'attendance__admin-nav-link--active': adminActiveSectionId === item.id }"
-                    :aria-current="adminActiveSectionId === item.id ? 'true' : undefined"
-                    :data-admin-anchor-recent="item.id"
-                    type="button"
-                    @click="scrollToAdminSection(item.id)"
-                  >
-                    {{ item.label }}
+                  :aria-current="adminActiveSectionId === item.id ? 'true' : undefined"
+                  :data-admin-anchor-recent="item.id"
+                  type="button"
+                  @click="scrollToAdminSection(item.id)"
+                >
+                    {{ item.contextLabel }}
                   </button>
                 </div>
               </section>
@@ -4555,6 +4559,11 @@ type AdminSectionNavItem = {
   label: string
 }
 
+type AdminSectionNavDisplayItem = AdminSectionNavItem & {
+  groupLabel: string | null
+  contextLabel: string
+}
+
 type AdminSectionNavGroup = {
   id: string
   label: string
@@ -4640,6 +4649,15 @@ const adminSectionNavGroups = computed<AdminSectionNavGroup[]>(() => [
     ],
   },
 ])
+const adminSectionGroupLabelByItemId = computed(() => {
+  const groupLabels = new Map<string, string>()
+  for (const group of adminSectionNavGroups.value) {
+    for (const itemId of group.itemIds) {
+      groupLabels.set(itemId, group.label)
+    }
+  }
+  return groupLabels
+})
 const adminSectionFilter = ref('')
 const adminSectionFilterQuery = computed(() => adminSectionFilter.value.trim().toLowerCase())
 const adminSectionFilterActive = computed(() => adminSectionFilterQuery.value.length > 0)
@@ -4749,19 +4767,34 @@ const visibleAdminSectionNavGroups = computed(() => {
 })
 
 const visibleAdminSectionNavItems = computed(() => visibleAdminSectionNavGroups.value.flatMap(group => group.items))
-const visibleRecentAdminSectionNavItems = computed(() => {
+function formatAdminSectionContextLabel(item: AdminSectionNavItem | undefined | null): string {
+  if (!item) return tr('Sections', '区块')
+  const groupLabel = adminSectionGroupLabelByItemId.value.get(item.id)
+  if (!groupLabel || groupLabel === item.label) return item.label
+  return `${groupLabel} · ${item.label}`
+}
+
+const visibleRecentAdminSectionNavItems = computed<AdminSectionNavDisplayItem[]>(() => {
   const query = adminSectionFilterQuery.value
   return adminRecentSectionIds.value
     .map(id => adminSectionItemMap.value.get(id))
     .filter((item): item is AdminSectionNavItem => Boolean(item))
-    .filter(item => !query || item.label.toLowerCase().includes(query))
+    .map(item => {
+      const groupLabel = adminSectionGroupLabelByItemId.value.get(item.id) ?? null
+      const contextLabel = formatAdminSectionContextLabel(item)
+      return {
+        ...item,
+        groupLabel,
+        contextLabel,
+      }
+    })
+    .filter(item => !query || item.contextLabel.toLowerCase().includes(query))
 })
 const knownAdminSectionIds = computed(() => adminSectionNavItems.value.map(item => item.id))
 const knownAdminSectionGroupIds = computed(() => adminSectionNavGroups.value.map(group => group.id))
-const activeAdminSectionGroupLabel = computed(() => {
-  const activeId = adminActiveSectionId.value
-  const group = adminSectionNavGroups.value.find(candidate => candidate.itemIds.includes(activeId))
-  return group?.label ?? tr('Sections', '区块')
+const activeAdminSectionContextLabel = computed(() => {
+  const activeItem = adminSectionItemMap.value.get(adminActiveSectionId.value)
+  return formatAdminSectionContextLabel(activeItem)
 })
 const allAdminSectionGroupsExpanded = computed(() => adminCollapsedGroupIds.value.length === 0)
 const allAdminSectionGroupsCollapsed = computed(() => {
@@ -11420,6 +11453,24 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   background: #eef6ff;
   color: #1d4ed8;
   font-size: 12px;
+  line-height: 1.4;
+}
+
+.attendance__admin-nav-current {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #f8fbff;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.attendance__admin-nav-current strong {
+  color: #1f2937;
+  font-size: 13px;
   line-height: 1.4;
 }
 
