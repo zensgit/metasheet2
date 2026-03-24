@@ -292,12 +292,39 @@ describe('plmAuditSceneContext', () => {
         sceneId: 'scene-1',
         sceneName: '采购团队场景',
         sceneOwnerUserId: 'owner-a',
+        sceneRecommendationReason: 'recent-update',
+        sceneRecommendationSourceLabel: '近期更新的团队场景',
+        returnToPlmPath: '/plm?sceneFocus=scene-1',
       },
       nextState: {
         q: 'scene-1',
         sceneId: 'scene-1',
         sceneName: '采购团队场景',
         sceneOwnerUserId: 'owner-a',
+        sceneRecommendationReason: 'owner-default',
+        sceneRecommendationSourceLabel: '当前团队默认场景',
+        returnToPlmPath: '/plm?sceneFocus=scene-2',
+      },
+    })).toBe(true)
+
+    expect(shouldTakeOverPlmAuditSceneContextOnRouteChange({
+      previousState: {
+        q: 'scene-1',
+        sceneId: 'scene-1',
+        sceneName: '采购团队场景',
+        sceneOwnerUserId: 'owner-a',
+        sceneRecommendationReason: 'recent-update',
+        sceneRecommendationSourceLabel: '近期更新的团队场景',
+        returnToPlmPath: '/plm?sceneFocus=scene-1',
+      },
+      nextState: {
+        q: 'scene-1',
+        sceneId: 'scene-1',
+        sceneName: '采购团队场景',
+        sceneOwnerUserId: 'owner-a',
+        sceneRecommendationReason: 'recent-update',
+        sceneRecommendationSourceLabel: '近期更新的团队场景',
+        returnToPlmPath: '/plm?sceneFocus=scene-1',
       },
     })).toBe(false)
 
@@ -307,12 +334,18 @@ describe('plmAuditSceneContext', () => {
         sceneId: 'scene-1',
         sceneName: '采购团队场景',
         sceneOwnerUserId: 'owner-a',
+        sceneRecommendationReason: 'recent-update',
+        sceneRecommendationSourceLabel: '近期更新的团队场景',
+        returnToPlmPath: '/plm?sceneFocus=scene-1',
       },
       nextState: {
         q: 'supplier-42',
         sceneId: 'scene-1',
         sceneName: '采购团队场景',
         sceneOwnerUserId: 'owner-a',
+        sceneRecommendationReason: 'recent-update',
+        sceneRecommendationSourceLabel: '近期更新的团队场景',
+        returnToPlmPath: '/plm?sceneFocus=scene-1',
       },
     })).toBe(false)
   })

@@ -919,7 +919,7 @@ import {
 import {
   buildPlmAuditTeamViewBatchLogState,
   buildPlmAuditTeamViewLogState,
-  isPlmAuditOwnerlessTeamViewLifecycleLogRoute,
+  shouldClearPlmAuditTeamViewFormDraftsOnLogRoute,
 } from './plmAuditTeamViewAudit'
 import {
   buildPlmAuditTeamViewManagement,
@@ -3139,10 +3139,6 @@ watch(
     })
     const nextState = parsePlmAuditRouteState(queryState)
     const previousRouteState = parsePlmAuditRouteState(previousQueryState || {})
-    const previousCanonicalManagementTargetId = resolvePlmAuditCanonicalTeamViewManagementTargetId({
-      routeTeamViewId: previousRouteState.teamViewId,
-      followupTeamViewId: auditTeamViewCollaborationFollowup.value?.teamViewId || '',
-    })
     const currentState = readCurrentRouteState()
     const routeChanged = routeReady.value && !isPlmAuditRouteStateEqual(nextState, currentState)
     const canonicalRouteChanged = routeReady.value
@@ -3203,11 +3199,13 @@ watch(
     if (externalSceneContextTakeover) {
       consumeExternalSceneSharedEntry = applySceneContextTakeoverCleanup(nextState.teamViewId)
     }
-    if (
-      canonicalRouteChanged
-      && previousCanonicalManagementTargetId
-      && isPlmAuditOwnerlessTeamViewLifecycleLogRoute(nextState)
-    ) {
+    if (canonicalRouteChanged && shouldClearPlmAuditTeamViewFormDraftsOnLogRoute({
+      state: nextState,
+      canonicalManagementTargetId: resolvePlmAuditCanonicalTeamViewManagementTargetId({
+        routeTeamViewId: nextState.teamViewId,
+        followupTeamViewId: auditTeamViewCollaborationFollowup.value?.teamViewId || '',
+      }),
+    })) {
       clearAuditLogRouteTakeoverTeamViewFormDrafts()
     }
     applyRouteState(nextState)

@@ -3,6 +3,7 @@ import {
   buildPlmAuditTeamViewBatchLogState,
   buildPlmAuditTeamViewLogState,
   isPlmAuditOwnerlessTeamViewLifecycleLogRoute,
+  shouldClearPlmAuditTeamViewFormDraftsOnLogRoute,
 } from '../src/views/plmAuditTeamViewAudit'
 import type { PlmWorkbenchTeamView } from '../src/views/plm/plmPanelModels'
 
@@ -212,5 +213,34 @@ describe('plmAuditTeamViewAudit', () => {
       action: 'delete',
       resourceType: 'plm-team-view-batch',
     })).toBe(false)
+  })
+
+  it('clears management-owned drafts only when log routes no longer have a canonical owner', () => {
+    expect(shouldClearPlmAuditTeamViewFormDraftsOnLogRoute({
+      state: {
+        teamViewId: '',
+        action: 'set-default',
+        resourceType: 'plm-team-view-default',
+      },
+      canonicalManagementTargetId: '',
+    })).toBe(true)
+
+    expect(shouldClearPlmAuditTeamViewFormDraftsOnLogRoute({
+      state: {
+        teamViewId: '',
+        action: 'set-default',
+        resourceType: 'plm-team-view-default',
+      },
+      canonicalManagementTargetId: 'audit-view-1',
+    })).toBe(false)
+
+    expect(shouldClearPlmAuditTeamViewFormDraftsOnLogRoute({
+      state: {
+        teamViewId: '',
+        action: 'clear-default',
+        resourceType: 'plm-team-view-default',
+      },
+      canonicalManagementTargetId: '',
+    })).toBe(true)
   })
 })

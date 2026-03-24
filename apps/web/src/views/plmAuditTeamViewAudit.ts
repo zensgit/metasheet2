@@ -24,6 +24,21 @@ export function isPlmAuditOwnerlessTeamViewLifecycleLogRoute(
   return false
 }
 
+export function shouldClearPlmAuditTeamViewFormDraftsOnLogRoute(options: {
+  state: Pick<PlmAuditRouteState, 'teamViewId' | 'action' | 'resourceType'>
+  canonicalManagementTargetId: string
+}) {
+  if (options.canonicalManagementTargetId.trim()) return false
+
+  if (isPlmAuditOwnerlessTeamViewLifecycleLogRoute(options.state)) {
+    return true
+  }
+
+  return !options.state.teamViewId.trim()
+    && options.state.action === 'set-default'
+    && options.state.resourceType === 'plm-team-view-default'
+}
+
 function getAuditResourceType(action: PlmAuditTeamViewLogActionKind) {
   return action === 'set-default' || action === 'clear-default'
     ? 'plm-team-view-default'
