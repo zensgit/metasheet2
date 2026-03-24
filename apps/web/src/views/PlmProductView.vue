@@ -82,7 +82,10 @@ import { usePlmSearchPanel } from './plm/usePlmSearchPanel'
 import { usePlmSubstitutesPanel } from './plm/usePlmSubstitutesPanel'
 import { usePlmTeamFilterPresets } from './plm/usePlmTeamFilterPresets'
 import { usePlmTeamViews } from './plm/usePlmTeamViews'
-import { canSharePlmCollaborativeEntry } from './plm/usePlmCollaborativePermissions'
+import {
+  canApplyPlmCollaborativeEntry,
+  canSharePlmCollaborativeEntry,
+} from './plm/usePlmCollaborativePermissions'
 import { usePlmWhereUsedPanel } from './plm/usePlmWhereUsedPanel'
 import { usePlmWhereUsedState } from './plm/usePlmWhereUsedState'
 import {
@@ -4307,7 +4310,8 @@ function setSceneCatalogRecommendationFilter(value: '' | 'default' | 'recent-def
 }
 
 function applyRecommendedWorkbenchScene(viewId: string) {
-  if (!viewId) return
+  const view = workbenchTeamViews.value.find((entry) => entry.id === viewId)
+  if (!view || !canApplyPlmCollaborativeEntry(view)) return
   workbenchTeamViewKey.value = viewId
   applyWorkbenchTeamView()
 }

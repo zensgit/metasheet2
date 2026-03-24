@@ -578,6 +578,7 @@ export type PlmRecommendedWorkbenchScene = {
   recommendationSourceTimestamp?: string
   primaryActionKind: 'apply-scene'
   primaryActionLabel: string
+  primaryActionDisabled: boolean
   secondaryActionKind: 'copy-link' | 'open-audit'
   secondaryActionLabel: string
   secondaryActionDisabled: boolean

@@ -6,7 +6,10 @@ import type {
   PlmWorkbenchSceneRecommendationFilter,
   PlmWorkbenchTeamView,
 } from './plmPanelModels'
-import { canSharePlmCollaborativeEntry } from '../plm/usePlmCollaborativePermissions'
+import {
+  canApplyPlmCollaborativeEntry,
+  canSharePlmCollaborativeEntry,
+} from '../plm/usePlmCollaborativePermissions'
 
 export const WORKBENCH_SCENE_RECOMMENDATION_OPTIONS: FilterFieldOption[] = [
   { value: '', label: '全部推荐' },
@@ -156,6 +159,7 @@ export function buildRecommendedWorkbenchScenes(
     .map(({ view, recommendationReason }) => {
       const recommendationSource = getRecommendationSource(view, recommendationReason)
       const recommendationActions = getRecommendationActions(view, recommendationReason)
+      const primaryActionDisabled = !canApplyPlmCollaborativeEntry(view)
       return {
         id: view.id,
         name: view.name,
@@ -167,6 +171,7 @@ export function buildRecommendedWorkbenchScenes(
         recommendationSourceTimestamp: recommendationSource.timestamp,
         primaryActionKind: recommendationActions.primaryActionKind,
         primaryActionLabel: recommendationActions.primaryActionLabel,
+        primaryActionDisabled,
         secondaryActionKind: recommendationActions.secondaryActionKind,
         secondaryActionLabel: recommendationActions.secondaryActionLabel,
         secondaryActionDisabled: recommendationActions.secondaryActionDisabled,

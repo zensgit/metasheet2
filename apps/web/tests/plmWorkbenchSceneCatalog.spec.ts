@@ -91,6 +91,7 @@ describe('plmWorkbenchSceneCatalog', () => {
     expect(scenes[2].recommendationSourceLabel).toBe('近期更新的团队场景')
     expect(scenes[0].primaryActionKind).toBe('apply-scene')
     expect(scenes[0].primaryActionLabel).toBe('进入默认场景')
+    expect(scenes[0].primaryActionDisabled).toBe(false)
     expect(scenes[0].secondaryActionKind).toBe('copy-link')
     expect(scenes[0].secondaryActionLabel).toBe('复制默认链接')
     expect(scenes[0].secondaryActionDisabled).toBe(false)
@@ -220,6 +221,25 @@ describe('plmWorkbenchSceneCatalog', () => {
       secondaryActionKind: 'copy-link',
       secondaryActionLabel: '复制默认链接',
       secondaryActionDisabled: true,
+    })
+  })
+
+  it('disables recommended apply actions when the underlying team view cannot be applied', () => {
+    const [scene] = buildRecommendedWorkbenchScenes([
+      createView({
+        id: 'default-scene',
+        isDefault: true,
+        permissions: {
+          ...createView({}).permissions,
+          canApply: false,
+        },
+      }),
+    ])
+
+    expect(scene).toMatchObject({
+      primaryActionKind: 'apply-scene',
+      primaryActionLabel: '进入默认场景',
+      primaryActionDisabled: true,
     })
   })
 })

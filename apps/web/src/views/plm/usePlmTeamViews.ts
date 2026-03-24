@@ -18,7 +18,7 @@ import type {
   PlmWorkbenchTeamViewKind,
   PlmWorkbenchTeamViewStateByKind,
 } from './plmPanelModels'
-import { usePlmCollaborativePermissions } from './usePlmCollaborativePermissions'
+import { canApplyPlmCollaborativeEntry, usePlmCollaborativePermissions } from './usePlmCollaborativePermissions'
 
 type UsePlmTeamViewsOptions<Kind extends PlmWorkbenchTeamViewKind> = {
   kind: Kind
@@ -233,7 +233,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
-    if (view.isArchived) {
+    if (!canApplyPlmCollaborativeEntry(view)) {
       options.setMessage(`请先恢复${options.label}团队视角，再执行应用。`, true)
       return
     }

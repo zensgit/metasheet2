@@ -38,6 +38,14 @@ export function canSharePlmCollaborativeEntry(entry: CollaborativeEntry) {
   return resolveCanManage(entry) && !entry.isArchived
 }
 
+export function canApplyPlmCollaborativeEntry(entry: CollaborativeEntry) {
+  if (!entry) return false
+  if (typeof entry.permissions?.canApply === 'boolean') {
+    return entry.permissions.canApply
+  }
+  return !entry.isArchived
+}
+
 export function canDuplicatePlmCollaborativeEntry(entry: CollaborativeEntry) {
   if (!entry) return false
   if (typeof entry.permissions?.canDuplicate === 'boolean') {
@@ -71,12 +79,7 @@ export function usePlmCollaborativePermissions<TEntry extends CollaborativeEntry
     () => !options.selectedEntry.value || canManageSelectedEntry.value,
   )
   const canApply = computed(() => {
-    const entry = options.selectedEntry.value
-    if (!entry) return false
-    if (typeof entry.permissions?.canApply === 'boolean') {
-      return entry.permissions.canApply
-    }
-    return !entry.isArchived
+    return canApplyPlmCollaborativeEntry(options.selectedEntry.value)
   })
   const canDuplicate = computed(() => {
     const entry = options.selectedEntry.value

@@ -303,6 +303,7 @@
             <button
               class="btn mini"
               :class="scene.isDefault ? 'primary' : 'ghost'"
+              :disabled="scene.primaryActionDisabled"
               @click="panel.applyRecommendedWorkbenchScene(scene.id)"
             >
               {{ scene.primaryActionLabel }}

@@ -218,6 +218,48 @@ describe('usePlmTeamViews', () => {
     expect(workbenchApply).toHaveReturnedWith('workbench-view-1')
   })
 
+  it('does not apply a team view that fails explicit canApply gating', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-view-1',
+          kind: 'workbench',
+          scope: 'team',
+          name: '只读工作台视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: false,
+          },
+          state: {
+            query: {
+              documentFilter: 'gear',
+            },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-view-1'
+    model.applyTeamView()
+
+    expect(applyViewState).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenLastCalledWith('请先恢复工作台团队视角，再执行应用。', true)
+  })
+
   it('syncs workbench URL identity after save and set-default actions', async () => {
     const requestedViewId = ref('')
     const syncRequestedViewId = vi.fn((value?: string) => {

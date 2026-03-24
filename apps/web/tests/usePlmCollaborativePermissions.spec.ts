@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { describe, expect, it } from 'vitest'
 import {
+  canApplyPlmCollaborativeEntry,
   canDuplicatePlmCollaborativeEntry,
   canSharePlmCollaborativeEntry,
   canSetDefaultPlmCollaborativeEntry,
@@ -107,6 +108,24 @@ describe('usePlmCollaborativePermissions', () => {
   })
 
   it('can resolve set-default eligibility for a follow-up target without a current selection', () => {
+    expect(canApplyPlmCollaborativeEntry({
+      canManage: false,
+      isArchived: false,
+      isDefault: false,
+      permissions: {
+        canApply: true,
+      },
+    })).toBe(true)
+
+    expect(canApplyPlmCollaborativeEntry({
+      canManage: true,
+      isArchived: true,
+      isDefault: false,
+      permissions: {
+        canApply: false,
+      },
+    })).toBe(false)
+
     expect(canSharePlmCollaborativeEntry({
       canManage: true,
       isArchived: false,
