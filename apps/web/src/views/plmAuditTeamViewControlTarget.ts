@@ -38,6 +38,12 @@ export function resolvePlmAuditTeamViewApplyTarget<T extends { id: string }>(
   return resolvePlmAuditCanonicalTeamViewManagementTarget(views, options)
 }
 
+export function resolvePlmAuditTakeoverTeamViewSelectorId(options: {
+  targetTeamViewId: string
+}) {
+  return options.targetTeamViewId.trim()
+}
+
 export function shouldLockPlmAuditTeamViewManagementTarget(options: {
   canonicalTeamViewId: string
   selectedTeamViewId: string

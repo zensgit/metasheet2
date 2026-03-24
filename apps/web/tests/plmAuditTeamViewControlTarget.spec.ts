@@ -4,6 +4,7 @@ import {
   resolvePlmAuditCanonicalTeamViewManagementTarget,
   resolvePlmAuditCanonicalTeamViewManagementTargetId,
   resolvePlmAuditCanonicalTeamViewRouteState,
+  resolvePlmAuditTakeoverTeamViewSelectorId,
   resolvePlmAuditTeamViewDuplicateName,
   shouldEnablePlmAuditTeamViewRenameAction,
   shouldDisablePlmAuditTeamViewTransferOwnerInput,
@@ -79,6 +80,16 @@ describe('plmAuditTeamViewControlTarget', () => {
       id: 'audit-view-1',
       name: 'A',
     })
+  })
+
+  it('aligns non-apply takeovers to the target route owner instead of keeping a stale local selector', () => {
+    expect(resolvePlmAuditTakeoverTeamViewSelectorId({
+      targetTeamViewId: 'audit-view-1',
+    })).toBe('audit-view-1')
+
+    expect(resolvePlmAuditTakeoverTeamViewSelectorId({
+      targetTeamViewId: '',
+    })).toBe('')
   })
 
   it('locks generic management actions when the local selector drifts away from the canonical route owner', () => {

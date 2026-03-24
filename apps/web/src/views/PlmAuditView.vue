@@ -909,6 +909,7 @@ import {
   resolvePlmAuditCanonicalTeamViewManagementTarget,
   resolvePlmAuditCanonicalTeamViewManagementTargetId,
   resolvePlmAuditCanonicalTeamViewRouteState,
+  resolvePlmAuditTakeoverTeamViewSelectorId,
   resolvePlmAuditTeamViewDuplicateName,
   shouldDisablePlmAuditTeamViewTransferOwnerInput,
   shouldEnablePlmAuditTeamViewRenameAction,
@@ -1362,6 +1363,7 @@ function applySceneContextTakeoverCleanup() {
   auditTeamViewCollaborationDraft.value = nextState.collaboration.draft
   auditTeamViewCollaborationFollowup.value = nextState.collaboration.followup
   clearAuditTakeoverTeamViewFormDrafts()
+  alignAuditTakeoverTeamViewSelector(readCanonicalTeamViewRouteState().teamViewId)
   return nextState.consumeSharedEntry
 }
 
@@ -1374,6 +1376,12 @@ function clearAuditTakeoverTeamViewFormDrafts() {
   auditTeamViewName.value = nextDraftState.draftTeamViewName
   auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
   auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
+}
+
+function alignAuditTakeoverTeamViewSelector(targetTeamViewId: string) {
+  auditTeamViewKey.value = resolvePlmAuditTakeoverTeamViewSelectorId({
+    targetTeamViewId,
+  })
 }
 
 async function clearAuditSceneContext() {
@@ -1535,6 +1543,7 @@ async function saveCurrentLocalViewWithFollowup(
   auditTeamViewCollaborationDraft.value = nextCollaborationState.draft
   auditTeamViewCollaborationFollowup.value = nextCollaborationState.followup
   clearAuditTakeoverTeamViewFormDrafts()
+  alignAuditTakeoverTeamViewSelector(parsePlmAuditRouteState(route.query).teamViewId)
   applyAuditSourceLocalSaveAttention()
   applySavedViewAttentionAction({
     kind: 'install-followup',
@@ -2046,7 +2055,7 @@ function isSavedViewActive(view: PlmAuditSavedView) {
   return isPlmAuditRouteStateEqual(view.state, readCurrentRouteState())
 }
 
-function applySavedViewTakeover(actionKind: 'apply' | 'context-action') {
+function applySavedViewTakeover(actionKind: 'apply' | 'context-action', targetTeamViewId: string) {
   clearAuditAttentionFocus()
   applySavedViewAttentionAction({ kind: actionKind })
   applyCollaborationTakeoverCleanup()
@@ -2054,6 +2063,7 @@ function applySavedViewTakeover(actionKind: 'apply' | 'context-action') {
     clearAuditTeamViewShareEntry()
   }
   clearAuditTakeoverTeamViewFormDrafts()
+  alignAuditTakeoverTeamViewSelector(targetTeamViewId)
 }
 
 function runSavedViewContextAction(
@@ -2062,8 +2072,9 @@ function runSavedViewContextAction(
 ) {
   const badge = savedViewContextBadge(view)
   if (badge?.quickAction?.disabled) return
-  applySavedViewTakeover('context-action')
-  void syncRouteState(buildSavedViewContextState(view, actionKind), false, {
+  const nextState = buildSavedViewContextState(view, actionKind)
+  applySavedViewTakeover('context-action', nextState.teamViewId)
+  void syncRouteState(nextState, false, {
     consumeSharedEntry: true,
   })
 }
@@ -2929,8 +2940,9 @@ async function saveCurrentAuditView() {
 }
 
 function applySavedView(view: PlmAuditSavedView) {
-  applySavedViewTakeover('apply')
-  void syncRouteState(restorePlmAuditSavedViewState(view.state), false, {
+  const nextState = restorePlmAuditSavedViewState(view.state)
+  applySavedViewTakeover('apply', nextState.teamViewId)
+  void syncRouteState(nextState, false, {
     consumeSharedEntry: true,
   })
 }
