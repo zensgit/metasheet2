@@ -1,13 +1,14 @@
-# Attendance Admin Anchor Deeplink And Grouped Rail Design 2026-03-24
+# Attendance Admin Anchor Deeplink, Grouped Rail, And Collapse Persistence Design 2026-03-24
 
 ## Context
 
-`AttendanceView.vue` already carries the attendance admin console as a single long page with 22 top-level sections. The first-stage root-admin stabilization added a sticky left anchor rail, active-section tracking, and section-level refs. The second stage added quick-find and hash deep links. This follow-up turns the rail into grouped navigation so the page stays scannable as the section list grows without rewriting the hash/observer model.
+`AttendanceView.vue` already carries the attendance admin console as a single long page with 22 top-level sections. The first-stage root-admin stabilization added a sticky left anchor rail, active-section tracking, and section-level refs. The second stage added quick-find and hash deep links. The third stage grouped the rail by business domain. This follow-up makes the grouped rail durable and faster to control by persisting collapsed groups and adding bulk expand/collapse actions.
 
 ## Goals
 
 - Reduce scroll cost inside the attendance admin console.
 - Reduce cognitive load in the left rail itself.
+- Preserve the operator's preferred left-rail state across reloads.
 - Allow users to share or restore a concrete admin section via URL hash.
 - Keep the implementation local to attendance until a second real long-form admin page appears.
 
@@ -65,7 +66,24 @@ When filtering is active:
 - matching groups auto-expand
 - the top summary count remains `visible items / total items`
 
-### 3. Hash-based deep links
+### 3. Collapse persistence and bulk controls
+
+The grouped rail now persists `adminCollapsedGroupIds` in `localStorage`.
+
+Design choices:
+
+- store only group ids, not expanded state snapshots of every item
+- sanitize persisted ids against the current known group list
+- keep filtering higher priority than persisted collapse state
+- keep the active group's items visible even if its group id is stored as collapsed
+
+The rail also adds `Expand all` and `Collapse all` controls:
+
+- both operate on the grouped state only
+- both are disabled while quick-find filtering is active
+- `Collapse all` still leaves the active group's items visible through the existing active-group expansion rule
+
+### 4. Hash-based deep links
 
 The admin rail now treats each known section id as a valid deep-link target.
 
@@ -73,9 +91,9 @@ The admin rail now treats each known section id as a valid deep-link target.
 - First load reads the hash, restores the matching section, and marks the correct rail item active.
 - Active-section changes continue to keep the hash in sync after the initial restore.
 
-The restore path uses a bounded next-tick retry loop plus a non-reentrant guard. This makes the first-load hash restore resilient to mount timing without introducing duplicate scrolls, scroll polling, or route-level state. The same rule also guarantees that a hashed target remains visible when its group would otherwise be collapsed.
+The restore path uses a bounded next-tick retry loop plus a non-reentrant guard. This makes the first-load hash restore resilient to mount timing without introducing duplicate scrolls, scroll polling, or route-level state. The same rule also guarantees that a hashed target remains visible when its group would otherwise be collapsed by persisted state.
 
-### 4. Branch hygiene for timezone helpers
+### 5. Branch hygiene for timezone helpers
 
 This clean branch already depended on `apps/web/src/utils/timezones.ts` through `AttendanceView.vue`, but the file was missing from the branch itself. The follow-up includes it so the branch can build and type-check independently instead of relying on unrelated local dirt from another worktree.
 

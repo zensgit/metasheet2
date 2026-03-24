@@ -500,6 +500,24 @@
                   :placeholder="tr('Search sections', '搜索区块')"
                 />
               </label>
+              <div class="attendance__admin-nav-actions">
+                <button
+                  class="attendance__btn attendance__btn--inline"
+                  type="button"
+                  :disabled="adminSectionFilterActive || allAdminSectionGroupsExpanded"
+                  @click="expandAllAdminSectionGroups"
+                >
+                  {{ tr('Expand all', '展开全部') }}
+                </button>
+                <button
+                  class="attendance__btn attendance__btn--inline"
+                  type="button"
+                  :disabled="adminSectionFilterActive || allAdminSectionGroupsCollapsed"
+                  @click="collapseAllAdminSectionGroups"
+                >
+                  {{ tr('Collapse all', '收起全部') }}
+                </button>
+              </div>
               <nav class="attendance__admin-nav" :aria-label="tr('Attendance admin sections', '考勤管理区块')">
                 <section
                   v-for="group in visibleAdminSectionNavGroups"
@@ -3469,6 +3487,7 @@ const props = withDefaults(
 const { locale, isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 const CALENDAR_DISPLAY_PREFS_STORAGE_KEY = 'metasheet_attendance_calendar_display'
+const ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY = 'metasheet_attendance_admin_nav_collapsed_groups'
 
 interface AttendanceCalendarDisplayPrefs {
   showLunar: boolean
@@ -3498,6 +3517,27 @@ function persistCalendarDisplayPrefs(prefs: AttendanceCalendarDisplayPrefs): voi
   if (typeof window === 'undefined') return
   try {
     window.localStorage.setItem(CALENDAR_DISPLAY_PREFS_STORAGE_KEY, JSON.stringify(prefs))
+  } catch {
+    // ignore storage write failures (private mode, quota).
+  }
+}
+
+function loadAdminNavCollapsedGroups(): string[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function persistAdminNavCollapsedGroups(groupIds: string[]): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY, JSON.stringify(groupIds))
   } catch {
     // ignore storage write failures (private mode, quota).
   }
@@ -4503,7 +4543,7 @@ const adminSectionNavGroups = computed<AdminSectionNavGroup[]>(() => [
 const adminSectionFilter = ref('')
 const adminSectionFilterQuery = computed(() => adminSectionFilter.value.trim().toLowerCase())
 const adminSectionFilterActive = computed(() => adminSectionFilterQuery.value.length > 0)
-const adminCollapsedGroupIds = ref<string[]>([])
+const adminCollapsedGroupIds = ref<string[]>(loadAdminNavCollapsedGroups())
 function isAdminSectionGroupExpanded(groupId: string, items: AdminSectionNavItem[]): boolean {
   if (adminSectionFilterActive.value) return true
   if (items.some(item => item.id === adminActiveSectionId.value)) return true
@@ -4517,6 +4557,14 @@ function toggleAdminSectionGroup(groupId: string): void {
     return
   }
   adminCollapsedGroupIds.value = [...adminCollapsedGroupIds.value, groupId]
+}
+
+function expandAllAdminSectionGroups(): void {
+  adminCollapsedGroupIds.value = []
+}
+
+function collapseAllAdminSectionGroups(): void {
+  adminCollapsedGroupIds.value = adminSectionNavGroups.value.map(group => group.id)
 }
 
 const visibleAdminSectionNavGroups = computed(() => {
@@ -4544,6 +4592,12 @@ const visibleAdminSectionNavGroups = computed(() => {
 })
 
 const visibleAdminSectionNavItems = computed(() => visibleAdminSectionNavGroups.value.flatMap(group => group.items))
+const knownAdminSectionGroupIds = computed(() => adminSectionNavGroups.value.map(group => group.id))
+const allAdminSectionGroupsExpanded = computed(() => adminCollapsedGroupIds.value.length === 0)
+const allAdminSectionGroupsCollapsed = computed(() => {
+  const allGroupIds = knownAdminSectionGroupIds.value
+  return allGroupIds.length > 0 && allGroupIds.every(id => adminCollapsedGroupIds.value.includes(id))
+})
 const adminSectionNavCountLabel = computed(() => {
   const visible = visibleAdminSectionNavItems.value.length
   const total = adminSectionNavItems.value.length
@@ -4627,6 +4681,18 @@ const calendarLabel = computed(() => {
 
 watch([showLunarLabel, showHolidayBadge], ([showLunar, showHoliday]) => {
   persistCalendarDisplayPrefs({ showLunar, showHoliday })
+})
+
+watch(knownAdminSectionGroupIds, (groupIds) => {
+  const known = new Set(groupIds)
+  const nextIds = Array.from(new Set(adminCollapsedGroupIds.value.filter(id => known.has(id))))
+  if (nextIds.length !== adminCollapsedGroupIds.value.length || nextIds.some((id, index) => id !== adminCollapsedGroupIds.value[index])) {
+    adminCollapsedGroupIds.value = nextIds
+  }
+}, { immediate: true })
+
+watch(adminCollapsedGroupIds, (groupIds) => {
+  persistAdminNavCollapsedGroups(Array.from(new Set(groupIds)))
 })
 
 const recordMap = computed(() => {
@@ -11075,6 +11141,12 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
 
 .attendance__field--compact span {
   font-size: 12px;
+}
+
+.attendance__admin-nav-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .attendance__admin-nav {

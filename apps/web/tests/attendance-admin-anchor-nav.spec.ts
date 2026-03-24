@@ -3,6 +3,8 @@ import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { apiFetch } from '../src/utils/api'
 
+const ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY = 'metasheet_attendance_admin_nav_collapsed_groups'
+
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
     plugins: ref([
@@ -49,6 +51,7 @@ describe('Attendance admin anchor navigation', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     window.localStorage.setItem('metasheet_locale', 'en')
+    window.localStorage.removeItem(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY)
     window.history.replaceState({}, '', '/attendance')
     vi.mocked(apiFetch).mockResolvedValue(
       jsonResponse(200, {
@@ -130,6 +133,29 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeTruthy()
   })
 
+  it('persists collapsed groups across remounts', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const policiesHeader = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-nav-group-header'))
+      .find(button => button.textContent?.includes('Policies'))
+    expect(policiesHeader).toBeTruthy()
+
+    policiesHeader!.click()
+    await flushUi(2)
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeNull()
+    expect(window.localStorage.getItem(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY)).toContain('policies')
+
+    app.unmount()
+    container!.innerHTML = ''
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeNull()
+  })
+
   it('scrolls to the selected anchor target and marks it active', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
@@ -173,6 +199,7 @@ describe('Attendance admin anchor navigation', () => {
   })
 
   it('restores the hashed admin anchor on first load', async () => {
+    window.localStorage.setItem(ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY, JSON.stringify(['policies']))
     window.history.replaceState({}, '', '/attendance#attendance-admin-approval-flows')
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
@@ -185,5 +212,27 @@ describe('Attendance admin anchor navigation', () => {
     expect(button?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
     expect(button?.getAttribute('aria-current')).toBe('true')
     expect(window.location.hash).toBe('#attendance-admin-approval-flows')
+  })
+
+  it('supports expand all and collapse all controls', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const controls = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-nav-actions .attendance__btn'))
+    const expandAll = controls.find(button => button.textContent?.includes('Expand all'))
+    const collapseAll = controls.find(button => button.textContent?.includes('Collapse all'))
+    expect(expandAll).toBeTruthy()
+    expect(collapseAll).toBeTruthy()
+
+    collapseAll!.click()
+    await flushUi(2)
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeNull()
+    expect(container!.querySelector('[data-admin-anchor-group="policies"] [aria-expanded="false"]')).toBeTruthy()
+
+    expandAll!.click()
+    await flushUi(2)
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeTruthy()
+    expect(container!.querySelector('[data-admin-anchor-group="policies"] [aria-expanded="true"]')).toBeTruthy()
   })
 })
