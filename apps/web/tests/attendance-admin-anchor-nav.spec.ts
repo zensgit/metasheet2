@@ -376,6 +376,7 @@ describe('Attendance admin anchor navigation', () => {
     )
     expect(labels).toEqual(['Payroll Cycles', 'Import batches'])
     expect(container!.querySelector('.attendance__admin-nav-scope-badge')?.textContent?.trim()).toBe('org-b')
+    expect(container!.textContent).toContain('Switched to navigation memory for org-b.')
     expect(scrollIntoViewSpy).toHaveBeenCalled()
     const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
     expect(scrolledTargets.some(target => target.id === 'attendance-admin-payroll-cycles')).toBe(true)

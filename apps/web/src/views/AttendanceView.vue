@@ -500,6 +500,9 @@
                   </span>
                 </div>
               </div>
+              <div v-if="adminNavScopeFeedback" class="attendance__admin-nav-scope-note">
+                {{ adminNavScopeFeedback }}
+              </div>
               <button
                 v-if="isCompactAdminNav"
                 class="attendance__admin-nav-toggle"
@@ -4774,11 +4777,31 @@ const adminSectionNavCountLabel = computed(() => {
   return `${visible}/${total} ${tr('items', '项')}`
 })
 const adminActiveSectionId = ref<string>(ATTENDANCE_ADMIN_SECTION_IDS.settings)
+const adminNavScopeFeedback = ref('')
 const adminSectionElements = new Map<string, HTMLElement>()
 let adminSectionObserver: IntersectionObserver | null = null
 let adminHashSyncReady = false
 let adminHashRestoreCompleted = false
 let adminHashRestorePending = false
+let adminNavScopeFeedbackTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearAdminNavScopeFeedbackTimer(): void {
+  if (adminNavScopeFeedbackTimer) {
+    clearTimeout(adminNavScopeFeedbackTimer)
+    adminNavScopeFeedbackTimer = null
+  }
+}
+
+function setAdminNavScopeFeedback(scope: string): void {
+  adminNavScopeFeedback.value = scope === ADMIN_NAV_DEFAULT_STORAGE_SCOPE
+    ? tr('Switched to default navigation memory.', '已切换到默认导航记忆。')
+    : tr(`Switched to navigation memory for ${scope}.`, `已切换到 ${scope} 的导航记忆。`)
+  clearAdminNavScopeFeedbackTimer()
+  adminNavScopeFeedbackTimer = setTimeout(() => {
+    adminNavScopeFeedback.value = ''
+    adminNavScopeFeedbackTimer = null
+  }, 3200)
+}
 
 watch(adminActiveSectionId, (id) => {
   if (!showAdmin.value || !isKnownAdminSectionId(id)) return
@@ -10733,6 +10756,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   disconnectAdminSectionObserver()
+  clearAdminNavScopeFeedbackTimer()
   if (typeof window !== 'undefined') {
     window.removeEventListener('resize', syncAdminNavViewportState)
   }
@@ -10769,6 +10793,9 @@ watch(adminNavStorageScope, async (scope, previousScope) => {
   if (scope === previousScope) return
   adminCollapsedGroupIds.value = loadAdminNavCollapsedGroups(scope)
   adminRecentSectionIds.value = loadAdminNavRecentSections(scope)
+  if (previousScope !== undefined) {
+    setAdminNavScopeFeedback(scope)
+  }
   if (!showAdmin.value || adminForbidden.value) return
   adminHashSyncReady = false
   adminHashRestoreCompleted = false
@@ -11384,6 +11411,16 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   color: #3730a3;
   font-size: 11px;
   font-weight: 600;
+}
+
+.attendance__admin-nav-scope-note {
+  margin-top: -4px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #eef6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .attendance__field--compact {
