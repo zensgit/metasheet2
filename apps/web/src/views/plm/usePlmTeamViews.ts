@@ -193,7 +193,11 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       const items = result.items as PlmWorkbenchTeamView<Kind>[]
       teamViews.value = sortTeamViews(items)
       const availableIds = new Set(items.map((view) => view.id))
-      teamViewSelection.value = teamViewSelection.value.filter((id) => availableIds.has(id))
+      teamViewSelection.value = teamViewSelection.value.filter((id) => {
+        if (!availableIds.has(id)) return false
+        const selectedView = items.find((view) => view.id === id)
+        return Boolean(selectedView?.permissions?.canManage ?? selectedView?.canManage)
+      })
       if (!items.some((view) => view.id === teamViewKey.value)) {
         teamViewKey.value = ''
       } else if (teamViewKey.value) {

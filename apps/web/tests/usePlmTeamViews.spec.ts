@@ -390,6 +390,68 @@ describe('usePlmTeamViews', () => {
     expect(setMessage).toHaveBeenLastCalledWith('已应用工作台默认团队视角：默认工作台视角')
   })
 
+  it('clears batch selection entries that become readonly after refresh', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews)
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: 'workbench-selected',
+            kind: 'workbench',
+            scope: 'team',
+            name: '可管理工作台视角',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            isDefault: false,
+            state: {
+              query: {
+                documentFilter: 'gear',
+              },
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: 'workbench-selected',
+            kind: 'workbench',
+            scope: 'team',
+            name: '只读工作台视角',
+            ownerUserId: 'owner-2',
+            canManage: true,
+            isDefault: false,
+            permissions: {
+              canManage: false,
+            },
+            state: {
+              query: {
+                documentFilter: 'gear',
+              },
+            },
+          },
+        ],
+      })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewSelection.value = ['workbench-selected']
+
+    await model.refreshTeamViews()
+
+    expect(model.teamViewSelection.value).toEqual([])
+    expect(model.teamViewSelectionCount.value).toBe(0)
+  })
+
   it('syncs requested workbench view id before applying workbench state', async () => {
     const requestedViewId = ref('')
     const syncRequestedViewId = vi.fn((value?: string) => {
