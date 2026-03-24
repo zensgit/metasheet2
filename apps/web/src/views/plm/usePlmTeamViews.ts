@@ -151,6 +151,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   const defaultTeamViewLabel = computed(() => defaultTeamView.value?.name || '')
 
   function applyView(view: PlmWorkbenchTeamView<Kind>) {
+    if (teamViewKey.value && teamViewKey.value !== view.id) {
+      teamViewOwnerUserId.value = ''
+    }
     teamViewKey.value = view.id
     options.syncRequestedViewId?.(view.id)
     options.applyViewState(view.state)
@@ -238,6 +241,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       teamViews.value = upsertTeamView(teamViews.value, saved)
       applyView(saved)
       teamViewName.value = ''
+      teamViewOwnerUserId.value = ''
       options.setMessage(`已保存${options.label}团队视角。`)
     } catch (error) {
       teamViewsError.value = getErrorMessage(error, `保存${options.label}团队视角失败`)

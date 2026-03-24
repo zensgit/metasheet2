@@ -676,6 +676,7 @@ describe('usePlmTeamViews', () => {
 
     await model.refreshTeamViews()
     model.teamViewName.value = '我的工作台'
+    model.teamViewOwnerUserId.value = 'stale-owner'
     await model.saveTeamView()
 
     expect(savePlmWorkbenchTeamView).toHaveBeenCalledWith('workbench', '我的工作台', {
@@ -685,6 +686,7 @@ describe('usePlmTeamViews', () => {
       },
     })
     expect(model.teamViewKey.value).toBe('workbench-saved')
+    expect(model.teamViewOwnerUserId.value).toBe('')
     expect(syncRequestedViewId).toHaveBeenCalledWith('workbench-saved')
     expect(workbenchApply).toHaveLastReturnedWith('workbench-saved')
 
@@ -1111,10 +1113,12 @@ describe('usePlmTeamViews', () => {
 
     await model.refreshTeamViews()
     model.teamViewKey.value = 'workbench-shared'
+    model.teamViewOwnerUserId.value = 'stale-owner'
     await model.duplicateTeamView()
 
     expect(duplicatePlmWorkbenchTeamView).toHaveBeenCalledWith('workbench', 'workbench-shared', undefined)
     expect(model.teamViewKey.value).toBe('workbench-copy')
+    expect(model.teamViewOwnerUserId.value).toBe('')
     expect(syncRequestedViewId).toHaveBeenCalledWith('workbench-copy')
     expect(workbenchApply).toHaveLastReturnedWith('workbench-copy')
     expect(model.canRenameTeamView.value).toBe(false)
