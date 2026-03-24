@@ -68,21 +68,35 @@ export function trimPlmAuditExistingTeamViewUiState<T extends { id: string }>(
     managedTeamViewId: string
   },
   views: readonly T[],
+  options?: {
+    isApplicableView?: (view: T) => boolean
+    isSelectableView?: (view: T) => boolean
+  },
 ): PlmAuditTeamViewListUiState {
-  const existingIds = new Set(views.map((view) => view.id))
+  const viewsById = new Map(views.map((view) => [view.id, view]))
   const selectedTeamViewId = state.selectedTeamViewId.trim()
   const managedTeamViewId = state.managedTeamViewId.trim()
-  const selectedTeamViewStillExists = !selectedTeamViewId || existingIds.has(selectedTeamViewId)
-  const managedTeamViewStillExists = !managedTeamViewId || existingIds.has(managedTeamViewId)
-  const shouldPreserveDrafts = selectedTeamViewId
-    ? selectedTeamViewStillExists
+  const selectedTeamView = selectedTeamViewId ? viewsById.get(selectedTeamViewId) : null
+  const managedTeamView = managedTeamViewId ? viewsById.get(managedTeamViewId) : null
+  const selectedTeamViewStillAvailable = !selectedTeamViewId || Boolean(
+    selectedTeamView
+    && (options?.isApplicableView ? options.isApplicableView(selectedTeamView) : true),
+  )
+  const managedTeamViewStillExists = !managedTeamViewId || Boolean(managedTeamView)
+  const nextSelectedTeamViewId = selectedTeamViewStillAvailable ? state.selectedTeamViewId : ''
+  const shouldPreserveDrafts = nextSelectedTeamViewId.trim()
+    ? true
     : managedTeamViewStillExists
 
   return {
-    selectedTeamViewId: selectedTeamViewStillExists ? state.selectedTeamViewId : '',
-    selectedIds: state.selectedIds.filter((id) => existingIds.has(id)),
-    focusedTeamViewId: existingIds.has(state.focusedTeamViewId) ? state.focusedTeamViewId : '',
-    focusedRecommendedTeamViewId: existingIds.has(state.focusedRecommendedTeamViewId)
+    selectedTeamViewId: nextSelectedTeamViewId,
+    selectedIds: state.selectedIds.filter((id) => {
+      const view = viewsById.get(id)
+      if (!view) return false
+      return options?.isSelectableView ? options.isSelectableView(view) : true
+    }),
+    focusedTeamViewId: viewsById.has(state.focusedTeamViewId) ? state.focusedTeamViewId : '',
+    focusedRecommendedTeamViewId: viewsById.has(state.focusedRecommendedTeamViewId)
       ? state.focusedRecommendedTeamViewId
       : '',
     draftTeamViewName: shouldPreserveDrafts ? state.draftTeamViewName : '',

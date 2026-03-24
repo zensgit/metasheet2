@@ -164,6 +164,61 @@ describe('plmAuditTeamViewOwnership', () => {
     })
   })
 
+  it('drops stale local selectors when a refreshed team view still exists but is no longer apply-able', () => {
+    expect(trimPlmAuditExistingTeamViewUiState({
+      selectedTeamViewId: 'audit-view-2',
+      managedTeamViewId: 'audit-view-1',
+      selectedIds: ['audit-view-2'],
+      focusedTeamViewId: 'audit-view-2',
+      focusedRecommendedTeamViewId: '',
+      draftTeamViewName: '当前 canonical owner 草稿',
+      draftTeamViewNameOwnerId: 'audit-view-1',
+      draftOwnerUserId: 'owner-f',
+    }, [
+      { id: 'audit-view-1', applicable: true, selectable: true },
+      { id: 'audit-view-2', applicable: false, selectable: false },
+    ], {
+      isApplicableView: (view) => view.applicable,
+      isSelectableView: (view) => view.selectable,
+    })).toEqual({
+      selectedTeamViewId: '',
+      selectedIds: [],
+      focusedTeamViewId: 'audit-view-2',
+      focusedRecommendedTeamViewId: '',
+      draftTeamViewName: '当前 canonical owner 草稿',
+      draftTeamViewNameOwnerId: 'audit-view-1',
+      draftOwnerUserId: 'owner-f',
+    })
+  })
+
+  it('drops non-selectable batch selections even when the ids still exist after refresh', () => {
+    expect(trimPlmAuditExistingTeamViewUiState({
+      selectedTeamViewId: '',
+      managedTeamViewId: 'audit-view-1',
+      selectedIds: ['audit-view-1', 'audit-view-2', 'audit-view-3'],
+      focusedTeamViewId: '',
+      focusedRecommendedTeamViewId: '',
+      draftTeamViewName: '',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: '',
+    }, [
+      { id: 'audit-view-1', applicable: true, selectable: true },
+      { id: 'audit-view-2', applicable: true, selectable: false },
+      { id: 'audit-view-3', applicable: true, selectable: true },
+    ], {
+      isApplicableView: (view) => view.applicable,
+      isSelectableView: (view) => view.selectable,
+    })).toEqual({
+      selectedTeamViewId: '',
+      selectedIds: ['audit-view-1', 'audit-view-3'],
+      focusedTeamViewId: '',
+      focusedRecommendedTeamViewId: '',
+      draftTeamViewName: '',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: '',
+    })
+  })
+
   it('preserves team-view name drafts while clearing owner drafts when the canonical management target changes', () => {
     expect(resolvePlmAuditCanonicalTeamViewFormDraftState({
       previousCanonicalTeamViewId: 'audit-view-1',

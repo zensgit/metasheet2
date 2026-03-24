@@ -52,6 +52,19 @@ function canDeleteAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
   return view.permissions?.canDelete ?? view.canManage
 }
 
+export function canApplyPlmAuditTeamView(view: Pick<PlmWorkbenchTeamView<'audit'>, 'isArchived' | 'permissions'>) {
+  if (typeof view.permissions?.canApply === 'boolean') {
+    return view.permissions.canApply
+  }
+  return !view.isArchived
+}
+
+export function isSelectablePlmAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
+  return canArchiveAuditTeamView(view)
+    || canRestoreAuditTeamView(view)
+    || canDeleteAuditTeamView(view)
+}
+
 function buildLifecycleActions(
   view: PlmWorkbenchTeamView<'audit'>,
   tr: (en: string, zh: string) => string,
@@ -149,7 +162,7 @@ export function buildPlmAuditTeamViewManagement(
       isArchived: Boolean(view.isArchived),
       updatedAt: view.updatedAt || view.createdAt,
       selected: selectedSet.has(view.id),
-      selectable: lifecycleActions.length > 0,
+      selectable: isSelectablePlmAuditTeamView(view),
       selectionHint: lifecycleActions.length
         ? ''
         : tr('This team view is read-only in the current account.', '当前账号对这个团队视图只有只读权限。'),
