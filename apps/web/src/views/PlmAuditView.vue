@@ -445,7 +445,7 @@
               <button
                 class="plm-audit__button plm-audit__button--primary"
                 type="button"
-                :disabled="auditTeamViewsLoading || !findAuditTeamViewById(view.id)"
+                :disabled="auditTeamViewsLoading || view.primaryActionDisabled"
                 @click="applyRecommendedAuditTeamView(view)"
               >
                 {{ view.primaryActionLabel }}
@@ -848,6 +848,7 @@ import {
   buildAuditTeamViewSummaryHint,
   buildRecommendedAuditTeamViews,
   consumeStaleRecommendedAuditTeamViewFocusId,
+  resolveApplicableRecommendedAuditTeamView,
   resolveAuditTeamViewRecommendationFilter,
   type PlmRecommendedAuditTeamView,
   type PlmRecommendedAuditTeamViewFilter,
@@ -2299,6 +2300,7 @@ async function transferAuditTeamView() {
 }
 
 async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
+  if (!canApplyPlmAuditTeamView(view)) return
   const nextState = buildPlmAuditSelectedTeamViewRouteState(view, readCurrentRouteState())
   clearAuditSourceFocus()
   applySavedViewAttentionAction({ kind: 'apply' })
@@ -2311,6 +2313,10 @@ async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
     consumeSharedEntry: true,
   })
   setStatus(tr('Audit team view applied.', '审计团队视图已应用。'))
+}
+
+function findApplicableRecommendedAuditTeamView(recommendedViewId: string) {
+  return resolveApplicableRecommendedAuditTeamView(auditTeamViews.value, recommendedViewId)
 }
 
 async function shareAuditTeamViewEntry(
@@ -2438,8 +2444,8 @@ async function setAuditTeamViewDefaultEntry(
 }
 
 async function applyRecommendedAuditTeamView(view: PlmRecommendedAuditTeamView) {
-  const target = findAuditTeamViewById(view.id)
-  if (!target || target.isArchived) return
+  const target = findApplicableRecommendedAuditTeamView(view.id)
+  if (!target) return
   await applyAuditTeamViewEntry(target)
 }
 

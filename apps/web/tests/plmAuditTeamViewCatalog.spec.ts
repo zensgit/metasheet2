@@ -4,6 +4,7 @@ import {
   buildAuditTeamViewSummaryHint,
   buildRecommendedAuditTeamViews,
   consumeStaleRecommendedAuditTeamViewFocusId,
+  resolveApplicableRecommendedAuditTeamView,
   resolveAuditTeamViewRecommendationFilter,
 } from '../src/views/plmAuditTeamViewCatalog'
 import type { PlmWorkbenchTeamView } from '../src/views/plm/plmPanelModels'
@@ -133,6 +134,23 @@ describe('plmAuditTeamViewCatalog', () => {
     })
   })
 
+  it('marks recommended apply actions as disabled when the target is no longer applicable', () => {
+    const [view] = buildRecommendedAuditTeamViews([
+      createAuditTeamView({
+        id: 'recent-update',
+        permissions: {
+          ...createAuditTeamView().permissions,
+          canApply: false,
+        },
+      }),
+    ])
+
+    expect(view).toMatchObject({
+      primaryActionKind: 'apply-view',
+      primaryActionDisabled: true,
+    })
+  })
+
   it('builds summary chips and hint from recommendation counts', () => {
     const chips = buildAuditTeamViewSummaryChips([
       createAuditTeamView({ id: 'default', isDefault: true }),
@@ -178,5 +196,30 @@ describe('plmAuditTeamViewCatalog', () => {
     expect(consumeStaleRecommendedAuditTeamViewFocusId(visibleViews, 'default')).toBe('default')
     expect(consumeStaleRecommendedAuditTeamViewFocusId(visibleViews, 'recent-default')).toBe('')
     expect(consumeStaleRecommendedAuditTeamViewFocusId(visibleViews, '')).toBe('')
+  })
+
+  it('only resolves recommended apply targets that still pass applyability gating', () => {
+    const basePermissions = createAuditTeamView().permissions
+    const applicable = createAuditTeamView({ id: 'applicable' })
+    const readOnly = createAuditTeamView({
+      id: 'read-only',
+      permissions: {
+        ...basePermissions,
+        canApply: false,
+      },
+    })
+    const archived = createAuditTeamView({
+      id: 'archived',
+      isArchived: true,
+      permissions: {
+        ...basePermissions,
+        canApply: false,
+      },
+    })
+
+    expect(resolveApplicableRecommendedAuditTeamView([applicable, readOnly, archived], 'applicable')?.id).toBe('applicable')
+    expect(resolveApplicableRecommendedAuditTeamView([applicable, readOnly, archived], 'read-only')).toBeNull()
+    expect(resolveApplicableRecommendedAuditTeamView([applicable, readOnly, archived], 'archived')).toBeNull()
+    expect(resolveApplicableRecommendedAuditTeamView([applicable], 'missing')).toBeNull()
   })
 })

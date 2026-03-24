@@ -1,4 +1,5 @@
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
+import { canApplyPlmAuditTeamView } from './plmAuditTeamViewManagement'
 
 export type PlmRecommendedAuditTeamViewReason = 'default' | 'recent-default' | 'recent-update'
 export type PlmRecommendedAuditTeamViewFilter = '' | PlmRecommendedAuditTeamViewReason
@@ -14,6 +15,7 @@ export type PlmRecommendedAuditTeamView = {
   recommendationSourceTimestamp?: string
   primaryActionKind: 'apply-view'
   primaryActionLabel: string
+  primaryActionDisabled: boolean
   secondaryActionKind: 'copy-link' | 'set-default'
   secondaryActionLabel: string
   managementActionKind: 'focus-management'
@@ -42,6 +44,15 @@ export function consumeStaleRecommendedAuditTeamViewFocusId(
 ) {
   if (!focusedViewId) return ''
   return visibleViews.some((view) => view.id === focusedViewId) ? focusedViewId : ''
+}
+
+export function resolveApplicableRecommendedAuditTeamView(
+  views: readonly PlmWorkbenchTeamView<'audit'>[],
+  recommendedViewId: string,
+) {
+  const target = views.find((view) => view.id === recommendedViewId) || null
+  if (!target || !canApplyPlmAuditTeamView(target)) return null
+  return target
 }
 
 const AUDIT_TEAM_VIEW_RECOMMENDATION_DESCRIPTIONS: Record<string, string> = {
@@ -184,6 +195,7 @@ export function buildRecommendedAuditTeamViews(
     .map(({ view, recommendationReason }) => {
       const recommendationSource = getRecommendationSource(view, recommendationReason)
       const recommendationActions = getRecommendationActions(view, recommendationReason)
+      const primaryActionDisabled = !canApplyPlmAuditTeamView(view)
       return {
         id: view.id,
         name: view.name,
@@ -195,6 +207,7 @@ export function buildRecommendedAuditTeamViews(
         recommendationSourceTimestamp: recommendationSource.timestamp,
         primaryActionKind: recommendationActions.primaryActionKind,
         primaryActionLabel: recommendationActions.primaryActionLabel,
+        primaryActionDisabled,
         secondaryActionKind: recommendationActions.secondaryActionKind,
         secondaryActionLabel: recommendationActions.secondaryActionLabel,
         managementActionKind: 'focus-management',
