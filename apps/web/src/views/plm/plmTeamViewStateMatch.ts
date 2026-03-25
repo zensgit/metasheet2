@@ -15,6 +15,20 @@ function normalizePlmTeamViewStateValue(value: unknown): unknown {
   return value
 }
 
+export function pickPlmTeamViewStateKeys(
+  value: unknown,
+  keys: readonly string[],
+): Record<string, unknown> {
+  const source = value && typeof value === 'object'
+    ? value as Record<string, unknown>
+    : {}
+
+  return keys.reduce<Record<string, unknown>>((acc, key) => {
+    acc[key] = source[key]
+    return acc
+  }, {})
+}
+
 export function matchPlmTeamViewStateSnapshot(left: unknown, right: unknown): boolean {
   return JSON.stringify(normalizePlmTeamViewStateValue(left)) === JSON.stringify(normalizePlmTeamViewStateValue(right))
 }

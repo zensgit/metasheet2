@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   matchPlmTeamViewStateSnapshot,
   mergePlmTeamViewBooleanMapDefaults,
+  pickPlmTeamViewStateKeys,
 } from '../src/views/plm/plmTeamViewStateMatch'
 
 describe('plmTeamViewStateMatch', () => {
@@ -61,6 +62,26 @@ describe('plmTeamViewStateMatch', () => {
       id: false,
       mime: true,
       actions: true,
+    })
+  })
+
+  it('picks only the compared team-view state keys before matching route owners', () => {
+    expect(
+      pickPlmTeamViewStateKeys(
+        {
+          fileId: 'file-main',
+          otherFileId: 'file-other',
+          reviewState: 'approved',
+          reviewNote: 'looks-good',
+          ignoredFutureKey: 'should-not-clear-route-owner',
+        },
+        ['fileId', 'otherFileId', 'reviewState', 'reviewNote'],
+      ),
+    ).toEqual({
+      fileId: 'file-main',
+      otherFileId: 'file-other',
+      reviewState: 'approved',
+      reviewNote: 'looks-good',
     })
   })
 })

@@ -105,6 +105,7 @@ import {
 import {
   matchPlmTeamViewStateSnapshot,
   mergePlmTeamViewBooleanMapDefaults,
+  pickPlmTeamViewStateKeys,
 } from './plm/plmTeamViewStateMatch'
 import {
   canActOnPlmApproval,
@@ -4667,7 +4668,7 @@ watch(
     const activeView = activeDocumentRouteView.value
     if (!activeView) return
     if (matchPlmTeamViewStateSnapshot({
-      ...activeView.state,
+      ...pickPlmTeamViewStateKeys(activeView.state, ['role', 'filter', 'sortKey', 'sortDir']),
       columns: mergePlmTeamViewBooleanMapDefaults(defaultDocumentColumns, activeView.state.columns),
     }, {
       role: documentRole.value,
@@ -4781,12 +4782,15 @@ watch(
     if (!viewId || !activeViewId) return
     const activeView = activeCadRouteView.value
     if (!activeView) return
-    if (matchPlmTeamViewStateSnapshot(activeView.state, {
+    if (matchPlmTeamViewStateSnapshot(
+      pickPlmTeamViewStateKeys(activeView.state, ['fileId', 'otherFileId', 'reviewState', 'reviewNote']),
+      {
       fileId: cadFileId.value,
       otherFileId: cadOtherFileId.value,
       reviewState: cadReviewState.value,
       reviewNote: cadReviewNote.value,
-    })) {
+    },
+    )) {
       return
     }
     cadTeamViewQuery.value = ''
@@ -4900,7 +4904,7 @@ watch(
     const activeView = activeApprovalsRouteView.value
     if (!activeView) return
     if (matchPlmTeamViewStateSnapshot({
-      ...activeView.state,
+      ...pickPlmTeamViewStateKeys(activeView.state, ['status', 'filter', 'comment', 'sortKey', 'sortDir']),
       columns: mergePlmTeamViewBooleanMapDefaults(defaultApprovalColumns, activeView.state.columns),
     }, {
       status: approvalsStatus.value,
