@@ -56,7 +56,7 @@
                   <button
                     class="btn btn--ghost btn--mini"
                     type="button"
-                    :disabled="actingId === approval.id"
+                    :disabled="actingId === approval.id || !canSubmitApprovalInboxAction('reject', comment)"
                     @click="reject(approval.id)"
                   >
                     Reject
@@ -76,7 +76,7 @@
 
         <label class="approval-inbox__comment">
           Action Comment
-          <input v-model.trim="comment" type="text" placeholder="Optional for approve, useful for reject" />
+          <input v-model.trim="comment" type="text" placeholder="Optional for approve, required for reject" />
         </label>
 
         <p v-if="actionStatus" class="approval-inbox__status">{{ actionStatus }}</p>
@@ -112,6 +112,10 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { apiFetch } from '../utils/api'
+import {
+  buildApprovalInboxActionPayload,
+  canSubmitApprovalInboxAction,
+} from './approvalInboxActionPayload'
 
 interface ApprovalInstance {
   id: string
@@ -189,14 +193,18 @@ async function refresh() {
 }
 
 async function performAction(id: string, action: 'approve' | 'reject') {
-  actingId.value = id
   actionStatus.value = ''
   error.value = ''
+  if (!canSubmitApprovalInboxAction(action, comment.value)) {
+    error.value = 'Reject requires a reason'
+    return
+  }
+  actingId.value = id
 
   try {
     const response = await apiFetch(`/api/approvals/${encodeURIComponent(id)}/${action}`, {
       method: 'POST',
-      body: JSON.stringify(comment.value ? { comment: comment.value } : {}),
+      body: JSON.stringify(buildApprovalInboxActionPayload(action, comment.value)),
     })
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
     actionStatus.value = `${action === 'approve' ? 'Approved' : 'Rejected'} ${id}`
