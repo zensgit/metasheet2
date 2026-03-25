@@ -1966,6 +1966,7 @@ describe('usePlmTeamViews', () => {
     expect(model.canDeleteTeamView.value).toBe(false)
     expect(model.canArchiveTeamView.value).toBe(false)
     expect(model.canRenameTeamView.value).toBe(false)
+    expect(model.canTransferTargetTeamView.value).toBe(false)
     expect(model.canTransferTeamView.value).toBe(false)
     expect(model.canSetTeamViewDefault.value).toBe(false)
 
@@ -2001,6 +2002,61 @@ describe('usePlmTeamViews', () => {
     expect(setMessage).toHaveBeenNthCalledWith(5, '当前工作台团队视角不可设为默认。', true)
     expect(setMessage).toHaveBeenNthCalledWith(6, '当前工作台团队视角不可取消默认。', true)
     expect(setMessage).toHaveBeenNthCalledWith(7, '当前工作台团队视角不可恢复。', true)
+  })
+
+  it('separates transfer target availability from transfer submission readiness', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-transferable',
+          kind: 'workbench',
+          scope: 'team',
+          name: '可转移工作台视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canManage: true,
+            canTransfer: true,
+          },
+          state: {
+            query: {
+              documentFilter: 'transferable',
+            },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-transferable'
+    await nextTick()
+
+    expect(model.canTransferTargetTeamView.value).toBe(true)
+    expect(model.canTransferTeamView.value).toBe(false)
+
+    model.teamViewOwnerUserId.value = 'dev-user'
+    await nextTick()
+
+    expect(model.canTransferTargetTeamView.value).toBe(true)
+    expect(model.canTransferTeamView.value).toBe(false)
+
+    model.teamViewOwnerUserId.value = 'owner-2'
+    await nextTick()
+
+    expect(model.canTransferTargetTeamView.value).toBe(true)
+    expect(model.canTransferTeamView.value).toBe(true)
   })
 
   it('allows rename, set-default, and clear-default when permissions.canManage overrides legacy false', async () => {

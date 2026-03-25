@@ -84,6 +84,7 @@
         v-model.trim="teamViewOwnerUserId.value"
         :name="ownerInputName"
         :placeholder="`${label}目标用户 ID`"
+        :disabled="!(canTransferTarget?.value ?? canTransfer?.value ?? false) || loading.value"
       />
       <button
         class="btn ghost mini"
@@ -178,6 +179,7 @@ defineProps<{
   canArchive?: ComputedRef<boolean>
   canRestore?: ComputedRef<boolean>
   canRename?: ComputedRef<boolean>
+  canTransferTarget?: ComputedRef<boolean>
   canTransfer?: ComputedRef<boolean>
   canSetDefault: ComputedRef<boolean>
   canClearDefault: ComputedRef<boolean>

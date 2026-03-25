@@ -175,6 +175,7 @@
       :can-archive="panel.canArchiveWorkbenchTeamView"
       :can-restore="panel.canRestoreWorkbenchTeamView"
       :can-rename="panel.canRenameWorkbenchTeamView"
+      :can-transfer-target="panel.canTransferWorkbenchTeamViewTarget"
       :can-transfer="panel.canTransferWorkbenchTeamView"
       :can-set-default="panel.canSetWorkbenchTeamViewDefault"
       :can-clear-default="panel.canClearWorkbenchTeamViewDefault"

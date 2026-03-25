@@ -75,6 +75,7 @@ type UsePlmProductPanelOptions = {
   canArchiveWorkbenchTeamView: ComputedRef<boolean>
   canRestoreWorkbenchTeamView: ComputedRef<boolean>
   canRenameWorkbenchTeamView: ComputedRef<boolean>
+  canTransferWorkbenchTeamViewTarget: ComputedRef<boolean>
   canTransferWorkbenchTeamView: ComputedRef<boolean>
   canSetWorkbenchTeamViewDefault: ComputedRef<boolean>
   canClearWorkbenchTeamViewDefault: ComputedRef<boolean>
@@ -253,6 +254,7 @@ export function usePlmProductPanel(options: UsePlmProductPanelOptions) {
     canArchiveWorkbenchTeamView: options.canArchiveWorkbenchTeamView,
     canRestoreWorkbenchTeamView: options.canRestoreWorkbenchTeamView,
     canRenameWorkbenchTeamView: options.canRenameWorkbenchTeamView,
+    canTransferWorkbenchTeamViewTarget: options.canTransferWorkbenchTeamViewTarget,
     canTransferWorkbenchTeamView: options.canTransferWorkbenchTeamView,
     canSetWorkbenchTeamViewDefault: options.canSetWorkbenchTeamViewDefault,
     canClearWorkbenchTeamViewDefault: options.canClearWorkbenchTeamViewDefault,

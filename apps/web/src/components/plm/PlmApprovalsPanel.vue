@@ -93,6 +93,7 @@
       :can-archive="panel.canArchiveApprovalsTeamView"
       :can-restore="panel.canRestoreApprovalsTeamView"
       :can-rename="panel.canRenameApprovalsTeamView"
+      :can-transfer-target="panel.canTransferApprovalsTeamViewTarget"
       :can-transfer="panel.canTransferApprovalsTeamView"
       :can-set-default="panel.canSetApprovalsTeamViewDefault"
       :can-clear-default="panel.canClearApprovalsTeamViewDefault"

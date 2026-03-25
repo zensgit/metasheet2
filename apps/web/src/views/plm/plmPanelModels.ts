@@ -769,6 +769,7 @@ export type PlmProductPanelModel = {
   canArchiveWorkbenchTeamView: ComputedRef<boolean>
   canRestoreWorkbenchTeamView: ComputedRef<boolean>
   canRenameWorkbenchTeamView: ComputedRef<boolean>
+  canTransferWorkbenchTeamViewTarget: ComputedRef<boolean>
   canTransferWorkbenchTeamView: ComputedRef<boolean>
   canSetWorkbenchTeamViewDefault: ComputedRef<boolean>
   canClearWorkbenchTeamViewDefault: ComputedRef<boolean>
@@ -871,6 +872,7 @@ export type PlmDocumentsPanelModel = {
   canArchiveDocumentTeamView: ComputedRef<boolean>
   canRestoreDocumentTeamView: ComputedRef<boolean>
   canRenameDocumentTeamView: ComputedRef<boolean>
+  canTransferDocumentTeamViewTarget: ComputedRef<boolean>
   canTransferDocumentTeamView: ComputedRef<boolean>
   canSetDocumentTeamViewDefault: ComputedRef<boolean>
   canClearDocumentTeamViewDefault: ComputedRef<boolean>
@@ -933,6 +935,7 @@ export type PlmCadPanelModel = {
   canArchiveCadTeamView: ComputedRef<boolean>
   canRestoreCadTeamView: ComputedRef<boolean>
   canRenameCadTeamView: ComputedRef<boolean>
+  canTransferCadTeamViewTarget: ComputedRef<boolean>
   canTransferCadTeamView: ComputedRef<boolean>
   canSetCadTeamViewDefault: ComputedRef<boolean>
   canClearCadTeamViewDefault: ComputedRef<boolean>
@@ -1008,6 +1011,7 @@ export type PlmApprovalsPanelModel = {
   canArchiveApprovalsTeamView: ComputedRef<boolean>
   canRestoreApprovalsTeamView: ComputedRef<boolean>
   canRenameApprovalsTeamView: ComputedRef<boolean>
+  canTransferApprovalsTeamViewTarget: ComputedRef<boolean>
   canTransferApprovalsTeamView: ComputedRef<boolean>
   canSetApprovalsTeamViewDefault: ComputedRef<boolean>
   canClearApprovalsTeamViewDefault: ComputedRef<boolean>

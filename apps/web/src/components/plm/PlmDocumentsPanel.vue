@@ -87,6 +87,7 @@
       :can-archive="panel.canArchiveDocumentTeamView"
       :can-restore="panel.canRestoreDocumentTeamView"
       :can-rename="panel.canRenameDocumentTeamView"
+      :can-transfer-target="panel.canTransferDocumentTeamViewTarget"
       :can-transfer="panel.canTransferDocumentTeamView"
       :can-set-default="panel.canSetDocumentTeamViewDefault"
       :can-clear-default="panel.canClearDocumentTeamViewDefault"

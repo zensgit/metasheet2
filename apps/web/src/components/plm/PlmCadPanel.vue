@@ -52,6 +52,7 @@
       :can-archive="panel.canArchiveCadTeamView"
       :can-restore="panel.canRestoreCadTeamView"
       :can-rename="panel.canRenameCadTeamView"
+      :can-transfer-target="panel.canTransferCadTeamViewTarget"
       :can-transfer="panel.canTransferCadTeamView"
       :can-set-default="panel.canSetCadTeamViewDefault"
       :can-clear-default="panel.canClearCadTeamViewDefault"
