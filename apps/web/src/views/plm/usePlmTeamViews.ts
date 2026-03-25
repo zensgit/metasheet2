@@ -696,6 +696,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     }
 
     const selectedIdBeforeAction = teamViewKey.value
+    const requestedIdBeforeAction = options.requestedViewId?.value.trim() || ''
     teamViewsLoading.value = true
     teamViewsError.value = ''
     try {
@@ -711,9 +712,17 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
         )
       }
 
+      const processedRequestedId = requestedIdBeforeAction && processedSet.has(requestedIdBeforeAction)
       if (selectedIdBeforeAction && processedSet.has(selectedIdBeforeAction)) {
         if (action === 'restore') {
-          const restored = result.items.find((view) => view.id === selectedIdBeforeAction)
+          const restoreTargetId = processedRequestedId
+            ? requestedIdBeforeAction
+            : requestedIdBeforeAction
+              ? ''
+              : selectedIdBeforeAction
+          const restored = restoreTargetId
+            ? result.items.find((view) => view.id === restoreTargetId)
+            : null
           if (restored) {
             applyView(restored)
           }
@@ -721,8 +730,11 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
           teamViewKey.value = ''
           teamViewName.value = ''
           teamViewOwnerUserId.value = ''
-          options.syncRequestedViewId?.(undefined)
         }
+      }
+
+      if (processedRequestedId && action !== 'restore') {
+        options.syncRequestedViewId?.(undefined)
       }
 
       if (lastAutoAppliedDefaultId.value && processedSet.has(lastAutoAppliedDefaultId.value) && action !== 'restore') {

@@ -2890,6 +2890,106 @@ describe('usePlmTeamViews', () => {
     expect(model.teamViews.value.find((view) => view.id === 'workbench-view-1')?.isArchived).toBe(true)
   })
 
+  it('keeps the canonical workbench route owner when batch archiving a pending local selector target', async () => {
+    const requestedViewId = ref('workbench-view-a')
+    const syncRequestedViewId = vi.fn((value?: string) => {
+      requestedViewId.value = value || ''
+    })
+    const workbenchApply = vi.fn(() => requestedViewId.value)
+
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-view-a',
+          kind: 'workbench',
+          scope: 'team',
+          name: '已应用工作台视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          state: {
+            query: {
+              documentFilter: 'gear',
+              approvalsFilter: 'eco-a',
+            },
+          },
+        },
+        {
+          id: 'workbench-view-b',
+          kind: 'workbench',
+          scope: 'team',
+          name: '待归档工作台视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          state: {
+            query: {
+              documentFilter: 'motor',
+            },
+          },
+        },
+      ],
+    })
+    vi.mocked(batchPlmWorkbenchTeamViews).mockResolvedValue({
+      action: 'archive',
+      processedIds: ['workbench-view-b'],
+      skippedIds: [],
+      items: [
+        {
+          id: 'workbench-view-b',
+          kind: 'workbench',
+          scope: 'team',
+          name: '待归档工作台视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          isArchived: true,
+          archivedAt: '2026-03-25T08:00:00.000Z',
+          state: {
+            query: {
+              documentFilter: 'motor',
+            },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {
+          documentFilter: 'gear',
+          approvalsFilter: 'eco-a',
+        },
+      }),
+      applyViewState: workbenchApply,
+      setMessage,
+      requestedViewId,
+      syncRequestedViewId,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    workbenchApply.mockClear()
+    syncRequestedViewId.mockClear()
+    model.teamViewKey.value = 'workbench-view-b'
+    model.teamViewName.value = '临时草稿'
+    model.teamViewOwnerUserId.value = 'owner-b'
+    model.teamViewSelection.value = ['workbench-view-b']
+
+    await model.archiveTeamViewSelection()
+
+    expect(batchPlmWorkbenchTeamViews).toHaveBeenCalledWith('workbench', 'archive', ['workbench-view-b'])
+    expect(syncRequestedViewId).not.toHaveBeenCalled()
+    expect(requestedViewId.value).toBe('workbench-view-a')
+    expect(model.teamViewKey.value).toBe('')
+    expect(model.teamViewName.value).toBe('')
+    expect(model.teamViewOwnerUserId.value).toBe('')
+    expect(model.teamViewSelection.value).toEqual([])
+    expect(workbenchApply).not.toHaveBeenCalled()
+  })
+
   it('reapplies explicit cad team view identity after batch restore', async () => {
     const requestedViewId = ref('')
     const syncRequestedViewId = vi.fn((value?: string) => {
@@ -2977,5 +3077,103 @@ describe('usePlmTeamViews', () => {
       reviewState: 'approved',
       reviewNote: 'restore-me',
     })
+  })
+
+  it('does not hijack the canonical workbench route owner when batch restoring a pending local selector target', async () => {
+    const requestedViewId = ref('workbench-view-a')
+    const syncRequestedViewId = vi.fn((value?: string) => {
+      requestedViewId.value = value || ''
+    })
+    const workbenchApply = vi.fn(() => requestedViewId.value)
+
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-view-a',
+          kind: 'workbench',
+          scope: 'team',
+          name: '已应用工作台视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          state: {
+            query: {
+              documentFilter: 'gear',
+              approvalsFilter: 'eco-a',
+            },
+          },
+        },
+        {
+          id: 'workbench-view-b',
+          kind: 'workbench',
+          scope: 'team',
+          name: '待恢复工作台视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          isArchived: true,
+          archivedAt: '2026-03-25T09:00:00.000Z',
+          state: {
+            query: {
+              documentFilter: 'motor',
+            },
+          },
+        },
+      ],
+    })
+    vi.mocked(batchPlmWorkbenchTeamViews).mockResolvedValue({
+      action: 'restore',
+      processedIds: ['workbench-view-b'],
+      skippedIds: [],
+      items: [
+        {
+          id: 'workbench-view-b',
+          kind: 'workbench',
+          scope: 'team',
+          name: '待恢复工作台视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          isArchived: false,
+          state: {
+            query: {
+              documentFilter: 'motor',
+            },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {
+          documentFilter: 'gear',
+          approvalsFilter: 'eco-a',
+        },
+      }),
+      applyViewState: workbenchApply,
+      setMessage,
+      requestedViewId,
+      syncRequestedViewId,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    workbenchApply.mockClear()
+    syncRequestedViewId.mockClear()
+    model.teamViewKey.value = 'workbench-view-b'
+    model.teamViewSelection.value = ['workbench-view-b']
+
+    await model.restoreTeamViewSelection()
+
+    expect(batchPlmWorkbenchTeamViews).toHaveBeenCalledWith('workbench', 'restore', ['workbench-view-b'])
+    expect(syncRequestedViewId).not.toHaveBeenCalled()
+    expect(requestedViewId.value).toBe('workbench-view-a')
+    expect(model.teamViewKey.value).toBe('workbench-view-b')
+    expect(model.teamViewSelection.value).toEqual([])
+    expect(model.teamViews.value.find((view) => view.id === 'workbench-view-b')?.isArchived).toBe(false)
+    expect(workbenchApply).not.toHaveBeenCalled()
   })
 })
