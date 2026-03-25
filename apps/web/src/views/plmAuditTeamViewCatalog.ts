@@ -287,3 +287,9 @@ export function buildAuditTeamViewSummaryHint(
       || AUDIT_TEAM_VIEW_RECOMMENDATION_DESCRIPTIONS[''],
   }
 }
+
+export function shouldShowAuditTeamViewRecommendations(
+  chips: readonly PlmAuditTeamViewSummaryChip[],
+): boolean {
+  return chips.some((chip) => chip.count > 0)
+}

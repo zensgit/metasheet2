@@ -402,7 +402,11 @@
         {{ tr('Current default', '当前默认') }}: {{ defaultAuditTeamViewLabel }}
       </p>
 
-      <div id="plm-audit-recommended-team-views" v-if="recommendedAuditTeamViews.length" class="plm-audit__recommended-team-views">
+      <div
+        id="plm-audit-recommended-team-views"
+        v-if="showAuditTeamViewRecommendations"
+        class="plm-audit__recommended-team-views"
+      >
         <div class="plm-audit__recommended-header">
           <div>
             <h3>{{ tr('Recommended audit team views', '推荐审计团队视图') }}</h3>
@@ -423,6 +427,9 @@
         </div>
 
         <div class="plm-audit__recommended-grid">
+          <p v-if="!recommendedAuditTeamViews.length" class="plm-audit__empty plm-audit__empty--card-grid">
+            {{ auditTeamViewRecommendationEmptyLabel }}
+          </p>
           <article
             v-for="view in recommendedAuditTeamViews"
             :key="view.id"
@@ -851,6 +858,7 @@ import {
   consumeStaleRecommendedAuditTeamViewFocusId,
   resolveApplicableRecommendedAuditTeamView,
   resolveAuditTeamViewRecommendationFilter,
+  shouldShowAuditTeamViewRecommendations,
   type PlmRecommendedAuditTeamView,
   type PlmRecommendedAuditTeamViewFilter,
 } from './plmAuditTeamViewCatalog'
@@ -1065,6 +1073,20 @@ const auditTeamViewSummaryChips = computed(() => buildAuditTeamViewSummaryChips(
   recommendationFilter: auditTeamViewRecommendationFilter.value,
 }))
 const auditTeamViewSummaryHint = computed(() => buildAuditTeamViewSummaryHint(auditTeamViewSummaryChips.value))
+const showAuditTeamViewRecommendations = computed(() => shouldShowAuditTeamViewRecommendations(auditTeamViewSummaryChips.value))
+const auditTeamViewRecommendationEmptyLabel = computed(() => {
+  if (!auditTeamViewSummaryHint.value.value) {
+    return tr(
+      'No recommended audit team views are available yet.',
+      '当前暂无可推荐的审计团队视图。',
+    )
+  }
+
+  return tr(
+    `No recommended audit team views are available in ${auditTeamViewSummaryHint.value.label}. Switch back to all recommendations to keep exploring.`,
+    `当前筛选下暂无${auditTeamViewSummaryHint.value.label}审计团队视图，可切回“全部推荐”查看其它候选。`,
+  )
+})
 const auditTeamViewManagement = computed(() => buildPlmAuditTeamViewManagement(
   auditTeamViews.value,
   auditTeamViewSelection.value,
@@ -3897,6 +3919,11 @@ watch(
 .plm-audit__empty--table {
   padding: 32px 16px;
   text-align: center;
+}
+
+.plm-audit__empty--card-grid {
+  grid-column: 1 / -1;
+  padding: 12px 0;
 }
 
 @media (max-width: 960px) {

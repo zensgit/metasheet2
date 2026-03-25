@@ -6,6 +6,7 @@ import {
   consumeStaleRecommendedAuditTeamViewFocusId,
   resolveApplicableRecommendedAuditTeamView,
   resolveAuditTeamViewRecommendationFilter,
+  shouldShowAuditTeamViewRecommendations,
 } from '../src/views/plmAuditTeamViewCatalog'
 import type { PlmWorkbenchTeamView } from '../src/views/plm/plmPanelModels'
 
@@ -194,6 +195,22 @@ describe('plmAuditTeamViewCatalog', () => {
       count: 1,
       description: '只看近期被设为默认的审计团队视图，适合追踪默认切换历史。',
     })
+  })
+
+  it('keeps recommendation chips visible when the active bucket is empty', () => {
+    const chips = buildAuditTeamViewSummaryChips([
+      createAuditTeamView({ id: 'default', isDefault: true }),
+    ], {
+      recommendationFilter: 'recent-default',
+    })
+
+    expect(chips).toEqual([
+      { value: '', label: '全部推荐', count: 1, active: false },
+      { value: 'default', label: '当前默认', count: 1, active: false },
+      { value: 'recent-default', label: '近期默认', count: 0, active: true },
+      { value: 'recent-update', label: '近期更新', count: 0, active: false },
+    ])
+    expect(shouldShowAuditTeamViewRecommendations(chips)).toBe(true)
   })
 
   it('resolves the recommended filter bucket for a team view', () => {
