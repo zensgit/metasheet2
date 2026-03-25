@@ -5134,8 +5134,6 @@ async function applyQueryState() {
     compareSyncEnabled.value = true
     bomLineId.value = ''
     substitutesFilter.value = ''
-    deepLinkScope.value = []
-
     const productParam = readQueryParam('productId')
     if (productParam !== undefined) {
       productId.value = productParam
