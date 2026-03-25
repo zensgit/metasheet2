@@ -1160,6 +1160,7 @@ describe('usePlmTeamViews', () => {
     await model.refreshTeamViews()
     model.teamViewName.value = '我的工作台'
     model.teamViewOwnerUserId.value = 'stale-owner'
+    model.teamViewSelection.value = ['workbench-saved-stale-a', 'workbench-saved-stale-b']
     await model.saveTeamView()
 
     expect(savePlmWorkbenchTeamView).toHaveBeenCalledWith('workbench', '我的工作台', {
@@ -1170,6 +1171,8 @@ describe('usePlmTeamViews', () => {
     })
     expect(model.teamViewKey.value).toBe('workbench-saved')
     expect(model.teamViewOwnerUserId.value).toBe('')
+    expect(model.teamViewSelection.value).toEqual([])
+    expect(model.teamViewSelectionCount.value).toBe(0)
     expect(syncRequestedViewId).toHaveBeenCalledWith('workbench-saved')
     expect(workbenchApply).toHaveLastReturnedWith('workbench-saved')
 
@@ -1177,6 +1180,97 @@ describe('usePlmTeamViews', () => {
 
     expect(setPlmWorkbenchTeamViewDefault).toHaveBeenCalledWith('workbench', 'workbench-saved')
     expect(model.teamViews.value.find((view) => view.id === 'workbench-saved')?.isDefault).toBe(true)
+    expect(syncRequestedViewId).toHaveBeenLastCalledWith('workbench-saved')
+    expect(workbenchApply).toHaveLastReturnedWith('workbench-saved')
+  })
+
+  it('clears stale batch selections before saving a new workbench team view', async () => {
+    const requestedViewId = ref('workbench-current')
+    const syncRequestedViewId = vi.fn((value?: string) => {
+      requestedViewId.value = value || ''
+    })
+    const workbenchApply = vi.fn(() => requestedViewId.value)
+
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-current',
+          kind: 'workbench',
+          scope: 'team',
+          name: '当前工作台视角',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: true,
+          },
+          state: {
+            query: {
+              documentFilter: 'gear',
+            },
+          },
+        },
+        {
+          id: 'workbench-other',
+          kind: 'workbench',
+          scope: 'team',
+          name: '旧批量选择工作台视角',
+          ownerUserId: 'owner-b',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: true,
+          },
+          state: {
+            query: {
+              documentFilter: 'motor',
+            },
+          },
+        },
+      ],
+    })
+    vi.mocked(savePlmWorkbenchTeamView).mockResolvedValue({
+      id: 'workbench-saved',
+      kind: 'workbench',
+      scope: 'team',
+      name: '新的工作台视角',
+      ownerUserId: 'dev-user',
+      canManage: true,
+      isDefault: false,
+      state: {
+        query: {
+          documentFilter: 'eco',
+        },
+      },
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {
+          documentFilter: 'eco',
+        },
+      }),
+      applyViewState: workbenchApply,
+      setMessage,
+      requestedViewId,
+      syncRequestedViewId,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewSelection.value = ['workbench-current', 'workbench-other']
+    model.teamViewName.value = '新的工作台视角'
+    syncRequestedViewId.mockClear()
+    workbenchApply.mockClear()
+
+    await model.saveTeamView()
+
+    expect(model.teamViewSelection.value).toEqual([])
+    expect(model.teamViewSelectionCount.value).toBe(0)
     expect(syncRequestedViewId).toHaveBeenLastCalledWith('workbench-saved')
     expect(workbenchApply).toHaveLastReturnedWith('workbench-saved')
   })
@@ -1597,11 +1691,14 @@ describe('usePlmTeamViews', () => {
     await model.refreshTeamViews()
     model.teamViewKey.value = 'workbench-shared'
     model.teamViewOwnerUserId.value = 'stale-owner'
+    model.teamViewSelection.value = ['workbench-shared']
     await model.duplicateTeamView()
 
     expect(duplicatePlmWorkbenchTeamView).toHaveBeenCalledWith('workbench', 'workbench-shared', undefined)
     expect(model.teamViewKey.value).toBe('workbench-copy')
     expect(model.teamViewOwnerUserId.value).toBe('')
+    expect(model.teamViewSelection.value).toEqual([])
+    expect(model.teamViewSelectionCount.value).toBe(0)
     expect(syncRequestedViewId).toHaveBeenCalledWith('workbench-copy')
     expect(workbenchApply).toHaveLastReturnedWith('workbench-copy')
     expect(model.canRenameTeamView.value).toBe(false)

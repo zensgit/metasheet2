@@ -282,6 +282,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
         options.getCurrentViewState(),
       )
       teamViews.value = upsertTeamView(teamViews.value, saved)
+      teamViewSelection.value = []
       applyView(saved)
       teamViewName.value = ''
       teamViewOwnerUserId.value = ''
@@ -460,6 +461,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
         teamViewName.value.trim() || undefined,
       )
       teamViews.value = upsertTeamView(teamViews.value, duplicated)
+      teamViewSelection.value = []
       applyView(duplicated)
       teamViewName.value = ''
       options.setMessage(`已复制${options.label}团队视角：${duplicated.name}`)
