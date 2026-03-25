@@ -150,7 +150,6 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   const {
     canManageSelectedEntry: canManageSelectedTeamView,
     showManagementActions,
-    canApply: canApplyTeamView,
     canShare: canShareTeamView,
     canDelete: canDeleteTeamView,
     canArchive: canArchiveTeamView,
@@ -164,6 +163,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     nameRef: teamViewName,
     ownerUserIdRef: teamViewOwnerUserId,
   })
+  const canApplyTeamView = computed(() => canApplyPlmCollaborativeEntry(selectedTeamView.value))
   const canDuplicateTeamView = computed(() => canDuplicatePlmCollaborativeEntry(selectedTeamView.value))
   const defaultTeamViewLabel = computed(() => defaultTeamView.value?.name || '')
 

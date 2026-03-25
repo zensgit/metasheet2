@@ -706,6 +706,7 @@ describe('usePlmTeamViews', () => {
     model.teamViewName.value = '待重命名工作台视角'
     await nextTick()
 
+    expect(model.canApplyTeamView.value).toBe(true)
     expect(model.canDuplicateTeamView.value).toBe(true)
     expect(model.canShareTeamView.value).toBe(false)
     expect(model.canRenameTeamView.value).toBe(false)
@@ -807,6 +808,83 @@ describe('usePlmTeamViews', () => {
     expect(model.teamViewKey.value).toBe('workbench-copy-from-pending')
     expect(syncRequestedViewId).toHaveBeenLastCalledWith('workbench-copy-from-pending')
     expect(workbenchApply).toHaveLastReturnedWith('workbench-copy-from-pending')
+  })
+
+  it('still allows applying the pending selector target while generic management stays frozen', async () => {
+    const requestedViewId = ref('workbench-applied')
+    const syncRequestedViewId = vi.fn((value?: string) => {
+      requestedViewId.value = value || ''
+    })
+    const workbenchApply = vi.fn(() => requestedViewId.value)
+
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-applied',
+          kind: 'workbench',
+          scope: 'team',
+          name: '已应用工作台视角',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: true,
+            canShare: true,
+          },
+          state: {
+            query: {
+              documentFilter: 'gear',
+            },
+          },
+        },
+        {
+          id: 'workbench-pending',
+          kind: 'workbench',
+          scope: 'team',
+          name: '待应用工作台视角',
+          ownerUserId: 'owner-b',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: true,
+            canShare: true,
+          },
+          state: {
+            query: {
+              documentFilter: 'motor',
+            },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState: workbenchApply,
+      setMessage,
+      requestedViewId,
+      syncRequestedViewId,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-pending'
+    await nextTick()
+
+    expect(model.canApplyTeamView.value).toBe(true)
+    expect(model.canShareTeamView.value).toBe(false)
+
+    model.applyTeamView()
+
+    expect(syncRequestedViewId).toHaveBeenLastCalledWith('workbench-pending')
+    expect(workbenchApply).toHaveLastReturnedWith('workbench-pending')
+    expect(setMessage).toHaveBeenLastCalledWith('已应用工作台团队视角：待应用工作台视角')
   })
 
   it('does not apply a team view that fails explicit canApply gating', async () => {
