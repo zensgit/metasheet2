@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { normalizePlmAuditDateTimeTransport } from '../src/views/plmAuditDateTimeTransport'
 import {
   buildPlmAuditRouteStateFromTeamView,
   buildPlmAuditTeamViewState,
@@ -13,6 +14,9 @@ import {
 
 describe('plmAuditQueryState', () => {
   it('parses audit filters, page, and window from route query', () => {
+    const expectedFrom = normalizePlmAuditDateTimeTransport('2026-03-11T15:00')
+    const expectedTo = normalizePlmAuditDateTimeTransport('2026-03-11T16:00')
+
     expect(parsePlmAuditRouteState({
       auditPage: '3',
       auditQ: 'documents',
@@ -36,8 +40,8 @@ describe('plmAuditQueryState', () => {
       kind: 'documents',
       action: 'archive',
       resourceType: 'plm-team-view-batch',
-      from: '2026-03-11T15:00',
-      to: '2026-03-11T16:00',
+      from: expectedFrom,
+      to: expectedTo,
       windowMinutes: 720,
       teamViewId: '',
       sceneId: 'scene-1',
@@ -62,6 +66,9 @@ describe('plmAuditQueryState', () => {
   })
 
   it('drops defaults when building a shareable route query', () => {
+    const expectedFrom = normalizePlmAuditDateTimeTransport('2026-03-11T15:00')
+    const expectedTo = normalizePlmAuditDateTimeTransport('2026-03-11T16:00')
+
     expect(buildPlmAuditRouteQuery(DEFAULT_PLM_AUDIT_ROUTE_STATE)).toEqual({})
 
     expect(buildPlmAuditRouteQuery({
@@ -69,6 +76,8 @@ describe('plmAuditQueryState', () => {
       page: 2,
       q: 'bom',
       action: 'delete',
+      from: '2026-03-11T15:00',
+      to: '2026-03-11T16:00',
       windowMinutes: 60,
       teamViewId: 'audit-view-1',
       sceneId: 'scene-2',
@@ -81,6 +90,8 @@ describe('plmAuditQueryState', () => {
       auditPage: '2',
       auditQ: 'bom',
       auditAction: 'delete',
+      auditFrom: expectedFrom,
+      auditTo: expectedTo,
       auditWindow: '60',
       auditTeamView: 'audit-view-1',
       auditSceneId: 'scene-2',
@@ -93,6 +104,9 @@ describe('plmAuditQueryState', () => {
   })
 
   it('builds audit route state from team-view snapshots', () => {
+    const expectedFrom = normalizePlmAuditDateTimeTransport('2026-03-11T15:00')
+    const expectedTo = normalizePlmAuditDateTimeTransport('2026-03-11T16:00')
+
     const state = buildPlmAuditRouteStateFromTeamView('audit-view-1', {
       page: 2,
       q: 'archive',
@@ -100,8 +114,8 @@ describe('plmAuditQueryState', () => {
       kind: 'documents',
       action: 'archive',
       resourceType: 'plm-team-view-batch',
-      from: '2026-03-11T15:00',
-      to: '2026-03-11T16:00',
+      from: expectedFrom,
+      to: expectedTo,
       windowMinutes: 720,
     })
 
@@ -112,8 +126,8 @@ describe('plmAuditQueryState', () => {
       kind: 'documents',
       action: 'archive',
       resourceType: 'plm-team-view-batch',
-      from: '2026-03-11T15:00',
-      to: '2026-03-11T16:00',
+      from: expectedFrom,
+      to: expectedTo,
       windowMinutes: 720,
       teamViewId: 'audit-view-1',
       sceneId: '',
@@ -130,8 +144,8 @@ describe('plmAuditQueryState', () => {
       kind: 'documents',
       action: 'archive',
       resourceType: 'plm-team-view-batch',
-      from: '2026-03-11T15:00',
-      to: '2026-03-11T16:00',
+      from: expectedFrom,
+      to: expectedTo,
       windowMinutes: 720,
     })
   })

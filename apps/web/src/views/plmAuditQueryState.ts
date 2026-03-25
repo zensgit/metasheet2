@@ -1,5 +1,6 @@
 import type { LocationQuery, LocationQueryRaw } from 'vue-router'
 import type { PlmCollaborativeAuditAction, PlmCollaborativeAuditResourceType } from '../services/plm/plmWorkbenchClient'
+import { normalizePlmAuditDateTimeTransport } from './plmAuditDateTimeTransport'
 
 export interface PlmAuditTeamViewState {
   page: number
@@ -91,8 +92,8 @@ export function parsePlmAuditRouteState(query: LocationQuery): PlmAuditRouteStat
       || resourceType === 'plm-team-view-default'
         ? resourceType
         : '',
-    from: readString(query.auditFrom),
-    to: readString(query.auditTo),
+    from: normalizePlmAuditDateTimeTransport(query.auditFrom),
+    to: normalizePlmAuditDateTimeTransport(query.auditTo),
     windowMinutes: normalizeWindowMinutes(query.auditWindow),
     teamViewId: readString(query.auditTeamView),
     sceneId: readString(query.auditSceneId),
@@ -106,6 +107,8 @@ export function parsePlmAuditRouteState(query: LocationQuery): PlmAuditRouteStat
 
 export function buildPlmAuditRouteQuery(state: PlmAuditRouteState): LocationQueryRaw {
   const query: LocationQueryRaw = {}
+  const from = normalizePlmAuditDateTimeTransport(state.from)
+  const to = normalizePlmAuditDateTimeTransport(state.to)
 
   if (state.page > DEFAULT_PLM_AUDIT_ROUTE_STATE.page) query.auditPage = String(state.page)
   if (state.q) query.auditQ = state.q
@@ -113,8 +116,8 @@ export function buildPlmAuditRouteQuery(state: PlmAuditRouteState): LocationQuer
   if (state.kind) query.auditKind = state.kind
   if (state.action) query.auditAction = state.action
   if (state.resourceType) query.auditType = state.resourceType
-  if (state.from) query.auditFrom = state.from
-  if (state.to) query.auditTo = state.to
+  if (from) query.auditFrom = from
+  if (to) query.auditTo = to
   if (state.windowMinutes !== DEFAULT_PLM_AUDIT_ROUTE_STATE.windowMinutes) {
     query.auditWindow = String(state.windowMinutes)
   }
@@ -139,8 +142,8 @@ export function buildPlmAuditTeamViewState(state: PlmAuditRouteState): PlmAuditT
     kind: state.kind,
     action: state.action,
     resourceType: state.resourceType,
-    from: state.from,
-    to: state.to,
+    from: normalizePlmAuditDateTimeTransport(state.from),
+    to: normalizePlmAuditDateTimeTransport(state.to),
     windowMinutes: state.windowMinutes,
   }
 }
@@ -152,6 +155,8 @@ export function buildPlmAuditRouteStateFromTeamView(
   return {
     ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
     ...state,
+    from: normalizePlmAuditDateTimeTransport(state.from),
+    to: normalizePlmAuditDateTimeTransport(state.to),
     teamViewId,
   }
 }

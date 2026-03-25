@@ -1,4 +1,5 @@
 import { apiFetch } from '../../utils/api'
+import { normalizePlmAuditDateTimeTransport } from '../../views/plmAuditDateTimeTransport'
 import type {
   PlmApprovalsTeamViewState,
   PlmCollaborativePermissions,
@@ -211,8 +212,8 @@ function normalizeTeamViewState<Kind extends PlmWorkbenchTeamViewKind>(
         || resourceType === 'plm-team-view-default'
           ? resourceType
           : '',
-      from: typeof record.from === 'string' ? record.from.trim() : '',
-      to: typeof record.to === 'string' ? record.to.trim() : '',
+      from: normalizePlmAuditDateTimeTransport(record.from),
+      to: normalizePlmAuditDateTimeTransport(record.to),
       windowMinutes: normalizeAuditWindowMinutes(record.windowMinutes),
     } as PlmWorkbenchTeamViewStateByKind[Kind]
   }
@@ -442,10 +443,11 @@ export async function savePlmWorkbenchTeamView<Kind extends PlmWorkbenchTeamView
     isDefault?: boolean
   },
 ): Promise<PlmWorkbenchTeamView<Kind>> {
+  const normalizedState = kind === 'audit' ? normalizeTeamViewState(kind, state) : state
   const body: Record<string, unknown> = {
     kind,
     name,
-    state,
+    state: normalizedState,
   }
 
   if (typeof options?.isDefault === 'boolean') {

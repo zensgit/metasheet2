@@ -242,11 +242,11 @@
       </label>
       <label class="plm-audit__field">
         <span>{{ tr('From', '起始') }}</span>
-        <input v-model="from" type="datetime-local" />
+        <input v-model="fromInput" type="datetime-local" />
       </label>
       <label class="plm-audit__field">
         <span>{{ tr('To', '截止') }}</span>
-        <input v-model="to" type="datetime-local" />
+        <input v-model="toInput" type="datetime-local" />
       </label>
       <div class="plm-audit__filter-actions">
         <button class="plm-audit__button plm-audit__button--primary" type="submit" :disabled="logsLoading">
@@ -808,6 +808,10 @@ import {
   type PlmAuditRouteState,
   type PlmAuditTeamViewState,
 } from './plmAuditQueryState'
+import {
+  formatPlmAuditDateTimeInputValue,
+  normalizePlmAuditDateTimeTransport,
+} from './plmAuditDateTimeTransport'
 import { buildPlmAuditSceneContextTakeoverState } from './plmAuditSceneContextTakeover'
 import { buildPlmAuditTeamViewRouteTakeoverState } from './plmAuditTeamViewRouteTakeover'
 import {
@@ -1021,6 +1025,8 @@ const action = ref<PlmCollaborativeAuditAction | ''>(DEFAULT_PLM_AUDIT_ROUTE_STA
 const resourceType = ref<PlmCollaborativeAuditResourceType | ''>(DEFAULT_PLM_AUDIT_ROUTE_STATE.resourceType)
 const from = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.from)
 const to = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.to)
+const fromInput = ref(formatPlmAuditDateTimeInputValue(DEFAULT_PLM_AUDIT_ROUTE_STATE.from))
+const toInput = ref(formatPlmAuditDateTimeInputValue(DEFAULT_PLM_AUDIT_ROUTE_STATE.to))
 const windowMinutes = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.windowMinutes)
 const auditSceneId = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.sceneId)
 const auditSceneName = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.sceneName)
@@ -1250,6 +1256,14 @@ const auditSavedViewShareFollowupNotice = computed(() => {
   return buildPlmAuditSavedViewShareFollowupNotice(view, followup, tr)
 })
 
+watch(fromInput, (value) => {
+  from.value = normalizePlmAuditDateTimeTransport(value)
+})
+
+watch(toInput, (value) => {
+  to.value = normalizePlmAuditDateTimeTransport(value)
+})
+
 function readCurrentRouteState(): PlmAuditRouteState {
   return {
     page: page.value,
@@ -1285,8 +1299,10 @@ function applyRouteState(state: PlmAuditRouteState) {
   kind.value = state.kind
   action.value = state.action
   resourceType.value = state.resourceType
-  from.value = state.from
-  to.value = state.to
+  from.value = normalizePlmAuditDateTimeTransport(state.from)
+  to.value = normalizePlmAuditDateTimeTransport(state.to)
+  fromInput.value = formatPlmAuditDateTimeInputValue(from.value)
+  toInput.value = formatPlmAuditDateTimeInputValue(to.value)
   windowMinutes.value = state.windowMinutes
   auditTeamViewKey.value = state.teamViewId
   auditSceneId.value = state.sceneId
@@ -2924,8 +2940,8 @@ async function loadLogs(nextPage = page.value) {
       action: action.value,
       resourceType: resourceType.value,
       kind: kind.value,
-      from: from.value ? new Date(from.value).toISOString() : '',
-      to: to.value ? new Date(to.value).toISOString() : '',
+      from: from.value,
+      to: to.value,
     })
 
     logs.value = result.items
@@ -2951,8 +2967,8 @@ async function exportCsv() {
       action: action.value,
       resourceType: resourceType.value,
       kind: kind.value,
-      from: from.value ? new Date(from.value).toISOString() : '',
-      to: to.value ? new Date(to.value).toISOString() : '',
+      from: from.value,
+      to: to.value,
       limit: 5000,
     })
     downloadCsvText(result.filename, result.csvText)

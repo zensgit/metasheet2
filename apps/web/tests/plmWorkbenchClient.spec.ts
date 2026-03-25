@@ -778,6 +778,75 @@ describe('plmWorkbenchClient', () => {
     )
   })
 
+  it('normalizes local audit datetime filters before saving team views', async () => {
+    const expectedFrom = new Date('2026-03-11T15:00').toISOString()
+    const expectedTo = new Date('2026-03-11T16:00').toISOString()
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          id: 'audit-view-local-time',
+          kind: 'audit',
+          name: '审计本地时间',
+          ownerUserId: 'auditor',
+          canManage: true,
+          isDefault: false,
+          state: {
+            page: 1,
+            q: 'documents',
+            actorId: 'owner-1',
+            kind: 'documents',
+            action: 'archive',
+            resourceType: 'plm-team-view-batch',
+            from: expectedFrom,
+            to: expectedTo,
+            windowMinutes: 180,
+          },
+        },
+      }),
+    })
+
+    const saved = await savePlmWorkbenchTeamView('audit', '审计本地时间', {
+      page: 1,
+      q: 'documents',
+      actorId: 'owner-1',
+      kind: 'documents',
+      action: 'archive',
+      resourceType: 'plm-team-view-batch',
+      from: '2026-03-11T15:00',
+      to: '2026-03-11T16:00',
+      windowMinutes: 180,
+    })
+
+    expect(saved.state).toMatchObject({
+      from: expectedFrom,
+      to: expectedTo,
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plm-workbench/views/team'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          kind: 'audit',
+          name: '审计本地时间',
+          state: {
+            page: 1,
+            q: 'documents',
+            actorId: 'owner-1',
+            kind: 'documents',
+            action: 'archive',
+            resourceType: 'plm-team-view-batch',
+            from: expectedFrom,
+            to: expectedTo,
+            windowMinutes: 180,
+          },
+        }),
+      }),
+    )
+  })
+
   it('passes the default flag when saving an audit team view as default', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
