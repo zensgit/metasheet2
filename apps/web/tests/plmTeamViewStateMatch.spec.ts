@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { matchPlmTeamViewStateSnapshot } from '../src/views/plm/plmTeamViewStateMatch'
+import {
+  matchPlmTeamViewStateSnapshot,
+  mergePlmTeamViewBooleanMapDefaults,
+} from '../src/views/plm/plmTeamViewStateMatch'
 
 describe('plmTeamViewStateMatch', () => {
   it('matches structurally identical panel team-view state regardless of object key order', () => {
@@ -40,5 +43,24 @@ describe('plmTeamViewStateMatch', () => {
         },
       ),
     ).toBe(false)
+  })
+
+  it('merges sparse boolean maps onto panel defaults before comparison', () => {
+    expect(
+      mergePlmTeamViewBooleanMapDefaults(
+        {
+          id: false,
+          mime: false,
+          actions: true,
+        },
+        {
+          mime: true,
+        },
+      ),
+    ).toEqual({
+      id: false,
+      mime: true,
+      actions: true,
+    })
   })
 })

@@ -102,7 +102,10 @@ import {
   normalizePlmWorkbenchQuerySnapshot,
   PLM_WORKBENCH_QUERY_KEYS,
 } from './plm/plmWorkbenchViewState'
-import { matchPlmTeamViewStateSnapshot } from './plm/plmTeamViewStateMatch'
+import {
+  matchPlmTeamViewStateSnapshot,
+  mergePlmTeamViewBooleanMapDefaults,
+} from './plm/plmTeamViewStateMatch'
 import {
   buildRecommendedWorkbenchSceneAuditQuery,
   buildWorkbenchAuditQuery,
@@ -4487,12 +4490,15 @@ watch(
     if (!viewId || !activeViewId) return
     const activeView = activeDocumentRouteView.value
     if (!activeView) return
-    if (matchPlmTeamViewStateSnapshot(activeView.state, {
+    if (matchPlmTeamViewStateSnapshot({
+      ...activeView.state,
+      columns: mergePlmTeamViewBooleanMapDefaults(defaultDocumentColumns, activeView.state.columns),
+    }, {
       role: documentRole.value,
       filter: documentFilter.value,
       sortKey: documentSortKey.value,
       sortDir: documentSortDir.value,
-      columns: { ...documentColumns.value },
+      columns: mergePlmTeamViewBooleanMapDefaults(defaultDocumentColumns, documentColumns.value),
     })) {
       return
     }
@@ -4717,13 +4723,16 @@ watch(
     if (!viewId || !activeViewId) return
     const activeView = activeApprovalsRouteView.value
     if (!activeView) return
-    if (matchPlmTeamViewStateSnapshot(activeView.state, {
+    if (matchPlmTeamViewStateSnapshot({
+      ...activeView.state,
+      columns: mergePlmTeamViewBooleanMapDefaults(defaultApprovalColumns, activeView.state.columns),
+    }, {
       status: approvalsStatus.value,
       filter: approvalsFilter.value,
       comment: approvalComment.value,
       sortKey: approvalSortKey.value,
       sortDir: approvalSortDir.value,
-      columns: { ...approvalColumns.value },
+      columns: mergePlmTeamViewBooleanMapDefaults(defaultApprovalColumns, approvalColumns.value),
     })) {
       return
     }
