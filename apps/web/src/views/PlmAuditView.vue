@@ -202,13 +202,13 @@
       <label class="plm-audit__field">
         <span>{{ tr('Kind', '类型') }}</span>
         <select v-model="kind">
-          <option value="">{{ tr('All', '全部') }}</option>
-          <option value="bom">BOM</option>
-          <option value="where-used">Where-Used</option>
-          <option value="documents">Documents</option>
-          <option value="cad">CAD</option>
-          <option value="approvals">Approvals</option>
-          <option value="workbench">Workbench</option>
+          <option
+            v-for="option in PLM_AUDIT_KIND_OPTIONS"
+            :key="option.value || 'all'"
+            :value="option.value"
+          >
+            {{ tr(option.label, option.labelZh) }}
+          </option>
         </select>
       </label>
       <label class="plm-audit__field">
@@ -932,6 +932,7 @@ import {
   resolvePlmAuditProcessedBatchLogViews,
   shouldClearPlmAuditTeamViewFormDraftsOnLogRoute,
 } from './plmAuditTeamViewAudit'
+import { PLM_AUDIT_KIND_OPTIONS } from './plmAuditFilterOptions'
 import {
   buildPlmAuditTeamViewManagement,
   canApplyPlmAuditTeamView,
