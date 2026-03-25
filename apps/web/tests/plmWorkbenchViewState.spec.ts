@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildPlmWorkbenchTeamViewShareUrl,
+  matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
   normalizePlmWorkbenchQuerySnapshot,
 } from '../src/views/plm/plmWorkbenchViewState'
@@ -55,6 +56,42 @@ describe('plmWorkbenchViewState', () => {
       documentFilter: 'gear',
       approvalsFilter: 'eco',
     })
+  })
+
+  it('matches workbench snapshots while ignoring explicit team-view identity', () => {
+    expect(
+      matchPlmWorkbenchQuerySnapshot(
+        {
+          workbenchTeamView: 'view-1',
+          productId: 'prod-100',
+          documentFilter: ' gear ',
+          approvalsFilter: 'eco',
+        },
+        {
+          productId: 'prod-100',
+          documentFilter: 'gear',
+          approvalsFilter: 'eco',
+        },
+      ),
+    ).toBe(true)
+  })
+
+  it('detects workbench snapshot drift after manual query edits', () => {
+    expect(
+      matchPlmWorkbenchQuerySnapshot(
+        {
+          workbenchTeamView: 'view-1',
+          productId: 'prod-100',
+          documentFilter: 'gear',
+          approvalsFilter: 'eco',
+        },
+        {
+          productId: 'prod-100',
+          documentFilter: 'motor',
+          approvalsFilter: 'eco',
+        },
+      ),
+    ).toBe(false)
   })
 
   it('builds a workbench team view share URL that preserves explicit identity and normalized query state', () => {

@@ -101,6 +101,23 @@ export function normalizePlmWorkbenchQuerySnapshot(value: unknown): Record<strin
   }, {})
 }
 
+function stripPlmWorkbenchTeamViewIdentity(snapshot: Record<string, string>): Record<string, string> {
+  const next = { ...snapshot }
+  delete next.workbenchTeamView
+  return next
+}
+
+export function matchPlmWorkbenchQuerySnapshot(left: unknown, right: unknown): boolean {
+  const normalizedLeft = stripPlmWorkbenchTeamViewIdentity(normalizePlmWorkbenchQuerySnapshot(left))
+  const normalizedRight = stripPlmWorkbenchTeamViewIdentity(normalizePlmWorkbenchQuerySnapshot(right))
+
+  const leftKeys = Object.keys(normalizedLeft)
+  const rightKeys = Object.keys(normalizedRight)
+  if (leftKeys.length !== rightKeys.length) return false
+
+  return leftKeys.every((key) => normalizedLeft[key] === normalizedRight[key])
+}
+
 export function mergePlmWorkbenchRouteQuery(
   currentQuery: LocationQuery,
   snapshot: Record<string, string>,

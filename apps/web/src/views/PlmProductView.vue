@@ -97,6 +97,7 @@ import {
 } from './plm/plmWorkbenchSceneCatalog'
 import {
   buildPlmWorkbenchTeamViewShareUrl,
+  matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
   normalizePlmWorkbenchQuerySnapshot,
   PLM_WORKBENCH_QUERY_KEYS,
@@ -4287,6 +4288,28 @@ const recommendedWorkbenchScenes = computed<PlmRecommendedWorkbenchScene[]>(() =
     ownerUserId: sceneCatalogOwnerFilter.value,
     recommendationFilter: sceneCatalogRecommendationFilter.value,
   }),
+)
+
+const activeWorkbenchRouteView = computed(() => {
+  const viewId = workbenchTeamViewQuery.value.trim()
+  if (!viewId) return null
+  return workbenchTeamViews.value.find((entry) => entry.id === viewId) || null
+})
+
+watch(
+  () => [
+    workbenchTeamViewQuery.value,
+    activeWorkbenchRouteView.value?.id || '',
+    JSON.stringify(buildWorkbenchTeamViewState().query),
+  ],
+  ([viewId, activeViewId]) => {
+    if (!viewId || !activeViewId) return
+    const activeView = activeWorkbenchRouteView.value
+    if (!activeView) return
+    if (matchPlmWorkbenchQuerySnapshot(activeView.state.query, buildWorkbenchTeamViewState().query)) return
+    workbenchTeamViewQuery.value = ''
+    scheduleQuerySync({ workbenchTeamView: undefined })
+  },
 )
 
 const sceneCatalogSummaryChips = computed(() =>
