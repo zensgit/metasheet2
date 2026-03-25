@@ -803,6 +803,56 @@ describe('usePlmTeamFilterPresets', () => {
     expect(model.canShareTeamPreset.value).toBe(false)
   })
 
+  it('clears rename, group, and owner drafts when switching the selected team preset', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-a',
+          kind: 'bom',
+          scope: 'team',
+          name: '预设 A',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isDefault: false,
+          state: { field: 'path', value: 'root/a', group: 'A组' },
+        },
+        {
+          id: 'preset-b',
+          kind: 'bom',
+          scope: 'team',
+          name: '预设 B',
+          ownerUserId: 'owner-b',
+          canManage: true,
+          isDefault: false,
+          state: { field: 'path', value: 'root/b', group: 'B组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/a', group: 'A组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+
+    model.teamPresetKey.value = 'preset-a'
+    model.teamPresetName.value = '重命名草稿'
+    model.teamPresetGroup.value = '草稿分组'
+    model.teamPresetOwnerUserId.value = 'owner-next'
+
+    model.teamPresetKey.value = 'preset-b'
+    await nextTick()
+
+    expect(model.teamPresetName.value).toBe('')
+    expect(model.teamPresetGroup.value).toBe('')
+    expect(model.teamPresetOwnerUserId.value).toBe('')
+  })
+
   it('clears requested identity and stale form fields after deleting the current team preset', async () => {
     const requestedPresetId = ref('preset-delete')
     const syncRequestedPresetId = vi.fn((value?: string) => {

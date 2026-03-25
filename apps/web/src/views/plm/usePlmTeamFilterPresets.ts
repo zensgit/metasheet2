@@ -1,4 +1,4 @@
-import { computed, ref, type Ref } from 'vue'
+import { computed, ref, watch, type Ref } from 'vue'
 import {
   archivePlmTeamFilterPreset,
   batchPlmTeamFilterPresets,
@@ -207,6 +207,14 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     if (!preset) return ''
     return preset.state.group ? `${preset.name} (${preset.state.group})` : preset.name
   })
+
+  watch(teamPresetKey, (next, previous) => {
+    if (next !== previous) {
+      teamPresetName.value = ''
+      teamPresetGroup.value = ''
+      teamPresetOwnerUserId.value = ''
+    }
+  }, { flush: 'sync' })
 
   function applyPresetToTarget(preset: PlmTeamFilterPreset) {
     teamPresetKey.value = preset.id
