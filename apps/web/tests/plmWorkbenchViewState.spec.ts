@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildPlmWorkbenchRoutePath,
   buildPlmWorkbenchTeamViewShareUrl,
   matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
@@ -203,6 +204,23 @@ describe('plmWorkbenchViewState', () => {
     expect(approvalsUrl).toBe(
       'https://example.test/plm?panel=approvals&approvalsTeamView=approval-view-1&approvalsStatus=approved&approvalsFilter=eco&approvalComment=ship-it&approvalSort=title&approvalSortDir=asc&approvalColumns=product',
     )
+  })
+
+  it('builds return paths from the current local workbench state with optional overlays', () => {
+    expect(buildPlmWorkbenchRoutePath(
+      '/plm',
+      {
+        searchQuery: 'gear',
+        approvalsFilter: 'eco',
+        autoload: true,
+      },
+      {
+        hash: '#audit',
+        extraQuery: {
+          sceneFocus: 'scene-1',
+        },
+      },
+    )).toBe('/plm?searchQuery=gear&approvalsFilter=eco&autoload=true&sceneFocus=scene-1#audit')
   })
 
   it('builds audit team view share URLs with explicit team-view identity', () => {

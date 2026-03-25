@@ -96,6 +96,7 @@ import {
   WORKBENCH_SCENE_RECOMMENDATION_OPTIONS,
 } from './plm/plmWorkbenchSceneCatalog'
 import {
+  buildPlmWorkbenchRoutePath,
   buildPlmWorkbenchTeamViewShareUrl,
   matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
@@ -117,7 +118,6 @@ import {
   buildWorkbenchAuditQuery,
 } from './plm/plmWorkbenchSceneAudit'
 import {
-  buildWorkbenchSceneFocusQuery,
   readWorkbenchSceneFocus,
 } from './plm/plmWorkbenchSceneFocus'
 import {
@@ -4552,23 +4552,34 @@ async function copyRecommendedWorkbenchSceneLink(viewId: string) {
 }
 
 async function openRecommendedWorkbenchSceneAudit(scene: PlmRecommendedWorkbenchScene) {
+  const returnToPlmPath = buildPlmWorkbenchRoutePath(
+    route.path,
+    buildDeepLinkParams(true),
+    {
+      hash: route.hash,
+      extraQuery: { sceneFocus: scene.id },
+    },
+  )
   await router.push({
     name: 'plm-audit',
     query: buildRecommendedWorkbenchSceneAuditQuery(
       scene,
-      router.resolve({
-        path: route.path,
-        query: buildWorkbenchSceneFocusQuery(route.query, scene.id),
-        hash: route.hash,
-      }).fullPath,
+      returnToPlmPath,
     ),
   })
 }
 
 async function openWorkbenchSceneAudit() {
+  const returnToPlmPath = buildPlmWorkbenchRoutePath(
+    route.path,
+    buildDeepLinkParams(true),
+    {
+      hash: route.hash,
+    },
+  )
   await router.push({
     name: 'plm-audit',
-    query: buildWorkbenchAuditQuery(route.fullPath),
+    query: buildWorkbenchAuditQuery(returnToPlmPath),
   })
 }
 

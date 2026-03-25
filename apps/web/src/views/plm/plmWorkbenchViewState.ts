@@ -136,6 +136,38 @@ export function mergePlmWorkbenchRouteQuery(
   return nextQuery
 }
 
+export function buildPlmWorkbenchRoutePath(
+  basePath: string,
+  snapshot: Record<string, unknown>,
+  options?: {
+    hash?: string
+    extraQuery?: Record<string, unknown>
+  },
+) {
+  const params = new URLSearchParams()
+
+  for (const [key, value] of Object.entries(normalizePlmWorkbenchQuerySnapshot(snapshot))) {
+    params.set(key, value)
+  }
+
+  for (const [key, value] of Object.entries(options?.extraQuery || {})) {
+    const normalized = normalizeQueryValue(value)
+    if (!normalized) continue
+    params.set(key, normalized)
+  }
+
+  const query = params.toString()
+  const hash = options?.hash
+    ? options.hash.startsWith('#') ? options.hash : `#${options.hash}`
+    : ''
+
+  if (!query) {
+    return `${basePath}${hash}`
+  }
+
+  return `${basePath}?${query}${hash}`
+}
+
 function appendIfPresent(params: URLSearchParams, key: string, value: unknown) {
   const normalized = normalizeQueryValue(value)
   if (!normalized) return
