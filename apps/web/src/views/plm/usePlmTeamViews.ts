@@ -336,6 +336,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     try {
       await deletePlmWorkbenchTeamView(view.id)
       teamViews.value = teamViews.value.filter((entry) => entry.id !== view.id)
+      teamViewSelection.value = teamViewSelection.value.filter((id) => id !== view.id)
       if (teamViewKey.value === view.id) {
         teamViewKey.value = ''
         teamViewName.value = ''
@@ -383,6 +384,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     try {
       const saved = await archivePlmWorkbenchTeamView(options.kind, view.id)
       teamViews.value = replaceTeamView(teamViews.value, saved)
+      teamViewSelection.value = teamViewSelection.value.filter((id) => id !== view.id)
       if (teamViewKey.value === view.id) {
         teamViewKey.value = ''
         teamViewName.value = ''

@@ -2394,6 +2394,7 @@ describe('usePlmTeamViews', () => {
     model.teamViewKey.value = 'workbench-delete'
     model.teamViewName.value = '即将删除工作台'
     model.teamViewOwnerUserId.value = 'owner-delete'
+    model.teamViewSelection.value = ['workbench-delete']
 
     await model.deleteTeamView()
 
@@ -2403,6 +2404,8 @@ describe('usePlmTeamViews', () => {
     expect(model.teamViewKey.value).toBe('')
     expect(model.teamViewName.value).toBe('')
     expect(model.teamViewOwnerUserId.value).toBe('')
+    expect(model.teamViewSelection.value).toEqual([])
+    expect(model.teamViewSelectionCount.value).toBe(0)
     expect(model.teamViews.value).toHaveLength(0)
   })
 
@@ -2488,6 +2491,7 @@ describe('usePlmTeamViews', () => {
     syncRequestedViewId.mockClear()
     model.teamViewKey.value = 'workbench-archive'
     model.teamViewOwnerUserId.value = 'owner-archive'
+    model.teamViewSelection.value = ['workbench-archive']
     await model.archiveTeamView()
 
     expect(archivePlmWorkbenchTeamView).toHaveBeenCalledWith('workbench', 'workbench-archive')
@@ -2495,6 +2499,8 @@ describe('usePlmTeamViews', () => {
     expect(requestedViewId.value).toBe('')
     expect(model.teamViewKey.value).toBe('')
     expect(model.teamViewOwnerUserId.value).toBe('')
+    expect(model.teamViewSelection.value).toEqual([])
+    expect(model.teamViewSelectionCount.value).toBe(0)
     expect(model.teamViews.value[0]).toMatchObject({
       id: 'workbench-archive',
       isArchived: true,
