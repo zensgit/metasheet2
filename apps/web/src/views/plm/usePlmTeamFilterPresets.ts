@@ -18,7 +18,10 @@ import type {
   PlmTeamFilterPreset,
   PlmTeamFilterPresetKind,
 } from './plmPanelModels'
-import { usePlmCollaborativePermissions } from './usePlmCollaborativePermissions'
+import {
+  canApplyPlmCollaborativeEntry,
+  usePlmCollaborativePermissions,
+} from './usePlmCollaborativePermissions'
 
 type UsePlmTeamFilterPresetsOptions = {
   kind: PlmTeamFilterPresetKind
@@ -221,7 +224,10 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     if (teamPresetKey.value) return
     const requestedPresetId = options.requestedPresetId?.value.trim() || ''
     if (requestedPresetId) {
-      const requestedPreset = items.find((entry) => entry.id === requestedPresetId && !entry.isArchived)
+      const requestedPreset = items.find((entry) => (
+        entry.id === requestedPresetId
+        && canApplyPlmCollaborativeEntry(entry)
+      ))
       if (requestedPreset) {
         applyPresetToTarget(requestedPreset)
         return
@@ -230,7 +236,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     }
     if (!options.shouldAutoApplyDefault?.()) return
 
-    const preset = items.find((entry) => entry.isDefault && !entry.isArchived)
+    const preset = items.find((entry) => entry.isDefault && canApplyPlmCollaborativeEntry(entry))
     if (!preset) return
     if (lastAutoAppliedDefaultId.value === preset.id) return
 
@@ -245,14 +251,21 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     try {
       const result = await listPlmTeamFilterPresets(options.kind)
       teamPresets.value = sortTeamPresets(result.items)
-      const availableIds = new Set(result.items.map((preset) => preset.id))
-      teamPresetSelection.value = teamPresetSelection.value.filter((id) => availableIds.has(id))
-      if (!result.items.some((preset) => preset.id === teamPresetKey.value)) {
+      const presetMap = new Map(result.items.map((preset) => [preset.id, preset]))
+      teamPresetSelection.value = teamPresetSelection.value.filter((id) => {
+        const preset = presetMap.get(id)
+        return preset ? readTeamPresetPermissions(preset).canManage : false
+      })
+      const selectedPreset = presetMap.get(teamPresetKey.value)
+      if (!selectedPreset || !canApplyPlmCollaborativeEntry(selectedPreset)) {
         teamPresetKey.value = ''
       }
       if (
         options.requestedPresetId?.value
-        && !result.items.some((preset) => preset.id === options.requestedPresetId?.value)
+        && !result.items.some((preset) => (
+          preset.id === options.requestedPresetId?.value
+          && canApplyPlmCollaborativeEntry(preset)
+        ))
       ) {
         options.syncRequestedPresetId?.(undefined)
       }

@@ -148,6 +148,59 @@ describe('usePlmTeamFilterPresets', () => {
     expect(syncRequestedPresetId).toHaveBeenCalledWith('preset-explicit')
   })
 
+  it('clears stale requested and selected presets when refresh keeps them but removes applyability', async () => {
+    const requestedPresetId = ref('preset-locked')
+    const syncRequestedPresetId = vi.fn((value?: string) => {
+      requestedPresetId.value = value || ''
+    })
+
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-locked',
+          kind: 'bom',
+          scope: 'team',
+          name: '只读 BOM',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canManage: true,
+            canApply: false,
+            canDuplicate: true,
+            canShare: true,
+            canDelete: true,
+            canArchive: true,
+            canRestore: false,
+            canRename: true,
+            canTransfer: true,
+            canSetDefault: true,
+            canClearDefault: false,
+          },
+          state: { field: 'path', value: 'root/locked', group: '锁定组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/locked', group: '锁定组' }),
+      applyPreset,
+      setMessage,
+      requestedPresetId,
+      syncRequestedPresetId,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    model.teamPresetKey.value = 'preset-locked'
+    await model.refreshTeamPresets()
+
+    expect(model.teamPresetKey.value).toBe('')
+    expect(requestedPresetId.value).toBe('')
+    expect(syncRequestedPresetId).toHaveBeenLastCalledWith(undefined)
+  })
+
   it('refreshes, saves, toggles default, applies, and deletes team presets', async () => {
     vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
       items: [
@@ -1016,6 +1069,50 @@ describe('usePlmTeamFilterPresets', () => {
     expect(requestedPresetId.value).toBe('')
     expect(model.teamPresetSelection.value).toEqual(['preset-readonly', 'preset-archived'])
     expect(setMessage).toHaveBeenCalledWith('已批量归档BOM团队预设 1 项，跳过 2 项。')
+  })
+
+  it('clears stale readonly selections during refresh before batch actions run', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-readonly-refresh',
+          kind: 'bom',
+          scope: 'team',
+          name: '刷新后只读',
+          ownerUserId: 'other-user',
+          canManage: false,
+          isDefault: false,
+          permissions: {
+            canManage: false,
+            canApply: true,
+            canDuplicate: true,
+            canShare: false,
+            canDelete: false,
+            canArchive: false,
+            canRestore: false,
+            canRename: false,
+            canTransfer: false,
+            canSetDefault: false,
+            canClearDefault: false,
+          },
+          state: { field: 'path', value: 'root/readonly', group: '只读组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/readonly', group: '只读组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    model.teamPresetSelection.value = ['preset-readonly-refresh']
+    await model.refreshTeamPresets()
+
+    expect(model.teamPresetSelection.value).toEqual([])
   })
 
   it('batch restores archived team presets and reapplies the restored explicit identity', async () => {
