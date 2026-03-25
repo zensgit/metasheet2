@@ -575,6 +575,64 @@ describe('usePlmTeamViews', () => {
     expect(workbenchApply).toHaveReturnedWith('workbench-view-1')
   })
 
+  it('clears local rename and owner drafts when the workbench selector switches targets', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-view-a',
+          kind: 'workbench',
+          scope: 'team',
+          name: '工作台视角 A',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isDefault: false,
+          state: {
+            query: {
+              documentFilter: 'gear',
+            },
+          },
+        },
+        {
+          id: 'workbench-view-b',
+          kind: 'workbench',
+          scope: 'team',
+          name: '工作台视角 B',
+          ownerUserId: 'owner-b',
+          canManage: true,
+          isDefault: false,
+          state: {
+            query: {
+              documentFilter: 'motor',
+            },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-view-a'
+    model.teamViewName.value = 'A 的重命名草稿'
+    model.teamViewOwnerUserId.value = 'owner-next'
+    await nextTick()
+
+    model.teamViewKey.value = 'workbench-view-b'
+    await nextTick()
+
+    expect(model.teamViewName.value).toBe('')
+    expect(model.teamViewOwnerUserId.value).toBe('')
+  })
+
   it('does not apply a team view that fails explicit canApply gating', async () => {
     vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
       items: [

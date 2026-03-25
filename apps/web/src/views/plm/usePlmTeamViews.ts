@@ -1,4 +1,4 @@
-import { computed, ref, shallowRef, type Ref } from 'vue'
+import { computed, ref, shallowRef, watch, type Ref } from 'vue'
 import {
   archivePlmWorkbenchTeamView,
   batchPlmWorkbenchTeamViews,
@@ -149,6 +149,13 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     ownerUserIdRef: teamViewOwnerUserId,
   })
   const defaultTeamViewLabel = computed(() => defaultTeamView.value?.name || '')
+
+  watch(teamViewKey, (next, previous) => {
+    if (next !== previous) {
+      teamViewName.value = ''
+      teamViewOwnerUserId.value = ''
+    }
+  }, { flush: 'sync' })
 
   function applyView(view: PlmWorkbenchTeamView<Kind>) {
     if (teamViewKey.value && teamViewKey.value !== view.id) {
