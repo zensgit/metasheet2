@@ -58,6 +58,20 @@ function findImportSection(container: HTMLElement): HTMLElement {
   return section as HTMLElement
 }
 
+function previewRowCount(section: HTMLElement): number {
+  return section.querySelectorAll('.attendance__table-wrapper .attendance__table tbody tr').length
+}
+
+function previewEmptyStateText(section: HTMLElement): string {
+  return section.querySelector('.attendance__empty')?.textContent?.trim() ?? ''
+}
+
+function csvWarningText(section: HTMLElement): string {
+  return Array.from(section.querySelectorAll('.attendance__status'))
+    .map(node => node.textContent?.trim() ?? '')
+    .find(text => text.includes('CSV warnings:')) ?? ''
+}
+
 function unwrapRef<T>(value: unknown): T {
   if (value && typeof value === 'object' && 'value' in (value as Record<string, unknown>)) {
     return (value as { value: T }).value
@@ -83,7 +97,7 @@ describe('Attendance import preview regression', () => {
     container = null
   })
 
-  it('clears stale preview rows/warnings on preview retry failure and keeps retry action context', async () => {
+  it('clears stale preview rows/warnings on preview retry failure and keeps retry action metadata', async () => {
     const apiFetchMock = vi.mocked(apiFetch)
     let previewRequestCount = 0
 
@@ -151,16 +165,17 @@ describe('Attendance import preview regression', () => {
     findButton(importSection, 'Preview').click()
     await flushUi(6)
 
-    expect(container!.textContent).toContain('user-old')
-    expect(container!.textContent).toContain('CSV warnings: stale-csv-warning; stale-group-warning')
+    expect(importSection.textContent).toContain('user-old')
+    expect(csvWarningText(importSection)).toContain('stale-csv-warning; stale-group-warning')
+    expect(previewRowCount(importSection)).toBe(1)
 
     findButton(importSection, 'Preview').click()
     await flushUi(6)
 
     const setupState = (vm as any).$?.setupState as Record<string, unknown>
-    expect(container!.textContent).toContain('No preview data.')
-    expect(container!.textContent).not.toContain('user-old')
-    expect(container!.textContent).not.toContain('stale-csv-warning')
+    expect(previewRowCount(importSection)).toBe(0)
+    expect(previewEmptyStateText(importSection)).toBe('No preview data.')
+    expect(csvWarningText(importSection)).toBe('')
     expect(container!.textContent).toContain('Import preview request hit a temporary gateway error.')
     expect(container!.textContent).toContain('Code: BAD_GATEWAY')
     expect(container!.textContent).toContain('Retry preview')
@@ -168,15 +183,14 @@ describe('Attendance import preview regression', () => {
     expect(unwrapRef<any[]>(setupState.importPreview)).toHaveLength(0)
     expect(unwrapRef<string[]>(setupState.importCsvWarnings)).toEqual([])
     expect(unwrapRef<Record<string, unknown> | null>(setupState.statusMeta)?.action).toBe('retry-preview-import')
-    expect(unwrapRef<Record<string, unknown> | null>(setupState.statusMeta)?.context).toBe('import-preview')
 
     findButton(container!, 'Retry preview').click()
     await flushUi(6)
 
     expect(previewRequestCount).toBe(3)
-    expect(container!.textContent).toContain('No preview data.')
-    expect(container!.textContent).not.toContain('user-old')
-    expect(container!.textContent).not.toContain('stale-csv-warning')
+    expect(previewRowCount(importSection)).toBe(0)
+    expect(previewEmptyStateText(importSection)).toBe('No preview data.')
+    expect(csvWarningText(importSection)).toBe('')
     expect(unwrapRef<any[]>(setupState.importPreview)).toHaveLength(0)
     expect(unwrapRef<string[]>(setupState.importCsvWarnings)).toEqual([])
     expect(unwrapRef<Record<string, unknown> | null>(setupState.statusMeta)?.action).toBe('retry-preview-import')

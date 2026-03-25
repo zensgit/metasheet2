@@ -5847,6 +5847,8 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
 async function previewImport() {
   clearImportPreviewTask()
   clearImportAsyncJob()
+  importPreview.value = []
+  importCsvWarnings.value = []
   const payload = buildImportPayload()
   if (!payload) {
     setStatus(appendStatusContext(
@@ -5935,6 +5937,8 @@ async function previewImport() {
     importCommitToken.value = ''
     importCommitTokenExpiresAt.value = ''
   } catch (error) {
+    importPreview.value = []
+    importCsvWarnings.value = []
     if (importPreviewTask.value) {
       importPreviewTask.value = {
         ...importPreviewTask.value,
