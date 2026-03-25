@@ -624,6 +624,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     try {
       const saved = await transferPlmWorkbenchTeamView(options.kind, view.id, targetOwnerUserId)
       teamViews.value = replaceTeamView(teamViews.value, saved)
+      if (!canManageTeamView(saved)) {
+        teamViewSelection.value = teamViewSelection.value.filter((id) => id !== saved.id)
+      }
       applyView(saved)
       teamViewOwnerUserId.value = ''
       options.setMessage(`已将${options.label}团队视角转移给：${saved.ownerUserId}`)

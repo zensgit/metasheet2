@@ -2582,6 +2582,7 @@ describe('usePlmTeamViews', () => {
 
     await model.refreshTeamViews()
     model.teamViewKey.value = 'document-view-1'
+    model.teamViewSelection.value = ['document-view-1']
     model.teamViewOwnerUserId.value = 'owner-2'
     syncRequestedViewId.mockClear()
     applyViewState.mockClear()
@@ -2597,6 +2598,8 @@ describe('usePlmTeamViews', () => {
       ownerUserId: 'owner-2',
       canManage: false,
     })
+    expect(model.teamViewSelection.value).toEqual([])
+    expect(model.teamViewSelectionCount.value).toBe(0)
     expect(model.showManagementActions.value).toBe(false)
     expect(model.canDeleteTeamView.value).toBe(false)
     expect(applyViewState).toHaveBeenCalledWith({
