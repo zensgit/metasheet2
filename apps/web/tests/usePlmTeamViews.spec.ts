@@ -706,6 +706,7 @@ describe('usePlmTeamViews', () => {
     model.teamViewName.value = '待重命名工作台视角'
     await nextTick()
 
+    expect(model.canDuplicateTeamView.value).toBe(true)
     expect(model.canShareTeamView.value).toBe(false)
     expect(model.canRenameTeamView.value).toBe(false)
     expect(model.canDeleteTeamView.value).toBe(false)
@@ -717,6 +718,95 @@ describe('usePlmTeamViews', () => {
     expect(copyShareUrl).not.toHaveBeenCalled()
     expect(renamePlmWorkbenchTeamView).not.toHaveBeenCalled()
     expect(setMessage).toHaveBeenCalledWith('请先应用工作台团队视角，再执行管理操作。', true)
+  })
+
+  it('still allows duplicating the pending selector target before apply', async () => {
+    const requestedViewId = ref('workbench-applied')
+    const syncRequestedViewId = vi.fn((value?: string) => {
+      requestedViewId.value = value || ''
+    })
+    const workbenchApply = vi.fn(() => requestedViewId.value)
+
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-applied',
+          kind: 'workbench',
+          scope: 'team',
+          name: '已应用工作台视角',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: true,
+            canDuplicate: true,
+          },
+          state: {
+            query: {
+              documentFilter: 'gear',
+            },
+          },
+        },
+        {
+          id: 'workbench-pending',
+          kind: 'workbench',
+          scope: 'team',
+          name: '待复制工作台视角',
+          ownerUserId: 'owner-b',
+          canManage: false,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: false,
+            canDuplicate: true,
+          },
+          state: {
+            query: {
+              documentFilter: 'motor',
+            },
+          },
+        },
+      ],
+    })
+    vi.mocked(duplicatePlmWorkbenchTeamView).mockResolvedValue({
+      id: 'workbench-copy-from-pending',
+      kind: 'workbench',
+      scope: 'team',
+      name: '待复制工作台视角（副本）',
+      ownerUserId: 'dev-user',
+      canManage: true,
+      isDefault: false,
+      state: {
+        query: {
+          documentFilter: 'motor',
+        },
+      },
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState: workbenchApply,
+      setMessage,
+      requestedViewId,
+      syncRequestedViewId,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-pending'
+    await nextTick()
+
+    await model.duplicateTeamView()
+
+    expect(duplicatePlmWorkbenchTeamView).toHaveBeenCalledWith('workbench', 'workbench-pending', undefined)
+    expect(model.teamViewKey.value).toBe('workbench-copy-from-pending')
+    expect(syncRequestedViewId).toHaveBeenLastCalledWith('workbench-copy-from-pending')
+    expect(workbenchApply).toHaveLastReturnedWith('workbench-copy-from-pending')
   })
 
   it('does not apply a team view that fails explicit canApply gating', async () => {

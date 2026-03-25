@@ -18,7 +18,11 @@ import type {
   PlmWorkbenchTeamViewKind,
   PlmWorkbenchTeamViewStateByKind,
 } from './plmPanelModels'
-import { canApplyPlmCollaborativeEntry, usePlmCollaborativePermissions } from './usePlmCollaborativePermissions'
+import {
+  canApplyPlmCollaborativeEntry,
+  canDuplicatePlmCollaborativeEntry,
+  usePlmCollaborativePermissions,
+} from './usePlmCollaborativePermissions'
 
 type UsePlmTeamViewsOptions<Kind extends PlmWorkbenchTeamViewKind> = {
   kind: Kind
@@ -147,7 +151,6 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     canManageSelectedEntry: canManageSelectedTeamView,
     showManagementActions,
     canApply: canApplyTeamView,
-    canDuplicate: canDuplicateTeamView,
     canShare: canShareTeamView,
     canDelete: canDeleteTeamView,
     canArchive: canArchiveTeamView,
@@ -161,6 +164,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     nameRef: teamViewName,
     ownerUserIdRef: teamViewOwnerUserId,
   })
+  const canDuplicateTeamView = computed(() => canDuplicatePlmCollaborativeEntry(selectedTeamView.value))
   const defaultTeamViewLabel = computed(() => defaultTeamView.value?.name || '')
 
   watch(teamViewKey, (next, previous) => {
@@ -423,9 +427,6 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function duplicateTeamView() {
-    if (blockPendingApplyManagementAction()) {
-      return
-    }
     const view = selectedTeamView.value
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
