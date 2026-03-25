@@ -9,6 +9,9 @@ Scope: Daily pilot issue review
 - Moderator:
 - Teams reviewed:
 - Build / branch / commit:
+- On-prem gate stamp:
+- Release-bound report:
+- Handoff artifact:
 
 ## New Issues
 
@@ -41,3 +44,9 @@ For each issue:
 - Repeated confusion themes:
 - Copy / UX issues worth fixing without changing contracts:
 - Risks to watch tomorrow:
+
+## Evidence Paths
+
+- `output/playwright/multitable-pilot-handoff/<stamp>/handoff.md`
+- `output/playwright/multitable-pilot-handoff/<stamp>/release-bound/report.md`
+- `output/playwright/multitable-pilot-ready-local/<stamp>/readiness.md`

@@ -55,6 +55,7 @@ type UniverMetaViewConfig = {
   sortInfo?: Record<string, unknown>
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
+  config?: Record<string, unknown>
 }
 
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
@@ -400,12 +401,88 @@ function extractSelectOptions(property: unknown): Array<{ value: string; color?:
   return options.length > 0 ? options : undefined
 }
 
+function sanitizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+}
+
 function sanitizeFieldProperty(type: UniverMetaField['type'], property: unknown): Record<string, unknown> {
   const obj = normalizeJson(property)
-  if (type !== 'select') return obj
+  if (type === 'select') {
+    const options = extractSelectOptions(obj) ?? []
+    return { ...obj, options }
+  }
 
-  const options = extractSelectOptions(obj) ?? []
-  return { ...obj, options }
+  if (type === 'link') {
+    const foreignSheetId = typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
+      ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
+      : ''
+    return {
+      ...obj,
+      ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId } : {}),
+      limitSingleRecord: obj.limitSingleRecord === true,
+      ...(typeof obj.refKind === 'string' && obj.refKind.trim().length > 0 ? { refKind: obj.refKind.trim() } : {}),
+    }
+  }
+
+  if (type === 'lookup') {
+    const linkFieldId = typeof (obj.linkFieldId ?? obj.relatedLinkFieldId ?? obj.linkedFieldId ?? obj.sourceFieldId) === 'string'
+      ? String(obj.linkFieldId ?? obj.relatedLinkFieldId ?? obj.linkedFieldId ?? obj.sourceFieldId).trim()
+      : ''
+    const targetFieldId = typeof (obj.targetFieldId ?? obj.lookUpTargetFieldId ?? obj.lookupTargetFieldId ?? obj.lookupFieldId) === 'string'
+      ? String(obj.targetFieldId ?? obj.lookUpTargetFieldId ?? obj.lookupTargetFieldId ?? obj.lookupFieldId).trim()
+      : ''
+    const foreignSheetId = typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
+      ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
+      : ''
+    return {
+      ...obj,
+      ...(linkFieldId ? { linkFieldId, relatedLinkFieldId: linkFieldId } : {}),
+      ...(targetFieldId ? { targetFieldId, lookUpTargetFieldId: targetFieldId } : {}),
+      ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId, datasheetId: foreignSheetId } : {}),
+    }
+  }
+
+  if (type === 'rollup') {
+    const linkFieldId = typeof (obj.linkFieldId ?? obj.linkedFieldId ?? obj.relatedLinkFieldId ?? obj.sourceFieldId) === 'string'
+      ? String(obj.linkFieldId ?? obj.linkedFieldId ?? obj.relatedLinkFieldId ?? obj.sourceFieldId).trim()
+      : ''
+    const targetFieldId = typeof (obj.targetFieldId ?? obj.lookUpTargetFieldId ?? obj.lookupTargetFieldId ?? obj.lookupFieldId) === 'string'
+      ? String(obj.targetFieldId ?? obj.lookUpTargetFieldId ?? obj.lookupTargetFieldId ?? obj.lookupFieldId).trim()
+      : ''
+    const foreignSheetId = typeof (obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId) === 'string'
+      ? String(obj.foreignSheetId ?? obj.foreignDatasheetId ?? obj.datasheetId).trim()
+      : ''
+    const aggregation = parseRollupAggregation(obj.aggregation ?? obj.agg ?? obj.function ?? obj.rollupFunction) ?? 'count'
+    return {
+      ...obj,
+      ...(linkFieldId ? { linkFieldId, linkedFieldId: linkFieldId } : {}),
+      ...(targetFieldId ? { targetFieldId } : {}),
+      aggregation,
+      ...(foreignSheetId ? { foreignSheetId, foreignDatasheetId: foreignSheetId, datasheetId: foreignSheetId } : {}),
+    }
+  }
+
+  if (type === 'formula') {
+    return {
+      ...obj,
+      expression: typeof obj.expression === 'string' ? obj.expression.trim() : '',
+    }
+  }
+
+  if (type === 'attachment') {
+    const maxFiles = typeof obj.maxFiles === 'number' ? obj.maxFiles : Number(obj.maxFiles)
+    return {
+      ...obj,
+      ...(Number.isFinite(maxFiles) && maxFiles > 0 ? { maxFiles: Math.round(maxFiles) } : {}),
+      acceptedMimeTypes: sanitizeStringArray(obj.acceptedMimeTypes),
+    }
+  }
+
+  return obj
 }
 
 function serializeFieldRow(row: any): UniverMetaField {
@@ -927,7 +1004,7 @@ function getDbNotReadyMessage(err: unknown): string | null {
 
 async function tryResolveView(pool: { query: QueryFn }, viewId: string): Promise<UniverMetaViewConfig | null> {
   const result = await pool.query(
-    'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids FROM meta_views WHERE id = $1',
+    'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
     [viewId],
   )
   if (result.rows.length === 0) return null
@@ -942,6 +1019,7 @@ async function tryResolveView(pool: { query: QueryFn }, viewId: string): Promise
     sortInfo: normalizeJson(row.sort_info),
     groupInfo: normalizeJson(row.group_info),
     hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+    config: normalizeJson(row.config),
   }
 }
 
@@ -1815,7 +1893,7 @@ export function univerMetaRouter(): Router {
 
       const viewsResult = effectiveSheetId
         ? await pool.query(
-          `SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids
+          `SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config
            FROM meta_views
            WHERE sheet_id = $1
            ORDER BY created_at ASC`,
@@ -1850,6 +1928,7 @@ export function univerMetaRouter(): Router {
             sortInfo: normalizeJson(row.sort_info),
             groupInfo: normalizeJson(row.group_info),
             hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+            config: normalizeJson(row.config),
           })),
           capabilities,
         },
@@ -2216,20 +2295,20 @@ export function univerMetaRouter(): Router {
       }
 
       let result = await pool.query(
-        'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 200',
+        'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 200',
         [sheetId],
       )
 
       if (result.rows.length === 0) {
         const defaultId = buildId('view')
         await pool.query(
-          `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids)
-           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb)
+          `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
            ON CONFLICT (id) DO NOTHING`,
-          [defaultId, sheetId, '默认视图', 'grid', '{}', '{}', '{}', '[]'],
+          [defaultId, sheetId, '默认视图', 'grid', '{}', '{}', '{}', '[]', '{}'],
         )
         result = await pool.query(
-          'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 200',
+          'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = $1 ORDER BY created_at ASC LIMIT 200',
           [sheetId],
         )
       }
@@ -2243,6 +2322,7 @@ export function univerMetaRouter(): Router {
         sortInfo: normalizeJson(r.sort_info),
         groupInfo: normalizeJson(r.group_info),
         hiddenFieldIds: normalizeJsonArray(r.hidden_field_ids),
+        config: normalizeJson(r.config),
       }))
 
       return res.json({ ok: true, data: { views } })
@@ -2264,6 +2344,7 @@ export function univerMetaRouter(): Router {
       sortInfo: z.record(z.unknown()).optional(),
       groupInfo: z.record(z.unknown()).optional(),
       hiddenFieldIds: z.array(z.string().min(1)).optional(),
+      config: z.record(z.unknown()).optional(),
     })
 
     const parsed = schema.safeParse(req.body)
@@ -2284,8 +2365,8 @@ export function univerMetaRouter(): Router {
       }
 
       await pool.query(
-        `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb)`,
+        `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)`,
         [
           viewId,
           sheetId,
@@ -2295,6 +2376,7 @@ export function univerMetaRouter(): Router {
           JSON.stringify(parsed.data.sortInfo ?? {}),
           JSON.stringify(parsed.data.groupInfo ?? {}),
           JSON.stringify(parsed.data.hiddenFieldIds ?? []),
+          JSON.stringify(parsed.data.config ?? {}),
         ],
       )
 
@@ -2307,6 +2389,7 @@ export function univerMetaRouter(): Router {
         sortInfo: parsed.data.sortInfo ?? {},
         groupInfo: parsed.data.groupInfo ?? {},
         hiddenFieldIds: parsed.data.hiddenFieldIds ?? [],
+        config: parsed.data.config ?? {},
       }
 
       return res.status(201).json({ ok: true, data: { view } })
@@ -2331,6 +2414,7 @@ export function univerMetaRouter(): Router {
       sortInfo: z.record(z.unknown()).optional(),
       groupInfo: z.record(z.unknown()).optional(),
       hiddenFieldIds: z.array(z.string().min(1)).optional(),
+      config: z.record(z.unknown()).optional(),
     })
 
     const parsed = schema.safeParse(req.body)
@@ -2341,7 +2425,7 @@ export function univerMetaRouter(): Router {
     try {
       const pool = poolManager.get()
       const current = await pool.query(
-        'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids FROM meta_views WHERE id = $1',
+        'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
         [viewId],
       )
       if (current.rows.length === 0) {
@@ -2355,10 +2439,11 @@ export function univerMetaRouter(): Router {
       const nextSort = parsed.data.sortInfo ?? normalizeJson(row.sort_info)
       const nextGroup = parsed.data.groupInfo ?? normalizeJson(row.group_info)
       const nextHiddenFieldIds = parsed.data.hiddenFieldIds ?? normalizeJsonArray(row.hidden_field_ids)
+      const nextConfig = parsed.data.config ?? normalizeJson(row.config)
 
       await pool.query(
         `UPDATE meta_views
-         SET name = $2, type = $3, filter_info = $4::jsonb, sort_info = $5::jsonb, group_info = $6::jsonb, hidden_field_ids = $7::jsonb
+         SET name = $2, type = $3, filter_info = $4::jsonb, sort_info = $5::jsonb, group_info = $6::jsonb, hidden_field_ids = $7::jsonb, config = $8::jsonb
          WHERE id = $1`,
         [
           viewId,
@@ -2368,6 +2453,7 @@ export function univerMetaRouter(): Router {
           JSON.stringify(nextSort ?? {}),
           JSON.stringify(nextGroup ?? {}),
           JSON.stringify(nextHiddenFieldIds ?? []),
+          JSON.stringify(nextConfig ?? {}),
         ],
       )
 
@@ -2380,6 +2466,7 @@ export function univerMetaRouter(): Router {
         sortInfo: nextSort ?? {},
         groupInfo: nextGroup ?? {},
         hiddenFieldIds: nextHiddenFieldIds ?? [],
+        config: nextConfig ?? {},
       }
 
       return res.json({ ok: true, data: { view } })

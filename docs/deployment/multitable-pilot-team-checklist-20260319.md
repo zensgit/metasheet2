@@ -4,6 +4,12 @@ Date: 2026-03-19
 Scope: Internal pilot execution checklist  
 Repo: `/Users/huazhou/Downloads/Github/metasheet2-multitable`
 
+Before the team starts, the pilot owner should pin one release-bound artifact bundle and share:
+
+1. the grid URL
+2. the form URL
+3. the bound quickstart or handoff location
+
 ## Team A: Intake / Data Entry
 
 Goal: validate `form + attachment + comments`.
@@ -67,3 +73,7 @@ Severity guide:
 - `P1`: severe confusion or repeated failure
 - `P2`: workaround exists, but experience is poor
 - `P3`: polish or copy issue
+
+Operator note:
+
+- If the pilot run is tied to an exact on-prem release, prefer generating the pilot packet with `ONPREM_GATE_STAMP=<gate-stamp> pnpm prepare:multitable-pilot:release-bound` before distributing links.

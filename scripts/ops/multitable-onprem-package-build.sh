@@ -12,9 +12,17 @@ PACKAGE_TAG="${PACKAGE_TAG:-$(date +%Y%m%d-%H%M%S)}"
 PACKAGE_NAME="${PACKAGE_PREFIX}-v${PACKAGE_VERSION}-${PACKAGE_TAG}"
 BUILD_ROOT="${OUTPUT_DIR}/.build/${PACKAGE_NAME}"
 PACKAGE_ROOT="${BUILD_ROOT}/${PACKAGE_NAME}"
+TMP_OUTPUT_DIR="${OUTPUT_DIR}/.tmp/${PACKAGE_NAME}"
 ARCHIVE_TGZ_PATH="${OUTPUT_DIR}/${PACKAGE_NAME}.tgz"
 ARCHIVE_ZIP_PATH="${OUTPUT_DIR}/${PACKAGE_NAME}.zip"
+ARCHIVE_TGZ_TMP_PATH="${TMP_OUTPUT_DIR}/${PACKAGE_NAME}.tgz"
+ARCHIVE_ZIP_TMP_PATH="${TMP_OUTPUT_DIR}/${PACKAGE_NAME}.zip"
+ARCHIVE_TGZ_SHA_TMP_PATH="${ARCHIVE_TGZ_TMP_PATH}.sha256"
+ARCHIVE_ZIP_SHA_TMP_PATH="${ARCHIVE_ZIP_TMP_PATH}.sha256"
+METADATA_JSON_PATH="${OUTPUT_DIR}/${PACKAGE_NAME}.json"
+METADATA_JSON_TMP_PATH="${TMP_OUTPUT_DIR}/${PACKAGE_NAME}.json"
 CHECKSUM_FILE="${OUTPUT_DIR}/SHA256SUMS"
+checksum_tmp=""
 
 REQUIRED_PATHS=(
   "apps/web/dist"
@@ -104,6 +112,11 @@ function copy_path() {
   fi
 }
 
+function cleanup() {
+  [[ -n "$checksum_tmp" ]] && rm -f "$checksum_tmp" || true
+  rm -rf "$TMP_OUTPUT_DIR" || true
+}
+
 function stamp_packaged_version() {
   local rel="$1"
   local file="${PACKAGE_ROOT}/${rel}"
@@ -131,6 +144,8 @@ if [[ "$BUILD_BACKEND" == "1" ]]; then
   run pnpm --filter @metasheet/core-backend build
 fi
 
+trap cleanup EXIT
+
 for rel in "${REQUIRED_PATHS[@]}"; do
   [[ -e "${ROOT_DIR}/${rel}" ]] || die "Required file missing before packaging: ${rel}"
 done
@@ -138,6 +153,7 @@ done
 run rm -rf "$BUILD_ROOT"
 run mkdir -p "$PACKAGE_ROOT"
 run mkdir -p "$OUTPUT_DIR"
+run mkdir -p "$TMP_OUTPUT_DIR"
 command -v zip >/dev/null 2>&1 || die "zip command is required to build Windows package"
 
 for rel in "${REQUIRED_PATHS[@]}"; do
@@ -159,24 +175,22 @@ Package layout guide:
   docs/deployment/multitable-onprem-package-layout-20260319.md
 EOF
 
-run tar -czf "$ARCHIVE_TGZ_PATH" -C "$BUILD_ROOT" "$PACKAGE_NAME"
-run bash -lc "cd \"$BUILD_ROOT\" && zip -qr \"$ARCHIVE_ZIP_PATH\" \"$PACKAGE_NAME\""
-write_sha_file "$ARCHIVE_TGZ_PATH"
-write_sha_file "$ARCHIVE_ZIP_PATH"
+run rm -f "$ARCHIVE_TGZ_TMP_PATH" "$ARCHIVE_ZIP_TMP_PATH" "$ARCHIVE_TGZ_SHA_TMP_PATH" "$ARCHIVE_ZIP_SHA_TMP_PATH" "$METADATA_JSON_TMP_PATH"
+run tar -czf "$ARCHIVE_TGZ_TMP_PATH" -C "$BUILD_ROOT" "$PACKAGE_NAME"
+run bash -lc "cd \"$BUILD_ROOT\" && zip -qr \"$ARCHIVE_ZIP_TMP_PATH\" \"$PACKAGE_NAME\""
+write_sha_file "$ARCHIVE_TGZ_TMP_PATH"
+write_sha_file "$ARCHIVE_ZIP_TMP_PATH"
 
 checksum_tmp="$(mktemp)"
-trap 'rm -f "$checksum_tmp"' EXIT
 if [[ -f "$CHECKSUM_FILE" ]]; then
   awk -v tgz="${PACKAGE_NAME}.tgz" -v zip="${PACKAGE_NAME}.zip" '$2 != tgz && $2 != zip { print }' "$CHECKSUM_FILE" > "$checksum_tmp"
 else
   : > "$checksum_tmp"
 fi
-add_checksum_entry "$ARCHIVE_TGZ_PATH" >> "$checksum_tmp"
-add_checksum_entry "$ARCHIVE_ZIP_PATH" >> "$checksum_tmp"
-mv "$checksum_tmp" "$CHECKSUM_FILE"
-trap - EXIT
+add_checksum_entry "$ARCHIVE_TGZ_TMP_PATH" >> "$checksum_tmp"
+add_checksum_entry "$ARCHIVE_ZIP_TMP_PATH" >> "$checksum_tmp"
 
-cat > "${OUTPUT_DIR}/${PACKAGE_NAME}.json" <<EOF
+cat > "${METADATA_JSON_TMP_PATH}" <<EOF
 {
   "name": "${PACKAGE_NAME}",
   "version": "${PACKAGE_VERSION}",
@@ -191,9 +205,19 @@ cat > "${OUTPUT_DIR}/${PACKAGE_NAME}.json" <<EOF
 }
 EOF
 
+mv "$ARCHIVE_TGZ_TMP_PATH" "$ARCHIVE_TGZ_PATH"
+mv "$ARCHIVE_ZIP_TMP_PATH" "$ARCHIVE_ZIP_PATH"
+mv "$ARCHIVE_TGZ_SHA_TMP_PATH" "${ARCHIVE_TGZ_PATH}.sha256"
+mv "$ARCHIVE_ZIP_SHA_TMP_PATH" "${ARCHIVE_ZIP_PATH}.sha256"
+mv "$checksum_tmp" "$CHECKSUM_FILE"
+checksum_tmp=""
+mv "${METADATA_JSON_TMP_PATH}" "${METADATA_JSON_PATH}"
+rm -rf "$TMP_OUTPUT_DIR"
+
 info "Package built:"
 info "  archive_tgz: ${ARCHIVE_TGZ_PATH}"
 info "  archive_zip: ${ARCHIVE_ZIP_PATH}"
 info "  checksum_tgz: ${ARCHIVE_TGZ_PATH}.sha256"
 info "  checksum_zip: ${ARCHIVE_ZIP_PATH}.sha256"
 info "  index: ${CHECKSUM_FILE}"
+info "  metadata_json: ${METADATA_JSON_PATH}"

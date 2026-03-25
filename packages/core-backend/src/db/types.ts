@@ -629,6 +629,7 @@ export interface MetaViewsTable {
   sort_info: JSONColumnType<Record<string, unknown> | null>
   group_info: JSONColumnType<Record<string, unknown> | null>
   hidden_field_ids: JSONColumnType<string[]>
+  config: JSONColumnType<Record<string, unknown> | null>
   created_at: CreatedAt
   updated_at: UpdatedAt
 }

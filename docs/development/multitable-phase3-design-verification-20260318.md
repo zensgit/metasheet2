@@ -120,7 +120,14 @@ User clicks "⚙ Fields" → MetaFieldManager opens (modal)
       → grid.loadViewData (refresh grid with new schema)
 ```
 
-### 2.3 Data Flow — Base Navigation
+### 2.3 Manager dirty-guard / prop-reconcile
+
+- Opening `MetaFieldManager` or `MetaViewManager`, and switching a config target inside them, always initializes the local draft from the latest props.
+- Once the local draft becomes dirty, background prop refreshes do not silently overwrite the current draft; the manager shows a stale warning and lets the user reload the latest settings explicitly.
+- Structural invalidation still forces reconcile/reset: the target field/view disappears, referenced sheets/fields disappear, or the manager closes and reopens.
+- After save, cancel, or reopen, the manager synchronizes from the latest props again.
+
+### 2.4 Data Flow — Base Navigation
 
 ```
 User selects base in MetaBasePicker

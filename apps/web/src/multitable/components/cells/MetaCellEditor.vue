@@ -80,24 +80,43 @@
 
     <!-- attachment -->
     <div v-else-if="field.type === 'attachment'" class="meta-cell-editor__attachment">
-      <input
-        ref="inputRef"
-        type="file"
-        multiple
-        class="meta-cell-editor__file-input"
-        :disabled="uploading"
-        @change="onFileSelect"
-        @keydown.escape="emit('cancel')"
+      <MetaAttachmentList
+        :attachments="attachmentItems"
+        removable
+        empty-label="No attachments"
+        @remove="onRemoveAttachment"
       />
-      <div
-        v-if="!uploading"
-        class="meta-cell-editor__drop-zone"
-        @dragover.prevent
-        @drop.prevent="onFileDrop"
-      >
-        Drop files or click to browse
+      <div class="meta-cell-editor__attachment-actions">
+        <label class="meta-cell-editor__file-trigger">
+          <input
+            ref="inputRef"
+            type="file"
+            :multiple="attachmentAllowsMultiple"
+            :accept="attachmentAcceptAttrValue"
+            class="meta-cell-editor__file-input"
+            :disabled="!!attachmentActivity || uploading"
+            @change="onFileSelect"
+            @keydown.escape="emit('cancel')"
+          />
+          <span
+            class="meta-cell-editor__file-trigger-label"
+            @dragover.prevent
+            @drop.prevent="onFileDrop"
+          >Drop files or click to browse</span>
+        </label>
+        <button
+          type="button"
+          class="meta-cell-editor__clear-btn"
+          :disabled="!attachmentIds.length || !!attachmentActivity || uploading"
+          @click="clearAttachments"
+        >
+          Clear all
+        </button>
       </div>
-      <div v-else class="meta-cell-editor__uploading">Uploading...</div>
+      <div v-if="attachmentActivity" class="meta-cell-editor__uploading">
+        {{ attachmentActivity === 'removing' ? 'Removing...' : attachmentActivity === 'clearing' ? 'Clearing...' : 'Uploading...' }}
+      </div>
+      <div v-if="attachmentError" class="meta-cell-editor__error">{{ attachmentError }}</div>
     </div>
 
     <!-- readonly fallback -->
@@ -107,13 +126,18 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import type { MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaField } from '../../types'
+import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaField } from '../../types'
+import MetaAttachmentList from '../MetaAttachmentList.vue'
+import { attachmentAcceptAttr, resolveAttachmentFieldProperty, validateAttachmentSelection } from '../../utils/field-config'
+import { linkActionLabel as formatLinkActionLabel } from '../../utils/link-fields'
 
 const props = defineProps<{
   field: MetaField
   modelValue: unknown
   uploadFn?: MetaAttachmentUploadFn
+  deleteAttachmentFn?: MetaAttachmentDeleteFn
   uploadContext?: MetaAttachmentUploadContext
+  attachmentSummaries?: MetaAttachment[]
 }>()
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}/
@@ -136,35 +160,83 @@ const inputRef = ref<HTMLElement | null>(null)
 const linkButtonLabel = computed(() => {
   if (props.field.type !== 'link') return 'Choose linked records...'
   const count = Array.isArray(props.modelValue) ? props.modelValue.length : props.modelValue ? 1 : 0
-  return count > 0 ? `Edit links (${count})` : 'Choose linked records...'
+  return formatLinkActionLabel(props.field, count)
 })
 
 const uploading = ref(false)
+const attachmentActivity = ref<'uploading' | 'removing' | 'clearing' | null>(null)
+const attachmentError = ref('')
+
+const attachmentIds = computed(() => {
+  const v = props.modelValue
+  if (Array.isArray(v)) return v.map(String)
+  if (v) return [String(v)]
+  return []
+})
+const attachmentAcceptAttrValue = computed(() => attachmentAcceptAttr(props.field))
+const attachmentAllowsMultiple = computed(() => {
+  if (props.field.type !== 'attachment') return true
+  return resolveAttachmentFieldProperty(props.field.property).maxFiles !== 1
+})
+
+const attachmentItems = computed<MetaAttachment[]>(() => {
+  const summaryById = new Map((props.attachmentSummaries ?? []).map((attachment) => [attachment.id, attachment]))
+  return attachmentIds.value.map((id) => summaryById.get(id) ?? {
+    id,
+    filename: id,
+    mimeType: 'application/octet-stream',
+    size: 0,
+    url: '',
+    thumbnailUrl: null,
+    uploadedAt: null,
+  })
+})
+
+function attachmentContext(): MetaAttachmentUploadContext {
+  return {
+    ...props.uploadContext,
+    fieldId: props.field.id,
+  }
+}
+
+async function deleteAttachment(attachmentId: string) {
+  if (!props.deleteAttachmentFn) return
+  await props.deleteAttachmentFn(attachmentId, attachmentContext())
+}
+
+function setAttachmentValue(nextIds: string[], confirm = true) {
+  emit('update:modelValue', nextIds)
+  if (confirm) emit('confirm')
+}
 
 async function uploadFiles(files: FileList) {
+  attachmentError.value = ''
+  const validationError = validateAttachmentSelection(props.field, files, attachmentIds.value.length)
+  if (validationError) {
+    attachmentError.value = validationError
+    return
+  }
   if (!props.uploadFn) {
     // Fallback: emit filenames when no uploadFn provided
     emit('update:modelValue', Array.from(files).map((f) => f.name))
     emit('confirm')
     return
   }
+  attachmentActivity.value = 'uploading'
   uploading.value = true
   try {
-    const existingIds = Array.isArray(props.modelValue) ? [...props.modelValue] : props.modelValue ? [props.modelValue] : []
+    const existingIds = [...attachmentIds.value]
     const newIds: string[] = []
     for (const file of Array.from(files)) {
-      const attachment = await props.uploadFn(file, {
-        ...props.uploadContext,
-        fieldId: props.field.id,
-      })
+      const attachment = await props.uploadFn(file, attachmentContext())
       newIds.push(attachment.id)
     }
-    emit('update:modelValue', [...existingIds, ...newIds])
-    emit('confirm')
-  } catch {
-    // Upload failed — leave cell unchanged
+    setAttachmentValue([...existingIds, ...newIds])
+  } catch (error: any) {
+    attachmentError.value = error?.message ?? 'Failed to upload attachment'
   } finally {
     uploading.value = false
+    attachmentActivity.value = null
   }
 }
 
@@ -181,6 +253,50 @@ function onFileDrop(e: DragEvent) {
 function onNumberInput(e: Event) {
   const v = (e.target as HTMLInputElement).value
   emit('update:modelValue', v === '' ? null : Number(v))
+}
+
+async function onRemoveAttachment(attachmentId: string) {
+  attachmentError.value = ''
+  attachmentActivity.value = 'removing'
+  try {
+    const nextIds = attachmentIds.value.filter((id) => id !== attachmentId)
+    if (props.deleteAttachmentFn) {
+      await deleteAttachment(attachmentId)
+      emit('update:modelValue', nextIds)
+      emit('cancel')
+      return
+    }
+    setAttachmentValue(nextIds)
+  } catch (error: any) {
+    attachmentError.value = error?.message ?? 'Failed to remove attachment'
+  } finally {
+    attachmentActivity.value = null
+  }
+}
+
+async function clearAttachments() {
+  if (!attachmentIds.value.length) return
+  attachmentError.value = ''
+  attachmentActivity.value = 'clearing'
+  const remainingIds = [...attachmentIds.value]
+  try {
+    if (props.deleteAttachmentFn) {
+      for (const attachment of attachmentItems.value) {
+        await deleteAttachment(attachment.id)
+        const index = remainingIds.indexOf(attachment.id)
+        if (index >= 0) remainingIds.splice(index, 1)
+      }
+      emit('update:modelValue', [])
+      emit('cancel')
+      return
+    }
+    setAttachmentValue([])
+  } catch (error: any) {
+    attachmentError.value = error?.message ?? 'Failed to clear attachments'
+    setAttachmentValue(remainingIds, false)
+  } finally {
+    attachmentActivity.value = null
+  }
 }
 
 onMounted(() => {
@@ -206,13 +322,40 @@ onMounted(() => {
   background: #ecf5ff; color: #409eff; cursor: pointer; font-size: 12px;
 }
 .meta-cell-editor__attachment { display: flex; flex-direction: column; gap: 4px; width: 100%; }
-.meta-cell-editor__file-input { font-size: 12px; }
-.meta-cell-editor__drop-zone {
-  padding: 8px 12px; border: 2px dashed #c0d8f0; border-radius: 4px;
-  text-align: center; font-size: 11px; color: #999; cursor: pointer;
+.meta-cell-editor__attachment-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.meta-cell-editor__file-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 2px dashed #c0d8f0;
+  border-radius: 4px;
+  color: #999;
+  cursor: pointer;
   background: #fafcff;
 }
-.meta-cell-editor__drop-zone:hover { border-color: #409eff; color: #409eff; }
+.meta-cell-editor__file-trigger:hover { border-color: #409eff; color: #409eff; }
+.meta-cell-editor__file-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.meta-cell-editor__file-trigger-label { font-size: 11px; }
+.meta-cell-editor__clear-btn {
+  padding: 6px 10px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  background: #fff;
+  color: #606266;
+  cursor: pointer;
+  font-size: 12px;
+}
+.meta-cell-editor__clear-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .meta-cell-editor__uploading { padding: 8px 12px; text-align: center; font-size: 11px; color: #409eff; }
+.meta-cell-editor__error { color: #f56c6c; font-size: 11px; }
 .meta-cell-editor__readonly { color: #999; font-size: 13px; }
 </style>

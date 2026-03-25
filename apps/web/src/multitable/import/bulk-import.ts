@@ -1,9 +1,19 @@
 import type { MultitableApiClient } from '../api/client'
 
+export type BulkImportFailure = {
+  index: number
+  message: string
+  status?: number
+  code?: string
+  retryable: boolean
+}
+
 export type BulkImportResult = {
+  attempted: number
   succeeded: number
   failed: number
   firstError: string | null
+  failures: BulkImportFailure[]
 }
 
 export async function bulkImportRecords(params: {
@@ -16,13 +26,29 @@ export async function bulkImportRecords(params: {
   const settled = await Promise.allSettled(
     records.map((data) => client.createRecord({ sheetId, viewId, data })),
   )
-  const failed = settled.filter((item) => item.status === 'rejected')
-  const firstError = failed[0] && failed[0].status === 'rejected'
-    ? failed[0].reason?.message ?? String(failed[0].reason)
+  const isRetryableError = (error: unknown) => {
+    const status = typeof error === 'object' && error && 'status' in error ? (error as { status?: number }).status : undefined
+    return status === undefined || status >= 500 || status === 409 || status === 429
+  }
+  const failures = settled.flatMap((item, index) => {
+    if (item.status !== 'rejected') return []
+    const reason = item.reason as { message?: string; status?: number; code?: string } | undefined
+    return [{
+      index,
+      message: reason?.message ?? String(item.reason),
+      status: reason?.status,
+      code: reason?.code,
+      retryable: isRetryableError(item.reason),
+    }]
+  })
+  const firstError = failures[0]
+    ? failures[0].message
     : null
   return {
-    succeeded: settled.length - failed.length,
-    failed: failed.length,
+    attempted: settled.length,
+    succeeded: settled.length - failures.length,
+    failed: failures.length,
     firstError,
+    failures,
   }
 }

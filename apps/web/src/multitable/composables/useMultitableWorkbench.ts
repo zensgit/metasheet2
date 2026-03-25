@@ -19,7 +19,6 @@ function filterVisibleSheets(sheets: MetaSheet[]): MetaSheet[] {
 }
 
 export function useMultitableWorkbench(opts?: {
-  initialBaseId?: string
   initialSheetId?: string
   initialViewId?: string
   client?: MultitableApiClient
@@ -30,7 +29,6 @@ export function useMultitableWorkbench(opts?: {
   const fields = ref<MetaField[]>([])
   const views = ref<MetaView[]>([])
 
-  const activeBaseId = ref(opts?.initialBaseId ?? '')
   const activeSheetId = ref(opts?.initialSheetId ?? '')
   const activeViewId = ref(opts?.initialViewId ?? '')
   const capabilities = ref<MetaCapabilities>({ ...EMPTY_CAPABILITIES })
@@ -41,53 +39,16 @@ export function useMultitableWorkbench(opts?: {
     () => views.value.find((v) => v.id === activeViewId.value) ?? null,
   )
 
-  function syncContextState(
-    ctx: {
-      base?: { id?: string | null } | null
-      sheet?: MetaSheet | null
-      sheets?: MetaSheet[]
-      views?: MetaView[]
-      capabilities?: MetaCapabilities
-    },
-    preferredViewId?: string | null,
-  ) {
-    sheets.value = filterVisibleSheets(ctx.sheets ?? sheets.value)
-    views.value = ctx.views ?? []
-    capabilities.value = ctx.capabilities ?? { ...EMPTY_CAPABILITIES }
-    if (ctx.base?.id) activeBaseId.value = ctx.base.id
-    if (ctx.sheet?.baseId) activeBaseId.value = ctx.sheet.baseId
-    if (ctx.sheet?.id && ctx.sheet.description !== SYSTEM_PEOPLE_SHEET_DESCRIPTION) {
-      activeSheetId.value = ctx.sheet.id
-    } else if (!sheets.value.find((sheet) => sheet.id === activeSheetId.value)) {
-      activeSheetId.value = sheets.value[0]?.id ?? ''
-    }
-    const requestedViewId = typeof preferredViewId === 'string' ? preferredViewId.trim() : ''
-    if (requestedViewId && views.value.some((view) => view.id === requestedViewId)) {
-      activeViewId.value = requestedViewId
-    } else if (!views.value.find((view) => view.id === activeViewId.value)) {
-      activeViewId.value = views.value[0]?.id ?? ''
-    }
-  }
-
   async function loadSheets() {
     loading.value = true
     error.value = null
     const hadActiveSheet = !!activeSheetId.value
     try {
-      if (activeBaseId.value) {
-        await loadBaseContext(activeBaseId.value, {
-          sheetId: activeSheetId.value || undefined,
-          viewId: activeViewId.value || undefined,
-        })
-        return
-      }
       const data = await client.listSheets()
       sheets.value = filterVisibleSheets(data.sheets ?? [])
       if (!activeSheetId.value && sheets.value.length) {
         activeSheetId.value = sheets.value[0].id
       }
-      const selectedSheet = sheets.value.find((sheet) => sheet.id === activeSheetId.value)
-      if (selectedSheet?.baseId) activeBaseId.value = selectedSheet.baseId
       if (hadActiveSheet && activeSheetId.value) {
         await loadSheetMeta(activeSheetId.value)
       }
@@ -110,45 +71,45 @@ export function useMultitableWorkbench(opts?: {
         }),
       ])
       fields.value = fData.fields ?? []
-      syncContextState(ctx, activeViewId.value)
+      sheets.value = filterVisibleSheets(ctx.sheets ?? sheets.value)
+      views.value = ctx.views ?? []
+      capabilities.value = ctx.capabilities ?? { ...EMPTY_CAPABILITIES }
+      if (ctx.sheet?.id && ctx.sheet.description !== SYSTEM_PEOPLE_SHEET_DESCRIPTION) {
+        activeSheetId.value = ctx.sheet.id
+      }
+      if (!activeViewId.value && views.value.length) {
+        activeViewId.value = views.value[0].id
+      }
     } catch (e: any) {
       error.value = e.message ?? 'Failed to load sheet metadata'
     }
   }
 
-  async function loadBaseContext(baseId: string, opts?: { sheetId?: string; viewId?: string }) {
-    if (!baseId) return
-    loading.value = true
-    error.value = null
-    try {
-      const ctx = await client.loadContext({
-        baseId,
-        sheetId: opts?.sheetId,
-        viewId: opts?.viewId,
-      })
-      syncContextState(ctx, opts?.viewId)
-      if (activeSheetId.value) {
-        const fData = await client.listFields(activeSheetId.value)
-        fields.value = fData.fields ?? []
-      } else {
-        fields.value = []
+  async function ensureRequestedSelection(requestedSheetId?: string | null, requestedViewId?: string | null) {
+    const nextSheetId = typeof requestedSheetId === 'string' ? requestedSheetId.trim() : ''
+    const nextViewId = typeof requestedViewId === 'string' ? requestedViewId.trim() : ''
+
+    if (!nextSheetId && !nextViewId) return
+
+    if (nextSheetId) {
+      activeSheetId.value = nextSheetId
+      if (nextViewId) activeViewId.value = nextViewId
+      await loadSheetMeta(nextSheetId)
+    }
+
+    if (nextViewId) {
+      const matchedView = views.value.find((view) => view.id === nextViewId)
+      if (matchedView) {
+        activeViewId.value = matchedView.id
+      } else if (!activeViewId.value && views.value.length) {
+        activeViewId.value = views.value[0].id
       }
-    } catch (e: any) {
-      error.value = e.message ?? 'Failed to load base metadata'
-    } finally {
-      loading.value = false
     }
   }
 
   function selectSheet(sheetId: string) {
     activeSheetId.value = sheetId
-    const selectedSheet = sheets.value.find((sheet) => sheet.id === sheetId)
-    if (selectedSheet?.baseId) activeBaseId.value = selectedSheet.baseId
     activeViewId.value = ''
-  }
-
-  function selectBase(baseId: string) {
-    activeBaseId.value = baseId
   }
 
   function selectView(viewId: string) {
@@ -166,7 +127,6 @@ export function useMultitableWorkbench(opts?: {
     sheets,
     fields,
     views,
-    activeBaseId,
     activeSheetId,
     activeViewId,
     capabilities,
@@ -174,9 +134,8 @@ export function useMultitableWorkbench(opts?: {
     loading,
     error,
     loadSheets,
-    loadBaseContext,
     loadSheetMeta,
-    selectBase,
+    ensureRequestedSelection,
     selectSheet,
     selectView,
   }

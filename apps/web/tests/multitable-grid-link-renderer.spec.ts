@@ -37,6 +37,69 @@ describe('MetaCellRenderer link rendering', () => {
     container.remove()
   })
 
+  it('uses the people style for user link fields', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaCellRenderer, {
+          field: {
+            id: 'fld_owner',
+            name: 'Owner',
+            type: 'link',
+            property: {
+              refKind: 'user',
+              limitSingleRecord: true,
+            },
+          },
+          value: ['user_1'],
+          linkSummaries: [
+            { id: 'user_1', display: 'Jamie' },
+          ],
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const chip = container.querySelector('.meta-cell-renderer__link') as HTMLElement | null
+    expect(chip?.classList.contains('meta-cell-renderer__link--person')).toBe(true)
+    expect(container.textContent).toContain('Jamie')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('does not expose raw link ids when summaries are missing', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaCellRenderer, {
+          field: {
+            id: 'fld_vendor',
+            name: 'Vendor',
+            type: 'link',
+          },
+          value: ['rec_vendor_1', 'rec_vendor_2'],
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    expect(container.textContent).toContain('2 linked records')
+    expect(container.textContent).not.toContain('rec_vendor_1')
+    expect(container.textContent).not.toContain('rec_vendor_2')
+
+    app.unmount()
+    container.remove()
+  })
+
   it('shows attachment filenames instead of raw ids when summaries are present', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
@@ -70,6 +133,45 @@ describe('MetaCellRenderer link rendering', () => {
 
     expect(container.textContent).toContain('report.pdf')
     expect(container.textContent).not.toContain('att_001')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('renders attachment thumbnails for image summaries', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaCellRenderer, {
+          field: {
+            id: 'fld_images',
+            name: 'Images',
+            type: 'attachment',
+          },
+          value: ['att_img_1'],
+          attachmentSummaries: [
+            {
+              id: 'att_img_1',
+              filename: 'photo.png',
+              mimeType: 'image/png',
+              size: 2048,
+              url: '/api/multitable/attachments/att_img_1',
+              thumbnailUrl: '/api/multitable/attachments/att_img_1?thumbnail=true',
+              uploadedAt: '2026-03-21T10:00:00.000Z',
+            },
+          ],
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const image = container.querySelector('img') as HTMLImageElement | null
+    expect(image).not.toBeNull()
+    expect(image?.getAttribute('src')).toContain('thumbnail=true')
 
     app.unmount()
     container.remove()

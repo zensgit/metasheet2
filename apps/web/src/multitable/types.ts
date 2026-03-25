@@ -56,6 +56,7 @@ export interface MetaView {
   sortInfo?: Record<string, unknown>
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
+  config?: Record<string, unknown>
 }
 
 export interface MetaRecord {
@@ -264,6 +265,7 @@ export interface CreateViewInput {
   sortInfo?: Record<string, unknown>
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
+  config?: Record<string, unknown>
 }
 
 export interface UpdateViewInput {
@@ -273,6 +275,7 @@ export interface UpdateViewInput {
   sortInfo?: Record<string, unknown>
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
+  config?: Record<string, unknown>
 }
 
 export interface CreateRecordInput {
@@ -315,9 +318,42 @@ export type MetaAttachmentUploadFn = (
   context?: MetaAttachmentUploadContext,
 ) => Promise<MetaAttachment>
 
+export type MetaAttachmentDeleteFn = (
+  attachmentId: string,
+  context?: MetaAttachmentUploadContext,
+) => Promise<void>
+
 // --- Timeline config ---
 export interface TimelineConfig {
   startFieldId: string
   endFieldId: string
   zoom: 'day' | 'week' | 'month'
+}
+
+export interface MetaGalleryViewConfig {
+  titleFieldId?: string | null
+  coverFieldId?: string | null
+  fieldIds?: string[]
+  columns?: number
+  cardSize?: 'small' | 'medium' | 'large'
+}
+
+export interface MetaCalendarViewConfig {
+  dateFieldId?: string | null
+  endDateFieldId?: string | null
+  titleFieldId?: string | null
+  defaultView?: 'month' | 'week' | 'day'
+  weekStartsOn?: number
+}
+
+export interface MetaKanbanViewConfig {
+  groupFieldId?: string | null
+  cardFieldIds?: string[]
+}
+
+export interface MetaTimelineViewConfig {
+  startFieldId?: string | null
+  endFieldId?: string | null
+  labelFieldId?: string | null
+  zoom?: 'day' | 'week' | 'month'
 }

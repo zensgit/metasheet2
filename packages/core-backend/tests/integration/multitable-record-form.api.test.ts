@@ -166,7 +166,7 @@ describe('Multitable record and form context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids FROM meta_views WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
           expect(params).toEqual(['view_form_ops'])
           return {
             rows: [{
@@ -178,6 +178,7 @@ describe('Multitable record and form context API', () => {
               sort_info: {},
               group_info: {},
               hidden_field_ids: ['fld_internal'],
+              config: {},
             }],
           }
         }
@@ -259,7 +260,7 @@ describe('Multitable record and form context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids FROM meta_views WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
           expect(params).toEqual(['view_orders'])
           return {
             rows: [{
@@ -271,6 +272,7 @@ describe('Multitable record and form context API', () => {
               sort_info: {},
               group_info: {},
               hidden_field_ids: [],
+              config: {},
             }],
           }
         }
@@ -376,7 +378,7 @@ describe('Multitable record and form context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids FROM meta_views WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
           expect(params).toEqual(['view_orders_search'])
           return {
             rows: [{
@@ -388,6 +390,7 @@ describe('Multitable record and form context API', () => {
               sort_info: {},
               group_info: {},
               hidden_field_ids: [],
+              config: {},
             }],
           }
         }
@@ -533,7 +536,7 @@ describe('Multitable record and form context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write', 'comments:write'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids FROM meta_views WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
           expect(params).toEqual(['view_form_ops'])
           return {
             rows: [{
@@ -545,6 +548,7 @@ describe('Multitable record and form context API', () => {
               sort_info: {},
               group_info: {},
               hidden_field_ids: [],
+              config: {},
             }],
           }
         }
@@ -995,7 +999,7 @@ describe('Multitable record and form context API', () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],
       queryHandler: async (sql, params) => {
-        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids FROM meta_views WHERE id = $1')) {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
           expect(params).toEqual(['view_form_ops'])
           return {
             rows: [{
@@ -1007,6 +1011,7 @@ describe('Multitable record and form context API', () => {
               sort_info: {},
               group_info: {},
               hidden_field_ids: ['fld_internal'],
+              config: {},
             }],
           }
         }

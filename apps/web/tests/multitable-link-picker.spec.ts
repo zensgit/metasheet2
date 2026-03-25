@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, computed } from 'vue'
 import MetaGridTable from '../src/multitable/components/MetaGridTable.vue'
 import MetaLinkPicker from '../src/multitable/components/MetaLinkPicker.vue'
@@ -29,6 +29,16 @@ const personField = {
   },
 }
 
+const multiPersonField = {
+  id: 'fld_owner_multi',
+  name: 'Owners',
+  type: 'link',
+  property: {
+    refKind: 'user',
+    limitSingleRecord: false,
+  },
+}
+
 const flushPromises = async () => {
   await Promise.resolve()
   await nextTick()
@@ -37,6 +47,10 @@ const flushPromises = async () => {
 }
 
 describe('MetaLinkPicker', () => {
+  beforeEach(() => {
+    mockListLinkOptions.mockReset()
+  })
+
   it('shows current selections and resets them after cancel', async () => {
     mockListLinkOptions.mockResolvedValue({
       field: linkField,
@@ -221,6 +235,10 @@ describe('MetaLinkPicker', () => {
     vm.visible = true
     await flushPromises()
 
+    expect(container.textContent).toContain('Select People')
+    const searchInput = container.querySelector('.meta-link-picker__input') as HTMLInputElement | null
+    expect(searchInput?.getAttribute('placeholder')).toBe('Search people...')
+
     const checkboxes = Array.from(container.querySelectorAll('.meta-link-picker__item input[type="checkbox"]')) as HTMLInputElement[]
     expect(checkboxes).toHaveLength(2)
     checkboxes[1]?.click()
@@ -234,6 +252,118 @@ describe('MetaLinkPicker', () => {
       recordIds: ['user_2'],
       summaries: [{ id: 'user_2', display: 'Jamie' }],
     })
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('allows multiple selections for people fields when limitSingleRecord is false', async () => {
+    mockListLinkOptions.mockResolvedValue({
+      field: multiPersonField,
+      targetSheet: { id: 'sheet_people', baseId: 'base_1', name: 'People' },
+      selected: [{ id: 'user_1', display: 'Amy' }],
+      records: [
+        { id: 'user_1', display: 'Amy' },
+        { id: 'user_2', display: 'Jamie' },
+      ],
+      page: { offset: 0, limit: 50, total: 2, hasMore: false },
+    })
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const onConfirm = vi.fn()
+
+    const Harness = defineComponent({
+      setup() {
+        const visible = ref(false)
+        return {
+          visible,
+          onClose: () => {
+            visible.value = false
+          },
+        }
+      },
+      render() {
+        return h(MetaLinkPicker, {
+          visible: this.visible,
+          field: multiPersonField,
+          currentValue: ['user_1'],
+          onClose: this.onClose,
+          onConfirm,
+        })
+      },
+    })
+
+    const app = createApp(Harness)
+    const vm = app.mount(container) as any
+    vm.visible = true
+    await flushPromises()
+
+    const checkboxes = Array.from(container.querySelectorAll('.meta-link-picker__item input[type="checkbox"]')) as HTMLInputElement[]
+    expect(checkboxes).toHaveLength(2)
+    checkboxes[1]?.click()
+    await nextTick()
+
+    expect(container.textContent).toContain('2 selected')
+    ;(container.querySelector('.meta-link-picker__confirm') as HTMLButtonElement | null)?.click()
+
+    expect(onConfirm).toHaveBeenCalledWith({
+      recordIds: ['user_1', 'user_2'],
+      summaries: [
+        { id: 'user_1', display: 'Amy' },
+        { id: 'user_2', display: 'Jamie' },
+      ],
+    })
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('uses initialSearch for the first load and input value', async () => {
+    mockListLinkOptions.mockResolvedValue({
+      field: personField,
+      targetSheet: { id: 'sheet_people', baseId: 'base_1', name: 'People' },
+      selected: [],
+      records: [{ id: 'user_2', display: 'Jamie' }],
+      page: { offset: 0, limit: 50, total: 1, hasMore: false },
+    })
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const Harness = defineComponent({
+      setup() {
+        const visible = ref(false)
+        return {
+          visible,
+          onClose: () => {
+            visible.value = false
+          },
+        }
+      },
+      render() {
+        return h(MetaLinkPicker, {
+          visible: this.visible,
+          field: personField,
+          currentValue: [],
+          initialSearch: 'Jamie',
+          onClose: this.onClose,
+          onConfirm: vi.fn(),
+        })
+      },
+    })
+
+    const app = createApp(Harness)
+    const vm = app.mount(container) as any
+    vm.visible = true
+    await flushPromises()
+
+    expect(mockListLinkOptions).toHaveBeenCalledWith('fld_owner', expect.objectContaining({
+      search: 'Jamie',
+      limit: 50,
+      offset: 0,
+    }))
+    expect((container.querySelector('.meta-link-picker__input') as HTMLInputElement | null)?.value).toBe('Jamie')
 
     app.unmount()
     container.remove()

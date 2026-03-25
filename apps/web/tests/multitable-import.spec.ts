@@ -23,8 +23,8 @@ describe('multitable import parsing', () => {
     ])
   })
 
-  it('coerces imported values using field types', () => {
-    const records = buildImportedRecords({
+  it('coerces imported values using field types', async () => {
+    const records = await buildImportedRecords({
       parsedRows: [['Alice', '30', 'true', '2026-03-19']],
       fieldMapping: { 0: 'fld_name', 1: 'fld_age', 2: 'fld_active', 3: 'fld_date' },
       fields: [
@@ -34,7 +34,7 @@ describe('multitable import parsing', () => {
         { id: 'fld_date', name: 'Date', type: 'date' },
       ],
     })
-    expect(records).toEqual([
+    expect(records.records).toEqual([
       {
         fld_name: 'Alice',
         fld_age: 30,
@@ -42,6 +42,93 @@ describe('multitable import parsing', () => {
         fld_date: '2026-03-19',
       },
     ])
+    expect(records.rowIndexes).toEqual([0])
+    expect(records.failures).toEqual([])
+  })
+
+  it('resolves people fields to linked record ids during import', async () => {
+    const records = await buildImportedRecords({
+      parsedRows: [['Alice <alice@example.com>']],
+      fieldMapping: { 0: 'fld_people' },
+      fields: [
+        {
+          id: 'fld_people',
+          name: 'People',
+          type: 'link',
+          property: { refKind: 'user', foreignSheetId: 'sheet_people' },
+        },
+      ],
+      fieldResolvers: {
+        fld_people: async (rawValue) => {
+          expect(rawValue).toContain('alice@example.com')
+          return ['rec_person_1']
+        },
+      },
+    })
+
+    expect(records.records).toEqual([{ fld_people: ['rec_person_1'] }])
+    expect(records.rowIndexes).toEqual([0])
+    expect(records.failures).toEqual([])
+  })
+
+  it('reports unresolved people values as preflight failures', async () => {
+    const records = await buildImportedRecords({
+      parsedRows: [['Unknown Person']],
+      fieldMapping: { 0: 'fld_people' },
+      fields: [
+        {
+          id: 'fld_people',
+          name: 'People',
+          type: 'link',
+          property: { refKind: 'user', foreignSheetId: 'sheet_people' },
+        },
+      ],
+      fieldResolvers: {
+        fld_people: async () => null,
+      },
+    })
+
+    expect(records.records).toEqual([])
+    expect(records.rowIndexes).toEqual([])
+    expect(records.failures).toEqual([
+      expect.objectContaining({
+        rowIndex: 0,
+        retryable: false,
+        message: 'Unable to resolve people value for People: Unknown Person',
+      }),
+    ])
+  })
+
+  it('prefers field overrides over people resolution failures', async () => {
+    const resolver = vi.fn(async () => {
+      throw new Error('Multiple people match "Owner". Use email for an exact match.')
+    })
+
+    const records = await buildImportedRecords({
+      parsedRows: [['Owner']],
+      fieldMapping: { 0: 'fld_people' },
+      fields: [
+        {
+          id: 'fld_people',
+          name: 'People',
+          type: 'link',
+          property: { refKind: 'user', foreignSheetId: 'sheet_people', limitSingleRecord: true },
+        },
+      ],
+      fieldResolvers: {
+        fld_people: resolver,
+      },
+      fieldOverrides: {
+        0: {
+          fld_people: ['rec_person_fixed'],
+        },
+      },
+    })
+
+    expect(records.records).toEqual([{ fld_people: ['rec_person_fixed'] }])
+    expect(records.rowIndexes).toEqual([0])
+    expect(records.failures).toEqual([])
+    expect(resolver).not.toHaveBeenCalled()
   })
 })
 
@@ -57,7 +144,7 @@ describe('multitable bulk import', () => {
       records: [{ fld_name: 'A' }, { fld_name: 'B' }],
     })
 
-    expect(result).toEqual({ succeeded: 2, failed: 0, firstError: null })
+    expect(result).toEqual({ attempted: 2, succeeded: 2, failed: 0, firstError: null, failures: [] })
     expect(fetchFn).toHaveBeenCalledTimes(2)
   })
 
@@ -76,6 +163,27 @@ describe('multitable bulk import', () => {
 
     expect(result.succeeded).toBe(1)
     expect(result.failed).toBe(1)
+    expect(result.attempted).toBe(2)
     expect(result.firstError).toBe('Invalid select option')
+    expect(result.failures).toEqual([
+      { index: 1, message: 'Invalid select option', status: 400, code: undefined, retryable: false },
+    ])
+  })
+
+  it('marks transient server failures as retryable', async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, error: { message: 'Temporary outage' } }), { status: 503 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const result = await bulkImportRecords({
+      client,
+      sheetId: 'sheet_ops',
+      records: [{ fld_name: 'A' }],
+    })
+
+    expect(result.failures).toEqual([
+      { index: 0, message: 'Temporary outage', status: 503, code: undefined, retryable: true },
+    ])
   })
 })

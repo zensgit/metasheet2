@@ -103,8 +103,8 @@ describe('Multitable context API', () => {
           expect(params).toEqual(['sheet_ops'])
           return {
             rows: [
-              { id: 'view_grid', sheet_id: 'sheet_ops', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [] },
-              { id: 'view_form', sheet_id: 'sheet_ops', name: 'Intake Form', type: 'form', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [] },
+              { id: 'view_grid', sheet_id: 'sheet_ops', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {} },
+              { id: 'view_form', sheet_id: 'sheet_ops', name: 'Intake Form', type: 'form', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {} },
             ],
           }
         }
@@ -163,7 +163,7 @@ describe('Multitable context API', () => {
           expect(params).toEqual(['sheet_a'])
           return {
             rows: [
-              { id: 'view_alpha', sheet_id: 'sheet_a', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [] },
+              { id: 'view_alpha', sheet_id: 'sheet_a', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {} },
             ],
           }
         }
@@ -260,7 +260,7 @@ describe('Multitable context API', () => {
           expect(params).toEqual(['sheet_orders'])
           return {
             rows: [
-              { id: 'view_orders', sheet_id: 'sheet_orders', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [] },
+              { id: 'view_orders', sheet_id: 'sheet_orders', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {} },
             ],
           }
         }

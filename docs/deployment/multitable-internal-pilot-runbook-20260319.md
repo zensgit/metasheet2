@@ -12,6 +12,30 @@ This runbook does not add new product functionality. It standardizes how to deci
 
 ## Readiness Commands
 
+### Release-bound one-shot
+
+If this pilot handoff must be pinned to one exact on-prem gate and you want readiness plus handoff in one run, use:
+
+```bash
+cd /Users/huazhou/Downloads/Github/metasheet2-multitable
+ONPREM_GATE_STAMP=<gate-stamp> \
+ENSURE_PLAYWRIGHT=false \
+pnpm prepare:multitable-pilot:release-bound
+```
+
+This produces:
+
+- release-bound readiness
+- release-bound handoff
+- one summary report under:
+
+```text
+output/playwright/multitable-pilot-release-bound/<timestamp>/
+```
+
+- `report.md`
+- `report.json`
+
 ### Local one-shot readiness
 
 ```bash
@@ -40,11 +64,46 @@ Key outputs:
 - `readiness.md`
 - `readiness.json`
 
+If you need readiness itself to be explicitly bound to one on-prem gate report, regenerate it with:
+
+```bash
+cd /Users/huazhou/Downloads/Github/metasheet2-multitable
+ONPREM_GATE_STAMP=<gate-stamp> \
+ENSURE_PLAYWRIGHT=false \
+pnpm verify:multitable-pilot:ready:local:release-bound
+```
+
+You can still pass a full report path when the gate artifact is outside the default release root:
+
+```bash
+cd /Users/huazhou/Downloads/Github/metasheet2-multitable
+ONPREM_GATE_REPORT_JSON=/Users/huazhou/Downloads/Github/metasheet2-multitable/output/releases/multitable-onprem/gates/<gate-stamp>/report.json \
+ENSURE_PLAYWRIGHT=false \
+pnpm verify:multitable-pilot:ready:local:release-bound
+```
+
 ### Pilot handoff bundle
 
 ```bash
 cd /Users/huazhou/Downloads/Github/metasheet2-multitable
 pnpm prepare:multitable-pilot:handoff
+```
+
+If you are preparing a release-bound pilot handoff and want to bind it to one explicit on-prem gate instead of auto-discovering the latest one, run:
+
+```bash
+cd /Users/huazhou/Downloads/Github/metasheet2-multitable
+ONPREM_GATE_STAMP=<gate-stamp> \
+pnpm prepare:multitable-pilot:handoff:release-bound
+```
+
+If you want to bind handoff to a specific readiness run at the same time:
+
+```bash
+cd /Users/huazhou/Downloads/Github/metasheet2-multitable
+ONPREM_GATE_STAMP=<gate-stamp> \
+READINESS_ROOT=/Users/huazhou/Downloads/Github/metasheet2-multitable/output/playwright/multitable-pilot-ready-local/<ready-stamp> \
+pnpm prepare:multitable-pilot:handoff:release-bound
 ```
 
 This copies the latest readiness run plus pilot docs into:
@@ -60,11 +119,27 @@ Key outputs:
 - `readiness.md`
 - `readiness.json`
 - `smoke/grid-import.png`
+- `smoke/grid-import-people-manual-fix.png`
 - `smoke/grid-hydrated.png`
 - `smoke/form-comments.png`
 - `docs/multitable-internal-pilot-runbook-20260319.md`
 - `docs/multitable-pilot-quickstart-20260319.md`
 - `docs/multitable-pilot-feedback-template-20260319.md`
+- `release-gate/operator-commands.sh`
+- `release-bound/operator-commands.sh`
+- `artifacts/deploy/multitable-onprem-package-install.sh`
+- `artifacts/deploy/multitable-onprem-deploy-easy.sh`
+- `artifacts/deploy/multitable-onprem-package-install.env.example.sh`
+- `artifacts/deploy/multitable-onprem-deploy-easy.env.example.sh`
+- `artifacts/preflight/multitable-onprem-preflight.sh`
+- `artifacts/preflight/multitable-onprem-preflight.env.example.sh`
+- `artifacts/healthcheck/multitable-onprem-healthcheck.sh`
+- `artifacts/healthcheck/multitable-onprem-healthcheck.env.example.sh`
+
+The bundled preflight env template now defaults report outputs to:
+
+- `/opt/metasheet/output/preflight/multitable-onprem-preflight.json`
+- `/opt/metasheet/output/preflight/multitable-onprem-preflight.md`
 
 ### CI readiness
 
@@ -112,7 +187,9 @@ If you use a real admin token, `RBAC_TOKEN_TRUST=true` is not required.
 
 Smoke must pass all of these:
 
-- `ui.grid.import`
+- `ui.import.failed-retry`
+- `ui.import.people-manual-fix`
+- `api.import.people-manual-fix-hydration`
 - `ui.person.assign`
 - `ui.form.upload-comments`
 - `ui.grid.search-hydration`
@@ -139,21 +216,29 @@ Use this checklist before handing the branch to a real team:
 Do not ask the pilot team to assemble these URLs manually.
 
 2. Run `pnpm verify:multitable-pilot:ready:local`
+   If you need the pilot artifact bundle and explicit gate binding together, prefer `ONPREM_GATE_STAMP=<gate-stamp> pnpm prepare:multitable-pilot:release-bound`
 3. Confirm `readiness.md` says `Overall: PASS`
-4. Confirm profile was run at `ROW_COUNT=2000`
-5. Confirm smoke report includes attachment, person preset, comments, and conflict retry
-6. Confirm no local-only flags are required for the target environment, except the documented dev-token `RBAC_TOKEN_TRUST=true` case
-7. Give the pilot team the feedback template:
+4. If this pilot handoff is tied to a concrete on-prem package, regenerate readiness or handoff with `ONPREM_GATE_STAMP=<gate-stamp>` or `ONPREM_GATE_REPORT_JSON=<gate-report>`
+5. Confirm profile was run at `ROW_COUNT=2000`
+6. Confirm smoke report includes import retry, people manual-fix, attachment, person preset, comments, and conflict retry
+7. Confirm no local-only flags are required for the target environment, except the documented dev-token `RBAC_TOKEN_TRUST=true` case
+8. Give the pilot team the feedback template:
 
 ```text
 docs/deployment/multitable-pilot-feedback-template-20260319.md
 ```
-8. If the team uses GitHub issues for pilot tracking, open:
+9. If the team uses GitHub issues for pilot tracking, open:
 
 ```text
 .github/ISSUE_TEMPLATE/multitable-pilot-feedback.yml
 ```
-9. Start the team with:
+10. Start the team with:
+11. If the pilot is tied to an on-prem rollout, collect these preflight reports before checkpoint, expansion review, or sign-off:
+
+```text
+/opt/metasheet/output/preflight/multitable-onprem-preflight.json
+/opt/metasheet/output/preflight/multitable-onprem-preflight.md
+```
 
 ```text
 docs/deployment/multitable-pilot-quickstart-20260319.md
@@ -161,12 +246,14 @@ docs/deployment/multitable-pilot-quickstart-20260319.md
 
 Use the runbook for operators and gate owners, not as the first document for business users.
 
-10. Use these pilot operation templates during the week:
+11. Use these pilot operation templates during the week:
 
 ```text
 docs/deployment/multitable-pilot-team-checklist-20260319.md
 docs/deployment/multitable-pilot-daily-triage-template-20260319.md
 docs/deployment/multitable-pilot-go-no-go-template-20260319.md
+docs/deployment/multitable-pilot-expansion-decision-template-20260323.md
+docs/deployment/multitable-uat-signoff-template-20260323.md
 ```
 
 ## Current Pilot Recommendation
@@ -176,6 +263,7 @@ The branch is suitable for a first internal pilot when the readiness gate is gre
 Do not expand feature scope before pilot feedback. The highest-value next step is to collect real user behavior against the existing gate:
 
 - import
+- people import manual repair
 - linked person assignment
 - attachment upload
 - form submit

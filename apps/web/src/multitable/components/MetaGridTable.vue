@@ -63,6 +63,8 @@
                     :field="field"
                     :model-value="editCell!.value"
                     :upload-fn="props.uploadFn"
+                    :delete-attachment-fn="props.deleteAttachmentFn"
+                    :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                     :upload-context="{ recordId: row.id, fieldId: field.id }"
                     @update:model-value="editCell!.value = $event"
                     @confirm="confirmEdit(row)"
@@ -120,6 +122,8 @@
                   :field="field"
                   :model-value="editCell!.value"
                   :upload-fn="props.uploadFn"
+                  :delete-attachment-fn="props.deleteAttachmentFn"
+                  :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                   :upload-context="{ recordId: row.id, fieldId: field.id }"
                   @update:model-value="editCell!.value = $event"
                   @confirm="confirmEdit(row)"
@@ -187,7 +191,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import type { MetaAttachment, MetaAttachmentUploadFn, MetaField, MetaRecord, RowDensity } from '../types'
+import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadFn, MetaField, MetaRecord, RowDensity } from '../types'
 import type { SortRule } from '../composables/useMultitableGrid'
 import MetaCellRenderer from './cells/MetaCellRenderer.vue'
 import MetaCellEditor from './cells/MetaCellEditor.vue'
@@ -216,6 +220,7 @@ const props = defineProps<{
   searchText?: string
   rowDensity?: RowDensity
   uploadFn?: MetaAttachmentUploadFn
+  deleteAttachmentFn?: MetaAttachmentDeleteFn
 }>()
 
 const emit = defineEmits<{

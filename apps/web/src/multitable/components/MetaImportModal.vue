@@ -1,10 +1,10 @@
 <template>
   <Teleport to="body">
-    <div v-if="visible" class="meta-import-overlay" @click.self="emit('close')">
+    <div v-if="visible" class="meta-import-overlay" @click.self="requestClose">
       <div class="meta-import-modal">
         <div class="meta-import__header">
           <strong>Import Records</strong>
-          <button class="meta-import__close" @click="emit('close')">&times;</button>
+          <button class="meta-import__close" :disabled="isImporting" @click="requestClose">&times;</button>
         </div>
 
         <!-- Step 1: Paste -->
@@ -23,7 +23,7 @@
           ></textarea>
           <div v-if="parseError" class="meta-import__error">{{ parseError }}</div>
           <div class="meta-import__actions">
-            <button class="meta-import__btn" @click="emit('close')">Cancel</button>
+            <button class="meta-import__btn" :disabled="isImporting" @click="requestClose">Cancel</button>
             <button class="meta-import__btn meta-import__btn--primary" :disabled="!rawText.trim()" @click="parseAndPreview">Preview</button>
           </div>
         </div>
@@ -31,13 +31,17 @@
         <!-- Step 2: Preview & Map -->
         <div v-else-if="step === 'preview'" class="meta-import__body">
           <p class="meta-import__hint">{{ parsedRows.length }} record(s) detected. Map columns to fields:</p>
+          <div v-if="hasImportDraftIssues" class="meta-import__warning">
+            <span>{{ importDraftIssueText }}</span>
+            <button class="meta-import__btn-inline" @click="reconcileImportDraft">Reconcile draft</button>
+          </div>
           <div class="meta-import__mapping">
             <div v-for="(header, i) in parsedHeaders" :key="i" class="meta-import__map-row">
               <span class="meta-import__col-name">{{ header }}</span>
               <span class="meta-import__arrow">&rarr;</span>
               <select class="meta-import__field-select" :value="fieldMapping[i] ?? ''" @change="fieldMapping[i] = ($event.target as HTMLSelectElement).value">
                 <option value="">(skip)</option>
-                <option v-for="f in fields" :key="f.id" :value="f.id">{{ f.name }}</option>
+                <option v-for="f in importableFields" :key="f.id" :value="f.id">{{ f.name }}</option>
               </select>
             </div>
           </div>
@@ -53,61 +57,318 @@
             </table>
           </div>
           <div class="meta-import__actions">
-            <button class="meta-import__btn" @click="step = 'paste'">Back</button>
-            <button class="meta-import__btn meta-import__btn--primary" :disabled="!hasMappedFields" @click="doImport">
+            <button class="meta-import__btn" :disabled="isImporting" @click="goBackToPaste">Back</button>
+            <button class="meta-import__btn meta-import__btn--primary" :disabled="!canImportPreview" @click="doImport">
               Import {{ parsedRows.length }} record(s)
             </button>
           </div>
         </div>
 
         <!-- Step 3: Importing -->
-        <div v-else class="meta-import__body meta-import__importing">
+        <div v-else-if="step === 'importing'" class="meta-import__body meta-import__importing">
           <div class="meta-import__spinner"></div>
-          <p>Importing {{ importProgress }} / {{ parsedRows.length }}...</p>
+          <p>Importing {{ pendingRecordCount }} record(s)...</p>
+        </div>
+
+        <!-- Step 4: Result -->
+        <div v-else class="meta-import__body">
+          <div
+            class="meta-import__result"
+            :class="hasFailedImports ? 'meta-import__result--warning' : 'meta-import__result--success'"
+          >
+            <strong>{{ resultSummaryText }}</strong>
+            <p v-if="hasFailedImports">
+              <template v-if="retryableFailureCount > 0">
+                Review the failed rows below, then retry just those rows or return to mapping.
+              </template>
+              <template v-else>
+                Review the failed rows below and return to mapping to fix the source data.
+              </template>
+            </p>
+            <p v-else>The selected records were imported successfully.</p>
+          </div>
+          <div v-if="hasImportDraftIssues" class="meta-import__warning">
+            <span>{{ importDraftIssueText }}</span>
+            <button class="meta-import__btn-inline" @click="reconcileImportDraft">Reconcile draft</button>
+          </div>
+          <div v-if="failedPreviewRows.length" class="meta-import__failures">
+            <div v-for="failure in failedPreviewRows" :key="failure.index" class="meta-import__failure">
+              <div class="meta-import__failure-head">
+                <strong>Row {{ failure.rowNumber }}</strong>
+                <span>{{ failure.message }}</span>
+              </div>
+              <div class="meta-import__failure-row">{{ failure.values.join(' | ') || '(empty row)' }}</div>
+            </div>
+            <div v-if="remainingFailedCount > 0" class="meta-import__more">
+              ... and {{ remainingFailedCount }} more failed row(s)
+            </div>
+          </div>
+          <div v-if="manualFixRows.length" class="meta-import__fixes">
+            <div v-for="failure in manualFixRows" :key="`${failure.rowIndex}:${failure.fieldId ?? 'row'}`" class="meta-import__fix">
+              <div class="meta-import__failure-head">
+                <strong>Fix Row {{ failure.rowNumber }}</strong>
+                <span>{{ failure.message }}</span>
+              </div>
+              <div class="meta-import__fix-grid">
+                <label
+                  v-for="(cell, ci) in failure.values"
+                  :key="`${failure.rowIndex}:${ci}`"
+                  class="meta-import__fix-cell"
+                  :class="{ 'meta-import__fix-cell--problem': failure.problemColumnIndexes.includes(ci) }"
+                >
+                  <span>{{ parsedHeaders[ci] || `Column ${ci + 1}` }}</span>
+                  <input
+                    class="meta-import__fix-input"
+                    :value="cell"
+                    @input="updateFailedCell(failure.rowIndex, ci, ($event.target as HTMLInputElement).value)"
+                  />
+                </label>
+              </div>
+              <div v-if="failure.showPeopleHint" class="meta-import__fix-hint">
+                Use an exact email address or person record ID for this field.
+              </div>
+              <div v-if="failure.canUsePicker" class="meta-import__fix-picker-row">
+                <button class="meta-import__btn meta-import__btn--primary" @click="openPickerForFailure(failure)">
+                  {{ failure.pickerButtonLabel }}
+                </button>
+                <div v-if="failure.selectedSummaries.length" class="meta-import__fix-selected">
+                  {{ failure.selectedSummaries.map((item) => item.display || item.id).join(', ') }}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="meta-import__actions">
+            <button class="meta-import__btn" :disabled="isImporting" @click="goBackToPreview">Back to mapping</button>
+            <button
+              v-if="hasFailedImports && retryableFailureCount > 0"
+              class="meta-import__btn meta-import__btn--primary"
+              :disabled="!canRetryFailedRows"
+              @click="retryFailedRows"
+            >
+              Retry failed rows
+            </button>
+            <button
+              v-if="manualFixRows.length"
+              class="meta-import__btn meta-import__btn--primary"
+              :disabled="!canApplyFixes"
+              @click="applyFixesAndRetry"
+            >
+              Apply fixes and retry
+            </button>
+            <button class="meta-import__btn" :disabled="isImporting" @click="requestClose">Close</button>
+          </div>
         </div>
       </div>
     </div>
+    <MetaLinkPicker
+      :visible="pickerVisible"
+      :field="pickerField"
+      :current-value="pickerCurrentValue"
+      :initial-search="pickerInitialSearch"
+      @close="closePicker"
+      @confirm="onPickerConfirm"
+    />
   </Teleport>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
-import type { MetaField } from '../types'
+import MetaLinkPicker from './MetaLinkPicker.vue'
+import type { LinkedRecordSummary, MetaField } from '../types'
 import { buildImportedRecords, parseDelimitedText } from '../import/delimited'
+import type { ImportBuildFailure, ImportBuildResult, ImportFieldOverrides, ImportValueResolver } from '../import/delimited'
+import { isPersonField } from '../utils/link-fields'
+
+type ImportResultFailure = ImportBuildFailure & {
+  index?: number
+  rowIndex: number
+  retryable?: boolean
+}
+
+type ImportResult = {
+  attempted: number
+  succeeded: number
+  failed: number
+  firstError: string | null
+  failures: ImportResultFailure[]
+}
+
+type ImportDraftIssue = {
+  kind: 'mapping-missing' | 'mapping-not-importable' | 'manual-override-invalid'
+  fieldId: string
+  message: string
+}
 
 const props = defineProps<{
   visible: boolean
   fields: MetaField[]
+  importing?: boolean
+  result?: ImportResult | null
+  fieldResolvers?: Record<string, ImportValueResolver>
 }>()
 
 const emit = defineEmits<{
   (e: 'close'): void
-  (e: 'import', records: Array<Record<string, unknown>>): void
+  (e: 'import', payload: ImportBuildResult): void
 }>()
 
-const step = ref<'paste' | 'preview' | 'importing'>('paste')
+const step = ref<'paste' | 'preview' | 'importing' | 'result'>('paste')
 const rawText = ref('')
 const parsedHeaders = ref<string[]>([])
 const parsedRows = ref<string[][]>([])
 const fieldMapping = ref<Record<number, string>>({})
-const importProgress = ref(0)
+const pendingRecordCount = ref(0)
+const lastAttemptRecords = ref<Array<Record<string, unknown>>>([])
+const lastAttemptRowIndexes = ref<number[]>([])
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const parseError = ref('')
+const manualFieldOverrides = ref<ImportFieldOverrides>({})
+const manualOverrideSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
+const pickerTarget = ref<{ rowIndex: number; fieldId: string } | null>(null)
+const pickerVisible = ref(false)
 
 const hasMappedFields = computed(() => Object.values(fieldMapping.value).some((v) => v))
+const importableFields = computed(() => props.fields.filter((field) => !['formula', 'lookup', 'rollup'].includes(field.type)))
+const importableFieldIds = computed(() => new Set(importableFields.value.map((field) => field.id)))
+const fieldsById = computed(() => new Map(props.fields.map((field) => [field.id, field])))
+const hasFailedImports = computed(() => (props.result?.failed ?? 0) > 0)
+const isImporting = computed(() => props.importing === true || step.value === 'importing')
+const retryableFailureCount = computed(() =>
+  (props.result?.failures ?? []).filter((failure) => failure.retryable !== false).length,
+)
+const manualFixRows = computed(() => (props.result?.failures ?? [])
+  .filter((failure) => failure.retryable === false)
+  .map((failure) => {
+    const field = typeof failure.fieldId === 'string'
+      ? props.fields.find((candidate) => candidate.id === failure.fieldId) ?? null
+      : null
+    const problemColumnIndexes = typeof failure.fieldId === 'string'
+      ? Object.entries(fieldMapping.value)
+        .filter(([, mappedFieldId]) => mappedFieldId === failure.fieldId)
+        .map(([columnIndex]) => Number(columnIndex))
+      : []
+    const key = failure.fieldId ? overrideKey(failure.rowIndex, failure.fieldId) : null
+    return {
+      ...failure,
+      rowNumber: failure.rowIndex + 2,
+      values: [...(parsedRows.value[failure.rowIndex] ?? [])],
+      problemColumnIndexes,
+      problemField: field,
+      showPeopleHint: /exact match|people value/i.test(failure.message),
+      canUsePicker: !!field && isPersonField(field),
+      pickerButtonLabel: field?.property?.limitSingleRecord === true ? 'Select person' : 'Select people',
+      selectedSummaries: key ? (manualOverrideSummaries.value[key] ?? []) : [],
+    }
+  }))
+const resultSummaryText = computed(() => {
+  if (!props.result) return 'Import complete'
+  if (props.result.failed > 0) return `${props.result.succeeded} imported, ${props.result.failed} failed`
+  return `Imported ${props.result.succeeded} record(s)`
+})
+const failedPreviewRows = computed(() => (props.result?.failures ?? []).slice(0, 5).map((failure) => ({
+  ...failure,
+  originalIndex: failure.rowIndex,
+})).map((failure) => ({
+  ...failure,
+  rowNumber: failure.originalIndex + 2,
+  values: parsedRows.value[failure.originalIndex] ?? [],
+})))
+const remainingFailedCount = computed(() => Math.max((props.result?.failures.length ?? 0) - failedPreviewRows.value.length, 0))
+const pickerField = computed(() => {
+  const target = pickerTarget.value
+  if (!target) return null
+  return props.fields.find((field) => field.id === target.fieldId) ?? null
+})
+const pickerCurrentValue = computed(() => {
+  const target = pickerTarget.value
+  if (!target) return []
+  return manualFieldOverrides.value[target.rowIndex]?.[target.fieldId] ?? []
+})
+const pickerInitialSearch = computed(() => {
+  const target = pickerTarget.value
+  if (!target) return ''
+  const failure = manualFixRows.value.find((item) => item.rowIndex === target.rowIndex && item.fieldId === target.fieldId)
+  const problemIndex = failure?.problemColumnIndexes[0]
+  if (typeof problemIndex !== 'number') return ''
+  return parsedRows.value[target.rowIndex]?.[problemIndex] ?? ''
+})
+const importDraftIssues = computed<ImportDraftIssue[]>(() => {
+  const issues = new Map<string, ImportDraftIssue>()
+  for (const [columnIndex, fieldId] of Object.entries(fieldMapping.value)) {
+    if (!fieldId) continue
+    const field = fieldsById.value.get(fieldId)
+    const header = parsedHeaders.value[Number(columnIndex)] || `Column ${Number(columnIndex) + 1}`
+    if (!field) {
+      issues.set(`mapping:${fieldId}`, {
+        kind: 'mapping-missing',
+        fieldId,
+        message: `Mapped field for ${header} was removed in the background. Reconcile the draft before importing.`,
+      })
+      continue
+    }
+    if (!importableFieldIds.value.has(fieldId)) {
+      issues.set(`mapping:${fieldId}`, {
+        kind: 'mapping-not-importable',
+        fieldId,
+        message: `${field.name} is no longer an importable field. Reconcile the draft before importing.`,
+      })
+    }
+  }
+  for (const [rowIndexText, rowOverrides] of Object.entries(manualFieldOverrides.value)) {
+    for (const fieldId of Object.keys(rowOverrides ?? {})) {
+      const field = fieldsById.value.get(fieldId)
+      if (!field) {
+        issues.set(`override:${rowIndexText}:${fieldId}`, {
+          kind: 'manual-override-invalid',
+          fieldId,
+          message: 'A manual repair targets a field that was removed in the background. Reconcile the draft before importing.',
+        })
+        continue
+      }
+      if (!isPersonField(field)) {
+        issues.set(`override:${rowIndexText}:${fieldId}`, {
+          kind: 'manual-override-invalid',
+          fieldId,
+          message: `A selected people repair for ${field.name} is no longer valid because the field changed type. Reconcile the draft before importing.`,
+        })
+      }
+    }
+  }
+  return [...issues.values()]
+})
+const hasImportDraftIssues = computed(() => importDraftIssues.value.length > 0)
+const importDraftIssueText = computed(() => {
+  if (!importDraftIssues.value.length) return ''
+  const [first, ...rest] = importDraftIssues.value
+  return rest.length > 0 ? `${first.message} ${rest.length} more issue(s) need review.` : first.message
+})
+const canImportPreview = computed(() => hasMappedFields.value && props.importing !== true && !hasImportDraftIssues.value)
+const canRetryFailedRows = computed(() => !props.importing && !hasImportDraftIssues.value && failedPreviewRows.value.length > 0)
+const canApplyFixes = computed(() => !props.importing && !hasImportDraftIssues.value)
 
-watch(() => props.visible, (v) => {
-  if (v) {
-    step.value = 'paste'
-    rawText.value = ''
-    parsedHeaders.value = []
-    parsedRows.value = []
-    fieldMapping.value = {}
-    importProgress.value = 0
-    parseError.value = ''
+function overrideKey(rowIndex: number, fieldId: string) {
+  return `${rowIndex}:${fieldId}`
+}
+
+watch(() => props.visible, (visible, previousVisible) => {
+  if (!visible) {
+    resetState()
+    return
+  }
+  if (!previousVisible) {
+    resetState()
     nextTick(() => textareaRef.value?.focus())
   }
 })
+
+watch(
+  pickerField,
+  (field) => {
+    if (!pickerVisible.value) return
+    if (field && isPersonField(field)) return
+    closePicker()
+  },
+)
 
 function parseAndPreview() {
   parseError.value = ''
@@ -128,7 +389,7 @@ function parseAndPreview() {
   fieldMapping.value = {}
   parsedHeaders.value.forEach((header, i) => {
     const lh = header.toLowerCase().trim()
-    const match = props.fields.find((f) => f.name.toLowerCase() === lh)
+    const match = importableFields.value.find((f) => f.name.toLowerCase() === lh)
     if (match) fieldMapping.value[i] = match.id
   })
   step.value = 'preview'
@@ -153,15 +414,251 @@ function onFileDrop(event: DragEvent) {
   if (file) void readAndSetText(file)
 }
 
-function doImport() {
-  const records = buildImportedRecords({
+watch(
+  [() => props.importing, () => props.result, () => props.visible],
+  ([importing, result, visible]) => {
+    if (!visible) return
+    if (importing) {
+      step.value = 'importing'
+      return
+    }
+    if (result) {
+      step.value = 'result'
+    }
+  },
+  { immediate: true },
+)
+
+async function buildRecords(): Promise<ImportBuildResult> {
+  return buildImportedRecords({
     parsedRows: parsedRows.value,
     fieldMapping: fieldMapping.value,
     fields: props.fields,
+    fieldResolvers: props.fieldResolvers,
+    fieldOverrides: manualFieldOverrides.value,
   })
+}
+
+async function doImport() {
   step.value = 'importing'
-  importProgress.value = records.length
-  emit('import', records)
+  pendingRecordCount.value = parsedRows.value.length
+  const result = await buildRecords()
+  emitImport(result)
+}
+
+function requestClose() {
+  if (isImporting.value) return
+  emit('close')
+}
+
+function goBackToPaste() {
+  if (isImporting.value) return
+  step.value = 'paste'
+}
+
+function goBackToPreview() {
+  if (isImporting.value) return
+  step.value = 'preview'
+}
+
+function retryFailedRows() {
+  const result = props.result
+  if (!result?.failures.length) return
+  const retryableFailures = result.failures.filter((failure) => failure.retryable !== false)
+  const preservedFailures = result.failures
+    .filter((failure) => failure.retryable === false)
+    .map((failure) => ({ ...failure }))
+  const nextRecords = retryableFailures
+    .map((failure) => (typeof failure.index === 'number' ? lastAttemptRecords.value[failure.index] : null))
+    .filter((record): record is Record<string, unknown> => !!record)
+  const nextRowIndexes = retryableFailures
+    .map((failure) => (typeof failure.index === 'number' ? lastAttemptRowIndexes.value[failure.index] : null))
+    .filter((rowIndex): rowIndex is number => typeof rowIndex === 'number')
+  if (!nextRecords.length) {
+    if (preservedFailures.length) {
+      emitImport({
+        records: [],
+        rowIndexes: [],
+        failures: preservedFailures,
+      })
+    }
+    return
+  }
+  if (nextRecords.length !== nextRowIndexes.length) return
+  emitImport({
+    records: nextRecords,
+    rowIndexes: nextRowIndexes,
+    failures: preservedFailures,
+  })
+}
+
+function updateFailedCell(rowIndex: number, columnIndex: number, value: string) {
+  const nextRows = [...parsedRows.value]
+  const currentRow = [...(nextRows[rowIndex] ?? [])]
+  currentRow[columnIndex] = value
+  nextRows[rowIndex] = currentRow
+  parsedRows.value = nextRows
+  const fieldId = fieldMapping.value[columnIndex]
+  if (fieldId && manualFieldOverrides.value[rowIndex]?.[fieldId] !== undefined) {
+    const rowOverrides = { ...(manualFieldOverrides.value[rowIndex] ?? {}) }
+    delete rowOverrides[fieldId]
+    manualFieldOverrides.value = {
+      ...manualFieldOverrides.value,
+      ...(Object.keys(rowOverrides).length ? { [rowIndex]: rowOverrides } : {}),
+    }
+    if (!Object.keys(rowOverrides).length) {
+      const nextOverrides = { ...manualFieldOverrides.value }
+      delete nextOverrides[rowIndex]
+      manualFieldOverrides.value = nextOverrides
+    }
+    const nextSummaries = { ...manualOverrideSummaries.value }
+    delete nextSummaries[overrideKey(rowIndex, fieldId)]
+    manualOverrideSummaries.value = nextSummaries
+  }
+}
+
+function reconcileImportDraft() {
+  const nextFieldMapping = { ...fieldMapping.value }
+  for (const [columnIndex, fieldId] of Object.entries(nextFieldMapping)) {
+    if (!fieldId || importableFieldIds.value.has(fieldId)) continue
+    delete nextFieldMapping[Number(columnIndex)]
+  }
+
+  const nextOverrides: ImportFieldOverrides = {}
+  const nextSummaries: Record<string, LinkedRecordSummary[]> = {}
+  for (const [rowIndexText, rowOverrides] of Object.entries(manualFieldOverrides.value)) {
+    const rowIndex = Number(rowIndexText)
+    const keptOverrides: Record<string, unknown> = {}
+    for (const [fieldId, overrideValue] of Object.entries(rowOverrides ?? {})) {
+      const field = fieldsById.value.get(fieldId)
+      if (!field || !isPersonField(field)) continue
+      keptOverrides[fieldId] = overrideValue
+      const summaries = manualOverrideSummaries.value[overrideKey(rowIndex, fieldId)]
+      if (summaries) nextSummaries[overrideKey(rowIndex, fieldId)] = summaries
+    }
+    if (Object.keys(keptOverrides).length > 0) nextOverrides[rowIndex] = keptOverrides
+  }
+
+  fieldMapping.value = nextFieldMapping
+  manualFieldOverrides.value = nextOverrides
+  manualOverrideSummaries.value = nextSummaries
+  if (pickerTarget.value) {
+    const field = fieldsById.value.get(pickerTarget.value.fieldId)
+    if (!field || !isPersonField(field)) closePicker()
+  }
+}
+
+async function applyFixesAndRetry() {
+  const result = props.result
+  if (!result?.failures.length) return
+
+  const manualFailures = result.failures.filter((failure) => failure.retryable === false)
+  const manualRowIndexes = [...new Set(manualFailures.map((failure) => failure.rowIndex))].sort((a, b) => a - b)
+  const subsetOverrides = manualRowIndexes.reduce<ImportFieldOverrides>((acc, originalRowIndex, subsetRowIndex) => {
+    if (manualFieldOverrides.value[originalRowIndex]) {
+      acc[subsetRowIndex] = { ...manualFieldOverrides.value[originalRowIndex] }
+    }
+    return acc
+  }, {})
+  const rebuilt = await buildImportedRecords({
+    parsedRows: manualRowIndexes.map((rowIndex) => [...(parsedRows.value[rowIndex] ?? [])]),
+    fieldMapping: fieldMapping.value,
+    fields: props.fields,
+    fieldResolvers: props.fieldResolvers,
+    fieldOverrides: subsetOverrides,
+  })
+
+  const retryableFailures = result.failures.filter((failure) => failure.retryable !== false)
+  const nextRetryableRecords = retryableFailures
+    .map((failure) => (typeof failure.index === 'number' ? lastAttemptRecords.value[failure.index] : null))
+    .filter((record): record is Record<string, unknown> => !!record)
+  const nextRetryableRowIndexes = retryableFailures
+    .map((failure) => (typeof failure.index === 'number' ? lastAttemptRowIndexes.value[failure.index] : null))
+    .filter((rowIndex): rowIndex is number => typeof rowIndex === 'number')
+
+  emitImport({
+    records: [
+      ...nextRetryableRecords,
+      ...rebuilt.records,
+    ],
+    rowIndexes: [
+      ...nextRetryableRowIndexes,
+      ...rebuilt.rowIndexes.map((rowIndex) => manualRowIndexes[rowIndex] ?? rowIndex),
+    ],
+    failures: rebuilt.failures.map((failure) => ({
+      ...failure,
+      rowIndex: manualRowIndexes[failure.rowIndex] ?? failure.rowIndex,
+    })),
+  })
+}
+
+function openPickerForFailure(failure: {
+  rowIndex: number
+  fieldId?: string
+  canUsePicker?: boolean
+}) {
+  if (!failure.canUsePicker || !failure.fieldId) return
+  pickerTarget.value = { rowIndex: failure.rowIndex, fieldId: failure.fieldId }
+  pickerVisible.value = true
+}
+
+function closePicker() {
+  pickerVisible.value = false
+  pickerTarget.value = null
+}
+
+function onPickerConfirm(payload: { recordIds: string[]; summaries: LinkedRecordSummary[] }) {
+  const target = pickerTarget.value
+  if (!target) return
+  const rowOverrides = {
+    ...(manualFieldOverrides.value[target.rowIndex] ?? {}),
+    [target.fieldId]: payload.recordIds,
+  }
+  manualFieldOverrides.value = {
+    ...manualFieldOverrides.value,
+    [target.rowIndex]: rowOverrides,
+  }
+  manualOverrideSummaries.value = {
+    ...manualOverrideSummaries.value,
+    [overrideKey(target.rowIndex, target.fieldId)]: payload.summaries,
+  }
+
+  const label = payload.summaries.map((summary) => summary.display || summary.id).join(', ')
+  const failure = manualFixRows.value.find((item) => item.rowIndex === target.rowIndex && item.fieldId === target.fieldId)
+  const problemIndex = failure?.problemColumnIndexes[0]
+  if (typeof problemIndex === 'number') {
+    const nextRows = [...parsedRows.value]
+    const currentRow = [...(nextRows[target.rowIndex] ?? [])]
+    currentRow[problemIndex] = label
+    nextRows[target.rowIndex] = currentRow
+    parsedRows.value = nextRows
+  }
+  closePicker()
+}
+
+function emitImport(payload: ImportBuildResult) {
+  if (!payload.records.length && !payload.failures.length) return
+  step.value = 'importing'
+  pendingRecordCount.value = payload.records.length
+  lastAttemptRecords.value = payload.records
+  lastAttemptRowIndexes.value = payload.rowIndexes
+  emit('import', payload)
+}
+
+function resetState() {
+  step.value = 'paste'
+  rawText.value = ''
+  parsedHeaders.value = []
+  parsedRows.value = []
+  fieldMapping.value = {}
+  pendingRecordCount.value = 0
+  lastAttemptRecords.value = []
+  lastAttemptRowIndexes.value = []
+  manualFieldOverrides.value = {}
+  manualOverrideSummaries.value = {}
+  pickerTarget.value = null
+  pickerVisible.value = false
+  parseError.value = ''
 }
 </script>
 
@@ -172,6 +669,19 @@ function doImport() {
 .meta-import__close { border: none; background: none; font-size: 20px; cursor: pointer; color: #999; }
 .meta-import__body { padding: 16px 20px; overflow-y: auto; }
 .meta-import__hint { font-size: 13px; color: #666; margin-bottom: 12px; }
+.meta-import__warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 1px solid #f3d19e;
+  border-radius: 6px;
+  background: #fff7e6;
+  color: #8a5a00;
+  font-size: 12px;
+}
 .meta-import__file-drop {
   display: flex; align-items: center; justify-content: center; margin-bottom: 12px; padding: 12px;
   border: 1px dashed #cbd5e1; border-radius: 6px; color: #475569; font-size: 13px; cursor: pointer; background: #f8fafc;
@@ -187,6 +697,7 @@ function doImport() {
 .meta-import__btn--primary { background: #409eff; color: #fff; border-color: #409eff; }
 .meta-import__btn--primary:hover { background: #66b1ff; }
 .meta-import__btn--primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.meta-import__btn-inline { align-self: flex-start; padding: 4px 10px; border: 1px dashed #cbd5e1; border-radius: 4px; background: #fff; color: #475569; cursor: pointer; font-size: 12px; }
 .meta-import__mapping { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
 .meta-import__map-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .meta-import__col-name { min-width: 100px; font-weight: 500; color: #333; }
@@ -198,6 +709,25 @@ function doImport() {
 .meta-import__preview-table td { padding: 4px 8px; border-bottom: 1px solid #f5f5f5; }
 .meta-import__more { text-align: center; color: #999; font-style: italic; }
 .meta-import__importing { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 40px 20px; }
+.meta-import__result { padding: 12px; border-radius: 8px; margin-bottom: 12px; }
+.meta-import__result strong { display: block; margin-bottom: 6px; font-size: 14px; }
+.meta-import__result p { margin: 0; font-size: 12px; line-height: 1.5; }
+.meta-import__result--success { background: #f0f9eb; color: #2f7d32; }
+.meta-import__result--warning { background: #fff7e6; color: #8a5a00; }
+.meta-import__failures { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.meta-import__failure { padding: 10px 12px; border: 1px solid #f3e2b8; border-radius: 8px; background: #fffdfa; }
+.meta-import__failure-head { display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px; font-size: 12px; color: #7c5b12; }
+.meta-import__failure-row { font-family: monospace; font-size: 11px; color: #5b6472; word-break: break-word; }
+.meta-import__fixes { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.meta-import__fix { padding: 10px 12px; border: 1px solid #d9e5f7; border-radius: 8px; background: #f8fbff; }
+.meta-import__fix-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.meta-import__fix-cell { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #475467; }
+.meta-import__fix-cell--problem span { color: #0f5ba7; font-weight: 600; }
+.meta-import__fix-input { width: 100%; padding: 6px 8px; border: 1px solid #d0d5dd; border-radius: 4px; font-size: 12px; background: #fff; }
+.meta-import__fix-cell--problem .meta-import__fix-input { border-color: #409eff; box-shadow: 0 0 0 1px rgba(64,158,255,.12); }
+.meta-import__fix-hint { margin-top: 8px; font-size: 12px; color: #0f5ba7; }
+.meta-import__fix-picker-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.meta-import__fix-selected { font-size: 12px; color: #0f5ba7; }
 .meta-import__spinner { width: 32px; height: 32px; border: 3px solid #eee; border-top-color: #409eff; border-radius: 50%; animation: meta-import-spin 0.8s linear infinite; }
 @keyframes meta-import-spin { to { transform: rotate(360deg); } }
 </style>

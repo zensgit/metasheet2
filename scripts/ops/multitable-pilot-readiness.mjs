@@ -1,12 +1,21 @@
 import fs from 'fs/promises'
 import path from 'path'
+import { fileURLToPath } from 'url'
+
+const scriptDir = path.dirname(fileURLToPath(import.meta.url))
+const repoRoot = path.resolve(scriptDir, '../..')
 
 const smokeReportPath = process.env.SMOKE_REPORT_JSON || ''
 const profileReportPath = process.env.PROFILE_REPORT_JSON || ''
 const profileSummaryPath = process.env.PROFILE_SUMMARY_MD || ''
+const gateReportPath = process.env.GATE_REPORT_JSON || ''
+const onPremGateReportPath = process.env.ONPREM_GATE_REPORT_JSON || ''
+const requireOnPremGate = process.env.REQUIRE_ONPREM_GATE === 'true'
+const requireExplicitOnPremGate = process.env.REQUIRE_EXPLICIT_ONPREM_GATE === 'true'
 const readinessMdPath = process.env.READINESS_MD || ''
 const readinessJsonPath = process.env.READINESS_JSON || ''
 const stepSummaryPath = process.env.GITHUB_STEP_SUMMARY || ''
+const onPremGateRoot = path.join(repoRoot, 'output/releases/multitable-onprem/gates')
 
 async function readJson(filePath, label) {
   if (!filePath) {
@@ -25,23 +34,125 @@ async function readOptionalText(filePath) {
   }
 }
 
+async function readOptionalJson(filePath) {
+  const text = await readOptionalText(filePath)
+  if (!text) return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+async function resolveOnPremGateReportPath() {
+  if (requireExplicitOnPremGate && !onPremGateReportPath) {
+    throw new Error('REQUIRE_EXPLICIT_ONPREM_GATE=true requires ONPREM_GATE_REPORT_JSON')
+  }
+  if (onPremGateReportPath) return path.resolve(onPremGateReportPath)
+  try {
+    const entries = await fs.readdir(onPremGateRoot, { withFileTypes: true })
+    const dirs = entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort()
+    const latest = dirs.at(-1)
+    if (!latest) return null
+    const reportPath = path.join(onPremGateRoot, latest, 'report.json')
+    await fs.access(reportPath)
+    return reportPath
+  } catch {
+    return null
+  }
+}
+
 function fmtMs(value) {
   return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)} ms` : 'n/a'
 }
 
 function summarizeSmoke(report) {
   const requiredChecks = [
-    'ui.grid.import',
+    'ui.import.failed-retry',
+    'ui.import.mapping-reconcile',
+    'ui.import.people-repair-reconcile',
+    'ui.import.people-manual-fix',
+    'api.import.people-manual-fix-hydration',
     'ui.person.assign',
     'ui.form.upload-comments',
+    'api.form.attachment-delete-clear',
     'ui.grid.search-hydration',
     'ui.conflict.retry',
+    'ui.field-manager.prop-reconcile',
+    'ui.field-manager.type-reconcile',
+    'ui.field-manager.target-removal',
+    'ui.view-manager.prop-reconcile',
+    'ui.view-manager.field-schema-reconcile',
+    'ui.view-manager.target-removal',
+    'ui.gallery.config-replay',
+    'ui.calendar.config-replay',
+    'ui.timeline.config-replay',
+    'ui.kanban.config-replay',
+    'ui.kanban.empty-card-fields-replay',
+    'ui.kanban.clear-group-replay',
+    'api.multitable.legacy-submit',
   ]
   const missing = requiredChecks.filter((name) => !report.checks?.some((item) => item.name === name && item.ok))
   return {
     ok: Boolean(report.ok) && missing.length === 0,
     requiredChecks,
     missingChecks: missing,
+  }
+}
+
+function summarizeImportDraftRecovery(report) {
+  const checks = Array.isArray(report?.checks) ? report.checks : []
+  const uiCheck = checks.find((item) => item.name === 'ui.import.mapping-reconcile')
+  return {
+    ok: Boolean(uiCheck?.ok),
+    uiCheck: uiCheck ?? null,
+  }
+}
+
+function summarizePeopleRepairReconcile(report) {
+  const checks = Array.isArray(report?.checks) ? report.checks : []
+  const uiCheck = checks.find((item) => item.name === 'ui.import.people-repair-reconcile')
+  return {
+    ok: Boolean(uiCheck?.ok),
+    uiCheck: uiCheck ?? null,
+  }
+}
+
+function summarizePeopleImportRecovery(report) {
+  const checks = Array.isArray(report?.checks) ? report.checks : []
+  const uiCheck = checks.find((item) => item.name === 'ui.import.people-manual-fix')
+  const apiCheck = checks.find((item) => item.name === 'api.import.people-manual-fix-hydration')
+  return {
+    ok: Boolean(uiCheck?.ok) && Boolean(apiCheck?.ok),
+    uiCheck: uiCheck ?? null,
+    apiCheck: apiCheck ?? null,
+  }
+}
+
+function summarizeManagerRecovery(report) {
+  const checks = Array.isArray(report?.checks) ? report.checks : []
+  const fieldCheck = checks.find((item) => item.name === 'ui.field-manager.prop-reconcile')
+  const fieldTypeCheck = checks.find((item) => item.name === 'ui.field-manager.type-reconcile')
+  const fieldRemovalCheck = checks.find((item) => item.name === 'ui.field-manager.target-removal')
+  const viewCheck = checks.find((item) => item.name === 'ui.view-manager.prop-reconcile')
+  const viewFieldSchemaCheck = checks.find((item) => item.name === 'ui.view-manager.field-schema-reconcile')
+  const viewRemovalCheck = checks.find((item) => item.name === 'ui.view-manager.target-removal')
+  return {
+    ok: Boolean(fieldCheck?.ok) &&
+      Boolean(fieldTypeCheck?.ok) &&
+      Boolean(fieldRemovalCheck?.ok) &&
+      Boolean(viewCheck?.ok) &&
+      Boolean(viewFieldSchemaCheck?.ok) &&
+      Boolean(viewRemovalCheck?.ok),
+    fieldCheck: fieldCheck ?? null,
+    fieldTypeCheck: fieldTypeCheck ?? null,
+    fieldRemovalCheck: fieldRemovalCheck ?? null,
+    viewCheck: viewCheck ?? null,
+    viewFieldSchemaCheck: viewFieldSchemaCheck ?? null,
+    viewRemovalCheck: viewRemovalCheck ?? null,
   }
 }
 
@@ -56,14 +167,57 @@ function summarizeProfile(report) {
   }
 }
 
+function summarizeGates(report) {
+  const checks = Array.isArray(report?.checks) ? report.checks : []
+  const missing = checks.filter((check) => !check.ok).map((check) => check.name)
+  return {
+    ok: Boolean(report?.ok) && missing.length === 0,
+    checks,
+    missingChecks: missing,
+  }
+}
+
+function summarizeOnPremReleaseGate(report, reportPath) {
+  const checks = Array.isArray(report?.checks) ? report.checks : []
+  const missing = checks.filter((check) => !check.ok).map((check) => check.name)
+  return {
+    ok: Boolean(report?.ok) && missing.length === 0,
+    report: reportPath ? path.resolve(reportPath) : null,
+    packageName: report?.packageName ?? null,
+    checks,
+    missingChecks: missing,
+    signoffRecoveryPath: report?.signoffRecoveryPath ?? null,
+  }
+}
+
 async function main() {
   const smoke = await readJson(smokeReportPath, 'SMOKE_REPORT_JSON')
   const profile = await readJson(profileReportPath, 'PROFILE_REPORT_JSON')
   const profileSummary = await readOptionalText(profileSummaryPath)
+  const gateReport = await readOptionalJson(gateReportPath)
+  const resolvedOnPremGateReportPath = await resolveOnPremGateReportPath()
+  const onPremGateReport = resolvedOnPremGateReportPath
+    ? await readJson(resolvedOnPremGateReportPath, 'ONPREM_GATE_REPORT_JSON')
+    : null
 
   const smokeSummary = summarizeSmoke(smoke)
+  const importDraftRecovery = summarizeImportDraftRecovery(smoke)
+  const peopleRepairReconcile = summarizePeopleRepairReconcile(smoke)
+  const peopleImportRecovery = summarizePeopleImportRecovery(smoke)
+  const managerRecovery = summarizeManagerRecovery(smoke)
   const profileSummaryData = summarizeProfile(profile)
-  const overallOk = smokeSummary.ok && profileSummaryData.ok
+  const gateSummary = gateReport ? summarizeGates(gateReport) : { ok: true, checks: [], missingChecks: [] }
+  const onPremGateSummary = onPremGateReport
+    ? summarizeOnPremReleaseGate(onPremGateReport, resolvedOnPremGateReportPath)
+    : null
+  if (requireOnPremGate && !onPremGateSummary) {
+    throw new Error('REQUIRE_ONPREM_GATE=true but no on-prem release gate report was found')
+  }
+  const overallOk = smokeSummary.ok &&
+    profileSummaryData.ok &&
+    gateSummary.ok &&
+    (!requireOnPremGate || Boolean(onPremGateSummary?.ok))
+  const signoffRecoveryPath = onPremGateSummary?.signoffRecoveryPath ?? null
 
   const payload = {
     ok: overallOk,
@@ -71,11 +225,71 @@ async function main() {
       report: path.resolve(smokeReportPath),
       ...smokeSummary,
     },
+    importDraftRecovery: {
+      ...importDraftRecovery,
+      flow: [
+        'Import records',
+        'Preview the pasted rows and confirm header auto-mapping',
+        'Rename the mapped field in the background and confirm the preview label updates without a warning',
+        'Change the same field to a non-importable type and confirm importing is blocked',
+        'Click Reconcile draft and confirm the stale mapping is cleared',
+      ],
+    },
+    peopleRepairReconcile: {
+      ...peopleRepairReconcile,
+      flow: [
+        'Import records into a people field and enter the manual-fix result panel',
+        'Pick a person from the picker',
+        'Change the same field to a non-people type in the background',
+        'Confirm Apply fixes is blocked until Reconcile draft is clicked',
+        'Retry after reconcile and confirm the row still imports successfully',
+      ],
+    },
+    peopleImportRecovery: {
+      ...peopleImportRecovery,
+      flow: [
+        'Import records',
+        'If people mismatch appears, use Select person/Select people in the result panel',
+        'Search and confirm the person in the picker',
+        'Apply fixes and retry',
+        'Search the imported row again in grid',
+        'Confirm API hydration check passes',
+      ],
+    },
+    managerRecovery: {
+      ...managerRecovery,
+      flow: [
+        'Open Fields or Views manager',
+        'Dirty an existing config draft',
+        'Apply an upstream field/view patch while the manager stays open',
+        'Wait for the background-change warning banner',
+        'Dismiss the close confirmation once to verify the draft is protected',
+        'Click Reload latest and confirm the UI now reflects the server state',
+        'Rename a dependent field and verify labels reconcile without losing the current manager session',
+        'Change a dependent field type and verify saving is blocked until Reload latest',
+        'Open a temporary field/view config and delete that target from the backend',
+        'Confirm the config panel closes itself and no stale warning remains',
+      ],
+    },
     profile: {
       report: path.resolve(profileReportPath),
       summary: profileSummaryPath ? path.resolve(profileSummaryPath) : null,
       ...profileSummaryData,
     },
+    gates: gateReport
+      ? {
+          report: path.resolve(gateReportPath),
+          ...gateSummary,
+        }
+      : null,
+    onPremReleaseGate: onPremGateSummary,
+    onPremReleaseGateBinding: {
+      required: requireOnPremGate,
+      explicitRequired: requireExplicitOnPremGate,
+      explicitReport: onPremGateReportPath ? path.resolve(onPremGateReportPath) : null,
+      resolvedReport: resolvedOnPremGateReportPath ? path.resolve(resolvedOnPremGateReportPath) : null,
+    },
+    signoffRecoveryPath,
     generatedAt: new Date().toISOString(),
   }
 
@@ -86,6 +300,23 @@ async function main() {
     `- Smoke report: \`${path.resolve(smokeReportPath)}\``,
     `- Profile report: \`${path.resolve(profileReportPath)}\``,
     '',
+  ]
+
+  if (signoffRecoveryPath) {
+    lines.push(
+      '## Sign-Off Recovery Path',
+      '',
+      `- Step 1 command: \`${signoffRecoveryPath.step1RunPreflight ?? 'missing'}\``,
+      `- Repair instruction: ${signoffRecoveryPath.step2RepairInstruction ?? 'missing'}`,
+      `- Repair helper path: \`${signoffRecoveryPath.step2RepairHelper ?? 'missing'}\``,
+      Array.isArray(signoffRecoveryPath.step3ReturnEvidence) && signoffRecoveryPath.step3ReturnEvidence.length
+        ? `- Return both files: ${signoffRecoveryPath.step3ReturnEvidence.map((item) => `\`${item}\``).join(', ')}`
+        : '- Return both files: missing',
+      '',
+    )
+  }
+
+  lines.push(
     '## Smoke Gates',
     '',
     `- Status: **${smokeSummary.ok ? 'PASS' : 'FAIL'}**`,
@@ -93,6 +324,62 @@ async function main() {
     smokeSummary.missingChecks.length
       ? `- Missing checks: ${smokeSummary.missingChecks.map((item) => `\`${item}\``).join(', ')}`
       : '- Missing checks: none',
+    '',
+    '## Import Draft Reconcile Chain',
+    '',
+    `- Status: **${importDraftRecovery.ok ? 'PASS' : 'FAIL'}**`,
+    `- UI check: ${importDraftRecovery.uiCheck?.ok ? '`ui.import.mapping-reconcile`' : '`missing`'}`,
+    '- Flow:',
+    '- Import records',
+    '- Preview the pasted rows and confirm header auto-mapping',
+    '- Rename the mapped field in the background and confirm the preview label updates without a warning',
+    '- Change the same field to a non-importable type and confirm importing is blocked',
+    '- Click `Reconcile draft` and confirm the stale mapping is cleared',
+    '',
+    '## People Repair Reconcile Chain',
+    '',
+    `- Status: **${peopleRepairReconcile.ok ? 'PASS' : 'FAIL'}**`,
+    `- UI check: ${peopleRepairReconcile.uiCheck?.ok ? '`ui.import.people-repair-reconcile`' : '`missing`'}`,
+    '- Flow:',
+    '- Import records into a people field and enter the manual-fix result panel',
+    '- Pick a person from the picker',
+    '- Change the same field to a non-people type in the background',
+    '- Confirm `Apply fixes and retry` is blocked until `Reconcile draft` is clicked',
+    '- Retry after reconcile and confirm the row still imports successfully',
+    '',
+    '## People Import Recovery Chain',
+    '',
+    `- Status: **${peopleImportRecovery.ok ? 'PASS' : 'FAIL'}**`,
+    `- UI check: ${peopleImportRecovery.uiCheck?.ok ? '`ui.import.people-manual-fix`' : '`missing`'}`,
+    `- API check: ${peopleImportRecovery.apiCheck?.ok ? '`api.import.people-manual-fix-hydration`' : '`missing`'}`,
+    '- Flow:',
+    '- Import records',
+    '- If people mismatch appears, use `Select person` or `Select people` in the result panel',
+    '- Search and confirm the person in the picker',
+    '- Click `Apply fixes and retry`',
+    '- Search the imported row again in grid',
+    '- Confirm API hydration passes for the imported record',
+    '',
+    '## Manager Recovery Chain',
+    '',
+    `- Status: **${managerRecovery.ok ? 'PASS' : 'FAIL'}**`,
+    `- Field manager check: ${managerRecovery.fieldCheck?.ok ? '`ui.field-manager.prop-reconcile`' : '`missing`'}`,
+    `- Field manager type reconcile: ${managerRecovery.fieldTypeCheck?.ok ? '`ui.field-manager.type-reconcile`' : '`missing`'}`,
+    `- Field manager removal check: ${managerRecovery.fieldRemovalCheck?.ok ? '`ui.field-manager.target-removal`' : '`missing`'}`,
+    `- View manager check: ${managerRecovery.viewCheck?.ok ? '`ui.view-manager.prop-reconcile`' : '`missing`'}`,
+    `- View manager field schema reconcile: ${managerRecovery.viewFieldSchemaCheck?.ok ? '`ui.view-manager.field-schema-reconcile`' : '`missing`'}`,
+    `- View manager removal check: ${managerRecovery.viewRemovalCheck?.ok ? '`ui.view-manager.target-removal`' : '`missing`'}`,
+    '- Flow:',
+    '- Open `Fields` or `Views` manager',
+    '- Dirty an existing config draft',
+    '- Apply an upstream field/view patch while the manager stays open',
+    '- Wait for the background-change warning banner',
+    '- Dismiss the close confirmation once to verify the draft is protected',
+    '- Click `Reload latest` and confirm the UI reflects the server state',
+    '- Rename a dependent field and verify labels reconcile without closing the manager',
+    '- Change a dependent field type and verify save is blocked until `Reload latest`',
+    '- Open a temporary field/view config and delete that target from the backend',
+    '- Confirm the config panel closes itself and no stale warning remains',
     '',
     '## Grid Profile',
     '',
@@ -108,7 +395,52 @@ async function main() {
     '- Local dev-token pilot runs still require `RBAC_TOKEN_TRUST=true` on backend unless you use a real admin token.',
     '- Default local endpoints remain `http://127.0.0.1:7778` (backend) and `http://127.0.0.1:8899` (frontend).',
     '',
-  ]
+  )
+
+  if (gateReport) {
+    lines.push(
+      '## Build & Test Gates',
+      '',
+      `- Status: **${gateSummary.ok ? 'PASS' : 'FAIL'}**`,
+      `- Report: \`${path.resolve(gateReportPath)}\``,
+      gateSummary.checks.length
+        ? `- Checks: ${gateSummary.checks.map((item) => `\`${item.name}\``).join(', ')}`
+        : '- Checks: none',
+      gateSummary.missingChecks.length
+        ? `- Failing checks: ${gateSummary.missingChecks.map((item) => `\`${item}\``).join(', ')}`
+        : '- Failing checks: none',
+      '',
+    )
+  }
+
+  if (onPremGateSummary) {
+    lines.push(
+      '## On-Prem Release Gate',
+      '',
+      `- Status: **${onPremGateSummary.ok ? 'PASS' : 'FAIL'}**`,
+      `- Required binding: \`${requireOnPremGate ? 'true' : 'false'}\``,
+      `- Explicit report required: \`${requireExplicitOnPremGate ? 'true' : 'false'}\``,
+      `- Report: \`${onPremGateSummary.report}\``,
+      `- Package name: \`${onPremGateSummary.packageName ?? 'unknown'}\``,
+      onPremGateSummary.checks.length
+        ? `- Checks: ${onPremGateSummary.checks.map((item) => `\`${item.name}\``).join(', ')}`
+        : '- Checks: none',
+      onPremGateSummary.missingChecks.length
+        ? `- Failing checks: ${onPremGateSummary.missingChecks.map((item) => `\`${item}\``).join(', ')}`
+        : '- Failing checks: none',
+      '',
+    )
+  } else if (requireOnPremGate) {
+    lines.push(
+      '## On-Prem Release Gate',
+      '',
+      '- Status: **FAIL**',
+      `- Required binding: \`${requireOnPremGate ? 'true' : 'false'}\``,
+      `- Explicit report required: \`${requireExplicitOnPremGate ? 'true' : 'false'}\``,
+      '- Report: `missing`',
+      '',
+    )
+  }
 
   if (profileSummary) {
     lines.push('## Profile Threshold Summary', '', profileSummary.trim(), '')

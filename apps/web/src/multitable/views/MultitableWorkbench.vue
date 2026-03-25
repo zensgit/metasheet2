@@ -48,30 +48,54 @@
           :link-summaries-by-field="selectedRecordLinkSummaries"
           :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
           :upload-fn="uploadAttachmentFn"
+          :delete-attachment-fn="deleteAttachmentFn"
           @submit="onFormSubmit" @open-link-picker="openLinkPicker"
         />
         <MetaKanbanView
           v-else-if="activeViewType === 'kanban'"
           :rows="grid.rows.value" :fields="grid.fields.value" :loading="grid.loading.value"
+          :group-info="workbench.activeView.value?.groupInfo"
+          :view-config="workbench.activeView.value?.config"
+          :link-summaries="grid.linkSummaries.value"
+          :attachment-summaries="grid.attachmentSummaries.value"
           :can-create="caps.canCreateRecord.value" :can-edit="caps.canEditRecord.value"
           @select-record="onSelectRecord" @patch-cell="onPatchCell" @create-record="onKanbanCreateRecord"
+          @update-view-config="onPersistActiveViewConfig"
         />
         <MetaGalleryView
           v-else-if="activeViewType === 'gallery'"
           :rows="grid.rows.value" :fields="grid.fields.value" :loading="grid.loading.value"
+          :view-config="workbench.activeView.value?.config"
+          :link-summaries="grid.linkSummaries.value"
+          :attachment-summaries="grid.attachmentSummaries.value"
+          :can-create="caps.canCreateRecord.value"
           :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
           @select-record="onSelectRecord" @go-to-page="grid.goToPage"
+          @create-record="onKanbanCreateRecord"
+          @update-view-config="onPersistActiveViewConfig"
         />
         <MetaCalendarView
           v-else-if="activeViewType === 'calendar'"
           :rows="grid.rows.value" :fields="grid.fields.value" :loading="grid.loading.value"
+          :view-config="workbench.activeView.value?.config"
+          :link-summaries="grid.linkSummaries.value"
+          :attachment-summaries="grid.attachmentSummaries.value"
           :can-create="caps.canCreateRecord.value"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
+          @update-view-config="onPersistActiveViewConfig"
         />
         <MetaTimelineView
           v-else-if="activeViewType === 'timeline'"
           :rows="grid.rows.value" :fields="grid.fields.value" :loading="grid.loading.value"
+          :view-config="workbench.activeView.value?.config"
+          :link-summaries="grid.linkSummaries.value"
+          :attachment-summaries="grid.attachmentSummaries.value"
+          :can-create="caps.canCreateRecord.value"
+          :can-edit="caps.canEditRecord.value"
           @select-record="onSelectRecord"
+          @create-record="onKanbanCreateRecord"
+          @patch-dates="onTimelinePatchDates"
+          @update-view-config="onPersistActiveViewConfig"
         />
         <MetaGridTable
           v-else
@@ -84,6 +108,7 @@
           :group-field="grid.groupField.value"
           :search-text="searchText" :row-density="rowDensity"
           :upload-fn="uploadAttachmentFn"
+          :delete-attachment-fn="deleteAttachmentFn"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
           @bulk-delete="onBulkDelete" @reorder-field="onReorderField"
@@ -96,6 +121,7 @@
         :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
         :record-ids="drawerRecordIds"
         :upload-fn="uploadAttachmentFn"
+        :delete-attachment-fn="deleteAttachmentFn"
         @close="selectedRecordId = null" @delete="onDeleteRecord" @patch="onDrawerPatch"
         @toggle-comments="showComments = !showComments" @open-link-picker="openLinkPicker"
         @navigate="onDrawerNavigate"
@@ -127,16 +153,24 @@
         </div>
       </div>
     </div>
-    <MetaImportModal :visible="showImportModal" :fields="grid.fields.value" @close="showImportModal = false" @import="onBulkImport" />
+    <MetaImportModal
+      :visible="showImportModal"
+      :fields="workbench.fields.value"
+      :field-resolvers="importFieldResolvers"
+      :importing="importSubmitting"
+      :result="importResult"
+      @close="closeImportModal"
+      @import="onBulkImport"
+    />
     <MetaLinkPicker :visible="linkPickerVisible" :field="linkPickerField" :current-value="linkPickerCurrentValue"
       @close="linkPickerVisible = false" @confirm="onLinkPickerConfirm"
     />
     <MetaFieldManager
-      :visible="showFieldManager" :fields="workbench.fields.value" :sheet-id="workbench.activeSheetId.value"
+      :visible="showFieldManager" :fields="workbench.fields.value" :sheets="workbench.sheets.value" :sheet-id="workbench.activeSheetId.value"
       @close="showFieldManager = false" @create-field="onCreateField" @update-field="onUpdateField" @delete-field="onDeleteField"
     />
     <MetaViewManager
-      :visible="showViewManager" :views="workbench.views.value" :sheet-id="workbench.activeSheetId.value"
+      :visible="showViewManager" :views="workbench.views.value" :fields="workbench.fields.value" :sheet-id="workbench.activeSheetId.value"
       :active-view-id="workbench.activeViewId.value"
       @close="showViewManager = false" @create-view="onCreateView" @update-view="onUpdateView" @delete-view="onDeleteView"
     />
@@ -178,11 +212,18 @@ import MetaToast from '../components/MetaToast.vue'
 import MetaImportModal from '../components/MetaImportModal.vue'
 import type { MetaBase } from '../types'
 import { bulkImportRecords } from '../import/bulk-import'
+import { type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
+import { isPersonField } from '../utils/link-fields'
+import {
+  addPeopleLookupToken,
+  inferPeopleLookupKind,
+  resolvePeopleImportValue,
+} from '../utils/people-import'
 
 const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; mode?: string; role?: MultitableRole }>()
 
 const role = ref<MultitableRole>(props.role ?? 'editor')
-const workbench = useMultitableWorkbench({ initialBaseId: props.baseId, initialSheetId: props.sheetId, initialViewId: props.viewId })
+const workbench = useMultitableWorkbench({ initialSheetId: props.sheetId, initialViewId: props.viewId })
 const capabilitySource = computed(() => workbench.capabilities.value ?? role.value)
 const caps = useMultitableCapabilities(capabilitySource)
 const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workbench.activeViewId })
@@ -196,20 +237,154 @@ const linkPickerRecordId = ref<string | null>(null)
 const linkPickerCurrentValue = ref<unknown>(null)
 const showFieldManager = ref(false)
 const showViewManager = ref(false)
+let dialogMetaRefreshTimer: number | null = null
+let dialogMetaRefreshInFlight = false
 const bases = ref<MetaBase[]>([])
-const activeBaseId = computed(() => workbench.activeBaseId.value)
+const activeBaseId = ref(props.baseId ?? '')
 const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
 const commentDraft = ref('')
 const searchText = ref('')
 const showShortcuts = ref(false)
 const showImportModal = ref(false)
+const importSubmitting = ref(false)
+type ImportFailure = ImportBuildFailure & { rowIndex: number; retryable?: boolean }
+type ImportResult = {
+  attempted: number
+  succeeded: number
+  failed: number
+  firstError: string | null
+  failures: ImportFailure[]
+}
+
+const importResult = ref<ImportResult | null>(null)
 const rowDensity = ref<RowDensity>('normal')
+const peopleResolverCache = new Map<string, Promise<ImportValueResolver>>()
+const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() => {
+  const resolvers: Record<string, ImportValueResolver> = {}
+  for (const field of workbench.fields.value) {
+    if (!isPersonField(field)) continue
+    resolvers[field.id] = async (rawValue, currentField) => {
+      const resolver = await getPeopleResolver(currentField)
+      return resolver ? resolver(rawValue, currentField) : null
+    }
+  }
+  return resolvers
+})
+
 async function uploadAttachmentFn(file: File, context?: MetaAttachmentUploadContext): Promise<MetaAttachment> {
   return workbench.client.uploadAttachment(file, {
     sheetId: workbench.activeSheetId.value || undefined,
     recordId: context?.recordId,
     fieldId: context?.fieldId,
   })
+}
+
+async function deleteAttachmentFn(attachmentId: string, context?: MetaAttachmentUploadContext): Promise<void> {
+  await workbench.client.deleteAttachment(attachmentId)
+  if (context?.recordId) {
+    await grid.loadViewData(grid.page.value.offset)
+    if (selectedRecordId.value === context.recordId) {
+      await resolveDeepLink(context.recordId)
+    }
+  }
+  showSuccess('Attachment removed')
+}
+
+async function loadAllRecordSummaries(sheetId: string, displayFieldId: string) {
+  const records: LinkedRecordSummary[] = []
+  const displayMap: Record<string, string> = {}
+  let offset = 0
+  const limit = 200
+
+  for (;;) {
+    const page = await workbench.client.listRecordSummaries({
+      sheetId,
+      displayFieldId,
+      limit,
+      offset,
+    })
+    records.push(...(page.records ?? []))
+    Object.assign(displayMap, page.displayMap ?? {})
+    if (!page.page?.hasMore) break
+    offset += limit
+  }
+
+  return { records, displayMap }
+}
+
+async function getPeopleResolver(field: MetaField): Promise<ImportValueResolver | null> {
+  if (!isPersonField(field)) return null
+  const targetSheetId = typeof field.property?.foreignSheetId === 'string' ? field.property.foreignSheetId.trim() : ''
+  if (!targetSheetId) return null
+
+  const existing = peopleResolverCache.get(targetSheetId)
+  if (existing) return existing
+
+  const promise = (async () => {
+    const { fields } = await workbench.client.listFields(targetSheetId)
+    const stringFields = fields.filter((targetField) => targetField.type === 'string')
+    const emailFieldIds = stringFields
+      .filter((targetField) => inferPeopleLookupKind(targetField.name) === 'email')
+      .map((targetField) => targetField.id)
+    const nameFieldIds = stringFields
+      .filter((targetField) => inferPeopleLookupKind(targetField.name) === 'name')
+      .map((targetField) => targetField.id)
+    const aliasFieldIds = stringFields
+      .filter((targetField) => inferPeopleLookupKind(targetField.name) === 'alias')
+      .map((targetField) => targetField.id)
+    const fallbackAliasFieldId = stringFields.find(
+      (targetField) => !emailFieldIds.includes(targetField.id) && !nameFieldIds.includes(targetField.id),
+    )?.id
+
+    const recordIdLookup = new Map<string, string | null>()
+    const emailLookup = new Map<string, string | null>()
+    const nameLookup = new Map<string, string | null>()
+    const aliasLookup = new Map<string, string | null>()
+
+    async function hydrateLookup(fieldIds: string[], targetLookup: Map<string, string | null>) {
+      await Promise.all(fieldIds.map(async (displayFieldId) => {
+        const summary = await loadAllRecordSummaries(targetSheetId, displayFieldId)
+        for (const record of summary.records ?? []) {
+          addPeopleLookupToken(recordIdLookup, record.id, record.id)
+          addPeopleLookupToken(targetLookup, record.display, record.id)
+        }
+        for (const [recordId, display] of Object.entries(summary.displayMap ?? {})) {
+          addPeopleLookupToken(recordIdLookup, recordId, recordId)
+          addPeopleLookupToken(targetLookup, display, recordId)
+        }
+      }))
+    }
+
+    await Promise.all([
+      hydrateLookup(emailFieldIds, emailLookup),
+      hydrateLookup(nameFieldIds, nameLookup),
+      hydrateLookup(
+        [
+          ...aliasFieldIds,
+          ...(fallbackAliasFieldId && !aliasFieldIds.includes(fallbackAliasFieldId) ? [fallbackAliasFieldId] : []),
+        ],
+        aliasLookup,
+      ),
+    ])
+
+    return async (rawValue: string, currentField?: MetaField) =>
+      resolvePeopleImportValue({
+        rawValue,
+        currentField,
+        lookups: {
+          recordId: recordIdLookup,
+          email: emailLookup,
+          name: nameLookup,
+          alias: aliasLookup,
+        },
+      })
+  })().catch((error) => {
+    peopleResolverCache.delete(targetSheetId)
+    throw error
+  })
+
+  peopleResolverCache.set(targetSheetId, promise)
+  return promise
 }
 
 const formSubmitting = ref(false)
@@ -319,6 +494,32 @@ function onClearFilters() { grid.clearFilters(); grid.applySortFilter() }
 function onSetConjunction(c: FilterConjunction) { grid.filterConjunction.value = c; grid.sortFilterDirty.value = true }
 
 async function onPatchCell(recordId: string, fieldId: string, value: unknown, version: number) { await grid.patchCell(recordId, fieldId, value, version) }
+async function onTimelinePatchDates(payload: {
+  recordId: string
+  version: number
+  startFieldId: string
+  endFieldId: string
+  startValue: string
+  endValue: string
+}) {
+  try {
+    await workbench.client.patchRecords({
+      sheetId: workbench.activeSheetId.value || undefined,
+      viewId: workbench.activeViewId.value || undefined,
+      changes: [
+        { recordId: payload.recordId, fieldId: payload.startFieldId, value: payload.startValue, expectedVersion: payload.version },
+        { recordId: payload.recordId, fieldId: payload.endFieldId, value: payload.endValue, expectedVersion: payload.version },
+      ],
+    })
+    await grid.loadViewData(grid.page.value.offset)
+    if (selectedRecordId.value === payload.recordId) {
+      await resolveDeepLink(payload.recordId)
+    }
+    showSuccess('Timeline updated')
+  } catch (error: any) {
+    showError(error?.message ?? 'Failed to update timeline dates')
+  }
+}
 async function onAddRecord() { await grid.createRecord() }
 async function onKanbanCreateRecord(data: Record<string, unknown>) { await grid.createRecord(data) }
 async function onDeleteRecord() {
@@ -476,7 +677,7 @@ async function onLinkPickerConfirm(payload: { recordIds: string[]; summaries: Li
 }
 
 // --- Field management ---
-async function onCreateField(input: { sheetId: string; name: string; type: string }) {
+async function onCreateField(input: { sheetId: string; name: string; type: string; property?: Record<string, unknown> }) {
   try {
     if (input.type === 'person') {
       const preset = await workbench.client.preparePersonField(input.sheetId)
@@ -484,21 +685,30 @@ async function onCreateField(input: { sheetId: string; name: string; type: strin
         sheetId: input.sheetId,
         name: input.name,
         type: 'link',
-        property: preset.fieldProperty,
+        property: input.property
+          ? { ...preset.fieldProperty, ...input.property }
+          : preset.fieldProperty,
       })
     } else {
-      await workbench.client.createField({ sheetId: input.sheetId, name: input.name, type: input.type as MetaFieldType })
+      await workbench.client.createField({
+        sheetId: input.sheetId,
+        name: input.name,
+        type: input.type as MetaFieldType,
+        property: input.property,
+      })
     }
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
+    showSuccess('Field created')
   } catch (e: any) { showError(e.message ?? 'Failed to create field') }
 }
 
-async function onUpdateField(fieldId: string, input: { name?: string; order?: number }) {
+async function onUpdateField(fieldId: string, input: { name?: string; order?: number; type?: string; property?: Record<string, unknown> }) {
   try {
     await workbench.client.updateField(fieldId, input)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     await grid.loadViewData(grid.page.value.offset)
+    showSuccess('Field updated')
   } catch (e: any) { showError(e.message ?? 'Failed to update field') }
 }
 
@@ -511,18 +721,41 @@ async function onDeleteField(fieldId: string) {
 }
 
 // --- View management ---
-async function onCreateView(input: { sheetId: string; name: string; type: string }) {
+async function onCreateView(input: { sheetId: string; name: string; type: string; config?: Record<string, unknown>; groupInfo?: Record<string, unknown> }) {
   try {
-    const res = await workbench.client.createView({ sheetId: input.sheetId, name: input.name, type: input.type })
+    const res = await workbench.client.createView({
+      sheetId: input.sheetId,
+      name: input.name,
+      type: input.type,
+      config: input.config,
+      groupInfo: input.groupInfo,
+    })
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
     workbench.selectView(res.view.id)
+    await grid.loadViewData(grid.page.value.offset)
   } catch (e: any) { showError(e.message ?? 'Failed to create view') }
 }
 
-async function onUpdateView(viewId: string, input: { name?: string }) {
+async function onUpdateView(viewId: string, input: { name?: string; config?: Record<string, unknown>; groupInfo?: Record<string, unknown> }) {
+  await updateViewInternal(viewId, input, true)
+}
+
+async function onPersistActiveViewConfig(input: { config?: Record<string, unknown>; groupInfo?: Record<string, unknown> }) {
+  const viewId = workbench.activeViewId.value
+  if (!viewId) return
+  await updateViewInternal(viewId, input, false)
+}
+
+async function updateViewInternal(
+  viewId: string,
+  input: { name?: string; config?: Record<string, unknown>; groupInfo?: Record<string, unknown> },
+  notify: boolean,
+) {
   try {
     await workbench.client.updateView(viewId, input)
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
+    await grid.loadViewData(grid.page.value.offset)
+    if (notify) showSuccess('View settings saved')
   } catch (e: any) { showError(e.message ?? 'Failed to update view') }
 }
 
@@ -537,12 +770,8 @@ async function onDeleteView(viewId: string) {
 // --- Sheet management ---
 async function onCreateSheet(name: string) {
   try {
-    const res = await workbench.client.createSheet({ name, baseId: workbench.activeBaseId.value || undefined, seed: true })
-    if (workbench.activeBaseId.value) {
-      await workbench.loadBaseContext(workbench.activeBaseId.value)
-    } else {
-      await workbench.loadSheets()
-    }
+    const res = await workbench.client.createSheet({ name, baseId: activeBaseId.value || undefined, seed: true })
+    await workbench.loadSheets()
     workbench.selectSheet(res.sheet.id)
   } catch (e: any) { showError(e.message ?? 'Failed to create sheet') }
 }
@@ -552,14 +781,18 @@ async function loadBases() {
   try {
     const data = await workbench.client.listBases()
     bases.value = data.bases ?? []
-    if (!workbench.activeBaseId.value && bases.value.length) workbench.selectBase(bases.value[0].id)
+    if (!activeBaseId.value && bases.value.length) activeBaseId.value = bases.value[0].id
   } catch { /* silent */ }
 }
 
 async function onSelectBase(baseId: string) {
-  workbench.selectBase(baseId)
+  activeBaseId.value = baseId
   try {
-    await workbench.loadBaseContext(baseId)
+    const ctx = await workbench.client.loadContext({ baseId })
+    workbench.sheets.value = ctx.sheets ?? []
+    workbench.views.value = ctx.views ?? []
+    if (ctx.sheet) workbench.selectSheet(ctx.sheet.id)
+    else if (workbench.sheets.value.length) workbench.selectSheet(workbench.sheets.value[0].id)
   } catch (e: any) { showError(e.message ?? 'Failed to load base') }
 }
 
@@ -603,32 +836,68 @@ function onReorderField(fromId: string, toId: string) {
 }
 
 // --- Bulk import ---
-async function onBulkImport(records: Array<Record<string, unknown>>) {
+async function onBulkImport(payload: ImportBuildResult) {
+  importSubmitting.value = true
+  importResult.value = null
   try {
-    const result = await bulkImportRecords({
-      client: workbench.client,
-      sheetId: workbench.activeSheetId.value || undefined,
-      viewId: workbench.activeViewId.value || undefined,
-      records,
-    })
-    showImportModal.value = false
+    const importResultRows = payload.records.length > 0
+      ? await bulkImportRecords({
+        client: workbench.client,
+        sheetId: workbench.activeSheetId.value || undefined,
+        viewId: workbench.activeViewId.value || undefined,
+        records: payload.records,
+      })
+      : { attempted: 0, succeeded: 0, failed: 0, firstError: null, failures: [] }
+
+    const failures = [
+      ...payload.failures
+        .map((failure) => ({ ...failure, retryable: false }))
+        .sort((a, b) => a.rowIndex - b.rowIndex),
+      ...importResultRows.failures.map((failure) => ({
+        ...failure,
+        rowIndex: payload.rowIndexes[failure.index] ?? failure.index,
+        retryable: failure.retryable,
+      })),
+    ].sort((a, b) => a.rowIndex - b.rowIndex)
+
+    const result = {
+      attempted: payload.records.length + payload.failures.length,
+      succeeded: importResultRows.succeeded,
+      failed: failures.length,
+      firstError: failures[0]?.message ?? importResultRows.firstError,
+      failures,
+    }
+
+    importResult.value = result
     if (result.succeeded > 0) {
       await grid.loadViewData(grid.page.value.offset)
     }
     if (result.failed === 0) {
+      closeImportModal()
       showSuccess(`${result.succeeded} record(s) imported`)
       return
     }
     if (result.succeeded > 0) {
-      showError(`${result.failed} record(s) failed to import. ${result.firstError ?? ''}`.trim())
+      const failedRows = failures
+        .slice(0, 3)
+        .map((failure) => `row ${failure.rowIndex + 2}`)
+        .join(', ')
+      showError(`${result.failed} record(s) failed to import${failedRows ? ` (${failedRows})` : ''}. ${result.firstError ?? ''}`.trim())
       showSuccess(`${result.succeeded} record(s) imported`)
       return
     }
     showError(result.firstError ?? 'Import failed')
   } catch (e: any) {
-    showImportModal.value = false
     showError(e.message ?? 'Import failed')
+  } finally {
+    importSubmitting.value = false
   }
+}
+
+function closeImportModal() {
+  showImportModal.value = false
+  importSubmitting.value = false
+  importResult.value = null
 }
 
 // --- CSV export ---
@@ -661,6 +930,33 @@ function csvEscape(val: string): string {
 }
 
 const drawerRecordIds = computed(() => grid.rows.value.map((r) => r.id))
+
+async function refreshDialogMeta() {
+  if (dialogMetaRefreshInFlight || !workbench.activeSheetId.value) return
+  dialogMetaRefreshInFlight = true
+  try {
+    await workbench.loadSheetMeta(workbench.activeSheetId.value)
+  } catch {
+    // Keep dialog refresh silent; UI save paths still surface explicit errors.
+  } finally {
+    dialogMetaRefreshInFlight = false
+  }
+}
+
+function stopDialogMetaRefresh() {
+  if (dialogMetaRefreshTimer != null) {
+    window.clearInterval(dialogMetaRefreshTimer)
+    dialogMetaRefreshTimer = null
+  }
+}
+
+function startDialogMetaRefresh() {
+  if (dialogMetaRefreshTimer != null) return
+  void refreshDialogMeta()
+  dialogMetaRefreshTimer = window.setInterval(() => {
+    void refreshDialogMeta()
+  }, 1200)
+}
 
 function onDrawerNavigate(recordId: string) {
   void selectRecord(recordId)
@@ -703,6 +999,14 @@ watch([selectedRecordId, () => workbench.activeViewId.value], () => {
   formErrorMessage.value = null
   formFieldErrors.value = {}
 })
+
+watch(
+  [showFieldManager, showViewManager, showImportModal, () => workbench.activeSheetId.value],
+  ([fieldManagerVisible, viewManagerVisible, importVisible, activeSheetId]) => {
+    if ((fieldManagerVisible || viewManagerVisible || importVisible) && activeSheetId) startDialogMetaRefresh()
+    else stopDialogMetaRefresh()
+  },
+)
 
 // --- Bulk delete ---
 async function onBulkDelete(recordIds: string[]) {
@@ -777,14 +1081,8 @@ onMounted(async () => {
   window.addEventListener('beforeunload', onBeforeUnload)
   try {
     await loadBases()
-    if (workbench.activeBaseId.value) {
-      await workbench.loadBaseContext(workbench.activeBaseId.value, {
-        sheetId: props.sheetId,
-        viewId: props.viewId,
-      })
-    } else {
-      await workbench.loadSheets()
-    }
+    await workbench.loadSheets()
+    await workbench.ensureRequestedSelection(props.sheetId, props.viewId)
     const deepRecordId = props.recordId ?? parseDeepLink()
     if (deepRecordId) await resolveDeepLink(deepRecordId)
     if (activeViewType.value === 'form') loadStandaloneForm()
@@ -795,6 +1093,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
+  stopDialogMetaRefresh()
 })
 </script>
 
