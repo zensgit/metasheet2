@@ -820,6 +820,17 @@ describe('plmWorkbenchClient', () => {
     })
 
     expect(saved.isDefault).toBe(true)
+    expect(saved.state).toMatchObject({
+      page: 1,
+      q: 'scene-1',
+      actorId: '',
+      kind: 'workbench',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+      from: '',
+      to: '',
+      windowMinutes: 180,
+    })
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/views/team'),
       expect.objectContaining({
@@ -842,6 +853,54 @@ describe('plmWorkbenchClient', () => {
         }),
       }),
     )
+  })
+
+  it('preserves clear-default audit filters when listing audit team views', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: [
+          {
+            id: 'audit-view-clear-default',
+            kind: 'audit',
+            name: '取消默认日志',
+            ownerUserId: 'auditor',
+            canManage: true,
+            isDefault: false,
+            state: {
+              page: 1,
+              q: 'scene-2',
+              actorId: '',
+              kind: 'workbench',
+              action: 'clear-default',
+              resourceType: 'plm-team-view-default',
+              from: '',
+              to: '',
+              windowMinutes: 180,
+            },
+          },
+        ],
+      }),
+    })
+
+    const listed = await listPlmWorkbenchTeamViews('audit')
+
+    expect(listed.items[0]).toMatchObject({
+      id: 'audit-view-clear-default',
+      kind: 'audit',
+      state: {
+        page: 1,
+        q: 'scene-2',
+        actorId: '',
+        kind: 'workbench',
+        action: 'clear-default',
+        resourceType: 'plm-team-view-default',
+        from: '',
+        to: '',
+        windowMinutes: 180,
+      },
+    })
   })
 
   it('normalizes approvals and cad team view states by kind', async () => {

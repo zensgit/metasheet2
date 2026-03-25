@@ -198,11 +198,17 @@ function normalizeTeamViewState<Kind extends PlmWorkbenchTeamViewKind>(
       actorId: typeof record.actorId === 'string' ? record.actorId.trim() : '',
       kind: typeof record.kind === 'string' ? record.kind.trim() : '',
       action:
-        action === 'archive' || action === 'restore' || action === 'delete'
+        action === 'archive'
+        || action === 'restore'
+        || action === 'delete'
+        || action === 'set-default'
+        || action === 'clear-default'
           ? action
           : '',
       resourceType:
-        resourceType === 'plm-team-preset-batch' || resourceType === 'plm-team-view-batch'
+        resourceType === 'plm-team-preset-batch'
+        || resourceType === 'plm-team-view-batch'
+        || resourceType === 'plm-team-view-default'
           ? resourceType
           : '',
       from: typeof record.from === 'string' ? record.from.trim() : '',
