@@ -102,6 +102,7 @@ import {
   normalizePlmWorkbenchQuerySnapshot,
   PLM_WORKBENCH_QUERY_KEYS,
 } from './plm/plmWorkbenchViewState'
+import { matchPlmTeamViewStateSnapshot } from './plm/plmTeamViewStateMatch'
 import {
   buildRecommendedWorkbenchSceneAuditQuery,
   buildWorkbenchAuditQuery,
@@ -4464,6 +4465,42 @@ const {
   ),
 })
 
+const activeDocumentRouteView = computed(() => {
+  const viewId = documentTeamViewQuery.value.trim()
+  if (!viewId) return null
+  return documentTeamViews.value.find((entry) => entry.id === viewId) || null
+})
+
+watch(
+  () => [
+    documentTeamViewQuery.value,
+    activeDocumentRouteView.value?.id || '',
+    JSON.stringify({
+      role: documentRole.value,
+      filter: documentFilter.value,
+      sortKey: documentSortKey.value,
+      sortDir: documentSortDir.value,
+      columns: { ...documentColumns.value },
+    }),
+  ],
+  ([viewId, activeViewId]) => {
+    if (!viewId || !activeViewId) return
+    const activeView = activeDocumentRouteView.value
+    if (!activeView) return
+    if (matchPlmTeamViewStateSnapshot(activeView.state, {
+      role: documentRole.value,
+      filter: documentFilter.value,
+      sortKey: documentSortKey.value,
+      sortDir: documentSortDir.value,
+      columns: { ...documentColumns.value },
+    })) {
+      return
+    }
+    documentTeamViewQuery.value = ''
+    scheduleQuerySync({ documentTeamView: undefined })
+  },
+)
+
 const {
   teamViewKey: cadTeamViewKey,
   teamViewName: cadTeamViewName,
@@ -4540,6 +4577,40 @@ const {
     && !cadReviewNote.value.trim()
   ),
 })
+
+const activeCadRouteView = computed(() => {
+  const viewId = cadTeamViewQuery.value.trim()
+  if (!viewId) return null
+  return cadTeamViews.value.find((entry) => entry.id === viewId) || null
+})
+
+watch(
+  () => [
+    cadTeamViewQuery.value,
+    activeCadRouteView.value?.id || '',
+    JSON.stringify({
+      fileId: cadFileId.value,
+      otherFileId: cadOtherFileId.value,
+      reviewState: cadReviewState.value,
+      reviewNote: cadReviewNote.value,
+    }),
+  ],
+  ([viewId, activeViewId]) => {
+    if (!viewId || !activeViewId) return
+    const activeView = activeCadRouteView.value
+    if (!activeView) return
+    if (matchPlmTeamViewStateSnapshot(activeView.state, {
+      fileId: cadFileId.value,
+      otherFileId: cadOtherFileId.value,
+      reviewState: cadReviewState.value,
+      reviewNote: cadReviewNote.value,
+    })) {
+      return
+    }
+    cadTeamViewQuery.value = ''
+    scheduleQuerySync({ cadTeamView: undefined })
+  },
+)
 
 const {
   teamViewKey: approvalsTeamViewKey,
@@ -4622,6 +4693,44 @@ const {
     && approvalSortDir.value === 'desc'
   ),
 })
+
+const activeApprovalsRouteView = computed(() => {
+  const viewId = approvalsTeamViewQuery.value.trim()
+  if (!viewId) return null
+  return approvalsTeamViews.value.find((entry) => entry.id === viewId) || null
+})
+
+watch(
+  () => [
+    approvalsTeamViewQuery.value,
+    activeApprovalsRouteView.value?.id || '',
+    JSON.stringify({
+      status: approvalsStatus.value,
+      filter: approvalsFilter.value,
+      comment: approvalComment.value,
+      sortKey: approvalSortKey.value,
+      sortDir: approvalSortDir.value,
+      columns: { ...approvalColumns.value },
+    }),
+  ],
+  ([viewId, activeViewId]) => {
+    if (!viewId || !activeViewId) return
+    const activeView = activeApprovalsRouteView.value
+    if (!activeView) return
+    if (matchPlmTeamViewStateSnapshot(activeView.state, {
+      status: approvalsStatus.value,
+      filter: approvalsFilter.value,
+      comment: approvalComment.value,
+      sortKey: approvalSortKey.value,
+      sortDir: approvalSortDir.value,
+      columns: { ...approvalColumns.value },
+    })) {
+      return
+    }
+    approvalsTeamViewQuery.value = ''
+    scheduleQuerySync({ approvalsTeamView: undefined })
+  },
+)
 
 function formatDeepLinkTargets(panel?: string): string {
   if (panel) {
