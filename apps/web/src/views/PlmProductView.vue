@@ -107,6 +107,11 @@ import {
   mergePlmTeamViewBooleanMapDefaults,
 } from './plm/plmTeamViewStateMatch'
 import {
+  canActOnPlmApproval,
+  getPlmApprovalApproverId,
+  resolvePlmApprovalActorIds,
+} from './plm/plmApprovalActionability'
+import {
   buildRecommendedWorkbenchSceneAuditQuery,
   buildWorkbenchAuditQuery,
 } from './plm/plmWorkbenchSceneAudit'
@@ -360,6 +365,9 @@ const approvalComment = ref('')
 const approvalActionStatus = ref('')
 const approvalActionError = ref('')
 const approvalActingId = ref('')
+const approvalActionabilityById = ref<Record<string, boolean>>({})
+const approvalActionabilityLoadingById = ref<Record<string, boolean>>({})
+const approvalActionabilityActorKey = ref('')
 const approvalHistoryFor = ref('')
 const approvalHistoryLabel = ref('')
 const approvalHistory = ref<ApprovalHistoryEntry[]>([])
@@ -1377,6 +1385,9 @@ function resetAll() {
   approvalActionStatus.value = ''
   approvalActionError.value = ''
   approvalActingId.value = ''
+  approvalActionabilityById.value = {}
+  approvalActionabilityLoadingById.value = {}
+  approvalActionabilityActorKey.value = ''
   approvalHistoryFor.value = ''
   approvalHistoryLabel.value = ''
   approvalHistory.value = []
@@ -2075,6 +2086,7 @@ async function loadApprovals() {
       status: approvalsStatus.value,
     })
     approvals.value = result.items || []
+    void warmApprovalActionability(approvals.value)
   } catch (error: any) {
     handleAuthError(error)
     approvalsError.value = error?.message || '加载审批失败'
@@ -2549,8 +2561,152 @@ function clearApprovalHistory() {
   approvalHistoryLoading.value = false
 }
 
+function getApprovalActionStorage() {
+  return typeof localStorage !== 'undefined' ? localStorage : null
+}
+
+function getApprovalActorIds(): string[] {
+  return resolvePlmApprovalActorIds(getApprovalActionStorage())
+}
+
+function getApprovalActorKey(actorIds: readonly string[]): string {
+  return actorIds.join('|')
+}
+
+function trimApprovalActionabilityCache(entries: ApprovalEntry[], actorKey: string) {
+  const pendingIds = new Set(
+    entries
+      .filter((entry) => isApprovalPending(entry))
+      .map((entry) => getApprovalId(entry))
+      .filter((approvalId) => approvalId && approvalId !== '-'),
+  )
+
+  const nextActionability: Record<string, boolean> = {}
+  const nextLoading: Record<string, boolean> = {}
+
+  if (approvalActionabilityActorKey.value === actorKey) {
+    Object.entries(approvalActionabilityById.value).forEach(([approvalId, actionable]) => {
+      if (pendingIds.has(approvalId)) {
+        nextActionability[approvalId] = actionable
+      }
+    })
+    Object.entries(approvalActionabilityLoadingById.value).forEach(([approvalId, loading]) => {
+      if (pendingIds.has(approvalId) && loading) {
+        nextLoading[approvalId] = true
+      }
+    })
+  }
+
+  approvalActionabilityById.value = nextActionability
+  approvalActionabilityLoadingById.value = nextLoading
+  approvalActionabilityActorKey.value = actorKey
+}
+
+async function resolveApprovalActionability(entry: ApprovalEntry, actorIds: readonly string[]): Promise<boolean> {
+  const approvalId = getApprovalId(entry)
+  if (!approvalId || approvalId === '-') {
+    return false
+  }
+
+  const actorKey = getApprovalActorKey(actorIds)
+  const directApproverId = getPlmApprovalApproverId(entry)
+  if (directApproverId) {
+    const actionable = canActOnPlmApproval(entry, actorIds)
+    approvalActionabilityById.value = {
+      ...approvalActionabilityById.value,
+      [approvalId]: actionable,
+    }
+    return actionable
+  }
+
+  approvalActionabilityLoadingById.value = {
+    ...approvalActionabilityLoadingById.value,
+    [approvalId]: true,
+  }
+
+  try {
+    const result = await plmService.getApprovalHistory<ApprovalHistoryEntry>(approvalId)
+    const actionable = canActOnPlmApproval(entry, actorIds, result.items || [])
+    if (approvalActionabilityActorKey.value === actorKey) {
+      approvalActionabilityById.value = {
+        ...approvalActionabilityById.value,
+        [approvalId]: actionable,
+      }
+    }
+    return actionable
+  } catch (error: any) {
+    handleAuthError(error)
+    if (approvalActionabilityActorKey.value === actorKey) {
+      approvalActionabilityById.value = {
+        ...approvalActionabilityById.value,
+        [approvalId]: false,
+      }
+    }
+    return false
+  } finally {
+    if (approvalActionabilityActorKey.value === actorKey) {
+      const nextLoading = { ...approvalActionabilityLoadingById.value }
+      delete nextLoading[approvalId]
+      approvalActionabilityLoadingById.value = nextLoading
+    }
+  }
+}
+
+async function warmApprovalActionability(entries: ApprovalEntry[]) {
+  const actorIds = getApprovalActorIds()
+  const actorKey = getApprovalActorKey(actorIds)
+  trimApprovalActionabilityCache(entries, actorKey)
+
+  if (!actorIds.length) {
+    return
+  }
+
+  await Promise.all(
+    entries.map(async (entry) => {
+      if (!isApprovalPending(entry)) {
+        return
+      }
+      const approvalId = getApprovalId(entry)
+      if (!approvalId || approvalId === '-') {
+        return
+      }
+      if (approvalActionabilityLoadingById.value[approvalId]) {
+        return
+      }
+      if (getPlmApprovalApproverId(entry) || approvalId in approvalActionabilityById.value) {
+        await resolveApprovalActionability(entry, actorIds)
+        return
+      }
+      await resolveApprovalActionability(entry, actorIds)
+    }),
+  )
+}
+
 function isApprovalPending(entry: ApprovalEntry): boolean {
   return getApprovalStatus(entry).toLowerCase() === 'pending'
+}
+
+function canActOnApproval(entry: ApprovalEntry): boolean {
+  if (!isApprovalPending(entry)) {
+    return false
+  }
+
+  const actorIds = getApprovalActorIds()
+  if (!actorIds.length) {
+    return false
+  }
+
+  const approvalId = getApprovalId(entry)
+  if (!approvalId || approvalId === '-') {
+    return false
+  }
+
+  if (getPlmApprovalApproverId(entry)) {
+    return canActOnPlmApproval(entry, actorIds)
+  }
+
+  return approvalActionabilityActorKey.value === getApprovalActorKey(actorIds)
+    && approvalActionabilityById.value[approvalId] === true
 }
 
 async function approveApproval(entry: ApprovalEntry) {
@@ -2559,9 +2715,19 @@ async function approveApproval(entry: ApprovalEntry) {
     approvalActionError.value = '审批记录缺少 ID'
     return
   }
-  approvalActingId.value = approvalId
   approvalActionStatus.value = ''
   approvalActionError.value = ''
+  if (!isApprovalPending(entry)) {
+    approvalActionError.value = '当前审批已不是待处理状态'
+    return
+  }
+  const actorIds = getApprovalActorIds()
+  const actionable = await resolveApprovalActionability(entry, actorIds)
+  if (!actionable) {
+    approvalActionError.value = '当前登录用户不是该审批的审批人'
+    return
+  }
+  approvalActingId.value = approvalId
   try {
     const comment = approvalComment.value.trim()
     await plmService.approveApproval({
@@ -2588,6 +2754,18 @@ async function rejectApproval(entry: ApprovalEntry) {
     approvalActionError.value = '审批记录缺少 ID'
     return
   }
+  approvalActionStatus.value = ''
+  approvalActionError.value = ''
+  if (!isApprovalPending(entry)) {
+    approvalActionError.value = '当前审批已不是待处理状态'
+    return
+  }
+  const actorIds = getApprovalActorIds()
+  const actionable = await resolveApprovalActionability(entry, actorIds)
+  if (!actionable) {
+    approvalActionError.value = '当前登录用户不是该审批的审批人'
+    return
+  }
   const comment = approvalComment.value.trim()
   if (!comment) {
     approvalActionError.value = '拒绝需要填写原因'
@@ -2597,8 +2775,6 @@ async function rejectApproval(entry: ApprovalEntry) {
     return
   }
   approvalActingId.value = approvalId
-  approvalActionStatus.value = ''
-  approvalActionError.value = ''
   try {
     await plmService.rejectApproval({
       approvalId,
@@ -5994,6 +6170,7 @@ const approvalsPanel = {
   loadApprovalHistory,
   clearApprovalHistory,
   isApprovalPending,
+  canActOnApproval,
   approveApproval,
   rejectApproval,
 } satisfies PlmApprovalsPanelModel
@@ -6285,6 +6462,13 @@ watch(authState, (value) => {
     void loadBomCompareSchema()
   }
 })
+
+watch(
+  () => [authState.value, plmAuthState.value, plmAuthLegacy.value],
+  () => {
+    void warmApprovalActionability(approvals.value)
+  },
+)
 
 watch(
   () => [

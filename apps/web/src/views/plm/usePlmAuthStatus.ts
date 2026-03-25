@@ -1,7 +1,7 @@
 import { ref } from 'vue'
 import type { AuthState } from './plmPanelModels'
 
-type TokenPayload = {
+type TokenPayload = Record<string, unknown> & {
   exp?: number
 }
 

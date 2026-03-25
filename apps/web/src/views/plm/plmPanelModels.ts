@@ -389,6 +389,8 @@ export type ApprovalEntry = UnknownRecord & {
   created_by_name?: string
   requester_id?: string | number
   created_by_id?: string | number
+  approver_name?: string
+  approver_id?: string | number
   created_at?: string
   createdAt?: string
   updated_at?: string
@@ -1071,6 +1073,7 @@ export type PlmApprovalsPanelModel = {
   loadApprovalHistory: (entry?: ApprovalEntry) => Promise<void>
   clearApprovalHistory: PanelAction
   isApprovalPending: (entry: ApprovalEntry) => boolean
+  canActOnApproval: (entry: ApprovalEntry) => boolean
   approveApproval: (entry: ApprovalEntry) => Promise<void>
   rejectApproval: (entry: ApprovalEntry) => Promise<void>
 }

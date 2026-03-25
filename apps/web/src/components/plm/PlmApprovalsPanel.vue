@@ -174,7 +174,7 @@
               <button class="btn ghost mini" @click="panel.copyApprovalId(approval)">复制 ID</button>
               <button class="btn ghost mini" @click="panel.loadApprovalHistory(approval)">记录</button>
               <button
-                v-if="panel.isApprovalPending(approval)"
+                v-if="panel.canActOnApproval(approval)"
                 class="btn ghost mini"
                 :disabled="panel.approvalActingId.value === panel.getApprovalId(approval) || panel.getApprovalId(approval) === '-'"
                 @click="panel.approveApproval(approval)"
@@ -182,7 +182,7 @@
                 通过
               </button>
               <button
-                v-if="panel.isApprovalPending(approval)"
+                v-if="panel.canActOnApproval(approval)"
                 class="btn ghost mini"
                 :disabled="panel.approvalActingId.value === panel.getApprovalId(approval) || panel.getApprovalId(approval) === '-'"
                 @click="panel.rejectApproval(approval)"
