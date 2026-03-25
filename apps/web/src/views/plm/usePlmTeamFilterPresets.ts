@@ -532,6 +532,9 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     try {
       const saved = await transferPlmTeamFilterPreset(preset.id, targetOwnerUserId)
       teamPresets.value = replaceTeamPreset(teamPresets.value, saved)
+      if (!readTeamPresetPermissions(saved).canManage) {
+        teamPresetSelection.value = teamPresetSelection.value.filter((id) => id !== saved.id)
+      }
       applyPresetToTarget(saved)
       teamPresetOwnerUserId.value = ''
       options.setMessage(`已将${options.label}团队预设转移给：${saved.ownerUserId}`)
@@ -557,10 +560,12 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     try {
       await deletePlmTeamFilterPreset(preset.id)
       teamPresets.value = teamPresets.value.filter((entry) => entry.id !== preset.id)
+      teamPresetSelection.value = teamPresetSelection.value.filter((id) => id !== preset.id)
       if (teamPresetKey.value === preset.id) {
         teamPresetKey.value = ''
         teamPresetName.value = ''
         teamPresetGroup.value = ''
+        teamPresetOwnerUserId.value = ''
       }
       if (options.requestedPresetId?.value === preset.id) {
         options.syncRequestedPresetId?.(undefined)
@@ -664,10 +669,12 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     try {
       const saved = await archivePlmTeamFilterPreset(preset.id)
       teamPresets.value = replaceTeamPreset(teamPresets.value, saved)
+      teamPresetSelection.value = teamPresetSelection.value.filter((id) => id !== preset.id)
       if (teamPresetKey.value === preset.id) {
         teamPresetKey.value = ''
         teamPresetName.value = ''
         teamPresetGroup.value = ''
+        teamPresetOwnerUserId.value = ''
       }
       if (options.requestedPresetId?.value === preset.id) {
         options.syncRequestedPresetId?.(undefined)

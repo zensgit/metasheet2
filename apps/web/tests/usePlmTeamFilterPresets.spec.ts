@@ -440,6 +440,8 @@ describe('usePlmTeamFilterPresets', () => {
     expect(model.teamPresetKey.value).toBe('preset-archive')
     expect(model.canArchiveTeamPreset.value).toBe(true)
     expect(model.canRestoreTeamPreset.value).toBe(false)
+    model.teamPresetSelection.value = ['preset-archive']
+    model.teamPresetOwnerUserId.value = 'owner-stale'
 
     await model.archiveTeamPreset()
 
@@ -447,6 +449,8 @@ describe('usePlmTeamFilterPresets', () => {
     expect(syncRequestedPresetId).toHaveBeenLastCalledWith(undefined)
     expect(requestedPresetId.value).toBe('')
     expect(model.teamPresetKey.value).toBe('')
+    expect(model.teamPresetSelection.value).toEqual([])
+    expect(model.teamPresetOwnerUserId.value).toBe('')
     expect(model.canArchiveTeamPreset.value).toBe(false)
     expect(model.teamPresets.value[0]).toMatchObject({
       id: 'preset-archive',
@@ -745,6 +749,7 @@ describe('usePlmTeamFilterPresets', () => {
     await model.refreshTeamPresets()
 
     model.teamPresetKey.value = 'preset-transfer'
+    model.teamPresetSelection.value = ['preset-transfer']
     model.teamPresetOwnerUserId.value = 'owner-b'
     expect(model.canTransferTeamPreset.value).toBe(true)
     await model.transferTeamPreset()
@@ -753,6 +758,7 @@ describe('usePlmTeamFilterPresets', () => {
     expect(syncRequestedPresetId).toHaveBeenLastCalledWith('preset-transfer')
     expect(trackedApply).toHaveReturnedWith('preset-transfer')
     expect(model.teamPresetKey.value).toBe('preset-transfer')
+    expect(model.teamPresetSelection.value).toEqual([])
     expect(model.teamPresetOwnerUserId.value).toBe('')
     expect(model.showManagementActions.value).toBe(false)
     expect(model.canShareTeamPreset.value).toBe(false)
@@ -838,6 +844,8 @@ describe('usePlmTeamFilterPresets', () => {
     model.teamPresetKey.value = 'preset-delete'
     model.teamPresetName.value = '即将删除'
     model.teamPresetGroup.value = '旧分组'
+    model.teamPresetSelection.value = ['preset-delete']
+    model.teamPresetOwnerUserId.value = 'owner-stale'
 
     await model.deleteTeamPreset()
 
@@ -847,6 +855,8 @@ describe('usePlmTeamFilterPresets', () => {
     expect(model.teamPresetKey.value).toBe('')
     expect(model.teamPresetName.value).toBe('')
     expect(model.teamPresetGroup.value).toBe('')
+    expect(model.teamPresetSelection.value).toEqual([])
+    expect(model.teamPresetOwnerUserId.value).toBe('')
     expect(model.teamPresets.value).toHaveLength(0)
   })
 
