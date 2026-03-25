@@ -44,6 +44,14 @@ function getErrorMessage(error: unknown, fallback: string) {
   return fallback
 }
 
+function canManageTeamView(view: { canManage?: boolean; permissions?: { canManage?: boolean } } | null) {
+  if (!view) return false
+  if (typeof view.permissions?.canManage === 'boolean') {
+    return view.permissions.canManage
+  }
+  return Boolean(view.canManage)
+}
+
 function getViewTimestamp(view: PlmWorkbenchTeamView) {
   const raw = view.updatedAt || view.createdAt || ''
   const parsed = Date.parse(raw)
@@ -118,6 +126,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   const selectedManagementTarget = computed(() => (
     hasPendingApplySelection.value ? null : selectedTeamView.value
   ))
+  const visibleManagementTarget = computed(() => (
+    hasPendingApplySelection.value ? requestedTeamView.value : selectedTeamView.value
+  ))
   const defaultTeamView = computed(
     () => teamViews.value.find((view) => view.isDefault && !view.isArchived) || null,
   )
@@ -149,7 +160,6 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   const canSaveTeamView = computed(() => Boolean(teamViewName.value.trim()))
   const {
     canManageSelectedEntry: canManageSelectedTeamView,
-    showManagementActions,
     canShare: canShareTeamView,
     canDelete: canDeleteTeamView,
     canArchive: canArchiveTeamView,
@@ -163,6 +173,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     nameRef: teamViewName,
     ownerUserIdRef: teamViewOwnerUserId,
   })
+  const showManagementActions = computed(() => (
+    !visibleManagementTarget.value || canManageTeamView(visibleManagementTarget.value)
+  ))
   const canApplyTeamView = computed(() => canApplyPlmCollaborativeEntry(selectedTeamView.value))
   const canDuplicateTeamView = computed(() => canDuplicatePlmCollaborativeEntry(selectedTeamView.value))
   const defaultTeamViewLabel = computed(() => defaultTeamView.value?.name || '')
@@ -297,6 +310,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       return
     }
 
+    teamViewSelection.value = []
     applyView(view)
     options.setMessage(`已应用${options.label}团队视角：${view.name}`)
   }
