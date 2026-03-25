@@ -112,6 +112,14 @@ export function usePlmDeepLinkState(options: UsePlmDeepLinkStateOptions) {
     }, 250)
   }
 
+  function cancelScheduledQuerySync() {
+    if (typeof window !== 'undefined' && querySyncTimer) {
+      window.clearTimeout(querySyncTimer)
+      querySyncTimer = undefined
+    }
+    querySyncPending = {}
+  }
+
   function setDeepLinkMessage(message: string, isError = false) {
     if (typeof window !== 'undefined' && deepLinkTimer) {
       window.clearTimeout(deepLinkTimer)
@@ -395,6 +403,7 @@ export function usePlmDeepLinkState(options: UsePlmDeepLinkStateOptions) {
     customDeepLinkPresets,
     deepLinkPresets,
     scheduleQuerySync,
+    cancelScheduledQuerySync,
     setDeepLinkMessage,
     resetDeepLinkState,
     clearDeepLinkScope,

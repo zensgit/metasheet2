@@ -68,4 +68,16 @@ describe('usePlmDeepLinkState', () => {
     expect(copyText).toHaveBeenCalledWith('http://example.test/plm?panel=product,compare')
     expect(state.deepLinkStatus.value).toContain('product,compare')
   })
+
+  it('cancels pending query sync patches before the debounce flushes', () => {
+    const { state, syncQueryParams } = createState()
+
+    state.scheduleQuerySync({ productId: 'P-1' })
+    state.scheduleQuerySync({ compareLeftId: 'L-1' })
+    state.cancelScheduledQuerySync()
+
+    vi.advanceTimersByTime(250)
+
+    expect(syncQueryParams).not.toHaveBeenCalled()
+  })
 })

@@ -423,7 +423,8 @@ const {
   importFileInput,
   isPresetDropActive,
   deepLinkPresets,
-  scheduleQuerySync,
+  scheduleQuerySync: scheduleBaseQuerySync,
+  cancelScheduledQuerySync,
   setDeepLinkMessage,
   resetDeepLinkState,
   clearDeepLinkScope,
@@ -452,6 +453,15 @@ const {
   applyPresetParams,
   copyText: copyToClipboard,
 })
+const isApplyingRouteQueryState = ref(false)
+let pendingRouteQueryHydration = false
+
+function scheduleQuerySync(patch: Record<string, string | number | boolean | undefined>) {
+  if (isApplyingRouteQueryState.value) {
+    return
+  }
+  scheduleBaseQuerySync(patch)
+}
 const compareLeftId = ref('')
 const compareRightId = ref('')
 const {
@@ -5061,349 +5071,423 @@ function buildDeepLinkUrl(panelOverride?: string): string {
 }
 
 async function applyQueryState() {
-  const productParam = readQueryParam('productId')
-  if (productParam !== undefined) {
-    productId.value = productParam
-  }
-  const itemNumberParam = readQueryParam('itemNumber')
-  if (itemNumberParam !== undefined) {
-    productItemNumber.value = itemNumberParam
-  }
-  const itemTypeParam = readQueryParam('itemType')
-  if (itemTypeParam !== undefined) {
-    itemType.value = itemTypeParam || DEFAULT_ITEM_TYPE
-  }
-  const searchQueryParam = readQueryParam('searchQuery')
-  if (searchQueryParam !== undefined) {
-    searchQuery.value = searchQueryParam
-  }
-  const searchItemTypeParam = readQueryParam('searchItemType')
-  if (searchItemTypeParam !== undefined) {
-    searchItemType.value = searchItemTypeParam || DEFAULT_ITEM_TYPE
-  }
-  const searchLimitParam = parseQueryNumber(readQueryParam('searchLimit'))
-  if (searchLimitParam !== undefined) {
-    const clamped = Math.min(50, Math.max(1, Math.floor(searchLimitParam)))
-    searchLimit.value = clamped
-  }
-  const workbenchTeamViewParam = readQueryParam('workbenchTeamView')
-  if (workbenchTeamViewParam !== undefined) {
-    workbenchTeamViewQuery.value = workbenchTeamViewParam
-  }
-  const sceneFocus = readWorkbenchSceneFocus(route.query)
-  if (sceneFocus) {
-    sceneCatalogAutoFocusSceneId.value = sceneFocus
-  }
-  const documentTeamViewParam = readQueryParam('documentTeamView')
-  if (documentTeamViewParam !== undefined) {
-    documentTeamViewQuery.value = documentTeamViewParam
-  }
-  const cadTeamViewParam = readQueryParam('cadTeamView')
-  if (cadTeamViewParam !== undefined) {
-    cadTeamViewQuery.value = cadTeamViewParam
-  }
-  const approvalsTeamViewParam = readQueryParam('approvalsTeamView')
-  if (approvalsTeamViewParam !== undefined) {
-    approvalsTeamViewQuery.value = approvalsTeamViewParam
-  }
-  const documentRoleParam = readQueryParam('documentRole')
-  if (documentRoleParam !== undefined) {
-    documentRole.value = documentRoleParam
-  }
-  const documentFilterParam = readQueryParam('documentFilter')
-  if (documentFilterParam !== undefined) {
-    documentFilter.value = documentFilterParam
-  }
-  const documentSortParam = readQueryParam('documentSort')
-  if (documentSortParam !== undefined) {
-    const normalized = documentSortParam.trim().toLowerCase()
-    if (['updated', 'created', 'name', 'type', 'revision', 'role', 'mime', 'size'].includes(normalized)) {
-      documentSortKey.value = normalized as typeof documentSortKey.value
-    }
-  }
-  const documentSortDirParam = readQueryParam('documentSortDir')
-  if (documentSortDirParam !== undefined) {
-    const normalized = documentSortDirParam.trim().toLowerCase()
-    if (normalized === 'asc' || normalized === 'desc') {
-      documentSortDir.value = normalized as typeof documentSortDir.value
-    }
-  }
-  const documentColumnsParam = parseColumnQuery(readQueryParam('documentColumns'), defaultDocumentColumns)
-  if (documentColumnsParam) {
-    documentColumns.value = documentColumnsParam
-  }
-  const cadFileParam = readQueryParam('cadFileId')
-  if (cadFileParam !== undefined) {
-    cadFileId.value = cadFileParam
-  }
-  const cadOtherParam = readQueryParam('cadOtherFileId')
-  if (cadOtherParam !== undefined) {
-    cadOtherFileId.value = cadOtherParam
-  }
-  const cadReviewStateParam = readQueryParam('cadReviewState')
-  if (cadReviewStateParam !== undefined) {
-    cadReviewState.value = cadReviewStateParam
-  }
-  const cadReviewNoteParam = readQueryParam('cadReviewNote')
-  if (cadReviewNoteParam !== undefined) {
-    cadReviewNote.value = cadReviewNoteParam
-  }
-  const approvalsStatusParam = readQueryParam('approvalsStatus')
-  if (approvalsStatusParam !== undefined) {
-    const normalized = approvalsStatusParam.trim().toLowerCase()
-    if (['all', 'pending', 'approved', 'rejected'].includes(normalized)) {
-      approvalsStatus.value = normalized as typeof approvalsStatus.value
-    }
-  }
-  const approvalsFilterParam = readQueryParam('approvalsFilter')
-  if (approvalsFilterParam !== undefined) {
-    approvalsFilter.value = approvalsFilterParam
-  }
-  const approvalCommentParam = readQueryParam('approvalComment')
-  if (approvalCommentParam !== undefined) {
-    approvalComment.value = approvalCommentParam
-  }
-  const approvalSortParam = readQueryParam('approvalSort')
-  if (approvalSortParam !== undefined) {
-    const normalized = approvalSortParam.trim().toLowerCase()
-    if (['created', 'title', 'status', 'requester', 'product'].includes(normalized)) {
-      approvalSortKey.value = normalized as typeof approvalSortKey.value
-    }
-  }
-  const approvalSortDirParam = readQueryParam('approvalSortDir')
-  if (approvalSortDirParam !== undefined) {
-    const normalized = approvalSortDirParam.trim().toLowerCase()
-    if (normalized === 'asc' || normalized === 'desc') {
-      approvalSortDir.value = normalized as typeof approvalSortDir.value
-    }
-  }
-  const approvalColumnsParam = parseColumnQuery(readQueryParam('approvalColumns'), defaultApprovalColumns)
-  if (approvalColumnsParam) {
-    approvalColumns.value = approvalColumnsParam
-  }
-  if (['valid', 'expiring'].includes(authState.value)) {
-    const teamViewRefreshTasks: Array<Promise<void>> = []
-    if (workbenchTeamViewQuery.value) {
-      teamViewRefreshTasks.push(refreshWorkbenchTeamViews())
-    }
-    if (documentTeamViewQuery.value) {
-      teamViewRefreshTasks.push(refreshDocumentTeamViews())
-    }
-    if (cadTeamViewQuery.value) {
-      teamViewRefreshTasks.push(refreshCadTeamViews())
-    }
-    if (approvalsTeamViewQuery.value) {
-      teamViewRefreshTasks.push(refreshApprovalsTeamViews())
-    }
-    if (teamViewRefreshTasks.length) {
-      await Promise.all(teamViewRefreshTasks)
-    }
-  }
-  const whereUsedParam = readQueryParam('whereUsedItemId')
-  if (whereUsedParam !== undefined) {
-    whereUsedItemId.value = whereUsedParam
-  }
-  const whereUsedRecursiveParam = parseQueryBoolean(readQueryParam('whereUsedRecursive'))
-  if (whereUsedRecursiveParam !== undefined) {
-    whereUsedRecursive.value = whereUsedRecursiveParam
-  }
-  const whereUsedMaxLevelsParam = parseQueryNumber(readQueryParam('whereUsedMaxLevels'))
-  if (whereUsedMaxLevelsParam !== undefined) {
-    whereUsedMaxLevels.value = Math.max(1, Math.floor(whereUsedMaxLevelsParam))
-  }
-  const whereUsedFilterPresetParam = readQueryParam('whereUsedFilterPreset')
-  if (whereUsedFilterPresetParam !== undefined) {
-    whereUsedFilterPresetQuery.value = whereUsedFilterPresetParam
-  }
-  const whereUsedTeamPresetParam = readQueryParam('whereUsedTeamPreset')
-  if (whereUsedTeamPresetParam !== undefined) {
-    whereUsedTeamPresetQuery.value = whereUsedTeamPresetParam
-  }
-  const whereUsedFilterParam = readQueryParam('whereUsedFilter')
-  if (whereUsedFilterParam !== undefined) {
-    whereUsedFilter.value = whereUsedFilterParam
-  }
-  const whereUsedFilterFieldParam = readQueryParam('whereUsedFilterField')
-  if (whereUsedFilterFieldParam !== undefined) {
-    const matched = whereUsedFilterFieldOptions.find(
-      (entry) => entry.value === whereUsedFilterFieldParam
-    )
-    if (matched) {
-      whereUsedFilterField.value = matched.value
-    }
-  }
-  const bomDepthParam = parseQueryNumber(readQueryParam('bomDepth'))
-  if (bomDepthParam !== undefined) {
-    bomDepth.value = Math.max(1, Math.floor(bomDepthParam))
-  }
-  const bomEffectiveAtParam = readQueryParam('bomEffectiveAt')
-  if (bomEffectiveAtParam !== undefined) {
-    bomEffectiveAt.value = bomEffectiveAtParam
-  }
-  const bomFilterPresetParam = readQueryParam('bomFilterPreset')
-  if (bomFilterPresetParam !== undefined) {
-    bomFilterPresetQuery.value = bomFilterPresetParam
-  }
-  const bomTeamPresetParam = readQueryParam('bomTeamPreset')
-  if (bomTeamPresetParam !== undefined) {
-    bomTeamPresetQuery.value = bomTeamPresetParam
-  }
-  const bomFilterParam = readQueryParam('bomFilter')
-  if (bomFilterParam !== undefined) {
-    bomFilter.value = bomFilterParam
-  }
-  const bomFilterFieldParam = readQueryParam('bomFilterField')
-  if (bomFilterFieldParam !== undefined) {
-    const matched = bomFilterFieldOptions.find((entry) => entry.value === bomFilterFieldParam)
-    if (matched) {
-      bomFilterField.value = matched.value
-    }
-  }
-  const bomViewParam = readQueryParam('bomView')
-  if (bomViewParam !== undefined) {
-    const normalized = bomViewParam.trim().toLowerCase()
-    if (normalized === 'tree' || normalized === 'table') {
-      bomView.value = normalized as typeof bomView.value
-    }
-  }
-  const bomCollapsedParam = readQueryParam('bomCollapsed')
-  if (bomCollapsedParam !== undefined) {
-    const parsed = filterBomCollapsed(parseBomCollapsed(bomCollapsedParam))
-    bomCollapsed.value = parsed
-    persistBomCollapsed(parsed)
-  } else if (bomView.value === 'tree') {
-    const stored = loadStoredBomCollapsed()
-    if (stored) {
-      bomCollapsed.value = filterBomCollapsed(stored)
-    }
-  }
-  if (['valid', 'expiring'].includes(authState.value)) {
-    const teamPresetRefreshTasks: Array<Promise<void>> = []
-    if (bomTeamPresetQuery.value) {
-      teamPresetRefreshTasks.push(refreshBomTeamPresets())
-    }
-    if (whereUsedTeamPresetQuery.value) {
-      teamPresetRefreshTasks.push(refreshWhereUsedTeamPresets())
-    }
-    if (teamPresetRefreshTasks.length) {
-      await Promise.all(teamPresetRefreshTasks)
-    }
-  }
-  if (bomFilterPresetQuery.value) {
-    const preset = applyFilterPreset(bomFilterPresets.value, bomFilterPresetQuery.value)
-    if (preset) {
-      applyBomLocalFilterPresetIdentity(preset)
-    } else {
-      syncBomFilterPresetQuery(undefined)
-    }
-  }
-  if (whereUsedFilterPresetQuery.value) {
-    const preset = applyFilterPreset(whereUsedFilterPresets.value, whereUsedFilterPresetQuery.value)
-    if (preset) {
-      applyWhereUsedLocalFilterPresetIdentity(preset)
-    } else {
-      syncWhereUsedFilterPresetQuery(undefined)
-    }
-  }
-  const compareLeftParam = readQueryParam('compareLeftId')
-  if (compareLeftParam !== undefined) {
-    compareLeftId.value = compareLeftParam
-  }
-  const compareRightParam = readQueryParam('compareRightId')
-  if (compareRightParam !== undefined) {
-    compareRightId.value = compareRightParam
-  }
-  const compareModeParam = readQueryParam('compareMode')
-  if (compareModeParam !== undefined) {
-    compareMode.value = compareModeParam
-  }
-  const compareLineKeyParam = readQueryParam('compareLineKey')
-  if (compareLineKeyParam !== undefined) {
-    compareLineKey.value = compareLineKeyParam
-  }
-  const compareMaxLevelsParam = parseQueryNumber(readQueryParam('compareMaxLevels'))
-  if (compareMaxLevelsParam !== undefined) {
-    compareMaxLevels.value = Math.max(1, Math.floor(compareMaxLevelsParam))
-  }
-  const compareEffectiveAtParam = readQueryParam('compareEffectiveAt')
-  if (compareEffectiveAtParam !== undefined) {
-    compareEffectiveAt.value = compareEffectiveAtParam
-  }
-  const compareRelPropsParam = readQueryParam('compareRelationshipProps')
-  if (compareRelPropsParam !== undefined) {
-    compareRelationshipProps.value = compareRelPropsParam
-  }
-  const compareFilterParam = readQueryParam('compareFilter')
-  if (compareFilterParam !== undefined) {
-    compareFilter.value = compareFilterParam
-  }
-  const includeChildFieldsParam = parseQueryBoolean(readQueryParam('compareIncludeChildFields'))
-  if (includeChildFieldsParam !== undefined) {
-    compareIncludeChildFields.value = includeChildFieldsParam
-  }
-  const includeSubstitutesParam = parseQueryBoolean(readQueryParam('compareIncludeSubstitutes'))
-  if (includeSubstitutesParam !== undefined) {
-    compareIncludeSubstitutes.value = includeSubstitutesParam
-  }
-  const includeEffectivityParam = parseQueryBoolean(readQueryParam('compareIncludeEffectivity'))
-  if (includeEffectivityParam !== undefined) {
-    compareIncludeEffectivity.value = includeEffectivityParam
-  }
-  const compareSyncParam = parseQueryBoolean(readQueryParam('compareSync'))
-  if (compareSyncParam !== undefined) {
-    compareSyncEnabled.value = compareSyncParam
-  }
-  const bomLineParam = readQueryParam('bomLineId')
-  if (bomLineParam !== undefined) {
-    bomLineId.value = bomLineParam
-  }
-  const substitutesFilterParam = readQueryParam('substitutesFilter')
-  if (substitutesFilterParam !== undefined) {
-    substitutesFilter.value = substitutesFilterParam
+  if (isApplyingRouteQueryState.value) {
+    pendingRouteQueryHydration = true
+    return
   }
 
-  const bomPresetShareParam = readQueryParam('bomPresetShare')
-  if (bomPresetShareParam !== undefined) {
-    if (bomPresetShareParam) {
-      const mode = resolveFilterPresetShareMode(readQueryParam('bomPresetShareMode'))
-      importBomFilterPresetShare(bomPresetShareParam, mode)
+  isApplyingRouteQueryState.value = true
+
+  try {
+    productId.value = ''
+    productItemNumber.value = ''
+    itemType.value = DEFAULT_ITEM_TYPE
+    searchQuery.value = ''
+    searchItemType.value = DEFAULT_ITEM_TYPE
+    searchLimit.value = DEFAULT_SEARCH_LIMIT
+    workbenchTeamViewQuery.value = ''
+    sceneCatalogAutoFocusSceneId.value = ''
+    documentTeamViewQuery.value = ''
+    cadTeamViewQuery.value = ''
+    approvalsTeamViewQuery.value = ''
+    documentRole.value = ''
+    documentFilter.value = ''
+    documentSortKey.value = 'updated'
+    documentSortDir.value = 'desc'
+    documentColumns.value = loadStoredColumns(DOCUMENT_COLUMNS_STORAGE_KEY, defaultDocumentColumns)
+    cadFileId.value = ''
+    cadOtherFileId.value = ''
+    cadReviewState.value = ''
+    cadReviewNote.value = ''
+    approvalsStatus.value = DEFAULT_APPROVAL_STATUS
+    approvalsFilter.value = ''
+    approvalComment.value = ''
+    approvalSortKey.value = 'created'
+    approvalSortDir.value = 'desc'
+    approvalColumns.value = loadStoredColumns(APPROVAL_COLUMNS_STORAGE_KEY, defaultApprovalColumns)
+    whereUsedItemId.value = ''
+    whereUsedRecursive.value = true
+    whereUsedMaxLevels.value = DEFAULT_WHERE_USED_MAX_LEVELS
+    whereUsedFilterPresetQuery.value = ''
+    whereUsedTeamPresetQuery.value = ''
+    whereUsedFilter.value = ''
+    whereUsedFilterField.value = 'all'
+    bomDepth.value = DEFAULT_BOM_DEPTH
+    bomEffectiveAt.value = ''
+    bomFilterPresetQuery.value = ''
+    bomTeamPresetQuery.value = ''
+    bomFilter.value = ''
+    bomFilterField.value = 'all'
+    bomView.value = 'table'
+    bomCollapsed.value = new Set()
+    compareLeftId.value = ''
+    compareRightId.value = ''
+    compareMode.value = ''
+    compareLineKey.value = DEFAULT_COMPARE_LINE_KEY
+    compareMaxLevels.value = DEFAULT_COMPARE_MAX_LEVELS
+    compareEffectiveAt.value = ''
+    compareRelationshipProps.value = DEFAULT_COMPARE_REL_PROPS
+    compareFilter.value = ''
+    compareIncludeChildFields.value = true
+    compareIncludeSubstitutes.value = false
+    compareIncludeEffectivity.value = false
+    compareSyncEnabled.value = true
+    bomLineId.value = ''
+    substitutesFilter.value = ''
+    deepLinkScope.value = []
+
+    const productParam = readQueryParam('productId')
+    if (productParam !== undefined) {
+      productId.value = productParam
     }
-    syncQueryParams({ bomPresetShare: undefined, bomPresetShareMode: undefined })
-  }
-  const whereUsedPresetShareParam = readQueryParam('whereUsedPresetShare')
-  if (whereUsedPresetShareParam !== undefined) {
-    if (whereUsedPresetShareParam) {
-      const mode = resolveFilterPresetShareMode(readQueryParam('whereUsedPresetShareMode'))
-      importWhereUsedFilterPresetShare(whereUsedPresetShareParam, mode)
+    const itemNumberParam = readQueryParam('itemNumber')
+    if (itemNumberParam !== undefined) {
+      productItemNumber.value = itemNumberParam
     }
-    syncQueryParams({ whereUsedPresetShare: undefined, whereUsedPresetShareMode: undefined })
+    const itemTypeParam = readQueryParam('itemType')
+    if (itemTypeParam !== undefined) {
+      itemType.value = itemTypeParam || DEFAULT_ITEM_TYPE
+    }
+    const searchQueryParam = readQueryParam('searchQuery')
+    if (searchQueryParam !== undefined) {
+      searchQuery.value = searchQueryParam
+    }
+    const searchItemTypeParam = readQueryParam('searchItemType')
+    if (searchItemTypeParam !== undefined) {
+      searchItemType.value = searchItemTypeParam || DEFAULT_ITEM_TYPE
+    }
+    const searchLimitParam = parseQueryNumber(readQueryParam('searchLimit'))
+    if (searchLimitParam !== undefined) {
+      const clamped = Math.min(50, Math.max(1, Math.floor(searchLimitParam)))
+      searchLimit.value = clamped
+    }
+    const workbenchTeamViewParam = readQueryParam('workbenchTeamView')
+    if (workbenchTeamViewParam !== undefined) {
+      workbenchTeamViewQuery.value = workbenchTeamViewParam
+    }
+    const sceneFocus = readWorkbenchSceneFocus(route.query)
+    sceneCatalogAutoFocusSceneId.value = sceneFocus || ''
+    const documentTeamViewParam = readQueryParam('documentTeamView')
+    if (documentTeamViewParam !== undefined) {
+      documentTeamViewQuery.value = documentTeamViewParam
+    }
+    const cadTeamViewParam = readQueryParam('cadTeamView')
+    if (cadTeamViewParam !== undefined) {
+      cadTeamViewQuery.value = cadTeamViewParam
+    }
+    const approvalsTeamViewParam = readQueryParam('approvalsTeamView')
+    if (approvalsTeamViewParam !== undefined) {
+      approvalsTeamViewQuery.value = approvalsTeamViewParam
+    }
+    const documentRoleParam = readQueryParam('documentRole')
+    if (documentRoleParam !== undefined) {
+      documentRole.value = documentRoleParam
+    }
+    const documentFilterParam = readQueryParam('documentFilter')
+    if (documentFilterParam !== undefined) {
+      documentFilter.value = documentFilterParam
+    }
+    const documentSortParam = readQueryParam('documentSort')
+    if (documentSortParam !== undefined) {
+      const normalized = documentSortParam.trim().toLowerCase()
+      if (['updated', 'created', 'name', 'type', 'revision', 'role', 'mime', 'size'].includes(normalized)) {
+        documentSortKey.value = normalized as typeof documentSortKey.value
+      }
+    }
+    const documentSortDirParam = readQueryParam('documentSortDir')
+    if (documentSortDirParam !== undefined) {
+      const normalized = documentSortDirParam.trim().toLowerCase()
+      if (normalized === 'asc' || normalized === 'desc') {
+        documentSortDir.value = normalized as typeof documentSortDir.value
+      }
+    }
+    const documentColumnsParam = parseColumnQuery(readQueryParam('documentColumns'), defaultDocumentColumns)
+    if (documentColumnsParam) {
+      documentColumns.value = documentColumnsParam
+    }
+    const cadFileParam = readQueryParam('cadFileId')
+    if (cadFileParam !== undefined) {
+      cadFileId.value = cadFileParam
+    }
+    const cadOtherParam = readQueryParam('cadOtherFileId')
+    if (cadOtherParam !== undefined) {
+      cadOtherFileId.value = cadOtherParam
+    }
+    const cadReviewStateParam = readQueryParam('cadReviewState')
+    if (cadReviewStateParam !== undefined) {
+      cadReviewState.value = cadReviewStateParam
+    }
+    const cadReviewNoteParam = readQueryParam('cadReviewNote')
+    if (cadReviewNoteParam !== undefined) {
+      cadReviewNote.value = cadReviewNoteParam
+    }
+    const approvalsStatusParam = readQueryParam('approvalsStatus')
+    if (approvalsStatusParam !== undefined) {
+      const normalized = approvalsStatusParam.trim().toLowerCase()
+      if (['all', 'pending', 'approved', 'rejected'].includes(normalized)) {
+        approvalsStatus.value = normalized as typeof approvalsStatus.value
+      }
+    }
+    const approvalsFilterParam = readQueryParam('approvalsFilter')
+    if (approvalsFilterParam !== undefined) {
+      approvalsFilter.value = approvalsFilterParam
+    }
+    const approvalCommentParam = readQueryParam('approvalComment')
+    if (approvalCommentParam !== undefined) {
+      approvalComment.value = approvalCommentParam
+    }
+    const approvalSortParam = readQueryParam('approvalSort')
+    if (approvalSortParam !== undefined) {
+      const normalized = approvalSortParam.trim().toLowerCase()
+      if (['created', 'title', 'status', 'requester', 'product'].includes(normalized)) {
+        approvalSortKey.value = normalized as typeof approvalSortKey.value
+      }
+    }
+    const approvalSortDirParam = readQueryParam('approvalSortDir')
+    if (approvalSortDirParam !== undefined) {
+      const normalized = approvalSortDirParam.trim().toLowerCase()
+      if (normalized === 'asc' || normalized === 'desc') {
+        approvalSortDir.value = normalized as typeof approvalSortDir.value
+      }
+    }
+    const approvalColumnsParam = parseColumnQuery(readQueryParam('approvalColumns'), defaultApprovalColumns)
+    if (approvalColumnsParam) {
+      approvalColumns.value = approvalColumnsParam
+    }
+    if (['valid', 'expiring'].includes(authState.value)) {
+      const teamViewRefreshTasks: Array<Promise<void>> = []
+      if (workbenchTeamViewQuery.value) {
+        teamViewRefreshTasks.push(refreshWorkbenchTeamViews())
+      }
+      if (documentTeamViewQuery.value) {
+        teamViewRefreshTasks.push(refreshDocumentTeamViews())
+      }
+      if (cadTeamViewQuery.value) {
+        teamViewRefreshTasks.push(refreshCadTeamViews())
+      }
+      if (approvalsTeamViewQuery.value) {
+        teamViewRefreshTasks.push(refreshApprovalsTeamViews())
+      }
+      if (teamViewRefreshTasks.length) {
+        await Promise.all(teamViewRefreshTasks)
+      }
+    }
+    const whereUsedParam = readQueryParam('whereUsedItemId')
+    if (whereUsedParam !== undefined) {
+      whereUsedItemId.value = whereUsedParam
+    }
+    const whereUsedRecursiveParam = parseQueryBoolean(readQueryParam('whereUsedRecursive'))
+    if (whereUsedRecursiveParam !== undefined) {
+      whereUsedRecursive.value = whereUsedRecursiveParam
+    }
+    const whereUsedMaxLevelsParam = parseQueryNumber(readQueryParam('whereUsedMaxLevels'))
+    if (whereUsedMaxLevelsParam !== undefined) {
+      whereUsedMaxLevels.value = Math.max(1, Math.floor(whereUsedMaxLevelsParam))
+    }
+    const whereUsedFilterPresetParam = readQueryParam('whereUsedFilterPreset')
+    if (whereUsedFilterPresetParam !== undefined) {
+      whereUsedFilterPresetQuery.value = whereUsedFilterPresetParam
+    }
+    const whereUsedTeamPresetParam = readQueryParam('whereUsedTeamPreset')
+    if (whereUsedTeamPresetParam !== undefined) {
+      whereUsedTeamPresetQuery.value = whereUsedTeamPresetParam
+    }
+    const whereUsedFilterParam = readQueryParam('whereUsedFilter')
+    if (whereUsedFilterParam !== undefined) {
+      whereUsedFilter.value = whereUsedFilterParam
+    }
+    const whereUsedFilterFieldParam = readQueryParam('whereUsedFilterField')
+    if (whereUsedFilterFieldParam !== undefined) {
+      const matched = whereUsedFilterFieldOptions.find(
+        (entry) => entry.value === whereUsedFilterFieldParam
+      )
+      if (matched) {
+        whereUsedFilterField.value = matched.value
+      }
+    }
+    const bomDepthParam = parseQueryNumber(readQueryParam('bomDepth'))
+    if (bomDepthParam !== undefined) {
+      bomDepth.value = Math.max(1, Math.floor(bomDepthParam))
+    }
+    const bomEffectiveAtParam = readQueryParam('bomEffectiveAt')
+    if (bomEffectiveAtParam !== undefined) {
+      bomEffectiveAt.value = bomEffectiveAtParam
+    }
+    const bomFilterPresetParam = readQueryParam('bomFilterPreset')
+    if (bomFilterPresetParam !== undefined) {
+      bomFilterPresetQuery.value = bomFilterPresetParam
+    }
+    const bomTeamPresetParam = readQueryParam('bomTeamPreset')
+    if (bomTeamPresetParam !== undefined) {
+      bomTeamPresetQuery.value = bomTeamPresetParam
+    }
+    const bomFilterParam = readQueryParam('bomFilter')
+    if (bomFilterParam !== undefined) {
+      bomFilter.value = bomFilterParam
+    }
+    const bomFilterFieldParam = readQueryParam('bomFilterField')
+    if (bomFilterFieldParam !== undefined) {
+      const matched = bomFilterFieldOptions.find((entry) => entry.value === bomFilterFieldParam)
+      if (matched) {
+        bomFilterField.value = matched.value
+      }
+    }
+    const bomViewParam = readQueryParam('bomView')
+    if (bomViewParam !== undefined) {
+      const normalized = bomViewParam.trim().toLowerCase()
+      if (normalized === 'tree' || normalized === 'table') {
+        bomView.value = normalized as typeof bomView.value
+      }
+    }
+    const bomCollapsedParam = readQueryParam('bomCollapsed')
+    const currentBomView = String(bomView.value)
+    if (bomCollapsedParam !== undefined) {
+      const parsed = filterBomCollapsed(parseBomCollapsed(bomCollapsedParam))
+      bomCollapsed.value = parsed
+      persistBomCollapsed(parsed)
+    } else if (currentBomView === 'tree') {
+      const stored = loadStoredBomCollapsed()
+      if (stored) {
+        bomCollapsed.value = filterBomCollapsed(stored)
+      }
+    }
+    if (['valid', 'expiring'].includes(authState.value)) {
+      const teamPresetRefreshTasks: Array<Promise<void>> = []
+      if (bomTeamPresetQuery.value) {
+        teamPresetRefreshTasks.push(refreshBomTeamPresets())
+      }
+      if (whereUsedTeamPresetQuery.value) {
+        teamPresetRefreshTasks.push(refreshWhereUsedTeamPresets())
+      }
+      if (teamPresetRefreshTasks.length) {
+        await Promise.all(teamPresetRefreshTasks)
+      }
+    }
+    if (bomFilterPresetQuery.value) {
+      const preset = applyFilterPreset(bomFilterPresets.value, bomFilterPresetQuery.value)
+      if (preset) {
+        applyBomLocalFilterPresetIdentity(preset)
+      } else {
+        syncBomFilterPresetQuery(undefined)
+      }
+    }
+    if (whereUsedFilterPresetQuery.value) {
+      const preset = applyFilterPreset(whereUsedFilterPresets.value, whereUsedFilterPresetQuery.value)
+      if (preset) {
+        applyWhereUsedLocalFilterPresetIdentity(preset)
+      } else {
+        syncWhereUsedFilterPresetQuery(undefined)
+      }
+    }
+    const compareLeftParam = readQueryParam('compareLeftId')
+    if (compareLeftParam !== undefined) {
+      compareLeftId.value = compareLeftParam
+    }
+    const compareRightParam = readQueryParam('compareRightId')
+    if (compareRightParam !== undefined) {
+      compareRightId.value = compareRightParam
+    }
+    const compareModeParam = readQueryParam('compareMode')
+    if (compareModeParam !== undefined) {
+      compareMode.value = compareModeParam
+    }
+    const compareLineKeyParam = readQueryParam('compareLineKey')
+    if (compareLineKeyParam !== undefined) {
+      compareLineKey.value = compareLineKeyParam
+    }
+    const compareMaxLevelsParam = parseQueryNumber(readQueryParam('compareMaxLevels'))
+    if (compareMaxLevelsParam !== undefined) {
+      compareMaxLevels.value = Math.max(1, Math.floor(compareMaxLevelsParam))
+    }
+    const compareEffectiveAtParam = readQueryParam('compareEffectiveAt')
+    if (compareEffectiveAtParam !== undefined) {
+      compareEffectiveAt.value = compareEffectiveAtParam
+    }
+    const compareRelPropsParam = readQueryParam('compareRelationshipProps')
+    if (compareRelPropsParam !== undefined) {
+      compareRelationshipProps.value = compareRelPropsParam
+    }
+    const compareFilterParam = readQueryParam('compareFilter')
+    if (compareFilterParam !== undefined) {
+      compareFilter.value = compareFilterParam
+    }
+    const includeChildFieldsParam = parseQueryBoolean(readQueryParam('compareIncludeChildFields'))
+    if (includeChildFieldsParam !== undefined) {
+      compareIncludeChildFields.value = includeChildFieldsParam
+    }
+    const includeSubstitutesParam = parseQueryBoolean(readQueryParam('compareIncludeSubstitutes'))
+    if (includeSubstitutesParam !== undefined) {
+      compareIncludeSubstitutes.value = includeSubstitutesParam
+    }
+    const includeEffectivityParam = parseQueryBoolean(readQueryParam('compareIncludeEffectivity'))
+    if (includeEffectivityParam !== undefined) {
+      compareIncludeEffectivity.value = includeEffectivityParam
+    }
+    const compareSyncParam = parseQueryBoolean(readQueryParam('compareSync'))
+    if (compareSyncParam !== undefined) {
+      compareSyncEnabled.value = compareSyncParam
+    }
+    const bomLineParam = readQueryParam('bomLineId')
+    if (bomLineParam !== undefined) {
+      bomLineId.value = bomLineParam
+    }
+    const substitutesFilterParam = readQueryParam('substitutesFilter')
+    if (substitutesFilterParam !== undefined) {
+      substitutesFilter.value = substitutesFilterParam
+    }
+
+    const bomPresetShareParam = readQueryParam('bomPresetShare')
+    if (bomPresetShareParam !== undefined) {
+      if (bomPresetShareParam) {
+        const mode = resolveFilterPresetShareMode(readQueryParam('bomPresetShareMode'))
+        importBomFilterPresetShare(bomPresetShareParam, mode)
+      }
+      syncQueryParams({ bomPresetShare: undefined, bomPresetShareMode: undefined })
+    }
+    const whereUsedPresetShareParam = readQueryParam('whereUsedPresetShare')
+    if (whereUsedPresetShareParam !== undefined) {
+      if (whereUsedPresetShareParam) {
+        const mode = resolveFilterPresetShareMode(readQueryParam('whereUsedPresetShareMode'))
+        importWhereUsedFilterPresetShare(whereUsedPresetShareParam, mode)
+      }
+      syncQueryParams({ whereUsedPresetShare: undefined, whereUsedPresetShareMode: undefined })
+    }
+
+    const panelParam = readQueryParam('panel')
+    if (panelParam !== undefined) {
+      const selectedPanels = Array.from(parseDeepLinkPanels(panelParam)).filter((entry) => entry !== 'all')
+      deepLinkScope.value = selectedPanels
+      deepLinkPreset.value = ''
+      editingPresetLabel.value = ''
+    }
+    const panelTargets = parseDeepLinkPanels(panelParam)
+    const allowAllPanels = panelTargets.has('all')
+    const allowsPanel = (key: string) => allowAllPanels || panelTargets.has(key)
+
+    const autoLoad = parseQueryBoolean(readQueryParam('autoload')) ?? false
+    if (!autoLoad) {
+      return
+    }
+    const tasks: Array<Promise<void>> = []
+    if (allowsPanel('search') && searchQuery.value) tasks.push(searchProducts())
+    if (allowsPanel('product') && productId.value) tasks.push(loadProduct())
+    if (allowsPanel('documents') && productId.value) tasks.push(loadDocuments())
+    if (allowsPanel('approvals') && productId.value) tasks.push(loadApprovals())
+    if (allowsPanel('cad') && cadFileId.value) tasks.push(loadCadMetadata())
+    if (allowsPanel('where-used') && whereUsedItemId.value) tasks.push(loadWhereUsed())
+    if (allowsPanel('compare') && compareLeftId.value && compareRightId.value) tasks.push(loadBomCompare())
+    if (allowsPanel('substitutes') && bomLineId.value) tasks.push(loadSubstitutes())
+    if (allowsPanel('cad') && cadFileId.value && cadOtherFileId.value) tasks.push(loadCadDiff())
+    if (tasks.length) {
+      await Promise.all(tasks)
+    }
+  } finally {
+    isApplyingRouteQueryState.value = false
   }
 
-  const panelParam = readQueryParam('panel')
-  if (panelParam !== undefined) {
-    const selectedPanels = Array.from(parseDeepLinkPanels(panelParam)).filter((entry) => entry !== 'all')
-    deepLinkScope.value = selectedPanels
-    deepLinkPreset.value = ''
-    editingPresetLabel.value = ''
-  }
-  const panelTargets = parseDeepLinkPanels(panelParam)
-  const allowAllPanels = panelTargets.has('all')
-  const allowsPanel = (key: string) => allowAllPanels || panelTargets.has(key)
-
-  const autoLoad = parseQueryBoolean(readQueryParam('autoload')) ?? false
-  if (!autoLoad) return
-  const tasks: Array<Promise<void>> = []
-  if (allowsPanel('search') && searchQuery.value) tasks.push(searchProducts())
-  if (allowsPanel('product') && productId.value) tasks.push(loadProduct())
-  if (allowsPanel('documents') && productId.value) tasks.push(loadDocuments())
-  if (allowsPanel('approvals') && productId.value) tasks.push(loadApprovals())
-  if (allowsPanel('cad') && cadFileId.value) tasks.push(loadCadMetadata())
-  if (allowsPanel('where-used') && whereUsedItemId.value) tasks.push(loadWhereUsed())
-  if (allowsPanel('compare') && compareLeftId.value && compareRightId.value) tasks.push(loadBomCompare())
-  if (allowsPanel('substitutes') && bomLineId.value) tasks.push(loadSubstitutes())
-  if (allowsPanel('cad') && cadFileId.value && cadOtherFileId.value) tasks.push(loadCadDiff())
-  if (tasks.length) {
-    await Promise.all(tasks)
+  if (pendingRouteQueryHydration) {
+    pendingRouteQueryHydration = false
+    await applyQueryState()
   }
 }
 
@@ -6327,6 +6411,14 @@ onMounted(() => {
   }
   void applyQueryState()
 })
+
+watch(
+  () => route.fullPath,
+  () => {
+    cancelScheduledQuerySync()
+    void applyQueryState()
+  },
+)
 
 onBeforeUnmount(() => {
   stopAuthStatusPolling()
