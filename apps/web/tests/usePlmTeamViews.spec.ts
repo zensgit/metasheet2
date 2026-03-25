@@ -633,6 +633,92 @@ describe('usePlmTeamViews', () => {
     expect(model.teamViewOwnerUserId.value).toBe('')
   })
 
+  it('blocks generic management actions until the pending workbench selector target is applied', async () => {
+    const requestedViewId = ref('workbench-applied')
+    const syncRequestedViewId = vi.fn((value?: string) => {
+      requestedViewId.value = value || ''
+    })
+    const buildShareUrl = vi.fn(() => 'http://example.test/plm?workbenchTeamView=workbench-pending')
+    const copyShareUrl = vi.fn(async () => true)
+
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-applied',
+          kind: 'workbench',
+          scope: 'team',
+          name: '已应用工作台视角',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: true,
+            canShare: true,
+            canRename: true,
+          },
+          state: {
+            query: {
+              documentFilter: 'gear',
+            },
+          },
+        },
+        {
+          id: 'workbench-pending',
+          kind: 'workbench',
+          scope: 'team',
+          name: '待应用工作台视角',
+          ownerUserId: 'owner-b',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: true,
+            canShare: true,
+            canRename: true,
+          },
+          state: {
+            query: {
+              documentFilter: 'motor',
+            },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      requestedViewId,
+      syncRequestedViewId,
+      shouldAutoApplyDefault: () => false,
+      buildShareUrl,
+      copyShareUrl,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-pending'
+    model.teamViewName.value = '待重命名工作台视角'
+    await nextTick()
+
+    expect(model.canShareTeamView.value).toBe(false)
+    expect(model.canRenameTeamView.value).toBe(false)
+    expect(model.canDeleteTeamView.value).toBe(false)
+
+    await model.shareTeamView()
+    await model.renameTeamView()
+
+    expect(buildShareUrl).not.toHaveBeenCalled()
+    expect(copyShareUrl).not.toHaveBeenCalled()
+    expect(renamePlmWorkbenchTeamView).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenCalledWith('请先应用工作台团队视角，再执行管理操作。', true)
+  })
+
   it('does not apply a team view that fails explicit canApply gating', async () => {
     vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
       items: [

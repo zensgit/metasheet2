@@ -101,6 +101,19 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   const selectedTeamView = computed(
     () => teamViews.value.find((view) => view.id === teamViewKey.value) || null,
   )
+  const requestedTeamView = computed(() => {
+    const requestedViewId = options.requestedViewId?.value.trim() || ''
+    if (!requestedViewId) return null
+    return teamViews.value.find((view) => view.id === requestedViewId) || null
+  })
+  const hasPendingApplySelection = computed(() => (
+    Boolean(requestedTeamView.value)
+    && Boolean(selectedTeamView.value)
+    && requestedTeamView.value?.id !== selectedTeamView.value?.id
+  ))
+  const selectedManagementTarget = computed(() => (
+    hasPendingApplySelection.value ? null : selectedTeamView.value
+  ))
   const defaultTeamView = computed(
     () => teamViews.value.find((view) => view.isDefault && !view.isArchived) || null,
   )
@@ -144,7 +157,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     canSetDefault: canSetTeamViewDefault,
     canClearDefault: canClearTeamViewDefault,
   } = usePlmCollaborativePermissions({
-    selectedEntry: selectedTeamView,
+    selectedEntry: selectedManagementTarget,
     nameRef: teamViewName,
     ownerUserIdRef: teamViewOwnerUserId,
   })
@@ -164,6 +177,12 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     teamViewKey.value = view.id
     options.syncRequestedViewId?.(view.id)
     options.applyViewState(view.state)
+  }
+
+  function blockPendingApplyManagementAction() {
+    if (!hasPendingApplySelection.value) return false
+    options.setMessage(`请先应用${options.label}团队视角，再执行管理操作。`, true)
+    return true
   }
 
   function maybeAutoApplyDefault(items: PlmWorkbenchTeamView<Kind>[]) {
@@ -279,6 +298,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function deleteTeamView() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     if (!view) return
     if (!canManageSelectedTeamView.value) {
@@ -316,6 +338,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function archiveTeamView() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
@@ -360,6 +385,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function restoreTeamView() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
@@ -395,6 +423,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function duplicateTeamView() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
@@ -426,6 +457,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function shareTeamView() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
@@ -458,6 +492,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function renameTeamView() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
@@ -497,6 +534,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function setTeamViewDefault() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
@@ -532,6 +572,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function transferTeamView() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     const targetOwnerUserId = teamViewOwnerUserId.value.trim()
     if (!view) {
@@ -576,6 +619,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function clearTeamViewDefault() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
