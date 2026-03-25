@@ -190,6 +190,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     canArchive: canArchiveTeamPreset,
     canRestore: canRestoreTeamPreset,
     canRename: canRenameTeamPreset,
+    canTransferTarget: canTransferTeamPresetTarget,
     canTransfer: canTransferTeamPreset,
     canSetDefault: canSetTeamPresetDefault,
     canClearDefault: canClearTeamPresetDefault,
@@ -368,6 +369,15 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`请选择${options.label}团队预设。`, true)
       return
     }
+    if (!canApplyTeamPreset.value) {
+      if (preset.isArchived) {
+        options.setMessage(`请先恢复${options.label}团队预设，再执行应用。`, true)
+        return
+      }
+      options.setMessage(`当前${options.label}团队预设不可应用。`, true)
+      return
+    }
+
     if (preset.isArchived) {
       options.setMessage(`请先恢复${options.label}团队预设，再执行应用。`, true)
       return
@@ -383,12 +393,12 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`请选择${options.label}团队预设。`, true)
       return
     }
-    if (!preset.canManage) {
-      options.setMessage(`仅创建者可分享${options.label}团队预设。`, true)
-      return
-    }
-    if (preset.isArchived) {
-      options.setMessage(`请先恢复${options.label}团队预设，再执行分享。`, true)
+    if (!canShareTeamPreset.value) {
+      if (preset.isArchived) {
+        options.setMessage(`请先恢复${options.label}团队预设，再执行分享。`, true)
+        return
+      }
+      options.setMessage(`当前${options.label}团队预设不可分享。`, true)
       return
     }
     if (!options.buildShareUrl || !options.copyShareUrl) {
@@ -415,6 +425,10 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     const preset = selectedTeamPreset.value
     if (!preset) {
       options.setMessage(`请选择${options.label}团队预设。`, true)
+      return
+    }
+    if (!canDuplicateTeamPreset.value) {
+      options.setMessage(`当前${options.label}团队预设不可复制。`, true)
       return
     }
 
@@ -445,16 +459,16 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`请选择${options.label}团队预设。`, true)
       return
     }
-    if (!preset.canManage) {
-      options.setMessage(`仅创建者可重命名${options.label}团队预设。`, true)
-      return
-    }
-    if (preset.isArchived) {
-      options.setMessage(`请先恢复${options.label}团队预设，再执行重命名。`, true)
-      return
-    }
     if (!teamPresetName.value.trim()) {
       options.setMessage(`请输入${options.label}团队预设名称。`, true)
+      return
+    }
+    if (!canRenameTeamPreset.value) {
+      if (preset.isArchived) {
+        options.setMessage(`请先恢复${options.label}团队预设，再执行重命名。`, true)
+        return
+      }
+      options.setMessage(`当前${options.label}团队预设不可重命名。`, true)
       return
     }
 
@@ -486,16 +500,16 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`请选择${options.label}团队预设。`, true)
       return
     }
-    if (!preset.canManage) {
-      options.setMessage(`仅创建者可转移${options.label}团队预设。`, true)
-      return
-    }
     if (!targetOwnerUserId) {
       options.setMessage(`请输入${options.label}团队预设目标用户 ID。`, true)
       return
     }
     if (targetOwnerUserId === preset.ownerUserId) {
       options.setMessage(`${options.label}团队预设已经属于该用户。`)
+      return
+    }
+    if (!canTransferTeamPresetTarget.value) {
+      options.setMessage(`当前${options.label}团队预设不可转移。`, true)
       return
     }
 
@@ -519,8 +533,8 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
   async function deleteTeamPreset() {
     const preset = selectedTeamPreset.value
     if (!preset) return
-    if (!preset.canManage) {
-      options.setMessage(`仅创建者可删除${options.label}团队预设。`, true)
+    if (!canDeleteTeamPreset.value) {
+      options.setMessage(`当前${options.label}团队预设不可删除。`, true)
       return
     }
 
@@ -556,12 +570,12 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`请选择${options.label}团队预设。`, true)
       return
     }
-    if (!preset.canManage) {
-      options.setMessage(`仅创建者可设置${options.label}默认团队预设。`, true)
-      return
-    }
-    if (preset.isArchived) {
-      options.setMessage(`请先恢复${options.label}团队预设，再设为默认。`, true)
+    if (!canSetTeamPresetDefault.value) {
+      if (preset.isArchived) {
+        options.setMessage(`请先恢复${options.label}团队预设，再设为默认。`, true)
+        return
+      }
+      options.setMessage(`当前${options.label}团队预设不可设为默认。`, true)
       return
     }
 
@@ -588,12 +602,12 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`请选择${options.label}团队预设。`, true)
       return
     }
-    if (!preset.canManage) {
-      options.setMessage(`仅创建者可取消${options.label}默认团队预设。`, true)
-      return
-    }
-    if (preset.isArchived) {
-      options.setMessage(`已归档的${options.label}团队预设无需取消默认。`, true)
+    if (!canClearTeamPresetDefault.value) {
+      if (preset.isArchived) {
+        options.setMessage(`已归档的${options.label}团队预设无需取消默认。`, true)
+        return
+      }
+      options.setMessage(`当前${options.label}团队预设不可取消默认。`, true)
       return
     }
 
@@ -622,12 +636,12 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`请选择${options.label}团队预设。`, true)
       return
     }
-    if (!preset.canManage) {
-      options.setMessage(`仅创建者可归档${options.label}团队预设。`, true)
-      return
-    }
     if (preset.isArchived) {
       options.setMessage(`${options.label}团队预设已归档。`)
+      return
+    }
+    if (!canArchiveTeamPreset.value) {
+      options.setMessage(`当前${options.label}团队预设不可归档。`, true)
       return
     }
 
@@ -663,12 +677,12 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`请选择${options.label}团队预设。`, true)
       return
     }
-    if (!preset.canManage) {
-      options.setMessage(`仅创建者可恢复${options.label}团队预设。`, true)
-      return
-    }
     if (!preset.isArchived) {
       options.setMessage(`${options.label}团队预设无需恢复。`)
+      return
+    }
+    if (!canRestoreTeamPreset.value) {
+      options.setMessage(`当前${options.label}团队预设不可恢复。`, true)
       return
     }
 

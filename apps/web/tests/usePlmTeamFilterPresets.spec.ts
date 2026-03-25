@@ -447,7 +447,128 @@ describe('usePlmTeamFilterPresets', () => {
     await model.deleteTeamPreset()
 
     expect(deletePlmTeamFilterPreset).not.toHaveBeenCalled()
-    expect(setMessage).toHaveBeenCalledWith('仅创建者可删除Where-Used团队预设。', true)
+    expect(setMessage).toHaveBeenCalledWith('当前Where-Used团队预设不可删除。', true)
+  })
+
+  it('honors granular action denials for active team presets', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-guarded',
+          kind: 'bom',
+          scope: 'team',
+          name: '受限预设',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canManage: true,
+            canApply: false,
+            canDuplicate: false,
+            canShare: false,
+            canDelete: false,
+            canArchive: false,
+            canRestore: false,
+            canRename: false,
+            canTransfer: false,
+            canSetDefault: false,
+            canClearDefault: false,
+          },
+          state: { field: 'path', value: 'root/guarded', group: '受限组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/guarded', group: '受限组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-guarded'
+    model.teamPresetName.value = '受限预设副本'
+    model.teamPresetOwnerUserId.value = 'owner-b'
+
+    await model.applyTeamPreset()
+    await model.shareTeamPreset()
+    await model.duplicateTeamPreset()
+    await model.renameTeamPreset()
+    await model.transferTeamPreset()
+    await model.deleteTeamPreset()
+    await model.archiveTeamPreset()
+    await model.setTeamPresetDefault()
+    await model.clearTeamPresetDefault()
+
+    expect(applyPreset).not.toHaveBeenCalled()
+    expect(duplicatePlmTeamFilterPreset).not.toHaveBeenCalled()
+    expect(renamePlmTeamFilterPreset).not.toHaveBeenCalled()
+    expect(transferPlmTeamFilterPreset).not.toHaveBeenCalled()
+    expect(deletePlmTeamFilterPreset).not.toHaveBeenCalled()
+    expect(archivePlmTeamFilterPreset).not.toHaveBeenCalled()
+    expect(setPlmTeamFilterPresetDefault).not.toHaveBeenCalled()
+    expect(clearPlmTeamFilterPresetDefault).not.toHaveBeenCalled()
+    expect(model.canApplyTeamPreset.value).toBe(false)
+    expect(model.canDuplicateTeamPreset.value).toBe(false)
+    expect(model.canShareTeamPreset.value).toBe(false)
+    expect(model.canDeleteTeamPreset.value).toBe(false)
+    expect(model.canArchiveTeamPreset.value).toBe(false)
+    expect(model.canRenameTeamPreset.value).toBe(false)
+    expect(model.canTransferTeamPreset.value).toBe(false)
+    expect(model.canSetTeamPresetDefault.value).toBe(false)
+    expect(model.canClearTeamPresetDefault.value).toBe(false)
+  })
+
+  it('honors granular restore denials for archived team presets', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-archived-guarded',
+          kind: 'where-used',
+          scope: 'team',
+          name: '受限归档预设',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          isArchived: true,
+          permissions: {
+            canManage: true,
+            canApply: false,
+            canDuplicate: true,
+            canShare: false,
+            canDelete: true,
+            canArchive: false,
+            canRestore: false,
+            canRename: false,
+            canTransfer: false,
+            canSetDefault: false,
+            canClearDefault: false,
+          },
+          state: { field: 'parent', value: 'assy-guarded', group: '归档组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'where-used',
+      label: 'Where-Used',
+      getCurrentPresetState: () => ({ field: 'parent', value: 'assy-guarded', group: '归档组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-archived-guarded'
+
+    await model.restoreTeamPreset()
+
+    expect(restorePlmTeamFilterPreset).not.toHaveBeenCalled()
+    expect(model.canRestoreTeamPreset.value).toBe(false)
+    expect(setMessage).toHaveBeenLastCalledWith('当前Where-Used团队预设不可恢复。', true)
   })
 
   it('duplicates a visible preset and renames the owned copy while keeping requested identity aligned', async () => {
