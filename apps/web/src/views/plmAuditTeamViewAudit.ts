@@ -95,3 +95,21 @@ export function buildPlmAuditTeamViewBatchLogState(
     returnToPlmPath: currentState.returnToPlmPath,
   }
 }
+
+export function resolvePlmAuditProcessedBatchLogViews(options: {
+  processedIds: string[]
+  resolveView: (id: string) => Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'kind'> | null | undefined
+}) {
+  const processedViews = options.processedIds
+    .map((id) => options.resolveView(id))
+    .filter((view): view is Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'kind'> => Boolean(view))
+
+  if (processedViews.length) {
+    return processedViews
+  }
+
+  return options.processedIds.map((id) => ({
+    id,
+    kind: 'audit' as const,
+  }))
+}

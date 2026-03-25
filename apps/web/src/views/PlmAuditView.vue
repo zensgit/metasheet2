@@ -929,6 +929,7 @@ import {
 import {
   buildPlmAuditTeamViewBatchLogState,
   buildPlmAuditTeamViewLogState,
+  resolvePlmAuditProcessedBatchLogViews,
   shouldClearPlmAuditTeamViewFormDraftsOnLogRoute,
 } from './plmAuditTeamViewAudit'
 import {
@@ -2868,12 +2869,13 @@ async function runAuditTeamViewBatchAction(actionKind: PlmAuditTeamViewLifecycle
     const skippedSuffix = skippedTotal
       ? tr(` (${skippedTotal} skipped)`, `（跳过 ${skippedTotal} 项）`)
       : ''
-    const processedViews = result.processedIds
-      .map((id) => findAuditTeamViewById(id))
-      .filter((view): view is PlmWorkbenchTeamView<'audit'> => Boolean(view))
+    const processedViews = resolvePlmAuditProcessedBatchLogViews({
+      processedIds: result.processedIds,
+      resolveView: (id) => findAuditTeamViewById(id),
+    })
     applyAuditManagedTeamViewAttention()
     await syncRouteState(buildPlmAuditTeamViewBatchLogState(
-      processedViews.length ? processedViews : batchAction.eligibleIds.map((id) => ({ id, kind: 'audit' as const })),
+      processedViews,
       actionKind,
       readCurrentRouteState(),
     ))

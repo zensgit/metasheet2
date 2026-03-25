@@ -3,6 +3,7 @@ import {
   buildPlmAuditTeamViewBatchLogState,
   buildPlmAuditTeamViewLogState,
   isPlmAuditOwnerlessTeamViewLifecycleLogRoute,
+  resolvePlmAuditProcessedBatchLogViews,
   shouldClearPlmAuditTeamViewFormDraftsOnLogRoute,
 } from '../src/views/plmAuditTeamViewAudit'
 import type { PlmWorkbenchTeamView } from '../src/views/plm/plmPanelModels'
@@ -187,6 +188,18 @@ describe('plmAuditTeamViewAudit', () => {
       sceneRecommendationSourceLabel: '',
       returnToPlmPath: '/plm?sceneFocus=batch-view-a',
     })
+  })
+
+  it('falls back to processed ids instead of eligible ids when deleted views are gone from memory', () => {
+    expect(resolvePlmAuditProcessedBatchLogViews({
+      processedIds: ['batch-view-b'],
+      resolveView: () => null,
+    })).toEqual([
+      {
+        id: 'batch-view-b',
+        kind: 'audit',
+      },
+    ])
   })
 
   it('detects ownerless lifecycle log routes while excluding active team-view and set-default routes', () => {
