@@ -794,6 +794,34 @@ describe('Multitable record and form context API', () => {
     })
   })
 
+  test('returns 404 when patching a missing multitable record through the direct endpoint', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          expect(params).toEqual(['rec_missing', 'sheet_ops'])
+          return { rows: [] }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .patch('/api/multitable/records/rec_missing')
+      .send({
+        sheetId: 'sheet_ops',
+        expectedVersion: 1,
+        data: {
+          fld_title: 'Missing title',
+        },
+      })
+      .expect(404)
+
+    expect(response.body.ok).toBe(false)
+    expect(response.body.error.code).toBe('NOT_FOUND')
+    expect(response.body.error.message).toBe('Record not found: rec_missing')
+  })
+
   test('returns link summaries from patch response for updated multitable link fields', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:write'],

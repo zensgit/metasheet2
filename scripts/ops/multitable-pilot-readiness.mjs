@@ -96,7 +96,7 @@ function summarizeSmoke(report) {
     'ui.kanban.config-replay',
     'ui.kanban.empty-card-fields-replay',
     'ui.kanban.clear-group-replay',
-    'api.multitable.legacy-submit',
+    'api.multitable.view-submit',
   ]
   const missing = requiredChecks.filter((name) => !report.checks?.some((item) => item.name === name && item.ok))
   return {

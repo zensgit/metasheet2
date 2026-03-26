@@ -214,6 +214,47 @@ describe('Multitable context API', () => {
     expect(mockPool.transaction).toHaveBeenCalledTimes(1)
   })
 
+  test('deletes a multitable sheet by id', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('DELETE FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [], rowCount: 1 }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .delete('/api/multitable/sheets/sheet_ops')
+      .expect(200)
+
+    expect(response.body.ok).toBe(true)
+    expect(response.body.data).toEqual({ deleted: 'sheet_ops' })
+  })
+
+  test('returns 404 when deleting a missing multitable sheet', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('DELETE FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_missing'])
+          return { rows: [], rowCount: 0 }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .delete('/api/multitable/sheets/sheet_missing')
+      .expect(404)
+
+    expect(response.body.ok).toBe(false)
+    expect(response.body.error.code).toBe('NOT_FOUND')
+    expect(response.body.error.message).toBe('Sheet not found: sheet_missing')
+  })
+
   test('rejects context access without multitable read permission', async () => {
     const { app, mockPool } = await createApp({
       tokenPerms: [],

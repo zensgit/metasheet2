@@ -31,7 +31,7 @@ const requiredSmokeChecks = [
   'ui.kanban.config-replay',
   'ui.kanban.empty-card-fields-replay',
   'ui.kanban.clear-group-replay',
-  'api.multitable.legacy-submit',
+  'api.multitable.view-submit',
 ]
 
 function writeFixtureReport(tmpRoot) {

@@ -282,13 +282,13 @@ async function deleteRecord(token, recordId, expectedVersion) {
   await ensureOk('api.multitable.delete-record', result, { recordId })
 }
 
-async function submitLegacyForm(token, viewId, data) {
-  const result = await fetchJson(`${apiBase}/api/views/${encodeURIComponent(viewId)}/submit`, {
+async function submitViewForm(token, viewId, data) {
+  const result = await fetchJson(`${apiBase}/api/multitable/views/${encodeURIComponent(viewId)}/submit`, {
     method: 'POST',
     headers: headers(token, { 'Content-Type': 'application/json' }),
     body: JSON.stringify({ data }),
   })
-  const json = await ensureOk('api.multitable.legacy-submit', result, {
+  const json = await ensureOk('api.multitable.view-submit', result, {
     viewId,
     fieldIds: Object.keys(data),
   })
@@ -1807,7 +1807,7 @@ async function run() {
     const retryTitle = `${titlePrefix} retry`
     const peopleRepairReconcileTitle = `${titlePrefix} people repair reconcile`
     const manualFixTitle = `${titlePrefix} manual fix`
-    const legacySubmitTitle = `${titlePrefix} legacy submit`
+    const viewSubmitTitle = `${titlePrefix} view submit`
     const importDriftField = await createField(token, {
       id: `fld_pilot_import_drift_${Date.now()}`,
       sheetId: sheet.id,
@@ -2180,16 +2180,16 @@ async function run() {
       const finalRecord = await fetchRecord(token, sheet.id, recordId)
       trackRecord(finalRecord.record)
 
-      const legacySubmit = await submitLegacyForm(token, formView.id, {
-        [titleField.id]: legacySubmitTitle,
+      const viewSubmit = await submitViewForm(token, formView.id, {
+        [titleField.id]: viewSubmitTitle,
       })
-      if (!legacySubmit?.record?.id) {
-        throw new Error('Legacy submit did not return a record')
+      if (!viewSubmit?.record?.id) {
+        throw new Error('View submit did not return a record')
       }
-      cleanupRecords.set(legacySubmit.record.id, legacySubmit.record.version)
-      record('api.multitable.legacy-submit', true, {
+      cleanupRecords.set(viewSubmit.record.id, viewSubmit.record.version)
+      record('api.multitable.view-submit', true, {
         viewId: formView.id,
-        recordId: legacySubmit.record.id,
+        recordId: viewSubmit.record.id,
       })
 
       report.metadata = {
@@ -2204,7 +2204,7 @@ async function run() {
         primaryRecordId: recordId,
         retryRecordId: retried.row.id,
         manualFixRecordId: manualFixed.row.id,
-        legacySubmitRecordId: legacySubmit.record.id,
+        viewSubmitRecordId: viewSubmit.record.id,
       }
     } finally {
       await browser.close()

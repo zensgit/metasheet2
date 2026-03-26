@@ -36,7 +36,7 @@ Scope: customer or controlled pilot acceptance for the multitable/platform packa
 | MT-UAT-07 | Upload attachment | Upload completes and file is visible again after reopen |  |  |
 | MT-UAT-08 | Add and resolve comment | Comment thread updates correctly |  |  |
 | MT-UAT-09 | Conflict retry | Retry or reload path preserves the intended latest value |  |  |
-| MT-UAT-10 | Legacy form submit | Legacy submit path still creates a record |  |  |
+| MT-UAT-10 | Form submit | Form submit path creates a record through `/api/multitable/views/:viewId/submit` |  |  |
 
 ## 3. Deployment And Safety Checks
 
