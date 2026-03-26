@@ -162,7 +162,11 @@ async function loadHistory(id: string) {
     const response = await apiFetch(`/api/approvals/${encodeURIComponent(id)}/history`)
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
     const payload = await response.json()
-    history.value = Array.isArray(payload?.data) ? payload.data : []
+    history.value = Array.isArray(payload?.data?.items)
+      ? payload.data.items
+      : Array.isArray(payload?.data)
+        ? payload.data
+        : []
   } catch (err) {
     historyError.value = err instanceof Error ? err.message : 'Failed to load approval history'
     history.value = []

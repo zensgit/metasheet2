@@ -16,23 +16,6 @@ const logger = new Logger('ApprovalsRouter')
 let approvalsDegraded = false
 const allowDegradation = process.env.APPROVALS_OPTIONAL === '1'
 
-interface ApprovalRecord {
-  id: string
-  instance_id: string
-  action: string
-  actor_id: string
-  actor_name: string | null
-  comment: string | null
-  reason: string | null
-  from_status: string | null
-  to_status: string
-  from_version: number | null
-  to_version: number
-  metadata: Record<string, unknown>
-  occurred_at: Date
-  created_at: Date
-}
-
 interface ApprovalInstance {
   id: string
   status: string
@@ -87,39 +70,6 @@ export function approvalsRouter(): Router {
       }
       logger.error('Failed to get pending approvals', error instanceof Error ? error : undefined)
       res.status(500).json({ error: 'Failed to get pending approvals' })
-    }
-  })
-
-  // Get approval history for an instance
-  r.get('/api/approvals/:instanceId/history', authenticate, async (req: Request, res: Response) => {
-    try {
-      if (!pool) {
-        return res.status(503).json({ error: 'Database not available' })
-      }
-
-      const { instanceId } = req.params
-
-      const result = await pool.query<ApprovalRecord>(
-        `SELECT * FROM approval_records
-         WHERE instance_id = $1
-         ORDER BY occurred_at DESC`,
-        [instanceId]
-      )
-
-      res.json({
-        data: result.rows,
-        total: result.rowCount || 0
-      })
-    } catch (error) {
-      if (isDatabaseSchemaError(error) && allowDegradation) {
-        if (!approvalsDegraded) {
-          logger.warn('Approvals service degraded - tables not found')
-          approvalsDegraded = true
-        }
-        return res.json({ data: [], total: 0, degraded: true })
-      }
-      logger.error('Failed to get approval history', error instanceof Error ? error : undefined)
-      res.status(500).json({ error: 'Failed to get approval history' })
     }
   })
 
