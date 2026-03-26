@@ -94,6 +94,17 @@ function createFakeBash(binDir) {
     '      { "step": 2, "title": "Use the helper instead of rebuilding replay commands by hand", "artifact": "/tmp/gates/operator-commands.sh" }',
     '    ]',
     '  },',
+    '  "onPremReleaseGateOperatorContract": {',
+    '    "helper": "/tmp/release-gate/operator-commands.sh",',
+    '    "operatorCommandEntries": [',
+    '      { "name": "showSignoffEvidence", "command": "/tmp/release-gate/operator-commands.sh show-signoff-evidence" },',
+    '      { "name": "rerunGate", "command": "pnpm verify:multitable-onprem:release-gate" }',
+    '    ],',
+    '    "operatorChecklist": [',
+    '      { "step": 1, "title": "Review gate status and package identity", "artifact": "/tmp/release-gate/report.md" },',
+    '      { "step": 2, "title": "Confirm tgz and zip verify reports are present and PASS", "artifact": "/tmp/release-gate/verify-tgz.json" }',
+    '    ]',
+    '  },',
     '  "recommendedTemplates": {',
     '    "goNoGo": "docs/multitable-pilot-go-no-go-template-20260319.md"',
     '  },',
@@ -192,6 +203,25 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
         },
       ],
     },
+    onPremReleaseGateOperatorContract: {
+      helper: '/tmp/release-gate/operator-commands.sh',
+      operatorCommandEntries: [
+        { name: 'showSignoffEvidence', command: '/tmp/release-gate/operator-commands.sh show-signoff-evidence' },
+        { name: 'rerunGate', command: 'pnpm verify:multitable-onprem:release-gate' },
+      ],
+      operatorChecklist: [
+        {
+          step: 1,
+          title: 'Review gate status and package identity',
+          artifact: '/tmp/release-gate/report.md',
+        },
+        {
+          step: 2,
+          title: 'Confirm tgz and zip verify reports are present and PASS',
+          artifact: '/tmp/release-gate/verify-tgz.json',
+        },
+      ],
+    },
     recommendedTemplates: {
       goNoGo: 'docs/multitable-pilot-go-no-go-template-20260319.md',
     },
@@ -227,6 +257,7 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
     const report = JSON.parse(fs.readFileSync(reportJsonPath, 'utf8'))
     const reportMd = fs.readFileSync(reportMdPath, 'utf8')
 
+    assert.equal(report.ok, false)
     assert.equal(report.embedHostAcceptance.ok, false)
     assert.equal(report.runMode, 'staging')
     assert.match(report.readinessGateReport, /gates\/report\.json$/)
@@ -235,6 +266,8 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
     assert.match(report.readinessGateOperatorCommands, /gates\/operator-commands\.sh$/)
     assert.equal(report.readinessGateOperatorContract.operatorCommandEntries.length, 2)
     assert.equal(report.readinessGateOperatorContract.operatorChecklist.length, 2)
+    assert.equal(report.onPremReleaseGateOperatorContract.operatorCommandEntries.length, 2)
+    assert.equal(report.onPremReleaseGateOperatorContract.operatorChecklist.length, 2)
     assert.equal(report.pilotRunner.runMode, 'staging')
     assert.equal(report.localRunner.available, true)
     assert.equal(report.localRunner.serviceModes.backend, 'reused')
@@ -256,6 +289,9 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
     assert.match(reportMd, /## Readiness Gate Operator Contract/)
     assert.match(reportMd, /Operator commands: showArtifacts, rerunGate/)
     assert.match(reportMd, /Operator checklist: 1\. Review the canonical gate report before promotion or replay, 2\. Use the helper instead of rebuilding replay commands by hand/)
+    assert.match(reportMd, /## On-Prem Release Gate Operator Contract/)
+    assert.match(reportMd, /Operator commands: showSignoffEvidence, rerunGate/)
+    assert.match(reportMd, /Operator checklist: 1\. Review gate status and package identity, 2\. Confirm tgz and zip verify reports are present and PASS/)
     assert.match(reportMd, /prepare:multitable-pilot:release-bound:staging/)
     assert.match(reportMd, /verify:multitable-pilot:ready:staging:release-bound/)
     assert.match(reportMd, /prepare:multitable-pilot:handoff:staging:release-bound/)
@@ -370,9 +406,12 @@ test('multitable pilot release-bound falls back to staging runner report basenam
       stdio: 'pipe',
     })
 
+    const reportJsonPath = path.join(repoRoot, reportRoot, 'report.json')
     const reportMdPath = path.join(repoRoot, reportRoot, 'report.md')
+    const report = JSON.parse(fs.readFileSync(reportJsonPath, 'utf8'))
     const reportMd = fs.readFileSync(reportMdPath, 'utf8')
 
+    assert.equal(report.ok, true)
     assert.match(reportMd, /staging-report\.json/)
     assert.match(reportMd, /staging-report\.md/)
   } finally {

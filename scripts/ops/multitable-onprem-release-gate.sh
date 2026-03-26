@@ -219,6 +219,11 @@ fi
 printf '%s\n' \
   '{' \
   '  "ok": true,' \
+  "  \"outputRoot\": \"${OUTPUT_ROOT}\"," \
+  "  \"reportPath\": \"${REPORT_JSON}\"," \
+  "  \"reportMdPath\": \"${REPORT_MD}\"," \
+  "  \"logRoot\": \"${LOG_ROOT}\"," \
+  "  \"operatorCommandsPath\": \"${COMMANDS_SH}\"," \
   "  \"packageName\": \"${PACKAGE_NAME}\"," \
   "  \"packageJson\": \"${PACKAGE_JSON_PATH}\"," \
   "  \"deliveryRoot\": \"${DELIVERY_ROOT}\"," \
@@ -330,6 +335,10 @@ cat > "$REPORT_MD" <<EOF
 - Package name: \`${PACKAGE_NAME}\`
 - Package metadata: \`${PACKAGE_JSON_PATH}\`
 - Gate root: \`${OUTPUT_ROOT}\`
+- Report json: \`${REPORT_JSON}\`
+- Report markdown: \`${REPORT_MD}\`
+- Log root: \`${LOG_ROOT}\`
+- Operator helper: \`${COMMANDS_SH}\`
 
 ## Checks
 

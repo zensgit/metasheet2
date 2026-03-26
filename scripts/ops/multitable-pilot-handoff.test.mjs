@@ -143,6 +143,28 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
       ok: true,
       packageName,
       packageJson: packageJsonPath,
+      operatorCommands: [
+        {
+          name: 'showSignoffEvidence',
+          command: '/tmp/release-gate/operator-commands.sh show-signoff-evidence',
+        },
+        {
+          name: 'rerunGate',
+          command: 'pnpm verify:multitable-onprem:release-gate',
+        },
+      ],
+      operatorChecklist: [
+        {
+          step: 1,
+          title: 'Review gate status and package identity',
+          artifact: '/tmp/release-gate/report.md',
+        },
+        {
+          step: 2,
+          title: 'Confirm tgz and zip verify reports are present and PASS',
+          artifact: '/tmp/release-gate/verify-tgz.json',
+        },
+      ],
       signoffRecoveryPath: {
         step1RunPreflight: 'bash ./artifacts/preflight/multitable-onprem-preflight.sh',
         step2RepairInstruction: 'run the first quick fix',
@@ -189,8 +211,12 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
     assert.equal(handoffJson.artifactChecks.readinessGate.readinessGateOperatorCommands, true)
     assert.equal(handoffJson.readinessGateOperatorContract.operatorCommandEntries.length, 2)
     assert.equal(handoffJson.readinessGateOperatorContract.operatorChecklist.length, 2)
+    assert.equal(handoffJson.onPremReleaseGateOperatorContract.operatorCommandEntries.length, 2)
+    assert.equal(handoffJson.onPremReleaseGateOperatorContract.operatorChecklist.length, 2)
     assert.equal(handoffJson.artifactChecks.readinessGate.operatorCommandEntries.length, 2)
     assert.equal(handoffJson.artifactChecks.readinessGate.operatorChecklist.length, 2)
+    assert.equal(handoffJson.artifactChecks.onPremReleaseGate.operatorCommandEntries.length, 2)
+    assert.equal(handoffJson.artifactChecks.onPremReleaseGate.operatorChecklist.length, 2)
     assert.equal(handoffJson.localRunner.serviceModes.backend, 'reused')
     assert.equal(handoffJson.localRunner.serviceModes.web, 'started')
     assert.deepEqual(
@@ -209,6 +235,9 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
     assert.match(handoffMd, /## Readiness Gate Operator Contract/)
     assert.match(handoffMd, /Operator commands: `showArtifacts`, `rerunGate`/)
     assert.match(handoffMd, /Operator checklist: `1\. Review the canonical gate report before promotion or replay`, `2\. Use the helper instead of rebuilding replay commands by hand`/)
+    assert.match(handoffMd, /## On-Prem Release Gate Operator Contract/)
+    assert.match(handoffMd, /Operator commands: `showSignoffEvidence`, `rerunGate`/)
+    assert.match(handoffMd, /Operator checklist: `1\. Review gate status and package identity`, `2\. Confirm tgz and zip verify reports are present and PASS`/)
     assert.match(handoffMd, /gates\/report\.md: `present`/)
     assert.match(handoffMd, /gates\/release-gate\.log: `present`/)
     assert.match(handoffMd, /gates\/operator-commands\.sh: `present`/)
@@ -342,6 +371,134 @@ test('multitable pilot handoff falls back to staging runner report names when st
     fs.rmSync(readinessRoot, { recursive: true, force: true })
     fs.rmSync(handoffOutputRoot, { recursive: true, force: true })
     fs.rmSync(gateRoot, { recursive: true, force: true })
+    fs.rmSync(packageJsonPath, { force: true })
+    fs.rmSync(releaseTgz, { force: true })
+    fs.rmSync(releaseZip, { force: true })
+    fs.rmSync(`${releaseTgz}.sha256`, { force: true })
+    fs.rmSync(`${releaseZip}.sha256`, { force: true })
+    fs.rmSync(releaseBuildRoot, { recursive: true, force: true })
+    fs.rmSync(deliveryRoot, { recursive: true, force: true })
+  }
+})
+
+test('multitable pilot handoff prefers canonical on-prem gate artifact paths over default gate-root guesses', () => {
+  const stamp = `test-handoff-onprem-paths-${Date.now()}`
+  const packageName = `metasheet-multitable-onprem-${stamp}`
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'multitable-handoff-onprem-paths-'))
+  const readinessRoot = path.join(repoRoot, 'output/playwright/multitable-pilot-ready-local', stamp)
+  const handoffOutputRoot = path.join(tmpRoot, 'handoff-output')
+  const gateReportPath = path.join(tmpRoot, 'gate-report.json')
+  const customGateRoot = path.join(tmpRoot, 'custom-gate')
+  const customGateMd = path.join(customGateRoot, 'custom-report.md')
+  const customGateHelper = path.join(customGateRoot, 'helpers', 'operator-commands.sh')
+  const customGateLogs = path.join(customGateRoot, 'logs-alt')
+  const packageJsonPath = path.join(repoRoot, 'output/releases/multitable-onprem', `${packageName}.json`)
+  const releaseBuildRoot = path.join(repoRoot, 'output/releases/multitable-onprem/.build', packageName)
+  const releasePackageRoot = path.join(repoRoot, 'output/releases/multitable-onprem/.build', packageName, packageName)
+  const deliveryRoot = path.join(repoRoot, 'output/delivery/multitable-onprem', packageName)
+  const releaseTgz = path.join(repoRoot, 'output/releases/multitable-onprem', `${packageName}.tgz`)
+  const releaseZip = path.join(repoRoot, 'output/releases/multitable-onprem', `${packageName}.zip`)
+
+  try {
+    writeFile(path.join(readinessRoot, 'readiness.md'), '# readiness\n')
+    writeFile(path.join(readinessRoot, 'readiness.json'), JSON.stringify({
+      ok: true,
+      localRunner: {
+        required: true,
+        available: true,
+        ok: true,
+        runMode: 'local',
+        report: path.join(readinessRoot, 'smoke', 'local-report.json'),
+        reportMd: path.join(readinessRoot, 'smoke', 'local-report.md'),
+        runnerReport: path.join(readinessRoot, 'smoke', 'report.json'),
+        serviceModes: {
+          backend: 'reused',
+          web: 'reused',
+        },
+        embedHostAcceptance: {
+          available: true,
+          ok: true,
+        },
+      },
+      embedHostProtocol: { available: true, ok: true, requiredWhenPresent: [], observedChecks: [], missingChecks: [] },
+      embedHostNavigationProtection: { available: true, ok: true, requiredWhenPresent: [], observedChecks: [], missingChecks: [] },
+      embedHostDeferredReplay: { available: true, ok: true, requiredWhenPresent: [], observedChecks: [], missingChecks: [] },
+    }, null, 2))
+    writeFile(path.join(readinessRoot, 'gates', 'report.json'), JSON.stringify({ ok: true }, null, 2))
+    writeFile(path.join(readinessRoot, 'gates', 'report.md'), '# gate report\n')
+    writeFile(path.join(readinessRoot, 'gates', 'release-gate.log'), 'gate log\n')
+    writeFile(path.join(readinessRoot, 'gates', 'operator-commands.sh'), '#!/usr/bin/env bash\n', true)
+    writeFile(path.join(readinessRoot, 'smoke', 'report.json'), JSON.stringify({ ok: true }, null, 2))
+    writeFile(path.join(readinessRoot, 'smoke', 'report.md'), '# smoke report\n')
+    writeFile(path.join(readinessRoot, 'smoke', 'local-report.json'), JSON.stringify({ ok: true }, null, 2))
+    writeFile(path.join(readinessRoot, 'smoke', 'local-report.md'), '# local report\n')
+    writeFile(path.join(readinessRoot, 'profile', 'report.json'), JSON.stringify({ ok: true }, null, 2))
+    writeFile(path.join(readinessRoot, 'profile', 'summary.md'), '# profile\n')
+
+    writeFile(packageJsonPath, JSON.stringify({ name: packageName }, null, 2))
+    writeFile(releaseTgz, 'tgz')
+    writeFile(releaseZip, 'zip')
+    writeFile(`${releaseTgz}.sha256`, 'sha')
+    writeFile(`${releaseZip}.sha256`, 'sha')
+    writeFile(path.join(repoRoot, 'output/releases/multitable-onprem', 'SHA256SUMS'), 'checksums\n')
+
+    writeFile(path.join(releasePackageRoot, 'scripts/ops/multitable-onprem-deploy-easy.sh'), '#!/usr/bin/env bash\n', true)
+    writeFile(path.join(releasePackageRoot, 'scripts/ops/multitable-onprem-package-install.sh'), '#!/usr/bin/env bash\n', true)
+    writeFile(path.join(releasePackageRoot, 'scripts/ops/multitable-onprem-healthcheck.sh'), '#!/usr/bin/env bash\n', true)
+    writeFile(path.join(releasePackageRoot, 'ops/systemd/metasheet-healthcheck.service.example'), '[Unit]\n')
+    writeFile(path.join(releasePackageRoot, 'ops/systemd/metasheet-healthcheck.timer.example'), '[Timer]\n')
+
+    writeFile(path.join(deliveryRoot, 'DELIVERY.json'), JSON.stringify({ ok: true }, null, 2))
+    writeFile(path.join(deliveryRoot, 'DELIVERY.md'), '# delivery\n')
+
+    writeFile(gateReportPath, JSON.stringify({
+      ok: true,
+      packageName,
+      packageJson: packageJsonPath,
+      outputRoot: customGateRoot,
+      reportMdPath: customGateMd,
+      operatorCommandsPath: customGateHelper,
+      logRoot: customGateLogs,
+    }, null, 2))
+    writeFile(customGateMd, '# custom gate report\n')
+    writeFile(customGateHelper, '#!/usr/bin/env bash\n', true)
+    writeFile(path.join(customGateLogs, 'build.log'), 'build\n')
+    writeFile(path.join(customGateLogs, 'verify-tgz.log'), 'verify tgz\n')
+    writeFile(path.join(customGateLogs, 'verify-zip.log'), 'verify zip\n')
+    writeFile(path.join(customGateLogs, 'delivery.log'), 'delivery\n')
+
+    execFileSync('node', ['scripts/ops/multitable-pilot-handoff.mjs'], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        READINESS_ROOT: readinessRoot,
+        HANDOFF_OUTPUT_ROOT: handoffOutputRoot,
+        ONPREM_GATE_REPORT_JSON: gateReportPath,
+        REQUIRE_ONPREM_GATE: 'true',
+        REQUIRE_EXPLICIT_ONPREM_GATE: 'true',
+      },
+      stdio: 'pipe',
+    })
+
+    const handoffRoot = path.join(handoffOutputRoot, stamp)
+    const handoffJson = JSON.parse(fs.readFileSync(path.join(handoffRoot, 'handoff.json'), 'utf8'))
+
+    assert.equal(handoffJson.artifactChecks.onPremReleaseGate.reportMd, true)
+    assert.equal(handoffJson.artifactChecks.onPremReleaseGate.operatorCommands, true)
+    assert.equal(handoffJson.artifactChecks.onPremReleaseGate.buildLog, true)
+    assert.equal(handoffJson.artifactChecks.onPremReleaseGate.verifyTgzLog, true)
+    assert.equal(handoffJson.artifactChecks.onPremReleaseGate.verifyZipLog, true)
+    assert.equal(handoffJson.artifactChecks.onPremReleaseGate.deliveryLog, true)
+    assert.equal(fs.existsSync(path.join(handoffRoot, 'release-gate', 'report.md')), true)
+    assert.equal(fs.existsSync(path.join(handoffRoot, 'release-gate', 'operator-commands.sh')), true)
+    assert.equal(fs.existsSync(path.join(handoffRoot, 'release-gate', 'logs', 'build.log')), true)
+    assert.equal(fs.existsSync(path.join(handoffRoot, 'release-gate', 'logs', 'verify-tgz.log')), true)
+    assert.equal(fs.existsSync(path.join(handoffRoot, 'release-gate', 'logs', 'verify-zip.log')), true)
+    assert.equal(fs.existsSync(path.join(handoffRoot, 'release-gate', 'logs', 'delivery.log')), true)
+  } finally {
+    fs.rmSync(readinessRoot, { recursive: true, force: true })
+    fs.rmSync(handoffOutputRoot, { recursive: true, force: true })
+    fs.rmSync(tmpRoot, { recursive: true, force: true })
     fs.rmSync(packageJsonPath, { force: true })
     fs.rmSync(releaseTgz, { force: true })
     fs.rmSync(releaseZip, { force: true })

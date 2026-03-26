@@ -193,12 +193,22 @@ async function resolveLatestOnPremGate() {
   })()
   if (!reportPath || !(await exists(reportPath))) return null
   const raw = JSON.parse(await fs.readFile(reportPath, 'utf8'))
-  const gateRoot = path.dirname(reportPath)
+  const gateRoot = typeof raw?.outputRoot === 'string' && raw.outputRoot
+    ? path.resolve(raw.outputRoot)
+    : path.dirname(reportPath)
   return {
     reportPath,
-    reportMdPath: path.join(gateRoot, 'report.md'),
-    operatorCommandsPath: path.join(gateRoot, 'operator-commands.sh'),
-    logsRoot: path.join(gateRoot, 'logs'),
+    reportMdPath: typeof raw?.reportMdPath === 'string' && raw.reportMdPath
+      ? path.resolve(raw.reportMdPath)
+      : path.join(gateRoot, 'report.md'),
+    operatorCommandsPath: typeof raw?.operatorCommandsPath === 'string' && raw.operatorCommandsPath
+      ? path.resolve(raw.operatorCommandsPath)
+      : typeof raw?.operatorCommandScript === 'string' && raw.operatorCommandScript
+        ? path.resolve(raw.operatorCommandScript)
+        : path.join(gateRoot, 'operator-commands.sh'),
+    logsRoot: typeof raw?.logRoot === 'string' && raw.logRoot
+      ? path.resolve(raw.logRoot)
+      : path.join(gateRoot, 'logs'),
     packageName: raw?.packageName ?? null,
     packageJson: raw?.packageJson ? path.resolve(raw.packageJson) : null,
     raw,
@@ -280,6 +290,12 @@ async function main() {
   const onPremGateReportJson = onPremGate?.reportPath ?? null
   const onPremGateReportMd = onPremGate?.reportMdPath ?? null
   const onPremGateOperatorCommands = onPremGate?.operatorCommandsPath ?? null
+  const onPremGateOperatorCommandEntries = Array.isArray(onPremGate?.raw?.operatorCommands)
+    ? onPremGate.raw.operatorCommands
+    : []
+  const onPremGateOperatorChecklist = Array.isArray(onPremGate?.raw?.operatorChecklist)
+    ? onPremGate.raw.operatorChecklist
+    : []
   const onPremGateBuildLog = onPremGate ? path.join(onPremGate.logsRoot, 'build.log') : null
   const onPremGateVerifyTgzLog = onPremGate ? path.join(onPremGate.logsRoot, 'verify-tgz.log') : null
   const onPremGateVerifyZipLog = onPremGate ? path.join(onPremGate.logsRoot, 'verify-zip.log') : null
@@ -603,6 +619,13 @@ async function main() {
       explicitRequired: requireExplicitOnPremGate,
       explicitReport: onPremGateReportOverride ? path.resolve(onPremGateReportOverride) : null,
     },
+    onPremReleaseGateOperatorContract: {
+      helper: copied.onPremGateOperatorCommands
+        ? path.join(handoffRoot, 'release-gate', 'operator-commands.sh')
+        : null,
+      operatorCommandEntries: onPremGateOperatorCommandEntries,
+      operatorChecklist: onPremGateOperatorChecklist,
+    },
     packageName: release.packageName,
     handoffRoot,
     expectedOperatorEvidence: {
@@ -644,6 +667,8 @@ async function main() {
         verifyZipLog: copied.onPremGateVerifyZipLog,
         deliveryLog: copied.onPremGateDeliveryLog,
         releaseGateScript: copied.onPremReleaseGateScript,
+        operatorCommandEntries: onPremGateOperatorCommandEntries,
+        operatorChecklist: onPremGateOperatorChecklist,
       },
       packageVerify: {
         ok: packageVerifyOk,
@@ -818,6 +843,16 @@ async function main() {
     `- UAT sign-off template: ${copied.uatSignoffTemplate ? '`present`' : '`missing`'}`,
     `- customer delivery sign-off template: ${copied.customerDeliverySignoffTemplate ? '`present`' : '`missing`'}`,
     `- issue template: ${copied.issueTemplate ? '`present`' : '`missing`'}`,
+    '',
+    '## On-Prem Release Gate Operator Contract',
+    '',
+    `- Helper: ${copied.onPremGateOperatorCommands ? '`release-gate/operator-commands.sh`' : '`missing`'}`,
+    onPremGateOperatorCommandEntries.length
+      ? `- Operator commands: ${onPremGateOperatorCommandEntries.map((item) => `\`${item.name}\``).join(', ')}`
+      : '- Operator commands: none',
+    onPremGateOperatorChecklist.length
+      ? `- Operator checklist: ${onPremGateOperatorChecklist.map((item) => `\`${item.step}. ${item.title}\``).join(', ')}`
+      : '- Operator checklist: none',
     '',
     '## Recommended Templates',
     '',

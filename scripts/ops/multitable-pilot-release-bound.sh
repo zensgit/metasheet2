@@ -110,11 +110,16 @@ HANDOFF_READINESS_GATE_OPERATOR_COMMANDS_JSON="$(node -e "const fs=require('fs')
 HANDOFF_READINESS_GATE_OPERATOR_CHECKLIST_JSON="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const contract=data?.readinessGateOperatorContract;const fallback=data?.artifactChecks?.readinessGate;const value=Array.isArray(contract?.operatorChecklist)?contract.operatorChecklist:Array.isArray(fallback?.operatorChecklist)?fallback.operatorChecklist:[];process.stdout.write(JSON.stringify(value))" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_READINESS_GATE_OPERATOR_COMMAND_NAMES="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const contract=data?.readinessGateOperatorContract;const fallback=data?.artifactChecks?.readinessGate;const value=Array.isArray(contract?.operatorCommandEntries)?contract.operatorCommandEntries:Array.isArray(fallback?.operatorCommandEntries)?fallback.operatorCommandEntries:[];process.stdout.write(value.length?value.map((item)=>String(item?.name||'unnamed')).join(', '):'none')" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_READINESS_GATE_OPERATOR_CHECKLIST_SUMMARY="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const contract=data?.readinessGateOperatorContract;const fallback=data?.artifactChecks?.readinessGate;const value=Array.isArray(contract?.operatorChecklist)?contract.operatorChecklist:Array.isArray(fallback?.operatorChecklist)?fallback.operatorChecklist:[];process.stdout.write(value.length?value.map((item)=>(String(item?.step ?? '?') + '. ' + String(item?.title || 'untitled'))).join(', '):'none')" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_ONPREM_GATE_OPERATOR_COMMANDS_JSON="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const contract=data?.onPremReleaseGateOperatorContract;const fallback=data?.artifactChecks?.onPremReleaseGate;const value=Array.isArray(contract?.operatorCommandEntries)?contract.operatorCommandEntries:Array.isArray(fallback?.operatorCommandEntries)?fallback.operatorCommandEntries:[];process.stdout.write(JSON.stringify(value))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_ONPREM_GATE_OPERATOR_CHECKLIST_JSON="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const contract=data?.onPremReleaseGateOperatorContract;const fallback=data?.artifactChecks?.onPremReleaseGate;const value=Array.isArray(contract?.operatorChecklist)?contract.operatorChecklist:Array.isArray(fallback?.operatorChecklist)?fallback.operatorChecklist:[];process.stdout.write(JSON.stringify(value))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_ONPREM_GATE_OPERATOR_COMMAND_NAMES="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const contract=data?.onPremReleaseGateOperatorContract;const fallback=data?.artifactChecks?.onPremReleaseGate;const value=Array.isArray(contract?.operatorCommandEntries)?contract.operatorCommandEntries:Array.isArray(fallback?.operatorCommandEntries)?fallback.operatorCommandEntries:[];process.stdout.write(value.length?value.map((item)=>String(item?.name||'unnamed')).join(', '):'none')" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_ONPREM_GATE_OPERATOR_CHECKLIST_SUMMARY="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const contract=data?.onPremReleaseGateOperatorContract;const fallback=data?.artifactChecks?.onPremReleaseGate;const value=Array.isArray(contract?.operatorChecklist)?contract.operatorChecklist:Array.isArray(fallback?.operatorChecklist)?fallback.operatorChecklist:[];process.stdout.write(value.length?value.map((item)=>(String(item?.step ?? '?') + '. ' + String(item?.title || 'untitled'))).join(', '):'none')" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_EMBED_HOST_ACCEPTANCE_STATUS="FAIL"
 HANDOFF_EMBED_HOST_PROTOCOL_STATUS="FAIL"
 HANDOFF_EMBED_HOST_NAVIGATION_STATUS="FAIL"
 HANDOFF_EMBED_HOST_DEFERRED_STATUS="FAIL"
 HANDOFF_LOCAL_RUNNER_STATUS="FAIL"
+REPORT_OK="true"
 if [[ "${HANDOFF_LOCAL_RUNNER_OK}" == "true" ]]; then
   HANDOFF_LOCAL_RUNNER_STATUS="PASS"
 fi
@@ -129,6 +134,9 @@ if [[ "${HANDOFF_EMBED_HOST_NAVIGATION_OK}" == "true" ]]; then
 fi
 if [[ "${HANDOFF_EMBED_HOST_DEFERRED_OK}" == "true" ]]; then
   HANDOFF_EMBED_HOST_DEFERRED_STATUS="PASS"
+fi
+if [[ "${HANDOFF_LOCAL_RUNNER_OK}" != "true" || "${HANDOFF_EMBED_HOST_ACCEPTANCE_OK}" != "true" ]]; then
+  REPORT_OK="false"
 fi
 HANDOFF_PREFLIGHT_REPORT_JSON_DEFAULT="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const value=data?.artifactChecks?.preflight?.preflightReportJsonDefault||'';process.stdout.write(String(value))" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_PREFLIGHT_REPORT_MD_DEFAULT="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const value=data?.artifactChecks?.preflight?.preflightReportMdDefault||'';process.stdout.write(String(value))" "${HANDOFF_ROOT_ABS}/handoff.json")"
@@ -215,7 +223,7 @@ chmod +x "${REPORT_ROOT_ABS}/$(basename "${COMMANDS_SH}")"
 
 printf '%s\n' \
   '{' \
-  '  "ok": true,' \
+  "  \"ok\": ${REPORT_OK}," \
   "  \"generatedAt\": \"${generated_at}\"," \
   "  \"runMode\": \"${RUN_MODE}\"," \
   "  \"onPremGateReportJson\": \"${ONPREM_GATE_REPORT_JSON}\"," \
@@ -230,6 +238,11 @@ printf '%s\n' \
   "    \"helper\": \"${READY_OUTPUT_ROOT_ABS}/gates/operator-commands.sh\"," \
   "    \"operatorCommandEntries\": ${HANDOFF_READINESS_GATE_OPERATOR_COMMANDS_JSON}," \
   "    \"operatorChecklist\": ${HANDOFF_READINESS_GATE_OPERATOR_CHECKLIST_JSON}" \
+  '  },' \
+  '  "onPremReleaseGateOperatorContract": {' \
+  "    \"helper\": \"${HANDOFF_ROOT_ABS}/release-gate/operator-commands.sh\"," \
+  "    \"operatorCommandEntries\": ${HANDOFF_ONPREM_GATE_OPERATOR_COMMANDS_JSON}," \
+  "    \"operatorChecklist\": ${HANDOFF_ONPREM_GATE_OPERATOR_CHECKLIST_JSON}" \
   '  },' \
   "  \"handoffRoot\": \"${HANDOFF_ROOT_ABS}\"," \
   "  \"handoffJson\": \"${HANDOFF_ROOT_ABS}/handoff.json\"," \
@@ -321,6 +334,12 @@ printf '%s\n' \
   "- Helper: \`${READY_OUTPUT_ROOT_ABS}/gates/operator-commands.sh\`" \
   "- Operator commands: ${HANDOFF_READINESS_GATE_OPERATOR_COMMAND_NAMES}" \
   "- Operator checklist: ${HANDOFF_READINESS_GATE_OPERATOR_CHECKLIST_SUMMARY}" \
+  '' \
+  '## On-Prem Release Gate Operator Contract' \
+  '' \
+  "- Helper: \`${HANDOFF_ROOT_ABS}/release-gate/operator-commands.sh\`" \
+  "- Operator commands: ${HANDOFF_ONPREM_GATE_OPERATOR_COMMAND_NAMES}" \
+  "- Operator checklist: ${HANDOFF_ONPREM_GATE_OPERATOR_CHECKLIST_SUMMARY}" \
   '' \
   '## Recommended Templates' \
   '' \
