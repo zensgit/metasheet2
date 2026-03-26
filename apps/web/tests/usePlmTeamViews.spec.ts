@@ -3229,6 +3229,8 @@ describe('usePlmTeamViews', () => {
     applyViewState.mockClear()
     syncRequestedViewId.mockClear()
     model.teamViewKey.value = 'cad-view-1'
+    model.teamViewName.value = '待清空名称'
+    model.teamViewOwnerUserId.value = 'owner-stale'
     model.teamViewSelection.value = ['cad-view-1']
 
     await model.restoreTeamViewSelection()
@@ -3237,6 +3239,8 @@ describe('usePlmTeamViews', () => {
     expect(syncRequestedViewId).toHaveBeenLastCalledWith('cad-view-1')
     expect(requestedViewId.value).toBe('cad-view-1')
     expect(model.teamViewKey.value).toBe('cad-view-1')
+    expect(model.teamViewName.value).toBe('')
+    expect(model.teamViewOwnerUserId.value).toBe('')
     expect(model.teamViewSelection.value).toEqual([])
     expect(model.teamViews.value.find((view) => view.id === 'cad-view-1')?.isArchived).toBe(false)
     expect(applyViewState).toHaveBeenCalledWith({
