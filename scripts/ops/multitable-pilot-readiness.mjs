@@ -6,6 +6,7 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '../..')
 
 const smokeReportPath = process.env.SMOKE_REPORT_JSON || ''
+const smokeReportMdPath = process.env.SMOKE_REPORT_MD || ''
 const smokeRunnerReportPath = process.env.SMOKE_RUNNER_REPORT_JSON || process.env.SMOKE_LOCAL_REPORT_JSON || ''
 const smokeRunnerReportMdPath = process.env.SMOKE_RUNNER_REPORT_MD || process.env.SMOKE_LOCAL_REPORT_MD || ''
 const profileReportPath = process.env.PROFILE_REPORT_JSON || ''
@@ -361,6 +362,7 @@ async function main() {
     ok: overallOk,
     smoke: {
       report: path.resolve(smokeReportPath),
+      reportMd: smokeReportMdPath ? path.resolve(smokeReportMdPath) : null,
       ...smokeSummary,
     },
     importDraftRecovery: {
@@ -436,6 +438,7 @@ async function main() {
     '',
     `- Overall: **${overallOk ? 'PASS' : 'FAIL'}**`,
     `- Smoke report: \`${path.resolve(smokeReportPath)}\``,
+    `- Smoke markdown: \`${smokeReportMdPath ? path.resolve(smokeReportMdPath) : 'missing'}\``,
     `- Profile report: \`${path.resolve(profileReportPath)}\``,
     '',
   ]

@@ -18,6 +18,8 @@ function createMockPool(queryHandler: QueryHandler) {
 async function createApp(args: {
   tokenPerms?: string[]
   tokenRoles?: string[]
+  requestPermissions?: string[]
+  requestRole?: string
   queryHandler?: QueryHandler
   fallbackPermissions?: string[]
   fallbackHasPermission?: boolean
@@ -46,6 +48,8 @@ async function createApp(args: {
   app.use((req, _res, next) => {
     req.user = {
       id: 'user_multitable_1',
+      role: args.requestRole,
+      permissions: args.requestPermissions,
       roles: args.tokenRoles ?? [],
       perms: args.tokenPerms ?? [],
     }
@@ -129,6 +133,72 @@ describe('Multitable context API', () => {
       canDeleteRecord: false,
       canManageFields: false,
       canManageViews: false,
+      canComment: true,
+      canManageAutomation: true,
+    })
+  })
+
+  test('derives multitable capabilities from req.user role and permissions when token roles/perms are absent', async () => {
+    const { app } = await createApp({
+      requestRole: 'admin',
+      requestPermissions: ['*:*'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM meta_sheets s') && sql.includes('LEFT JOIN meta_bases')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{
+              id: 'sheet_ops',
+              base_id: 'base_ops',
+              name: 'Orders',
+              description: 'Ops records',
+            }],
+          }
+        }
+        if (sql.includes('FROM meta_bases') && sql.includes('WHERE id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [{
+              id: 'base_ops',
+              name: 'Ops Base',
+              icon: 'table',
+              color: '#1677ff',
+              owner_id: 'owner_1',
+              workspace_id: 'workspace_1',
+            }],
+          }
+        }
+        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [
+              { id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: 'Ops records' },
+            ],
+          }
+        }
+        if (sql.includes('FROM meta_views') && sql.includes('WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              { id: 'view_grid', sheet_id: 'sheet_ops', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {} },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/context')
+      .query({ sheetId: 'sheet_ops' })
+      .expect(200)
+
+    expect(response.body.data.capabilities).toEqual({
+      canRead: true,
+      canCreateRecord: true,
+      canEditRecord: true,
+      canDeleteRecord: true,
+      canManageFields: true,
+      canManageViews: true,
       canComment: true,
       canManageAutomation: true,
     })
@@ -491,6 +561,120 @@ describe('Multitable context API', () => {
       foreignSheetId: peopleSheetId,
       limitSingleRecord: true,
       refKind: 'user',
+    })
+  })
+
+  test('accepts date fields in create and update multitable field contracts', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops' }] }
+        }
+        if (sql.includes('SELECT COALESCE(MAX("order"), -1) AS max_order FROM meta_fields')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ max_order: 2 }] }
+        }
+        if (sql.includes('INSERT INTO meta_fields')) {
+          expect(params).toEqual([
+            'fld_due_date',
+            'sheet_ops',
+            'Due Date',
+            'date',
+            '{}',
+            3,
+          ])
+          return {
+            rows: [{
+              id: 'fld_due_date',
+              name: 'Due Date',
+              type: 'date',
+              property: {},
+              order: 3,
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE id = $1')) {
+          if (params?.[0] === 'fld_due_date') {
+            return {
+              rows: [{
+                id: 'fld_due_date',
+                name: 'Due Date',
+                type: 'date',
+                property: {},
+                order: 3,
+              }],
+            }
+          }
+          throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)
+        }
+        if (sql.includes('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1')) {
+          if (params?.[0] === 'fld_due_date') {
+            return {
+              rows: [{
+                id: 'fld_due_date',
+                sheet_id: 'sheet_ops',
+                name: 'Due Date',
+                type: 'date',
+                property: {},
+                order: 3,
+              }],
+            }
+          }
+          throw new Error(`Unexpected field lookup params: ${JSON.stringify(params)}`)
+        }
+        if (sql.includes('UPDATE meta_fields') && sql.includes('SET name = $2, type = $3, property = $4::jsonb, "order" = $5')) {
+          expect(params).toEqual([
+            'fld_due_date',
+            'Due Date',
+            'date',
+            '{}',
+            3,
+          ])
+          return {
+            rows: [{
+              id: 'fld_due_date',
+              name: 'Due Date',
+              type: 'date',
+              property: {},
+              order: 3,
+            }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const createResponse = await request(app)
+      .post('/api/multitable/fields')
+      .send({
+        id: 'fld_due_date',
+        sheetId: 'sheet_ops',
+        name: 'Due Date',
+        type: 'date',
+      })
+      .expect(201)
+
+    expect(createResponse.body.data.field).toMatchObject({
+      id: 'fld_due_date',
+      name: 'Due Date',
+      type: 'date',
+      order: 3,
+    })
+
+    const updateResponse = await request(app)
+      .patch('/api/multitable/fields/fld_due_date')
+      .send({
+        type: 'date',
+      })
+      .expect(200)
+
+    expect(updateResponse.body.data.field).toMatchObject({
+      id: 'fld_due_date',
+      name: 'Due Date',
+      type: 'date',
+      order: 3,
     })
   })
 })

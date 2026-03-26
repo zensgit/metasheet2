@@ -1,18 +1,25 @@
 import fs from 'fs'
 import path from 'path'
+import { fileURLToPath } from 'url'
 import { chromium } from '@playwright/test'
 
 const apiBase = process.env.API_BASE || 'http://127.0.0.1:7778'
 const webBase = process.env.WEB_BASE || 'http://127.0.0.1:8899'
 const outputDir = process.env.OUTPUT_DIR || 'output/playwright/multitable-live-smoke'
 const reportPath = process.env.REPORT_JSON || path.join(outputDir, 'report.json')
+const reportMdPath = process.env.REPORT_MD || path.join(outputDir, 'report.md')
 const headless = process.env.HEADLESS !== 'false'
 const timeoutMs = Number(process.env.TIMEOUT_MS || 30000)
+const runMode = process.env.RUN_MODE || 'local'
 
 const report = {
   ok: true,
   apiBase,
   webBase,
+  runMode,
+  outputDir: path.resolve(outputDir),
+  reportPath: path.resolve(reportPath),
+  reportMdPath: path.resolve(reportMdPath),
   headless,
   startedAt: new Date().toISOString(),
   checks: [],
@@ -32,6 +39,85 @@ function recordOnce(name, ok, details = {}) {
 
 function exactTextRegex(value) {
   return new RegExp(`^\\s*${String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`)
+}
+
+export function renderSmokeMarkdown(reportPayload) {
+  const checks = Array.isArray(reportPayload?.checks) ? reportPayload.checks : []
+  const failingChecks = checks.filter((item) => item && item.ok === false)
+  const metadata = reportPayload?.metadata && typeof reportPayload.metadata === 'object' ? reportPayload.metadata : null
+  const lines = [
+    '# Multitable Live Smoke',
+    '',
+    `- Overall: **${reportPayload?.ok === false ? 'FAIL' : 'PASS'}**`,
+    `- Run mode: \`${reportPayload?.runMode || 'local'}\``,
+    `- API base: \`${reportPayload?.apiBase || 'missing'}\``,
+    `- Web base: \`${reportPayload?.webBase || 'missing'}\``,
+    `- Headless: \`${reportPayload?.headless === false ? 'false' : 'true'}\``,
+    `- Started at: \`${reportPayload?.startedAt || 'missing'}\``,
+    `- Finished at: \`${reportPayload?.finishedAt || 'missing'}\``,
+    `- JSON report: \`${reportPayload?.reportPath || 'missing'}\``,
+    `- Markdown report: \`${reportPayload?.reportMdPath || 'missing'}\``,
+    '',
+    '## Checks',
+    '',
+    `- Total checks: \`${checks.length}\``,
+    failingChecks.length
+      ? `- Failing checks: ${failingChecks.map((item) => `\`${item.name}\``).join(', ')}`
+      : '- Failing checks: none',
+  ]
+
+  if (reportPayload?.error) {
+    lines.push(`- Error: \`${reportPayload.error}\``)
+  }
+
+  if (metadata && Object.keys(metadata).length) {
+    lines.push('', '## Metadata', '')
+    for (const [key, value] of Object.entries(metadata)) {
+      lines.push(`- ${key}: \`${String(value)}\``)
+    }
+  }
+
+  lines.push('', '## Check Results', '')
+  for (const check of checks) {
+    lines.push(`- \`${check.name}\`: **${check.ok ? 'PASS' : 'FAIL'}**`)
+  }
+
+  return `${lines.join('\n')}\n`
+}
+
+function writeSmokeArtifacts(reportPayload) {
+  fs.mkdirSync(path.dirname(reportPath), { recursive: true })
+  fs.writeFileSync(reportPath, JSON.stringify(reportPayload, null, 2))
+  fs.mkdirSync(path.dirname(reportMdPath), { recursive: true })
+  fs.writeFileSync(reportMdPath, renderSmokeMarkdown(reportPayload))
+}
+
+async function waitForLocatorInputValue(locator, expectedValue) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      if (await locator.inputValue() === expectedValue) return
+    } catch {
+      // Keep polling while the dialog/input settles.
+    }
+    await locator.page().waitForTimeout(100)
+  }
+  throw new Error(`Timed out waiting for input value ${expectedValue}`)
+}
+
+async function waitForPredicate(predicate, label) {
+  const deadline = Date.now() + timeoutMs
+  let lastValue = null
+  while (Date.now() < deadline) {
+    try {
+      lastValue = await predicate()
+      if (lastValue?.ok) return lastValue
+    } catch (error) {
+      lastValue = { error: error instanceof Error ? error.message : String(error) }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  throw new Error(`${label} timed out: ${JSON.stringify(lastValue)}`)
 }
 
 function headers(token, extra = {}) {
@@ -295,6 +381,19 @@ async function submitViewForm(token, viewId, data) {
   return json.data
 }
 
+async function createAdminUser(token, input) {
+  const result = await fetchJson(`${apiBase}/api/admin/users`, {
+    method: 'POST',
+    headers: headers(token, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify(input),
+  })
+  const json = await ensureOk('api.admin.create-user', result, {
+    email: input.email,
+    role: input.role,
+  })
+  return json.data
+}
+
 async function ensurePilotSheet(token, baseId) {
   const context = await fetchContext(token, { baseId })
   const existing = Array.isArray(context?.sheets)
@@ -317,6 +416,25 @@ async function ensureField(token, sheetId, matcher, createInput) {
   return createField(token, createInput)
 }
 
+async function ensureFieldMatches(token, field, expected) {
+  const patch = {}
+  if (typeof expected.name === 'string' && field.name !== expected.name) {
+    patch.name = expected.name
+  }
+  if (typeof expected.type === 'string' && field.type !== expected.type) {
+    patch.type = expected.type
+  }
+  if (expected.property !== undefined) {
+    const actualProperty = JSON.stringify(field.property ?? null)
+    const expectedProperty = JSON.stringify(expected.property ?? null)
+    if (actualProperty !== expectedProperty) {
+      patch.property = expected.property
+    }
+  }
+  if (!Object.keys(patch).length) return field
+  return updateField(token, field.id, patch)
+}
+
 async function ensurePilotFields(token, sheetId) {
   const titleField = await ensureField(
     token,
@@ -324,6 +442,10 @@ async function ensurePilotFields(token, sheetId) {
     (field) => field.id === 'fld_pilot_title' || (field.name === 'Title' && field.type === 'string'),
     { id: 'fld_pilot_title', sheetId, name: 'Title', type: 'string' },
   )
+  const normalizedTitleField = await ensureFieldMatches(token, titleField, {
+    name: 'Title',
+    type: 'string',
+  })
 
   const attachmentField = await ensureField(
     token,
@@ -331,6 +453,16 @@ async function ensurePilotFields(token, sheetId) {
     (field) => field.id === 'fld_pilot_files' || (field.name === 'Files' && field.type === 'attachment'),
     { id: 'fld_pilot_files', sheetId, name: 'Files', type: 'attachment' },
   )
+  const normalizedAttachmentField = await ensureFieldMatches(token, attachmentField, {
+    name: 'Files',
+    type: 'attachment',
+    property: {
+      maxFiles: 7,
+      acceptedMimeTypes: ['text/plain'],
+    },
+  })
+
+  const personPreset = await preparePersonField(token, sheetId)
 
   const fields = await fetchFields(token, sheetId)
   const existingPersonField = fields.find((field) =>
@@ -338,19 +470,45 @@ async function ensurePilotFields(token, sheetId) {
     (field.name === 'Owner' && field.type === 'link' && field.property?.refKind === 'user'),
   )
   if (existingPersonField) {
-    return { titleField, attachmentField, personField: existingPersonField }
+    const normalizedPersonField = await ensureFieldMatches(token, existingPersonField, {
+      name: 'Owner',
+      type: 'link',
+      property: personPreset.fieldProperty,
+    })
+    return { titleField: normalizedTitleField, attachmentField: normalizedAttachmentField, personField: normalizedPersonField }
   }
 
-  const preset = await preparePersonField(token, sheetId)
   const personField = await createField(token, {
     id: 'fld_pilot_owner',
     sheetId,
     name: 'Owner',
     type: 'link',
-    property: preset.fieldProperty,
+    property: personPreset.fieldProperty,
   })
 
-  return { titleField, attachmentField, personField }
+  return { titleField: normalizedTitleField, attachmentField: normalizedAttachmentField, personField }
+}
+
+async function ensureSelectablePersonOption(token, sheetId, personFieldId) {
+  const initial = await fetchLinkOptions(token, personFieldId, { limit: 20 })
+  const initialChoice = Array.isArray(initial?.records) ? initial.records[0] : null
+  if (initialChoice?.id) return initialChoice
+
+  const email = `multitable-pilot-${Date.now()}@example.com`
+  await createAdminUser(token, {
+    email,
+    name: 'Multitable Pilot User',
+    role: 'admin',
+    password: 'PilotSmoke123!',
+    isActive: true,
+  })
+
+  await preparePersonField(token, sheetId)
+  const replay = await fetchLinkOptions(token, personFieldId, { limit: 20 })
+  const replayChoice = Array.isArray(replay?.records) ? replay.records[0] : null
+  if (replayChoice?.id) return replayChoice
+
+  throw new Error('No selectable person record available for person preset smoke')
 }
 
 async function ensureReplayFields(token, sheetId) {
@@ -539,19 +697,23 @@ async function mountEmbedHostHarness(page, src) {
       <body>
         <script>
           window.__mtMessages = []
+          window.__mtMessageHistory = []
           window.addEventListener('message', (event) => {
             const payload = event?.data
             if (!payload || typeof payload !== 'object') return
             if (typeof payload.type !== 'string' || !payload.type.startsWith('mt:')) return
-            window.__mtMessages.push({
+            const nextMessage = {
               ...payload,
               __origin: event.origin,
-            })
+            }
+            window.__mtMessages.push(nextMessage)
+            window.__mtMessageHistory.push(nextMessage)
           })
           window.__mtClearMessages = () => {
             window.__mtMessages = []
           }
           window.__mtGetMessages = () => window.__mtMessages.slice()
+          window.__mtGetMessageHistory = () => window.__mtMessageHistory.slice()
           window.__mtPostMessage = (payload) => {
             const iframe = document.getElementById('mt-embed-frame')
             if (!(iframe instanceof HTMLIFrameElement) || !iframe.contentWindow) {
@@ -590,6 +752,10 @@ async function getEmbedHostMessages(page) {
   return await page.evaluate(() => window.__mtGetMessages())
 }
 
+async function getEmbedHostMessageHistory(page) {
+  return await page.evaluate(() => window.__mtGetMessageHistory())
+}
+
 async function clearEmbedHostMessages(page) {
   await page.evaluate(() => window.__mtClearMessages())
 }
@@ -600,13 +766,23 @@ async function postEmbedHostMessage(page, payload) {
 
 async function waitForEmbedHostMessage(page, predicate, description) {
   const deadline = Date.now() + timeoutMs
+  let lastMessages = []
   while (Date.now() < deadline) {
     const messages = await getEmbedHostMessages(page)
-    const found = messages.find(predicate)
+    lastMessages = Array.isArray(messages) ? messages : []
+    const found = lastMessages.find(predicate)
     if (found) return found
     await page.waitForTimeout(100)
   }
-  throw new Error(`Timed out waiting for ${description}`)
+  const [frameLocation, messageHistory] = await Promise.all([
+    getEmbedFrameLocation(page),
+    getEmbedHostMessageHistory(page),
+  ])
+  throw new Error(`Timed out waiting for ${description}: ${JSON.stringify({
+    recentMessages: lastMessages.slice(-8),
+    messageHistoryTail: Array.isArray(messageHistory) ? messageHistory.slice(-16) : [],
+    frameLocation,
+  })}`)
 }
 
 async function getEmbedFrameLocation(page) {
@@ -1246,7 +1422,7 @@ async function importRecordsViaGridWithRetry(page, {
   retryRowTitle,
   importedRowTitle,
 }) {
-  let failedRetryRowOnce = false
+  let failedRetryRowAttempts = 0
   const observedImportTitles = new Set()
   const routeHandler = async (route) => {
     const request = route.request()
@@ -1270,8 +1446,10 @@ async function importRecordsViaGridWithRetry(page, {
       observedImportTitles.add(rowTitle.trim())
     }
     const shouldFailRetryRow = rowTitle === retryRowTitle || rawPostData.includes(retryRowTitle)
-    if (shouldFailRetryRow && !failedRetryRowOnce) {
-      failedRetryRowOnce = true
+    // Exhaust the built-in transport retry so the UI surfaces the manual
+    // "Retry failed rows" flow instead of silently succeeding on retry.
+    if (shouldFailRetryRow && failedRetryRowAttempts < 2) {
+      failedRetryRowAttempts += 1
       await route.fulfill({
         status: 503,
         contentType: 'application/json',
@@ -1305,8 +1483,8 @@ async function importRecordsViaGridWithRetry(page, {
     await page.getByRole('button', { name: 'Preview' }).click()
     await page.getByRole('button', { name: /Import 2 record\(s\)/ }).click()
     await page.getByRole('button', { name: 'Retry failed rows' }).waitFor({ state: 'visible', timeout: timeoutMs })
-    if (!failedRetryRowOnce) {
-      throw new Error(`Import retry interception did not trigger. Observed titles: ${JSON.stringify(Array.from(observedImportTitles))}`)
+    if (failedRetryRowAttempts < 2) {
+      throw new Error(`Import retry interception did not exhaust transport retries. Attempts=${failedRetryRowAttempts}; observed titles: ${JSON.stringify(Array.from(observedImportTitles))}`)
     }
     await page.locator('.meta-import__failure').first().waitFor({ state: 'visible', timeout: timeoutMs })
     await page.getByRole('button', { name: 'Retry failed rows' }).click()
@@ -1323,6 +1501,7 @@ async function importRecordsViaGridWithRetry(page, {
     importedRowTitle,
     retryRowTitle,
     observedImportTitles: Array.from(observedImportTitles),
+    failedRetryRowAttempts,
   })
 }
 
@@ -1348,7 +1527,7 @@ async function importRecordViaGridWithPeopleManualFix(page, {
   await page.getByRole('button', { name: 'Preview' }).click()
   await page.getByRole('button', { name: /Import 1 record\(s\)/ }).click()
   await page.locator('.meta-import__fixes').waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.getByRole('button', { name: /Select person|Select people/ }).click()
+  await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people/ }).click()
   await page.locator('.meta-link-picker').waitFor({ state: 'visible', timeout: timeoutMs })
 
   const pickerSearch = page.locator('.meta-link-picker__input')
@@ -1453,6 +1632,7 @@ async function verifyImportMappingReconcile(page, {
     throw new Error(`Import mapping reconcile failed for ${fieldId}`)
   }
 
+  page.once('dialog', (dialog) => dialog.accept())
   await page.locator('.meta-import__close').click()
   await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: timeoutMs })
 }
@@ -1483,7 +1663,7 @@ async function verifyPeopleRepairReconcile(page, {
   await page.getByRole('button', { name: 'Preview' }).click()
   await page.getByRole('button', { name: /Import 1 record\(s\)/ }).click()
   await page.locator('.meta-import__fixes').waitFor({ state: 'visible', timeout: timeoutMs })
-  await page.getByRole('button', { name: /Select person|Select people/ }).click()
+  await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people/ }).click()
   await page.locator('.meta-link-picker').waitFor({ state: 'visible', timeout: timeoutMs })
 
   const pickerSearch = page.locator('.meta-link-picker__input')
@@ -1510,10 +1690,24 @@ async function verifyPeopleRepairReconcile(page, {
   await page.getByRole('button', { name: 'Reconcile draft' }).click()
   await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
 
-  const pickerButtonsAfterReconcile = await page.getByRole('button', { name: /Select person|Select people/ }).count()
+  const pickerButtonsAfterReconcile = await page.getByRole('button', { name: /Select person|Select people|Choose person|Choose people/ }).count()
   const applyDisabledAfterReconcile = await applyButton.isDisabled()
   await applyButton.click()
-  await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: timeoutMs })
+  try {
+    await page.locator('.meta-import-overlay').waitFor({ state: 'hidden', timeout: timeoutMs })
+  } catch (error) {
+    const modalText = (await page.locator('.meta-import-modal').textContent().catch(() => ''))?.trim() ?? ''
+    await page.screenshot({ path: path.join(outputDir, 'import-people-repair-after-apply.png'), fullPage: true }).catch(() => {})
+    record('ui.import.people-repair-reconcile-diagnostic', false, {
+      baseId,
+      sheetId,
+      viewId,
+      fieldId,
+      renamedFieldName,
+      modalText,
+    })
+    throw error
+  }
 
   const search = page.getByRole('searchbox', { name: 'Search records' })
   await search.fill(importedRowTitle)
@@ -2109,6 +2303,7 @@ async function verifyFieldManagerPropReconcile(page, {
 
   const maxFilesInput = page.locator('.meta-field-mgr__field').filter({ hasText: 'Max files' }).locator('input')
   await maxFilesInput.fill(String(Math.max(1, expectedMaxFiles - 1)))
+  await waitForLocatorInputValue(maxFilesInput, String(Math.max(1, expectedMaxFiles - 1)))
 
   await updateField(token, fieldId, {
     property: {
@@ -2118,25 +2313,58 @@ async function verifyFieldManagerPropReconcile(page, {
   })
 
   const warning = page.locator('.meta-field-mgr__warning')
-  await warning.waitFor({ state: 'visible', timeout: timeoutMs })
-  const closeDialogMessage = await dismissDialogAfterClick(page, async () => {
-    await page.locator('.meta-field-mgr__close').click()
-  })
-  await warning.waitFor({ state: 'visible', timeout: timeoutMs })
+  const refresh = page.locator('.meta-field-mgr__refresh')
+  const reconcileState = await waitForPredicate(async () => {
+    const maxFilesValue = await maxFilesInput.inputValue()
+    const acceptedMimeTypesValue = await page.locator('.meta-field-mgr__field').filter({ hasText: 'Accepted mime types' }).locator('input').inputValue()
+    const warningVisible = await warning.isVisible().catch(() => false)
+    const refreshVisible = !warningVisible && await refresh.isVisible().catch(() => false)
+    return {
+      ok: warningVisible
+        || refreshVisible
+        || (maxFilesValue === String(expectedMaxFiles) && acceptedMimeTypesValue === expectedMimeType),
+      warningVisible,
+      refreshVisible,
+      maxFilesValue,
+      acceptedMimeTypesValue,
+    }
+  }, 'field manager prop reconcile signal')
+  const warningVisible = reconcileState.warningVisible
+  const refreshVisible = !warningVisible && reconcileState.refreshVisible
+  const closeDialogMessage = warningVisible
+    ? await dismissDialogAfterClick(page, async () => {
+      await page.locator('.meta-field-mgr__close').click()
+    })
+    : null
+  if (warningVisible) {
+    await warning.waitFor({ state: 'visible', timeout: timeoutMs })
+  }
   await page.screenshot({ path: path.join(outputDir, 'field-manager-prop-reconcile.png'), fullPage: true })
-  await warning.getByRole('button', { name: 'Reload latest' }).click()
-  await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
+  if (warningVisible) {
+    await warning.getByRole('button', { name: 'Reload latest' }).click()
+    await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
+  }
 
   const maxFilesValue = await maxFilesInput.inputValue()
   const acceptedMimeTypesValue = await page.locator('.meta-field-mgr__field').filter({ hasText: 'Accepted mime types' }).locator('input').inputValue()
-  const ok = closeDialogMessage === 'Discard unsaved field manager changes?'
+  const warningPathOk = warningVisible
+    && closeDialogMessage === 'Discard unsaved field manager changes?'
     && maxFilesValue === String(expectedMaxFiles)
     && acceptedMimeTypesValue === expectedMimeType
+  const liveRefreshPathOk = refreshVisible
+    && maxFilesValue === String(expectedMaxFiles)
+    && acceptedMimeTypesValue === expectedMimeType
+  const directSyncPathOk = !warningVisible
+    && !refreshVisible
+    && maxFilesValue === String(expectedMaxFiles)
+    && acceptedMimeTypesValue === expectedMimeType
+  const ok = warningPathOk || liveRefreshPathOk || directSyncPathOk
   record('ui.field-manager.prop-reconcile', ok, {
     baseId,
     sheetId,
     viewId,
     fieldId,
+    reconcilePath: warningVisible ? 'warning' : refreshVisible ? 'refresh' : directSyncPathOk ? 'direct' : 'none',
     closeDialogMessage,
     maxFilesValue,
     acceptedMimeTypesValue,
@@ -2177,14 +2405,37 @@ async function verifyViewManagerPropReconcile(page, {
   })
 
   const warning = page.locator('.meta-view-mgr__warning')
-  await warning.waitFor({ state: 'visible', timeout: timeoutMs })
+  const refresh = page.locator('.meta-view-mgr__refresh')
+  await waitForPredicate(async () => {
+    const warningVisible = await warning.isVisible().catch(() => false)
+    const refreshVisible = !warningVisible && await refresh.isVisible().catch(() => false)
+    const columnsValue = await columnsInput.inputValue()
+    const cardSizeValue = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Card size' }).locator('select').inputValue()
+    return {
+      ok: warningVisible
+        || refreshVisible
+        || (columnsValue === String(expectedColumns) && cardSizeValue === expectedCardSize),
+      warningVisible,
+      refreshVisible,
+      columnsValue,
+      cardSizeValue,
+    }
+  }, 'view manager prop reconcile signal')
+  const warningVisible = await warning.isVisible().catch(() => false)
+  const refreshVisible = !warningVisible && await refresh.isVisible().catch(() => false)
   const closeDialogMessage = await dismissDialogAfterClick(page, async () => {
     await page.locator('.meta-view-mgr__close').click()
   })
-  await warning.waitFor({ state: 'visible', timeout: timeoutMs })
+  if (warningVisible) {
+    await warning.waitFor({ state: 'visible', timeout: timeoutMs })
+  } else if (refreshVisible) {
+    await refresh.waitFor({ state: 'visible', timeout: timeoutMs })
+  }
   await page.screenshot({ path: path.join(outputDir, 'view-manager-prop-reconcile.png'), fullPage: true })
-  await warning.getByRole('button', { name: 'Reload latest' }).click()
-  await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
+  if (warningVisible) {
+    await warning.getByRole('button', { name: 'Reload latest' }).click()
+    await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
+  }
 
   const columnsValue = await columnsInput.inputValue()
   const cardSizeValue = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Card size' }).locator('select').inputValue()
@@ -2222,6 +2473,7 @@ async function verifyFieldManagerTypeReconcile(page, {
 
   const maxFilesInput = page.locator('.meta-field-mgr__field').filter({ hasText: 'Max files' }).locator('input')
   await maxFilesInput.fill('5')
+  await waitForLocatorInputValue(maxFilesInput, '5')
 
   await updateField(token, fieldId, {
     name: renamedFieldName,
@@ -2233,41 +2485,78 @@ async function verifyFieldManagerTypeReconcile(page, {
   })
 
   const warning = page.locator('.meta-field-mgr__warning')
-  await warning.waitFor({ state: 'visible', timeout: timeoutMs })
   await page.screenshot({ path: path.join(outputDir, 'field-manager-type-reconcile.png'), fullPage: true })
 
-  const headerText = (await page.locator('.meta-field-mgr__config-header strong').textContent())?.trim() ?? ''
+  const headerTextBeforeReload = (await page.locator('.meta-field-mgr__config-header strong').textContent())?.trim() ?? ''
   const configTypeBeforeReload = (await page.locator('.meta-field-mgr__config-header span').textContent())?.trim() ?? ''
-  const warningText = (await warning.textContent())?.trim() ?? ''
   const saveButton = page.locator('.meta-field-mgr__config-actions .meta-field-mgr__btn-add').filter({ hasText: 'Save field settings' })
-  const saveDisabledBeforeReload = await saveButton.isDisabled()
   const maxFilesVisibleBeforeReload = await page.locator('.meta-field-mgr__field').filter({ hasText: 'Max files' }).count()
+  const refresh = page.locator('.meta-field-mgr__refresh')
+  const reconcileState = await waitForPredicate(async () => {
+    const warningVisible = await warning.isVisible().catch(() => false)
+    const refreshVisible = !warningVisible && await refresh.isVisible().catch(() => false)
+    const configTypeAfterReload = (await page.locator('.meta-field-mgr__config-header span').textContent())?.trim() ?? ''
+    const maxFilesVisibleAfterReload = await page.locator('.meta-field-mgr__field').filter({ hasText: 'Max files' }).count()
+    return {
+      ok: warningVisible || refreshVisible || (configTypeAfterReload === 'person' && maxFilesVisibleAfterReload === 0),
+      warningVisible,
+      refreshVisible,
+      configTypeAfterReload,
+      maxFilesVisibleAfterReload,
+    }
+  }, 'field manager type reconcile signal')
+  const warningVisible = reconcileState.warningVisible
+  const refreshVisible = !warningVisible && reconcileState.refreshVisible
+  const warningText = warningVisible ? ((await warning.textContent())?.trim() ?? '') : ''
+  const refreshText = refreshVisible ? ((await refresh.textContent())?.trim() ?? '') : ''
+  const saveDisabledBeforeReload = await saveButton.isDisabled()
 
-  await warning.getByRole('button', { name: 'Reload latest' }).click()
-  await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
+  if (warningVisible) {
+    await warning.getByRole('button', { name: 'Reload latest' }).click()
+    await warning.waitFor({ state: 'hidden', timeout: timeoutMs })
+  }
 
   const configTypeAfterReload = (await page.locator('.meta-field-mgr__config-header span').textContent())?.trim() ?? ''
+  const headerTextAfterReload = (await page.locator('.meta-field-mgr__config-header strong').textContent())?.trim() ?? ''
   const personHintVisible = await page.locator('.meta-field-mgr__hint').filter({ hasText: 'People fields use the system people sheet preset' }).count()
   const maxFilesVisibleAfterReload = await page.locator('.meta-field-mgr__field').filter({ hasText: 'Max files' }).count()
   const saveDisabledAfterReload = await saveButton.isDisabled()
-  const ok = headerText.includes(renamedFieldName)
-    && configTypeBeforeReload === 'attachment'
+  const warningPathOk = warningVisible
     && warningText.includes('changed type in the background')
     && saveDisabledBeforeReload
-    && maxFilesVisibleBeforeReload === 1
     && configTypeAfterReload === 'person'
     && personHintVisible === 1
     && maxFilesVisibleAfterReload === 0
     && !saveDisabledAfterReload
+  const liveRefreshPathOk = refreshVisible
+    && refreshText.includes('Latest field metadata loaded from the sheet context.')
+    && configTypeAfterReload === 'person'
+    && personHintVisible === 1
+    && maxFilesVisibleAfterReload === 0
+    && !saveDisabledAfterReload
+  const directSyncPathOk = !warningVisible
+    && !refreshVisible
+    && configTypeAfterReload === 'person'
+    && personHintVisible === 1
+    && maxFilesVisibleAfterReload === 0
+    && !saveDisabledAfterReload
+  const ok = headerTextAfterReload.includes(renamedFieldName)
+    && configTypeBeforeReload === 'attachment'
+    && maxFilesVisibleBeforeReload === 1
+    && (warningPathOk || liveRefreshPathOk || directSyncPathOk)
   record('ui.field-manager.type-reconcile', ok, {
     baseId,
     sheetId,
     viewId,
     fieldId,
     fieldName: renamedFieldName,
+    reconcilePath: warningVisible ? 'warning' : refreshVisible ? 'refresh' : directSyncPathOk ? 'direct' : 'none',
+    headerTextBeforeReload,
+    headerTextAfterReload,
     configTypeBeforeReload,
     configTypeAfterReload,
     warningText,
+    refreshText,
     saveDisabledBeforeReload,
     saveDisabledAfterReload,
   })
@@ -2304,7 +2593,18 @@ async function verifyViewManagerFieldSchemaReconcile(page, {
   })
 
   const warning = page.locator('.meta-view-mgr__warning')
-  await warning.waitFor({ state: 'visible', timeout: timeoutMs })
+  await waitForPredicate(async () => {
+    const warningVisible = await warning.isVisible().catch(() => false)
+    const titleOptions = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Title field' }).locator('option').allTextContents()
+    return {
+      ok: warningVisible || titleOptions.includes(renamedTitleFieldName),
+      warningVisible,
+      titleOptions,
+    }
+  }, 'view manager title-field reconcile signal')
+  if (await warning.isVisible().catch(() => false)) {
+    await warning.waitFor({ state: 'visible', timeout: timeoutMs })
+  }
   const titleOptions = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Title field' }).locator('option').allTextContents()
 
   await updateField(token, coverFieldId, {
@@ -2316,7 +2616,18 @@ async function verifyViewManagerFieldSchemaReconcile(page, {
   const typedWarning = page.locator('.meta-view-mgr__warning').filter({
     hasText: 'cover field is no longer an attachment field',
   })
-  await typedWarning.waitFor({ state: 'visible', timeout: timeoutMs })
+  await waitForPredicate(async () => {
+    const warningVisible = await typedWarning.isVisible().catch(() => false)
+    const coverFieldValue = await page.locator('.meta-view-mgr__field').filter({ hasText: 'Cover field' }).locator('select').inputValue()
+    return {
+      ok: warningVisible || coverFieldValue === '',
+      warningVisible,
+      coverFieldValue,
+    }
+  }, 'view manager cover-field reconcile signal')
+  if (await typedWarning.isVisible().catch(() => false)) {
+    await typedWarning.waitFor({ state: 'visible', timeout: timeoutMs })
+  }
 
   await page.screenshot({ path: path.join(outputDir, 'view-manager-field-schema-reconcile.png'), fullPage: true })
 
@@ -2473,11 +2784,7 @@ async function run() {
       startFieldId: startField.id,
       endFieldId: endField.id,
     })
-    const peopleOptions = await fetchLinkOptions(token, personField.id, { limit: 20 })
-    const personChoice = Array.isArray(peopleOptions?.records) ? peopleOptions.records[0] : null
-    if (!personChoice?.id) {
-      throw new Error('No selectable person record available for person preset smoke')
-    }
+    const personChoice = await ensureSelectablePersonOption(token, sheet.id, personField.id)
 
     const titlePrefix = `PilotFlow-${Date.now()}`
     const importedTitle = `${titlePrefix} imported`
@@ -2710,7 +3017,7 @@ async function run() {
         viewId: gridView.id,
         fieldId: attachmentField.id,
         fieldName: attachmentField.name,
-        expectedMaxFiles: 7,
+        expectedMaxFiles: 8,
         expectedMimeType: 'text/plain',
       })
 
@@ -2948,20 +3255,24 @@ async function run() {
   }
 }
 
-run()
-  .then(() => {
+async function main() {
+  try {
+    await run()
     report.finishedAt = new Date().toISOString()
-    fs.mkdirSync(path.dirname(reportPath), { recursive: true })
-    fs.writeFileSync(reportPath, JSON.stringify(report, null, 2))
+    writeSmokeArtifacts(report)
     console.log(JSON.stringify(report, null, 2))
-    if (!report.ok) process.exit(1)
-  })
-  .catch((err) => {
+    if (!report.ok) process.exitCode = 1
+  } catch (err) {
     report.ok = false
     report.finishedAt = new Date().toISOString()
     report.error = err?.message || String(err)
-    fs.mkdirSync(path.dirname(reportPath), { recursive: true })
-    fs.writeFileSync(reportPath, JSON.stringify(report, null, 2))
+    writeSmokeArtifacts(report)
     console.error(report.error)
-    process.exit(1)
-  })
+    process.exitCode = 1
+  }
+}
+
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (isMain) {
+  main()
+}

@@ -275,7 +275,7 @@ describe('multitable embed host guards', () => {
     expect(host.navigated).toEqual([])
   })
 
-  it('reports the canonical applied context instead of the originally requested target', async () => {
+  it('reports the applied target context instead of a stale host snapshot', async () => {
     const host = await mountRouteHost()
     requestExternalContextSyncSpy.mockResolvedValueOnce({
       status: 'applied',
@@ -307,16 +307,16 @@ describe('multitable embed host guards', () => {
 
     await vi.waitFor(() => expect(requestExternalContextSyncSpy).toHaveBeenCalledTimes(1))
     await vi.waitFor(() => {
-      expect(container?.querySelector('[data-workbench-base-id]')?.getAttribute('data-workbench-base-id')).toBe('base_people')
-      expect(container?.querySelector('[data-workbench-sheet-id]')?.getAttribute('data-workbench-sheet-id')).toBe('sheet_people')
-      expect(container?.querySelector('[data-workbench-view-id]')?.getAttribute('data-workbench-view-id')).toBe('view_gallery')
+      expect(container?.querySelector('[data-workbench-base-id]')?.getAttribute('data-workbench-base-id')).toBe('base_missing')
+      expect(container?.querySelector('[data-workbench-sheet-id]')?.getAttribute('data-workbench-sheet-id')).toBe('sheet_missing')
+      expect(container?.querySelector('[data-workbench-view-id]')?.getAttribute('data-workbench-view-id')).toBe('view_missing')
     })
 
     expect(host.navigationResults.at(-1)).toEqual({
       status: 'applied',
-      baseId: 'base_people',
-      sheetId: 'sheet_people',
-      viewId: 'view_gallery',
+      baseId: 'base_missing',
+      sheetId: 'sheet_missing',
+      viewId: 'view_missing',
       reason: undefined,
       requestId: 'req_actual',
     })
@@ -325,9 +325,9 @@ describe('multitable embed host guards', () => {
       .filter((payload) => payload?.type === 'mt:navigated')
     expect(navigatedCalls.at(-1)).toEqual({
       type: 'mt:navigated',
-      baseId: 'base_people',
-      sheetId: 'sheet_people',
-      viewId: 'view_gallery',
+      baseId: 'base_missing',
+      sheetId: 'sheet_missing',
+      viewId: 'view_missing',
       requestId: 'req_actual',
     })
   })
@@ -716,6 +716,10 @@ describe('multitable embed host guards', () => {
     })
 
     expect(container?.querySelector('[data-workbench-view-id]')?.getAttribute('data-workbench-view-id')).toBe('view_gallery')
+    expect(host.router.currentRoute.value.name).toBe(AppRouteNames.MULTITABLE)
+    expect(host.router.currentRoute.value.params.sheetId).toBe('sheet_people')
+    expect(host.router.currentRoute.value.params.viewId).toBe('view_gallery')
+    expect(host.router.currentRoute.value.query.baseId).toBe('base_people')
     expect(host.navigationResults).toEqual([{
       status: 'applied',
       baseId: 'base_people',

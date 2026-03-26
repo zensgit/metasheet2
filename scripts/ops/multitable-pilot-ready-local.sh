@@ -124,15 +124,18 @@ pnpm verify:multitable-grid-profile:summary; then
 fi
 
 echo "[multitable-pilot-ready-local] Running release gate" >&2
+RUN_MODE=local \
 REPORT_JSON="${GATE_REPORT_JSON}" \
 REPORT_MD="${GATE_REPORT_MD}" \
 LOG_PATH="${GATE_ROOT}/release-gate.log" \
 PILOT_SMOKE_REPORT="${SMOKE_ROOT}/report.json" \
+PILOT_SMOKE_REPORT_MD="${SMOKE_ROOT}/report.md" \
 SKIP_MULTITABLE_PILOT_SMOKE=true \
 bash scripts/ops/multitable-pilot-release-gate.sh >"${GATE_ROOT}/release-gate.log" 2>&1
 
 echo "[multitable-pilot-ready-local] Writing readiness summary" >&2
 SMOKE_REPORT_JSON="${SMOKE_ROOT}/report.json" \
+SMOKE_REPORT_MD="${SMOKE_ROOT}/report.md" \
 SMOKE_RUNNER_REPORT_JSON="${SMOKE_ROOT}/${RUNNER_REPORT_BASENAME}.json" \
 SMOKE_RUNNER_REPORT_MD="${SMOKE_ROOT}/${RUNNER_REPORT_BASENAME}.md" \
 PROFILE_REPORT_JSON="${PROFILE_ROOT}/report.json" \

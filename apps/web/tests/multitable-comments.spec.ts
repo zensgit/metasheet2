@@ -15,19 +15,26 @@ describe('useMultitableComments', () => {
 
   it('loads comments', async () => {
     const comments = [{ id: 'c1', containerId: 's1', targetId: 'r1', authorId: 'u1', content: 'hello', resolved: false, createdAt: '2026-01-01' }]
-    ;(client as any).fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { comments } }), { status: 200 }))
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { comments } }), { status: 200 }))
+    ;(client as any).fetch = fetch
     const state = useMultitableComments(client)
     await state.loadComments({ containerId: 's1', targetId: 'r1' })
+    expect(fetch).toHaveBeenCalledWith('/api/comments?spreadsheetId=s1&rowId=r1')
     expect(state.comments.value).toHaveLength(1)
     expect(state.comments.value[0].content).toBe('hello')
   })
 
   it('adds comment and prepends', async () => {
     const newComment = { id: 'c2', containerId: 's1', targetId: 'r1', authorId: 'u1', content: 'new', resolved: false, createdAt: '2026-01-02' }
-    ;(client as any).fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { comment: newComment } }), { status: 200 }))
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: { comment: newComment } }), { status: 200 }))
+    ;(client as any).fetch = fetch
     const state = useMultitableComments(client)
     state.comments.value = [{ id: 'c1', containerId: 's1', targetId: 'r1', authorId: 'u1', content: 'old', resolved: false, createdAt: '2026-01-01' }]
     await state.addComment({ containerId: 's1', targetId: 'r1', content: 'new' })
+    expect(fetch).toHaveBeenCalledWith('/api/comments', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ spreadsheetId: 's1', rowId: 'r1', content: 'new' }),
+    }))
     expect(state.comments.value[0].id).toBe('c2')
   })
 

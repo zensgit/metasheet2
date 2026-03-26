@@ -19,9 +19,10 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
-import { onBeforeRouteLeave } from 'vue-router'
+import { onBeforeRouteLeave, useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 import type { MultitableRole } from '../composables/useMultitableCapabilities'
 import MultitableWorkbench from './MultitableWorkbench.vue'
+import { AppRouteNames } from '../../router/types'
 
 const props = defineProps<{
   baseId?: string
@@ -91,6 +92,8 @@ type PendingNavigationEcho = {
 }
 
 const workbenchRef = ref<MultitableWorkbenchExpose | null>(null)
+const route = useRoute()
+const router = useRouter()
 const overrideBaseId = ref<string | undefined>(undefined)
 const overrideSheetId = ref<string | undefined>(undefined)
 const overrideViewId = ref<string | undefined>(undefined)
@@ -231,10 +234,31 @@ function flushPendingNavigationEcho(context: ContextSnapshot) {
   return true
 }
 
-function applyHostOverrides(context: ContextSnapshot) {
+async function applyHostOverrides(context: ContextSnapshot) {
   overrideBaseId.value = context.baseId || undefined
   overrideSheetId.value = context.sheetId || undefined
   overrideViewId.value = context.viewId || undefined
+  if (route.name !== AppRouteNames.MULTITABLE) return
+  const routeContext = normalizeContextSnapshot({
+    baseId: typeof route.query.baseId === 'string' ? route.query.baseId : undefined,
+    sheetId: typeof route.params.sheetId === 'string' ? route.params.sheetId : undefined,
+    viewId: typeof route.params.viewId === 'string' ? route.params.viewId : undefined,
+  })
+  if (contextMatches(routeContext, context)) return
+  const nextQuery: LocationQueryRaw = {
+    ...route.query,
+    baseId: context.baseId || undefined,
+  }
+  delete nextQuery.recordId
+  delete nextQuery.mode
+  await router.replace({
+    name: AppRouteNames.MULTITABLE,
+    params: {
+      sheetId: context.sheetId,
+      viewId: context.viewId,
+    },
+    query: nextQuery,
+  })
 }
 
 function resolveNavigationRequestId(data: Record<string, unknown>) {
@@ -263,9 +287,7 @@ async function handleNavigateMessage(data: Record<string, unknown>) {
       viewId: nextViewId ?? '',
     },
   }
-  const resolvedContext = result.status === 'applied'
-    ? getEmbedHostStateSnapshot().currentContext
-    : normalizeContextSnapshot(result.context)
+  const resolvedContext = normalizeContextSnapshot(result.context)
   emitNavigationResult({
     status: result.status,
     ...toOptionalContext(resolvedContext),
@@ -281,7 +303,7 @@ async function handleNavigateMessage(data: Record<string, unknown>) {
   }))) {
     return
   }
-  applyHostOverrides(resolvedContext)
+  await applyHostOverrides(resolvedContext)
 }
 
 function onWorkbenchExternalContextResult(payload: {
@@ -291,9 +313,7 @@ function onWorkbenchExternalContextResult(payload: {
   requestId?: string | number
 }) {
   if (payload.requestId == null) return
-  const resolvedContext = payload.status === 'applied'
-    ? getEmbedHostStateSnapshot().currentContext
-    : normalizeContextSnapshot(payload.context)
+  const resolvedContext = normalizeContextSnapshot(payload.context)
   emitNavigationResult({
     status: payload.status,
     ...toOptionalContext(resolvedContext),
@@ -309,7 +329,7 @@ function onWorkbenchExternalContextResult(payload: {
   }))) {
     return
   }
-  applyHostOverrides(resolvedContext)
+  void applyHostOverrides(resolvedContext)
 }
 
 onMounted(() => {

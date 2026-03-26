@@ -76,6 +76,7 @@ test('multitable pilot ready staging produces readiness with staging runner meta
   const runnerMdFixturePath = path.join(tmpRoot, 'fixtures', 'staging-report.md')
   const profileFixturePath = path.join(tmpRoot, 'fixtures', 'profile-report.json')
   const profileSummaryFixturePath = path.join(tmpRoot, 'fixtures', 'profile-summary.md')
+  const gateEnvLogPath = path.join(tmpRoot, 'gate-env.log')
   fs.mkdirSync(path.dirname(smokeFixturePath), { recursive: true })
 
   fs.writeFileSync(smokeFixturePath, JSON.stringify({
@@ -150,6 +151,7 @@ test('multitable pilot ready staging produces readiness with staging runner meta
       '#!/bin/bash',
       'set -euo pipefail',
       'if [[ "${1:-}" == "scripts/ops/multitable-pilot-release-gate.sh" ]]; then',
+      '  printf "RUN_MODE=%s\\n" "${RUN_MODE:-}" > "${FAKE_GATE_ENV_LOG}"',
       '  mkdir -p "$(dirname "${REPORT_JSON}")"',
       "  printf '%s\\n' '{\"ok\":true,\"checks\":[]}' > \"${REPORT_JSON}\"",
       "  printf '%s\\n' '# gate' > \"${REPORT_MD}\"",
@@ -172,6 +174,7 @@ test('multitable pilot ready staging produces readiness with staging runner meta
       FAKE_RUNNER_REPORT_MD: runnerMdFixturePath,
       FAKE_PROFILE_REPORT: profileFixturePath,
       FAKE_PROFILE_SUMMARY: profileSummaryFixturePath,
+      FAKE_GATE_ENV_LOG: gateEnvLogPath,
       RUNNER_REPORT_BASENAME: 'staging-report',
     },
     stdio: 'pipe',
@@ -187,6 +190,7 @@ test('multitable pilot ready staging produces readiness with staging runner meta
   assert.match(readiness.localRunner.reportMd, /staging-report\.md$/)
   assert.match(readinessMd, /## Pilot Runner/)
   assert.match(readinessMd, /Run mode: `staging`/)
+  assert.match(fs.readFileSync(gateEnvLogPath, 'utf8'), /RUN_MODE=staging/)
 
   fs.rmSync(tmpRoot, { recursive: true, force: true })
 })

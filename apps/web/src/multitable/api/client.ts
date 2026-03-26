@@ -317,7 +317,10 @@ export class MultitableApiClient {
 
   // --- Comments (uses /api/comments) ---
   async listComments(params: { containerId: string; targetId: string }): Promise<{ comments: MultitableComment[] }> {
-    const res = await this.fetch(`/api/comments${qs(params)}`)
+    const res = await this.fetch(`/api/comments${qs({
+      spreadsheetId: params.containerId,
+      rowId: params.targetId,
+    })}`)
     const data = await parseJson<{ comments?: MultitableComment[]; items?: MultitableComment[] }>(res)
     return normalizeCommentsList(data)
   }
@@ -326,7 +329,11 @@ export class MultitableApiClient {
     const res = await this.fetch('/api/comments', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
+      body: JSON.stringify({
+        spreadsheetId: input.containerId,
+        rowId: input.targetId,
+        content: input.content,
+      }),
     })
     return parseJson(res)
   }

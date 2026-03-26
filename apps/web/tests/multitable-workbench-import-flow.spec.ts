@@ -538,6 +538,41 @@ describe('MultitableWorkbench import flow', () => {
     expect(document.body.querySelector('.meta-import-modal')).toBeNull()
   })
 
+  it('refreshes import mapping labels when sheet metadata changes while the import modal is open', async () => {
+    mountWorkbench([
+      { id: 'fld_name', name: 'Name', type: 'string' },
+    ])
+
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
+    await flushUi()
+
+    const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+    textarea.value = 'Name\nAlpha'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    ;(document.body.querySelector('.meta-import__btn--primary') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    const fieldSelect = document.body.querySelector('.meta-import__field-select') as HTMLSelectElement | null
+    expect(fieldSelect?.value).toBe('fld_name')
+    expect(fieldSelect?.selectedOptions[0]?.textContent).toContain('Name')
+
+    workbenchMock.loadSheetMeta.mockImplementation(async () => {
+      workbenchMock.fields.value = [{ id: 'fld_name', name: 'Name Renamed', type: 'string' }] as any
+      return true
+    })
+
+    await vi.advanceTimersByTimeAsync(1300)
+    await flushUi(12)
+
+    const refreshedSelect = document.body.querySelector('.meta-import__field-select') as HTMLSelectElement | null
+    expect(refreshedSelect?.value).toBe('fld_name')
+    expect(refreshedSelect?.selectedOptions[0]?.textContent).toContain('Name Renamed')
+  })
+
   it('cancels an in-flight import and closes the modal cleanly', async () => {
     mountWorkbench([
       { id: 'fld_name', name: 'Name', type: 'string' },

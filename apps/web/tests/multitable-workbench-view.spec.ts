@@ -143,7 +143,7 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
 vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
   default: defineComponent({
     name: 'MetaFormView',
-    emits: ['update:dirty'],
+    emits: ['submit', 'update:dirty'],
     render() {
       return h('div', [
         h(
@@ -153,6 +153,14 @@ vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
             onClick: () => this.$emit('update:dirty', true),
           },
           'form-dirty',
+        ),
+        h(
+          'button',
+          {
+            'data-form-submit': 'true',
+            onClick: () => this.$emit('submit', { fld_title: 'Saved title' }),
+          },
+          'form-submit',
         ),
       ])
     },
@@ -582,6 +590,13 @@ describe('MultitableWorkbench view wiring', () => {
 
   function mountWorkbench(initialProps?: { baseId?: string; sheetId?: string; viewId?: string }) {
     let hostState!: { baseId?: string; sheetId?: string; viewId?: string }
+    const externalContextResults: Array<{
+      status: 'applied' | 'failed' | 'superseded'
+      context: { baseId: string; sheetId: string; viewId: string }
+      reason?: 'sync-failed' | 'superseded'
+      requestId?: string | number
+    }> = []
+    const workbenchRef = ref<any>(null)
     workbenchMock.activeBaseId.value = initialProps?.baseId ?? 'base_ops'
     workbenchMock.activeSheetId.value = initialProps?.sheetId ?? 'sheet_orders'
     workbenchMock.activeViewId.value = initialProps?.viewId ?? 'view_grid'
@@ -592,13 +607,17 @@ describe('MultitableWorkbench view wiring', () => {
           sheetId: initialProps?.sheetId ?? 'sheet_orders',
           viewId: initialProps?.viewId ?? 'view_grid',
         })
-        return () => h(MultitableWorkbench as Component, hostState)
+        return () => h(MultitableWorkbench as Component, {
+          ...hostState,
+          ref: workbenchRef,
+          onExternalContextResult: (payload: typeof externalContextResults[number]) => externalContextResults.push(payload),
+        })
       },
     })
 
     app = createApp(Host)
     app.mount(container!)
-    return hostState
+    return Object.assign(hostState, { externalContextResults, workbenchRef })
   }
 
   it('syncs external base/sheet/view props after mount', async () => {
@@ -616,6 +635,58 @@ describe('MultitableWorkbench view wiring', () => {
       baseId: 'base_sales',
       sheetId: 'sheet_deals',
       viewId: 'view_board',
+    })
+  })
+
+  it('replays the latest busy external context after form submit settles', async () => {
+    workbenchMock.views.value = [
+      { id: 'view_form', sheetId: 'sheet_orders', name: 'Form', type: 'form' },
+      { id: 'view_gallery', sheetId: 'sheet_orders', name: 'Gallery', type: 'gallery', config: { columns: 3 } },
+    ]
+    workbenchMock.activeViewId.value = 'view_form'
+    gridMock.fields.value = [{ id: 'fld_title', name: 'Title', type: 'text' }]
+    const submitDeferred = createDeferred<any>()
+    workbenchMock.client.submitForm.mockImplementation(() => submitDeferred.promise)
+    workbenchMock.syncExternalContext.mockImplementation(async ({ baseId, sheetId, viewId }: { baseId?: string; sheetId?: string; viewId?: string }) => {
+      workbenchMock.activeBaseId.value = baseId ?? ''
+      workbenchMock.activeSheetId.value = sheetId ?? ''
+      workbenchMock.activeViewId.value = viewId ?? ''
+      return true
+    })
+    const hostState = mountWorkbench({ viewId: 'view_form' })
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-form-submit="true"]')!.click()
+    await nextTick()
+
+    const deferredResult = await hostState.workbenchRef.requestExternalContextSync(
+      { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      { requestId: 'req_busy_replay' },
+    )
+    expect(deferredResult).toEqual({
+      status: 'deferred',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      reason: 'busy',
+      requestId: 'req_busy_replay',
+    })
+    expect(hostState.externalContextResults).toEqual([])
+
+    submitDeferred.resolve({
+      mode: 'update',
+      record: { id: 'rec_1', version: 2, data: { fld_title: 'Saved title' } },
+      attachmentSummaries: {},
+    })
+    await flushUi()
+
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledWith({
+      baseId: 'base_ops',
+      sheetId: 'sheet_orders',
+      viewId: 'view_gallery',
+    })
+    expect(hostState.externalContextResults).toContainEqual({
+      status: 'applied',
+      context: { baseId: 'base_ops', sheetId: 'sheet_orders', viewId: 'view_gallery' },
+      requestId: 'req_busy_replay',
     })
   })
 

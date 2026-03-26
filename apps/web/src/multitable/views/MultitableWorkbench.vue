@@ -175,7 +175,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import type {
   LinkedRecordSummary,
   MetaAttachment,
@@ -702,6 +702,7 @@ async function onFormSubmit(data: Record<string, unknown>) {
       deepLinkedRecord.value = result.record
       deepLinkedRecordAttachmentSummaries.value = result.attachmentSummaries ?? {}
       selectedRecordId.value = result.record.id
+      formDirty.value = false
       await grid.loadViewData(grid.page.value.offset)
       formSuccessMessage.value = result.mode === 'create' ? 'Record created' : 'Changes saved'
       formFieldErrors.value = {}
@@ -713,6 +714,8 @@ async function onFormSubmit(data: Record<string, unknown>) {
       showError(message)
     } finally {
       formSubmitting.value = false
+      await nextTick()
+      await replayPendingExternalContextIfReady()
     }
   } else if (selectedRecordResolved.value) {
     const changes = Object.entries(data).filter(([k, v]) => v !== selectedRecordResolved.value!.data[k]).map(([fieldId, value]) => ({ recordId: selectedRecordResolved.value!.id, fieldId, value, expectedVersion: selectedRecordResolved.value!.version }))
@@ -1027,6 +1030,40 @@ async function applyExternalContext(input: { baseId: string; sheetId: string; vi
   return ok
 }
 
+async function replayPendingExternalContextIfReady() {
+  const pending = pendingExternalContext.value
+  if (!workbenchReady.value || hasBlockingUnloadState.value || !pending) return false
+  if (externalContextMatchesWorkbench(pending.context)) {
+    pendingExternalContext.value = null
+    pendingExternalContextReason.value = null
+    pendingExternalContextNoticeKey.value = ''
+    emit('external-context-result', {
+      status: 'applied',
+      context: getCurrentExternalContext(),
+      requestId: pending.requestId,
+    })
+    return true
+  }
+  const replay = pending
+  pendingExternalContext.value = null
+  pendingExternalContextReason.value = null
+  pendingExternalContextNoticeKey.value = ''
+  const ok = await applyExternalContext(replay.context)
+  emit('external-context-result', ok
+    ? {
+      status: 'applied',
+      context: replay.context,
+      requestId: replay.requestId,
+    }
+    : {
+      status: 'failed',
+      context: replay.context,
+      reason: 'sync-failed',
+      requestId: replay.requestId,
+    })
+  return ok
+}
+
 function deferExternalContextSync(
   input: { baseId: string; sheetId: string; viewId: string },
   reason: Extract<ExternalContextSyncReason, 'busy' | 'unsaved-drafts'>,
@@ -1107,7 +1144,7 @@ async function requestExternalContextSync(
   if (!ok) {
     return { status: 'failed', context: nextContext, reason: 'sync-failed', requestId: options?.requestId }
   }
-  return { status: 'applied', context: getCurrentExternalContext(), requestId: options?.requestId }
+  return { status: 'applied', context: nextContext, requestId: options?.requestId }
 }
 
 async function onCreateBase(name: string) {
@@ -1230,6 +1267,8 @@ async function onBulkImport(payload: ImportBuildResult) {
       importAbortController.value = null
     }
     importSubmitting.value = false
+    await nextTick()
+    await replayPendingExternalContextIfReady()
   }
 }
 
@@ -1326,7 +1365,10 @@ async function refreshDialogMeta() {
   dialogMetaRefreshInFlight = true
   try {
     dialogMetaRefreshQueued = false
-    await workbench.loadSheetMeta(activeSheetId)
+    const refreshed = await workbench.loadSheetMeta(activeSheetId)
+    if (refreshed && workbench.activeSheetId.value === activeSheetId) {
+      grid.fields.value = [...workbench.fields.value]
+    }
   } catch {
     // Keep dialog refresh silent; explicit save paths still surface errors.
   } finally {
@@ -1392,9 +1434,9 @@ async function resolveDeepLink(recordId: string) {
 // Override selectedRecord to also consider deep-linked record
 const selectedRecordResolved = computed<MetaRecord | null>(() => {
   if (selectedRecordId.value) {
+    if (deepLinkedRecord.value?.id === selectedRecordId.value) return deepLinkedRecord.value
     const inPage = grid.rows.value.find((r) => r.id === selectedRecordId.value)
     if (inPage) return inPage
-    if (deepLinkedRecord.value?.id === selectedRecordId.value) return deepLinkedRecord.value
   }
   return null
 })
@@ -1451,38 +1493,7 @@ watch(
   [hasBlockingUnloadState, pendingExternalContext],
   ([blocked, pending]) => {
     if (!workbenchReady.value || blocked || !pending) return
-    if (externalContextMatchesWorkbench(pending.context)) {
-      pendingExternalContext.value = null
-      pendingExternalContextReason.value = null
-      pendingExternalContextNoticeKey.value = ''
-      emit('external-context-result', {
-        status: 'applied',
-        context: getCurrentExternalContext(),
-        requestId: pending.requestId,
-      })
-      return
-    }
-    const replay = pending
-    pendingExternalContext.value = null
-    pendingExternalContextReason.value = null
-    pendingExternalContextNoticeKey.value = ''
-    void (async () => {
-      const ok = await applyExternalContext(replay.context)
-      if (ok) {
-        emit('external-context-result', {
-          status: 'applied',
-          context: getCurrentExternalContext(),
-          requestId: replay.requestId,
-        })
-        return
-      }
-      emit('external-context-result', {
-        status: 'failed',
-        context: replay.context,
-        reason: 'sync-failed',
-        requestId: replay.requestId,
-      })
-    })()
+    void replayPendingExternalContextIfReady()
   },
 )
 

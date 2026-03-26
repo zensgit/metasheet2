@@ -69,11 +69,13 @@ test('multitable pilot release gate writes canonical gate report and keeps execu
 
   const reportPath = path.join(tmpRoot, 'gates', 'report.json')
   const smokeReportPath = path.join(tmpRoot, 'smoke', 'report.json')
+  const smokeReportMdPath = path.join(tmpRoot, 'smoke', 'report.md')
   const reportMdPath = path.join(tmpRoot, 'gates', 'report.md')
   const logPath = path.join(tmpRoot, 'gates', 'release-gate.log')
   const fakePnpmLogPath = path.join(tmpRoot, 'fake-pnpm.log')
   fs.mkdirSync(path.dirname(smokeReportPath), { recursive: true })
   fs.writeFileSync(smokeReportPath, JSON.stringify(createSmokeReport(), null, 2))
+  fs.writeFileSync(smokeReportMdPath, '# smoke report\n')
 
   execFileSync('bash', ['scripts/ops/multitable-pilot-release-gate.sh'], {
     cwd: repoRoot,
@@ -84,6 +86,7 @@ test('multitable pilot release gate writes canonical gate report and keeps execu
       REPORT_JSON: reportPath,
       LOG_PATH: logPath,
       PILOT_SMOKE_REPORT: smokeReportPath,
+      PILOT_SMOKE_REPORT_MD: smokeReportMdPath,
       SKIP_MULTITABLE_PILOT_SMOKE: 'true',
     },
     stdio: 'pipe',
@@ -96,11 +99,13 @@ test('multitable pilot release gate writes canonical gate report and keeps execu
   assert.ok(Array.isArray(report.checks))
   assert.equal(report.liveSmoke.available, true)
   assert.equal(report.liveSmoke.ok, true)
+  assert.match(report.liveSmoke.reportMd, /smoke\/report\.md$/)
   assert.equal(report.embedHostAcceptance.ok, true)
   assert.equal(report.embedHostProtocol.available, true)
   assert.equal(report.embedHostNavigationProtection.ok, true)
   assert.equal(report.embedHostDeferredReplay.ok, true)
   assert.match(reportMd, /## Live Smoke Artifact/)
+  assert.match(reportMd, /Markdown: `.*smoke\/report\.md`/)
   assert.match(reportMd, /## Embed Host Acceptance/)
   assert.match(reportMd, /### Embed Host Busy Deferred Replay/)
 
@@ -124,6 +129,45 @@ test('multitable pilot release gate writes canonical gate report and keeps execu
     .filter((check) => check.status !== 'skipped')
     .map((check) => check.command)
   assert.deepEqual(reportCommands, executedCommands)
+})
+
+test('multitable pilot release gate switches skipped smoke metadata to staging mode when RUN_MODE=staging', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'multitable-release-gate-staging-'))
+  const binDir = path.join(tmpRoot, 'bin')
+  fs.mkdirSync(binDir, { recursive: true })
+  createFakePnpm(binDir)
+
+  const reportPath = path.join(tmpRoot, 'gates', 'report.json')
+  const smokeReportPath = path.join(tmpRoot, 'smoke', 'report.json')
+  const smokeReportMdPath = path.join(tmpRoot, 'smoke', 'report.md')
+  const reportMdPath = path.join(tmpRoot, 'gates', 'report.md')
+  fs.mkdirSync(path.dirname(smokeReportPath), { recursive: true })
+  fs.writeFileSync(smokeReportPath, JSON.stringify(createSmokeReport(), null, 2))
+  fs.writeFileSync(smokeReportMdPath, '# smoke report\n')
+
+  execFileSync('bash', ['scripts/ops/multitable-pilot-release-gate.sh'], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH}`,
+      REPORT_JSON: reportPath,
+      PILOT_SMOKE_REPORT: smokeReportPath,
+      PILOT_SMOKE_REPORT_MD: smokeReportMdPath,
+      SKIP_MULTITABLE_PILOT_SMOKE: 'true',
+      RUN_MODE: 'staging',
+    },
+    stdio: 'pipe',
+  })
+
+  const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'))
+  const reportMd = fs.readFileSync(reportMdPath, 'utf8')
+  const checksByName = new Map(report.checks.map((check) => [check.name, check]))
+
+  assert.equal(report.runMode, 'staging')
+  assert.match(report.liveSmoke.reportMd, /smoke\/report\.md$/)
+  assert.equal(checksByName.get('release-gate.multitable.live-smoke')?.command, 'pnpm verify:multitable-pilot:staging')
+  assert.equal(checksByName.get('release-gate.multitable.live-smoke')?.note, 'executed earlier by multitable-pilot-ready-staging')
+  assert.match(reportMd, /Run mode: `staging`/)
 })
 
 test('multitable pilot release gate writes a failed report when a step exits non-zero', () => {
@@ -175,12 +219,14 @@ test('multitable pilot release gate fails the canonical report when skipped smok
   const reportPath = path.join(tmpRoot, 'gates', 'report.json')
   const reportMdPath = path.join(tmpRoot, 'gates', 'report.md')
   const smokeReportPath = path.join(tmpRoot, 'smoke', 'report.json')
+  const smokeReportMdPath = path.join(tmpRoot, 'smoke', 'report.md')
   const fakePnpmLogPath = path.join(tmpRoot, 'fake-pnpm.log')
   fs.mkdirSync(path.dirname(smokeReportPath), { recursive: true })
   const smokeReport = createSmokeReport({
     checks: createSmokeReport().checks.filter((check) => check.name !== 'api.embed-host.persisted-busy-form-save'),
   })
   fs.writeFileSync(smokeReportPath, JSON.stringify(smokeReport, null, 2))
+  fs.writeFileSync(smokeReportMdPath, '# smoke report\n')
 
   execFileSync('bash', ['scripts/ops/multitable-pilot-release-gate.sh'], {
     cwd: repoRoot,
@@ -190,6 +236,7 @@ test('multitable pilot release gate fails the canonical report when skipped smok
       FAKE_PNPM_LOG: fakePnpmLogPath,
       REPORT_JSON: reportPath,
       PILOT_SMOKE_REPORT: smokeReportPath,
+      PILOT_SMOKE_REPORT_MD: smokeReportMdPath,
       SKIP_MULTITABLE_PILOT_SMOKE: 'true',
     },
     stdio: 'pipe',

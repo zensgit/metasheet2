@@ -13,7 +13,7 @@ import type { RequestWithFile } from '../types/multer'
 type UniverMetaField = {
   id: string
   name: string
-  type: 'string' | 'number' | 'boolean' | 'formula' | 'select' | 'link' | 'lookup' | 'rollup' | 'attachment'
+  type: 'string' | 'number' | 'boolean' | 'date' | 'formula' | 'select' | 'link' | 'lookup' | 'rollup' | 'attachment'
   options?: Array<{ value: string; color?: string }>
   order?: number
   property?: Record<string, unknown>
@@ -347,7 +347,7 @@ function normalizeSearchTerm(value: unknown): string {
 }
 
 function isSearchableFieldType(type: UniverMetaField['type']): boolean {
-  return type === 'string' || type === 'number' || type === 'select' || type === 'formula'
+  return type === 'string' || type === 'number' || type === 'date' || type === 'select' || type === 'formula'
 }
 
 function valueMatchesSearch(value: unknown, search: string): boolean {
@@ -375,6 +375,7 @@ function mapFieldType(type: string): UniverMetaField['type'] {
   const normalized = type.trim().toLowerCase()
   if (normalized === 'number') return 'number'
   if (normalized === 'boolean' || normalized === 'checkbox') return 'boolean'
+  if (normalized === 'date' || normalized === 'datetime') return 'date'
   if (normalized === 'formula') return 'formula'
   if (normalized === 'select' || normalized === 'multiselect') return 'select'
   if (normalized === 'link') return 'link'
@@ -540,19 +541,18 @@ function compareMetaSortValue(type: UniverMetaField['type'], valueA: unknown, va
   if (bNull) return -1
 
   let cmp = 0
-  if (effectiveType === 'number') {
-    const numA = typeof valueA === 'number' ? valueA : Number(valueA)
-    const numB = typeof valueB === 'number' ? valueB : Number(valueB)
-    const aOk = Number.isFinite(numA)
-    const bOk = Number.isFinite(numB)
+  if (effectiveType === 'number' || effectiveType === 'date') {
+    const toComparable = effectiveType === 'date' ? toEpoch : toComparableNumber
+    const leftValue = toComparable(valueA)
+    const rightValue = toComparable(valueB)
+    const aOk = leftValue !== null && Number.isFinite(leftValue)
+    const bOk = rightValue !== null && Number.isFinite(rightValue)
 
-    if (aOk && bOk) cmp = numA === numB ? 0 : numA > numB ? 1 : -1
+    if (aOk && bOk) cmp = leftValue === rightValue ? 0 : leftValue > rightValue ? 1 : -1
     else if (aOk) cmp = -1
     else if (bOk) cmp = 1
     else cmp = 0
-  }
-
-  if (effectiveType === 'boolean') {
+  } else if (effectiveType === 'boolean') {
     const toBool = (v: unknown) => {
       if (typeof v === 'boolean') return v
       if (typeof v === 'number') return v !== 0
@@ -938,9 +938,10 @@ function evaluateMetaFilterCondition(
   if (opNorm === 'isempty') return isNullishSortValue(cellValue)
   if (opNorm === 'isnotempty') return !isNullishSortValue(cellValue)
 
-  if (effectiveType === 'number') {
-    const left = toComparableNumber(cellValue)
-    const right = toComparableNumber(value)
+  if (effectiveType === 'number' || effectiveType === 'date') {
+    const toComparable = effectiveType === 'date' ? toEpoch : toComparableNumber
+    const left = toComparable(cellValue)
+    const right = toComparable(value)
 
     if (opNorm === 'is' || opNorm === 'equal') return left !== null && right !== null && left === right
     if (opNorm === 'isnot' || opNorm === 'notequal') return left === null || right === null ? left !== right : left !== right
@@ -1034,17 +1035,20 @@ async function resolveRequestAccess(req: Request): Promise<{ permissions: string
   const userId = req.user?.id?.toString() ?? req.user?.sub?.toString() ?? req.user?.userId?.toString() ?? ''
   const tokenRoles = normalizePermissionCodes(req.user?.roles)
   const tokenPerms = normalizePermissionCodes(req.user?.perms)
-  const isAdminRole = tokenRoles.includes('admin')
+  const resolvedPermissions = normalizePermissionCodes((req.user as { permissions?: unknown } | undefined)?.permissions)
+  const role = typeof req.user?.role === 'string' ? req.user.role.trim() : ''
+  const isAdminRole = role === 'admin' || tokenRoles.includes('admin')
+  const directPermissions = tokenPerms.length > 0 ? tokenPerms : resolvedPermissions
   if (!userId) {
-    return { permissions: tokenPerms, isAdminRole }
+    return { permissions: directPermissions, isAdminRole }
   }
 
   if (isAdminRole) {
-    return { permissions: tokenPerms, isAdminRole: true }
+    return { permissions: directPermissions, isAdminRole: true }
   }
 
-  if (tokenPerms.length > 0) {
-    return { permissions: tokenPerms, isAdminRole: false }
+  if (directPermissions.length > 0) {
+    return { permissions: directPermissions, isAdminRole: false }
   }
 
   return {
@@ -1997,7 +2001,7 @@ export function univerMetaRouter(): Router {
       id: z.string().min(1).max(50).optional(),
       sheetId: z.string().min(1).max(50),
       name: z.string().min(1).max(255),
-      type: z.enum(['string', 'number', 'boolean', 'formula', 'select', 'link', 'lookup', 'rollup', 'attachment']).default('string'),
+      type: z.enum(['string', 'number', 'boolean', 'date', 'formula', 'select', 'link', 'lookup', 'rollup', 'attachment']).default('string'),
       property: z.record(z.unknown()).optional(),
       order: z.number().int().nonnegative().optional(),
     })
@@ -2107,7 +2111,7 @@ export function univerMetaRouter(): Router {
 
     const schema = z.object({
       name: z.string().min(1).max(255).optional(),
-      type: z.enum(['string', 'number', 'boolean', 'formula', 'select', 'link', 'lookup', 'rollup', 'attachment']).optional(),
+      type: z.enum(['string', 'number', 'boolean', 'date', 'formula', 'select', 'link', 'lookup', 'rollup', 'attachment']).optional(),
       property: z.record(z.unknown()).optional(),
       order: z.number().int().nonnegative().optional(),
     }).refine((v) => Object.keys(v).length > 0, { message: 'At least one field must be updated' })

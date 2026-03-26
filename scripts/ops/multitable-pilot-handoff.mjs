@@ -251,6 +251,7 @@ async function main() {
   const readinessJson = path.join(readinessRoot, 'readiness.json')
   const readinessGateReport = path.join(readinessRoot, 'gates', 'report.json')
   const smokeReport = path.join(readinessRoot, 'smoke', 'report.json')
+  const smokeReportMd = path.join(readinessRoot, 'smoke', 'report.md')
   const profileReport = path.join(readinessRoot, 'profile', 'report.json')
   const profileSummary = path.join(readinessRoot, 'profile', 'summary.md')
   const smokeGridImport = path.join(readinessRoot, 'smoke', 'grid-import.png')
@@ -375,8 +376,14 @@ async function main() {
   const embedHostNavigationProtection = summarizeEmbedEvidence(readinessPayload?.embedHostNavigationProtection)
   const embedHostDeferredReplay = summarizeEmbedEvidence(readinessPayload?.embedHostDeferredReplay)
   const localRunner = summarizeLocalRunner(readinessPayload?.pilotRunner ?? readinessPayload?.localRunner)
-  const smokeRunnerReport = localRunner.report ?? path.join(readinessRoot, 'smoke', 'local-report.json')
-  const smokeRunnerReportMd = localRunner.reportMd ?? path.join(readinessRoot, 'smoke', 'local-report.md')
+  const defaultRunnerReportBase = localRunner.runMode === 'staging' ? 'staging-report' : 'local-report'
+  const smokeRunnerReport = localRunner.report ?? path.join(readinessRoot, 'smoke', `${defaultRunnerReportBase}.json`)
+  const smokeRunnerReportMd = localRunner.reportMd ?? path.join(readinessRoot, 'smoke', `${defaultRunnerReportBase}.md`)
+  const effectiveLocalRunner = {
+    ...localRunner,
+    report: smokeRunnerReport,
+    reportMd: smokeRunnerReportMd,
+  }
   const smokeRunnerReportBase = path.basename(smokeRunnerReport)
   const smokeRunnerReportMdBase = path.basename(smokeRunnerReportMd)
   const embedHostAcceptance = {
@@ -391,6 +398,7 @@ async function main() {
     readinessJson: await safeCopy(readinessJson, path.join(handoffRoot, 'readiness.json')),
     readinessGateReport: await safeCopy(readinessGateReport, path.join(handoffRoot, 'gates', 'report.json')),
     smokeReport: await safeCopy(smokeReport, path.join(handoffRoot, 'smoke', 'report.json')),
+    smokeReportMd: await safeCopy(smokeReportMd, path.join(handoffRoot, 'smoke', 'report.md')),
     smokeLocalReport: await safeCopy(smokeRunnerReport, path.join(handoffRoot, 'smoke', smokeRunnerReportBase)),
     smokeLocalReportMd: await safeCopy(smokeRunnerReportMd, path.join(handoffRoot, 'smoke', smokeRunnerReportMdBase)),
     smokeGridImport: await safeCopy(smokeGridImport, path.join(handoffRoot, 'smoke', 'grid-import.png')),
@@ -583,8 +591,8 @@ async function main() {
       preflightReportMd: defaultPreflightReportMd,
     },
     embedHostAcceptance,
-    pilotRunner: localRunner,
-    localRunner,
+    pilotRunner: effectiveLocalRunner,
+    localRunner: effectiveLocalRunner,
     embedHostProtocol,
     embedHostNavigationProtection,
     embedHostDeferredReplay,
@@ -651,7 +659,9 @@ async function main() {
         readinessMd: copied.readinessMd,
         readinessJson: copied.readinessJson,
         readinessGateReport: copied.readinessGateReport,
-        localRunner,
+        smokeReport: copied.smokeReport,
+        smokeReportMd: copied.smokeReportMd,
+        localRunner: effectiveLocalRunner,
         embedHostProtocol,
         embedHostNavigationProtection,
         embedHostDeferredReplay,
@@ -702,16 +712,16 @@ async function main() {
     ...embedEvidenceSection('### Embed Host Busy Deferred Replay', embedHostDeferredReplay),
     '## Pilot Runner',
     '',
-    `- Required in readiness: \`${localRunner.required ? 'true' : 'false'}\``,
-    `- Available in readiness: \`${localRunner.available ? 'true' : 'false'}\``,
-    `- Status: **${localRunner.ok ? 'PASS' : 'FAIL'}**`,
-    `- Run mode: \`${localRunner.runMode}\``,
-    `- Backend mode: \`${localRunner.serviceModes.backend}\``,
-    `- Web mode: \`${localRunner.serviceModes.web}\``,
-    `- Wrapper embed-host acceptance: **${localRunner.embedHostAcceptance.ok ? 'PASS' : 'FAIL'}**`,
-    `- Runner report json: \`${localRunner.report ?? 'missing'}\``,
-    `- Runner report markdown: \`${localRunner.reportMd ?? 'missing'}\``,
-    `- Raw runner report: \`${localRunner.runnerReport ?? 'missing'}\``,
+    `- Required in readiness: \`${effectiveLocalRunner.required ? 'true' : 'false'}\``,
+    `- Available in readiness: \`${effectiveLocalRunner.available ? 'true' : 'false'}\``,
+    `- Status: **${effectiveLocalRunner.ok ? 'PASS' : 'FAIL'}**`,
+    `- Run mode: \`${effectiveLocalRunner.runMode}\``,
+    `- Backend mode: \`${effectiveLocalRunner.serviceModes.backend}\``,
+    `- Web mode: \`${effectiveLocalRunner.serviceModes.web}\``,
+    `- Wrapper embed-host acceptance: **${effectiveLocalRunner.embedHostAcceptance.ok ? 'PASS' : 'FAIL'}**`,
+    `- Runner report json: \`${effectiveLocalRunner.report ?? 'missing'}\``,
+    `- Runner report markdown: \`${effectiveLocalRunner.reportMd ?? 'missing'}\``,
+    `- Raw runner report: \`${effectiveLocalRunner.runnerReport ?? 'missing'}\``,
     '',
     '## Included Files',
     '',
@@ -719,6 +729,7 @@ async function main() {
     `- readiness.json: ${copied.readinessJson ? '`present`' : '`missing`'}`,
     `- gates/report.json: ${copied.readinessGateReport ? '`present`' : '`missing`'}`,
     `- smoke/report.json: ${copied.smokeReport ? '`present`' : '`missing`'}`,
+    `- smoke/report.md: ${copied.smokeReportMd ? '`present`' : '`missing`'}`,
     `- smoke/${smokeRunnerReportBase}: ${copied.smokeLocalReport ? '`present`' : '`missing`'}`,
     `- smoke/${smokeRunnerReportMdBase}: ${copied.smokeLocalReportMd ? '`present`' : '`missing`'}`,
     `- smoke/grid-import.png: ${copied.smokeGridImport ? '`present`' : '`missing`'}`,

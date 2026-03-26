@@ -63,6 +63,7 @@ const embedHostDeferredReplayChecks = [
 
 function writeFixtureReport(tmpRoot) {
   const smokeReportPath = path.join(tmpRoot, 'smoke.json')
+  const smokeReportMdPath = path.join(tmpRoot, 'smoke.md')
   const smokeLocalReportPath = path.join(tmpRoot, 'local-report.json')
   const smokeLocalReportMdPath = path.join(tmpRoot, 'local-report.md')
   const profileReportPath = path.join(tmpRoot, 'profile.json')
@@ -71,6 +72,7 @@ function writeFixtureReport(tmpRoot) {
 
   fs.writeFileSync(smokeReportPath, JSON.stringify({
     ok: true,
+    runMode: 'local',
     checks: [
       ...requiredSmokeChecks,
       ...embedHostProtocolChecks,
@@ -78,6 +80,7 @@ function writeFixtureReport(tmpRoot) {
       ...embedHostDeferredReplayChecks,
     ].map((name) => ({ name, ok: true })),
   }, null, 2))
+  fs.writeFileSync(smokeReportMdPath, '# smoke report\n')
   fs.writeFileSync(profileReportPath, JSON.stringify({
     ok: true,
     rowCount: 2000,
@@ -107,6 +110,7 @@ function writeFixtureReport(tmpRoot) {
 
   return {
     smokeReportPath,
+    smokeReportMdPath,
     smokeLocalReportPath,
     smokeLocalReportMdPath,
     profileReportPath,
@@ -125,6 +129,7 @@ test('multitable pilot readiness fails when gate report is missing by default', 
       env: {
         ...process.env,
         SMOKE_REPORT_JSON: fixture.smokeReportPath,
+        SMOKE_REPORT_MD: fixture.smokeReportMdPath,
         PROFILE_REPORT_JSON: fixture.profileReportPath,
         READINESS_MD: fixture.readinessMdPath,
         READINESS_JSON: fixture.readinessJsonPath,
@@ -148,6 +153,7 @@ test('multitable pilot readiness surfaces local runner summary when the wrapper 
     env: {
       ...process.env,
       SMOKE_REPORT_JSON: fixture.smokeReportPath,
+      SMOKE_REPORT_MD: fixture.smokeReportMdPath,
       SMOKE_LOCAL_REPORT_JSON: fixture.smokeLocalReportPath,
       SMOKE_LOCAL_REPORT_MD: fixture.smokeLocalReportMdPath,
       PROFILE_REPORT_JSON: fixture.profileReportPath,
@@ -161,12 +167,14 @@ test('multitable pilot readiness surfaces local runner summary when the wrapper 
   const readiness = JSON.parse(fs.readFileSync(fixture.readinessJsonPath, 'utf8'))
   const readinessMd = fs.readFileSync(fixture.readinessMdPath, 'utf8')
   assert.equal(readiness.ok, true)
+  assert.match(readiness.smoke.reportMd, /smoke\.md$/)
   assert.equal(readiness.pilotRunner.runMode, 'local')
   assert.equal(readiness.localRunner.required, true)
   assert.equal(readiness.localRunner.available, true)
   assert.equal(readiness.localRunner.serviceModes.backend, 'reused')
   assert.equal(readiness.localRunner.serviceModes.web, 'reused')
   assert.match(readinessMd, /## Pilot Runner/)
+  assert.match(readinessMd, /Smoke markdown: `.*smoke\.md`/)
   assert.match(readinessMd, /Run mode: `local`/)
   assert.match(readinessMd, /Backend mode: `reused`/)
 })
@@ -182,6 +190,7 @@ test('multitable pilot readiness fails when a required local runner artifact is 
       env: {
         ...process.env,
         SMOKE_REPORT_JSON: fixture.smokeReportPath,
+        SMOKE_REPORT_MD: fixture.smokeReportMdPath,
         SMOKE_LOCAL_REPORT_JSON: fixture.smokeLocalReportPath,
         SMOKE_LOCAL_REPORT_MD: fixture.smokeLocalReportMdPath,
         PROFILE_REPORT_JSON: fixture.profileReportPath,
@@ -221,6 +230,7 @@ test('multitable pilot readiness fails when gate report records a failed step', 
       env: {
         ...process.env,
         SMOKE_REPORT_JSON: fixture.smokeReportPath,
+        SMOKE_REPORT_MD: fixture.smokeReportMdPath,
         PROFILE_REPORT_JSON: fixture.profileReportPath,
         GATE_REPORT_JSON: gateReportPath,
         READINESS_MD: fixture.readinessMdPath,
@@ -247,6 +257,7 @@ test('multitable pilot readiness can opt out of gate binding for ad hoc checks',
     env: {
       ...process.env,
       SMOKE_REPORT_JSON: fixture.smokeReportPath,
+      SMOKE_REPORT_MD: fixture.smokeReportMdPath,
       PROFILE_REPORT_JSON: fixture.profileReportPath,
       READINESS_MD: fixture.readinessMdPath,
       READINESS_JSON: fixture.readinessJsonPath,
@@ -274,6 +285,7 @@ test('multitable pilot readiness fails when required embed-host protocol evidenc
       env: {
         ...process.env,
         SMOKE_REPORT_JSON: fixture.smokeReportPath,
+        SMOKE_REPORT_MD: fixture.smokeReportMdPath,
         PROFILE_REPORT_JSON: fixture.profileReportPath,
         READINESS_MD: fixture.readinessMdPath,
         READINESS_JSON: fixture.readinessJsonPath,
@@ -302,6 +314,7 @@ test('multitable pilot readiness fails when required embed-host navigation prote
       env: {
         ...process.env,
         SMOKE_REPORT_JSON: fixture.smokeReportPath,
+        SMOKE_REPORT_MD: fixture.smokeReportMdPath,
         PROFILE_REPORT_JSON: fixture.profileReportPath,
         READINESS_MD: fixture.readinessMdPath,
         READINESS_JSON: fixture.readinessJsonPath,

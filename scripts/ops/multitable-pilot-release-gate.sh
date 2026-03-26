@@ -8,13 +8,15 @@ API_BASE="${API_BASE:-http://127.0.0.1:7778}"
 WEB_BASE="${WEB_BASE:-http://127.0.0.1:8899}"
 HEADLESS="${HEADLESS:-true}"
 TIMEOUT_MS="${TIMEOUT_MS:-40000}"
+RUN_MODE="${RUN_MODE:-local}"
 SKIP_MULTITABLE_PILOT_SMOKE="${SKIP_MULTITABLE_PILOT_SMOKE:-false}"
 REPORT_JSON="${REPORT_JSON:-}"
 REPORT_MD="${REPORT_MD:-}"
 LOG_PATH="${LOG_PATH:-}"
 PILOT_SMOKE_REPORT="${PILOT_SMOKE_REPORT:-}"
+PILOT_SMOKE_REPORT_MD="${PILOT_SMOKE_REPORT_MD:-}"
 
-export API_BASE WEB_BASE HEADLESS TIMEOUT_MS
+export API_BASE WEB_BASE HEADLESS TIMEOUT_MS RUN_MODE
 
 declare -a STEP_NAMES=()
 declare -a STEP_COMMANDS=()
@@ -37,6 +39,13 @@ add_release_gate_step() {
 
 define_release_gate_steps() {
   local shared_log="${LOG_PATH:-}"
+  local smoke_command="pnpm verify:multitable-pilot"
+  local smoke_skip_note="executed earlier by multitable-pilot-ready-local"
+
+  if [[ "$RUN_MODE" == "staging" ]]; then
+    smoke_command="pnpm verify:multitable-pilot:staging"
+    smoke_skip_note="executed earlier by multitable-pilot-ready-staging"
+  fi
 
   add_release_gate_step \
     "web.build" \
@@ -80,17 +89,17 @@ define_release_gate_steps() {
   if [[ "$SKIP_MULTITABLE_PILOT_SMOKE" == "true" ]]; then
     add_release_gate_step \
       "release-gate.multitable.live-smoke" \
-      "pnpm verify:multitable-pilot" \
+      "$smoke_command" \
       "${PILOT_SMOKE_REPORT:-$shared_log}" \
       "$smoke_env" \
-      "executed earlier by multitable-pilot-ready-local" \
+      "$smoke_skip_note" \
       "skipped"
     return
   fi
 
   add_release_gate_step \
     "release-gate.multitable.live-smoke" \
-    "pnpm verify:multitable-pilot" \
+    "$smoke_command" \
     "${PILOT_SMOKE_REPORT:-$shared_log}" \
     "$smoke_env"
 }
@@ -132,6 +141,8 @@ write_release_gate_report() {
   RELEASE_GATE_FAILED_STEP="$FAILED_STEP" \
   RELEASE_GATE_STEPS_FILE="$steps_file" \
   PILOT_SMOKE_REPORT_PATH="$PILOT_SMOKE_REPORT" \
+  PILOT_SMOKE_REPORT_MD_PATH="$PILOT_SMOKE_REPORT_MD" \
+  RELEASE_GATE_RUN_MODE="$RUN_MODE" \
   node <<'NODE'
 const fs = require('fs')
 const path = require('path')
@@ -142,6 +153,8 @@ const fallbackLogPath = process.env.RELEASE_GATE_LOG_PATH || null
 const exitCode = Number(process.env.RELEASE_GATE_EXIT_CODE || '0')
 const failedStep = process.env.RELEASE_GATE_FAILED_STEP || null
 const smokeReportPath = process.env.PILOT_SMOKE_REPORT_PATH || null
+const smokeReportMdPath = process.env.PILOT_SMOKE_REPORT_MD_PATH || null
+const runMode = process.env.RELEASE_GATE_RUN_MODE === 'staging' ? 'staging' : 'local'
 const rows = fs.readFileSync(process.env.RELEASE_GATE_STEPS_FILE, 'utf8').trimEnd()
 const checks = rows
   ? rows.split('\n').map((line) => {
@@ -227,6 +240,7 @@ const liveSmoke = {
   available: Boolean(smokeReport),
   ok: smokeReport ? Boolean(smokeReport.ok) : true,
   report: smokeReportPath ? path.resolve(smokeReportPath) : null,
+  reportMd: smokeReportMdPath ? path.resolve(smokeReportMdPath) : null,
   checkCount: smokeChecks.length,
   failingChecks: smokeChecks.filter((item) => item && item.ok === false).map((item) => item.name),
 }
@@ -240,6 +254,7 @@ const failingEvidence = [
 
 const report = {
   ok: exitCode === 0 && checks.every((check) => check.ok) && failingEvidence.length === 0,
+  runMode,
   exitCode,
   failedStep,
   failingEvidence,
@@ -279,6 +294,7 @@ if (reportMdPath) {
     '# Multitable Pilot Release Gate',
     '',
     `- Overall: **${report.ok ? 'PASS' : 'FAIL'}**`,
+    `- Run mode: \`${runMode}\``,
     `- Exit code: \`${exitCode}\``,
     failedStep ? `- Failed step: \`${failedStep}\`` : '- Failed step: none',
     reportPath ? `- JSON report: \`${path.resolve(reportPath)}\`` : '- JSON report: not written',
@@ -296,6 +312,7 @@ if (reportMdPath) {
     `- Available: \`${liveSmoke.available ? 'true' : 'false'}\``,
     `- Status: **${liveSmoke.ok ? 'PASS' : 'FAIL'}**`,
     liveSmoke.report ? `- Report: \`${liveSmoke.report}\`` : '- Report: missing',
+    liveSmoke.reportMd ? `- Markdown: \`${liveSmoke.reportMd}\`` : '- Markdown: missing',
     `- Check count: \`${liveSmoke.checkCount}\``,
     liveSmoke.failingChecks.length
       ? `- Failing checks: ${liveSmoke.failingChecks.map((item) => `\`${item}\``).join(', ')}`

@@ -1357,6 +1357,17 @@ components:
           type: string
         type:
           type: string
+          enum:
+            - string
+            - number
+            - boolean
+            - date
+            - formula
+            - select
+            - link
+            - lookup
+            - rollup
+            - attachment
         property:
           type: object
           additionalProperties: true

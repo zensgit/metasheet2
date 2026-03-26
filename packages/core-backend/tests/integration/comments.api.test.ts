@@ -13,8 +13,9 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
 
 async function ensureCommentsTable() {
   const pool = poolManager.get()
+  await pool.query('DROP TABLE IF EXISTS meta_comments')
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS meta_comments (
+    CREATE TABLE meta_comments (
       id varchar(50) PRIMARY KEY,
       spreadsheet_id varchar(50) NOT NULL,
       row_id varchar(50) NOT NULL,
