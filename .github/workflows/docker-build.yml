@@ -86,9 +86,24 @@ jobs:
             "DEPLOY_PATH=\"${DEPLOY_PATH:-metasheet2}\""
             "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}\""
             "DRILL_FAIL_STAGE=\"${DRILL_FAIL_STAGE:-none}\""
-            "cd \"${DEPLOY_PATH}\""
+            'if [[ "${DEPLOY_PATH}" == /* ]]; then'
+            '  DEPLOY_REPO_PATH="${DEPLOY_PATH}"'
+            'elif [[ "${DEPLOY_PATH}" == ~/* ]]; then'
+            '  DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH#~/}"'
+            'else'
+            '  DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH}"'
+            'fi'
+            'if [[ ! -d "$DEPLOY_REPO_PATH" ]]; then'
+            '  echo "[deploy][error] DEPLOY_PATH missing: ${DEPLOY_PATH} (resolved: ${DEPLOY_REPO_PATH})" >&2'
+            '  echo "[deploy][error] pwd=$(pwd)" >&2'
+            '  echo "[deploy][error] home=${HOME}" >&2'
+            '  ls -la "${HOME}" >&2 || true'
+            '  exit 1'
+            'fi'
+            'cd "$DEPLOY_REPO_PATH"'
+            'echo "[deploy] repo_path=${DEPLOY_REPO_PATH}"'
             "# Keep host-mounted config (e.g. docker/nginx.conf) in sync with main."
-            "git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo \"[deploy][error] DEPLOY_PATH is not a git repo: ${DEPLOY_PATH}\" >&2; exit 1; }"
+            'git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "[deploy][error] DEPLOY_PATH is not a git repo: ${DEPLOY_PATH} (resolved: ${DEPLOY_REPO_PATH})" >&2; echo "[deploy][error] pwd=$(pwd)" >&2; ls -la >&2 || true; exit 1; }'
             "git fetch origin main"
             "git checkout main"
             "git merge --ff-only origin/main"

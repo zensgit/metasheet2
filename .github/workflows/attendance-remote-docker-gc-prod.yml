@@ -59,7 +59,22 @@ jobs:
             "DEPLOY_PATH=\"${DEPLOY_PATH}\""
             "PRUNE=\"${PRUNE}\""
             "SKIP_HOST_SYNC=\"${SKIP_HOST_SYNC}\""
-            "cd \"${DEPLOY_PATH}\""
+            'if [[ "${DEPLOY_PATH}" == /* ]]; then'
+              '  DEPLOY_REPO_PATH="${DEPLOY_PATH}"'
+            'elif [[ "${DEPLOY_PATH}" == ~/* ]]; then'
+              '  DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH#~/}"'
+            "else"
+              '  DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH}"'
+            "fi"
+            'if [[ ! -d "$DEPLOY_REPO_PATH" ]]; then'
+              '  echo "[host-sync][error] DEPLOY_PATH missing: ${DEPLOY_PATH} (resolved: ${DEPLOY_REPO_PATH})"'
+              '  echo "[host-sync][error] pwd=$(pwd)"'
+              '  echo "[host-sync][error] home=${HOME}"'
+              '  ls -la "${HOME}" || true'
+              '  exit 1'
+            "fi"
+            'cd "$DEPLOY_REPO_PATH"'
+            'echo "[host-sync] repo_path=${DEPLOY_REPO_PATH}"'
             "echo \"=== HOST SYNC START ===\""
             "host_sync_rc=0"
             "host_sync_attempts=3"
@@ -72,6 +87,7 @@ jobs:
               '    git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git fetch origin main && git checkout main && git pull --ff-only origin main'
               '    host_sync_rc=$?'
               '    echo "[host-sync] attempt=$attempt rc=$host_sync_rc"'
+              '    if [[ "$host_sync_rc" != "0" && "$attempt" == "1" ]]; then echo "[host-sync][error] not a git repo at ${DEPLOY_REPO_PATH}" ; pwd ; ls -la || true; fi'
               '    if [[ "$host_sync_rc" == "0" ]]; then break; fi'
               '    if [[ "$attempt" -lt "$host_sync_attempts" ]]; then sleep $((attempt * 2)); fi'
               '  done'
