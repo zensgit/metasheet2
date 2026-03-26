@@ -629,13 +629,14 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       await deletePlmTeamFilterPreset(preset.id)
       teamPresets.value = teamPresets.value.filter((entry) => entry.id !== preset.id)
       teamPresetSelection.value = teamPresetSelection.value.filter((id) => id !== preset.id)
+      const requestedPresetId = options.requestedPresetId?.value.trim() || ''
       if (teamPresetKey.value === preset.id) {
         teamPresetKey.value = ''
         teamPresetName.value = ''
         teamPresetGroup.value = ''
         teamPresetOwnerUserId.value = ''
       }
-      if (options.requestedPresetId?.value === preset.id) {
+      if (requestedPresetId === preset.id) {
         options.syncRequestedPresetId?.(undefined)
       }
       if (lastAutoAppliedDefaultId.value === preset.id) {
@@ -747,13 +748,14 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       const saved = await archivePlmTeamFilterPreset(preset.id)
       teamPresets.value = replaceTeamPreset(teamPresets.value, saved)
       teamPresetSelection.value = teamPresetSelection.value.filter((id) => id !== preset.id)
+      const requestedPresetId = options.requestedPresetId?.value.trim() || ''
       if (teamPresetKey.value === preset.id) {
         teamPresetKey.value = ''
         teamPresetName.value = ''
         teamPresetGroup.value = ''
         teamPresetOwnerUserId.value = ''
       }
-      if (options.requestedPresetId?.value === preset.id) {
+      if (requestedPresetId === preset.id) {
         options.syncRequestedPresetId?.(undefined)
       }
       if (lastAutoAppliedDefaultId.value === preset.id) {

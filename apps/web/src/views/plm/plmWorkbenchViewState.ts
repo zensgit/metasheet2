@@ -248,7 +248,6 @@ export function buildPlmWorkbenchTeamViewShareUrl<Kind extends PlmWorkbenchTeamV
   params.set('approvalsTeamView', view.id)
   appendIfPresent(params, 'approvalsStatus', approvalsView.state.status !== 'pending' ? approvalsView.state.status : '')
   appendIfPresent(params, 'approvalsFilter', approvalsView.state.filter)
-  appendIfPresent(params, 'approvalComment', approvalsView.state.comment)
   appendIfPresent(params, 'approvalSort', approvalsView.state.sortKey !== 'created' ? approvalsView.state.sortKey : '')
   appendIfPresent(params, 'approvalSortDir', approvalsView.state.sortDir !== 'desc' ? approvalsView.state.sortDir : '')
   appendIfPresent(params, 'approvalColumns', serializeEnabledColumns(approvalsView.state.columns))

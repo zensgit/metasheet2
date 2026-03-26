@@ -1525,7 +1525,6 @@ describe('usePlmTeamViews', () => {
           state: {
             status: 'pending',
             filter: 'eco',
-            comment: '',
             sortKey: 'created',
             sortDir: 'desc',
             columns: { status: true },
@@ -1544,7 +1543,6 @@ describe('usePlmTeamViews', () => {
       state: {
         status: 'approved',
         filter: 'gear',
-        comment: 'ok',
         sortKey: 'product',
         sortDir: 'asc',
         columns: { product: true },
@@ -1561,7 +1559,6 @@ describe('usePlmTeamViews', () => {
       state: {
         status: 'pending',
         filter: 'eco',
-        comment: '',
         sortKey: 'created',
         sortDir: 'desc',
         columns: { status: true },
@@ -1578,7 +1575,6 @@ describe('usePlmTeamViews', () => {
       state: {
         status: 'pending',
         filter: 'eco',
-        comment: '',
         sortKey: 'created',
         sortDir: 'desc',
         columns: { status: true },
@@ -1595,7 +1591,6 @@ describe('usePlmTeamViews', () => {
       getCurrentViewState: () => ({
         status: 'approved',
         filter: 'gear',
-        comment: 'ok',
         sortKey: 'product',
         sortDir: 'asc',
         columns: { product: true },
@@ -1613,7 +1608,6 @@ describe('usePlmTeamViews', () => {
     expect(applyViewState).toHaveBeenCalledWith({
       status: 'pending',
       filter: 'eco',
-      comment: '',
       sortKey: 'created',
       sortDir: 'desc',
       columns: { status: true },
@@ -1624,7 +1618,6 @@ describe('usePlmTeamViews', () => {
     expect(savePlmWorkbenchTeamView).toHaveBeenCalledWith('approvals', '新审批视角', {
       status: 'approved',
       filter: 'gear',
-      comment: 'ok',
       sortKey: 'product',
       sortDir: 'asc',
       columns: { product: true },
@@ -2637,7 +2630,7 @@ describe('usePlmTeamViews', () => {
   })
 
   it('clears requested workbench identity and stale form state after deleting the current team view', async () => {
-    const requestedViewId = ref('workbench-delete')
+    const requestedViewId = ref(' workbench-delete ')
     const syncRequestedViewId = vi.fn((value?: string) => {
       requestedViewId.value = value || ''
     })
@@ -2687,6 +2680,7 @@ describe('usePlmTeamViews', () => {
     model.teamViewName.value = '即将删除工作台'
     model.teamViewOwnerUserId.value = 'owner-delete'
     model.teamViewSelection.value = ['workbench-delete']
+    requestedViewId.value = ' workbench-delete '
 
     await model.deleteTeamView()
 

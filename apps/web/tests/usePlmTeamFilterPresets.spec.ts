@@ -611,6 +611,7 @@ describe('usePlmTeamFilterPresets', () => {
     expect(model.canRestoreTeamPreset.value).toBe(false)
     model.teamPresetSelection.value = ['preset-archive']
     model.teamPresetOwnerUserId.value = 'owner-stale'
+    requestedPresetId.value = ' preset-archive '
 
     await model.archiveTeamPreset()
 

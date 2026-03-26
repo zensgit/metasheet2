@@ -989,7 +989,6 @@ describe('plmWorkbenchClient', () => {
               state: {
                 status: 'APPROVED',
                 filter: 'eco',
-                comment: 'ok',
                 sortKey: 'status',
                 sortDir: 'asc',
                 columns: { status: true, product: false },
@@ -1030,7 +1029,6 @@ describe('plmWorkbenchClient', () => {
       state: {
         status: 'approved',
         filter: 'eco',
-        comment: 'ok',
         sortKey: 'status',
         sortDir: 'asc',
         columns: {

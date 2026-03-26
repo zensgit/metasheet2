@@ -353,12 +353,13 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       await deletePlmWorkbenchTeamView(view.id)
       teamViews.value = teamViews.value.filter((entry) => entry.id !== view.id)
       teamViewSelection.value = teamViewSelection.value.filter((id) => id !== view.id)
+      const requestedViewId = options.requestedViewId?.value.trim() || ''
       if (teamViewKey.value === view.id) {
         teamViewKey.value = ''
         teamViewName.value = ''
         teamViewOwnerUserId.value = ''
       }
-      if (options.requestedViewId?.value === view.id) {
+      if (requestedViewId === view.id) {
         options.syncRequestedViewId?.(undefined)
       }
       if (lastAutoAppliedDefaultId.value === view.id) {
@@ -401,12 +402,13 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       const saved = await archivePlmWorkbenchTeamView(options.kind, view.id)
       teamViews.value = replaceTeamView(teamViews.value, saved)
       teamViewSelection.value = teamViewSelection.value.filter((id) => id !== view.id)
+      const requestedViewId = options.requestedViewId?.value.trim() || ''
       if (teamViewKey.value === view.id) {
         teamViewKey.value = ''
         teamViewName.value = ''
         teamViewOwnerUserId.value = ''
       }
-      if (options.requestedViewId?.value === view.id) {
+      if (requestedViewId === view.id) {
         options.syncRequestedViewId?.(undefined)
       }
       if (lastAutoAppliedDefaultId.value === view.id) {

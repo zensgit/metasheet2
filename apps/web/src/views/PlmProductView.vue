@@ -4899,7 +4899,6 @@ const {
   getCurrentViewState: () => ({
     status: approvalsStatus.value,
     filter: approvalsFilter.value,
-    comment: approvalComment.value,
     sortKey: approvalSortKey.value,
     sortDir: approvalSortDir.value,
     columns: { ...approvalColumns.value },
@@ -4907,7 +4906,6 @@ const {
   applyViewState: (state) => {
     approvalsStatus.value = state.status
     approvalsFilter.value = state.filter
-    approvalComment.value = state.comment
     approvalSortKey.value = state.sortKey
     approvalSortDir.value = state.sortDir
     approvalColumns.value = { ...defaultApprovalColumns, ...state.columns }
@@ -4924,7 +4922,6 @@ const {
     !hasExplicitQueryKey(APPROVALS_QUERY_KEYS)
     && approvalsStatus.value === DEFAULT_APPROVAL_STATUS
     && !approvalsFilter.value.trim()
-    && !approvalComment.value.trim()
     && approvalSortKey.value === 'created'
     && approvalSortDir.value === 'desc'
   ),
@@ -4943,7 +4940,6 @@ watch(
     JSON.stringify({
       status: approvalsStatus.value,
       filter: approvalsFilter.value,
-      comment: approvalComment.value,
       sortKey: approvalSortKey.value,
       sortDir: approvalSortDir.value,
       columns: { ...approvalColumns.value },
@@ -4954,12 +4950,11 @@ watch(
     const activeView = activeApprovalsRouteView.value
     if (!activeView) return
     if (matchPlmTeamViewStateSnapshot({
-      ...pickPlmTeamViewStateKeys(activeView.state, ['status', 'filter', 'comment', 'sortKey', 'sortDir']),
+      ...pickPlmTeamViewStateKeys(activeView.state, ['status', 'filter', 'sortKey', 'sortDir']),
       columns: mergePlmTeamViewBooleanMapDefaults(defaultApprovalColumns, activeView.state.columns),
     }, {
       status: approvalsStatus.value,
       filter: approvalsFilter.value,
-      comment: approvalComment.value,
       sortKey: approvalSortKey.value,
       sortDir: approvalSortDir.value,
       columns: mergePlmTeamViewBooleanMapDefaults(defaultApprovalColumns, approvalColumns.value),

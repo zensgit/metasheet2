@@ -225,7 +225,6 @@ function normalizeTeamViewState<Kind extends PlmWorkbenchTeamViewKind>(
   return {
     status: status === 'pending' || status === 'approved' || status === 'rejected' ? status : 'all',
     filter: typeof record.filter === 'string' ? record.filter.trim() : '',
-    comment: typeof record.comment === 'string' ? record.comment.trim() : '',
     sortKey:
       sortKey === 'title'
       || sortKey === 'status'

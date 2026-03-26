@@ -545,7 +545,6 @@ export type PlmCadTeamViewState = {
 export type PlmApprovalsTeamViewState = {
   status: 'all' | 'pending' | 'approved' | 'rejected'
   filter: string
-  comment: string
   sortKey: ApprovalSortKey
   sortDir: SortDir
   columns: ApprovalColumnState

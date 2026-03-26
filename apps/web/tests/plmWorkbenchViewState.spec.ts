@@ -224,7 +224,6 @@ describe('plmWorkbenchViewState', () => {
         state: {
           status: 'approved',
           filter: 'eco',
-          comment: 'ship-it',
           sortKey: 'title',
           sortDir: 'asc',
           columns: {
@@ -244,7 +243,7 @@ describe('plmWorkbenchViewState', () => {
       'https://example.test/plm?panel=cad&cadTeamView=cad-view-1&cadFileId=file-main&cadOtherFileId=file-other&cadReviewState=approved&cadReviewNote=looks-good',
     )
     expect(approvalsUrl).toBe(
-      'https://example.test/plm?panel=approvals&approvalsTeamView=approval-view-1&approvalsStatus=approved&approvalsFilter=eco&approvalComment=ship-it&approvalSort=title&approvalSortDir=asc&approvalColumns=product',
+      'https://example.test/plm?panel=approvals&approvalsTeamView=approval-view-1&approvalsStatus=approved&approvalsFilter=eco&approvalSort=title&approvalSortDir=asc&approvalColumns=product',
     )
   })
 
