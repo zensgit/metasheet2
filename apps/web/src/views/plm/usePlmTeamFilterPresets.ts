@@ -20,6 +20,7 @@ import type {
 } from './plmPanelModels'
 import {
   canApplyPlmCollaborativeEntry,
+  canDuplicatePlmCollaborativeEntry,
   usePlmCollaborativePermissions,
 } from './usePlmCollaborativePermissions'
 
@@ -152,6 +153,22 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
   const selectedTeamPreset = computed(
     () => teamPresets.value.find((preset) => preset.id === teamPresetKey.value) || null,
   )
+  const requestedTeamPreset = computed(() => {
+    const requestedPresetId = options.requestedPresetId?.value.trim() || ''
+    if (!requestedPresetId) return null
+    return teamPresets.value.find((preset) => preset.id === requestedPresetId) || null
+  })
+  const hasPendingApplySelection = computed(() => (
+    Boolean(requestedTeamPreset.value)
+    && Boolean(selectedTeamPreset.value)
+    && requestedTeamPreset.value?.id !== selectedTeamPreset.value?.id
+  ))
+  const selectedManagementTarget = computed(() => (
+    hasPendingApplySelection.value ? null : selectedTeamPreset.value
+  ))
+  const visibleManagementTarget = computed(() => (
+    hasPendingApplySelection.value ? requestedTeamPreset.value : selectedTeamPreset.value
+  ))
   const defaultTeamPreset = computed(
     () => teamPresets.value.find((preset) => preset.isDefault && !preset.isArchived) || null,
   )
@@ -185,9 +202,6 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     return Boolean(teamPresetName.value.trim() && current.value.trim())
   })
   const {
-    showManagementActions,
-    canApply: canApplyTeamPreset,
-    canDuplicate: canDuplicateTeamPreset,
     canShare: canShareTeamPreset,
     canDelete: canDeleteTeamPreset,
     canArchive: canArchiveTeamPreset,
@@ -198,10 +212,17 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     canSetDefault: canSetTeamPresetDefault,
     canClearDefault: canClearTeamPresetDefault,
   } = usePlmCollaborativePermissions({
-    selectedEntry: selectedTeamPreset,
+    selectedEntry: selectedManagementTarget,
     nameRef: teamPresetName,
     ownerUserIdRef: teamPresetOwnerUserId,
   })
+  const canApplyTeamPreset = computed(() => canApplyPlmCollaborativeEntry(selectedTeamPreset.value))
+  const canDuplicateTeamPreset = computed(() => (
+    canDuplicatePlmCollaborativeEntry(selectedTeamPreset.value)
+  ))
+  const showManagementActions = computed(() => (
+    !visibleManagementTarget.value || readTeamPresetPermissions(visibleManagementTarget.value).canManage
+  ))
   const defaultTeamPresetLabel = computed(() => {
     const preset = defaultTeamPreset.value
     if (!preset) return ''
@@ -226,6 +247,12 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       value: preset.state.value,
       group: preset.state.group,
     })
+  }
+
+  function blockPendingApplyManagementAction() {
+    if (!hasPendingApplySelection.value) return false
+    options.setMessage(`请先应用${options.label}团队预设，再执行管理操作。`, true)
+    return true
   }
 
   function maybeAutoApplyDefault(items: PlmTeamFilterPreset[]) {
@@ -414,6 +441,9 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`请选择${options.label}团队预设。`, true)
       return
     }
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     if (!canShareTeamPreset.value) {
       if (preset.isArchived) {
         options.setMessage(`请先恢复${options.label}团队预设，再执行分享。`, true)
@@ -480,6 +510,9 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`请选择${options.label}团队预设。`, true)
       return
     }
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     if (!teamPresetName.value.trim()) {
       options.setMessage(`请输入${options.label}团队预设名称。`, true)
       return
@@ -521,6 +554,9 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`请选择${options.label}团队预设。`, true)
       return
     }
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     if (!targetOwnerUserId) {
       options.setMessage(`请输入${options.label}团队预设目标用户 ID。`, true)
       return
@@ -557,6 +593,9 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
   async function deleteTeamPreset() {
     const preset = selectedTeamPreset.value
     if (!preset) return
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     if (!canDeleteTeamPreset.value) {
       options.setMessage(`当前${options.label}团队预设不可删除。`, true)
       return
@@ -596,6 +635,9 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`请选择${options.label}团队预设。`, true)
       return
     }
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     if (!canSetTeamPresetDefault.value) {
       if (preset.isArchived) {
         options.setMessage(`请先恢复${options.label}团队预设，再设为默认。`, true)
@@ -626,6 +668,9 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     const preset = selectedTeamPreset.value
     if (!preset) {
       options.setMessage(`请选择${options.label}团队预设。`, true)
+      return
+    }
+    if (blockPendingApplyManagementAction()) {
       return
     }
     if (!canClearTeamPresetDefault.value) {
@@ -660,6 +705,9 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     const preset = selectedTeamPreset.value
     if (!preset) {
       options.setMessage(`请选择${options.label}团队预设。`, true)
+      return
+    }
+    if (blockPendingApplyManagementAction()) {
       return
     }
     if (preset.isArchived) {
@@ -703,6 +751,9 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     const preset = selectedTeamPreset.value
     if (!preset) {
       options.setMessage(`请选择${options.label}团队预设。`, true)
+      return
+    }
+    if (blockPendingApplyManagementAction()) {
       return
     }
     if (!preset.isArchived) {

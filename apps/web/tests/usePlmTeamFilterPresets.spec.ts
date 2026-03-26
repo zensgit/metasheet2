@@ -853,6 +853,288 @@ describe('usePlmTeamFilterPresets', () => {
     expect(model.teamPresetOwnerUserId.value).toBe('')
   })
 
+  it('blocks generic management actions until the pending preset selector target is applied', async () => {
+    const requestedPresetId = ref('preset-applied')
+    const syncRequestedPresetId = vi.fn((value?: string) => {
+      requestedPresetId.value = value || ''
+    })
+    const buildShareUrl = vi.fn(() => 'http://example.test/plm?bomTeamPreset=preset-pending')
+    const copyShareUrl = vi.fn(async () => true)
+
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-applied',
+          kind: 'bom',
+          scope: 'team',
+          name: '已应用 BOM 预设',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: true,
+            canShare: true,
+            canRename: true,
+          },
+          state: { field: 'path', value: 'root/a', group: 'A组' },
+        },
+        {
+          id: 'preset-pending',
+          kind: 'bom',
+          scope: 'team',
+          name: '待应用 BOM 预设',
+          ownerUserId: 'owner-b',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: true,
+            canDuplicate: true,
+            canShare: true,
+            canRename: true,
+          },
+          state: { field: 'path', value: 'root/b', group: 'B组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/a', group: 'A组' }),
+      applyPreset,
+      setMessage,
+      requestedPresetId,
+      syncRequestedPresetId,
+      shouldAutoApplyDefault: () => false,
+      buildShareUrl,
+      copyShareUrl,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-pending'
+    model.teamPresetName.value = '待重命名 BOM 预设'
+    await nextTick()
+
+    expect(model.canApplyTeamPreset.value).toBe(true)
+    expect(model.canDuplicateTeamPreset.value).toBe(true)
+    expect(model.canShareTeamPreset.value).toBe(false)
+    expect(model.canRenameTeamPreset.value).toBe(false)
+    expect(model.canDeleteTeamPreset.value).toBe(false)
+
+    await model.shareTeamPreset()
+    await model.renameTeamPreset()
+
+    expect(buildShareUrl).not.toHaveBeenCalled()
+    expect(copyShareUrl).not.toHaveBeenCalled()
+    expect(renamePlmTeamFilterPreset).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenCalledWith('请先应用BOM团队预设，再执行管理操作。', true)
+  })
+
+  it('keeps readonly management controls hidden while the pending preset selector target stays applyable', async () => {
+    const requestedPresetId = ref('preset-readonly-current')
+    const syncRequestedPresetId = vi.fn((value?: string) => {
+      requestedPresetId.value = value || ''
+    })
+
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-readonly-current',
+          kind: 'bom',
+          scope: 'team',
+          name: '当前只读 BOM 预设',
+          ownerUserId: 'owner-a',
+          canManage: false,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: false,
+            canDuplicate: true,
+            canShare: false,
+          },
+          state: { field: 'path', value: 'root/current', group: '当前组' },
+        },
+        {
+          id: 'preset-editable-pending',
+          kind: 'bom',
+          scope: 'team',
+          name: '待应用 BOM 预设',
+          ownerUserId: 'owner-b',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: true,
+            canDuplicate: true,
+            canShare: true,
+          },
+          state: { field: 'path', value: 'root/pending', group: '待应用组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/current', group: '当前组' }),
+      applyPreset,
+      setMessage,
+      requestedPresetId,
+      syncRequestedPresetId,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-editable-pending'
+    await nextTick()
+
+    expect(model.showManagementActions.value).toBe(false)
+    expect(model.canApplyTeamPreset.value).toBe(true)
+    expect(model.canDuplicateTeamPreset.value).toBe(true)
+    expect(model.canShareTeamPreset.value).toBe(false)
+  })
+
+  it('still allows duplicating the pending preset selector target before apply', async () => {
+    const requestedPresetId = ref('preset-applied')
+    const syncRequestedPresetId = vi.fn((value?: string) => {
+      requestedPresetId.value = value || ''
+    })
+    const trackedApply = vi.fn(() => requestedPresetId.value)
+
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-applied',
+          kind: 'where-used',
+          scope: 'team',
+          name: '已应用 Where-Used 预设',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: true,
+            canDuplicate: true,
+          },
+          state: { field: 'parent', value: 'assy-a', group: 'A组' },
+        },
+        {
+          id: 'preset-pending',
+          kind: 'where-used',
+          scope: 'team',
+          name: '待复制 Where-Used 预设',
+          ownerUserId: 'owner-b',
+          canManage: false,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: false,
+            canDuplicate: true,
+          },
+          state: { field: 'parent', value: 'assy-b', group: 'B组' },
+        },
+      ],
+    })
+    vi.mocked(duplicatePlmTeamFilterPreset).mockResolvedValue({
+      id: 'preset-copy',
+      kind: 'where-used',
+      scope: 'team',
+      name: '待复制 Where-Used 预设（副本）',
+      ownerUserId: 'dev-user',
+      canManage: true,
+      isDefault: false,
+      state: { field: 'parent', value: 'assy-b', group: 'B组' },
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'where-used',
+      label: 'Where-Used',
+      getCurrentPresetState: () => ({ field: 'parent', value: 'assy-a', group: 'A组' }),
+      applyPreset: trackedApply,
+      setMessage,
+      requestedPresetId,
+      syncRequestedPresetId,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-pending'
+    await nextTick()
+
+    await model.duplicateTeamPreset()
+
+    expect(duplicatePlmTeamFilterPreset).toHaveBeenCalledWith('preset-pending', undefined)
+    expect(model.teamPresetKey.value).toBe('preset-copy')
+    expect(syncRequestedPresetId).toHaveBeenLastCalledWith('preset-copy')
+    expect(trackedApply).toHaveReturnedWith('preset-copy')
+  })
+
+  it('still allows applying the pending preset selector target while generic management stays frozen', async () => {
+    const requestedPresetId = ref('preset-applied')
+    const syncRequestedPresetId = vi.fn((value?: string) => {
+      requestedPresetId.value = value || ''
+    })
+    const trackedApply = vi.fn(() => requestedPresetId.value)
+
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-applied',
+          kind: 'bom',
+          scope: 'team',
+          name: '已应用 BOM 预设',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: true,
+            canShare: true,
+          },
+          state: { field: 'path', value: 'root/a', group: 'A组' },
+        },
+        {
+          id: 'preset-pending',
+          kind: 'bom',
+          scope: 'team',
+          name: '待应用 BOM 预设',
+          ownerUserId: 'owner-b',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: true,
+            canShare: true,
+          },
+          state: { field: 'path', value: 'root/b', group: 'B组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/a', group: 'A组' }),
+      applyPreset: trackedApply,
+      setMessage,
+      requestedPresetId,
+      syncRequestedPresetId,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-pending'
+    await nextTick()
+
+    await model.applyTeamPreset()
+
+    expect(syncRequestedPresetId).toHaveBeenLastCalledWith('preset-pending')
+    expect(trackedApply).toHaveReturnedWith('preset-pending')
+    expect(model.teamPresetKey.value).toBe('preset-pending')
+  })
+
   it('clears requested identity and stale form fields after deleting the current team preset', async () => {
     const requestedPresetId = ref('preset-delete')
     const syncRequestedPresetId = vi.fn((value?: string) => {
