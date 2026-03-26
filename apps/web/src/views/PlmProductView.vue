@@ -122,6 +122,7 @@ import {
   matchPlmTeamFilterPresetStateSnapshot,
   pickPlmTeamFilterPresetRouteOwnerState,
 } from './plm/plmTeamFilterPresetStateMatch'
+import { resolvePlmHydratedTeamPresetOwnerTakeover } from './plm/plmHydratedTeamPresetOwnerTakeover'
 import { resolvePlmLocalFilterPresetRouteIdentity } from './plm/plmLocalFilterPresetRouteIdentity'
 import { resolvePlmHydratedTeamViewOwnerTakeover } from './plm/plmHydratedTeamViewOwnerTakeover'
 import {
@@ -5392,6 +5393,29 @@ function applyHydratedTeamViewOwnerTakeover(options: {
   options.clearTeamViewSelection()
 }
 
+function applyHydratedTeamPresetOwnerTakeover(options: {
+  routeOwnerId: string
+  teamPresetKey: { value: string }
+  teamPresetName: { value: string }
+  teamPresetGroup: { value: string }
+  teamPresetOwnerUserId: { value: string }
+  clearTeamPresetSelection: () => void
+}) {
+  const takeover = resolvePlmHydratedTeamPresetOwnerTakeover({
+    routeOwnerId: options.routeOwnerId,
+    localSelectorId: options.teamPresetKey.value,
+    localNameDraft: options.teamPresetName.value,
+    localGroupDraft: options.teamPresetGroup.value,
+    localOwnerUserIdDraft: options.teamPresetOwnerUserId.value,
+  })
+  if (!takeover.shouldClearLocalSelector) return
+  options.teamPresetKey.value = takeover.nextSelectorId
+  options.teamPresetName.value = takeover.nextNameDraft
+  options.teamPresetGroup.value = takeover.nextGroupDraft
+  options.teamPresetOwnerUserId.value = takeover.nextOwnerUserIdDraft
+  options.clearTeamPresetSelection()
+}
+
 async function applyQueryState() {
   if (isApplyingRouteQueryState.value) {
     pendingRouteQueryHydration = true
@@ -5638,6 +5662,14 @@ async function applyQueryState() {
     }
     const whereUsedTeamPresetParam = readQueryParam('whereUsedTeamPreset')
     if (whereUsedTeamPresetParam !== undefined) {
+      applyHydratedTeamPresetOwnerTakeover({
+        routeOwnerId: whereUsedTeamPresetParam,
+        teamPresetKey: whereUsedTeamPresetKey,
+        teamPresetName: whereUsedTeamPresetName,
+        teamPresetGroup: whereUsedTeamPresetGroup,
+        teamPresetOwnerUserId: whereUsedTeamPresetOwnerUserId,
+        clearTeamPresetSelection: clearWhereUsedTeamPresetSelection,
+      })
       whereUsedTeamPresetQuery.value = whereUsedTeamPresetParam
     }
     const whereUsedFilterParam = readQueryParam('whereUsedFilter')
@@ -5667,6 +5699,14 @@ async function applyQueryState() {
     }
     const bomTeamPresetParam = readQueryParam('bomTeamPreset')
     if (bomTeamPresetParam !== undefined) {
+      applyHydratedTeamPresetOwnerTakeover({
+        routeOwnerId: bomTeamPresetParam,
+        teamPresetKey: bomTeamPresetKey,
+        teamPresetName: bomTeamPresetName,
+        teamPresetGroup: bomTeamPresetGroup,
+        teamPresetOwnerUserId: bomTeamPresetOwnerUserId,
+        clearTeamPresetSelection: clearBomTeamPresetSelection,
+      })
       bomTeamPresetQuery.value = bomTeamPresetParam
     }
     const bomFilterParam = readQueryParam('bomFilter')
