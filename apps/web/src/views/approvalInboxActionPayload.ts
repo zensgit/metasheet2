@@ -18,19 +18,23 @@ export function canSubmitApprovalInboxAction(
 export function buildApprovalInboxActionPayload(
   action: ApprovalInboxAction,
   comment: string,
-): Record<string, string> {
+  version: number,
+): Record<string, string | number> {
   const normalizedComment = normalizeApprovalInboxComment(comment)
+  const payload: Record<string, string | number> = { version }
 
   if (action === 'approve') {
-    return normalizedComment ? { comment: normalizedComment } : {}
+    if (normalizedComment) {
+      payload.comment = normalizedComment
+    }
+    return payload
   }
 
   if (!normalizedComment) {
-    return {}
+    return payload
   }
 
-  return {
-    reason: normalizedComment,
-    comment: normalizedComment,
-  }
+  payload.reason = normalizedComment
+  payload.comment = normalizedComment
+  return payload
 }

@@ -203,12 +203,18 @@ async function performAction(id: string, action: 'approve' | 'reject') {
     error.value = 'Reject requires a reason'
     return
   }
+  const approval = approvals.value.find((entry) => entry.id === id)
+  const version = approval?.version
+  if (typeof version !== 'number' || !Number.isFinite(version)) {
+    error.value = 'Approval version is unavailable'
+    return
+  }
   actingId.value = id
 
   try {
     const response = await apiFetch(`/api/approvals/${encodeURIComponent(id)}/${action}`, {
       method: 'POST',
-      body: JSON.stringify(buildApprovalInboxActionPayload(action, comment.value)),
+      body: JSON.stringify(buildApprovalInboxActionPayload(action, comment.value, version)),
     })
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
     actionStatus.value = `${action === 'approve' ? 'Approved' : 'Rejected'} ${id}`
