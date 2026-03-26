@@ -117,7 +117,10 @@ import {
   pickPlmTeamFilterPresetRouteOwnerState,
 } from './plm/plmTeamFilterPresetStateMatch'
 import { resolvePlmLocalFilterPresetRouteIdentity } from './plm/plmLocalFilterPresetRouteIdentity'
-import { runPlmLocalPresetOwnershipAction } from './plm/plmLocalPresetOwnership'
+import {
+  runPlmLocalPresetOwnershipAction,
+  shouldClearLocalPresetOwnerAfterTeamPresetAction,
+} from './plm/plmLocalPresetOwnership'
 import {
   canActOnPlmApproval,
   getPlmApprovalApproverId,
@@ -4291,7 +4294,7 @@ async function archiveBomTeamPreset() {
     () => archiveBomTeamPresetBase(),
     {
       clearLocalOwner: clearBomLocalFilterPresetIdentity,
-      shouldClear: (saved) => Boolean(saved),
+      shouldClear: (saved) => shouldClearLocalPresetOwnerAfterTeamPresetAction('archive', saved),
     },
   )
 }
@@ -4381,7 +4384,10 @@ async function archiveBomTeamPresetSelection() {
     () => archiveBomTeamPresetSelectionBase(),
     {
       clearLocalOwner: clearBomLocalFilterPresetIdentity,
-      shouldClear: hasProcessedTeamPresetChanges,
+      shouldClear: (result) => (
+        hasProcessedTeamPresetChanges(result)
+        && shouldClearLocalPresetOwnerAfterTeamPresetAction('batch-archive', result)
+      ),
     },
   )
 }
@@ -4401,7 +4407,10 @@ async function deleteBomTeamPresetSelection() {
     () => deleteBomTeamPresetSelectionBase(),
     {
       clearLocalOwner: clearBomLocalFilterPresetIdentity,
-      shouldClear: hasProcessedTeamPresetChanges,
+      shouldClear: (result) => (
+        hasProcessedTeamPresetChanges(result)
+        && shouldClearLocalPresetOwnerAfterTeamPresetAction('batch-delete', result)
+      ),
     },
   )
 }
@@ -4431,7 +4440,7 @@ async function archiveWhereUsedTeamPreset() {
     () => archiveWhereUsedTeamPresetBase(),
     {
       clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
-      shouldClear: (saved) => Boolean(saved),
+      shouldClear: (saved) => shouldClearLocalPresetOwnerAfterTeamPresetAction('archive', saved),
     },
   )
 }
@@ -4521,7 +4530,10 @@ async function archiveWhereUsedTeamPresetSelection() {
     () => archiveWhereUsedTeamPresetSelectionBase(),
     {
       clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
-      shouldClear: hasProcessedTeamPresetChanges,
+      shouldClear: (result) => (
+        hasProcessedTeamPresetChanges(result)
+        && shouldClearLocalPresetOwnerAfterTeamPresetAction('batch-archive', result)
+      ),
     },
   )
 }
@@ -4541,7 +4553,10 @@ async function deleteWhereUsedTeamPresetSelection() {
     () => deleteWhereUsedTeamPresetSelectionBase(),
     {
       clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
-      shouldClear: hasProcessedTeamPresetChanges,
+      shouldClear: (result) => (
+        hasProcessedTeamPresetChanges(result)
+        && shouldClearLocalPresetOwnerAfterTeamPresetAction('batch-delete', result)
+      ),
     },
   )
 }

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { runPlmLocalPresetOwnershipAction } from '../src/views/plm/plmLocalPresetOwnership'
+import {
+  runPlmLocalPresetOwnershipAction,
+  shouldClearLocalPresetOwnerAfterTeamPresetAction,
+} from '../src/views/plm/plmLocalPresetOwnership'
 
 describe('plmLocalPresetOwnership', () => {
   it('clears the local owner after a successful save-style action', async () => {
@@ -39,5 +42,40 @@ describe('plmLocalPresetOwnership', () => {
 
     expect(result).toBeNull()
     expect(clearLocalOwner).not.toHaveBeenCalled()
+  })
+
+  it('keeps the local owner for destructive team preset actions that do not take over the current state', async () => {
+    const clearLocalOwner = vi.fn()
+
+    await runPlmLocalPresetOwnershipAction(
+      async () => ({ id: 'preset-archived' }),
+      {
+        clearLocalOwner,
+        shouldClear: (result) => shouldClearLocalPresetOwnerAfterTeamPresetAction('archive', result),
+      },
+    )
+    await runPlmLocalPresetOwnershipAction(
+      async () => ({ processedIds: ['preset-a'] }),
+      {
+        clearLocalOwner,
+        shouldClear: (result) => shouldClearLocalPresetOwnerAfterTeamPresetAction('batch-delete', result),
+      },
+    )
+
+    expect(clearLocalOwner).not.toHaveBeenCalled()
+  })
+
+  it('still clears the local owner when a restore-style team preset action reapplies a surviving target', async () => {
+    const clearLocalOwner = vi.fn()
+
+    await runPlmLocalPresetOwnershipAction(
+      async () => ({ id: 'preset-restored' }),
+      {
+        clearLocalOwner,
+        shouldClear: (result) => shouldClearLocalPresetOwnerAfterTeamPresetAction('restore', result),
+      },
+    )
+
+    expect(clearLocalOwner).toHaveBeenCalledTimes(1)
   })
 })
