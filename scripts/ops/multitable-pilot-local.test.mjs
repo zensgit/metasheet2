@@ -148,3 +148,39 @@ test('multitable pilot local fails when runner exits without writing report.json
   assert.equal(fs.existsSync(path.join(outputRoot, 'local-report.json')), false)
   assert.equal(fs.existsSync(path.join(outputRoot, 'local-report.md')), false)
 })
+
+test('multitable pilot local refuses to auto-start services when AUTO_START_SERVICES=false', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'multitable-pilot-local-no-autostart-'))
+  const binDir = path.join(tmpRoot, 'bin')
+  fs.mkdirSync(binDir, { recursive: true })
+  createFakeBin(binDir)
+
+  writeExecutable(
+    path.join(binDir, 'curl'),
+    [
+      '#!/usr/bin/env bash',
+      'exit 22',
+      '',
+    ].join('\n'),
+  )
+
+  const runnerScript = path.join(tmpRoot, 'runner.mjs')
+  createRunnerScript(runnerScript, { writeReport: true })
+
+  assert.throws(() => {
+    execFileSync('bash', ['scripts/ops/multitable-pilot-local.sh'], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH}`,
+        ENSURE_PLAYWRIGHT: 'false',
+        OUTPUT_ROOT: path.join(tmpRoot, 'output'),
+        RUNNER_SCRIPT: runnerScript,
+        API_BASE: 'http://127.0.0.1:7778',
+        WEB_BASE: 'http://127.0.0.1:8899',
+        AUTO_START_SERVICES: 'false',
+      },
+      stdio: 'pipe',
+    })
+  })
+})
