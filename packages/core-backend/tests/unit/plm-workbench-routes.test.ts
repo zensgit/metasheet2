@@ -1137,6 +1137,34 @@ describe('plm-workbench routes', () => {
     expect(response.body.error).toContain('Archived PLM team presets cannot be transferred')
   })
 
+  it('rejects clearing default for archived team presets', async () => {
+    routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
+      id: 'preset-archived-default',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'bom',
+      name: '归档默认团队预设',
+      name_key: '归档默认团队预设',
+      is_default: true,
+      archived_at: '2026-03-11T01:00:00.000Z',
+      state: JSON.stringify({ field: 'path', value: 'root/archive', group: '机械' }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-11T01:00:00.000Z',
+    })
+
+    const response = await request(app)
+      .delete('/api/plm-workbench/filter-presets/team/preset-archived-default/default')
+
+    expect(response.status).toBe(409)
+    expect(response.body.error).toContain('Archived PLM team presets cannot clear the default')
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('id', '=', 'preset-archived-default')
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('tenant_id', '=', 'tenant-a')
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('scope', '=', 'team')
+    expect(routeMocks.state.builder.executeTakeFirstOrThrow).not.toHaveBeenCalled()
+    expect(pgMocks.query).not.toHaveBeenCalled()
+  })
+
   it('archives a team preset for the owner', async () => {
     routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
       id: 'preset-archive',

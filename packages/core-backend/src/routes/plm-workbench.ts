@@ -2211,11 +2211,14 @@ router.delete(
         })
       }
 
+      const tenantId = req.user?.tenantId?.toString() || 'default'
       const presetId = req.params.id
       const preset = await dbAny
         .selectFrom('plm_filter_team_presets')
         .selectAll()
         .where('id', '=', presetId)
+        .where('tenant_id', '=', tenantId)
+        .where('scope', '=', 'team')
         .executeTakeFirst()
 
       if (!preset) {
@@ -2229,6 +2232,13 @@ router.delete(
         return res.status(403).json({
           success: false,
           error: 'Only the preset owner can clear the default PLM team preset',
+        })
+      }
+
+      if (preset.archived_at) {
+        return res.status(409).json({
+          success: false,
+          error: 'Archived PLM team presets cannot clear the default PLM team preset',
         })
       }
 
