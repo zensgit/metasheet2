@@ -53,6 +53,14 @@ const embedHostNavigationProtectionChecks = [
   'api.embed-host.discard-unsaved-form-draft',
 ]
 
+const embedHostDeferredReplayChecks = [
+  'ui.embed-host.navigate.deferred',
+  'ui.embed-host.navigate.superseded',
+  'ui.embed-host.state-query.deferred',
+  'ui.embed-host.navigate.replayed',
+  'api.embed-host.persisted-busy-form-save',
+]
+
 function writeFixtureReport(tmpRoot) {
   const smokeReportPath = path.join(tmpRoot, 'smoke.json')
   const profileReportPath = path.join(tmpRoot, 'profile.json')
@@ -65,6 +73,7 @@ function writeFixtureReport(tmpRoot) {
       ...requiredSmokeChecks,
       ...embedHostProtocolChecks,
       ...embedHostNavigationProtectionChecks,
+      ...embedHostDeferredReplayChecks,
     ].map((name) => ({ name, ok: true })),
   }, null, 2))
   fs.writeFileSync(profileReportPath, JSON.stringify({
@@ -225,4 +234,32 @@ test('multitable pilot readiness fails when required embed-host navigation prote
   assert.equal(readiness.ok, false)
   assert.equal(readiness.embedHostNavigationProtection.available, true)
   assert.deepEqual(readiness.embedHostNavigationProtection.missingChecks, ['api.embed-host.discard-unsaved-form-draft'])
+})
+
+test('multitable pilot readiness fails when required embed-host deferred replay evidence is missing', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'multitable-readiness-embed-host-deferred-'))
+  const fixture = writeFixtureReport(tmpRoot)
+  const smoke = JSON.parse(fs.readFileSync(fixture.smokeReportPath, 'utf8'))
+  smoke.checks = smoke.checks.filter((check) => check.name !== 'api.embed-host.persisted-busy-form-save')
+  fs.writeFileSync(fixture.smokeReportPath, JSON.stringify(smoke, null, 2))
+
+  assert.throws(() => {
+    execFileSync('node', ['scripts/ops/multitable-pilot-readiness.mjs'], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        SMOKE_REPORT_JSON: fixture.smokeReportPath,
+        PROFILE_REPORT_JSON: fixture.profileReportPath,
+        READINESS_MD: fixture.readinessMdPath,
+        READINESS_JSON: fixture.readinessJsonPath,
+        REQUIRE_GATE_REPORT: 'false',
+      },
+      stdio: 'pipe',
+    })
+  })
+
+  const readiness = JSON.parse(fs.readFileSync(fixture.readinessJsonPath, 'utf8'))
+  assert.equal(readiness.ok, false)
+  assert.equal(readiness.embedHostDeferredReplay.available, true)
+  assert.deepEqual(readiness.embedHostDeferredReplay.missingChecks, ['api.embed-host.persisted-busy-form-save'])
 })

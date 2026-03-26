@@ -64,6 +64,10 @@ function createFakeBash(binDir) {
     '    "available": true,',
     '    "ok": false,',
     '    "missingChecks": ["api.embed-host.discard-unsaved-form-draft"]',
+    '  },',
+    '  "embedHostDeferredReplay": {',
+    '    "available": true,',
+    '    "ok": true',
     '  }',
     '}',
     'JSON',
@@ -113,6 +117,7 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
     assert.equal(report.embedHostProtocol.available, true)
     assert.equal(report.embedHostProtocol.ok, true)
     assert.equal(report.embedHostNavigationProtection.ok, false)
+    assert.equal(report.embedHostDeferredReplay.ok, true)
     assert.deepEqual(
       report.embedHostNavigationProtection.missingChecks,
       ['api.embed-host.discard-unsaved-form-draft'],
@@ -121,6 +126,7 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
     assert.match(reportMd, /Overall embed-host acceptance: \*\*FAIL\*\*/)
     assert.match(reportMd, /Protocol evidence available: `true`/)
     assert.match(reportMd, /Navigation protection status: \*\*FAIL\*\*/)
+    assert.match(reportMd, /Busy deferred replay status: \*\*PASS\*\*/)
   } finally {
     fs.rmSync(path.join(repoRoot, readyOutputRoot), { recursive: true, force: true })
     fs.rmSync(path.join(repoRoot, handoffOutputRoot), { recursive: true, force: true })

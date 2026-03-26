@@ -327,10 +327,12 @@ async function main() {
   const readinessPayload = await readOptionalJsonFile(readinessJson)
   const embedHostProtocol = summarizeEmbedEvidence(readinessPayload?.embedHostProtocol)
   const embedHostNavigationProtection = summarizeEmbedEvidence(readinessPayload?.embedHostNavigationProtection)
+  const embedHostDeferredReplay = summarizeEmbedEvidence(readinessPayload?.embedHostDeferredReplay)
   const embedHostAcceptance = {
-    ok: embedHostProtocol.ok && embedHostNavigationProtection.ok,
+    ok: embedHostProtocol.ok && embedHostNavigationProtection.ok && embedHostDeferredReplay.ok,
     protocol: embedHostProtocol,
     navigationProtection: embedHostNavigationProtection,
+    deferredReplay: embedHostDeferredReplay,
   }
 
   const copied = {
@@ -530,6 +532,7 @@ async function main() {
     embedHostAcceptance,
     embedHostProtocol,
     embedHostNavigationProtection,
+    embedHostDeferredReplay,
     signoffBlockers: [
       `Do not close checkpoint, expansion, UAT, or customer sign-off until ${defaultPreflightReportJson} and ${defaultPreflightReportMd} are returned.`,
     ],
@@ -595,6 +598,7 @@ async function main() {
         readinessGateReport: copied.readinessGateReport,
         embedHostProtocol,
         embedHostNavigationProtection,
+        embedHostDeferredReplay,
       },
     },
     recommendedTemplates: {
@@ -639,6 +643,7 @@ async function main() {
     '',
     ...embedEvidenceSection('### Embed Host Protocol Evidence', embedHostProtocol),
     ...embedEvidenceSection('### Embed Host Navigation Protection', embedHostNavigationProtection),
+    ...embedEvidenceSection('### Embed Host Busy Deferred Replay', embedHostDeferredReplay),
     '## Included Files',
     '',
     `- readiness.md: ${copied.readinessMd ? '`present`' : '`missing`'}`,

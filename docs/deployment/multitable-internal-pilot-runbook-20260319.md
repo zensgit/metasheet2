@@ -237,7 +237,7 @@ Do not ask the pilot team to assemble these URLs manually.
 7. If this pilot handoff is tied to a concrete on-prem package, regenerate readiness or handoff with `ONPREM_GATE_STAMP=<gate-stamp>` or `ONPREM_GATE_REPORT_JSON=<gate-report>`
 8. Confirm profile was run at `ROW_COUNT=2000`
 9. Confirm smoke report includes import retry, people manual-fix, attachment, person preset, comments, and conflict retry
-10. Confirm `readiness.md` shows both `Embed Host Protocol Evidence` and `Embed Host Navigation Protection` as `PASS`
+10. Confirm `readiness.md` shows `Embed Host Protocol Evidence`, `Embed Host Navigation Protection`, and `Embed Host Busy Deferred Replay` as `PASS`
 11. Confirm no local-only flags are required for the target environment, except the documented dev-token `RBAC_TOKEN_TRUST=true` case
 12. Give the pilot team the feedback template:
 

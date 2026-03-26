@@ -57,6 +57,19 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
         observedChecks: ['ui.embed-host.form-ready'],
         missingChecks: ['api.embed-host.discard-unsaved-form-draft'],
       },
+      embedHostDeferredReplay: {
+        available: true,
+        ok: true,
+        requiredWhenPresent: [
+          'ui.embed-host.navigate.deferred',
+          'ui.embed-host.navigate.replayed',
+        ],
+        observedChecks: [
+          'ui.embed-host.navigate.deferred',
+          'ui.embed-host.navigate.replayed',
+        ],
+        missingChecks: [],
+      },
     }, null, 2))
     writeFile(path.join(readinessRoot, 'gates', 'report.json'), JSON.stringify({ ok: true }, null, 2))
     writeFile(path.join(readinessRoot, 'smoke', 'report.json'), JSON.stringify({ ok: true }, null, 2))
@@ -121,6 +134,7 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
     assert.equal(handoffJson.embedHostProtocol.available, true)
     assert.equal(handoffJson.embedHostProtocol.ok, true)
     assert.equal(handoffJson.embedHostNavigationProtection.ok, false)
+    assert.equal(handoffJson.embedHostDeferredReplay.ok, true)
     assert.deepEqual(
       handoffJson.embedHostNavigationProtection.missingChecks,
       ['api.embed-host.discard-unsaved-form-draft'],
@@ -129,6 +143,7 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
     assert.match(handoffMd, /Overall embed-host acceptance: \*\*FAIL\*\*/)
     assert.match(handoffMd, /### Embed Host Protocol Evidence/)
     assert.match(handoffMd, /### Embed Host Navigation Protection/)
+    assert.match(handoffMd, /### Embed Host Busy Deferred Replay/)
   } finally {
     fs.rmSync(readinessRoot, { recursive: true, force: true })
     fs.rmSync(handoffOutputRoot, { recursive: true, force: true })

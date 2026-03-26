@@ -67,11 +67,30 @@ HANDOFF_RECOMMENDED_TEMPLATES_JSON="$(node -e "const fs=require('fs');const file
 HANDOFF_EMBED_HOST_ACCEPTANCE_JSON="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(JSON.stringify(data.embedHostAcceptance||null))" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_EMBED_HOST_PROTOCOL_JSON="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(JSON.stringify(data.embedHostProtocol||null))" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_EMBED_HOST_NAVIGATION_JSON="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(JSON.stringify(data.embedHostNavigationProtection||null))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_EMBED_HOST_DEFERRED_JSON="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(JSON.stringify(data.embedHostDeferredReplay||null))" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_EMBED_HOST_ACCEPTANCE_OK="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(String(data?.embedHostAcceptance?.ok===false?'false':'true'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_EMBED_HOST_PROTOCOL_AVAILABLE="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(String(data?.embedHostProtocol?.available===true?'true':'false'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_EMBED_HOST_PROTOCOL_OK="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(String(data?.embedHostProtocol?.ok===false?'false':'true'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_EMBED_HOST_NAVIGATION_AVAILABLE="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(String(data?.embedHostNavigationProtection?.available===true?'true':'false'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_EMBED_HOST_NAVIGATION_OK="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(String(data?.embedHostNavigationProtection?.ok===false?'false':'true'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_EMBED_HOST_DEFERRED_AVAILABLE="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(String(data?.embedHostDeferredReplay?.available===true?'true':'false'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_EMBED_HOST_DEFERRED_OK="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(String(data?.embedHostDeferredReplay?.ok===false?'false':'true'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_EMBED_HOST_ACCEPTANCE_STATUS="FAIL"
+HANDOFF_EMBED_HOST_PROTOCOL_STATUS="FAIL"
+HANDOFF_EMBED_HOST_NAVIGATION_STATUS="FAIL"
+HANDOFF_EMBED_HOST_DEFERRED_STATUS="FAIL"
+if [[ "${HANDOFF_EMBED_HOST_ACCEPTANCE_OK}" == "true" ]]; then
+  HANDOFF_EMBED_HOST_ACCEPTANCE_STATUS="PASS"
+fi
+if [[ "${HANDOFF_EMBED_HOST_PROTOCOL_OK}" == "true" ]]; then
+  HANDOFF_EMBED_HOST_PROTOCOL_STATUS="PASS"
+fi
+if [[ "${HANDOFF_EMBED_HOST_NAVIGATION_OK}" == "true" ]]; then
+  HANDOFF_EMBED_HOST_NAVIGATION_STATUS="PASS"
+fi
+if [[ "${HANDOFF_EMBED_HOST_DEFERRED_OK}" == "true" ]]; then
+  HANDOFF_EMBED_HOST_DEFERRED_STATUS="PASS"
+fi
 HANDOFF_PREFLIGHT_REPORT_JSON_DEFAULT="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const value=data?.artifactChecks?.preflight?.preflightReportJsonDefault||'';process.stdout.write(String(value))" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_PREFLIGHT_REPORT_MD_DEFAULT="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const value=data?.artifactChecks?.preflight?.preflightReportMdDefault||'';process.stdout.write(String(value))" "${HANDOFF_ROOT_ABS}/handoff.json")"
 if [[ -z "$HANDOFF_PREFLIGHT_REPORT_JSON_DEFAULT" ]]; then
@@ -172,6 +191,7 @@ printf '%s\n' \
   "  \"embedHostAcceptance\": ${HANDOFF_EMBED_HOST_ACCEPTANCE_JSON}," \
   "  \"embedHostProtocol\": ${HANDOFF_EMBED_HOST_PROTOCOL_JSON}," \
   "  \"embedHostNavigationProtection\": ${HANDOFF_EMBED_HOST_NAVIGATION_JSON}," \
+  "  \"embedHostDeferredReplay\": ${HANDOFF_EMBED_HOST_DEFERRED_JSON}," \
   '  "expectedOperatorEvidence": {' \
   "    \"preflightReportJson\": \"${HANDOFF_PREFLIGHT_REPORT_JSON_DEFAULT}\"," \
   "    \"preflightReportMd\": \"${HANDOFF_PREFLIGHT_REPORT_MD_DEFAULT}\"" \
@@ -275,11 +295,13 @@ printf '%s\n' \
   '' \
   '## Embed Host Acceptance' \
   '' \
-  "- Overall embed-host acceptance: **$([[ \"${HANDOFF_EMBED_HOST_ACCEPTANCE_OK}\" == 'true' ]] && printf 'PASS' || printf 'FAIL')**" \
+  "- Overall embed-host acceptance: **${HANDOFF_EMBED_HOST_ACCEPTANCE_STATUS}**" \
   "- Protocol evidence available: \`${HANDOFF_EMBED_HOST_PROTOCOL_AVAILABLE}\`" \
-  "- Protocol status: **$([[ \"${HANDOFF_EMBED_HOST_PROTOCOL_OK}\" == 'true' ]] && printf 'PASS' || printf 'FAIL')**" \
+  "- Protocol status: **${HANDOFF_EMBED_HOST_PROTOCOL_STATUS}**" \
   "- Navigation protection available: \`${HANDOFF_EMBED_HOST_NAVIGATION_AVAILABLE}\`" \
-  "- Navigation protection status: **$([[ \"${HANDOFF_EMBED_HOST_NAVIGATION_OK}\" == 'true' ]] && printf 'PASS' || printf 'FAIL')**" \
+  "- Navigation protection status: **${HANDOFF_EMBED_HOST_NAVIGATION_STATUS}**" \
+  "- Busy deferred replay available: \`${HANDOFF_EMBED_HOST_DEFERRED_AVAILABLE}\`" \
+  "- Busy deferred replay status: **${HANDOFF_EMBED_HOST_DEFERRED_STATUS}**" \
   "- Detailed checks remain in \`${HANDOFF_ROOT_ABS}/handoff.md\` and \`${READY_OUTPUT_ROOT_ABS}/readiness.md\`." \
   '' \
   '## Sign-Off Recovery Path' \

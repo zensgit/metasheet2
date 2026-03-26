@@ -149,6 +149,26 @@ function summarizeEmbedHostNavigationProtection(report) {
   }
 }
 
+function summarizeEmbedHostDeferredReplay(report) {
+  const checks = Array.isArray(report?.checks) ? report.checks : []
+  const deferredReplayChecks = [
+    'ui.embed-host.navigate.deferred',
+    'ui.embed-host.navigate.superseded',
+    'ui.embed-host.state-query.deferred',
+    'ui.embed-host.navigate.replayed',
+    'api.embed-host.persisted-busy-form-save',
+  ]
+  const observedChecks = deferredReplayChecks.filter((name) => checks.some((item) => item.name === name))
+  const missingChecks = deferredReplayChecks.filter((name) => !checks.some((item) => item.name === name && item.ok))
+  return {
+    available: true,
+    ok: missingChecks.length === 0,
+    requiredChecks: deferredReplayChecks,
+    observedChecks,
+    missingChecks,
+  }
+}
+
 function summarizeImportDraftRecovery(report) {
   const checks = Array.isArray(report?.checks) ? report.checks : []
   const uiCheck = checks.find((item) => item.name === 'ui.import.mapping-reconcile')
@@ -268,6 +288,7 @@ async function main() {
   const managerRecovery = summarizeManagerRecovery(smoke)
   const embedHostProtocol = summarizeEmbedHostProtocol(smoke)
   const embedHostNavigationProtection = summarizeEmbedHostNavigationProtection(smoke)
+  const embedHostDeferredReplay = summarizeEmbedHostDeferredReplay(smoke)
   const profileSummaryData = summarizeProfile(profile)
   const gateSummary = summarizeGates(gateReport, gateReportPath, requireGateReport)
   const onPremGateSummary = onPremGateReport
@@ -279,6 +300,7 @@ async function main() {
   const overallOk = smokeSummary.ok &&
     embedHostProtocol.ok &&
     embedHostNavigationProtection.ok &&
+    embedHostDeferredReplay.ok &&
     profileSummaryData.ok &&
     gateSummary.ok &&
     (!requireOnPremGate || Boolean(onPremGateSummary?.ok))
@@ -338,6 +360,7 @@ async function main() {
     },
     embedHostProtocol,
     embedHostNavigationProtection,
+    embedHostDeferredReplay,
     profile: {
       report: path.resolve(profileReportPath),
       summary: profileSummaryPath ? path.resolve(profileSummaryPath) : null,
@@ -474,6 +497,17 @@ async function main() {
       : '- Observed checks: none',
     embedHostNavigationProtection.missingChecks.length
       ? `- Missing checks: ${embedHostNavigationProtection.missingChecks.map((item) => `\`${item}\``).join(', ')}`
+      : '- Missing checks: none',
+    '',
+    '## Embed Host Busy Deferred Replay',
+    '',
+    `- Status: **${embedHostDeferredReplay.ok ? 'PASS' : 'FAIL'}**`,
+    `- Required checks: ${embedHostDeferredReplay.requiredChecks.map((item) => `\`${item}\``).join(', ')}`,
+    embedHostDeferredReplay.observedChecks.length
+      ? `- Observed checks: ${embedHostDeferredReplay.observedChecks.map((item) => `\`${item}\``).join(', ')}`
+      : '- Observed checks: none',
+    embedHostDeferredReplay.missingChecks.length
+      ? `- Missing checks: ${embedHostDeferredReplay.missingChecks.map((item) => `\`${item}\``).join(', ')}`
       : '- Missing checks: none',
     '',
     '## Local Notes',

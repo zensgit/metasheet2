@@ -990,6 +990,203 @@ async function verifyEmbedHostDirtyFormNavigation(page, {
   }
 }
 
+async function verifyEmbedHostBusyDeferredNavigation(page, {
+  token,
+  baseId,
+  sheetId,
+  formViewId,
+  currentViewId,
+  deferredViewId,
+  supersedingViewId,
+  recordId,
+  titleFieldId,
+  originalTitle,
+}) {
+  await mountEmbedHostHarness(page, multitableUrl(baseId, sheetId, formViewId, {
+    embedded: '1',
+    role: 'editor',
+    mode: 'form',
+    recordId,
+  }))
+  const frame = page.frameLocator('#mt-embed-frame')
+  const titleInput = frame.locator(`#field_${titleFieldId}`)
+  await titleInput.waitFor({ state: 'visible', timeout: timeoutMs })
+  await frame.getByRole('button', { name: 'Save' }).waitFor({ state: 'visible', timeout: timeoutMs })
+
+  const requestPattern = `**/api/multitable/views/${formViewId}/submit`
+  let capturedRoute = null
+  let releaseSubmitRoute = null
+  const submitIntercepted = new Promise((resolve) => {
+    capturedRoute = resolve
+  })
+  releaseSubmitRoute = () => {}
+  const releaseSubmit = new Promise((resolve) => {
+    releaseSubmitRoute = resolve
+  })
+  const routeHandler = async (route) => {
+    capturedRoute(route)
+    await releaseSubmit
+    await route.continue()
+  }
+  await page.route(requestPattern, routeHandler)
+
+  try {
+    const busyTitle = `${originalTitle} busy-save`
+    const saveResponsePromise = page.waitForResponse((response) => (
+      response.url().includes(`/api/multitable/views/${formViewId}/submit`) &&
+      response.request().method() === 'POST'
+    ), { timeout: timeoutMs })
+
+    await titleInput.fill(busyTitle)
+    await frame.getByRole('button', { name: 'Save' }).click()
+    await submitIntercepted
+
+    await clearEmbedHostMessages(page)
+    const deferredRequestId = 'req_embed_form_deferred'
+    await postEmbedHostMessage(page, {
+      type: 'mt:navigate',
+      baseId,
+      sheetId,
+      viewId: deferredViewId,
+      requestId: deferredRequestId,
+    })
+    const deferredResult = await waitForEmbedHostMessage(page, (message) => (
+      message?.type === 'mt:navigate-result' &&
+      message.status === 'deferred' &&
+      message.requestId === deferredRequestId
+    ), 'deferred mt:navigate-result')
+    const deferredOk = deferredResult.reason === 'busy' &&
+      deferredResult.baseId === baseId &&
+      deferredResult.sheetId === sheetId &&
+      deferredResult.viewId === deferredViewId
+    record('ui.embed-host.navigate.deferred', deferredOk, {
+      requestId: deferredRequestId,
+      resultReason: deferredResult.reason,
+      deferredViewId,
+    })
+    if (!deferredOk) {
+      throw new Error('Embed host busy deferred navigation did not report the expected pending target')
+    }
+
+    const supersedingRequestId = 'req_embed_form_superseding'
+    await postEmbedHostMessage(page, {
+      type: 'mt:navigate',
+      baseId,
+      sheetId,
+      viewId: supersedingViewId,
+      requestId: supersedingRequestId,
+    })
+    const supersededResult = await waitForEmbedHostMessage(page, (message) => (
+      message?.type === 'mt:navigate-result' &&
+      message.status === 'superseded' &&
+      message.requestId === deferredRequestId
+    ), 'superseded mt:navigate-result')
+    const latestDeferredResult = await waitForEmbedHostMessage(page, (message) => (
+      message?.type === 'mt:navigate-result' &&
+      message.status === 'deferred' &&
+      message.requestId === supersedingRequestId
+    ), 'latest deferred mt:navigate-result')
+    const supersededOk = supersededResult.reason === 'superseded' &&
+      supersededResult.baseId === baseId &&
+      supersededResult.sheetId === sheetId &&
+      supersededResult.viewId === deferredViewId &&
+      latestDeferredResult.reason === 'busy' &&
+      latestDeferredResult.baseId === baseId &&
+      latestDeferredResult.sheetId === sheetId &&
+      latestDeferredResult.viewId === supersedingViewId
+    record('ui.embed-host.navigate.superseded', supersededOk, {
+      supersededRequestId: deferredRequestId,
+      latestRequestId: supersedingRequestId,
+      supersededReason: supersededResult.reason,
+      latestReason: latestDeferredResult.reason,
+      supersedingViewId,
+    })
+    if (!supersededOk) {
+      throw new Error('Embed host busy navigation did not supersede the older deferred target correctly')
+    }
+
+    const deferredStateRequestId = 'req_embed_form_busy_state'
+    await postEmbedHostMessage(page, {
+      type: 'mt:get-navigation-state',
+      requestId: deferredStateRequestId,
+    })
+    const deferredState = await waitForEmbedHostMessage(page, (message) => (
+      message?.type === 'mt:navigation-state' &&
+      message.requestId === deferredStateRequestId
+    ), 'busy deferred mt:navigation-state')
+    const deferredStateOk = deferredState.currentContext?.baseId === baseId &&
+      deferredState.currentContext?.sheetId === sheetId &&
+      deferredState.currentContext?.viewId === currentViewId &&
+      deferredState.pendingContext?.baseId === baseId &&
+      deferredState.pendingContext?.sheetId === sheetId &&
+      deferredState.pendingContext?.viewId === supersedingViewId &&
+      deferredState.pendingContext?.requestId === supersedingRequestId &&
+      deferredState.pendingContext?.reason === 'busy' &&
+      deferredState.busy === true
+    record('ui.embed-host.state-query.deferred', deferredStateOk, {
+      requestId: deferredStateRequestId,
+      currentContext: deferredState.currentContext,
+      pendingContext: deferredState.pendingContext,
+      busy: deferredState.busy,
+    })
+    if (!deferredStateOk) {
+      throw new Error('Embed host busy deferred state query did not retain the latest pending target')
+    }
+
+    releaseSubmitRoute()
+    await saveResponsePromise
+    const replayApplied = await waitForEmbedHostMessage(page, (message) => (
+      message?.type === 'mt:navigate-result' &&
+      message.status === 'applied' &&
+      message.requestId === supersedingRequestId
+    ), 'replayed applied mt:navigate-result')
+    await waitForEmbedFrameContext(page, { baseId, sheetId, viewId: supersedingViewId })
+    const replayNavigated = await waitForEmbedHostMessage(page, (message) => (
+      message?.type === 'mt:navigated' &&
+      message.requestId === supersedingRequestId &&
+      message.baseId === baseId &&
+      message.sheetId === sheetId &&
+      message.viewId === supersedingViewId
+    ), 'replayed mt:navigated')
+    const replayedOk = replayApplied.baseId === baseId &&
+      replayApplied.sheetId === sheetId &&
+      replayApplied.viewId === supersedingViewId &&
+      replayNavigated.viewId === supersedingViewId
+    record('ui.embed-host.navigate.replayed', replayedOk, {
+      requestId: supersedingRequestId,
+      replayedViewId: replayNavigated.viewId,
+    })
+    if (!replayedOk) {
+      throw new Error('Embed host busy deferred navigation did not replay the latest pending target after save completion')
+    }
+
+    const persistedRecord = await fetchRecord(token, sheetId, recordId)
+    const persistedOk = persistedRecord.record?.data?.[titleFieldId] === busyTitle
+    record('api.embed-host.persisted-busy-form-save', persistedOk, {
+      requestId: supersedingRequestId,
+      recordId,
+      fieldId: titleFieldId,
+      expectedTitle: busyTitle,
+      persistedTitle: persistedRecord.record?.data?.[titleFieldId],
+    })
+    if (!persistedOk) {
+      throw new Error('Embed host busy deferred replay dropped the in-flight form save unexpectedly')
+    }
+
+    await page.screenshot({
+      path: path.join(outputDir, 'embed-host-form-busy-deferred-replay.png'),
+      fullPage: true,
+    })
+
+    return {
+      deferredRequestId,
+      supersedingRequestId,
+    }
+  } finally {
+    await page.unroute(requestPattern, routeHandler)
+  }
+}
+
 function verifyDirectRouteEntry(page, {
   checkName,
   baseId,
@@ -2637,6 +2834,18 @@ async function run() {
         titleFieldId: titleField.id,
         originalTitle: importedTitle,
       })
+      const embedHostBusyDeferredNavigation = await verifyEmbedHostBusyDeferredNavigation(page, {
+        token,
+        baseId: base.id,
+        sheetId: sheet.id,
+        formViewId: formView.id,
+        currentViewId: formView.id,
+        deferredViewId: gridView.id,
+        supersedingViewId: galleryView.id,
+        recordId,
+        titleFieldId: titleField.id,
+        originalTitle: importedTitle,
+      })
 
       await verifyAttachmentDeleteClear(page, {
         token,
@@ -2706,6 +2915,8 @@ async function run() {
         embedHostExplicitRequestId: embedHost.explicitRequestId,
         embedHostBlockedRequestId: embedHostDirtyNavigation.blockedRequestId,
         embedHostConfirmedRequestId: embedHostDirtyNavigation.confirmRequestId,
+        embedHostDeferredRequestId: embedHostBusyDeferredNavigation.deferredRequestId,
+        embedHostSupersedingRequestId: embedHostBusyDeferredNavigation.supersedingRequestId,
       }
     } finally {
       await browser.close()
