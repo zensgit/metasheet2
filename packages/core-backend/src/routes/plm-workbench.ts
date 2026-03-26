@@ -51,6 +51,7 @@ type PlmTeamPresetBatchAction = 'archive' | 'restore' | 'delete'
 type PlmTeamViewBatchAction = 'archive' | 'restore' | 'delete'
 type PlmTeamViewDefaultAuditAction = 'set-default' | 'clear-default'
 type PlmTeamViewLifecycleAuditAction = 'archive' | 'restore' | 'delete'
+type PlmTeamPresetLifecycleAuditAction = 'archive' | 'restore' | 'delete'
 type PlmCollaborativeAuditResourceType = 'plm-team-preset-batch' | 'plm-team-view-batch' | 'plm-team-view-default'
 const UUID_LIKE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const PLM_COLLABORATIVE_AUDIT_RESOURCE_TYPES: PlmCollaborativeAuditResourceType[] = [
@@ -380,6 +381,49 @@ async function logPlmTeamPresetBatchAudit(params: {
     processedIds: params.processedIds,
     skippedIds: params.skippedIds,
     processedKinds: params.processedKinds,
+  })
+}
+
+async function logPlmTeamPresetLifecycleAudit(params: {
+  action: PlmTeamPresetLifecycleAuditAction
+  tenantId: string
+  ownerUserId: string
+  presetId: string
+  kind: string
+  presetName: string
+}) {
+  logger.info('Processed PLM team preset lifecycle action', {
+    audit: 'plm-team-preset-batch',
+    action: params.action,
+    tenantId: params.tenantId,
+    ownerUserId: params.ownerUserId,
+    presetId: params.presetId,
+    kind: params.kind,
+    presetName: params.presetName,
+    processedKinds: [params.kind],
+    processedTotal: 1,
+  })
+
+  await persistPlmCollaborativeAuditEvent({
+    route: `/api/plm-workbench/filter-presets/team/:id/${params.action === 'delete' ? '' : params.action}`.replace(/\/$/, ''),
+    resourceType: 'plm-team-preset-batch',
+    action: params.action,
+    ownerUserId: params.ownerUserId,
+    resourceId: params.presetId,
+    meta: {
+      tenantId: params.tenantId,
+      ownerUserId: params.ownerUserId,
+      audit: 'plm-team-preset-batch',
+      kind: params.kind,
+      presetName: params.presetName,
+      processedKinds: [params.kind],
+      requestedIds: [params.presetId],
+      processedIds: [params.presetId],
+      skippedIds: [],
+      requestedTotal: 1,
+      processedTotal: 1,
+      skippedTotal: 0,
+    },
   })
 }
 
@@ -2684,11 +2728,14 @@ router.delete(
         })
       }
 
+      const tenantId = req.user?.tenantId?.toString() || 'default'
       const presetId = req.params.id
       const preset = await dbAny
         .selectFrom('plm_filter_team_presets')
         .selectAll()
         .where('id', '=', presetId)
+        .where('tenant_id', '=', tenantId)
+        .where('scope', '=', 'team')
         .executeTakeFirst()
 
       if (!preset) {
@@ -2709,6 +2756,15 @@ router.delete(
         .deleteFrom('plm_filter_team_presets')
         .where('id', '=', presetId)
         .execute()
+
+      await logPlmTeamPresetLifecycleAudit({
+        action: 'delete',
+        tenantId,
+        ownerUserId: currentUserId,
+        presetId,
+        kind: String(preset.kind || ''),
+        presetName: String(preset.name || ''),
+      })
 
       return res.json({
         success: true,
@@ -2784,6 +2840,15 @@ router.post(
         .returningAll()
         .executeTakeFirstOrThrow()
 
+      await logPlmTeamPresetLifecycleAudit({
+        action: 'archive',
+        tenantId,
+        ownerUserId: currentUserId,
+        presetId,
+        kind: String(preset.kind || ''),
+        presetName: String(preset.name || ''),
+      })
+
       return res.json({
         success: true,
         data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
@@ -2853,6 +2918,15 @@ router.post(
         .where('id', '=', presetId)
         .returningAll()
         .executeTakeFirstOrThrow()
+
+      await logPlmTeamPresetLifecycleAudit({
+        action: 'restore',
+        tenantId,
+        ownerUserId: currentUserId,
+        presetId,
+        kind: String(preset.kind || ''),
+        presetName: String(preset.name || ''),
+      })
 
       return res.json({
         success: true,

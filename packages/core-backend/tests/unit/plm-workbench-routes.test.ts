@@ -1205,6 +1205,15 @@ describe('plm-workbench routes', () => {
       isArchived: true,
       archivedAt: '2026-03-10T08:00:00.000Z',
     })
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO operation_audit_logs'),
+      expect.arrayContaining([
+        'owner-1',
+        'archive',
+        'plm-team-preset-batch',
+        'preset-archive',
+      ]),
+    )
   })
 
   it('restores an archived team preset for the owner', async () => {
@@ -1245,6 +1254,53 @@ describe('plm-workbench routes', () => {
       kind: 'where-used',
       isArchived: false,
     })
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO operation_audit_logs'),
+      expect.arrayContaining([
+        'owner-1',
+        'restore',
+        'plm-team-preset-batch',
+        'preset-restore',
+      ]),
+    )
+  })
+
+  it('deletes a team preset for the owner and writes audit', async () => {
+    routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
+      id: 'preset-delete',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'where-used',
+      name: '待删除团队预设',
+      name_key: '待删除团队预设',
+      is_default: false,
+      archived_at: null,
+      state: JSON.stringify({ field: 'parent', value: 'assy-del', group: '装配' }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-09T00:12:00.000Z',
+    })
+    routeMocks.state.builder.execute.mockResolvedValueOnce(undefined)
+
+    const response = await request(app).delete('/api/plm-workbench/filter-presets/team/preset-delete')
+
+    expect(response.status).toBe(200)
+    expect(response.body.data).toEqual({
+      id: 'preset-delete',
+      message: 'PLM team preset deleted successfully',
+    })
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('id', '=', 'preset-delete')
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('tenant_id', '=', 'tenant-a')
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('scope', '=', 'team')
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO operation_audit_logs'),
+      expect.arrayContaining([
+        'owner-1',
+        'delete',
+        'plm-team-preset-batch',
+        'preset-delete',
+      ]),
+    )
   })
 
   it('batch archives manageable team presets and reports skipped ids', async () => {
