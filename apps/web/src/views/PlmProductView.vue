@@ -100,12 +100,12 @@ import {
   buildPlmWorkbenchResetHydratedPanelQueryPatch,
   buildPlmWorkbenchRoutePath,
   buildPlmWorkbenchTeamViewShareUrl,
+  hasExplicitPlmWorkbenchAutoApplyQueryState,
   matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
   normalizePlmWorkbenchCollaborativeQuerySnapshot,
   normalizePlmWorkbenchPanelScope,
   normalizePlmWorkbenchQuerySnapshot,
-  PLM_WORKBENCH_QUERY_KEYS,
 } from './plm/plmWorkbenchViewState'
 import {
   matchPlmTeamViewStateSnapshot,
@@ -3296,7 +3296,7 @@ function hasExplicitQueryKey(keys: string[]) {
 }
 
 function hasExplicitWorkbenchQueryState() {
-  return hasExplicitQueryKey([...PLM_WORKBENCH_QUERY_KEYS])
+  return hasExplicitPlmWorkbenchAutoApplyQueryState(route.query)
 }
 
 function serializeColumnQuery(

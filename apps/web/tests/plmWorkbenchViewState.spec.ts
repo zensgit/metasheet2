@@ -4,6 +4,7 @@ import {
   buildPlmWorkbenchResetOwnerQueryPatch,
   buildPlmWorkbenchRoutePath,
   buildPlmWorkbenchTeamViewShareUrl,
+  hasExplicitPlmWorkbenchAutoApplyQueryState,
   matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
   normalizePlmWorkbenchCollaborativeQuerySnapshot,
@@ -201,6 +202,25 @@ describe('plmWorkbenchViewState', () => {
           approvalComment: 'needs-review',
         },
       ),
+    ).toBe(true)
+  })
+
+  it('does not treat approval comments as explicit workbench auto-apply blockers', () => {
+    expect(
+      hasExplicitPlmWorkbenchAutoApplyQueryState({
+        approvalComment: 'draft-note',
+      }),
+    ).toBe(false)
+    expect(
+      hasExplicitPlmWorkbenchAutoApplyQueryState({
+        approvalComment: 'draft-note',
+        approvalsFilter: 'pending',
+      }),
+    ).toBe(true)
+    expect(
+      hasExplicitPlmWorkbenchAutoApplyQueryState({
+        workbenchTeamView: 'view-1',
+      }),
     ).toBe(true)
   })
 

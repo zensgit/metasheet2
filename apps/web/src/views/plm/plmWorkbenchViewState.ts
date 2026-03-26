@@ -156,6 +156,12 @@ export function normalizePlmWorkbenchCollaborativeQuerySnapshot(value: unknown):
   return next
 }
 
+export function hasExplicitPlmWorkbenchAutoApplyQueryState(value: unknown): boolean {
+  const next = normalizePlmWorkbenchQuerySnapshot(value)
+  delete next.approvalComment
+  return Object.keys(next).length > 0
+}
+
 export function buildPlmWorkbenchResetOwnerQueryPatch() {
   return Object.fromEntries(
     PLM_WORKBENCH_TEAM_VIEW_OWNER_QUERY_KEYS.map((key) => [key, '']),
