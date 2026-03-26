@@ -115,6 +115,7 @@ import {
   pickPlmTeamFilterPresetRouteOwnerState,
 } from './plm/plmTeamFilterPresetStateMatch'
 import { resolvePlmLocalFilterPresetRouteIdentity } from './plm/plmLocalFilterPresetRouteIdentity'
+import { runPlmLocalPresetOwnershipAction } from './plm/plmLocalPresetOwnership'
 import {
   canActOnPlmApproval,
   getPlmApprovalApproverId,
@@ -4289,8 +4290,10 @@ async function transferBomTeamPreset() {
 }
 
 async function saveBomTeamPreset() {
-  clearBomLocalFilterPresetIdentity()
-  await saveBomTeamPresetBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => saveBomTeamPresetBase(),
+    { clearLocalOwner: clearBomLocalFilterPresetIdentity },
+  )
 }
 
 async function promoteBomFilterPresetToTeam() {
@@ -4299,9 +4302,13 @@ async function promoteBomFilterPresetToTeam() {
     setDeepLinkMessage('请选择 BOM 过滤预设后再升为团队预设。', true)
     return
   }
-  const saved = await promoteBomFilterPresetToTeamBase(preset)
-  if (!saved) return
-  clearBomLocalFilterPresetIdentity()
+  await runPlmLocalPresetOwnershipAction(
+    () => promoteBomFilterPresetToTeamBase(preset),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function promoteBomFilterPresetToTeamDefault() {
@@ -4310,9 +4317,13 @@ async function promoteBomFilterPresetToTeamDefault() {
     setDeepLinkMessage('请选择 BOM 过滤预设后再升为默认团队预设。', true)
     return
   }
-  const saved = await promoteBomFilterPresetToTeamDefaultBase(preset)
-  if (!saved) return
-  clearBomLocalFilterPresetIdentity()
+  await runPlmLocalPresetOwnershipAction(
+    () => promoteBomFilterPresetToTeamDefaultBase(preset),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function setBomTeamPresetDefault() {
@@ -4366,8 +4377,10 @@ async function transferWhereUsedTeamPreset() {
 }
 
 async function saveWhereUsedTeamPreset() {
-  clearWhereUsedLocalFilterPresetIdentity()
-  await saveWhereUsedTeamPresetBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => saveWhereUsedTeamPresetBase(),
+    { clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity },
+  )
 }
 
 async function promoteWhereUsedFilterPresetToTeam() {
@@ -4376,9 +4389,13 @@ async function promoteWhereUsedFilterPresetToTeam() {
     setDeepLinkMessage('请选择 Where-Used 过滤预设后再升为团队预设。', true)
     return
   }
-  const saved = await promoteWhereUsedFilterPresetToTeamBase(preset)
-  if (!saved) return
-  clearWhereUsedLocalFilterPresetIdentity()
+  await runPlmLocalPresetOwnershipAction(
+    () => promoteWhereUsedFilterPresetToTeamBase(preset),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function promoteWhereUsedFilterPresetToTeamDefault() {
@@ -4387,9 +4404,13 @@ async function promoteWhereUsedFilterPresetToTeamDefault() {
     setDeepLinkMessage('请选择 Where-Used 过滤预设后再升为默认团队预设。', true)
     return
   }
-  const saved = await promoteWhereUsedFilterPresetToTeamDefaultBase(preset)
-  if (!saved) return
-  clearWhereUsedLocalFilterPresetIdentity()
+  await runPlmLocalPresetOwnershipAction(
+    () => promoteWhereUsedFilterPresetToTeamDefaultBase(preset),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function setWhereUsedTeamPresetDefault() {
