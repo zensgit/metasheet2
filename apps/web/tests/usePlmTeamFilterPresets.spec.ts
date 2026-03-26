@@ -1542,15 +1542,101 @@ describe('usePlmTeamFilterPresets', () => {
 
     await model.refreshTeamPresets()
     model.teamPresetKey.value = 'preset-owned'
+    model.teamPresetOwnerUserId.value = 'owner-stale'
     model.teamPresetSelection.value = ['preset-owned', 'preset-readonly', 'preset-archived']
 
     await model.archiveTeamPresetSelection()
 
     expect(batchPlmTeamFilterPresets).toHaveBeenCalledWith('archive', ['preset-owned'])
     expect(model.teamPresetKey.value).toBe('')
+    expect(model.teamPresetOwnerUserId.value).toBe('')
     expect(requestedPresetId.value).toBe('')
     expect(model.teamPresetSelection.value).toEqual(['preset-readonly', 'preset-archived'])
     expect(setMessage).toHaveBeenCalledWith('已批量归档BOM团队预设 1 项，跳过 2 项。')
+  })
+
+  it('keeps the canonical preset route owner when batch archiving a pending local selector target', async () => {
+    const requestedPresetId = ref('preset-a')
+    const syncRequestedPresetId = vi.fn((value?: string) => {
+      requestedPresetId.value = value || ''
+    })
+    const trackedApply = vi.fn(() => requestedPresetId.value)
+
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-a',
+          kind: 'bom',
+          scope: 'team',
+          name: '已应用 BOM 预设',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          state: { field: 'path', value: 'root/a', group: 'A组' },
+        },
+        {
+          id: 'preset-b',
+          kind: 'bom',
+          scope: 'team',
+          name: '待归档 BOM 预设',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          state: { field: 'path', value: 'root/b', group: 'B组' },
+        },
+      ],
+    })
+    vi.mocked(batchPlmTeamFilterPresets).mockResolvedValue({
+      action: 'archive',
+      processedIds: ['preset-b'],
+      skippedIds: [],
+      items: [
+        {
+          id: 'preset-b',
+          kind: 'bom',
+          scope: 'team',
+          name: '待归档 BOM 预设',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          isArchived: true,
+          archivedAt: '2026-03-26T09:00:00.000Z',
+          state: { field: 'path', value: 'root/b', group: 'B组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/a', group: 'A组' }),
+      applyPreset: trackedApply,
+      setMessage,
+      requestedPresetId,
+      syncRequestedPresetId,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+    trackedApply.mockClear()
+    syncRequestedPresetId.mockClear()
+    model.teamPresetKey.value = 'preset-b'
+    model.teamPresetName.value = '临时草稿'
+    model.teamPresetGroup.value = '临时分组'
+    model.teamPresetOwnerUserId.value = 'owner-b'
+    model.teamPresetSelection.value = ['preset-b']
+
+    await model.archiveTeamPresetSelection()
+
+    expect(batchPlmTeamFilterPresets).toHaveBeenCalledWith('archive', ['preset-b'])
+    expect(syncRequestedPresetId).not.toHaveBeenCalled()
+    expect(requestedPresetId.value).toBe('preset-a')
+    expect(model.teamPresetKey.value).toBe('')
+    expect(model.teamPresetName.value).toBe('')
+    expect(model.teamPresetGroup.value).toBe('')
+    expect(model.teamPresetOwnerUserId.value).toBe('')
+    expect(model.teamPresetSelection.value).toEqual([])
+    expect(trackedApply).not.toHaveBeenCalled()
   })
 
   it('clears stale readonly selections during refresh before batch actions run', async () => {

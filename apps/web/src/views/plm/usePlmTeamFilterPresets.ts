@@ -259,6 +259,12 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     teamPresetSelection.value = []
   }
 
+  function clearTeamPresetDrafts() {
+    teamPresetName.value = ''
+    teamPresetGroup.value = ''
+    teamPresetOwnerUserId.value = ''
+  }
+
   function maybeAutoApplyDefault(items: PlmTeamFilterPreset[]) {
     if (teamPresetKey.value) return
     const requestedPresetId = options.requestedPresetId?.value.trim() || ''
@@ -857,8 +863,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
           }
         } else {
           teamPresetKey.value = ''
-          teamPresetName.value = ''
-          teamPresetGroup.value = ''
+          clearTeamPresetDrafts()
         }
       }
 
