@@ -245,21 +245,62 @@ describe('plmWorkbenchViewState', () => {
   })
 
   it('does not treat approval comments as explicit approvals auto-apply blockers', () => {
+    const defaultColumns = {
+      status: true,
+      type: true,
+      requester: true,
+      created: true,
+      product: true,
+      actions: true,
+    }
+
     expect(
       hasExplicitPlmApprovalsAutoApplyQueryState({
         approvalComment: 'draft-note',
-      }),
+      }, defaultColumns),
     ).toBe(false)
     expect(
       hasExplicitPlmApprovalsAutoApplyQueryState({
         approvalComment: 'draft-note',
         approvalsFilter: 'pending',
-      }),
+      }, defaultColumns),
     ).toBe(true)
     expect(
       hasExplicitPlmApprovalsAutoApplyQueryState({
         approvalsTeamView: 'approvals-view-1',
-      }),
+      }, defaultColumns),
+    ).toBe(true)
+  })
+
+  it('ignores explicit default approvals query values when deciding approvals default auto-apply blockers', () => {
+    const defaultColumns = {
+      status: true,
+      type: true,
+      requester: true,
+      created: true,
+      product: true,
+      actions: true,
+    }
+
+    expect(
+      hasExplicitPlmApprovalsAutoApplyQueryState(
+        {
+          approvalsStatus: 'pending',
+          approvalSort: 'created',
+          approvalSortDir: 'desc',
+          approvalColumns: 'status,type,requester,created,product,actions',
+        },
+        defaultColumns,
+      ),
+    ).toBe(false)
+
+    expect(
+      hasExplicitPlmApprovalsAutoApplyQueryState(
+        {
+          approvalsStatus: 'approved',
+        },
+        defaultColumns,
+      ),
     ).toBe(true)
   })
 

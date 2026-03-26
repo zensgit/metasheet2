@@ -5203,6 +5203,7 @@ const {
         route.query as Record<string, unknown>,
         deferredRouteQueryPatch,
       ),
+      defaultApprovalColumns,
     )
     && approvalsStatus.value === DEFAULT_APPROVAL_STATUS
     && !approvalsFilter.value.trim()

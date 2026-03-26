@@ -180,16 +180,19 @@ export function hasExplicitPlmWorkbenchAutoApplyQueryState(value: unknown): bool
   return Object.keys(next).length > 0
 }
 
-export function hasExplicitPlmApprovalsAutoApplyQueryState(value: unknown): boolean {
+export function hasExplicitPlmApprovalsAutoApplyQueryState(
+  value: unknown,
+  defaults?: Record<string, boolean>,
+): boolean {
   const next = normalizePlmWorkbenchQuerySnapshot(value)
   delete next.approvalComment
   return Boolean(
     next.approvalsTeamView
-    || next.approvalsStatus
+    || (next.approvalsStatus && next.approvalsStatus !== 'pending')
     || next.approvalsFilter
-    || next.approvalSort
-    || next.approvalSortDir
-    || next.approvalColumns
+    || (next.approvalSort && next.approvalSort !== 'created')
+    || (next.approvalSortDir && next.approvalSortDir !== 'desc')
+    || hasExplicitPlmColumnQueryState(next.approvalColumns, defaults)
   )
 }
 
