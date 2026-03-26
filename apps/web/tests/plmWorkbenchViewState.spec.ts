@@ -4,6 +4,7 @@ import {
   buildPlmWorkbenchResetOwnerQueryPatch,
   buildPlmWorkbenchRoutePath,
   buildPlmWorkbenchTeamViewShareUrl,
+  hasExplicitPlmApprovalsAutoApplyQueryState,
   hasExplicitPlmWorkbenchAutoApplyQueryState,
   matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
@@ -235,6 +236,25 @@ describe('plmWorkbenchViewState', () => {
     expect(
       hasExplicitPlmWorkbenchAutoApplyQueryState({
         panel: 'approvals,documents',
+      }),
+    ).toBe(true)
+  })
+
+  it('does not treat approval comments as explicit approvals auto-apply blockers', () => {
+    expect(
+      hasExplicitPlmApprovalsAutoApplyQueryState({
+        approvalComment: 'draft-note',
+      }),
+    ).toBe(false)
+    expect(
+      hasExplicitPlmApprovalsAutoApplyQueryState({
+        approvalComment: 'draft-note',
+        approvalsFilter: 'pending',
+      }),
+    ).toBe(true)
+    expect(
+      hasExplicitPlmApprovalsAutoApplyQueryState({
+        approvalsTeamView: 'approvals-view-1',
       }),
     ).toBe(true)
   })

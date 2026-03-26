@@ -97,6 +97,7 @@ import {
   WORKBENCH_SCENE_RECOMMENDATION_OPTIONS,
 } from './plm/plmWorkbenchSceneCatalog'
 import {
+  hasExplicitPlmApprovalsAutoApplyQueryState,
   buildPlmWorkbenchResetHydratedPanelQueryPatch,
   buildPlmWorkbenchRoutePath,
   buildPlmWorkbenchTeamViewShareUrl,
@@ -5078,7 +5079,7 @@ const {
   buildShareUrl: (view) => buildPlmWorkbenchTeamViewShareUrl('approvals', view, route.path),
   copyShareUrl: copyToClipboard,
   shouldAutoApplyDefault: () => (
-    !hasExplicitQueryKey(APPROVALS_QUERY_KEYS)
+    !hasExplicitPlmApprovalsAutoApplyQueryState(route.query)
     && approvalsStatus.value === DEFAULT_APPROVAL_STATUS
     && !approvalsFilter.value.trim()
     && approvalSortKey.value === 'created'

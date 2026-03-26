@@ -168,6 +168,19 @@ export function hasExplicitPlmWorkbenchAutoApplyQueryState(value: unknown): bool
   return Object.keys(next).length > 0
 }
 
+export function hasExplicitPlmApprovalsAutoApplyQueryState(value: unknown): boolean {
+  const next = normalizePlmWorkbenchQuerySnapshot(value)
+  delete next.approvalComment
+  return Boolean(
+    next.approvalsTeamView
+    || next.approvalsStatus
+    || next.approvalsFilter
+    || next.approvalSort
+    || next.approvalSortDir
+    || next.approvalColumns
+  )
+}
+
 export function buildPlmWorkbenchResetOwnerQueryPatch() {
   return Object.fromEntries(
     PLM_WORKBENCH_TEAM_VIEW_OWNER_QUERY_KEYS.map((key) => [key, '']),
