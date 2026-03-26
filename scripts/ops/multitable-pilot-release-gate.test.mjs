@@ -64,7 +64,7 @@ test('multitable pilot release gate writes canonical gate report and keeps execu
   assert.equal(checksByName.get('openapi.multitable.parity')?.command, 'pnpm verify:multitable-openapi:parity')
   assert.equal(
     checksByName.get('web.vitest.multitable.contracts')?.command,
-    'pnpm --filter @metasheet/web exec vitest run tests/multitable-embed-route.spec.ts tests/multitable-client.spec.ts --reporter=dot',
+    'pnpm --filter @metasheet/web exec vitest run tests/multitable-embed-route.spec.ts tests/multitable-client.spec.ts tests/view-manager-multitable-contract.spec.ts --reporter=dot',
   )
 
   const executedCommands = fs.readFileSync(fakePnpmLogPath, 'utf8')

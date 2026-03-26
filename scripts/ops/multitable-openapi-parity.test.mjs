@@ -19,6 +19,17 @@ test('multitable openapi stays aligned with runtime contracts', () => {
     paths['/api/multitable/view']?.get?.responses?.['200']?.content?.['application/json']?.schema?.properties?.data?.$ref,
     '#/components/schemas/MultitableViewData',
   )
+  assert.ok(paths['/api/multitable/views']?.get, 'missing view list endpoint')
+  assert.equal(paths['/api/multitable/views']?.get?.parameters?.[0]?.name, 'sheetId')
+  assert.equal(paths['/api/multitable/views']?.get?.parameters?.[0]?.required, true)
+  assert.equal(
+    paths['/api/multitable/views']?.get?.responses?.['200']?.content?.['application/json']?.schema?.properties?.data?.properties?.views?.type,
+    'array',
+  )
+  assert.ok(
+    paths['/api/multitable/views']?.get?.responses?.['200']?.content?.['application/json']?.schema?.properties?.data?.properties?.views?.items,
+    'missing view list item schema',
+  )
   assert.equal(
     paths['/api/multitable/views']?.post?.requestBody?.content?.['application/json']?.schema?.properties?.config?.type,
     'object',
@@ -27,6 +38,11 @@ test('multitable openapi stays aligned with runtime contracts', () => {
     paths['/api/multitable/views/{viewId}']?.patch?.requestBody?.content?.['application/json']?.schema?.properties?.config?.type,
     'object',
   )
+  assert.equal(
+    paths['/api/multitable/views/{viewId}']?.delete?.responses?.['200']?.content?.['application/json']?.schema?.properties?.data?.properties?.deleted?.type,
+    'string',
+  )
+  assert.ok(paths['/api/multitable/views/{viewId}']?.delete?.responses?.['404'], 'missing view delete not-found response')
   assert.equal(paths['/api/multitable/records']?.post?.requestBody?.content?.['application/json']?.schema?.anyOf?.length, 2)
   assert.equal(paths['/api/multitable/patch']?.post?.requestBody?.content?.['application/json']?.schema?.anyOf?.length, 2)
   assert.equal(paths['/api/multitable/records/{recordId}']?.patch?.requestBody?.content?.['application/json']?.schema?.anyOf?.length, 2)

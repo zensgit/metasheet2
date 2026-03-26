@@ -57,7 +57,7 @@ define_release_gate_steps() {
 
   add_release_gate_step \
     "web.vitest.multitable.contracts" \
-    "pnpm --filter @metasheet/web exec vitest run tests/multitable-embed-route.spec.ts tests/multitable-client.spec.ts --reporter=dot" \
+    "pnpm --filter @metasheet/web exec vitest run tests/multitable-embed-route.spec.ts tests/multitable-client.spec.ts tests/view-manager-multitable-contract.spec.ts --reporter=dot" \
     "$shared_log" \
     ""
 
