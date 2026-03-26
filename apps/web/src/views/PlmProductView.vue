@@ -120,6 +120,7 @@ import { resolvePlmLocalFilterPresetRouteIdentity } from './plm/plmLocalFilterPr
 import {
   runPlmLocalPresetOwnershipAction,
   shouldClearLocalPresetOwnerAfterTeamPresetAction,
+  shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore,
 } from './plm/plmLocalPresetOwnership'
 import {
   canActOnPlmApproval,
@@ -4397,7 +4398,11 @@ async function restoreBomTeamPresetSelection() {
     () => restoreBomTeamPresetSelectionBase(),
     {
       clearLocalOwner: clearBomLocalFilterPresetIdentity,
-      shouldClear: hasProcessedTeamPresetChanges,
+      shouldClear: (result) => shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore(
+        result,
+        bomTeamPresetKey.value,
+        bomTeamPresetQuery.value,
+      ),
     },
   )
 }
@@ -4543,7 +4548,11 @@ async function restoreWhereUsedTeamPresetSelection() {
     () => restoreWhereUsedTeamPresetSelectionBase(),
     {
       clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
-      shouldClear: hasProcessedTeamPresetChanges,
+      shouldClear: (result) => shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore(
+        result,
+        whereUsedTeamPresetKey.value,
+        whereUsedTeamPresetQuery.value,
+      ),
     },
   )
 }

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   runPlmLocalPresetOwnershipAction,
   shouldClearLocalPresetOwnerAfterTeamPresetAction,
+  shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore,
 } from '../src/views/plm/plmLocalPresetOwnership'
 
 describe('plmLocalPresetOwnership', () => {
@@ -77,5 +78,23 @@ describe('plmLocalPresetOwnership', () => {
     )
 
     expect(clearLocalOwner).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears the local owner after batch restore only when the restored preset actually becomes the active owner', () => {
+    expect(
+      shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore(
+        { processedIds: ['preset-b'] },
+        'preset-b',
+        'preset-a',
+      ),
+    ).toBe(false)
+
+    expect(
+      shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore(
+        { processedIds: ['preset-b'] },
+        'preset-b',
+        'preset-b',
+      ),
+    ).toBe(true)
   })
 })

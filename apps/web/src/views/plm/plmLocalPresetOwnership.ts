@@ -27,6 +27,29 @@ export function shouldClearLocalPresetOwnerAfterTeamPresetAction(
   return Boolean(result)
 }
 
+export function shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore(
+  result: { processedIds?: string[] } | null | undefined,
+  activeTeamPresetId: string | null | undefined,
+  requestedTeamPresetId: string | null | undefined,
+) {
+  const activeId = activeTeamPresetId?.trim() || ''
+  if (!activeId) return false
+
+  const processedIds = new Set(
+    (result?.processedIds || [])
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  )
+  if (!processedIds.has(activeId)) return false
+
+  const requestedId = requestedTeamPresetId?.trim() || ''
+  if (requestedId && !processedIds.has(requestedId)) {
+    return false
+  }
+
+  return true
+}
+
 export async function runPlmLocalPresetOwnershipAction<Result>(
   action: () => Promise<Result>,
   options: RunPlmLocalPresetOwnershipActionOptions<Result>,
