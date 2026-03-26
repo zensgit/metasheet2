@@ -106,6 +106,30 @@ function summarizeSmoke(report) {
   }
 }
 
+function summarizeEmbedHostProtocol(report) {
+  const checks = Array.isArray(report?.checks) ? report.checks : []
+  const protocolChecks = [
+    'ui.embed-host.ready',
+    'ui.embed-host.state-query.initial',
+    'ui.embed-host.navigate.generated-request-id',
+    'ui.embed-host.navigate.applied',
+    'ui.embed-host.navigate.explicit-request-id',
+    'ui.embed-host.state-query.final',
+  ]
+  const availableChecks = protocolChecks.filter((name) => checks.some((item) => item.name === name))
+  const available = availableChecks.length > 0
+  const missingChecks = available
+    ? protocolChecks.filter((name) => !checks.some((item) => item.name === name && item.ok))
+    : []
+  return {
+    available,
+    ok: !available || missingChecks.length === 0,
+    requiredWhenPresent: protocolChecks,
+    observedChecks: availableChecks,
+    missingChecks,
+  }
+}
+
 function summarizeImportDraftRecovery(report) {
   const checks = Array.isArray(report?.checks) ? report.checks : []
   const uiCheck = checks.find((item) => item.name === 'ui.import.mapping-reconcile')
@@ -223,6 +247,7 @@ async function main() {
   const peopleRepairReconcile = summarizePeopleRepairReconcile(smoke)
   const peopleImportRecovery = summarizePeopleImportRecovery(smoke)
   const managerRecovery = summarizeManagerRecovery(smoke)
+  const embedHostProtocol = summarizeEmbedHostProtocol(smoke)
   const profileSummaryData = summarizeProfile(profile)
   const gateSummary = summarizeGates(gateReport, gateReportPath, requireGateReport)
   const onPremGateSummary = onPremGateReport
@@ -232,6 +257,7 @@ async function main() {
     throw new Error('REQUIRE_ONPREM_GATE=true but no on-prem release gate report was found')
   }
   const overallOk = smokeSummary.ok &&
+    embedHostProtocol.ok &&
     profileSummaryData.ok &&
     gateSummary.ok &&
     (!requireOnPremGate || Boolean(onPremGateSummary?.ok))
@@ -289,6 +315,7 @@ async function main() {
         'Confirm the config panel closes itself and no stale warning remains',
       ],
     },
+    embedHostProtocol,
     profile: {
       report: path.resolve(profileReportPath),
       summary: profileSummaryPath ? path.resolve(profileSummaryPath) : null,
@@ -402,6 +429,18 @@ async function main() {
     `- ui.grid.search-hit: ${fmtMs(profileSummaryData.uiGridSearchHitMs)}`,
     `- api.grid.initial-load: ${fmtMs(profileSummaryData.apiGridInitialLoadMs)}`,
     `- api.grid.search-hit: ${fmtMs(profileSummaryData.apiGridSearchHitMs)}`,
+    '',
+    '## Embed Host Protocol Evidence',
+    '',
+    `- Available in smoke: \`${embedHostProtocol.available ? 'true' : 'false'}\``,
+    `- Status: **${embedHostProtocol.ok ? 'PASS' : 'FAIL'}**`,
+    `- Required when present: ${embedHostProtocol.requiredWhenPresent.map((item) => `\`${item}\``).join(', ')}`,
+    embedHostProtocol.observedChecks.length
+      ? `- Observed checks: ${embedHostProtocol.observedChecks.map((item) => `\`${item}\``).join(', ')}`
+      : '- Observed checks: none',
+    embedHostProtocol.missingChecks.length
+      ? `- Missing checks: ${embedHostProtocol.missingChecks.map((item) => `\`${item}\``).join(', ')}`
+      : '- Missing checks: none',
     '',
     '## Local Notes',
     '',

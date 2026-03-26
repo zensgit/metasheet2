@@ -196,6 +196,17 @@ Build and test gate:
 - `gates/report.json` must not contain a `failedStep`
 - `gates/report.json` must include the route-contract and OpenAPI parity checks from the canonical release gate
 
+Embed host smoke evidence:
+
+- if `smoke.json` includes any `ui.embed-host.*` checks, readiness treats the full embed-host protocol set as required
+- the expected protocol evidence is:
+  - `ui.embed-host.ready`
+  - `ui.embed-host.state-query.initial`
+  - `ui.embed-host.navigate.generated-request-id`
+  - `ui.embed-host.navigate.applied`
+  - `ui.embed-host.navigate.explicit-request-id`
+  - `ui.embed-host.state-query.final`
+
 ## Pilot Entry Checklist
 
 Use this checklist before handing the branch to a real team:
@@ -218,19 +229,20 @@ Do not ask the pilot team to assemble these URLs manually.
 7. If this pilot handoff is tied to a concrete on-prem package, regenerate readiness or handoff with `ONPREM_GATE_STAMP=<gate-stamp>` or `ONPREM_GATE_REPORT_JSON=<gate-report>`
 8. Confirm profile was run at `ROW_COUNT=2000`
 9. Confirm smoke report includes import retry, people manual-fix, attachment, person preset, comments, and conflict retry
-10. Confirm no local-only flags are required for the target environment, except the documented dev-token `RBAC_TOKEN_TRUST=true` case
-11. Give the pilot team the feedback template:
+10. If smoke includes any `ui.embed-host.*` checks, confirm `readiness.md` shows `Embed Host Protocol Evidence` as `PASS`
+11. Confirm no local-only flags are required for the target environment, except the documented dev-token `RBAC_TOKEN_TRUST=true` case
+12. Give the pilot team the feedback template:
 
 ```text
 docs/deployment/multitable-pilot-feedback-template-20260319.md
 ```
-12. If the team uses GitHub issues for pilot tracking, open:
+13. If the team uses GitHub issues for pilot tracking, open:
 
 ```text
 .github/ISSUE_TEMPLATE/multitable-pilot-feedback.yml
 ```
-13. Start the team with:
-14. If the pilot is tied to an on-prem rollout, collect these preflight reports before checkpoint, expansion review, or sign-off:
+14. Start the team with:
+15. If the pilot is tied to an on-prem rollout, collect these preflight reports before checkpoint, expansion review, or sign-off:
 
 ```text
 /opt/metasheet/output/preflight/multitable-onprem-preflight.json
