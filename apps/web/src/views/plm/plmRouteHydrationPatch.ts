@@ -41,3 +41,22 @@ export function resolvePlmDeferredRouteQueryPatch(
     flushPatch: current,
   }
 }
+
+export function applyPlmDeferredRouteQueryPatch(
+  current: Record<string, unknown>,
+  patch: PlmDeferredRouteQueryPatch | null,
+) {
+  if (!patch || !Object.keys(patch).length) {
+    return { ...current }
+  }
+
+  const next: Record<string, unknown> = { ...current }
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined || value === '') {
+      delete next[key]
+      continue
+    }
+    next[key] = value
+  }
+  return next
+}

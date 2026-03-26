@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyPlmDeferredRouteQueryPatch,
   mergePlmDeferredRouteQueryPatch,
   resolvePlmDeferredRouteQueryPatch,
 } from '../src/views/plm/plmRouteHydrationPatch'
@@ -36,6 +37,26 @@ describe('plmRouteHydrationPatch', () => {
     ).toEqual({
       pendingPatch: null,
       flushPatch: { workbenchTeamView: undefined, approvalsTeamView: 'approvals-default' },
+    })
+  })
+
+  it('applies the deferred patch over the current route query when computing effective hydration state', () => {
+    expect(
+      applyPlmDeferredRouteQueryPatch(
+        {
+          documentTeamView: 'stale-document',
+          documentFilter: 'motor',
+          panel: 'documents',
+        },
+        {
+          documentTeamView: undefined,
+          documentFilter: '',
+          cadTeamView: 'cad-default',
+        },
+      ),
+    ).toEqual({
+      panel: 'documents',
+      cadTeamView: 'cad-default',
     })
   })
 })

@@ -88,6 +88,7 @@ import {
   canSharePlmCollaborativeEntry,
 } from './plm/usePlmCollaborativePermissions'
 import {
+  applyPlmDeferredRouteQueryPatch,
   mergePlmDeferredRouteQueryPatch,
   resolvePlmDeferredRouteQueryPatch,
 } from './plm/plmRouteHydrationPatch'
@@ -3300,11 +3301,20 @@ const APPROVALS_QUERY_KEYS = [
 ]
 
 function hasExplicitQueryKey(keys: string[]) {
-  return keys.some((key) => Object.prototype.hasOwnProperty.call(route.query, key))
+  const effectiveQuery = applyPlmDeferredRouteQueryPatch(
+    route.query as Record<string, unknown>,
+    deferredRouteQueryPatch,
+  )
+  return keys.some((key) => Object.prototype.hasOwnProperty.call(effectiveQuery, key))
 }
 
 function hasExplicitWorkbenchQueryState() {
-  return hasExplicitPlmWorkbenchAutoApplyQueryState(route.query)
+  return hasExplicitPlmWorkbenchAutoApplyQueryState(
+    applyPlmDeferredRouteQueryPatch(
+      route.query as Record<string, unknown>,
+      deferredRouteQueryPatch,
+    ),
+  )
 }
 
 function serializeColumnQuery(
@@ -5145,7 +5155,12 @@ const {
   buildShareUrl: (view) => buildPlmWorkbenchTeamViewShareUrl('approvals', view, route.path),
   copyShareUrl: copyToClipboard,
   shouldAutoApplyDefault: () => (
-    !hasExplicitPlmApprovalsAutoApplyQueryState(route.query)
+    !hasExplicitPlmApprovalsAutoApplyQueryState(
+      applyPlmDeferredRouteQueryPatch(
+        route.query as Record<string, unknown>,
+        deferredRouteQueryPatch,
+      ),
+    )
     && approvalsStatus.value === DEFAULT_APPROVAL_STATUS
     && !approvalsFilter.value.trim()
     && approvalSortKey.value === 'created'
