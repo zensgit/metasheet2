@@ -159,8 +159,8 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
     assert.equal(handoffJson.embedHostDeferredReplay.ok, true)
     assert.equal(handoffJson.pilotRunner.runMode, 'local')
     assert.equal(handoffJson.localRunner.available, true)
-    assert.match(handoffJson.artifactChecks.readinessGate.readinessGateReportMd, /gates\/report\.md$/)
-    assert.match(handoffJson.artifactChecks.readinessGate.readinessGateLog, /gates\/release-gate\.log$/)
+    assert.equal(handoffJson.artifactChecks.readinessGate.readinessGateReportMd, true)
+    assert.equal(handoffJson.artifactChecks.readinessGate.readinessGateLog, true)
     assert.equal(handoffJson.localRunner.serviceModes.backend, 'reused')
     assert.equal(handoffJson.localRunner.serviceModes.web, 'started')
     assert.deepEqual(
