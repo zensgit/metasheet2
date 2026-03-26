@@ -102,11 +102,13 @@ import {
   WORKBENCH_SCENE_RECOMMENDATION_OPTIONS,
 } from './plm/plmWorkbenchSceneCatalog'
 import {
+  hasExplicitPlmBomTeamPresetAutoApplyQueryState,
   hasExplicitPlmApprovalsAutoApplyQueryState,
   buildPlmWorkbenchResetHydratedPanelQueryPatch,
   buildPlmWorkbenchRoutePath,
   buildPlmWorkbenchTeamViewShareUrl,
   hasExplicitPlmWorkbenchAutoApplyQueryState,
+  hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState,
   matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
   normalizePlmWorkbenchCollaborativeQuerySnapshot,
@@ -4220,9 +4222,12 @@ const {
   buildShareUrl: (preset) => buildTeamFilterPresetShareUrl('bom', preset, route.path, 'bom'),
   copyShareUrl: copyToClipboard,
   shouldAutoApplyDefault: () => (
-    !Object.prototype.hasOwnProperty.call(route.query, 'bomFilterPreset')
-    && !Object.prototype.hasOwnProperty.call(route.query, 'bomFilter')
-    && !Object.prototype.hasOwnProperty.call(route.query, 'bomFilterField')
+    !hasExplicitPlmBomTeamPresetAutoApplyQueryState(
+      applyPlmDeferredRouteQueryPatch(
+        route.query as Record<string, unknown>,
+        deferredRouteQueryPatch,
+      ),
+    )
     && bomFilterField.value === 'all'
     && !bomFilter.value.trim()
   ),
@@ -4322,9 +4327,12 @@ const {
   buildShareUrl: (preset) => buildTeamFilterPresetShareUrl('where-used', preset, route.path, 'where-used'),
   copyShareUrl: copyToClipboard,
   shouldAutoApplyDefault: () => (
-    !Object.prototype.hasOwnProperty.call(route.query, 'whereUsedFilterPreset')
-    && !Object.prototype.hasOwnProperty.call(route.query, 'whereUsedFilter')
-    && !Object.prototype.hasOwnProperty.call(route.query, 'whereUsedFilterField')
+    !hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState(
+      applyPlmDeferredRouteQueryPatch(
+        route.query as Record<string, unknown>,
+        deferredRouteQueryPatch,
+      ),
+    )
     && whereUsedFilterField.value === 'all'
     && !whereUsedFilter.value.trim()
   ),

@@ -4,14 +4,17 @@ import {
   buildPlmWorkbenchResetOwnerQueryPatch,
   buildPlmWorkbenchRoutePath,
   buildPlmWorkbenchTeamViewShareUrl,
+  hasExplicitPlmBomTeamPresetAutoApplyQueryState,
   hasExplicitPlmApprovalsAutoApplyQueryState,
   hasExplicitPlmWorkbenchAutoApplyQueryState,
+  hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState,
   matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
   normalizePlmWorkbenchCollaborativeQuerySnapshot,
   normalizePlmWorkbenchPanelScope,
   normalizePlmWorkbenchQuerySnapshot,
 } from '../src/views/plm/plmWorkbenchViewState'
+import { applyPlmDeferredRouteQueryPatch } from '../src/views/plm/plmRouteHydrationPatch'
 
 describe('plmWorkbenchViewState', () => {
   it('normalizes only supported workbench query keys', () => {
@@ -257,6 +260,46 @@ describe('plmWorkbenchViewState', () => {
         approvalsTeamView: 'approvals-view-1',
       }),
     ).toBe(true)
+  })
+
+  it('treats deferred BOM preset blockers as explicit default auto-apply blockers', () => {
+    expect(
+      hasExplicitPlmBomTeamPresetAutoApplyQueryState(
+        applyPlmDeferredRouteQueryPatch(
+          {},
+          { bomFilterPreset: 'bom-local-1' },
+        ),
+      ),
+    ).toBe(true)
+
+    expect(
+      hasExplicitPlmBomTeamPresetAutoApplyQueryState(
+        applyPlmDeferredRouteQueryPatch(
+          { bomFilterPreset: 'bom-local-1' },
+          { bomFilterPreset: undefined },
+        ),
+      ),
+    ).toBe(false)
+  })
+
+  it('treats deferred Where-Used preset blockers as explicit default auto-apply blockers', () => {
+    expect(
+      hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState(
+        applyPlmDeferredRouteQueryPatch(
+          {},
+          { whereUsedFilterField: 'parent', whereUsedFilter: 'assy-01' },
+        ),
+      ),
+    ).toBe(true)
+
+    expect(
+      hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState(
+        applyPlmDeferredRouteQueryPatch(
+          { whereUsedFilterField: 'parent', whereUsedFilter: 'assy-01' },
+          { whereUsedFilterField: '', whereUsedFilter: undefined },
+        ),
+      ),
+    ).toBe(false)
   })
 
   it('builds a workbench team view share URL that preserves explicit identity and normalized query state', () => {
