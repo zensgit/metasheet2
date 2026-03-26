@@ -269,6 +269,14 @@ test('multitable pilot readiness falls back to canonical gate markdown and log p
     reportMdPath: fixture.gateReportMdPath,
     logPath: fixture.gateLogPath,
     operatorCommandsPath: path.join(tmpRoot, 'operator-commands.sh'),
+    operatorCommands: [
+      { name: 'showArtifacts', command: '/tmp/operator-commands.sh show-artifacts' },
+      { name: 'rerunGate', command: '/tmp/operator-commands.sh rerun-gate' },
+    ],
+    operatorChecklist: [
+      { step: 1, title: 'Review the canonical gate report before promotion or replay', artifact: gateReportPath },
+      { step: 2, title: 'Use the gate log when a failed step or replay needs diagnosis', artifact: fixture.gateLogPath },
+    ],
     checks: [
       { name: 'web.build', ok: true, status: 'passed', command: 'pnpm --filter @metasheet/web build' },
     ],
@@ -294,9 +302,16 @@ test('multitable pilot readiness falls back to canonical gate markdown and log p
   assert.match(readiness.gates.reportMd, /gate-report\.md$/)
   assert.match(readiness.gates.log, /release-gate\.log$/)
   assert.match(readiness.gates.operatorCommands, /operator-commands\.sh$/)
+  assert.deepEqual(
+    readiness.gates.operatorCommandEntries.map((item) => item.name),
+    ['showArtifacts', 'rerunGate'],
+  )
+  assert.equal(readiness.gates.operatorChecklist.length, 2)
   assert.match(readinessMd, /Markdown: `.*gate-report\.md`/)
   assert.match(readinessMd, /Log: `.*release-gate\.log`/)
   assert.match(readinessMd, /Operator helper: `.*operator-commands\.sh`/)
+  assert.match(readinessMd, /Operator commands: `showArtifacts`, `rerunGate`/)
+  assert.match(readinessMd, /Operator checklist: `1\. Review the canonical gate report before promotion or replay`/)
 })
 
 test('multitable pilot readiness can opt out of gate binding for ad hoc checks', () => {

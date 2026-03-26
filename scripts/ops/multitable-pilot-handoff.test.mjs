@@ -87,6 +87,30 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
         ],
         missingChecks: [],
       },
+      gates: {
+        operatorCommandEntries: [
+          {
+            name: 'showArtifacts',
+            command: '/tmp/operator-commands.sh show-artifacts',
+          },
+          {
+            name: 'rerunGate',
+            command: '/tmp/operator-commands.sh rerun-gate',
+          },
+        ],
+        operatorChecklist: [
+          {
+            step: 1,
+            title: 'Review the canonical gate report before promotion or replay',
+            artifact: '/tmp/gate/report.json',
+          },
+          {
+            step: 2,
+            title: 'Use the helper instead of rebuilding replay commands by hand',
+            artifact: '/tmp/gate/operator-commands.sh',
+          },
+        ],
+      },
     }, null, 2))
     writeFile(path.join(readinessRoot, 'gates', 'report.json'), JSON.stringify({ ok: true }, null, 2))
     writeFile(path.join(readinessRoot, 'gates', 'report.md'), '# gate report\n')
@@ -163,6 +187,10 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
     assert.equal(handoffJson.artifactChecks.readinessGate.readinessGateReportMd, true)
     assert.equal(handoffJson.artifactChecks.readinessGate.readinessGateLog, true)
     assert.equal(handoffJson.artifactChecks.readinessGate.readinessGateOperatorCommands, true)
+    assert.equal(handoffJson.readinessGateOperatorContract.operatorCommandEntries.length, 2)
+    assert.equal(handoffJson.readinessGateOperatorContract.operatorChecklist.length, 2)
+    assert.equal(handoffJson.artifactChecks.readinessGate.operatorCommandEntries.length, 2)
+    assert.equal(handoffJson.artifactChecks.readinessGate.operatorChecklist.length, 2)
     assert.equal(handoffJson.localRunner.serviceModes.backend, 'reused')
     assert.equal(handoffJson.localRunner.serviceModes.web, 'started')
     assert.deepEqual(
@@ -178,6 +206,9 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
     assert.match(handoffMd, /### Embed Host Protocol Evidence/)
     assert.match(handoffMd, /### Embed Host Navigation Protection/)
     assert.match(handoffMd, /### Embed Host Busy Deferred Replay/)
+    assert.match(handoffMd, /## Readiness Gate Operator Contract/)
+    assert.match(handoffMd, /Operator commands: `showArtifacts`, `rerunGate`/)
+    assert.match(handoffMd, /Operator checklist: `1\. Review the canonical gate report before promotion or replay`, `2\. Use the helper instead of rebuilding replay commands by hand`/)
     assert.match(handoffMd, /gates\/report\.md: `present`/)
     assert.match(handoffMd, /gates\/release-gate\.log: `present`/)
     assert.match(handoffMd, /gates\/operator-commands\.sh: `present`/)

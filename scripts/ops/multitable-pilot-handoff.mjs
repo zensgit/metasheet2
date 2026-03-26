@@ -378,6 +378,12 @@ async function main() {
   const embedHostProtocol = summarizeEmbedEvidence(readinessPayload?.embedHostProtocol)
   const embedHostNavigationProtection = summarizeEmbedEvidence(readinessPayload?.embedHostNavigationProtection)
   const embedHostDeferredReplay = summarizeEmbedEvidence(readinessPayload?.embedHostDeferredReplay)
+  const readinessGateOperatorCommandEntries = Array.isArray(readinessPayload?.gates?.operatorCommandEntries)
+    ? readinessPayload.gates.operatorCommandEntries
+    : []
+  const readinessGateOperatorChecklist = Array.isArray(readinessPayload?.gates?.operatorChecklist)
+    ? readinessPayload.gates.operatorChecklist
+    : []
   const localRunner = summarizeLocalRunner(readinessPayload?.pilotRunner ?? readinessPayload?.localRunner)
   const defaultRunnerReportBase = localRunner.runMode === 'staging' ? 'staging-report' : 'local-report'
   const smokeRunnerReport = localRunner.report ?? path.join(readinessRoot, 'smoke', `${defaultRunnerReportBase}.json`)
@@ -605,6 +611,13 @@ async function main() {
       preflightReportJson: defaultPreflightReportJson,
       preflightReportMd: defaultPreflightReportMd,
     },
+    readinessGateOperatorContract: {
+      helper: copied.readinessGateOperatorCommands
+        ? path.join(handoffRoot, 'gates', 'operator-commands.sh')
+        : null,
+      operatorCommandEntries: readinessGateOperatorCommandEntries,
+      operatorChecklist: readinessGateOperatorChecklist,
+    },
     embedHostAcceptance,
     pilotRunner: effectiveLocalRunner,
     localRunner: effectiveLocalRunner,
@@ -677,6 +690,8 @@ async function main() {
         readinessGateReportMd: copied.readinessGateReportMd,
         readinessGateLog: copied.readinessGateLog,
         readinessGateOperatorCommands: copied.readinessGateOperatorCommands,
+        operatorCommandEntries: readinessGateOperatorCommandEntries,
+        operatorChecklist: readinessGateOperatorChecklist,
         smokeReport: copied.smokeReport,
         smokeReportMd: copied.smokeReportMd,
         localRunner: effectiveLocalRunner,
@@ -813,6 +828,16 @@ async function main() {
     `- Controlled rollout / UAT sign-off: \`docs/${path.basename(uatSignoffTemplatePath)}\``,
     `- Customer delivery receipt: \`docs/${path.basename(customerDeliverySignoffTemplatePath)}\``,
     `- Feedback intake: \`docs/${path.basename(feedbackTemplatePath)}\``,
+    '',
+    '## Readiness Gate Operator Contract',
+    '',
+    `- Helper: ${copied.readinessGateOperatorCommands ? '`gates/operator-commands.sh`' : '`missing`'}`,
+    readinessGateOperatorCommandEntries.length
+      ? `- Operator commands: ${readinessGateOperatorCommandEntries.map((item) => `\`${item.name}\``).join(', ')}`
+      : '- Operator commands: none',
+    readinessGateOperatorChecklist.length
+      ? `- Operator checklist: ${readinessGateOperatorChecklist.map((item) => `\`${item.step}. ${item.title}\``).join(', ')}`
+      : '- Operator checklist: none',
     '',
     '## Operator Helpers',
     '',

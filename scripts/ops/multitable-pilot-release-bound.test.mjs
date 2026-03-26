@@ -7,6 +7,14 @@ import { execFileSync } from 'node:child_process'
 
 const repoRoot = '/Users/huazhou/Downloads/Github/metasheet2-multitable-next'
 
+function writeFile(filePath, content, executable = false) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  fs.writeFileSync(filePath, content)
+  if (executable) {
+    fs.chmodSync(filePath, 0o755)
+  }
+}
+
 function createFakeBash(binDir) {
   const fakeBashPath = path.join(binDir, 'bash')
   fs.writeFileSync(fakeBashPath, [
@@ -63,7 +71,28 @@ function createFakeBash(binDir) {
     '    "preflight": {',
     '      "preflightReportJsonDefault": "/opt/metasheet/output/preflight/multitable-onprem-preflight.json",',
     '      "preflightReportMdDefault": "/opt/metasheet/output/preflight/multitable-onprem-preflight.md"',
+    '    },',
+    '    "readinessGate": {',
+    '      "operatorCommandEntries": [',
+    '        { "name": "showArtifacts", "command": "/tmp/gates/operator-commands.sh show-artifacts" },',
+    '        { "name": "rerunGate", "command": "/tmp/gates/operator-commands.sh rerun-gate" }',
+    '      ],',
+    '      "operatorChecklist": [',
+    '        { "step": 1, "title": "Review the canonical gate report before promotion or replay", "artifact": "/tmp/gates/report.json" },',
+    '        { "step": 2, "title": "Use the helper instead of rebuilding replay commands by hand", "artifact": "/tmp/gates/operator-commands.sh" }',
+    '      ]',
     '    }',
+    '  },',
+    '  "readinessGateOperatorContract": {',
+    '    "helper": "/tmp/gates/operator-commands.sh",',
+    '    "operatorCommandEntries": [',
+    '      { "name": "showArtifacts", "command": "/tmp/gates/operator-commands.sh show-artifacts" },',
+    '      { "name": "rerunGate", "command": "/tmp/gates/operator-commands.sh rerun-gate" }',
+    '    ],',
+    '    "operatorChecklist": [',
+    '      { "step": 1, "title": "Review the canonical gate report before promotion or replay", "artifact": "/tmp/gates/report.json" },',
+    '      { "step": 2, "title": "Use the helper instead of rebuilding replay commands by hand", "artifact": "/tmp/gates/operator-commands.sh" }',
+    '    ]',
     '  },',
     '  "recommendedTemplates": {',
     '    "goNoGo": "docs/multitable-pilot-go-no-go-template-20260319.md"',
@@ -104,9 +133,78 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
   const readyOutputRoot = `output/playwright/test-ready-local/${stamp}`
   const handoffOutputRoot = 'output/playwright/test-handoff'
   const reportRoot = `output/playwright/test-release-bound/${stamp}`
+  const handoffRoot = path.join(repoRoot, handoffOutputRoot, stamp)
   const gateReportPath = path.join(tmpRoot, 'gate', 'report.json')
   fs.mkdirSync(path.dirname(gateReportPath), { recursive: true })
   fs.writeFileSync(gateReportPath, JSON.stringify({ ok: true }, null, 2))
+  writeFile(path.join(handoffRoot, 'handoff.json'), JSON.stringify({
+    localRunner: {
+      available: true,
+      ok: true,
+      runMode: 'staging',
+      report: '/tmp/staging-report.json',
+      reportMd: '/tmp/staging-report.md',
+      serviceModes: {
+        backend: 'reused',
+        web: 'started',
+      },
+    },
+    artifactChecks: {
+      preflight: {
+        preflightReportJsonDefault: '/opt/metasheet/output/preflight/multitable-onprem-preflight.json',
+        preflightReportMdDefault: '/opt/metasheet/output/preflight/multitable-onprem-preflight.md',
+      },
+      readinessGate: {
+        operatorCommandEntries: [
+          { name: 'showArtifacts', command: '/tmp/gates/operator-commands.sh show-artifacts' },
+          { name: 'rerunGate', command: '/tmp/gates/operator-commands.sh rerun-gate' },
+        ],
+        operatorChecklist: [
+          {
+            step: 1,
+            title: 'Review the canonical gate report before promotion or replay',
+            artifact: '/tmp/gates/report.json',
+          },
+          {
+            step: 2,
+            title: 'Use the helper instead of rebuilding replay commands by hand',
+            artifact: '/tmp/gates/operator-commands.sh',
+          },
+        ],
+      },
+    },
+    readinessGateOperatorContract: {
+      helper: '/tmp/gates/operator-commands.sh',
+      operatorCommandEntries: [
+        { name: 'showArtifacts', command: '/tmp/gates/operator-commands.sh show-artifacts' },
+        { name: 'rerunGate', command: '/tmp/gates/operator-commands.sh rerun-gate' },
+      ],
+      operatorChecklist: [
+        {
+          step: 1,
+          title: 'Review the canonical gate report before promotion or replay',
+          artifact: '/tmp/gates/report.json',
+        },
+        {
+          step: 2,
+          title: 'Use the helper instead of rebuilding replay commands by hand',
+          artifact: '/tmp/gates/operator-commands.sh',
+        },
+      ],
+    },
+    recommendedTemplates: {
+      goNoGo: 'docs/multitable-pilot-go-no-go-template-20260319.md',
+    },
+    embedHostAcceptance: { ok: false },
+    embedHostProtocol: { available: true, ok: true },
+    embedHostNavigationProtection: {
+      available: true,
+      ok: false,
+      missingChecks: ['api.embed-host.discard-unsaved-form-draft'],
+    },
+    embedHostDeferredReplay: { available: true, ok: true },
+  }, null, 2))
+  writeFile(path.join(handoffRoot, 'handoff.md'), '# handoff\n')
 
   try {
     execFileSync('bash', ['scripts/ops/multitable-pilot-release-bound.sh'], {
@@ -135,6 +233,8 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
     assert.match(report.readinessGateReportMd, /gates\/report\.md$/)
     assert.match(report.readinessGateLog, /gates\/release-gate\.log$/)
     assert.match(report.readinessGateOperatorCommands, /gates\/operator-commands\.sh$/)
+    assert.equal(report.readinessGateOperatorContract.operatorCommandEntries.length, 2)
+    assert.equal(report.readinessGateOperatorContract.operatorChecklist.length, 2)
     assert.equal(report.pilotRunner.runMode, 'staging')
     assert.equal(report.localRunner.available, true)
     assert.equal(report.localRunner.serviceModes.backend, 'reused')
@@ -153,6 +253,9 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
     assert.match(reportMd, /Readiness gate markdown: `.*gates\/report\.md`/)
     assert.match(reportMd, /Readiness gate log: `.*gates\/release-gate\.log`/)
     assert.match(reportMd, /Readiness gate helper: `.*gates\/operator-commands\.sh`/)
+    assert.match(reportMd, /## Readiness Gate Operator Contract/)
+    assert.match(reportMd, /Operator commands: showArtifacts, rerunGate/)
+    assert.match(reportMd, /Operator checklist: 1\. Review the canonical gate report before promotion or replay, 2\. Use the helper instead of rebuilding replay commands by hand/)
     assert.match(reportMd, /prepare:multitable-pilot:release-bound:staging/)
     assert.match(reportMd, /verify:multitable-pilot:ready:staging:release-bound/)
     assert.match(reportMd, /prepare:multitable-pilot:handoff:staging:release-bound/)
@@ -228,9 +331,28 @@ test('multitable pilot release-bound falls back to staging runner report basenam
   const readyOutputRoot = `output/playwright/test-ready-staging/${stamp}`
   const handoffOutputRoot = 'output/playwright/test-handoff-staging-fallback'
   const reportRoot = `output/playwright/test-release-bound-staging/${stamp}`
+  const handoffRoot = path.join(repoRoot, handoffOutputRoot, stamp)
   const gateReportPath = path.join(tmpRoot, 'gate', 'report.json')
   fs.mkdirSync(path.dirname(gateReportPath), { recursive: true })
   fs.writeFileSync(gateReportPath, JSON.stringify({ ok: true }, null, 2))
+  writeFile(path.join(handoffRoot, 'handoff.json'), JSON.stringify({
+    pilotRunner: {
+      available: true,
+      ok: true,
+      runMode: 'staging',
+      serviceModes: {
+        backend: 'reused',
+        web: 'reused',
+      },
+    },
+    recommendedTemplates: {},
+    artifactChecks: {},
+    embedHostAcceptance: { ok: true },
+    embedHostProtocol: { available: true, ok: true },
+    embedHostNavigationProtection: { available: true, ok: true },
+    embedHostDeferredReplay: { available: true, ok: true },
+  }, null, 2))
+  writeFile(path.join(handoffRoot, 'handoff.md'), '# handoff\n')
 
   try {
     execFileSync('bash', ['scripts/ops/multitable-pilot-release-bound.sh'], {

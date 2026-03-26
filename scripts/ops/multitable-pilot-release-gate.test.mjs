@@ -117,6 +117,11 @@ test('multitable pilot release gate writes canonical gate report and keeps execu
   assert.equal(report.embedHostProtocol.available, true)
   assert.equal(report.embedHostNavigationProtection.ok, true)
   assert.equal(report.embedHostDeferredReplay.ok, true)
+  assert.deepEqual(
+    report.operatorCommands.map((item) => item.name),
+    ['showArtifacts', 'rerunGate', 'rerunLiveSmoke', 'showLogTail'],
+  )
+  assert.equal(report.operatorChecklist.length, 4)
   assert.match(reportMd, /## Live Smoke Artifact/)
   assert.match(reportMd, /Output root: `.*gates`/)
   assert.match(reportMd, /Log path: `.*release-gate\.log`/)
@@ -125,6 +130,9 @@ test('multitable pilot release gate writes canonical gate report and keeps execu
   assert.match(reportMd, /Markdown: `.*smoke\/report\.md`/)
   assert.match(reportMd, /## Embed Host Acceptance/)
   assert.match(reportMd, /### Embed Host Busy Deferred Replay/)
+  assert.match(reportMd, /## Operator Checklist/)
+  assert.match(reportMd, /1\. Review the canonical gate report before promotion or replay/)
+  assert.match(reportMd, /3\. Use the helper instead of rebuilding replay commands by hand/)
   assert.match(reportMd, /## Operator Commands/)
   assert.match(reportMd, /Show artifacts: `.*operator-commands\.sh show-artifacts`/)
   assert.match(reportMd, /Rerun gate: `.*operator-commands\.sh rerun-gate`/)
@@ -201,6 +209,10 @@ test('multitable pilot release gate writes deterministic local smoke artifacts w
   assert.match(report.reportMdPath, /gate-output\/report\.md$/)
   assert.match(report.logPath, /gate-output\/release-gate\.log$/)
   assert.match(report.operatorCommandsPath, /gate-output\/operator-commands\.sh$/)
+  assert.deepEqual(
+    report.operatorCommands.map((item) => item.name),
+    ['showArtifacts', 'rerunGate', 'rerunLiveSmoke', 'showLogTail'],
+  )
   assert.match(report.liveSmoke.outputRoot, /gate-output\/smoke$/)
   assert.match(report.liveSmoke.report, /gate-output\/smoke\/report\.json$/)
   assert.match(report.liveSmoke.reportMd, /gate-output\/smoke\/report\.md$/)
@@ -262,6 +274,10 @@ test('multitable pilot release gate writes deterministic staging smoke artifacts
   assert.match(report.outputRoot, /gate-output$/)
   assert.match(report.logPath, /gate-output\/release-gate\.log$/)
   assert.match(report.operatorCommandsPath, /gate-output\/operator-commands\.sh$/)
+  assert.deepEqual(
+    report.operatorCommands.map((item) => item.name),
+    ['showArtifacts', 'rerunGate', 'rerunLiveSmoke', 'showLogTail'],
+  )
   assert.match(report.liveSmoke.outputRoot, /gate-output\/smoke$/)
   assert.match(report.liveSmoke.report, /gate-output\/smoke\/report\.json$/)
   assert.match(report.liveSmoke.reportMd, /gate-output\/smoke\/report\.md$/)
