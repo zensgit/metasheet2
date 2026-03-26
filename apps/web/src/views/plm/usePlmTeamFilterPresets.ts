@@ -255,6 +255,10 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     return true
   }
 
+  function clearSingleTargetTakeoverSelection() {
+    teamPresetSelection.value = []
+  }
+
   function maybeAutoApplyDefault(items: PlmTeamFilterPreset[]) {
     if (teamPresetKey.value) return
     const requestedPresetId = options.requestedPresetId?.value.trim() || ''
@@ -330,6 +334,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       })
 
       teamPresets.value = upsertTeamPreset(teamPresets.value, saved)
+      clearSingleTargetTakeoverSelection()
       applyPresetToTarget(saved)
       teamPresetName.value = ''
       teamPresetGroup.value = ''
@@ -360,6 +365,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       )
 
       teamPresets.value = upsertTeamPreset(teamPresets.value, saved)
+      clearSingleTargetTakeoverSelection()
       applyPresetToTarget(saved)
       teamPresetName.value = ''
       teamPresetGroup.value = ''
@@ -392,6 +398,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       )
 
       teamPresets.value = upsertTeamPreset(teamPresets.value, created)
+      clearSingleTargetTakeoverSelection()
       applyPresetToTarget(created)
 
       const defaulted = await setPlmTeamFilterPresetDefault(created.id)
@@ -431,6 +438,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       return
     }
 
+    clearSingleTargetTakeoverSelection()
     applyPresetToTarget(preset)
     options.setMessage(`已应用${options.label}团队预设：${preset.name}`)
   }
@@ -492,6 +500,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
         teamPresetName.value.trim() || undefined,
       )
       teamPresets.value = upsertTeamPreset(teamPresets.value, duplicated)
+      clearSingleTargetTakeoverSelection()
       applyPresetToTarget(duplicated)
       teamPresetName.value = ''
       teamPresetGroup.value = duplicated.state.group || ''

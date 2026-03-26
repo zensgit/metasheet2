@@ -1135,6 +1135,146 @@ describe('usePlmTeamFilterPresets', () => {
     expect(model.teamPresetKey.value).toBe('preset-pending')
   })
 
+  it('clears stale batch selection when applying, saving, and duplicating a single preset target', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-a',
+          kind: 'bom',
+          scope: 'team',
+          name: '预设 A',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isDefault: false,
+          state: { field: 'path', value: 'root/a', group: 'A组' },
+        },
+        {
+          id: 'preset-b',
+          kind: 'bom',
+          scope: 'team',
+          name: '预设 B',
+          ownerUserId: 'owner-b',
+          canManage: true,
+          isDefault: false,
+          state: { field: 'path', value: 'root/b', group: 'B组' },
+        },
+      ],
+    })
+    vi.mocked(savePlmTeamFilterPreset).mockResolvedValue({
+      id: 'preset-saved',
+      kind: 'bom',
+      scope: 'team',
+      name: '新团队预设',
+      ownerUserId: 'dev-user',
+      canManage: true,
+      isDefault: false,
+      state: { field: 'path', value: 'root/saved', group: '保存组' },
+    })
+    vi.mocked(duplicatePlmTeamFilterPreset).mockResolvedValue({
+      id: 'preset-copy',
+      kind: 'bom',
+      scope: 'team',
+      name: '预设 A（副本）',
+      ownerUserId: 'dev-user',
+      canManage: true,
+      isDefault: false,
+      state: { field: 'path', value: 'root/a', group: 'A组' },
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/saved', group: '保存组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+
+    model.teamPresetSelection.value = ['preset-a', 'preset-b']
+    model.teamPresetKey.value = 'preset-a'
+    model.applyTeamPreset()
+    expect(model.teamPresetSelection.value).toEqual([])
+
+    model.teamPresetSelection.value = ['preset-a', 'preset-b']
+    model.teamPresetName.value = '新团队预设'
+    model.teamPresetGroup.value = '保存组'
+    await model.saveTeamPreset()
+    expect(model.teamPresetSelection.value).toEqual([])
+
+    model.teamPresetSelection.value = ['preset-a', 'preset-b']
+    model.teamPresetKey.value = 'preset-a'
+    await model.duplicateTeamPreset()
+    expect(model.teamPresetSelection.value).toEqual([])
+  })
+
+  it('clears stale batch selection when promoting a local preset into team targets', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({ items: [] })
+    vi.mocked(savePlmTeamFilterPreset)
+      .mockResolvedValueOnce({
+        id: 'preset-promoted',
+        kind: 'where-used',
+        scope: 'team',
+        name: '共享父件 团队',
+        ownerUserId: 'dev-user',
+        canManage: true,
+        isDefault: false,
+        state: { field: 'parent', value: 'assy-1', group: '装配' },
+      })
+      .mockResolvedValueOnce({
+        id: 'preset-created',
+        kind: 'where-used',
+        scope: 'team',
+        name: '共享父件 默认',
+        ownerUserId: 'dev-user',
+        canManage: true,
+        isDefault: false,
+        state: { field: 'parent', value: 'assy-2', group: '默认组' },
+      })
+    vi.mocked(setPlmTeamFilterPresetDefault).mockResolvedValue({
+      id: 'preset-created',
+      kind: 'where-used',
+      scope: 'team',
+      name: '共享父件 默认',
+      ownerUserId: 'dev-user',
+      canManage: true,
+      isDefault: true,
+      state: { field: 'parent', value: 'assy-2', group: '默认组' },
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'where-used',
+      label: 'Where-Used',
+      getCurrentPresetState: () => ({ field: 'parent', value: 'assy-1', group: '装配' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+
+    model.teamPresetSelection.value = ['preset-stale-a', 'preset-stale-b']
+    await model.promoteFilterPresetToTeam({
+      key: 'local-1',
+      label: '共享父件',
+      field: 'parent',
+      value: 'assy-1',
+      group: '装配',
+    })
+    expect(model.teamPresetSelection.value).toEqual([])
+
+    model.teamPresetSelection.value = ['preset-stale-a', 'preset-stale-b']
+    await model.promoteFilterPresetToTeamDefault({
+      key: 'local-2',
+      label: '共享父件 默认',
+      field: 'parent',
+      value: 'assy-2',
+      group: '默认组',
+    })
+    expect(model.teamPresetSelection.value).toEqual([])
+  })
+
   it('clears requested identity and stale form fields after deleting the current team preset', async () => {
     const requestedPresetId = ref('preset-delete')
     const syncRequestedPresetId = vi.fn((value?: string) => {
