@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   matchPlmTeamFilterPresetStateSnapshot,
+  pickPlmTeamFilterPresetRouteOwnerState,
   pickPlmTeamFilterPresetStateKeys,
 } from '../src/views/plm/plmTeamFilterPresetStateMatch'
 
@@ -55,5 +56,37 @@ describe('plmTeamFilterPresetStateMatch', () => {
       value: 'root/a',
       group: '机械',
     })
+  })
+
+  it('projects route-owner state without local preset metadata drift', () => {
+    expect(
+      pickPlmTeamFilterPresetRouteOwnerState(
+        {
+          field: 'path',
+          value: 'root/a',
+          group: '机械',
+          ignoredFutureKey: 'should-not-clear-route-owner',
+        },
+      ),
+    ).toEqual({
+      field: 'path',
+      value: 'root/a',
+    })
+  })
+
+  it('keeps route owners when only the preset group draft changes', () => {
+    expect(
+      matchPlmTeamFilterPresetStateSnapshot(
+        pickPlmTeamFilterPresetRouteOwnerState({
+          field: 'path',
+          value: 'root/a',
+          group: '机械',
+        }),
+        {
+          field: 'path',
+          value: 'root/a',
+        },
+      ),
+    ).toBe(true)
   })
 })

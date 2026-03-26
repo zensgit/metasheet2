@@ -111,7 +111,7 @@ import {
 } from './plm/plmTeamViewStateMatch'
 import {
   matchPlmTeamFilterPresetStateSnapshot,
-  pickPlmTeamFilterPresetStateKeys,
+  pickPlmTeamFilterPresetRouteOwnerState,
 } from './plm/plmTeamFilterPresetStateMatch'
 import { resolvePlmLocalFilterPresetRouteIdentity } from './plm/plmLocalFilterPresetRouteIdentity'
 import {
@@ -6605,11 +6605,10 @@ watch(
     const activePreset = activeBomRoutePreset.value
     if (!activePreset) return
     if (matchPlmTeamFilterPresetStateSnapshot(
-      pickPlmTeamFilterPresetStateKeys(activePreset.state, ['field', 'value', 'group']),
+      pickPlmTeamFilterPresetRouteOwnerState(activePreset.state),
       {
         field: bomFilterField.value,
         value: bomFilter.value,
-        group: bomFilterPresetGroup.value,
       },
     )) {
       return
@@ -6634,11 +6633,10 @@ watch(
     const activePreset = activeWhereUsedRoutePreset.value
     if (!activePreset) return
     if (matchPlmTeamFilterPresetStateSnapshot(
-      pickPlmTeamFilterPresetStateKeys(activePreset.state, ['field', 'value', 'group']),
+      pickPlmTeamFilterPresetRouteOwnerState(activePreset.state),
       {
         field: whereUsedFilterField.value,
         value: whereUsedFilter.value,
-        group: whereUsedFilterPresetGroup.value,
       },
     )) {
       return

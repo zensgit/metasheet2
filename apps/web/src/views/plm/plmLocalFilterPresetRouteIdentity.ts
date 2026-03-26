@@ -1,6 +1,6 @@
 import {
   matchPlmTeamFilterPresetStateSnapshot,
-  pickPlmTeamFilterPresetStateKeys,
+  pickPlmTeamFilterPresetRouteOwnerState,
 } from './plmTeamFilterPresetStateMatch'
 import type { FilterPreset } from './plmPanelModels'
 
@@ -30,7 +30,7 @@ export function resolvePlmLocalFilterPresetRouteIdentity(
   }
 
   if (matchPlmTeamFilterPresetStateSnapshot(
-    pickPlmTeamFilterPresetStateKeys(activePreset, ['field', 'value']),
+    pickPlmTeamFilterPresetRouteOwnerState(activePreset),
     input.currentState,
   )) {
     return {

@@ -29,6 +29,12 @@ export function pickPlmTeamFilterPresetStateKeys(
   }, {})
 }
 
+export function pickPlmTeamFilterPresetRouteOwnerState(
+  value: unknown,
+): Record<string, unknown> {
+  return pickPlmTeamFilterPresetStateKeys(value, ['field', 'value'])
+}
+
 export function matchPlmTeamFilterPresetStateSnapshot(left: unknown, right: unknown): boolean {
   return JSON.stringify(normalizePlmTeamFilterPresetStateValue(left))
     === JSON.stringify(normalizePlmTeamFilterPresetStateValue(right))
