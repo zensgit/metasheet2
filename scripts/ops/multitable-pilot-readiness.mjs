@@ -282,6 +282,11 @@ function summarizeGates(report, reportPath, reportMdPath, logPath, required) {
   const canonicalReport = reportPath ? path.resolve(reportPath) : typeof report?.reportPath === "string" ? report.reportPath : null
   const canonicalReportMd = reportMdPath ? path.resolve(reportMdPath) : typeof report?.reportMdPath === "string" ? report.reportMdPath : null
   const canonicalLog = logPath ? path.resolve(logPath) : typeof report?.logPath === "string" ? report.logPath : null
+  const canonicalOperatorCommands = typeof report?.operatorCommandsPath === 'string'
+    ? path.resolve(report.operatorCommandsPath)
+    : null
+  const operatorCommandEntries = Array.isArray(report?.operatorCommands) ? report.operatorCommands : []
+  const operatorChecklist = Array.isArray(report?.operatorChecklist) ? report.operatorChecklist : []
   if (!report) {
     return {
       ok: !required,
@@ -289,6 +294,9 @@ function summarizeGates(report, reportPath, reportMdPath, logPath, required) {
       report: canonicalReport,
       reportMd: canonicalReportMd,
       log: canonicalLog,
+      operatorCommands: canonicalOperatorCommands,
+      operatorCommandEntries,
+      operatorChecklist,
       checks: [],
       missingChecks: [],
       failedStep: null,
@@ -303,6 +311,9 @@ function summarizeGates(report, reportPath, reportMdPath, logPath, required) {
     report: canonicalReport,
     reportMd: canonicalReportMd,
     log: canonicalLog,
+    operatorCommands: canonicalOperatorCommands,
+    operatorCommandEntries,
+    operatorChecklist,
     checks,
     missingChecks: missing,
     failedStep: report?.failedStep ?? null,
@@ -603,6 +614,13 @@ async function main() {
     `- Report: \`${gateSummary.report ?? 'missing'}\``,
     `- Markdown: \`${gateSummary.reportMd ?? 'missing'}\``,
     `- Log: \`${gateSummary.log ?? 'missing'}\``,
+    `- Operator helper: \`${gateSummary.operatorCommands ?? 'missing'}\``,
+    gateSummary.operatorCommandEntries.length
+      ? `- Operator commands: ${gateSummary.operatorCommandEntries.map((item) => `\`${item.name}\``).join(', ')}`
+      : '- Operator commands: none',
+    gateSummary.operatorChecklist.length
+      ? `- Operator checklist: ${gateSummary.operatorChecklist.map((item) => `\`${item.step}. ${item.title}\``).join(', ')}`
+      : '- Operator checklist: none',
     `- Missing report: \`${gateSummary.missingReport ? 'true' : 'false'}\``,
     gateSummary.failedStep
       ? `- Failed step: \`${gateSummary.failedStep}\``

@@ -221,6 +221,7 @@ printf '%s\n' \
   "  \"readinessGateReport\": \"${READY_OUTPUT_ROOT_ABS}/gates/report.json\"," \
   "  \"readinessGateReportMd\": \"${READY_OUTPUT_ROOT_ABS}/gates/report.md\"," \
   "  \"readinessGateLog\": \"${READY_OUTPUT_ROOT_ABS}/gates/release-gate.log\"," \
+  "  \"readinessGateOperatorCommands\": \"${READY_OUTPUT_ROOT_ABS}/gates/operator-commands.sh\"," \
   "  \"handoffRoot\": \"${HANDOFF_ROOT_ABS}\"," \
   "  \"handoffJson\": \"${HANDOFF_ROOT_ABS}/handoff.json\"," \
   "  \"handoffMd\": \"${HANDOFF_ROOT_ABS}/handoff.md\"," \
@@ -303,6 +304,7 @@ printf '%s\n' \
   "- Readiness gate report: \`${READY_OUTPUT_ROOT_ABS}/gates/report.json\`" \
   "- Readiness gate markdown: \`${READY_OUTPUT_ROOT_ABS}/gates/report.md\`" \
   "- Readiness gate log: \`${READY_OUTPUT_ROOT_ABS}/gates/release-gate.log\`" \
+  "- Readiness gate helper: \`${READY_OUTPUT_ROOT_ABS}/gates/operator-commands.sh\`" \
   "- Handoff root: \`${HANDOFF_ROOT_ABS}\`" \
   '' \
   '## Recommended Templates' \
@@ -328,13 +330,14 @@ printf '%s\n' \
   '' \
   "- Review the bound on-prem gate report: \`${ONPREM_GATE_REPORT_JSON}\`" \
   "- Share \`${READY_OUTPUT_ROOT_ABS}/readiness.md\` and \`${READY_OUTPUT_ROOT_ABS}/gates/report.json\` with the pilot owner and confirm the rollout still matches the bound gate." \
-  "- Use \`${READY_OUTPUT_ROOT_ABS}/gates/report.md\` and \`${READY_OUTPUT_ROOT_ABS}/gates/release-gate.log\` for operator-side diagnosis when gate checks fail or need replay justification." \
+  "- Use \`${READY_OUTPUT_ROOT_ABS}/gates/report.md\`, \`${READY_OUTPUT_ROOT_ABS}/gates/release-gate.log\`, and \`${READY_OUTPUT_ROOT_ABS}/gates/operator-commands.sh\` for operator-side diagnosis and replay when gate checks fail." \
   "- Use \`${HANDOFF_ROOT_ABS}/handoff.md\` as the operating index for daily triage, checkpoint review, and sign-off follow-up." \
   "- Select the correct template from \`${HANDOFF_ROOT_ABS}/docs\` before running checkpoint, expansion, UAT, or customer delivery sign-off." \
   "- Collect \`${HANDOFF_PREFLIGHT_REPORT_JSON_DEFAULT}\` and \`${HANDOFF_PREFLIGHT_REPORT_MD_DEFAULT}\` before pilot sign-off or expansion review." \
   '' \
   '## Operator Commands' \
   '' \
+  "- Readiness gate helper: \`${READY_OUTPUT_ROOT_ABS}/gates/operator-commands.sh\`" \
   "- Executable helper: \`${REPORT_ROOT_ABS}/$(basename "${COMMANDS_SH}")\`" \
   "- Show sign-off evidence: \`${REPORT_ROOT_ABS}/$(basename "${COMMANDS_SH}") show-signoff-evidence\`" \
   "- Rerun bound packet: \`ONPREM_GATE_REPORT_JSON=${ONPREM_GATE_REPORT_JSON} ENSURE_PLAYWRIGHT=false ${RELEASE_BOUND_COMMAND}\`" \
@@ -371,6 +374,7 @@ printf '%s\n' \
   "- \`${READY_OUTPUT_ROOT_ABS}/gates/report.json\`" \
   "- \`${READY_OUTPUT_ROOT_ABS}/gates/report.md\`" \
   "- \`${READY_OUTPUT_ROOT_ABS}/gates/release-gate.log\`" \
+  "- \`${READY_OUTPUT_ROOT_ABS}/gates/operator-commands.sh\`" \
   "- \`${READY_OUTPUT_ROOT_ABS}/smoke/report.md\`" \
   "- \`${READY_OUTPUT_ROOT_ABS}/smoke/${HANDOFF_LOCAL_RUNNER_REPORT_BASENAME}\`" \
   "- \`${READY_OUTPUT_ROOT_ABS}/smoke/${HANDOFF_LOCAL_RUNNER_REPORT_MD_BASENAME}\`" \

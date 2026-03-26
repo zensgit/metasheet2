@@ -38,6 +38,8 @@ function createFakeBash(binDir) {
     "  printf '%s\\n' '{\"ok\":true}' > \"${ready_root}/gates/report.json\"",
     "  printf '%s\\n' '# gate report' > \"${ready_root}/gates/report.md\"",
     "  printf '%s\\n' 'gate log' > \"${ready_root}/gates/release-gate.log\"",
+    "  printf '%s\\n' '#!/usr/bin/env bash' > \"${ready_root}/gates/operator-commands.sh\"",
+    '  chmod +x "${ready_root}/gates/operator-commands.sh"',
     '  exit 0',
     'fi',
     'if [[ "${1:-}" == "scripts/ops/multitable-pilot-handoff-release-bound.sh" ]]; then',
@@ -132,6 +134,7 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
     assert.match(report.readinessGateReport, /gates\/report\.json$/)
     assert.match(report.readinessGateReportMd, /gates\/report\.md$/)
     assert.match(report.readinessGateLog, /gates\/release-gate\.log$/)
+    assert.match(report.readinessGateOperatorCommands, /gates\/operator-commands\.sh$/)
     assert.equal(report.pilotRunner.runMode, 'staging')
     assert.equal(report.localRunner.available, true)
     assert.equal(report.localRunner.serviceModes.backend, 'reused')
@@ -149,6 +152,7 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
     assert.match(reportMd, /Run mode: `staging`/)
     assert.match(reportMd, /Readiness gate markdown: `.*gates\/report\.md`/)
     assert.match(reportMd, /Readiness gate log: `.*gates\/release-gate\.log`/)
+    assert.match(reportMd, /Readiness gate helper: `.*gates\/operator-commands\.sh`/)
     assert.match(reportMd, /prepare:multitable-pilot:release-bound:staging/)
     assert.match(reportMd, /verify:multitable-pilot:ready:staging:release-bound/)
     assert.match(reportMd, /prepare:multitable-pilot:handoff:staging:release-bound/)
@@ -184,6 +188,8 @@ test('multitable pilot release-bound falls back to staging runner report basenam
     "  printf '%s\\n' '{\"ok\":true}' > \"${ready_root}/gates/report.json\"",
     "  printf '%s\\n' '# gate report' > \"${ready_root}/gates/report.md\"",
     "  printf '%s\\n' 'gate log' > \"${ready_root}/gates/release-gate.log\"",
+    "  printf '%s\\n' '#!/usr/bin/env bash' > \"${ready_root}/gates/operator-commands.sh\"",
+    '  chmod +x "${ready_root}/gates/operator-commands.sh"',
     "  printf '%s\\n' '{}' > \"${ready_root}/smoke/staging-report.json\"",
     "  printf '%s\\n' '# staging report' > \"${ready_root}/smoke/staging-report.md\"",
     '  exit 0',

@@ -268,6 +268,7 @@ test('multitable pilot readiness falls back to canonical gate markdown and log p
     reportPath: gateReportPath,
     reportMdPath: fixture.gateReportMdPath,
     logPath: fixture.gateLogPath,
+    operatorCommandsPath: path.join(tmpRoot, 'operator-commands.sh'),
     checks: [
       { name: 'web.build', ok: true, status: 'passed', command: 'pnpm --filter @metasheet/web build' },
     ],
@@ -292,8 +293,10 @@ test('multitable pilot readiness falls back to canonical gate markdown and log p
   assert.equal(readiness.ok, true)
   assert.match(readiness.gates.reportMd, /gate-report\.md$/)
   assert.match(readiness.gates.log, /release-gate\.log$/)
+  assert.match(readiness.gates.operatorCommands, /operator-commands\.sh$/)
   assert.match(readinessMd, /Markdown: `.*gate-report\.md`/)
   assert.match(readinessMd, /Log: `.*release-gate\.log`/)
+  assert.match(readinessMd, /Operator helper: `.*operator-commands\.sh`/)
 })
 
 test('multitable pilot readiness can opt out of gate binding for ad hoc checks', () => {

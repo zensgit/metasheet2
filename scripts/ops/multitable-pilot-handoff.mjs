@@ -252,6 +252,7 @@ async function main() {
   const readinessGateReport = path.join(readinessRoot, 'gates', 'report.json')
   const readinessGateReportMd = path.join(readinessRoot, 'gates', 'report.md')
   const readinessGateLog = path.join(readinessRoot, 'gates', 'release-gate.log')
+  const readinessGateOperatorCommands = path.join(readinessRoot, 'gates', 'operator-commands.sh')
   const smokeReport = path.join(readinessRoot, 'smoke', 'report.json')
   const smokeReportMd = path.join(readinessRoot, 'smoke', 'report.md')
   const profileReport = path.join(readinessRoot, 'profile', 'report.json')
@@ -401,6 +402,10 @@ async function main() {
     readinessGateReport: await safeCopy(readinessGateReport, path.join(handoffRoot, 'gates', 'report.json')),
     readinessGateReportMd: await safeCopy(readinessGateReportMd, path.join(handoffRoot, 'gates', 'report.md')),
     readinessGateLog: await safeCopy(readinessGateLog, path.join(handoffRoot, 'gates', 'release-gate.log')),
+    readinessGateOperatorCommands: await safeCopy(
+      readinessGateOperatorCommands,
+      path.join(handoffRoot, 'gates', 'operator-commands.sh'),
+    ),
     smokeReport: await safeCopy(smokeReport, path.join(handoffRoot, 'smoke', 'report.json')),
     smokeReportMd: await safeCopy(smokeReportMd, path.join(handoffRoot, 'smoke', 'report.md')),
     smokeLocalReport: await safeCopy(smokeRunnerReport, path.join(handoffRoot, 'smoke', smokeRunnerReportBase)),
@@ -570,7 +575,12 @@ async function main() {
     `${preflightEnvTemplate}\n`,
   )
 
-  const readinessGateOk = copied.readinessMd && copied.readinessJson && copied.readinessGateReport && copied.readinessGateReportMd && copied.readinessGateLog
+  const readinessGateOk = copied.readinessMd &&
+    copied.readinessJson &&
+    copied.readinessGateReport &&
+    copied.readinessGateReportMd &&
+    copied.readinessGateLog &&
+    copied.readinessGateOperatorCommands
   const packageVerifyOk = copied.releaseJson && copied.releaseTgz && copied.releaseZip && copied.releaseTgzSha && copied.releaseZipSha && copied.releaseChecksumIndex && copied.packageVerifyScript
   const deployOk = copied.deployEasyScript && copied.packageInstallScript
   const preflightOk = copied.preflightScript && copied.repairHelperScript
@@ -591,6 +601,7 @@ async function main() {
     handoffRoot,
     expectedOperatorEvidence: {
       readinessGateReport: path.join(handoffRoot, 'gates', 'report.json'),
+      readinessGateOperatorCommands: path.join(handoffRoot, 'gates', 'operator-commands.sh'),
       preflightReportJson: defaultPreflightReportJson,
       preflightReportMd: defaultPreflightReportMd,
     },
@@ -665,6 +676,7 @@ async function main() {
         readinessGateReport: copied.readinessGateReport,
         readinessGateReportMd: copied.readinessGateReportMd,
         readinessGateLog: copied.readinessGateLog,
+        readinessGateOperatorCommands: copied.readinessGateOperatorCommands,
         smokeReport: copied.smokeReport,
         smokeReportMd: copied.smokeReportMd,
         localRunner: effectiveLocalRunner,
@@ -736,6 +748,7 @@ async function main() {
     `- gates/report.json: ${copied.readinessGateReport ? '`present`' : '`missing`'}`,
     `- gates/report.md: ${copied.readinessGateReportMd ? '`present`' : '`missing`'}`,
     `- gates/release-gate.log: ${copied.readinessGateLog ? '`present`' : '`missing`'}`,
+    `- gates/operator-commands.sh: ${copied.readinessGateOperatorCommands ? '`present`' : '`missing`'}`,
     `- smoke/report.json: ${copied.smokeReport ? '`present`' : '`missing`'}`,
     `- smoke/report.md: ${copied.smokeReportMd ? '`present`' : '`missing`'}`,
     `- smoke/${smokeRunnerReportBase}: ${copied.smokeLocalReport ? '`present`' : '`missing`'}`,
@@ -803,6 +816,7 @@ async function main() {
     '',
     '## Operator Helpers',
     '',
+    '- Readiness gate helper: `gates/operator-commands.sh`',
     '- On-prem release gate helper: `release-gate/operator-commands.sh`',
     '- Release-bound helper: `release-bound/operator-commands.sh`',
     '- Package install env template: `artifacts/deploy/multitable-onprem-package-install.env.example.sh`',

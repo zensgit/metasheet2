@@ -42,6 +42,30 @@ mkdir -p "$(dirname "${REPORT_JSON}")" "$(dirname "${REPORT_MD}")" "$(dirname "$
 
 export API_BASE WEB_BASE HEADLESS TIMEOUT_MS RUN_MODE
 
+LIVE_SMOKE_COMMAND="pnpm verify:multitable-pilot"
+LIVE_SMOKE_SKIP_NOTE="executed earlier by multitable-pilot-ready-local"
+if [[ "$RUN_MODE" == "staging" ]]; then
+  LIVE_SMOKE_COMMAND="pnpm verify:multitable-pilot:staging"
+  LIVE_SMOKE_SKIP_NOTE="executed earlier by multitable-pilot-ready-staging"
+fi
+
+log_release_gate() {
+  printf '%s\n' "$*" >> "$LOG_PATH"
+}
+
+init_release_gate_log() {
+  : > "$LOG_PATH"
+  log_release_gate "[gate] started_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  log_release_gate "[gate] run_mode=${RUN_MODE}"
+  log_release_gate "[gate] output_root=${OUTPUT_ROOT}"
+  log_release_gate "[gate] report_json=${REPORT_JSON}"
+  log_release_gate "[gate] report_md=${REPORT_MD}"
+  log_release_gate "[gate] operator_helper=${COMMANDS_SH}"
+  log_release_gate "[gate] smoke_output_root=${PILOT_SMOKE_OUTPUT_ROOT}"
+  log_release_gate "[gate] smoke_report=${PILOT_SMOKE_REPORT}"
+  log_release_gate "[gate] smoke_report_md=${PILOT_SMOKE_REPORT_MD}"
+}
+
 declare -a STEP_NAMES=()
 declare -a STEP_COMMANDS=()
 declare -a STEP_LOGS=()
@@ -63,13 +87,6 @@ add_release_gate_step() {
 
 define_release_gate_steps() {
   local shared_log="${LOG_PATH:-}"
-  local smoke_command="pnpm verify:multitable-pilot"
-  local smoke_skip_note="executed earlier by multitable-pilot-ready-local"
-
-  if [[ "$RUN_MODE" == "staging" ]]; then
-    smoke_command="pnpm verify:multitable-pilot:staging"
-    smoke_skip_note="executed earlier by multitable-pilot-ready-staging"
-  fi
 
   add_release_gate_step \
     "web.build" \
@@ -113,19 +130,117 @@ define_release_gate_steps() {
   if [[ "$SKIP_MULTITABLE_PILOT_SMOKE" == "true" ]]; then
     add_release_gate_step \
       "release-gate.multitable.live-smoke" \
-      "$smoke_command" \
+      "$LIVE_SMOKE_COMMAND" \
       "${PILOT_SMOKE_REPORT:-$shared_log}" \
       "$smoke_env" \
-      "$smoke_skip_note" \
+      "$LIVE_SMOKE_SKIP_NOTE" \
       "skipped"
     return
   fi
 
   add_release_gate_step \
     "release-gate.multitable.live-smoke" \
-    "$smoke_command" \
+    "$LIVE_SMOKE_COMMAND" \
     "${PILOT_SMOKE_REPORT:-$shared_log}" \
     "$smoke_env"
+}
+
+write_release_gate_operator_commands() {
+  local commands_tmp="${COMMANDS_SH}.tmp"
+
+  cat > "$commands_tmp" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="${ROOT_DIR}"
+RUN_MODE="${RUN_MODE}"
+API_BASE="${API_BASE}"
+WEB_BASE="${WEB_BASE}"
+HEADLESS="${HEADLESS}"
+TIMEOUT_MS="${TIMEOUT_MS}"
+OUTPUT_ROOT="${OUTPUT_ROOT}"
+REPORT_JSON="${REPORT_JSON}"
+REPORT_MD="${REPORT_MD}"
+LOG_PATH="${LOG_PATH}"
+COMMANDS_SH="${COMMANDS_SH}"
+PILOT_SMOKE_OUTPUT_ROOT="${PILOT_SMOKE_OUTPUT_ROOT}"
+PILOT_SMOKE_REPORT="${PILOT_SMOKE_REPORT}"
+PILOT_SMOKE_REPORT_MD="${PILOT_SMOKE_REPORT_MD}"
+LIVE_SMOKE_COMMAND="${LIVE_SMOKE_COMMAND}"
+
+print_artifacts() {
+  cat <<USAGE
+Release-gate artifacts:
+  - JSON report: \${REPORT_JSON}
+  - Markdown report: \${REPORT_MD}
+  - Gate log: \${LOG_PATH}
+  - Helper: \${COMMANDS_SH}
+  - Smoke output root: \${PILOT_SMOKE_OUTPUT_ROOT}
+  - Smoke report: \${PILOT_SMOKE_REPORT}
+  - Smoke markdown: \${PILOT_SMOKE_REPORT_MD}
+USAGE
+}
+
+case "\${1:-help}" in
+  help|-h|--help)
+    cat <<'USAGE'
+Usage: operator-commands.sh <command>
+
+Commands:
+  show-artifacts
+  rerun-gate
+  rerun-live-smoke
+  show-log-tail
+USAGE
+    echo
+    print_artifacts
+    ;;
+  show-artifacts)
+    print_artifacts
+    ;;
+  rerun-gate)
+    cd "\${ROOT_DIR}"
+    exec env \
+      RUN_MODE="\${RUN_MODE}" \
+      API_BASE="\${API_BASE}" \
+      WEB_BASE="\${WEB_BASE}" \
+      HEADLESS="\${HEADLESS}" \
+      TIMEOUT_MS="\${TIMEOUT_MS}" \
+      OUTPUT_ROOT="\${OUTPUT_ROOT}" \
+      REPORT_JSON="\${REPORT_JSON}" \
+      REPORT_MD="\${REPORT_MD}" \
+      LOG_PATH="\${LOG_PATH}" \
+      COMMANDS_SH="\${COMMANDS_SH}" \
+      PILOT_SMOKE_OUTPUT_ROOT="\${PILOT_SMOKE_OUTPUT_ROOT}" \
+      PILOT_SMOKE_REPORT="\${PILOT_SMOKE_REPORT}" \
+      PILOT_SMOKE_REPORT_MD="\${PILOT_SMOKE_REPORT_MD}" \
+      bash scripts/ops/multitable-pilot-release-gate.sh
+    ;;
+  rerun-live-smoke)
+    cd "\${ROOT_DIR}"
+    exec env \
+      API_BASE="\${API_BASE}" \
+      WEB_BASE="\${WEB_BASE}" \
+      HEADLESS="\${HEADLESS}" \
+      TIMEOUT_MS="\${TIMEOUT_MS}" \
+      RUN_MODE="\${RUN_MODE}" \
+      OUTPUT_ROOT="\${PILOT_SMOKE_OUTPUT_ROOT}" \
+      REPORT_MD="\${PILOT_SMOKE_REPORT_MD}" \
+      SMOKE_REPORT_MD="\${PILOT_SMOKE_REPORT_MD}" \
+      \${LIVE_SMOKE_COMMAND}
+    ;;
+  show-log-tail)
+    exec tail -n "\${TAIL_LINES:-80}" "\${LOG_PATH}"
+    ;;
+  *)
+    echo "Unknown command: \$1" >&2
+    exit 1
+    ;;
+esac
+EOF
+
+  mv "$commands_tmp" "$COMMANDS_SH"
+  chmod +x "$COMMANDS_SH"
 }
 
 write_release_gate_report() {
@@ -283,6 +398,38 @@ const failingEvidence = [
   embedHostDeferredReplay.available && !embedHostDeferredReplay.ok ? 'embedHostDeferredReplay' : null,
 ].filter(Boolean)
 
+const resolvedOperatorCommandsPath = operatorCommandsPath ? path.resolve(operatorCommandsPath) : null
+const operatorCommands = resolvedOperatorCommandsPath
+  ? [
+      { name: 'showArtifacts', command: `${resolvedOperatorCommandsPath} show-artifacts` },
+      { name: 'rerunGate', command: `${resolvedOperatorCommandsPath} rerun-gate` },
+      { name: 'rerunLiveSmoke', command: `${resolvedOperatorCommandsPath} rerun-live-smoke` },
+      { name: 'showLogTail', command: `${resolvedOperatorCommandsPath} show-log-tail` },
+    ]
+  : []
+const operatorChecklist = [
+  {
+    step: 1,
+    title: 'Review the canonical gate report before promotion or replay',
+    artifact: reportPath ? path.resolve(reportPath) : null,
+  },
+  {
+    step: 2,
+    title: 'Use the gate log when a failed step or replay needs diagnosis',
+    artifact: fallbackLogPath ? path.resolve(fallbackLogPath) : null,
+  },
+  {
+    step: 3,
+    title: 'Use the helper instead of rebuilding replay commands by hand',
+    artifact: resolvedOperatorCommandsPath,
+  },
+  {
+    step: 4,
+    title: 'Inspect raw live-smoke artifacts when embed-host evidence fails',
+    artifact: smokeReportPath ? path.resolve(smokeReportPath) : smokeOutputRoot ? path.resolve(smokeOutputRoot) : null,
+  },
+]
+
 const report = {
   ok: exitCode === 0 && checks.every((check) => check.ok) && failingEvidence.length === 0,
   runMode,
@@ -300,6 +447,8 @@ const report = {
   embedHostProtocol,
   embedHostNavigationProtection,
   embedHostDeferredReplay,
+  operatorCommands,
+  operatorChecklist,
   generatedAt: new Date().toISOString(),
 }
 
@@ -369,12 +518,25 @@ if (reportMdPath) {
     ...evidenceSection('### Embed Host Protocol Evidence', embedHostProtocol),
     ...evidenceSection('### Embed Host Navigation Protection', embedHostNavigationProtection),
     ...evidenceSection('### Embed Host Busy Deferred Replay', embedHostDeferredReplay),
+    '## Operator Checklist',
+    '',
+    ...operatorChecklist.map((item) => `- ${item.step}. ${item.title}${item.artifact ? `: \`${item.artifact}\`` : ''}`),
+    '',
     '## Operator Commands',
     '',
     `- Helper: \`${report.operatorCommandsPath ?? 'missing'}\``,
-    `- Rerun gate: \`${runMode === 'staging' ? 'RUN_MODE=staging ' : ''}OUTPUT_ROOT=${report.outputRoot ?? OUTPUT_ROOT} bash scripts/ops/multitable-pilot-release-gate.sh\``,
-    `- Rerun live smoke: \`${runMode === 'staging' ? 'RUN_MODE=staging ' : ''}OUTPUT_ROOT=${liveSmoke.outputRoot ?? 'missing'} pnpm ${runMode === 'staging' ? 'verify:multitable-pilot:staging' : 'verify:multitable-pilot'}\``,
-    report.logPath ? `- Tail log: \`tail -n 80 ${report.logPath}\`` : '- Tail log: missing',
+    report.operatorCommandsPath
+      ? `- Show artifacts: \`${report.operatorCommandsPath} show-artifacts\``
+      : '- Show artifacts: missing',
+    report.operatorCommandsPath
+      ? `- Rerun gate: \`${report.operatorCommandsPath} rerun-gate\``
+      : '- Rerun gate: missing',
+    report.operatorCommandsPath
+      ? `- Rerun live smoke: \`${report.operatorCommandsPath} rerun-live-smoke\``
+      : '- Rerun live smoke: missing',
+    report.operatorCommandsPath
+      ? `- Tail log: \`${report.operatorCommandsPath} show-log-tail\``
+      : '- Tail log: missing',
     '',
   ]
 
@@ -392,6 +554,7 @@ run_release_gate_step() {
   local env_json="${STEP_ENVS[$index]}"
 
   if [[ "${STEP_STATUSES[$index]}" == "skipped" ]]; then
+    log_release_gate "[step] name=${name} status=skipped note=${STEP_NOTES[$index]:-none}"
     return 0
   fi
 
@@ -413,23 +576,28 @@ NODE
     )
   fi
 
+  log_release_gate "[step] name=${name} status=running"
+  log_release_gate "[step] name=${name} command=${command}"
+
   set +e
   if [[ "${#env_args[@]}" -gt 0 ]]; then
-    env "${env_args[@]}" bash -c "$command"
+    env "${env_args[@]}" bash -c "$command" >>"$LOG_PATH" 2>&1
   else
-    bash -c "$command"
+    bash -c "$command" >>"$LOG_PATH" 2>&1
   fi
   local step_exit=$?
   set -e
 
   if [[ "$step_exit" -eq 0 ]]; then
     STEP_STATUSES[$index]="passed"
+    log_release_gate "[step] name=${name} status=passed"
     return 0
   fi
 
   STEP_STATUSES[$index]="failed"
   FAILED_STEP="$name"
   SCRIPT_EXIT_CODE="$step_exit"
+  log_release_gate "[step] name=${name} status=failed exit=${step_exit}"
   echo "[multitable-pilot-release-gate] ERROR: ${name} failed with exit ${step_exit}" >&2
   return "$step_exit"
 }
@@ -441,11 +609,14 @@ cleanup_release_gate() {
     SCRIPT_EXIT_CODE="$exit_code"
   fi
   set +e
+  log_release_gate "[gate] completed exit=${SCRIPT_EXIT_CODE} failed_step=${FAILED_STEP:-none}"
+  write_release_gate_operator_commands
   write_release_gate_report "$SCRIPT_EXIT_CODE"
   exit "$SCRIPT_EXIT_CODE"
 }
 
 main() {
+  init_release_gate_log
   define_release_gate_steps
 
   local index
