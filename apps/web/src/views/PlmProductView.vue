@@ -35,6 +35,7 @@ import { plmService } from '../services/PlmService'
 import type { PlmTeamFilterPresetBatchResult } from '../services/plm/plmWorkbenchClient'
 import { copyListToClipboard, copyTextToClipboard } from './plm/plmClipboard'
 import { downloadCsvFile } from './plm/plmCsv'
+import { resolveApprovalActionVersion } from './approvalInboxActionPayload'
 import type {
   ApprovalEntry,
   ApprovalHistoryEntry,
@@ -2773,8 +2774,14 @@ async function approveApproval(entry: ApprovalEntry) {
   approvalActingId.value = approvalId
   try {
     const comment = approvalComment.value.trim()
+    const version = resolveApprovalActionVersion(entry)
+    if (version === null) {
+      approvalActionError.value = '审批版本不可用'
+      return
+    }
     await plmService.approveApproval({
       approvalId,
+      version,
       comment: comment || undefined,
     })
     approvalActionStatus.value = `已通过审批 ${approvalId}`
@@ -2819,8 +2826,15 @@ async function rejectApproval(entry: ApprovalEntry) {
   }
   approvalActingId.value = approvalId
   try {
+    const version = resolveApprovalActionVersion(entry)
+    if (version === null) {
+      approvalActionError.value = '审批版本不可用'
+      return
+    }
     await plmService.rejectApproval({
       approvalId,
+      version,
+      reason: comment,
       comment,
     })
     approvalActionStatus.value = `已拒绝审批 ${approvalId}`

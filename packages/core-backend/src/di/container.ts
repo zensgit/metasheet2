@@ -71,8 +71,8 @@ class AdapterStub {
   async removeBomSubstitute(_bomLineId = '', substituteId = '') {
     return { data: [{ ok: true, substitute_id: substituteId }], metadata: { totalCount: 1 } }
   }
-  async approveApproval(approvalId = '') { return { data: [{ id: approvalId }], metadata: { totalCount: 1 } } }
-  async rejectApproval(approvalId = '') { return { data: [{ id: approvalId }], metadata: { totalCount: 1 } } }
+  async approveApproval(approvalId = '', version = 0) { return { data: [{ id: approvalId, version }], metadata: { totalCount: 1 } } }
+  async rejectApproval(approvalId = '', version = 0) { return { data: [{ id: approvalId, version }], metadata: { totalCount: 1 } } }
   async getCadProperties(fileId = '') { return { data: [{ file_id: fileId, properties: {} }], metadata: { totalCount: 1 } } }
   async getCadViewState(fileId = '') { return { data: [{ file_id: fileId, hidden_entity_ids: [], notes: [] }], metadata: { totalCount: 1 } } }
   async getCadReview(fileId = '') { return { data: [{ file_id: fileId, state: null }], metadata: { totalCount: 1 } } }

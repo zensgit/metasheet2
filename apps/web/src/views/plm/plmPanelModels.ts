@@ -378,6 +378,7 @@ export type ApprovalProductRef = UnknownRecord & {
 export type ApprovalEntry = UnknownRecord & {
   id?: string | number
   request_id?: string | number
+  version?: string | number
   title?: string
   name?: string
   status?: string

@@ -76,6 +76,8 @@ export interface ComparePlmBomParams {
 }
 export interface PlmApprovalActionParams {
     approvalId: string;
+    version: number;
+    reason?: string;
     comment?: string;
 }
 export interface AddPlmSubstituteParams {

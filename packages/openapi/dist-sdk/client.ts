@@ -102,6 +102,8 @@ export interface ComparePlmBomParams {
 
 export interface PlmApprovalActionParams {
   approvalId: string
+  version: number
+  reason?: string
   comment?: string
 }
 
@@ -372,6 +374,7 @@ export function createPlmFederationClient(clientOrOptions: ClientOptions | Reque
         {
           operation: 'approval_approve',
           approvalId: params.approvalId,
+          version: params.version,
           comment: params.comment,
         },
         'Failed to approve PLM approval',
@@ -386,6 +389,8 @@ export function createPlmFederationClient(clientOrOptions: ClientOptions | Reque
         {
           operation: 'approval_reject',
           approvalId: params.approvalId,
+          version: params.version,
+          reason: params.reason,
           comment: params.comment,
         },
         'Failed to reject PLM approval',

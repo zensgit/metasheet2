@@ -193,7 +193,9 @@ const PLMMutationSchema = z.object({
   substituteItemId: z.string().optional(),
   substituteId: z.string().optional(),
   approvalId: z.string().optional(),
+  version: z.number().int().min(0).optional(),
   comment: z.string().optional(),
+  reason: z.string().optional(),
   fileId: z.string().optional(),
   payload: z.record(z.unknown()).optional(),
   properties: z.record(z.unknown()).optional(),
@@ -1733,7 +1735,9 @@ export function federationRouter(injector?: Injector): Router {
           substituteItemId,
           substituteId,
           approvalId,
+          version,
           comment,
+          reason,
           fileId,
           payload,
           properties,
@@ -1896,8 +1900,23 @@ export function federationRouter(injector?: Injector): Router {
               },
             })
           }
+          const resolvedVersion = toNumberParam(
+            version ??
+              filterParams.version ??
+              (payload && typeof payload === 'object' ? (payload as Record<string, unknown>).version : undefined)
+          )
+          if (!Number.isInteger(resolvedVersion) || resolvedVersion < 0) {
+            return res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: 'version is required for approval actions',
+              },
+            })
+          }
           const resolvedComment = toStringParam(
             comment ??
+              reason ??
               filterParams.comment ??
               filterParams.reason ??
               (payload && typeof payload === 'object' ? (payload as Record<string, unknown>).comment : undefined)
@@ -1913,8 +1932,8 @@ export function federationRouter(injector?: Injector): Router {
           }
 
           const result = operation === 'approval_approve'
-            ? await adapter.approveApproval(resolvedApprovalId, resolvedComment || undefined)
-            : await adapter.rejectApproval(resolvedApprovalId, resolvedComment || '')
+            ? await adapter.approveApproval(resolvedApprovalId, resolvedVersion, resolvedComment || undefined)
+            : await adapter.rejectApproval(resolvedApprovalId, resolvedVersion, resolvedComment || '')
 
           metrics.recordRequest(
             { adapter: 'plm', method: 'POST', endpoint: `/plm/${operation}`, status: '200' },

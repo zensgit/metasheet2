@@ -115,6 +115,7 @@ import { apiFetch } from '../utils/api'
 import {
   buildApprovalInboxActionPayload,
   canSubmitApprovalInboxAction,
+  resolveApprovalActionVersion,
 } from './approvalInboxActionPayload'
 
 interface ApprovalInstance {
@@ -204,8 +205,8 @@ async function performAction(id: string, action: 'approve' | 'reject') {
     return
   }
   const approval = approvals.value.find((entry) => entry.id === id)
-  const version = approval?.version
-  if (typeof version !== 'number' || !Number.isFinite(version)) {
+  const version = resolveApprovalActionVersion(approval)
+  if (version === null) {
     error.value = 'Approval version is unavailable'
     return
   }

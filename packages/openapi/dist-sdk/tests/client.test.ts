@@ -158,8 +158,13 @@ describe('createPlmFederationClient', () => {
     })
 
     await client.listDocuments({ productId: 'ITEM-1000', role: 'primary' })
-    await client.approveApproval({ approvalId: 'ECO-42', comment: 'ok' })
-    await client.rejectApproval({ approvalId: 'ECO-42', comment: 'needs revision' })
+    await client.approveApproval({ approvalId: 'ECO-42', version: 2, comment: 'ok' })
+    await client.rejectApproval({
+      approvalId: 'ECO-42',
+      version: 3,
+      reason: 'needs revision',
+      comment: 'needs revision',
+    })
 
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
       operation: 'documents',
@@ -170,11 +175,14 @@ describe('createPlmFederationClient', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
       operation: 'approval_approve',
       approvalId: 'ECO-42',
+      version: 2,
       comment: 'ok',
     })
     expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({
       operation: 'approval_reject',
       approvalId: 'ECO-42',
+      version: 3,
+      reason: 'needs revision',
       comment: 'needs revision',
     })
   })

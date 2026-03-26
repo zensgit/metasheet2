@@ -3,6 +3,7 @@ import {
   buildApprovalInboxActionPayload,
   canSubmitApprovalInboxAction,
   normalizeApprovalInboxComment,
+  resolveApprovalActionVersion,
 } from '../src/views/approvalInboxActionPayload'
 
 describe('plmApprovalInboxActionPayload', () => {
@@ -32,5 +33,15 @@ describe('plmApprovalInboxActionPayload', () => {
       reason: 'missing sign-off',
       comment: 'missing sign-off',
     })
+  })
+
+  it('resolves optimistic-lock versions from numeric and string payloads', () => {
+    expect(resolveApprovalActionVersion({ version: 3 })).toBe(3)
+    expect(resolveApprovalActionVersion({ version: '4' })).toBe(4)
+    expect(resolveApprovalActionVersion({ version: ' 5 ' })).toBe(5)
+    expect(resolveApprovalActionVersion({ version: '' })).toBeNull()
+    expect(resolveApprovalActionVersion({ version: -1 })).toBeNull()
+    expect(resolveApprovalActionVersion({ version: 'NaN' })).toBeNull()
+    expect(resolveApprovalActionVersion(null)).toBeNull()
   })
 })

@@ -78,7 +78,9 @@ export interface UpdateCadPayload {
 
 export interface ApprovalActionParams {
   approvalId: string
+  version: number
   comment?: string
+  reason?: string
 }
 
 class PlmService {
@@ -178,6 +180,7 @@ class PlmService {
   async approveApproval<T = Record<string, unknown>>(params: ApprovalActionParams): Promise<T> {
     return plmClient.approveApproval<T>({
       approvalId: params.approvalId,
+      version: params.version,
       comment: params.comment,
     })
   }
@@ -185,6 +188,8 @@ class PlmService {
   async rejectApproval<T = Record<string, unknown>>(params: ApprovalActionParams): Promise<T> {
     return plmClient.rejectApproval<T>({
       approvalId: params.approvalId,
+      version: params.version,
+      reason: params.reason,
       comment: params.comment,
     })
   }

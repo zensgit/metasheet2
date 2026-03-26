@@ -164,7 +164,55 @@ describe('plmService', () => {
     await expect(
       plmService.approveApproval({
         approvalId: 'APP-1',
+        version: 0,
       }),
     ).rejects.toThrow('审批通过失败')
+  })
+
+  it('forwards approval action versions and reject reasons through the federation client', async () => {
+    apiPostMock
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          id: 'APP-1',
+          status: 'approved',
+          version: 2,
+        },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: {
+          id: 'APP-2',
+          status: 'rejected',
+          version: 5,
+        },
+      })
+
+    await plmService.approveApproval({
+      approvalId: 'APP-1',
+      version: 1,
+      comment: 'looks good',
+    })
+
+    await plmService.rejectApproval({
+      approvalId: 'APP-2',
+      version: 4,
+      reason: 'needs revision',
+      comment: 'needs revision',
+    })
+
+    expect(apiPostMock).toHaveBeenNthCalledWith(1, '/api/federation/plm/mutate', {
+      operation: 'approval_approve',
+      approvalId: 'APP-1',
+      version: 1,
+      comment: 'looks good',
+    })
+    expect(apiPostMock).toHaveBeenNthCalledWith(2, '/api/federation/plm/mutate', {
+      operation: 'approval_reject',
+      approvalId: 'APP-2',
+      version: 4,
+      reason: 'needs revision',
+      comment: 'needs revision',
+    })
   })
 })
