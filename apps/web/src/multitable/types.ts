@@ -15,6 +15,8 @@ export type MetaFieldType =
   | 'rollup'
   | 'attachment'
 
+export type MetaFieldCreateType = MetaFieldType | 'person'
+
 export type RowDensity = 'compact' | 'normal' | 'expanded'
 
 // --- Core entities ---
@@ -54,6 +56,7 @@ export interface MetaView {
   sortInfo?: Record<string, unknown>
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
+  config?: Record<string, unknown>
 }
 
 export interface MetaRecord {
@@ -76,6 +79,7 @@ export interface MetaViewData {
   fields: MetaField[]
   rows: MetaRecord[]
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
+  attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
   view?: MetaView | null
   meta?: MetaViewMeta
   page?: MetaPage
@@ -106,6 +110,7 @@ export interface MetaRecordContext {
   capabilities: MetaCapabilities
   commentsScope: MetaCommentsScope
   linkSummaries?: Record<string, LinkedRecordSummary[]>
+  attachmentSummaries?: Record<string, MetaAttachment[]>
 }
 
 // --- Form context (GET /api/multitable/form-context) ---
@@ -119,6 +124,7 @@ export interface MetaFormContext {
   capabilities: MetaCapabilities
   record?: MetaRecord | null
   commentsScope?: MetaCommentsScope | null
+  attachmentSummaries?: Record<string, MetaAttachment[]>
 }
 
 // --- Capabilities ---
@@ -192,6 +198,7 @@ export interface PatchResult {
   updated: RecordVersion[]
   records?: Array<{ recordId: string; data: Record<string, unknown> }>
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
+  attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
   relatedRecords?: Array<{ sheetId: string; recordId: string; data: Record<string, unknown> }>
 }
 
@@ -200,6 +207,7 @@ export interface FormSubmitResult {
   mode: 'create' | 'update'
   record: MetaRecord
   commentsScope: MetaCommentsScope
+  attachmentSummaries?: Record<string, MetaAttachment[]>
 }
 
 // --- Record summary ---
@@ -236,6 +244,11 @@ export interface CreateFieldInput {
   order?: number
 }
 
+export interface MetaPreparedPersonField {
+  targetSheet: MetaSheet
+  fieldProperty: Record<string, unknown>
+}
+
 export interface UpdateFieldInput {
   name?: string
   type?: string
@@ -252,6 +265,7 @@ export interface CreateViewInput {
   sortInfo?: Record<string, unknown>
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
+  config?: Record<string, unknown>
 }
 
 export interface UpdateViewInput {
@@ -261,6 +275,7 @@ export interface UpdateViewInput {
   sortInfo?: Record<string, unknown>
   groupInfo?: Record<string, unknown>
   hiddenFieldIds?: string[]
+  config?: Record<string, unknown>
 }
 
 export interface CreateRecordInput {
@@ -292,9 +307,53 @@ export interface MetaAttachment {
   uploadedAt: string
 }
 
+export interface MetaAttachmentUploadContext {
+  sheetId?: string
+  recordId?: string
+  fieldId?: string
+}
+
+export type MetaAttachmentUploadFn = (
+  file: File,
+  context?: MetaAttachmentUploadContext,
+) => Promise<MetaAttachment>
+
+export type MetaAttachmentDeleteFn = (
+  attachmentId: string,
+  context?: MetaAttachmentUploadContext,
+) => Promise<void>
+
 // --- Timeline config ---
 export interface TimelineConfig {
   startFieldId: string
   endFieldId: string
   zoom: 'day' | 'week' | 'month'
+}
+
+export interface MetaGalleryViewConfig {
+  titleFieldId?: string | null
+  coverFieldId?: string | null
+  fieldIds?: string[]
+  columns?: number
+  cardSize?: 'small' | 'medium' | 'large'
+}
+
+export interface MetaCalendarViewConfig {
+  dateFieldId?: string | null
+  endDateFieldId?: string | null
+  titleFieldId?: string | null
+  defaultView?: 'month' | 'week' | 'day'
+  weekStartsOn?: number
+}
+
+export interface MetaKanbanViewConfig {
+  groupFieldId?: string | null
+  cardFieldIds?: string[]
+}
+
+export interface MetaTimelineViewConfig {
+  startFieldId?: string | null
+  endFieldId?: string | null
+  labelFieldId?: string | null
+  zoom?: 'day' | 'week' | 'month'
 }

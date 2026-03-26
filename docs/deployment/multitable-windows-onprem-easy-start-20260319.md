@@ -13,10 +13,17 @@ PRODUCT_MODE=platform
 Local build on the release machine:
 
 ```bash
-cd <REPO_ROOT>
+cd /Users/huazhou/Downloads/Github/metasheet2-multitable
 chmod +x scripts/ops/multitable-onprem-package-build.sh scripts/ops/multitable-onprem-package-verify.sh
+PACKAGE_VERSION=2.5.1 \
+PACKAGE_TAG=pilot-r2 \
+INSTALL_DEPS=1 \
+BUILD_WEB=1 \
+BUILD_BACKEND=1 \
 scripts/ops/multitable-onprem-package-build.sh
 ```
+
+For a corrective reroll, do not run the build script bare. The defaults only repackage existing `dist/` content and do not force a fresh dependency install or rebuild.
 
 Artifacts:
 
@@ -26,7 +33,12 @@ Artifacts:
 Verify before delivery:
 
 ```bash
+VERIFY_REPORT_JSON=output/releases/multitable-onprem/verify/<PACKAGE_NAME>.tgz.verify.json \
+VERIFY_REPORT_MD=output/releases/multitable-onprem/verify/<PACKAGE_NAME>.tgz.verify.md \
 scripts/ops/multitable-onprem-package-verify.sh output/releases/multitable-onprem/<PACKAGE_NAME>.tgz
+
+VERIFY_REPORT_JSON=output/releases/multitable-onprem/verify/<PACKAGE_NAME>.zip.verify.json \
+VERIFY_REPORT_MD=output/releases/multitable-onprem/verify/<PACKAGE_NAME>.zip.verify.md \
 scripts/ops/multitable-onprem-package-verify.sh output/releases/multitable-onprem/<PACKAGE_NAME>.zip
 ```
 
@@ -141,4 +153,4 @@ scripts/ops/multitable-onprem-package-upgrade.sh
 
 Before handing this package to a customer or field team, also review:
 
-- `docs/deployment/multitable-onprem-customer-delivery-checklist-20260319.md`
+- `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-onprem-customer-delivery-checklist-20260319.md`

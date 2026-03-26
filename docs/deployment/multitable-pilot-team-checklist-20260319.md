@@ -2,7 +2,13 @@
 
 Date: 2026-03-19  
 Scope: Internal pilot execution checklist  
-Repo root: `<REPO_ROOT>`
+Repo: `/Users/huazhou/Downloads/Github/metasheet2-multitable-next`
+
+Before the team starts, the pilot owner should pin one release-bound artifact bundle and share:
+
+1. the grid URL
+2. the form URL
+3. the bound quickstart or handoff location
 
 ## Team A: Intake / Data Entry
 
@@ -58,8 +64,10 @@ Goal: validate `import + grid + search + person assignment + conflict recovery`.
 
 Use one of these for every issue or hesitation:
 
-- `docs/deployment/multitable-pilot-feedback-template-20260319.md`
-- `.github/ISSUE_TEMPLATE/multitable-pilot-feedback.yml`
+- `/Users/huazhou/Downloads/Github/metasheet2-multitable-next/docs/deployment/multitable-pilot-feedback-template-20260319.md`
+- `/Users/huazhou/Downloads/Github/metasheet2-multitable-next/.github/ISSUE_TEMPLATE/multitable-pilot-feedback.yml`
+
+Pilot owners should also distribute the matching `gates/report.json` from the readiness bundle so each issue can cite the same release-gate evidence.
 
 Severity guide:
 
@@ -67,3 +75,8 @@ Severity guide:
 - `P1`: severe confusion or repeated failure
 - `P2`: workaround exists, but experience is poor
 - `P3`: polish or copy issue
+
+Operator note:
+
+- If the pilot run is tied to an exact on-prem release, prefer generating the pilot packet with `ONPREM_GATE_STAMP=<gate-stamp> pnpm prepare:multitable-pilot:release-bound` before distributing links.
+- When you share the packet, include both `readiness.md` and `gates/report.json`.

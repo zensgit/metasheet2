@@ -31,6 +31,19 @@ function run() {
   "$@"
 }
 
+function verify_prebuilt_dist() {
+  local web_index="${ROOT_DIR}/apps/web/dist/index.html"
+  local backend_migrate="${ROOT_DIR}/packages/core-backend/dist/src/db/migrate.js"
+
+  if [[ "$BUILD_WEB" != "1" && ! -f "$web_index" ]]; then
+    die "Prebuilt web dist missing after dependency/bootstrap step: ${web_index}. Avoid \`pnpm add -w\` inside the packaged workspace; restore dist or rerun with BUILD_WEB=1."
+  fi
+
+  if [[ "$BUILD_BACKEND" != "1" && ! -f "$backend_migrate" ]]; then
+    die "Prebuilt backend dist missing after dependency/bootstrap step: ${backend_migrate}. Avoid \`pnpm add -w\` inside the packaged workspace; restore dist or rerun with BUILD_BACKEND=1."
+  fi
+}
+
 function require_cmd() {
   local name="$1"
   command -v "$name" >/dev/null 2>&1 || die "Missing required command: ${name}"
@@ -66,6 +79,8 @@ run env \
   RUN_MIGRATIONS="$RUN_MIGRATIONS" \
   START_SERVICE="$START_SERVICE" \
   "${ROOT_DIR}/scripts/ops/attendance-onprem-bootstrap.sh"
+
+verify_prebuilt_dist
 
 run env \
   ENV_FILE="$ENV_FILE" \

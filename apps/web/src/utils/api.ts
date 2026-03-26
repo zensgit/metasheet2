@@ -76,9 +76,7 @@ export function clearStoredAuthState(): void {
  * Build authorization headers for authenticated requests
  */
 export function authHeaders(token?: string): Record<string, string> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json'
-  }
+  const headers: Record<string, string> = {}
   const resolvedToken = typeof token === 'string' ? token : getStoredAuthToken()
   if (resolvedToken.trim().length > 0) {
     headers.Authorization = `Bearer ${resolvedToken}`
@@ -127,15 +125,19 @@ export async function apiFetch(
 ): Promise<Response> {
   const base = getApiBase()
   const { suppressUnauthorizedRedirect = false, ...requestOptions } = options
-  const headers = {
-    'Content-Type': 'application/json',
+  const headers = new Headers({
     ...authHeaders(),
-    ...(requestOptions.headers || {})
+    ...(requestOptions.headers || {}),
+  })
+  const body = requestOptions.body
+  const isFormData = typeof FormData !== 'undefined' && body instanceof FormData
+  if (!isFormData && body != null && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
   }
 
   const response = await fetch(`${base}${path}`, {
     ...requestOptions,
-    headers
+    headers,
   })
 
   if (response.status === 401 && !suppressUnauthorizedRedirect) {

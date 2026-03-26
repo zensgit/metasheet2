@@ -387,6 +387,97 @@ describe('useMultitableGrid', () => {
     expect(grid.rows.value[0].version).toBe(2)
     expect(grid.error.value).toBeNull()
   })
+
+  it('captures VERSION_CONFLICT state and preserves optimistic rollback', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (!input.startsWith('/api/multitable/patch')) throw new Error(`Unexpected request: ${input}`)
+      return new Response(JSON.stringify({
+        ok: false,
+        error: {
+          code: 'VERSION_CONFLICT',
+          message: 'Row changed elsewhere',
+          serverVersion: 8,
+        },
+      }), { status: 409 })
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref(''),
+      viewId: ref(''),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.fields.value = [{ id: 'f1', name: 'Title', type: 'string' }]
+    grid.rows.value = [{ id: 'r1', version: 1, data: { f1: 'before' } }]
+
+    await grid.patchCell('r1', 'f1', 'patched', 1)
+
+    expect(grid.rows.value[0].data.f1).toBe('before')
+    expect(grid.conflict.value).toEqual({
+      recordId: 'r1',
+      fieldId: 'f1',
+      attemptedValue: 'patched',
+      message: 'Row changed elsewhere',
+      serverVersion: 8,
+      previousLinkSummaries: undefined,
+      nextLinkSummaries: undefined,
+    })
+    expect(grid.error.value).toBe('Row changed elsewhere')
+  })
+
+  it('reloads and reapplies pending conflict edits', async () => {
+    const fetchFn = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.startsWith('/api/multitable/view')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            fields: [{ id: 'f1', name: 'Title', type: 'string' }],
+            rows: [{ id: 'r1', version: 8, data: { f1: 'server latest' } }],
+            page: { offset: 0, limit: 50, total: 1, hasMore: false },
+          },
+        }), { status: 200 })
+      }
+      if (input.startsWith('/api/multitable/patch')) {
+        const body = JSON.parse(String(init?.body ?? '{}'))
+        expect(body.changes?.[0]).toEqual({
+          recordId: 'r1',
+          fieldId: 'f1',
+          value: 'patched again',
+          expectedVersion: 8,
+        })
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            updated: [{ recordId: 'r1', version: 9 }],
+            records: [{ recordId: 'r1', data: { f1: 'patched again' } }],
+          },
+        }), { status: 200 })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+
+    const grid = useMultitableGrid({
+      sheetId: ref('sheet_1'),
+      viewId: ref('view_1'),
+      client: new MultitableApiClient({ fetchFn }),
+    })
+
+    grid.fields.value = [{ id: 'f1', name: 'Title', type: 'string' }]
+    grid.rows.value = [{ id: 'r1', version: 1, data: { f1: 'before' } }]
+    grid.conflict.value = {
+      recordId: 'r1',
+      fieldId: 'f1',
+      attemptedValue: 'patched again',
+      message: 'Row changed elsewhere',
+      serverVersion: 8,
+    }
+
+    const retried = await grid.retryConflict()
+
+    expect(retried).toBe(true)
+    expect(grid.conflict.value).toBeNull()
+    expect(grid.rows.value[0]).toEqual({ id: 'r1', version: 9, data: { f1: 'patched again' } })
+  })
 })
 
 describe('buildSortInfo', () => {

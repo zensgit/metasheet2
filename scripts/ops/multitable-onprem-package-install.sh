@@ -27,11 +27,11 @@ function die() {
 [[ -n "$ADMIN_PASSWORD" ]] || die "ADMIN_PASSWORD is required"
 
 if [[ "$RUN_MIGRATIONS" == "1" && "$BUILD_BACKEND" != "1" ]]; then
-  [[ -f "${ROOT_DIR}/packages/core-backend/dist/src/db/migrate.js" ]] || die "Missing backend dist migrate.js. Provide prebuilt dist or set BUILD_BACKEND=1."
+  [[ -f "${ROOT_DIR}/packages/core-backend/dist/src/db/migrate.js" ]] || die "Missing backend dist migrate.js. Provide prebuilt dist or set BUILD_BACKEND=1. If this disappeared after \`pnpm install\`, do not run \`pnpm add -w\` in the packaged workspace."
 fi
 
 if [[ "$BUILD_WEB" != "1" ]]; then
-  [[ -f "${ROOT_DIR}/apps/web/dist/index.html" ]] || die "Missing web dist index.html. Provide prebuilt dist or set BUILD_WEB=1."
+  [[ -f "${ROOT_DIR}/apps/web/dist/index.html" ]] || die "Missing web dist index.html. Provide prebuilt dist or set BUILD_WEB=1. If this disappeared after \`pnpm install\`, do not run \`pnpm add -w\` in the packaged workspace."
 fi
 
 exec env \

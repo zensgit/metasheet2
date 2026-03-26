@@ -5,10 +5,17 @@ Goal: deliver a full-app `multitable/platform` package without requiring `git pu
 ## Build on the release machine
 
 ```bash
-cd <REPO_ROOT>
+cd /Users/huazhou/Downloads/Github/metasheet2-multitable
 chmod +x scripts/ops/multitable-onprem-package-build.sh scripts/ops/multitable-onprem-package-verify.sh
+PACKAGE_VERSION=2.5.1 \
+PACKAGE_TAG=pilot-r2 \
+INSTALL_DEPS=1 \
+BUILD_WEB=1 \
+BUILD_BACKEND=1 \
 scripts/ops/multitable-onprem-package-build.sh
 ```
+
+For a corrective reroll, do not run the build script bare. Its defaults are `INSTALL_DEPS=0`, `BUILD_WEB=0`, and `BUILD_BACKEND=0`, which only repackage whatever `dist/` is already on disk.
 
 Output directory:
 
@@ -35,11 +42,27 @@ The workflow builds:
 
 The workflow already supports GitHub Release publishing through `publish_release=true`.
 
+For a corrective reroll such as `v2.5.1`, set:
+
+- `package_version=2.5.1`
+- `package_tag=<your-reroll-tag>`
+
 ## Verify before delivery
 
 ```bash
+VERIFY_REPORT_JSON=output/releases/multitable-onprem/verify/<PACKAGE_NAME>.tgz.verify.json \
+VERIFY_REPORT_MD=output/releases/multitable-onprem/verify/<PACKAGE_NAME>.tgz.verify.md \
 scripts/ops/multitable-onprem-package-verify.sh output/releases/multitable-onprem/<PACKAGE_NAME>.tgz
+
+VERIFY_REPORT_JSON=output/releases/multitable-onprem/verify/<PACKAGE_NAME>.zip.verify.json \
+VERIFY_REPORT_MD=output/releases/multitable-onprem/verify/<PACKAGE_NAME>.zip.verify.md \
 scripts/ops/multitable-onprem-package-verify.sh output/releases/multitable-onprem/<PACKAGE_NAME>.zip
+```
+
+Or run the full release gate in one shot:
+
+```bash
+pnpm verify:multitable-onprem:release-gate
 ```
 
 ## Minimum package contents
@@ -76,4 +99,4 @@ Current plugin policy:
 
 Before sending a package to a customer or field team, use:
 
-- `docs/deployment/multitable-onprem-customer-delivery-checklist-20260319.md`
+- `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-onprem-customer-delivery-checklist-20260319.md`

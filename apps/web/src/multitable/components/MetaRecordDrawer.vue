@@ -60,10 +60,34 @@
             @click="emit('open-link-picker', field)"
           >{{ linkButtonLabel(field.id) }}</button>
           <div v-else-if="field.type === 'attachment'" class="meta-record-drawer__attachments">
-            <span v-for="attId in attachmentList(field.id)" :key="attId" class="meta-record-drawer__attachment-chip">
-              &#x1F4CE; {{ attId }}
-            </span>
-            <span v-if="!attachmentList(field.id).length" class="meta-record-drawer__text">—</span>
+            <MetaAttachmentList
+              :attachments="attachmentItems(field.id)"
+              :removable="canEdit"
+              empty-label="—"
+              @remove="onRemoveAttachment(field.id, $event)"
+            />
+            <div v-if="canEdit" class="meta-record-drawer__attachment-add">
+              <input
+                type="file"
+                :multiple="attachmentAllowsMultiple(field)"
+                :accept="attachmentAccept(field)"
+                class="meta-record-drawer__file-input"
+                :disabled="!!attachmentActivity[field.id]"
+                @change="onDrawerFileSelect(field.id, $event)"
+              />
+              <span class="meta-record-drawer__attachment-hint">Add or replace files</span>
+              <button
+                v-if="attachmentList(field.id).length"
+                type="button"
+                class="meta-record-drawer__attachment-clear"
+                :disabled="!!attachmentActivity[field.id]"
+                @click="onClearAttachments(field.id)"
+              >Clear all</button>
+              <span v-if="attachmentActivity[field.id]" class="meta-record-drawer__uploading">
+                {{ attachmentActivity[field.id] === 'removing' ? 'Removing...' : attachmentActivity[field.id] === 'clearing' ? 'Clearing...' : 'Uploading...' }}
+              </span>
+            </div>
+            <div v-if="attachmentErrors[field.id]" class="meta-record-drawer__error">{{ attachmentErrors[field.id] }}</div>
           </div>
           <span v-else class="meta-record-drawer__text">{{ formatValue(record.data[field.id]) }}</span>
           <div v-if="field.type === 'link' && linkPreview(field.id)" class="meta-record-drawer__link-summary">{{ linkPreview(field.id) }}</div>
@@ -75,8 +99,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import type { MetaField, MetaRecord, LinkedRecordSummary } from '../types'
+import { computed, ref, watch } from 'vue'
+import type {
+  LinkedRecordSummary,
+  MetaAttachment,
+  MetaAttachmentDeleteFn,
+  MetaAttachmentUploadFn,
+  MetaField,
+  MetaRecord,
+} from '../types'
+import MetaAttachmentList from './MetaAttachmentList.vue'
+import { attachmentAcceptAttr, resolveAttachmentFieldProperty, validateAttachmentSelection } from '../utils/field-config'
+import { linkActionLabel } from '../utils/link-fields'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -86,7 +120,10 @@ const props = withDefaults(defineProps<{
   canComment: boolean
   canDelete: boolean
   linkSummariesByField?: Record<string, LinkedRecordSummary[]>
+  attachmentSummariesByField?: Record<string, MetaAttachment[]>
   recordIds?: string[]
+  uploadFn?: MetaAttachmentUploadFn
+  deleteAttachmentFn?: MetaAttachmentDeleteFn
 }>(), {
   recordIds: () => [],
 })
@@ -99,6 +136,16 @@ const emit = defineEmits<{
   (e: 'open-link-picker', field: MetaField): void
   (e: 'navigate', recordId: string): void
 }>()
+
+const attachmentActivity = ref<Record<string, 'uploading' | 'removing' | 'clearing'>>({})
+const attachmentErrors = ref<Record<string, string>>({})
+const localAttachmentSummaries = ref<Record<string, Record<string, MetaAttachment>>>({})
+
+watch(() => props.record, () => {
+  attachmentActivity.value = {}
+  attachmentErrors.value = {}
+  localAttachmentSummaries.value = {}
+})
 
 const currentRecordIndex = computed(() => {
   if (!props.record || !props.recordIds.length) return -1
@@ -123,7 +170,8 @@ function formatValue(v: unknown): string {
 
 function linkButtonLabel(fieldId: string): string {
   const count = linkSummaryCount(fieldId)
-  return count > 0 ? `Edit links (${count})` : 'Edit links'
+  const field = props.fields.find((item) => item.id === fieldId) ?? null
+  return linkActionLabel(field, count)
 }
 
 function linkPreview(fieldId: string): string {
@@ -141,11 +189,163 @@ function attachmentList(fieldId: string): string[] {
   return []
 }
 
+function attachmentItems(fieldId: string): MetaAttachment[] {
+  const summaryMap = new Map((props.attachmentSummariesByField?.[fieldId] ?? []).map((attachment) => [attachment.id, attachment]))
+  for (const attachment of Object.values(localAttachmentSummaries.value[fieldId] ?? {})) {
+    summaryMap.set(attachment.id, attachment)
+  }
+  return attachmentList(fieldId).map((id) => summaryMap.get(id) ?? ({
+    id,
+    filename: id,
+    mimeType: 'application/octet-stream',
+    size: 0,
+    url: '',
+    thumbnailUrl: null,
+    uploadedAt: '',
+  }))
+}
+
 function linkSummaryCount(fieldId: string): number {
   const summaries = props.linkSummariesByField?.[fieldId] ?? []
   if (summaries.length) return summaries.length
   const raw = props.record?.data[fieldId]
   return Array.isArray(raw) ? raw.length : raw ? 1 : 0
+}
+
+async function onDrawerFileSelect(fieldId: string, e: Event) {
+  const input = e.target as HTMLInputElement
+  const files = input.files
+  if (!files?.length) return
+  clearAttachmentError(fieldId)
+  const field = props.fields.find((item) => item.id === fieldId)
+  if (field) {
+    const validationError = validateAttachmentSelection(field, files, attachmentList(fieldId).length)
+    if (validationError) {
+      setAttachmentError(fieldId, validationError)
+      input.value = ''
+      return
+    }
+  }
+  if (!props.uploadFn) {
+    const existing = attachmentList(fieldId)
+    emit('patch', fieldId, [...existing, ...Array.from(files).map((file) => file.name)])
+    input.value = ''
+    return
+  }
+  setAttachmentActivity(fieldId, 'uploading')
+  try {
+    const existing = attachmentList(fieldId)
+    const newIds: string[] = []
+    for (const file of Array.from(files)) {
+      const attachment = await props.uploadFn(file, {
+        recordId: props.record?.id,
+        fieldId,
+      })
+      rememberLocalAttachment(fieldId, attachment)
+      newIds.push(attachment.id)
+    }
+    emit('patch', fieldId, [...existing, ...newIds])
+  } catch (error: any) {
+    setAttachmentError(fieldId, error?.message ?? 'Failed to upload attachment')
+  } finally {
+    setAttachmentActivity(fieldId)
+    input.value = ''
+  }
+}
+
+async function onRemoveAttachment(fieldId: string, attachmentId: string) {
+  clearAttachmentError(fieldId)
+  if (props.deleteAttachmentFn) {
+    setAttachmentActivity(fieldId, 'removing')
+    try {
+      await props.deleteAttachmentFn(attachmentId, {
+        recordId: props.record?.id,
+        fieldId,
+      })
+    } catch (error: any) {
+      setAttachmentError(fieldId, error?.message ?? 'Failed to remove attachment')
+      setAttachmentActivity(fieldId)
+      return
+    }
+    setAttachmentActivity(fieldId)
+  }
+  const existing = attachmentList(fieldId)
+  emit('patch', fieldId, existing.filter((id) => id !== attachmentId))
+  forgetLocalAttachment(fieldId, attachmentId)
+}
+
+async function onClearAttachments(fieldId: string) {
+  const existing = attachmentList(fieldId)
+  if (!existing.length) return
+  clearAttachmentError(fieldId)
+  if (props.deleteAttachmentFn) {
+    setAttachmentActivity(fieldId, 'clearing')
+    try {
+      for (const attachmentId of existing) {
+        await props.deleteAttachmentFn(attachmentId, {
+          recordId: props.record?.id,
+          fieldId,
+        })
+        forgetLocalAttachment(fieldId, attachmentId)
+      }
+    } catch (error: any) {
+      setAttachmentError(fieldId, error?.message ?? 'Failed to clear attachments')
+      setAttachmentActivity(fieldId)
+      return
+    }
+    setAttachmentActivity(fieldId)
+  }
+  emit('patch', fieldId, [])
+}
+
+function setAttachmentActivity(fieldId: string, activity?: 'uploading' | 'removing' | 'clearing') {
+  const next = { ...attachmentActivity.value }
+  if (activity) next[fieldId] = activity
+  else delete next[fieldId]
+  attachmentActivity.value = next
+}
+
+function setAttachmentError(fieldId: string, message: string) {
+  attachmentErrors.value = {
+    ...attachmentErrors.value,
+    [fieldId]: message,
+  }
+}
+
+function clearAttachmentError(fieldId: string) {
+  if (!attachmentErrors.value[fieldId]) return
+  const next = { ...attachmentErrors.value }
+  delete next[fieldId]
+  attachmentErrors.value = next
+}
+
+function rememberLocalAttachment(fieldId: string, attachment: MetaAttachment) {
+  localAttachmentSummaries.value = {
+    ...localAttachmentSummaries.value,
+    [fieldId]: {
+      ...(localAttachmentSummaries.value[fieldId] ?? {}),
+      [attachment.id]: attachment,
+    },
+  }
+}
+
+function forgetLocalAttachment(fieldId: string, attachmentId: string) {
+  const current = localAttachmentSummaries.value[fieldId]
+  if (!current?.[attachmentId]) return
+  const nextFieldMap = { ...current }
+  delete nextFieldMap[attachmentId]
+  localAttachmentSummaries.value = {
+    ...localAttachmentSummaries.value,
+    [fieldId]: nextFieldMap,
+  }
+}
+
+function attachmentAccept(field: MetaField): string | undefined {
+  return attachmentAcceptAttr(field)
+}
+
+function attachmentAllowsMultiple(field: MetaField): boolean {
+  return resolveAttachmentFieldProperty(field.property).maxFiles !== 1
 }
 </script>
 
@@ -169,13 +369,14 @@ function linkSummaryCount(fieldId: string): number {
 .meta-record-drawer__check { cursor: pointer; }
 .meta-record-drawer__link-btn { padding: 4px 10px; border: 1px solid #409eff; border-radius: 3px; background: #ecf5ff; color: #409eff; cursor: pointer; font-size: 12px; }
 .meta-record-drawer__link-summary { margin-top: 6px; font-size: 12px; color: #606266; }
-.meta-record-drawer__attachments { display: flex; flex-wrap: wrap; gap: 4px; }
-.meta-record-drawer__attachment-chip {
-  display: inline-flex; align-items: center; gap: 2px;
-  padding: 2px 8px; background: #f0f4f8; border-radius: 4px;
-  font-size: 12px; color: #333; max-width: 180px; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap;
-}
+.meta-record-drawer__attachments { display: flex; flex-direction: column; gap: 6px; }
+.meta-record-drawer__attachment-add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.meta-record-drawer__file-input { font-size: 12px; }
+.meta-record-drawer__attachment-hint { font-size: 12px; color: #606266; }
+.meta-record-drawer__attachment-clear { border: none; background: none; color: #e67e22; cursor: pointer; font-size: 12px; }
+.meta-record-drawer__attachment-clear:disabled { opacity: 0.5; cursor: not-allowed; }
+.meta-record-drawer__uploading { font-size: 12px; color: #409eff; }
+.meta-record-drawer__error { color: #f56c6c; font-size: 12px; }
 .meta-record-drawer__text { font-size: 13px; color: #333; }
 .meta-record-drawer__empty { padding: 32px; text-align: center; color: #999; }
 </style>

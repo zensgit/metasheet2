@@ -6,20 +6,23 @@
   >
     <MultitableWorkbench
       ref="workbenchRef"
-      :base-id="baseId"
+      :base-id="effectiveBaseId"
       :sheet-id="effectiveSheetId"
       :view-id="effectiveViewId"
       :record-id="recordId"
       :mode="mode"
       :role="role"
+      @external-context-result="onWorkbenchExternalContextResult"
     />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { onBeforeRouteLeave, useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 import type { MultitableRole } from '../composables/useMultitableCapabilities'
 import MultitableWorkbench from './MultitableWorkbench.vue'
+import { AppRouteNames } from '../../router/types'
 
 const props = defineProps<{
   baseId?: string
@@ -36,12 +39,68 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'record-selected', recordId: string): void
   (e: 'navigated', params: { sheetId?: string; viewId?: string }): void
+  (e: 'navigation-result', params: {
+    status: 'applied' | 'deferred' | 'blocked' | 'failed' | 'superseded'
+    baseId?: string
+    sheetId?: string
+    viewId?: string
+    reason?: string
+    requestId?: string | number
+  }): void
 }>()
 
-const workbenchRef = ref<InstanceType<typeof MultitableWorkbench> | null>(null)
+type ExternalContextSyncStatus = 'applied' | 'deferred' | 'blocked' | 'failed' | 'superseded'
+type EmbedHostBlockingReason = 'busy' | 'unsaved-drafts' | null
+type EmbedHostStateSnapshot = {
+  currentContext: {
+    baseId: string
+    sheetId: string
+    viewId: string
+  }
+  hasBlockingState: boolean
+  blockingReason: EmbedHostBlockingReason
+  hasUnsavedDrafts: boolean
+  busy: boolean
+  pendingContext: {
+    baseId: string
+    sheetId: string
+    viewId: string
+    requestId?: string | number
+    reason?: Exclude<EmbedHostBlockingReason, null>
+  } | null
+}
+type MultitableWorkbenchExpose = {
+  confirmPageLeave?: () => boolean
+  getEmbedHostState?: () => EmbedHostStateSnapshot
+  requestExternalContextSync?: (
+    input: { baseId?: string; sheetId?: string; viewId?: string },
+    options?: { confirmIfBlocked?: boolean; requestId?: string | number },
+  ) => Promise<{
+    status: ExternalContextSyncStatus
+    context: { baseId: string; sheetId: string; viewId: string }
+    reason?: string
+  }>
+}
+type ContextSnapshot = {
+  baseId: string
+  sheetId: string
+  viewId: string
+}
+type PendingNavigationEcho = {
+  requestId: string | number
+  context: ContextSnapshot
+}
+
+const workbenchRef = ref<MultitableWorkbenchExpose | null>(null)
+const route = useRoute()
+const router = useRouter()
+const overrideBaseId = ref<string | undefined>(undefined)
 const overrideSheetId = ref<string | undefined>(undefined)
 const overrideViewId = ref<string | undefined>(undefined)
+const pendingNavigationEcho = ref<PendingNavigationEcho | null>(null)
+let autoNavigationRequestId = 0
 
+const effectiveBaseId = computed(() => overrideBaseId.value ?? props.baseId)
 const effectiveSheetId = computed(() => overrideSheetId.value ?? props.sheetId)
 const effectiveViewId = computed(() => overrideViewId.value ?? props.viewId)
 
@@ -77,9 +136,11 @@ function onMessage(event: MessageEvent) {
 
   switch (data.type) {
     case 'mt:navigate':
-      if (data.sheetId) overrideSheetId.value = data.sheetId
-      if (data.viewId) overrideViewId.value = data.viewId
-      emit('navigated', { sheetId: data.sheetId, viewId: data.viewId })
+      void handleNavigateMessage(data)
+      break
+
+    case 'mt:get-navigation-state':
+      emitStateSnapshot(data)
       break
 
     case 'mt:select-record':
@@ -100,14 +161,189 @@ function onMessage(event: MessageEvent) {
   }
 }
 
+function getEmbedHostStateSnapshot(): EmbedHostStateSnapshot {
+  return workbenchRef.value?.getEmbedHostState?.() ?? {
+    currentContext: {
+      baseId: effectiveBaseId.value ?? '',
+      sheetId: effectiveSheetId.value ?? '',
+      viewId: effectiveViewId.value ?? '',
+    },
+    hasBlockingState: false,
+    blockingReason: null,
+    hasUnsavedDrafts: false,
+    busy: false,
+    pendingContext: null,
+  }
+}
+
+function emitStateSnapshot(data: Record<string, unknown>) {
+  const requestId = typeof data.requestId === 'string' || typeof data.requestId === 'number' ? data.requestId : undefined
+  const snapshot = getEmbedHostStateSnapshot()
+  postToParent({
+    type: 'mt:navigation-state',
+    requestId,
+    currentContext: snapshot.currentContext,
+    hasBlockingState: snapshot.hasBlockingState,
+    blockingReason: snapshot.blockingReason,
+    hasUnsavedDrafts: snapshot.hasUnsavedDrafts,
+    busy: snapshot.busy,
+    pendingContext: snapshot.pendingContext,
+  })
+}
+
+function normalizeContextSnapshot(input: { baseId?: string; sheetId?: string; viewId?: string }): ContextSnapshot {
+  return {
+    baseId: input.baseId ?? '',
+    sheetId: input.sheetId ?? '',
+    viewId: input.viewId ?? '',
+  }
+}
+
+function contextMatches(a: ContextSnapshot, b: ContextSnapshot) {
+  return a.baseId === b.baseId && a.sheetId === b.sheetId && a.viewId === b.viewId
+}
+
+function toOptionalContext(input: ContextSnapshot) {
+  return {
+    baseId: input.baseId || undefined,
+    sheetId: input.sheetId || undefined,
+    viewId: input.viewId || undefined,
+  }
+}
+
+function emitNavigated(context: ContextSnapshot, requestId?: string | number) {
+  const payload = {
+    type: 'mt:navigated',
+    ...toOptionalContext(context),
+    requestId,
+  }
+  emit('navigated', {
+    sheetId: context.sheetId || undefined,
+    viewId: context.viewId || undefined,
+  })
+  postToParent(payload)
+}
+
+function flushPendingNavigationEcho(context: ContextSnapshot) {
+  if (!pendingNavigationEcho.value || !contextMatches(pendingNavigationEcho.value.context, context)) {
+    return false
+  }
+  const requestId = pendingNavigationEcho.value.requestId
+  pendingNavigationEcho.value = null
+  emitNavigated(context, requestId)
+  return true
+}
+
+async function applyHostOverrides(context: ContextSnapshot) {
+  overrideBaseId.value = context.baseId || undefined
+  overrideSheetId.value = context.sheetId || undefined
+  overrideViewId.value = context.viewId || undefined
+  if (route.name !== AppRouteNames.MULTITABLE) return
+  const routeContext = normalizeContextSnapshot({
+    baseId: typeof route.query.baseId === 'string' ? route.query.baseId : undefined,
+    sheetId: typeof route.params.sheetId === 'string' ? route.params.sheetId : undefined,
+    viewId: typeof route.params.viewId === 'string' ? route.params.viewId : undefined,
+  })
+  if (contextMatches(routeContext, context)) return
+  const nextQuery: LocationQueryRaw = {
+    ...route.query,
+    baseId: context.baseId || undefined,
+  }
+  delete nextQuery.recordId
+  delete nextQuery.mode
+  await router.replace({
+    name: AppRouteNames.MULTITABLE,
+    params: {
+      sheetId: context.sheetId,
+      viewId: context.viewId,
+    },
+    query: nextQuery,
+  })
+}
+
+function resolveNavigationRequestId(data: Record<string, unknown>) {
+  if (typeof data.requestId === 'string' || typeof data.requestId === 'number') return data.requestId
+  autoNavigationRequestId += 1
+  return `mt_nav_${autoNavigationRequestId}`
+}
+
+async function handleNavigateMessage(data: Record<string, unknown>) {
+  const nextBaseId = typeof data.baseId === 'string' ? data.baseId : effectiveBaseId.value
+  const nextSheetId = typeof data.sheetId === 'string' ? data.sheetId : effectiveSheetId.value
+  const nextViewId = typeof data.viewId === 'string' ? data.viewId : effectiveViewId.value
+  const requestId = resolveNavigationRequestId(data)
+  const result = await workbenchRef.value?.requestExternalContextSync?.(
+    {
+      baseId: nextBaseId,
+      sheetId: nextSheetId,
+      viewId: nextViewId,
+    },
+    { confirmIfBlocked: true, requestId },
+  ) ?? {
+    status: 'applied' as const,
+    context: {
+      baseId: nextBaseId ?? '',
+      sheetId: nextSheetId ?? '',
+      viewId: nextViewId ?? '',
+    },
+  }
+  const resolvedContext = normalizeContextSnapshot(result.context)
+  emitNavigationResult({
+    status: result.status,
+    ...toOptionalContext(resolvedContext),
+    reason: result.reason,
+    requestId,
+  })
+  if (result.status !== 'applied') return
+  pendingNavigationEcho.value = { requestId, context: resolvedContext }
+  if (flushPendingNavigationEcho(normalizeContextSnapshot({
+    baseId: effectiveBaseId.value,
+    sheetId: effectiveSheetId.value,
+    viewId: effectiveViewId.value,
+  }))) {
+    return
+  }
+  await applyHostOverrides(resolvedContext)
+}
+
+function onWorkbenchExternalContextResult(payload: {
+  status: ExternalContextSyncStatus
+  context: { baseId: string; sheetId: string; viewId: string }
+  reason?: string
+  requestId?: string | number
+}) {
+  if (payload.requestId == null) return
+  const resolvedContext = normalizeContextSnapshot(payload.context)
+  emitNavigationResult({
+    status: payload.status,
+    ...toOptionalContext(resolvedContext),
+    reason: payload.reason,
+    requestId: payload.requestId,
+  })
+  if (payload.status !== 'applied') return
+  pendingNavigationEcho.value = { requestId: payload.requestId, context: resolvedContext }
+  if (flushPendingNavigationEcho(normalizeContextSnapshot({
+    baseId: effectiveBaseId.value,
+    sheetId: effectiveSheetId.value,
+    viewId: effectiveViewId.value,
+  }))) {
+    return
+  }
+  void applyHostOverrides(resolvedContext)
+}
+
 onMounted(() => {
   window.addEventListener('message', onMessage)
   // Notify parent that embed is ready
-  postToParent({ type: 'mt:ready', sheetId: effectiveSheetId.value, viewId: effectiveViewId.value })
+  postToParent({ type: 'mt:ready', baseId: effectiveBaseId.value, sheetId: effectiveSheetId.value, viewId: effectiveViewId.value })
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('message', onMessage)
+})
+
+onBeforeRouteLeave(() => {
+  return workbenchRef.value?.confirmPageLeave?.() ?? true
 })
 
 function postToParent(payload: Record<string, unknown>) {
@@ -116,9 +352,26 @@ function postToParent(payload: Record<string, unknown>) {
   } catch { /* cross-origin guard */ }
 }
 
+function emitNavigationResult(payload: {
+  status: ExternalContextSyncStatus
+  baseId?: string
+  sheetId?: string
+  viewId?: string
+  reason?: string
+  requestId?: string | number
+}) {
+  emit('navigation-result', payload)
+  postToParent({
+    type: 'mt:navigate-result',
+    ...payload,
+  })
+}
+
 // Notify parent on navigation changes
-watch([effectiveSheetId, effectiveViewId], ([sid, vid]) => {
-  postToParent({ type: 'mt:navigated', sheetId: sid, viewId: vid })
+watch([effectiveBaseId, effectiveSheetId, effectiveViewId], ([bid, sid, vid]) => {
+  const currentContext = normalizeContextSnapshot({ baseId: bid, sheetId: sid, viewId: vid })
+  if (flushPendingNavigationEcho(currentContext)) return
+  emitNavigated(currentContext)
 })
 </script>
 

@@ -2,7 +2,7 @@
 
 Date: 2026-03-19  
 Scope: Feishu-style multitable internal pilot  
-Repo root: `<REPO_ROOT>`
+Repo: `/Users/huazhou/Downloads/Github/metasheet2-multitable-next`
 
 ## Pilot Metadata
 
@@ -18,6 +18,9 @@ Repo root: `<REPO_ROOT>`
 - Latest readiness gate result:
 - `readiness.md` path:
 - `readiness.json` path:
+- Release gate result:
+- `gates/report.json` path:
+- Release gate failed step (if any):
 - Smoke report path:
 - Profile report path:
 
@@ -63,7 +66,8 @@ For each issue, use this format:
 4. Expected:
 5. Actual:
 6. Screenshot / artifact path:
-7. Blocking pilot rollout: `Yes` / `No`
+7. Related gate evidence (`gates/report.json` / readiness / smoke path):
+8. Blocking pilot rollout: `Yes` / `No`
 
 ## Rollout Decision
 

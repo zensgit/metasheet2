@@ -19,6 +19,7 @@ import type {
   CreateBaseInput,
   CreateSheetInput,
   CreateFieldInput,
+  MetaPreparedPersonField,
   UpdateFieldInput,
   CreateViewInput,
   UpdateViewInput,
@@ -37,6 +38,17 @@ type ApiErrorPayload = {
   message?: string
   fieldErrors?: Record<string, string>
   serverVersion?: number
+}
+
+export function parseRetryAfterMs(headerValue: string | null): number | undefined {
+  if (!headerValue) return undefined
+  const trimmed = headerValue.trim()
+  if (!trimmed) return undefined
+  const seconds = Number(trimmed)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000)
+  const retryDate = Date.parse(trimmed)
+  if (Number.isNaN(retryDate)) return undefined
+  return Math.max(0, retryDate - Date.now())
 }
 
 function defaultFetchFn(): FetchFn {
@@ -60,12 +72,14 @@ async function parseJson<T>(res: Response): Promise<T> {
       code?: string
       fieldErrors?: Record<string, string>
       serverVersion?: number
+      retryAfterMs?: number
     }
     error.name = 'MultitableApiError'
     error.status = res.status
     error.code = payload.code
     error.fieldErrors = payload.fieldErrors
     error.serverVersion = payload.serverVersion
+    error.retryAfterMs = parseRetryAfterMs(res.headers.get('Retry-After'))
     throw error
   }
   if (res.status === 204 || !raw.trim()) return undefined as T
@@ -153,6 +167,15 @@ export class MultitableApiClient {
     return parseJson(res)
   }
 
+  async preparePersonField(sheetId: string): Promise<MetaPreparedPersonField> {
+    const res = await this.fetch('/api/multitable/person-fields/prepare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sheetId }),
+    })
+    return parseJson(res)
+  }
+
   async updateField(fieldId: string, input: UpdateFieldInput): Promise<{ field: MetaField }> {
     const res = await this.fetch(`/api/multitable/fields/${fieldId}`, {
       method: 'PATCH',
@@ -222,11 +245,12 @@ export class MultitableApiClient {
     return parseJson(res)
   }
 
-  async createRecord(input: CreateRecordInput): Promise<{ record: MetaRecord }> {
+  async createRecord(input: CreateRecordInput, opts?: { signal?: AbortSignal }): Promise<{ record: MetaRecord }> {
     const res = await this.fetch('/api/multitable/records', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
+      signal: opts?.signal,
     })
     return parseJson(res)
   }
@@ -282,7 +306,8 @@ export class MultitableApiClient {
       method: 'POST',
       body: formData,
     })
-    return parseJson(res)
+    const data = await parseJson<MetaAttachment | { attachment: MetaAttachment }>(res)
+    return 'attachment' in data ? data.attachment : data
   }
 
   async deleteAttachment(attachmentId: string): Promise<{ deleted: string }> {
@@ -292,7 +317,10 @@ export class MultitableApiClient {
 
   // --- Comments (uses /api/comments) ---
   async listComments(params: { containerId: string; targetId: string }): Promise<{ comments: MultitableComment[] }> {
-    const res = await this.fetch(`/api/comments${qs(params)}`)
+    const res = await this.fetch(`/api/comments${qs({
+      spreadsheetId: params.containerId,
+      rowId: params.targetId,
+    })}`)
     const data = await parseJson<{ comments?: MultitableComment[]; items?: MultitableComment[] }>(res)
     return normalizeCommentsList(data)
   }
@@ -301,7 +329,11 @@ export class MultitableApiClient {
     const res = await this.fetch('/api/comments', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
+      body: JSON.stringify({
+        spreadsheetId: input.containerId,
+        rowId: input.targetId,
+        content: input.content,
+      }),
     })
     return parseJson(res)
   }

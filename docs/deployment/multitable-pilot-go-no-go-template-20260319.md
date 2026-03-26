@@ -10,6 +10,8 @@ Scope: 5-7 day internal pilot checkpoint
 - Teams in pilot:
 - Branch / commit:
 - Readiness artifact used:
+- On-prem gate report used:
+- Release-bound report used:
 
 ## Gate 1: Blocking Severity
 
@@ -61,3 +63,13 @@ Pick only the next highest-value batch:
 - Owner:
 - Due date:
 - Exact artifacts / issues to review next:
+
+## Evidence Paths
+
+Record the exact files used for this decision:
+
+- `output/playwright/multitable-pilot-ready-local/<stamp>/readiness.md`
+- `output/playwright/multitable-pilot-ready-local/<stamp>/gates/report.json`
+- `output/playwright/multitable-pilot-handoff/<stamp>/handoff.md`
+- `output/playwright/multitable-pilot-handoff/<stamp>/release-bound/report.md`
+- `output/releases/multitable-onprem/gates/<gate-stamp>/report.json`
