@@ -2166,6 +2166,9 @@ describe('usePlmTeamFilterPresets', () => {
 
     await model.refreshTeamPresets()
     model.teamPresetKey.value = 'preset-b'
+    model.teamPresetName.value = '待清空名称'
+    model.teamPresetGroup.value = '待清空分组'
+    model.teamPresetOwnerUserId.value = 'owner-stale'
     model.teamPresetSelection.value = ['preset-b']
 
     await model.restoreTeamPresetSelection()
@@ -2174,6 +2177,9 @@ describe('usePlmTeamFilterPresets', () => {
     expect(syncRequestedPresetId).not.toHaveBeenCalledWith('preset-b')
     expect(requestedPresetId.value).toBe('preset-a')
     expect(model.teamPresetKey.value).toBe('preset-b')
+    expect(model.teamPresetName.value).toBe('')
+    expect(model.teamPresetGroup.value).toBe('')
+    expect(model.teamPresetOwnerUserId.value).toBe('')
     expect(model.teamPresets.value.find((preset) => preset.id === 'preset-b')?.isArchived).toBe(false)
     expect(trackedApply).toHaveReturnedWith('preset-a')
   })

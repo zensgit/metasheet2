@@ -746,6 +746,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
             teamViewName.value = ''
             teamViewOwnerUserId.value = ''
           }
+          if (!restored) {
+            teamViewName.value = ''
+            teamViewOwnerUserId.value = ''
+          }
         } else {
           teamViewKey.value = ''
           teamViewName.value = ''

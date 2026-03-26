@@ -871,6 +871,9 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
             applyPresetToTarget(restored)
             clearTeamPresetDrafts()
           }
+          if (!restored) {
+            clearTeamPresetDrafts()
+          }
         } else {
           teamPresetKey.value = ''
           clearTeamPresetDrafts()
