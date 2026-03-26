@@ -268,6 +268,11 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
           && canApplyPlmCollaborativeEntry(view)
         ))
       ) {
+        if (teamViewKey.value && teamViewKey.value !== requestedViewId) {
+          teamViewKey.value = ''
+          teamViewName.value = ''
+          teamViewOwnerUserId.value = ''
+        }
         options.syncRequestedViewId?.(undefined)
       }
       maybeAutoApplyDefault(teamViews.value)

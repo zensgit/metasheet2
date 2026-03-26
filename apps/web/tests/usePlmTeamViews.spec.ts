@@ -394,7 +394,7 @@ describe('usePlmTeamViews', () => {
     expect(setMessage).toHaveBeenLastCalledWith('已应用工作台默认团队视角：默认工作台视角')
   })
 
-  it('clears a stale requested route owner when refresh keeps the id but removes applyability', async () => {
+  it('clears a stale requested route owner without promoting a pending selector target', async () => {
     const requestedViewId = ref('workbench-applied')
     const syncRequestedViewId = vi.fn((value?: string) => {
       requestedViewId.value = value || ''
@@ -502,16 +502,20 @@ describe('usePlmTeamViews', () => {
 
     await model.refreshTeamViews()
     model.teamViewKey.value = 'workbench-pending'
+    model.teamViewName.value = '待清理名称'
+    model.teamViewOwnerUserId.value = 'owner-stale'
     syncRequestedViewId.mockClear()
 
     await model.refreshTeamViews()
 
     expect(requestedViewId.value).toBe('')
     expect(syncRequestedViewId).toHaveBeenLastCalledWith(undefined)
-    expect(model.teamViewKey.value).toBe('workbench-pending')
+    expect(model.teamViewKey.value).toBe('')
+    expect(model.teamViewName.value).toBe('')
+    expect(model.teamViewOwnerUserId.value).toBe('')
     expect(model.showManagementActions.value).toBe(true)
-    expect(model.canManageSelectedTeamView.value).toBe(true)
-    expect(model.canTransferTargetTeamView.value).toBe(true)
+    expect(model.canManageSelectedTeamView.value).toBe(false)
+    expect(model.canTransferTargetTeamView.value).toBe(false)
   })
 
   it('reapplies the default workbench team view after an explicit target becomes stale', async () => {

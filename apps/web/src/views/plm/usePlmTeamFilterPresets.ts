@@ -315,6 +315,10 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
           && canApplyPlmCollaborativeEntry(preset)
         ))
       ) {
+        if (teamPresetKey.value && teamPresetKey.value !== options.requestedPresetId?.value) {
+          teamPresetKey.value = ''
+          clearTeamPresetDrafts()
+        }
         options.syncRequestedPresetId?.(undefined)
       }
       maybeAutoApplyDefault(teamPresets.value)
