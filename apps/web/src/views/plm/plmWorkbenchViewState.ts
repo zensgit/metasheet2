@@ -159,6 +159,12 @@ export function normalizePlmWorkbenchCollaborativeQuerySnapshot(value: unknown):
 export function hasExplicitPlmWorkbenchAutoApplyQueryState(value: unknown): boolean {
   const next = normalizePlmWorkbenchQuerySnapshot(value)
   delete next.approvalComment
+  const normalizedPanel = normalizePlmWorkbenchPanelScope(next.panel)
+  if (normalizedPanel) {
+    next.panel = normalizedPanel
+  } else {
+    delete next.panel
+  }
   return Object.keys(next).length > 0
 }
 

@@ -222,6 +222,21 @@ describe('plmWorkbenchViewState', () => {
         workbenchTeamView: 'view-1',
       }),
     ).toBe(true)
+    expect(
+      hasExplicitPlmWorkbenchAutoApplyQueryState({
+        panel: 'all',
+      }),
+    ).toBe(false)
+    expect(
+      hasExplicitPlmWorkbenchAutoApplyQueryState({
+        panel: 'unknown',
+      }),
+    ).toBe(false)
+    expect(
+      hasExplicitPlmWorkbenchAutoApplyQueryState({
+        panel: 'approvals,documents',
+      }),
+    ).toBe(true)
   })
 
   it('builds a workbench team view share URL that preserves explicit identity and normalized query state', () => {
