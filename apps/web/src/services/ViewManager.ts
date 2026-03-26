@@ -231,14 +231,19 @@ export class ViewManager {
    */
   async createGalleryView(config: Omit<GalleryConfig, 'id' | 'createdAt' | 'updatedAt'>): Promise<string | null> {
     try {
-      const response = await fetch(`${getApiBase()}/api/views/gallery`, {
-        method: 'POST',
-        headers: this.buildHeaders(),
-        body: JSON.stringify(config)
-      })
-
-      const result = await response.json()
-      return result.success ? result.data.id : null
+      const sheetId = typeof config.tableId === 'string' ? config.tableId : undefined
+      if (!sheetId) return null
+      const view = await this.createView({
+        ...config,
+        sheetId,
+        type: 'gallery',
+        config: {
+          cardTemplate: config.cardTemplate,
+          layout: config.layout,
+          display: config.display,
+        },
+      } as unknown as View)
+      return view?.id ?? null
     } catch (error) {
       console.error('Failed to create gallery view:', error)
       return null
@@ -250,14 +255,20 @@ export class ViewManager {
    */
   async createFormView(config: Omit<FormConfig, 'id' | 'createdAt' | 'updatedAt'>): Promise<string | null> {
     try {
-      const response = await fetch(`${getApiBase()}/api/views/form`, {
-        method: 'POST',
-        headers: this.buildHeaders(),
-        body: JSON.stringify(config)
-      })
-
-      const result = await response.json()
-      return result.success ? result.data.id : null
+      const sheetId = typeof config.tableId === 'string' ? config.tableId : undefined
+      if (!sheetId) return null
+      const view = await this.createView({
+        ...config,
+        sheetId,
+        type: 'form',
+        config: {
+          fields: config.fields,
+          settings: config.settings,
+          validation: config.validation,
+          styling: config.styling,
+        },
+      } as unknown as View)
+      return view?.id ?? null
     } catch (error) {
       console.error('Failed to create form view:', error)
       return null
@@ -266,13 +277,29 @@ export class ViewManager {
 
   async submitForm(viewId: string, data: Record<string, any>): Promise<FormSubmissionResponse> {
     try {
-      const response = await fetch(`${getApiBase()}/api/views/${viewId}/submit`, {
+      const response = await fetch(`${getApiBase()}/api/multitable/views/${viewId}/submit`, {
         method: 'POST',
         headers: this.buildHeaders(),
         body: JSON.stringify({ data })
       })
 
-      return await response.json()
+      const result = await response.json()
+
+      if (result?.ok) {
+        const recordId = result.data?.record?.id
+        return {
+          success: true,
+          data: {
+            id: typeof recordId === 'string' ? recordId : '',
+            message: result.data?.mode === 'update' ? 'Form updated successfully' : 'Form submitted successfully',
+          },
+        }
+      }
+
+      return {
+        success: false,
+        error: result?.error?.message || 'Failed to submit form',
+      }
     } catch (error) {
       console.error('Failed to submit form:', error)
       return {
