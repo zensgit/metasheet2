@@ -101,6 +101,7 @@ import {
   matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
   normalizePlmWorkbenchCollaborativeQuerySnapshot,
+  normalizePlmWorkbenchPanelScope,
   normalizePlmWorkbenchQuerySnapshot,
   PLM_WORKBENCH_QUERY_KEYS,
 } from './plm/plmWorkbenchViewState'
@@ -5015,6 +5016,7 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
     if (value === undefined || value === null || value === '') return
     params[key] = value
   }
+  const resolvedPanel = normalizePlmWorkbenchPanelScope(panelOverride ?? readQueryParam('panel'))
 
   append('searchQuery', searchQuery.value)
   append('searchItemType', searchItemType.value !== DEFAULT_ITEM_TYPE ? searchItemType.value : undefined)
@@ -5073,9 +5075,7 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
   append('compareFilter', compareFilter.value)
   append('bomLineId', bomLineId.value)
   append('substitutesFilter', substitutesFilter.value)
-  if (panelOverride && panelOverride !== 'all') {
-    append('panel', panelOverride)
-  }
+  append('panel', resolvedPanel)
 
   if (includeAutoload) {
     const shouldAutoload =

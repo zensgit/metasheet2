@@ -5,6 +5,7 @@ import {
   matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
   normalizePlmWorkbenchCollaborativeQuerySnapshot,
+  normalizePlmWorkbenchPanelScope,
   normalizePlmWorkbenchQuerySnapshot,
 } from '../src/views/plm/plmWorkbenchViewState'
 
@@ -82,6 +83,7 @@ describe('plmWorkbenchViewState', () => {
     expect(
       normalizePlmWorkbenchCollaborativeQuerySnapshot({
         workbenchTeamView: 'view-1',
+        panel: ' approvals, documents, approvals ',
         bomFilterPreset: 'bom-local-1',
         whereUsedFilterPreset: 'where-local-1',
         approvalComment: 'ship-it',
@@ -90,10 +92,17 @@ describe('plmWorkbenchViewState', () => {
         whereUsedFilter: 'assy',
       }),
     ).toEqual({
+      panel: 'documents,approvals',
       bomFilter: 'gear',
       bomFilterField: 'path',
       whereUsedFilter: 'assy',
     })
+  })
+
+  it('normalizes explicit panel scope to canonical collaborative order', () => {
+    expect(normalizePlmWorkbenchPanelScope(' approvals, documents, approvals ')).toBe('documents,approvals')
+    expect(normalizePlmWorkbenchPanelScope('all')).toBeUndefined()
+    expect(normalizePlmWorkbenchPanelScope('unknown')).toBeUndefined()
   })
 
   it('detects workbench snapshot drift after manual query edits', () => {
@@ -134,6 +143,22 @@ describe('plmWorkbenchViewState', () => {
     ).toBe(true)
   })
 
+  it('matches workbench snapshots even when explicit panel order differs', () => {
+    expect(
+      matchPlmWorkbenchQuerySnapshot(
+        {
+          workbenchTeamView: 'view-1',
+          panel: 'approvals,documents',
+          bomFilter: 'gear',
+        },
+        {
+          panel: 'documents,approvals',
+          bomFilter: 'gear',
+        },
+      ),
+    ).toBe(true)
+  })
+
   it('matches workbench snapshots even when only approval comments differ', () => {
     expect(
       matchPlmWorkbenchQuerySnapshot(
@@ -169,6 +194,7 @@ describe('plmWorkbenchViewState', () => {
               whereUsedFilterPreset: 'where-local-1',
               bomFilter: 'gear',
               bomFilterField: 'path',
+              panel: ' approvals, documents ',
               documentFilter: ' gear ',
               approvalsFilter: 'eco',
               approvalComment: 'ship-it',
@@ -180,7 +206,7 @@ describe('plmWorkbenchViewState', () => {
         'https://example.test',
       ),
     ).toBe(
-      'https://example.test/plm?workbenchTeamView=workbench-view-1&bomFilter=gear&bomFilterField=path&documentFilter=gear&approvalsFilter=eco',
+      'https://example.test/plm?workbenchTeamView=workbench-view-1&bomFilter=gear&bomFilterField=path&panel=documents%2Capprovals&documentFilter=gear&approvalsFilter=eco',
     )
   })
 
@@ -270,6 +296,7 @@ describe('plmWorkbenchViewState', () => {
       '/plm',
       {
         searchQuery: 'gear',
+        panel: ' approvals, documents ',
         bomFilterPreset: 'bom-local-1',
         bomFilter: 'assy',
         bomFilterField: 'path',
@@ -284,7 +311,7 @@ describe('plmWorkbenchViewState', () => {
           sceneFocus: 'scene-1',
         },
       },
-    )).toBe('/plm?searchQuery=gear&bomFilter=assy&bomFilterField=path&whereUsedFilter=motor&approvalsFilter=eco&autoload=true&sceneFocus=scene-1#audit')
+    )).toBe('/plm?searchQuery=gear&panel=documents%2Capprovals&bomFilter=assy&bomFilterField=path&whereUsedFilter=motor&approvalsFilter=eco&autoload=true&sceneFocus=scene-1#audit')
   })
 
   it('builds audit team view share URLs with explicit team-view identity', () => {

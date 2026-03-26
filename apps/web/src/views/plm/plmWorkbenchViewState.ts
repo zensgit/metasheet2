@@ -78,6 +78,17 @@ export const PLM_WORKBENCH_QUERY_KEYS = [
 ] as const
 
 const PLM_WORKBENCH_QUERY_KEY_SET = new Set<string>(PLM_WORKBENCH_QUERY_KEYS)
+const PLM_WORKBENCH_PANEL_SCOPE_KEYS = [
+  'search',
+  'product',
+  'documents',
+  'approvals',
+  'cad',
+  'where-used',
+  'compare',
+  'substitutes',
+] as const
+const PLM_WORKBENCH_PANEL_SCOPE_KEY_SET = new Set<string>(PLM_WORKBENCH_PANEL_SCOPE_KEYS)
 
 function normalizeQueryValue(value: unknown): string {
   if (typeof value === 'string') return value.trim()
@@ -107,11 +118,34 @@ function stripPlmWorkbenchTeamViewIdentity(snapshot: Record<string, string>): Re
   return next
 }
 
+export function normalizePlmWorkbenchPanelScope(value: unknown): string | undefined {
+  const normalized = normalizeQueryValue(value)
+  if (!normalized) return undefined
+
+  const selected = new Set(
+    normalized
+      .split(',')
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry && entry !== 'all' && PLM_WORKBENCH_PANEL_SCOPE_KEY_SET.has(entry)),
+  )
+  if (!selected.size) return undefined
+
+  return PLM_WORKBENCH_PANEL_SCOPE_KEYS
+    .filter((entry) => selected.has(entry))
+    .join(',')
+}
+
 export function normalizePlmWorkbenchCollaborativeQuerySnapshot(value: unknown): Record<string, string> {
   const next = stripPlmWorkbenchTeamViewIdentity(normalizePlmWorkbenchQuerySnapshot(value))
   delete next.bomFilterPreset
   delete next.whereUsedFilterPreset
   delete next.approvalComment
+  const normalizedPanel = normalizePlmWorkbenchPanelScope(next.panel)
+  if (normalizedPanel) {
+    next.panel = normalizedPanel
+  } else {
+    delete next.panel
+  }
   return next
 }
 
