@@ -67,6 +67,7 @@ export const AppRouteNames = {
 
   // Attendance routes
   ATTENDANCE: 'attendance',
+  MULTITABLE: 'multitable',
 
   // User routes
   USER_PROFILE: 'user-profile',
@@ -132,6 +133,7 @@ export interface AppRouteParams {
   'approval-pending': Record<string, never>
   'approval-history': Record<string, never>
   'attendance': Record<string, never>
+  'multitable': { sheetId: string; viewId: string }
   'user-settings': Record<string, never>
   'user-management': Record<string, never>
   'permission-management': Record<string, never>
@@ -178,6 +180,15 @@ export interface AppRouteQuery {
   // Login redirect
   'login': {
     redirect?: string
+  }
+
+  // Multitable direct host route
+  'multitable': {
+    baseId?: string
+    recordId?: string
+    mode?: 'grid' | 'form' | 'kanban' | 'gallery' | 'calendar' | 'timeline'
+    embedded?: string
+    role?: 'owner' | 'editor' | 'commenter' | 'viewer'
   }
 
   // Default (no query params) - index signature for untyped routes
@@ -362,6 +373,7 @@ export const ROUTE_PATHS = {
 
   // Attendance
   ATTENDANCE: '/attendance',
+  MULTITABLE: '/multitable/:sheetId/:viewId',
 
   // User
   USER_PROFILE: '/profile/:id?',
