@@ -109,6 +109,10 @@ import {
   pickPlmTeamViewStateKeys,
 } from './plm/plmTeamViewStateMatch'
 import {
+  matchPlmTeamFilterPresetStateSnapshot,
+  pickPlmTeamFilterPresetStateKeys,
+} from './plm/plmTeamFilterPresetStateMatch'
+import {
   canActOnPlmApproval,
   getPlmApprovalApproverId,
   resolvePlmApprovalActorIds,
@@ -4150,6 +4154,12 @@ const {
   ),
 })
 
+const activeBomRoutePreset = computed(() => {
+  const presetId = bomTeamPresetQuery.value.trim()
+  if (!presetId) return null
+  return bomTeamPresets.value.find((entry) => entry.id === presetId) || null
+})
+
 const {
   teamPresetKey: whereUsedTeamPresetKey,
   teamPresetName: whereUsedTeamPresetName,
@@ -4225,6 +4235,12 @@ const {
     && whereUsedFilterField.value === 'all'
     && !whereUsedFilter.value.trim()
   ),
+})
+
+const activeWhereUsedRoutePreset = computed(() => {
+  const presetId = whereUsedTeamPresetQuery.value.trim()
+  if (!presetId) return null
+  return whereUsedTeamPresets.value.find((entry) => entry.id === presetId) || null
 })
 
 function applyBomTeamPreset() {
@@ -6501,6 +6517,64 @@ watch(
       approvalColumns: columns,
     })
   }
+)
+
+watch(
+  () => [
+    bomTeamPresetQuery.value,
+    activeBomRoutePreset.value?.id || '',
+    JSON.stringify({
+      field: bomFilterField.value,
+      value: bomFilter.value,
+      group: bomFilterPresetGroup.value,
+    }),
+  ],
+  ([presetId, activePresetId]) => {
+    if (!presetId || !activePresetId) return
+    const activePreset = activeBomRoutePreset.value
+    if (!activePreset) return
+    if (matchPlmTeamFilterPresetStateSnapshot(
+      pickPlmTeamFilterPresetStateKeys(activePreset.state, ['field', 'value', 'group']),
+      {
+        field: bomFilterField.value,
+        value: bomFilter.value,
+        group: bomFilterPresetGroup.value,
+      },
+    )) {
+      return
+    }
+    bomTeamPresetQuery.value = ''
+    scheduleQuerySync({ bomTeamPreset: undefined })
+  },
+)
+
+watch(
+  () => [
+    whereUsedTeamPresetQuery.value,
+    activeWhereUsedRoutePreset.value?.id || '',
+    JSON.stringify({
+      field: whereUsedFilterField.value,
+      value: whereUsedFilter.value,
+      group: whereUsedFilterPresetGroup.value,
+    }),
+  ],
+  ([presetId, activePresetId]) => {
+    if (!presetId || !activePresetId) return
+    const activePreset = activeWhereUsedRoutePreset.value
+    if (!activePreset) return
+    if (matchPlmTeamFilterPresetStateSnapshot(
+      pickPlmTeamFilterPresetStateKeys(activePreset.state, ['field', 'value', 'group']),
+      {
+        field: whereUsedFilterField.value,
+        value: whereUsedFilter.value,
+        group: whereUsedFilterPresetGroup.value,
+      },
+    )) {
+      return
+    }
+    whereUsedTeamPresetQuery.value = ''
+    scheduleQuerySync({ whereUsedTeamPreset: undefined })
+  },
 )
 
 watch(
