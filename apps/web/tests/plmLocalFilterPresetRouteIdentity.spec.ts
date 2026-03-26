@@ -6,6 +6,8 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
     expect(resolvePlmLocalFilterPresetRouteIdentity({
       routePresetKey: 'bom:shared',
       selectedPresetKey: 'bom:shared',
+      nameDraft: '共享 BOM',
+      groupDraft: '机械',
       activePreset: {
         key: 'bom:shared',
         label: '共享 BOM',
@@ -20,6 +22,8 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
     })).toEqual({
       nextRoutePresetKey: 'bom:shared',
       nextSelectedPresetKey: 'bom:shared',
+      nextNameDraft: '共享 BOM',
+      nextGroupDraft: '机械',
       shouldClear: false,
     })
   })
@@ -28,6 +32,8 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
     expect(resolvePlmLocalFilterPresetRouteIdentity({
       routePresetKey: 'bom:shared',
       selectedPresetKey: 'bom:shared',
+      nameDraft: '共享 BOM 草稿',
+      groupDraft: '机械草稿',
       activePreset: {
         key: 'bom:shared',
         label: '共享 BOM',
@@ -41,6 +47,8 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
     })).toEqual({
       nextRoutePresetKey: '',
       nextSelectedPresetKey: '',
+      nextNameDraft: '',
+      nextGroupDraft: '',
       shouldClear: true,
     })
   })
@@ -49,6 +57,8 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
     expect(resolvePlmLocalFilterPresetRouteIdentity({
       routePresetKey: 'bom:shared',
       selectedPresetKey: 'bom:pending',
+      nameDraft: '待应用 BOM',
+      groupDraft: '待应用分组',
       activePreset: {
         key: 'bom:shared',
         label: '共享 BOM',
@@ -62,6 +72,8 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
     })).toEqual({
       nextRoutePresetKey: '',
       nextSelectedPresetKey: 'bom:pending',
+      nextNameDraft: '待应用 BOM',
+      nextGroupDraft: '待应用分组',
       shouldClear: true,
     })
   })
@@ -70,6 +82,8 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
     expect(resolvePlmLocalFilterPresetRouteIdentity({
       routePresetKey: 'bom:shared',
       selectedPresetKey: 'bom:shared',
+      nameDraft: '共享 BOM 新版',
+      groupDraft: '导入分组',
       activePreset: {
         key: 'bom:shared',
         label: '共享 BOM',
@@ -84,6 +98,8 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
     })).toEqual({
       nextRoutePresetKey: '',
       nextSelectedPresetKey: 'bom:shared',
+      nextNameDraft: '共享 BOM 新版',
+      nextGroupDraft: '导入分组',
       shouldClear: true,
     })
   })

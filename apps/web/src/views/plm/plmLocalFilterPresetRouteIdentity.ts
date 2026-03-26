@@ -7,6 +7,8 @@ import type { FilterPreset } from './plmPanelModels'
 type PlmLocalFilterPresetRouteIdentityInput = {
   routePresetKey: string
   selectedPresetKey: string
+  nameDraft?: string
+  groupDraft?: string
   activePreset: FilterPreset | null
   currentState: {
     field: string
@@ -26,6 +28,8 @@ export function resolvePlmLocalFilterPresetRouteIdentity(
     return {
       nextRoutePresetKey: routePresetKey,
       nextSelectedPresetKey: selectedPresetKey,
+      nextNameDraft: input.nameDraft || '',
+      nextGroupDraft: input.groupDraft || '',
       shouldClear: false,
     }
   }
@@ -37,16 +41,23 @@ export function resolvePlmLocalFilterPresetRouteIdentity(
     return {
       nextRoutePresetKey: routePresetKey,
       nextSelectedPresetKey: selectedPresetKey,
+      nextNameDraft: input.nameDraft || '',
+      nextGroupDraft: input.groupDraft || '',
       shouldClear: false,
     }
   }
 
+  const nextSelectedPresetKey =
+    input.preserveSelectedPresetKeyOnClear
+      ? selectedPresetKey
+      : selectedPresetKey === routePresetKey ? '' : selectedPresetKey
+  const shouldClearDrafts = !nextSelectedPresetKey.trim()
+
   return {
     nextRoutePresetKey: '',
-    nextSelectedPresetKey:
-      input.preserveSelectedPresetKeyOnClear
-        ? selectedPresetKey
-        : selectedPresetKey === routePresetKey ? '' : selectedPresetKey,
+    nextSelectedPresetKey,
+    nextNameDraft: shouldClearDrafts ? '' : input.nameDraft || '',
+    nextGroupDraft: shouldClearDrafts ? '' : input.groupDraft || '',
     shouldClear: true,
   }
 }

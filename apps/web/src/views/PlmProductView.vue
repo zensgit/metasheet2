@@ -4060,11 +4060,15 @@ function syncWhereUsedFilterPresetQuery(value?: string) {
 
 function clearBomLocalFilterPresetIdentity() {
   bomFilterPresetKey.value = ''
+  bomFilterPresetName.value = ''
+  bomFilterPresetGroup.value = ''
   syncBomFilterPresetQuery(undefined)
 }
 
 function clearWhereUsedLocalFilterPresetIdentity() {
   whereUsedFilterPresetKey.value = ''
+  whereUsedFilterPresetName.value = ''
+  whereUsedFilterPresetGroup.value = ''
   syncWhereUsedFilterPresetQuery(undefined)
 }
 
@@ -6914,6 +6918,8 @@ watch(
     const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
       routePresetKey,
       selectedPresetKey,
+      nameDraft: bomFilterPresetName.value,
+      groupDraft: bomFilterPresetGroup.value,
       activePreset: activeBomLocalRoutePreset.value,
       currentState: {
         field: bomFilterField.value,
@@ -6924,6 +6930,8 @@ watch(
       return
     }
     bomFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+    bomFilterPresetName.value = nextIdentity.nextNameDraft
+    bomFilterPresetGroup.value = nextIdentity.nextGroupDraft
     syncBomFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
   },
 )
@@ -6943,6 +6951,8 @@ watch(
     const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
       routePresetKey,
       selectedPresetKey,
+      nameDraft: whereUsedFilterPresetName.value,
+      groupDraft: whereUsedFilterPresetGroup.value,
       activePreset: activeWhereUsedLocalRoutePreset.value,
       currentState: {
         field: whereUsedFilterField.value,
@@ -6953,6 +6963,8 @@ watch(
       return
     }
     whereUsedFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+    whereUsedFilterPresetName.value = nextIdentity.nextNameDraft
+    whereUsedFilterPresetGroup.value = nextIdentity.nextGroupDraft
     syncWhereUsedFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
   },
 )
