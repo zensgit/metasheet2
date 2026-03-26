@@ -112,6 +112,7 @@ import {
   matchPlmTeamFilterPresetStateSnapshot,
   pickPlmTeamFilterPresetStateKeys,
 } from './plm/plmTeamFilterPresetStateMatch'
+import { resolvePlmLocalFilterPresetRouteIdentity } from './plm/plmLocalFilterPresetRouteIdentity'
 import {
   canActOnPlmApproval,
   getPlmApprovalApproverId,
@@ -4160,6 +4161,12 @@ const activeBomRoutePreset = computed(() => {
   return bomTeamPresets.value.find((entry) => entry.id === presetId) || null
 })
 
+const activeBomLocalRoutePreset = computed(() => {
+  const presetKey = bomFilterPresetQuery.value.trim()
+  if (!presetKey) return null
+  return bomFilterPresets.value.find((entry) => entry.key === presetKey) || null
+})
+
 const {
   teamPresetKey: whereUsedTeamPresetKey,
   teamPresetName: whereUsedTeamPresetName,
@@ -4241,6 +4248,12 @@ const activeWhereUsedRoutePreset = computed(() => {
   const presetId = whereUsedTeamPresetQuery.value.trim()
   if (!presetId) return null
   return whereUsedTeamPresets.value.find((entry) => entry.id === presetId) || null
+})
+
+const activeWhereUsedLocalRoutePreset = computed(() => {
+  const presetKey = whereUsedFilterPresetQuery.value.trim()
+  if (!presetKey) return null
+  return whereUsedFilterPresets.value.find((entry) => entry.key === presetKey) || null
 })
 
 function applyBomTeamPreset() {
@@ -6517,6 +6530,64 @@ watch(
       approvalColumns: columns,
     })
   }
+)
+
+watch(
+  () => [
+    bomFilterPresetQuery.value,
+    bomFilterPresetKey.value,
+    activeBomLocalRoutePreset.value?.key || '',
+    JSON.stringify({
+      field: bomFilterField.value,
+      value: bomFilter.value,
+    }),
+  ],
+  ([routePresetKey, selectedPresetKey, activePresetKey]) => {
+    if (!routePresetKey || !activePresetKey) return
+    const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+      routePresetKey,
+      selectedPresetKey,
+      activePreset: activeBomLocalRoutePreset.value,
+      currentState: {
+        field: bomFilterField.value,
+        value: bomFilter.value,
+      },
+    })
+    if (!nextIdentity.shouldClear) {
+      return
+    }
+    bomFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+    syncBomFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
+  },
+)
+
+watch(
+  () => [
+    whereUsedFilterPresetQuery.value,
+    whereUsedFilterPresetKey.value,
+    activeWhereUsedLocalRoutePreset.value?.key || '',
+    JSON.stringify({
+      field: whereUsedFilterField.value,
+      value: whereUsedFilter.value,
+    }),
+  ],
+  ([routePresetKey, selectedPresetKey, activePresetKey]) => {
+    if (!routePresetKey || !activePresetKey) return
+    const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+      routePresetKey,
+      selectedPresetKey,
+      activePreset: activeWhereUsedLocalRoutePreset.value,
+      currentState: {
+        field: whereUsedFilterField.value,
+        value: whereUsedFilter.value,
+      },
+    })
+    if (!nextIdentity.shouldClear) {
+      return
+    }
+    whereUsedFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+    syncWhereUsedFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
+  },
 )
 
 watch(
