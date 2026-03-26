@@ -36,6 +36,49 @@ async function exists(filePath) {
   }
 }
 
+async function readOptionalJsonFile(filePath) {
+  if (!(await exists(filePath))) return null
+  return JSON.parse(await fs.readFile(filePath, 'utf8'))
+}
+
+function summarizeEmbedEvidence(evidence) {
+  if (!evidence || typeof evidence !== 'object') {
+    return {
+      available: false,
+      ok: true,
+      requiredWhenPresent: [],
+      observedChecks: [],
+      missingChecks: [],
+    }
+  }
+  return {
+    available: Boolean(evidence.available),
+    ok: Boolean(evidence.ok),
+    requiredWhenPresent: Array.isArray(evidence.requiredWhenPresent) ? evidence.requiredWhenPresent : [],
+    observedChecks: Array.isArray(evidence.observedChecks) ? evidence.observedChecks : [],
+    missingChecks: Array.isArray(evidence.missingChecks) ? evidence.missingChecks : [],
+  }
+}
+
+function embedEvidenceSection(title, evidence) {
+  return [
+    title,
+    '',
+    `- Available in readiness: \`${evidence.available ? 'true' : 'false'}\``,
+    `- Status: **${evidence.ok ? 'PASS' : 'FAIL'}**`,
+    evidence.requiredWhenPresent.length
+      ? `- Required when present: ${evidence.requiredWhenPresent.map((item) => `\`${item}\``).join(', ')}`
+      : '- Required when present: none',
+    evidence.observedChecks.length
+      ? `- Observed checks: ${evidence.observedChecks.map((item) => `\`${item}\``).join(', ')}`
+      : '- Observed checks: none',
+    evidence.missingChecks.length
+      ? `- Missing checks: ${evidence.missingChecks.map((item) => `\`${item}\``).join(', ')}`
+      : '- Missing checks: none',
+    '',
+  ]
+}
+
 async function resolveLatestReadinessRoot() {
   if (sourceRoot) return path.resolve(sourceRoot)
   const entries = await fs.readdir(ROOT, { withFileTypes: true })
@@ -281,6 +324,15 @@ async function main() {
     '',
   ].join('\n')
 
+  const readinessPayload = await readOptionalJsonFile(readinessJson)
+  const embedHostProtocol = summarizeEmbedEvidence(readinessPayload?.embedHostProtocol)
+  const embedHostNavigationProtection = summarizeEmbedEvidence(readinessPayload?.embedHostNavigationProtection)
+  const embedHostAcceptance = {
+    ok: embedHostProtocol.ok && embedHostNavigationProtection.ok,
+    protocol: embedHostProtocol,
+    navigationProtection: embedHostNavigationProtection,
+  }
+
   const copied = {
     readinessMd: await safeCopy(readinessMd, path.join(handoffRoot, 'readiness.md')),
     readinessJson: await safeCopy(readinessJson, path.join(handoffRoot, 'readiness.json')),
@@ -475,6 +527,9 @@ async function main() {
       preflightReportJson: defaultPreflightReportJson,
       preflightReportMd: defaultPreflightReportMd,
     },
+    embedHostAcceptance,
+    embedHostProtocol,
+    embedHostNavigationProtection,
     signoffBlockers: [
       `Do not close checkpoint, expansion, UAT, or customer sign-off until ${defaultPreflightReportJson} and ${defaultPreflightReportMd} are returned.`,
     ],
@@ -538,6 +593,8 @@ async function main() {
         readinessMd: copied.readinessMd,
         readinessJson: copied.readinessJson,
         readinessGateReport: copied.readinessGateReport,
+        embedHostProtocol,
+        embedHostNavigationProtection,
       },
     },
     recommendedTemplates: {
@@ -575,6 +632,13 @@ async function main() {
     `- Repair helper path: \`${manifest.signoffRecoveryPath.step2RepairHelper}\``,
     `- Return both files: \`${defaultPreflightReportJson}\`, \`${defaultPreflightReportMd}\``,
     '',
+    '## Embed Host Acceptance',
+    '',
+    `- Overall embed-host acceptance: **${embedHostAcceptance.ok ? 'PASS' : 'FAIL'}**`,
+    '- Treat this section as required whenever smoke includes any `ui.embed-host.*` checks.',
+    '',
+    ...embedEvidenceSection('### Embed Host Protocol Evidence', embedHostProtocol),
+    ...embedEvidenceSection('### Embed Host Navigation Protection', embedHostNavigationProtection),
     '## Included Files',
     '',
     `- readiness.md: ${copied.readinessMd ? '`present`' : '`missing`'}`,
