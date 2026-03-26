@@ -712,18 +712,18 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     const preset = selectedTeamPreset.value
     if (!preset) {
       options.setMessage(`请选择${options.label}团队预设。`, true)
-      return
+      return null
     }
     if (blockPendingApplyManagementAction()) {
-      return
+      return null
     }
     if (!canClearTeamPresetDefault.value) {
       if (preset.isArchived) {
         options.setMessage(`已归档的${options.label}团队预设无需取消默认。`, true)
-        return
+        return null
       }
       options.setMessage(`当前${options.label}团队预设不可取消默认。`, true)
-      return
+      return null
     }
 
     teamPresetsLoading.value = true
@@ -737,9 +737,11 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
         lastAutoAppliedDefaultId.value = ''
       }
       options.setMessage(`已取消${options.label}默认团队预设。`)
+      return saved
     } catch (error) {
       teamPresetsError.value = getErrorMessage(error, `取消${options.label}默认团队预设失败`)
       options.setMessage(teamPresetsError.value, true)
+      return null
     } finally {
       teamPresetsLoading.value = false
     }

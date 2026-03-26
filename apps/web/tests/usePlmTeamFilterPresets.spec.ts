@@ -592,10 +592,11 @@ describe('usePlmTeamFilterPresets', () => {
     expect(syncRequestedPresetId).toHaveBeenLastCalledWith('preset-saved')
     expect(trackedApply).toHaveReturnedWith('preset-saved')
 
-    await model.clearTeamPresetDefault()
+    const clearedPreset = await model.clearTeamPresetDefault()
 
     expect(syncRequestedPresetId).toHaveBeenLastCalledWith('preset-saved')
     expect(trackedApply).toHaveReturnedWith('preset-saved')
+    expect(clearedPreset?.id).toBe('preset-saved')
   })
 
   it('archives the current team preset by clearing requested identity and restores it back into the URL identity', async () => {
