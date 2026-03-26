@@ -17,6 +17,16 @@ type PlmLocalFilterPresetRouteIdentityInput = {
   preserveSelectedPresetKeyOnClear?: boolean
 }
 
+export function buildPlmLocalFilterPresetRouteOwnerWatchKey(
+  preset: Pick<FilterPreset, 'key' | 'field' | 'value'> | null,
+) {
+  if (!preset) return ''
+  return JSON.stringify({
+    key: preset.key.trim(),
+    state: pickPlmTeamFilterPresetRouteOwnerState(preset),
+  })
+}
+
 export function resolvePlmLocalFilterPresetRouteIdentity(
   input: PlmLocalFilterPresetRouteIdentityInput,
 ) {

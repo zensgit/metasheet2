@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { resolvePlmLocalFilterPresetRouteIdentity } from '../src/views/plm/plmLocalFilterPresetRouteIdentity'
+import {
+  buildPlmLocalFilterPresetRouteOwnerWatchKey,
+  resolvePlmLocalFilterPresetRouteIdentity,
+} from '../src/views/plm/plmLocalFilterPresetRouteIdentity'
 
 describe('plmLocalFilterPresetRouteIdentity', () => {
   it('keeps the route owner when the live filter still matches the preset snapshot', () => {
@@ -102,5 +105,19 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
       nextGroupDraft: '导入分组',
       shouldClear: true,
     })
+  })
+
+  it('changes the route-owner watch key when an imported preset updates the same key in place', () => {
+    expect(buildPlmLocalFilterPresetRouteOwnerWatchKey({
+      key: 'bom:shared',
+      label: '共享 BOM',
+      field: 'path',
+      value: 'root/a',
+    })).not.toBe(buildPlmLocalFilterPresetRouteOwnerWatchKey({
+      key: 'bom:shared',
+      label: '共享 BOM',
+      field: 'path',
+      value: 'root/b',
+    }))
   })
 })

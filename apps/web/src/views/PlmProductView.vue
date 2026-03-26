@@ -127,7 +127,10 @@ import {
   pickPlmTeamFilterPresetRouteOwnerState,
 } from './plm/plmTeamFilterPresetStateMatch'
 import { resolvePlmHydratedTeamPresetOwnerTakeover } from './plm/plmHydratedTeamPresetOwnerTakeover'
-import { resolvePlmLocalFilterPresetRouteIdentity } from './plm/plmLocalFilterPresetRouteIdentity'
+import {
+  buildPlmLocalFilterPresetRouteOwnerWatchKey,
+  resolvePlmLocalFilterPresetRouteIdentity,
+} from './plm/plmLocalFilterPresetRouteIdentity'
 import { resolvePlmHydratedTeamViewOwnerTakeover } from './plm/plmHydratedTeamViewOwnerTakeover'
 import {
   runPlmLocalPresetOwnershipAction,
@@ -6907,7 +6910,7 @@ watch(
   () => [
     bomFilterPresetQuery.value,
     bomFilterPresetKey.value,
-    activeBomLocalRoutePreset.value?.key || '',
+    buildPlmLocalFilterPresetRouteOwnerWatchKey(activeBomLocalRoutePreset.value),
     JSON.stringify({
       field: bomFilterField.value,
       value: bomFilter.value,
@@ -6940,7 +6943,7 @@ watch(
   () => [
     whereUsedFilterPresetQuery.value,
     whereUsedFilterPresetKey.value,
-    activeWhereUsedLocalRoutePreset.value?.key || '',
+    buildPlmLocalFilterPresetRouteOwnerWatchKey(activeWhereUsedLocalRoutePreset.value),
     JSON.stringify({
       field: whereUsedFilterField.value,
       value: whereUsedFilter.value,
