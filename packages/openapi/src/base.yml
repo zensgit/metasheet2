@@ -1345,6 +1345,9 @@ components:
           type: array
           items:
             type: string
+        config:
+          type: object
+          additionalProperties: true
     MultitableField:
       type: object
       properties:
@@ -1357,6 +1360,18 @@ components:
         property:
           type: object
           additionalProperties: true
+        options:
+          type: array
+          items:
+            type: object
+            properties:
+              value:
+                type: string
+              color:
+                type: string
+                nullable: true
+            required:
+              - value
         order:
           type: integer
     MultitableRecord:
@@ -1482,6 +1497,16 @@ components:
       type: object
       additionalProperties:
         $ref: '#/components/schemas/MultitableLinkSummaryMap'
+    MultitableAttachmentSummaryMap:
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          $ref: '#/components/schemas/MultitableAttachment'
+    MultitableViewAttachmentSummaries:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
     MultitablePage:
       type: object
       properties:
@@ -1564,6 +1589,35 @@ components:
             $ref: '#/components/schemas/MultitableView'
         capabilities:
           $ref: '#/components/schemas/MultitableCapabilities'
+    MultitableViewData:
+      type: object
+      properties:
+        id:
+          type: string
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableField'
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableRecord'
+        linkSummaries:
+          $ref: '#/components/schemas/MultitableViewLinkSummaries'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableViewAttachmentSummaries'
+        view:
+          allOf:
+            - $ref: '#/components/schemas/MultitableView'
+          nullable: true
+        meta:
+          $ref: '#/components/schemas/MultitableViewMeta'
+        page:
+          $ref: '#/components/schemas/MultitablePage'
+      required:
+        - id
+        - fields
+        - rows
     MultitableRecordContext:
       type: object
       properties:
@@ -1585,6 +1639,8 @@ components:
           $ref: '#/components/schemas/MultitableCommentsScope'
         linkSummaries:
           $ref: '#/components/schemas/MultitableLinkSummaryMap'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
       required:
         - sheet
         - fields
@@ -1622,6 +1678,8 @@ components:
           allOf:
             - $ref: '#/components/schemas/MultitableCommentsScope'
           nullable: true
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
       required:
         - mode
         - readOnly
@@ -1629,6 +1687,66 @@ components:
         - sheet
         - fields
         - capabilities
+    MultitablePersonFieldPrepareResult:
+      type: object
+      properties:
+        targetSheet:
+          $ref: '#/components/schemas/MultitableSheet'
+        fieldProperty:
+          type: object
+          additionalProperties: true
+      required:
+        - targetSheet
+        - fieldProperty
+    MultitableRecordMutationResult:
+      type: object
+      properties:
+        record:
+          $ref: '#/components/schemas/MultitableRecord'
+        commentsScope:
+          $ref: '#/components/schemas/MultitableCommentsScope'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
+      required:
+        - record
+        - commentsScope
+    MultitableFormSubmitResult:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [create, update]
+        record:
+          $ref: '#/components/schemas/MultitableRecord'
+        commentsScope:
+          $ref: '#/components/schemas/MultitableCommentsScope'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
+      required:
+        - mode
+        - record
+        - commentsScope
+    MultitablePatchResult:
+      type: object
+      properties:
+        updated:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableRecordVersion'
+        records:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableComputedRecord'
+        linkSummaries:
+          $ref: '#/components/schemas/MultitableViewLinkSummaries'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableViewAttachmentSummaries'
+        relatedRecords:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableRelatedRecord'
+      required:
+        - updated
   responses:
     Unauthorized:
       description: Unauthorized - Missing or invalid JWT token

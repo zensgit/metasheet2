@@ -1995,6 +1995,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": true
           }
         }
       },
@@ -2013,6 +2017,24 @@
           "property": {
             "type": "object",
             "additionalProperties": true
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string"
+                },
+                "color": {
+                  "type": "string",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "value"
+              ]
+            }
           },
           "order": {
             "type": "integer"
@@ -2197,6 +2219,21 @@
           "$ref": "#/components/schemas/MultitableLinkSummaryMap"
         }
       },
+      "MultitableAttachmentSummaryMap": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/MultitableAttachment"
+          }
+        }
+      },
+      "MultitableViewAttachmentSummaries": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/MultitableAttachmentSummaryMap"
+        }
+      },
       "MultitablePage": {
         "type": "object",
         "properties": {
@@ -2321,6 +2358,51 @@
           }
         }
       },
+      "MultitableViewData": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MultitableField"
+            }
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MultitableRecord"
+            }
+          },
+          "linkSummaries": {
+            "$ref": "#/components/schemas/MultitableViewLinkSummaries"
+          },
+          "attachmentSummaries": {
+            "$ref": "#/components/schemas/MultitableViewAttachmentSummaries"
+          },
+          "view": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MultitableView"
+              }
+            ],
+            "nullable": true
+          },
+          "meta": {
+            "$ref": "#/components/schemas/MultitableViewMeta"
+          },
+          "page": {
+            "$ref": "#/components/schemas/MultitablePage"
+          }
+        },
+        "required": [
+          "id",
+          "fields",
+          "rows"
+        ]
+      },
       "MultitableRecordContext": {
         "type": "object",
         "properties": {
@@ -2352,6 +2434,9 @@
           },
           "linkSummaries": {
             "$ref": "#/components/schemas/MultitableLinkSummaryMap"
+          },
+          "attachmentSummaries": {
+            "$ref": "#/components/schemas/MultitableAttachmentSummaryMap"
           }
         },
         "required": [
@@ -2413,6 +2498,9 @@
               }
             ],
             "nullable": true
+          },
+          "attachmentSummaries": {
+            "$ref": "#/components/schemas/MultitableAttachmentSummaryMap"
           }
         },
         "required": [
@@ -2422,6 +2510,98 @@
           "sheet",
           "fields",
           "capabilities"
+        ]
+      },
+      "MultitablePersonFieldPrepareResult": {
+        "type": "object",
+        "properties": {
+          "targetSheet": {
+            "$ref": "#/components/schemas/MultitableSheet"
+          },
+          "fieldProperty": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "targetSheet",
+          "fieldProperty"
+        ]
+      },
+      "MultitableRecordMutationResult": {
+        "type": "object",
+        "properties": {
+          "record": {
+            "$ref": "#/components/schemas/MultitableRecord"
+          },
+          "commentsScope": {
+            "$ref": "#/components/schemas/MultitableCommentsScope"
+          },
+          "attachmentSummaries": {
+            "$ref": "#/components/schemas/MultitableAttachmentSummaryMap"
+          }
+        },
+        "required": [
+          "record",
+          "commentsScope"
+        ]
+      },
+      "MultitableFormSubmitResult": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "create",
+              "update"
+            ]
+          },
+          "record": {
+            "$ref": "#/components/schemas/MultitableRecord"
+          },
+          "commentsScope": {
+            "$ref": "#/components/schemas/MultitableCommentsScope"
+          },
+          "attachmentSummaries": {
+            "$ref": "#/components/schemas/MultitableAttachmentSummaryMap"
+          }
+        },
+        "required": [
+          "mode",
+          "record",
+          "commentsScope"
+        ]
+      },
+      "MultitablePatchResult": {
+        "type": "object",
+        "properties": {
+          "updated": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MultitableRecordVersion"
+            }
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MultitableComputedRecord"
+            }
+          },
+          "linkSummaries": {
+            "$ref": "#/components/schemas/MultitableViewLinkSummaries"
+          },
+          "attachmentSummaries": {
+            "$ref": "#/components/schemas/MultitableViewAttachmentSummaries"
+          },
+          "relatedRecords": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MultitableRelatedRecord"
+            }
+          }
+        },
+        "required": [
+          "updated"
         ]
       }
     },
@@ -12214,14 +12394,16 @@
             "name": "sheetId",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "When `viewId` is omitted, provide `sheetId` to resolve the active sheet."
           },
           {
             "in": "query",
             "name": "viewId",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Alternative to `sheetId` for resolving the active sheet and view."
           }
         ],
         "responses": {
@@ -12365,6 +12547,66 @@
                           ]
                         }
                       }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/multitable/sheets/{sheetId}": {
+      "delete": {
+        "summary": "Delete a multitable sheet",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sheetId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "deleted": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "deleted"
+                      ]
                     }
                   }
                 }
@@ -12800,6 +13042,10 @@
                     "items": {
                       "type": "string"
                     }
+                  },
+                  "config": {
+                    "type": "object",
+                    "additionalProperties": true
                   }
                 },
                 "required": [
@@ -12900,6 +13146,10 @@
                     "items": {
                       "type": "string"
                     }
+                  },
+                  "config": {
+                    "type": "object",
+                    "additionalProperties": true
                   }
                 }
               }
@@ -13020,14 +13270,16 @@
             "name": "sheetId",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Provide `sheetId` when `viewId` is omitted."
           },
           {
             "in": "query",
             "name": "viewId",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Alternative to `sheetId`; at least one of `sheetId` or `viewId` should be provided."
           },
           {
             "in": "query",
@@ -13081,46 +13333,67 @@
                       "type": "boolean"
                     },
                     "data": {
-                      "type": "object",
-                      "properties": {
-                        "id": {
-                          "type": "string"
-                        },
-                        "fields": {
-                          "type": "array",
-                          "items": {
-                            "$ref": "#/components/schemas/MultitableField"
-                          }
-                        },
-                        "rows": {
-                          "type": "array",
-                          "items": {
-                            "$ref": "#/components/schemas/MultitableRecord"
-                          }
-                        },
-                        "linkSummaries": {
-                          "$ref": "#/components/schemas/MultitableViewLinkSummaries"
-                        },
-                        "view": {
-                          "allOf": [
-                            {
-                              "$ref": "#/components/schemas/MultitableView"
-                            }
-                          ],
-                          "nullable": true
-                        },
-                        "meta": {
-                          "$ref": "#/components/schemas/MultitableViewMeta"
-                        },
-                        "page": {
-                          "$ref": "#/components/schemas/MultitablePage"
-                        }
-                      },
-                      "required": [
-                        "id",
-                        "fields",
-                        "rows"
-                      ]
+                      "$ref": "#/components/schemas/MultitableViewData"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ValidationError"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/multitable/person-fields/prepare": {
+      "post": {
+        "summary": "Prepare a multitable person field preset",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "sheetId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "sheetId"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/MultitablePersonFieldPrepareResult"
                     }
                   }
                 }
@@ -13354,14 +13627,16 @@
             "name": "sheetId",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Provide `sheetId` when `viewId` is omitted."
           },
           {
             "in": "query",
             "name": "viewId",
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Alternative to `sheetId`; at least one of `sheetId` or `viewId` should be provided."
           },
           {
             "in": "query",
@@ -13467,6 +13742,159 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "patch": {
+        "summary": "Patch a single multitable record",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recordId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "sheetId": {
+                    "type": "string"
+                  },
+                  "viewId": {
+                    "type": "string"
+                  },
+                  "expectedVersion": {
+                    "type": "integer"
+                  },
+                  "data": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                },
+                "anyOf": [
+                  {
+                    "required": [
+                      "sheetId"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "viewId"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/MultitableRecordMutationResult"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "type": "string"
+                            },
+                            "message": {
+                              "type": "string"
+                            },
+                            "fieldErrors": {
+                              "type": "object",
+                              "additionalProperties": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "Version conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorResponse"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "object",
+                          "properties": {
+                            "code": {
+                              "type": "string"
+                            },
+                            "message": {
+                              "type": "string"
+                            },
+                            "serverVersion": {
+                              "type": "integer"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
           }
         }
       },
@@ -13621,27 +14049,7 @@
                       "type": "boolean"
                     },
                     "data": {
-                      "type": "object",
-                      "properties": {
-                        "mode": {
-                          "type": "string",
-                          "enum": [
-                            "create",
-                            "update"
-                          ]
-                        },
-                        "record": {
-                          "$ref": "#/components/schemas/MultitableRecord"
-                        },
-                        "commentsScope": {
-                          "$ref": "#/components/schemas/MultitableCommentsScope"
-                        }
-                      },
-                      "required": [
-                        "mode",
-                        "record",
-                        "commentsScope"
-                      ]
+                      "$ref": "#/components/schemas/MultitableFormSubmitResult"
                     }
                   }
                 }
@@ -13972,7 +14380,19 @@
                     "type": "object",
                     "additionalProperties": true
                   }
-                }
+                },
+                "anyOf": [
+                  {
+                    "required": [
+                      "sheetId"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "viewId"
+                    ]
+                  }
+                ]
               }
             }
           }
@@ -14066,6 +14486,18 @@
                     "minItems": 1
                   }
                 },
+                "anyOf": [
+                  {
+                    "required": [
+                      "sheetId"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "viewId"
+                    ]
+                  }
+                ],
                 "required": [
                   "changes"
                 ]
@@ -14085,33 +14517,7 @@
                       "type": "boolean"
                     },
                     "data": {
-                      "type": "object",
-                      "properties": {
-                        "updated": {
-                          "type": "array",
-                          "items": {
-                            "$ref": "#/components/schemas/MultitableRecordVersion"
-                          }
-                        },
-                        "records": {
-                          "type": "array",
-                          "items": {
-                            "$ref": "#/components/schemas/MultitableComputedRecord"
-                          }
-                        },
-                        "linkSummaries": {
-                          "$ref": "#/components/schemas/MultitableViewLinkSummaries"
-                        },
-                        "relatedRecords": {
-                          "type": "array",
-                          "items": {
-                            "$ref": "#/components/schemas/MultitableRelatedRecord"
-                          }
-                        }
-                      },
-                      "required": [
-                        "updated"
-                      ]
+                      "$ref": "#/components/schemas/MultitablePatchResult"
                     }
                   }
                 }

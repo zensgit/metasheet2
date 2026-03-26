@@ -44,6 +44,7 @@
     "verify:multitable-pilot:ready:local": "bash scripts/ops/multitable-pilot-ready-local.sh",
     "verify:multitable-pilot:ready:local:release-bound": "bash scripts/ops/multitable-pilot-ready-release-bound.sh",
     "verify:multitable-pilot:release-gate": "bash scripts/ops/multitable-pilot-release-gate.sh",
+    "verify:multitable-openapi:parity": "pnpm exec tsx packages/openapi/tools/build.ts && node --test scripts/ops/multitable-openapi-parity.test.mjs",
     "prepare:multitable-pilot:handoff": "node scripts/ops/multitable-pilot-handoff.mjs",
     "prepare:multitable-pilot:handoff:release-bound": "bash scripts/ops/multitable-pilot-handoff-release-bound.sh",
     "prepare:multitable-pilot:release-bound": "bash scripts/ops/multitable-pilot-release-bound.sh",
