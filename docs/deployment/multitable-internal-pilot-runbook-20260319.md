@@ -206,6 +206,14 @@ Embed host smoke evidence:
   - `ui.embed-host.navigate.applied`
   - `ui.embed-host.navigate.explicit-request-id`
   - `ui.embed-host.state-query.final`
+- the expected host draft-protection evidence is:
+  - `ui.embed-host.form-ready`
+  - `ui.embed-host.form-draft`
+  - `ui.embed-host.navigate.blocked-dialog`
+  - `ui.embed-host.navigate.blocked`
+  - `ui.embed-host.navigate.confirm-dialog`
+  - `ui.embed-host.navigate.confirmed`
+  - `api.embed-host.discard-unsaved-form-draft`
 
 ## Pilot Entry Checklist
 
@@ -229,7 +237,7 @@ Do not ask the pilot team to assemble these URLs manually.
 7. If this pilot handoff is tied to a concrete on-prem package, regenerate readiness or handoff with `ONPREM_GATE_STAMP=<gate-stamp>` or `ONPREM_GATE_REPORT_JSON=<gate-report>`
 8. Confirm profile was run at `ROW_COUNT=2000`
 9. Confirm smoke report includes import retry, people manual-fix, attachment, person preset, comments, and conflict retry
-10. If smoke includes any `ui.embed-host.*` checks, confirm `readiness.md` shows `Embed Host Protocol Evidence` as `PASS`
+10. If smoke includes any `ui.embed-host.*` checks, confirm `readiness.md` shows both `Embed Host Protocol Evidence` and `Embed Host Navigation Protection` as `PASS`
 11. Confirm no local-only flags are required for the target environment, except the documented dev-token `RBAC_TOKEN_TRUST=true` case
 12. Give the pilot team the feedback template:
 

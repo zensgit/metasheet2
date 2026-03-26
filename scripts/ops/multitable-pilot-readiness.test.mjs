@@ -43,6 +43,16 @@ const embedHostProtocolChecks = [
   'ui.embed-host.state-query.final',
 ]
 
+const embedHostNavigationProtectionChecks = [
+  'ui.embed-host.form-ready',
+  'ui.embed-host.form-draft',
+  'ui.embed-host.navigate.blocked-dialog',
+  'ui.embed-host.navigate.blocked',
+  'ui.embed-host.navigate.confirm-dialog',
+  'ui.embed-host.navigate.confirmed',
+  'api.embed-host.discard-unsaved-form-draft',
+]
+
 function writeFixtureReport(tmpRoot) {
   const smokeReportPath = path.join(tmpRoot, 'smoke.json')
   const profileReportPath = path.join(tmpRoot, 'profile.json')
@@ -187,4 +197,36 @@ test('multitable pilot readiness surfaces embed-host protocol evidence and fails
   assert.equal(readiness.ok, false)
   assert.equal(readiness.embedHostProtocol.available, true)
   assert.deepEqual(readiness.embedHostProtocol.missingChecks, ['ui.embed-host.state-query.final'])
+})
+
+test('multitable pilot readiness surfaces embed-host navigation protection evidence and fails if partial evidence is present', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'multitable-readiness-embed-host-blocking-'))
+  const fixture = writeFixtureReport(tmpRoot)
+  const smoke = JSON.parse(fs.readFileSync(fixture.smokeReportPath, 'utf8'))
+  smoke.checks.push(
+    ...embedHostNavigationProtectionChecks
+      .filter((name) => name !== 'api.embed-host.discard-unsaved-form-draft')
+      .map((name) => ({ name, ok: true })),
+  )
+  fs.writeFileSync(fixture.smokeReportPath, JSON.stringify(smoke, null, 2))
+
+  assert.throws(() => {
+    execFileSync('node', ['scripts/ops/multitable-pilot-readiness.mjs'], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        SMOKE_REPORT_JSON: fixture.smokeReportPath,
+        PROFILE_REPORT_JSON: fixture.profileReportPath,
+        READINESS_MD: fixture.readinessMdPath,
+        READINESS_JSON: fixture.readinessJsonPath,
+        REQUIRE_GATE_REPORT: 'false',
+      },
+      stdio: 'pipe',
+    })
+  })
+
+  const readiness = JSON.parse(fs.readFileSync(fixture.readinessJsonPath, 'utf8'))
+  assert.equal(readiness.ok, false)
+  assert.equal(readiness.embedHostNavigationProtection.available, true)
+  assert.deepEqual(readiness.embedHostNavigationProtection.missingChecks, ['api.embed-host.discard-unsaved-form-draft'])
 })

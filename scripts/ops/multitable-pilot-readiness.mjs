@@ -130,6 +130,31 @@ function summarizeEmbedHostProtocol(report) {
   }
 }
 
+function summarizeEmbedHostNavigationProtection(report) {
+  const checks = Array.isArray(report?.checks) ? report.checks : []
+  const protectionChecks = [
+    'ui.embed-host.form-ready',
+    'ui.embed-host.form-draft',
+    'ui.embed-host.navigate.blocked-dialog',
+    'ui.embed-host.navigate.blocked',
+    'ui.embed-host.navigate.confirm-dialog',
+    'ui.embed-host.navigate.confirmed',
+    'api.embed-host.discard-unsaved-form-draft',
+  ]
+  const availableChecks = protectionChecks.filter((name) => checks.some((item) => item.name === name))
+  const available = availableChecks.length > 0
+  const missingChecks = available
+    ? protectionChecks.filter((name) => !checks.some((item) => item.name === name && item.ok))
+    : []
+  return {
+    available,
+    ok: !available || missingChecks.length === 0,
+    requiredWhenPresent: protectionChecks,
+    observedChecks: availableChecks,
+    missingChecks,
+  }
+}
+
 function summarizeImportDraftRecovery(report) {
   const checks = Array.isArray(report?.checks) ? report.checks : []
   const uiCheck = checks.find((item) => item.name === 'ui.import.mapping-reconcile')
@@ -248,6 +273,7 @@ async function main() {
   const peopleImportRecovery = summarizePeopleImportRecovery(smoke)
   const managerRecovery = summarizeManagerRecovery(smoke)
   const embedHostProtocol = summarizeEmbedHostProtocol(smoke)
+  const embedHostNavigationProtection = summarizeEmbedHostNavigationProtection(smoke)
   const profileSummaryData = summarizeProfile(profile)
   const gateSummary = summarizeGates(gateReport, gateReportPath, requireGateReport)
   const onPremGateSummary = onPremGateReport
@@ -258,6 +284,7 @@ async function main() {
   }
   const overallOk = smokeSummary.ok &&
     embedHostProtocol.ok &&
+    embedHostNavigationProtection.ok &&
     profileSummaryData.ok &&
     gateSummary.ok &&
     (!requireOnPremGate || Boolean(onPremGateSummary?.ok))
@@ -316,6 +343,7 @@ async function main() {
       ],
     },
     embedHostProtocol,
+    embedHostNavigationProtection,
     profile: {
       report: path.resolve(profileReportPath),
       summary: profileSummaryPath ? path.resolve(profileSummaryPath) : null,
@@ -440,6 +468,18 @@ async function main() {
       : '- Observed checks: none',
     embedHostProtocol.missingChecks.length
       ? `- Missing checks: ${embedHostProtocol.missingChecks.map((item) => `\`${item}\``).join(', ')}`
+      : '- Missing checks: none',
+    '',
+    '## Embed Host Navigation Protection',
+    '',
+    `- Available in smoke: \`${embedHostNavigationProtection.available ? 'true' : 'false'}\``,
+    `- Status: **${embedHostNavigationProtection.ok ? 'PASS' : 'FAIL'}**`,
+    `- Required when present: ${embedHostNavigationProtection.requiredWhenPresent.map((item) => `\`${item}\``).join(', ')}`,
+    embedHostNavigationProtection.observedChecks.length
+      ? `- Observed checks: ${embedHostNavigationProtection.observedChecks.map((item) => `\`${item}\``).join(', ')}`
+      : '- Observed checks: none',
+    embedHostNavigationProtection.missingChecks.length
+      ? `- Missing checks: ${embedHostNavigationProtection.missingChecks.map((item) => `\`${item}\``).join(', ')}`
       : '- Missing checks: none',
     '',
     '## Local Notes',
