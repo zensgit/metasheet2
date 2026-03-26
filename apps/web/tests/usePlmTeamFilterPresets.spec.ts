@@ -630,6 +630,9 @@ describe('usePlmTeamFilterPresets', () => {
     model.teamPresetKey.value = 'preset-archive'
     expect(model.canApplyTeamPreset.value).toBe(false)
     expect(model.canRestoreTeamPreset.value).toBe(true)
+    model.teamPresetName.value = '待清空名称'
+    model.teamPresetGroup.value = '待清空分组'
+    model.teamPresetOwnerUserId.value = 'owner-stale'
     await model.restoreTeamPreset()
 
     expect(restorePlmTeamFilterPreset).toHaveBeenCalledWith('preset-archive')
@@ -641,6 +644,9 @@ describe('usePlmTeamFilterPresets', () => {
       isArchived: false,
     })
     expect(model.canApplyTeamPreset.value).toBe(true)
+    expect(model.teamPresetName.value).toBe('')
+    expect(model.teamPresetGroup.value).toBe('')
+    expect(model.teamPresetOwnerUserId.value).toBe('')
   })
 
   it('blocks deleting a non-managed preset', async () => {
@@ -797,6 +803,56 @@ describe('usePlmTeamFilterPresets', () => {
     expect(setMessage).toHaveBeenLastCalledWith('当前Where-Used团队预设不可恢复。', true)
   })
 
+  it('blocks transferring archived team presets before validating the target owner input', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-archived-transfer',
+          kind: 'bom',
+          scope: 'team',
+          name: '归档 BOM 预设',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          isArchived: true,
+          archivedAt: '2026-03-26T08:00:00.000Z',
+          permissions: {
+            canManage: true,
+            canApply: false,
+            canDuplicate: true,
+            canShare: false,
+            canDelete: true,
+            canArchive: false,
+            canRestore: true,
+            canRename: false,
+            canTransfer: true,
+            canSetDefault: false,
+            canClearDefault: false,
+          },
+          state: { field: 'path', value: 'root/archived', group: '归档组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/archived', group: '归档组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-archived-transfer'
+    model.teamPresetOwnerUserId.value = 'owner-b'
+
+    await model.transferTeamPreset()
+
+    expect(transferPlmTeamFilterPreset).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenLastCalledWith('请先恢复BOM团队预设，再执行转移所有者。', true)
+  })
+
   it('duplicates a visible preset and renames the owned copy while keeping requested identity aligned', async () => {
     const requestedPresetId = ref('preset-source')
     const syncRequestedPresetId = vi.fn((value?: string) => {
@@ -853,6 +909,8 @@ describe('usePlmTeamFilterPresets', () => {
     await model.refreshTeamPresets()
 
     model.teamPresetKey.value = 'preset-source'
+    model.teamPresetGroup.value = '待清空分组'
+    model.teamPresetOwnerUserId.value = 'owner-stale'
     expect(model.canDuplicateTeamPreset.value).toBe(true)
     expect(model.canRenameTeamPreset.value).toBe(false)
     await model.duplicateTeamPreset()
@@ -861,8 +919,13 @@ describe('usePlmTeamFilterPresets', () => {
     expect(syncRequestedPresetId).toHaveBeenLastCalledWith('preset-copy')
     expect(trackedApply).toHaveReturnedWith('preset-copy')
     expect(model.teamPresetKey.value).toBe('preset-copy')
+    expect(model.teamPresetName.value).toBe('')
+    expect(model.teamPresetGroup.value).toBe('')
+    expect(model.teamPresetOwnerUserId.value).toBe('')
 
     model.teamPresetName.value = '共享 BOM 自定义副本'
+    model.teamPresetGroup.value = '重命名前草稿'
+    model.teamPresetOwnerUserId.value = 'owner-stale-2'
     expect(model.canRenameTeamPreset.value).toBe(true)
     await model.renameTeamPreset()
 
@@ -870,6 +933,9 @@ describe('usePlmTeamFilterPresets', () => {
     expect(syncRequestedPresetId).toHaveBeenLastCalledWith('preset-copy')
     expect(trackedApply).toHaveReturnedWith('preset-copy')
     expect(model.teamPresets.value.find((preset) => preset.id === 'preset-copy')?.name).toBe('共享 BOM 自定义副本')
+    expect(model.teamPresetName.value).toBe('')
+    expect(model.teamPresetGroup.value).toBe('')
+    expect(model.teamPresetOwnerUserId.value).toBe('')
   })
 
   it('transfers the current team preset to a new owner without losing the explicit id', async () => {
@@ -1912,6 +1978,9 @@ describe('usePlmTeamFilterPresets', () => {
     await model.refreshTeamPresets()
     model.teamPresetKey.value = 'preset-restore'
     model.teamPresetSelection.value = ['preset-restore']
+    model.teamPresetName.value = '待清空名称'
+    model.teamPresetGroup.value = '待清空分组'
+    model.teamPresetOwnerUserId.value = 'owner-stale'
 
     await model.restoreTeamPresetSelection()
 
@@ -1920,6 +1989,9 @@ describe('usePlmTeamFilterPresets', () => {
     expect(trackedApply).toHaveReturnedWith('preset-restore')
     expect(model.teamPresetKey.value).toBe('preset-restore')
     expect(model.teamPresets.value[0]?.isArchived).toBe(false)
+    expect(model.teamPresetName.value).toBe('')
+    expect(model.teamPresetGroup.value).toBe('')
+    expect(model.teamPresetOwnerUserId.value).toBe('')
   })
 
   it('does not hijack the canonical preset route owner when batch restoring a pending local selector target', async () => {

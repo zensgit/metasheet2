@@ -508,8 +508,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       teamPresets.value = upsertTeamPreset(teamPresets.value, duplicated)
       clearSingleTargetTakeoverSelection()
       applyPresetToTarget(duplicated)
-      teamPresetName.value = ''
-      teamPresetGroup.value = duplicated.state.group || ''
+      clearTeamPresetDrafts()
       options.setMessage(`已复制${options.label}团队预设：${duplicated.name}`)
     } catch (error) {
       teamPresetsError.value = getErrorMessage(error, `复制${options.label}团队预设失败`)
@@ -551,8 +550,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       )
       teamPresets.value = replaceTeamPreset(teamPresets.value, renamed)
       applyPresetToTarget(renamed)
-      teamPresetName.value = ''
-      teamPresetGroup.value = renamed.state.group || ''
+      clearTeamPresetDrafts()
       options.setMessage(`已重命名${options.label}团队预设：${renamed.name}`)
     } catch (error) {
       teamPresetsError.value = getErrorMessage(error, `重命名${options.label}团队预设失败`)
@@ -564,7 +562,6 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
 
   async function transferTeamPreset() {
     const preset = selectedTeamPreset.value
-    const targetOwnerUserId = teamPresetOwnerUserId.value.trim()
     if (!preset) {
       options.setMessage(`请选择${options.label}团队预设。`, true)
       return
@@ -572,6 +569,11 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     if (blockPendingApplyManagementAction()) {
       return
     }
+    if (preset.isArchived) {
+      options.setMessage(`请先恢复${options.label}团队预设，再执行转移所有者。`, true)
+      return
+    }
+    const targetOwnerUserId = teamPresetOwnerUserId.value.trim()
     if (!targetOwnerUserId) {
       options.setMessage(`请输入${options.label}团队预设目标用户 ID。`, true)
       return
@@ -787,8 +789,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       const saved = await restorePlmTeamFilterPreset(preset.id)
       teamPresets.value = replaceTeamPreset(teamPresets.value, saved)
       applyPresetToTarget(saved)
-      teamPresetName.value = ''
-      teamPresetGroup.value = saved.state.group || ''
+      clearTeamPresetDrafts()
       options.setMessage(`已恢复${options.label}团队预设：${saved.name}`)
     } catch (error) {
       teamPresetsError.value = getErrorMessage(error, `恢复${options.label}团队预设失败`)
@@ -858,8 +859,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
             : null
           if (restored) {
             applyPresetToTarget(restored)
-            teamPresetName.value = ''
-            teamPresetGroup.value = restored.state.group || ''
+            clearTeamPresetDrafts()
           }
         } else {
           teamPresetKey.value = ''
