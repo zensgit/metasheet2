@@ -123,6 +123,7 @@ import {
   pickPlmTeamFilterPresetRouteOwnerState,
 } from './plm/plmTeamFilterPresetStateMatch'
 import { resolvePlmLocalFilterPresetRouteIdentity } from './plm/plmLocalFilterPresetRouteIdentity'
+import { resolvePlmHydratedTeamViewOwnerTakeover } from './plm/plmHydratedTeamViewOwnerTakeover'
 import {
   runPlmLocalPresetOwnershipAction,
   shouldClearLocalPresetOwnerAfterTeamPresetAction,
@@ -5345,6 +5346,26 @@ function buildDeepLinkUrl(panelOverride?: string): string {
   return query ? `${base}?${query}` : base
 }
 
+function applyHydratedTeamViewOwnerTakeover(options: {
+  routeOwnerId: string
+  teamViewKey: { value: string }
+  teamViewName: { value: string }
+  teamViewOwnerUserId: { value: string }
+  clearTeamViewSelection: () => void
+}) {
+  const takeover = resolvePlmHydratedTeamViewOwnerTakeover({
+    routeOwnerId: options.routeOwnerId,
+    localSelectorId: options.teamViewKey.value,
+    localNameDraft: options.teamViewName.value,
+    localOwnerUserIdDraft: options.teamViewOwnerUserId.value,
+  })
+  if (!takeover.shouldClearLocalSelector) return
+  options.teamViewKey.value = takeover.nextSelectorId
+  options.teamViewName.value = takeover.nextNameDraft
+  options.teamViewOwnerUserId.value = takeover.nextOwnerUserIdDraft
+  options.clearTeamViewSelection()
+}
+
 async function applyQueryState() {
   if (isApplyingRouteQueryState.value) {
     pendingRouteQueryHydration = true
@@ -5436,20 +5457,48 @@ async function applyQueryState() {
     }
     const workbenchTeamViewParam = readQueryParam('workbenchTeamView')
     if (workbenchTeamViewParam !== undefined) {
+      applyHydratedTeamViewOwnerTakeover({
+        routeOwnerId: workbenchTeamViewParam,
+        teamViewKey: workbenchTeamViewKey,
+        teamViewName: workbenchTeamViewName,
+        teamViewOwnerUserId: workbenchTeamViewOwnerUserId,
+        clearTeamViewSelection: clearWorkbenchTeamViewSelection,
+      })
       workbenchTeamViewQuery.value = workbenchTeamViewParam
     }
     const sceneFocus = readWorkbenchSceneFocus(route.query)
     sceneCatalogAutoFocusSceneId.value = sceneFocus || ''
     const documentTeamViewParam = readQueryParam('documentTeamView')
     if (documentTeamViewParam !== undefined) {
+      applyHydratedTeamViewOwnerTakeover({
+        routeOwnerId: documentTeamViewParam,
+        teamViewKey: documentTeamViewKey,
+        teamViewName: documentTeamViewName,
+        teamViewOwnerUserId: documentTeamViewOwnerUserId,
+        clearTeamViewSelection: clearDocumentTeamViewSelection,
+      })
       documentTeamViewQuery.value = documentTeamViewParam
     }
     const cadTeamViewParam = readQueryParam('cadTeamView')
     if (cadTeamViewParam !== undefined) {
+      applyHydratedTeamViewOwnerTakeover({
+        routeOwnerId: cadTeamViewParam,
+        teamViewKey: cadTeamViewKey,
+        teamViewName: cadTeamViewName,
+        teamViewOwnerUserId: cadTeamViewOwnerUserId,
+        clearTeamViewSelection: clearCadTeamViewSelection,
+      })
       cadTeamViewQuery.value = cadTeamViewParam
     }
     const approvalsTeamViewParam = readQueryParam('approvalsTeamView')
     if (approvalsTeamViewParam !== undefined) {
+      applyHydratedTeamViewOwnerTakeover({
+        routeOwnerId: approvalsTeamViewParam,
+        teamViewKey: approvalsTeamViewKey,
+        teamViewName: approvalsTeamViewName,
+        teamViewOwnerUserId: approvalsTeamViewOwnerUserId,
+        clearTeamViewSelection: clearApprovalsTeamViewSelection,
+      })
       approvalsTeamViewQuery.value = approvalsTeamViewParam
     }
     const documentRoleParam = readQueryParam('documentRole')
