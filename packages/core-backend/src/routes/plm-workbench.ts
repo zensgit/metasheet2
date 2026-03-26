@@ -2586,6 +2586,13 @@ router.post(
         })
       }
 
+      if (preset.archived_at) {
+        return res.status(409).json({
+          success: false,
+          error: 'Archived PLM team presets cannot be transferred',
+        })
+      }
+
       if (targetOwnerUserId === currentUserId) {
         return res.json({
           success: true,

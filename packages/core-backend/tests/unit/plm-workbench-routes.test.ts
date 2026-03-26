@@ -1113,6 +1113,30 @@ describe('plm-workbench routes', () => {
     expect(response.body.error).toContain('Target owner user not found')
   })
 
+  it('rejects transferring archived team presets', async () => {
+    routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
+      id: 'preset-archived-transfer',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'bom',
+      name: '归档团队预设',
+      name_key: '归档团队预设',
+      is_default: false,
+      archived_at: '2026-03-11T01:00:00.000Z',
+      state: JSON.stringify({ field: 'path', value: 'root/archive', group: '机械' }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-11T01:00:00.000Z',
+    })
+
+    const response = await request(app)
+      .post('/api/plm-workbench/filter-presets/team/preset-archived-transfer/transfer')
+      .send({ ownerUserId: 'owner-2' })
+
+    expect(response.status).toBe(409)
+    expect(response.body.error).toContain('Archived PLM team presets cannot be transferred')
+  })
+
   it('archives a team preset for the owner', async () => {
     routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
       id: 'preset-archive',
