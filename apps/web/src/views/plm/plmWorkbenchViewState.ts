@@ -77,6 +77,13 @@ export const PLM_WORKBENCH_QUERY_KEYS = [
   'autoload',
 ] as const
 
+export const PLM_WORKBENCH_TEAM_VIEW_OWNER_QUERY_KEYS = [
+  'workbenchTeamView',
+  'documentTeamView',
+  'cadTeamView',
+  'approvalsTeamView',
+] as const
+
 const PLM_WORKBENCH_QUERY_KEY_SET = new Set<string>(PLM_WORKBENCH_QUERY_KEYS)
 const PLM_WORKBENCH_PANEL_SCOPE_KEYS = [
   'search',
@@ -147,6 +154,12 @@ export function normalizePlmWorkbenchCollaborativeQuerySnapshot(value: unknown):
     delete next.panel
   }
   return next
+}
+
+export function buildPlmWorkbenchResetOwnerQueryPatch() {
+  return Object.fromEntries(
+    PLM_WORKBENCH_TEAM_VIEW_OWNER_QUERY_KEYS.map((key) => [key, '']),
+  ) as Record<(typeof PLM_WORKBENCH_TEAM_VIEW_OWNER_QUERY_KEYS)[number], ''>
 }
 
 export function matchPlmWorkbenchQuerySnapshot(left: unknown, right: unknown): boolean {

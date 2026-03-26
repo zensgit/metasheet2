@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildPlmWorkbenchResetOwnerQueryPatch,
   buildPlmWorkbenchRoutePath,
   buildPlmWorkbenchTeamViewShareUrl,
   matchPlmWorkbenchQuerySnapshot,
@@ -103,6 +104,15 @@ describe('plmWorkbenchViewState', () => {
     expect(normalizePlmWorkbenchPanelScope(' approvals, documents, approvals ')).toBe('documents,approvals')
     expect(normalizePlmWorkbenchPanelScope('all')).toBeUndefined()
     expect(normalizePlmWorkbenchPanelScope('unknown')).toBeUndefined()
+  })
+
+  it('builds a reset patch that clears every canonical panel team-view owner', () => {
+    expect(buildPlmWorkbenchResetOwnerQueryPatch()).toEqual({
+      workbenchTeamView: '',
+      documentTeamView: '',
+      cadTeamView: '',
+      approvalsTeamView: '',
+    })
   })
 
   it('detects workbench snapshot drift after manual query edits', () => {
