@@ -244,6 +244,75 @@ describe('usePlmTeamFilterPresets', () => {
     })
   })
 
+  it('clears stale team-preset drafts when refresh removes the selected preset', async () => {
+    vi.mocked(listPlmTeamFilterPresets)
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: 'preset-removed',
+            kind: 'bom',
+            scope: 'team',
+            name: '将被移除的团队预设',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            isDefault: false,
+            state: { field: 'path', value: 'root/removed', group: '旧分组' },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        items: [],
+      })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/removed', group: '旧分组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-removed'
+    model.teamPresetName.value = '待清理团队预设'
+    model.teamPresetGroup.value = '待清理分组'
+    model.teamPresetOwnerUserId.value = 'owner-stale'
+
+    await model.refreshTeamPresets()
+
+    expect(model.teamPresetKey.value).toBe('')
+    expect(model.teamPresetName.value).toBe('')
+    expect(model.teamPresetGroup.value).toBe('')
+    expect(model.teamPresetOwnerUserId.value).toBe('')
+  })
+
+  it('preserves create-mode team-preset drafts when refresh runs without an active selection', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/create', group: '创建分组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    model.teamPresetName.value = '待保存团队预设'
+    model.teamPresetGroup.value = '创建分组'
+    model.teamPresetOwnerUserId.value = 'owner-draft'
+
+    await model.refreshTeamPresets()
+
+    expect(model.teamPresetKey.value).toBe('')
+    expect(model.teamPresetName.value).toBe('待保存团队预设')
+    expect(model.teamPresetGroup.value).toBe('创建分组')
+    expect(model.teamPresetOwnerUserId.value).toBe('owner-draft')
+  })
+
   it('clears stale requested and selected presets when refresh keeps them but removes applyability', async () => {
     const requestedPresetId = ref('preset-locked')
     const syncRequestedPresetId = vi.fn((value?: string) => {
