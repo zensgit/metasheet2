@@ -24,6 +24,38 @@ interface ApprovalInstance {
   updated_at: Date
 }
 
+function normalizeApprovalVersion(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) {
+    return value
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10)
+    if (Number.isInteger(parsed) && parsed >= 0) {
+      return parsed
+    }
+  }
+
+  return null
+}
+
+function normalizeApprovalText(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  return normalized.length > 0 ? normalized : null
+}
+
+function approvalVersionConflictResponse(currentVersion: number) {
+  return {
+    ok: false,
+    error: {
+      code: 'APPROVAL_VERSION_CONFLICT',
+      message: 'Approval instance version mismatch',
+      currentVersion,
+    },
+  }
+}
+
 export function approvalsRouter(): Router {
   const r = Router()
 
@@ -81,12 +113,25 @@ export function approvalsRouter(): Router {
       }
 
       const { id } = req.params
-      const { comment, metadata = {} } = req.body
+      const requestedVersion = normalizeApprovalVersion(req.body?.version)
+      const comment = normalizeApprovalText(req.body?.comment)
+      const metadata =
+        req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {}
       const userId = req.user?.sub || req.user?.userId
       const userName = req.user?.name || req.user?.email || userId
 
       if (!userId) {
         return res.status(401).json({ error: 'User ID not found in token' })
+      }
+
+      if (requestedVersion === null) {
+        return res.status(400).json({
+          ok: false,
+          error: {
+            code: 'APPROVAL_VERSION_REQUIRED',
+            message: 'Approval version is required',
+          },
+        })
       }
 
       // Start transaction
@@ -106,6 +151,11 @@ export function approvalsRouter(): Router {
         }
 
         const instance = instanceResult.rows[0]
+        if (instance.version !== requestedVersion) {
+          await client.query('ROLLBACK')
+          return res.status(409).json(approvalVersionConflictResponse(instance.version))
+        }
+
         if (instance.status !== 'pending') {
           await client.query('ROLLBACK')
           return res.status(400).json({ error: `Cannot approve: current status is ${instance.status}` })
@@ -144,10 +194,13 @@ export function approvalsRouter(): Router {
 
         logger.info(`Approval ${id} approved by ${userId}`)
         res.json({
-          success: true,
-          id,
-          status: 'approved',
-          version: newVersion
+          ok: true,
+          data: {
+            id,
+            status: 'approved',
+            version: newVersion,
+            prevVersion: instance.version,
+          },
         })
       } catch (innerError) {
         await client.query('ROLLBACK')
@@ -176,12 +229,26 @@ export function approvalsRouter(): Router {
       }
 
       const { id } = req.params
-      const { reason, comment, metadata = {} } = req.body
+      const requestedVersion = normalizeApprovalVersion(req.body?.version)
+      const comment = normalizeApprovalText(req.body?.comment)
+      const reason = normalizeApprovalText(req.body?.reason) ?? comment
+      const metadata =
+        req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {}
       const userId = req.user?.sub || req.user?.userId
       const userName = req.user?.name || req.user?.email || userId
 
       if (!userId) {
         return res.status(401).json({ error: 'User ID not found in token' })
+      }
+
+      if (requestedVersion === null) {
+        return res.status(400).json({
+          ok: false,
+          error: {
+            code: 'APPROVAL_VERSION_REQUIRED',
+            message: 'Approval version is required',
+          },
+        })
       }
 
       if (!reason) {
@@ -205,6 +272,11 @@ export function approvalsRouter(): Router {
         }
 
         const instance = instanceResult.rows[0]
+        if (instance.version !== requestedVersion) {
+          await client.query('ROLLBACK')
+          return res.status(409).json(approvalVersionConflictResponse(instance.version))
+        }
+
         if (instance.status !== 'pending') {
           await client.query('ROLLBACK')
           return res.status(400).json({ error: `Cannot reject: current status is ${instance.status}` })
@@ -244,10 +316,13 @@ export function approvalsRouter(): Router {
 
         logger.info(`Approval ${id} rejected by ${userId}: ${reason}`)
         res.json({
-          success: true,
-          id,
-          status: 'rejected',
-          version: newVersion
+          ok: true,
+          data: {
+            id,
+            status: 'rejected',
+            version: newVersion,
+            prevVersion: instance.version,
+          },
         })
       } catch (innerError) {
         await client.query('ROLLBACK')

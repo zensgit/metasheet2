@@ -27,8 +27,16 @@ paths:
           application/json:
             schema:
               type: object
-              properties: { version: { type: integer } }
+              properties:
+                version: { type: integer }
+                comment: { type: string }
+                metadata: { type: object }
               required: [version]
+            examples:
+              approve:
+                value:
+                  version: 0
+                  comment: 'LGTM'
       responses:
         '200':
           description: OK
@@ -42,9 +50,10 @@ paths:
                     type: object
                     properties:
                       id: { type: string, example: demo-1 }
-                      status: { type: string, example: APPROVED }
+                      status: { type: string, example: approved }
                       version: { type: integer, example: 1 }
                       prevVersion: { type: integer, example: 0 }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '409':
           description: Version conflict
           content:
@@ -75,8 +84,18 @@ paths:
           application/json:
             schema:
               type: object
-              properties: { version: { type: integer } }
+              description: Either `reason` or `comment` must be supplied.
+              properties:
+                version: { type: integer }
+                reason: { type: string }
+                comment: { type: string }
+                metadata: { type: object }
               required: [version]
+            examples:
+              reject:
+                value:
+                  version: 1
+                  comment: 'Needs revision'
       responses:
         '200':
           description: OK
@@ -90,10 +109,23 @@ paths:
                     type: object
                     properties:
                       id: { type: string, example: demo-1 }
-                      status: { type: string, example: REJECTED }
+                      status: { type: string, example: rejected }
                       version: { type: integer, example: 2 }
                       prevVersion: { type: integer, example: 1 }
-        '409': { $ref: '#/components/responses/ValidationError' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '409':
+          description: Version conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              examples:
+                conflict:
+                  value:
+                    ok: false
+                    error:
+                      code: APPROVAL_VERSION_CONFLICT
+                      message: Approval instance version mismatch
+                      currentVersion: 2
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/approvals/{id}/return:

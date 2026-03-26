@@ -309,6 +309,58 @@ components:
         updated_at:
           type: string
           format: date-time
+    AttendanceAnomaly:
+      type: object
+      properties:
+        recordId:
+          type: string
+        workDate:
+          type: string
+          format: date
+        status:
+          type: string
+        isWorkday:
+          type: boolean
+        firstInAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastOutAt:
+          type: string
+          format: date-time
+          nullable: true
+        workMinutes:
+          type: integer
+        lateMinutes:
+          type: integer
+        earlyLeaveMinutes:
+          type: integer
+        leaveMinutes:
+          type: integer
+        overtimeMinutes:
+          type: integer
+        warnings:
+          type: array
+          items:
+            type: string
+        state:
+          type: string
+          enum:
+            - open
+            - pending
+        request:
+          type: object
+          nullable: true
+          properties:
+            id:
+              type: string
+            status:
+              type: string
+            requestType:
+              type: string
+        suggestedRequestType:
+          type: string
+          nullable: true
     AttendanceLeaveType:
       type: object
       properties:
@@ -1301,8 +1353,17 @@ paths:
               properties:
                 version:
                   type: integer
+                comment:
+                  type: string
+                metadata:
+                  type: object
               required:
                 - version
+            examples:
+              approve:
+                value:
+                  version: 0
+                  comment: LGTM
       responses:
         '200':
           description: OK
@@ -1322,13 +1383,15 @@ paths:
                         example: demo-1
                       status:
                         type: string
-                        example: APPROVED
+                        example: approved
                       version:
                         type: integer
                         example: 1
                       prevVersion:
                         type: integer
                         example: 0
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -1364,11 +1427,23 @@ paths:
           application/json:
             schema:
               type: object
+              description: Either `reason` or `comment` must be supplied.
               properties:
                 version:
                   type: integer
+                reason:
+                  type: string
+                comment:
+                  type: string
+                metadata:
+                  type: object
               required:
                 - version
+            examples:
+              reject:
+                value:
+                  version: 1
+                  comment: Needs revision
       responses:
         '200':
           description: OK
@@ -1388,19 +1463,33 @@ paths:
                         example: demo-1
                       status:
                         type: string
-                        example: REJECTED
+                        example: rejected
                       version:
                         type: integer
                         example: 2
                       prevVersion:
                         type: integer
                         example: 1
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '409':
-          $ref: '#/components/responses/ValidationError'
+          description: Version conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                conflict:
+                  value:
+                    ok: false
+                    error:
+                      code: APPROVAL_VERSION_CONFLICT
+                      message: Approval instance version mismatch
+                      currentVersion: 2
   /api/approvals/{id}/return:
     post:
       summary: Return instance with optimistic locking
@@ -1671,6 +1760,74 @@ paths:
                         type: integer
                       pageSize:
                         type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/anomalies:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance anomalies (workday records needing attention)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: userId
+          schema:
+            type: string
+        - in: query
+          name: orgId
+          schema:
+            type: string
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendanceAnomaly'
+                      total:
+                        type: integer
+                      page:
+                        type: integer
+                      pageSize:
+                        type: integer
+                      from:
+                        type: string
+                        format: date
+                      to:
+                        type: string
+                        format: date
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -4655,6 +4812,74 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/attendance/payroll-cycles/generate:
+    x-plugin: plugin-attendance
+    post:
+      summary: Batch generate payroll cycles from a template
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                templateId:
+                  type: string
+                anchorDate:
+                  type: string
+                  format: date
+                count:
+                  type: integer
+                  default: 1
+                status:
+                  type: string
+                  default: open
+                namePrefix:
+                  type: string
+                metadata:
+                  type: object
+                orgId:
+                  type: string
+              required:
+                - anchorDate
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      templateId:
+                        type: string
+                      created:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendancePayrollCycle'
+                      skipped:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            startDate:
+                              type: string
+                              format: date
+                            endDate:
+                              type: string
+                              format: date
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /api/attendance/payroll-cycles/{id}:
     x-plugin: plugin-attendance
     put:
@@ -6322,6 +6547,59 @@ paths:
           description: OK
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/workflow-designer/hub-views/team:
+    get:
+      summary: List workflow hub team views
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+    post:
+      summary: Save workflow hub team view
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                state:
+                  type: object
+              required:
+                - name
+                - state
+      responses:
+        '201':
+          description: Created
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/workflow-designer/hub-views/team/{id}:
+    delete:
+      summary: Delete workflow hub team view
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/workflow-designer/node-types:
     get:
       summary: List workflow designer node types
@@ -6344,9 +6622,97 @@ paths:
           name: featured
           schema:
             type: boolean
+        - in: query
+          name: search
+          schema:
+            type: string
+        - in: query
+          name: source
+          schema:
+            type: string
+            enum:
+              - all
+              - builtin
+              - database
+            default: all
+        - in: query
+          name: sortBy
+          schema:
+            type: string
+            enum:
+              - usage_count
+              - name
+              - updated_at
+            default: usage_count
+        - in: query
+          name: sortOrder
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: desc
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
       responses:
         '200':
           description: OK
+  /api/workflow-designer/templates/{id}:
+    get:
+      summary: Get workflow template detail
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/workflow-designer/templates/{id}/instantiate:
+    post:
+      summary: Instantiate workflow from template
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                category:
+                  type: string
+      responses:
+        '201':
+          description: Created
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/workflow-designer/workflows:
     post:
       summary: Create workflow
@@ -6358,6 +6724,25 @@ paths:
           application/json:
             schema:
               type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                category:
+                  type: string
+                bpmnXml:
+                  type: string
+                nodes:
+                  type: array
+                  items:
+                    type: object
+                edges:
+                  type: array
+                  items:
+                    type: object
+              required:
+                - name
       responses:
         '201':
           description: Created
@@ -6380,6 +6765,36 @@ paths:
           name: search
           schema:
             type: string
+        - in: query
+          name: sortBy
+          schema:
+            type: string
+            enum:
+              - updated_at
+              - created_at
+              - name
+            default: updated_at
+        - in: query
+          name: sortOrder
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: desc
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
       responses:
         '200':
           description: OK
@@ -6417,11 +6832,91 @@ paths:
           application/json:
             schema:
               type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                category:
+                  type: string
+                bpmnXml:
+                  type: string
+                nodes:
+                  type: array
+                  items:
+                    type: object
+                edges:
+                  type: array
+                  items:
+                    type: object
       responses:
         '200':
           description: OK
         '400':
           $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/workflow-designer/workflows/{id}/duplicate:
+    post:
+      summary: Duplicate workflow draft
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+      responses:
+        '201':
+          description: Created
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/workflow-designer/workflows/{id}/archive:
+    post:
+      summary: Archive workflow draft
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/workflow-designer/workflows/{id}/restore:
+    post:
+      summary: Restore archived workflow draft
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':

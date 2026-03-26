@@ -230,17 +230,50 @@ paths:
               properties:
                 version:
                   type: integer
+                comment:
+                  type: string
+                metadata:
+                  type: object
               required: [version]
             examples:
               approve:
-                value: { version: 0 }
+                value:
+                  version: 0
+                  comment: LGTM
       responses:
         '200':
           description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        example: demo-1
+                      status:
+                        type: string
+                        example: approved
+                      version:
+                        type: integer
+                        example: 1
+                      prevVersion:
+                        type: integer
+                        example: 0
+        '400':
+          description: Validation error
         '409':
           description: Version conflict
           content:
             application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
               examples:
                 conflict:
                   value:
@@ -298,11 +331,64 @@ paths:
           application/json:
             schema:
               type: object
-              properties: { version: { type: integer } }
+              description: Either `reason` or `comment` must be supplied.
+              properties:
+                version:
+                  type: integer
+                reason:
+                  type: string
+                comment:
+                  type: string
+                metadata:
+                  type: object
               required: [version]
+            examples:
+              reject:
+                value:
+                  version: 1
+                  comment: Needs revision
       responses:
-        '200': { description: OK }
-        '409': { description: Version conflict }
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        example: demo-1
+                      status:
+                        type: string
+                        example: rejected
+                      version:
+                        type: integer
+                        example: 2
+                      prevVersion:
+                        type: integer
+                        example: 1
+        '400':
+          description: Validation error
+        '409':
+          description: Version conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                conflict:
+                  value:
+                    ok: false
+                    error:
+                      code: APPROVAL_VERSION_CONFLICT
+                      message: Approval instance version mismatch
+                      currentVersion: 2
 
   /api/approvals/{id}/return:
     post:
