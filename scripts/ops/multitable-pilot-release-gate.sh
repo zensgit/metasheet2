@@ -33,11 +33,12 @@ fi
 REPORT_JSON="${REPORT_JSON:-${OUTPUT_ROOT}/report.json}"
 REPORT_MD="${REPORT_MD:-${OUTPUT_ROOT}/report.md}"
 LOG_PATH="${LOG_PATH:-${OUTPUT_ROOT}/release-gate.log}"
+COMMANDS_SH="${COMMANDS_SH:-${OUTPUT_ROOT}/operator-commands.sh}"
 PILOT_SMOKE_OUTPUT_ROOT="${PILOT_SMOKE_OUTPUT_ROOT:-${OUTPUT_ROOT}/smoke}"
 PILOT_SMOKE_REPORT="${PILOT_SMOKE_REPORT:-${PILOT_SMOKE_OUTPUT_ROOT}/report.json}"
 PILOT_SMOKE_REPORT_MD="${PILOT_SMOKE_REPORT_MD:-${PILOT_SMOKE_OUTPUT_ROOT}/report.md}"
 
-mkdir -p "$(dirname "${REPORT_JSON}")" "$(dirname "${REPORT_MD}")" "$(dirname "${LOG_PATH}")" "${PILOT_SMOKE_OUTPUT_ROOT}"
+mkdir -p "$(dirname "${REPORT_JSON}")" "$(dirname "${REPORT_MD}")" "$(dirname "${LOG_PATH}")" "$(dirname "${COMMANDS_SH}")" "${PILOT_SMOKE_OUTPUT_ROOT}"
 
 export API_BASE WEB_BASE HEADLESS TIMEOUT_MS RUN_MODE
 
@@ -159,6 +160,7 @@ write_release_gate_report() {
 
   REPORT_JSON_PATH="$REPORT_JSON" \
   REPORT_MD_PATH="$report_md_path" \
+  COMMANDS_SH_PATH="$COMMANDS_SH" \
   RELEASE_GATE_OUTPUT_ROOT="$OUTPUT_ROOT" \
   RELEASE_GATE_LOG_PATH="$LOG_PATH" \
   RELEASE_GATE_EXIT_CODE="$exit_code" \
@@ -174,6 +176,7 @@ const path = require('path')
 
 const reportPath = process.env.REPORT_JSON_PATH
 const reportMdPath = process.env.REPORT_MD_PATH || null
+const operatorCommandsPath = process.env.COMMANDS_SH_PATH || null
 const outputRoot = process.env.RELEASE_GATE_OUTPUT_ROOT || null
 const fallbackLogPath = process.env.RELEASE_GATE_LOG_PATH || null
 const exitCode = Number(process.env.RELEASE_GATE_EXIT_CODE || '0')
@@ -287,6 +290,7 @@ const report = {
   reportPath: reportPath ? path.resolve(reportPath) : null,
   reportMdPath: reportMdPath ? path.resolve(reportMdPath) : null,
   logPath: fallbackLogPath ? path.resolve(fallbackLogPath) : null,
+  operatorCommandsPath: operatorCommandsPath ? path.resolve(operatorCommandsPath) : null,
   exitCode,
   failedStep,
   failingEvidence,
@@ -333,6 +337,7 @@ if (reportMdPath) {
     report.reportPath ? `- JSON report: \`${report.reportPath}\`` : '- JSON report: not written',
     `- Markdown report: \`${report.reportMdPath ?? 'missing'}\``,
     `- Log path: \`${report.logPath ?? 'missing'}\``,
+    `- Operator helper: \`${report.operatorCommandsPath ?? 'missing'}\``,
     '',
     '## Step Checks',
     '',
@@ -364,6 +369,13 @@ if (reportMdPath) {
     ...evidenceSection('### Embed Host Protocol Evidence', embedHostProtocol),
     ...evidenceSection('### Embed Host Navigation Protection', embedHostNavigationProtection),
     ...evidenceSection('### Embed Host Busy Deferred Replay', embedHostDeferredReplay),
+    '## Operator Commands',
+    '',
+    `- Helper: \`${report.operatorCommandsPath ?? 'missing'}\``,
+    `- Rerun gate: \`${runMode === 'staging' ? 'RUN_MODE=staging ' : ''}OUTPUT_ROOT=${report.outputRoot ?? OUTPUT_ROOT} bash scripts/ops/multitable-pilot-release-gate.sh\``,
+    `- Rerun live smoke: \`${runMode === 'staging' ? 'RUN_MODE=staging ' : ''}OUTPUT_ROOT=${liveSmoke.outputRoot ?? 'missing'} pnpm ${runMode === 'staging' ? 'verify:multitable-pilot:staging' : 'verify:multitable-pilot'}\``,
+    report.logPath ? `- Tail log: \`tail -n 80 ${report.logPath}\`` : '- Tail log: missing',
+    '',
   ]
 
   fs.mkdirSync(path.dirname(reportMdPath), { recursive: true })
