@@ -6,6 +6,7 @@ import {
   buildPlmWorkbenchTeamViewShareUrl,
   hasExplicitPlmBomTeamPresetAutoApplyQueryState,
   hasExplicitPlmApprovalsAutoApplyQueryState,
+  hasExplicitPlmDocumentAutoApplyQueryState,
   hasExplicitPlmWorkbenchAutoApplyQueryState,
   hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState,
   matchPlmWorkbenchQuerySnapshot,
@@ -259,6 +260,71 @@ describe('plmWorkbenchViewState', () => {
       hasExplicitPlmApprovalsAutoApplyQueryState({
         approvalsTeamView: 'approvals-view-1',
       }),
+    ).toBe(true)
+  })
+
+  it('ignores explicit default document query values when deciding document default auto-apply blockers', () => {
+    const defaultColumns = {
+      title: true,
+      type: true,
+      revision: true,
+      role: true,
+      size: true,
+    }
+
+    expect(
+      hasExplicitPlmDocumentAutoApplyQueryState(
+        {
+          documentSort: 'updated',
+          documentSortDir: 'desc',
+          documentColumns: 'title,type,revision,role,size',
+        },
+        defaultColumns,
+      ),
+    ).toBe(false)
+
+    expect(
+      hasExplicitPlmDocumentAutoApplyQueryState(
+        {
+          documentSort: 'name',
+        },
+        defaultColumns,
+      ),
+    ).toBe(true)
+  })
+
+  it('treats deferred document blockers with non-default state as explicit document auto-apply blockers', () => {
+    const defaultColumns = {
+      title: true,
+      type: true,
+      revision: true,
+      role: true,
+      size: true,
+    }
+
+    expect(
+      hasExplicitPlmDocumentAutoApplyQueryState(
+        applyPlmDeferredRouteQueryPatch(
+          {},
+          {
+            documentSort: 'updated',
+            documentSortDir: 'desc',
+          },
+        ),
+        defaultColumns,
+      ),
+    ).toBe(false)
+
+    expect(
+      hasExplicitPlmDocumentAutoApplyQueryState(
+        applyPlmDeferredRouteQueryPatch(
+          {},
+          {
+            documentFilter: 'gear',
+          },
+        ),
+        defaultColumns,
+      ),
     ).toBe(true)
   })
 

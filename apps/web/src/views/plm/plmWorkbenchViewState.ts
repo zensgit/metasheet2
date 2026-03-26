@@ -193,6 +193,44 @@ export function hasExplicitPlmApprovalsAutoApplyQueryState(value: unknown): bool
   )
 }
 
+function hasExplicitPlmColumnQueryState(
+  value: string | undefined,
+  defaults: Record<string, boolean> | undefined,
+): boolean {
+  if (!value) return false
+  const tokens = Array.from(new Set(
+    value
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  ))
+  if (!tokens.length) return false
+  if (!defaults) return true
+
+  const knownTokens = tokens.filter((token) => Object.prototype.hasOwnProperty.call(defaults, token))
+  if (!knownTokens.length) return false
+
+  const defaultEnabled = Object.keys(defaults).filter((key) => Boolean(defaults[key]))
+  if (knownTokens.length !== defaultEnabled.length) return true
+  const enabledTokenSet = new Set(knownTokens)
+  return defaultEnabled.some((key) => !enabledTokenSet.has(key))
+}
+
+export function hasExplicitPlmDocumentAutoApplyQueryState(
+  value: unknown,
+  defaults?: Record<string, boolean>,
+): boolean {
+  const next = normalizePlmWorkbenchQuerySnapshot(value)
+  return Boolean(
+    next.documentTeamView
+    || next.documentRole
+    || next.documentFilter
+    || (next.documentSort && next.documentSort !== 'updated')
+    || (next.documentSortDir && next.documentSortDir !== 'desc')
+    || hasExplicitPlmColumnQueryState(next.documentColumns, defaults),
+  )
+}
+
 function hasExplicitPlmQueryKeys(
   value: unknown,
   keys: readonly string[],

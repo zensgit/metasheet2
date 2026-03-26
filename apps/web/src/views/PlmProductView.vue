@@ -104,6 +104,7 @@ import {
 import {
   hasExplicitPlmBomTeamPresetAutoApplyQueryState,
   hasExplicitPlmApprovalsAutoApplyQueryState,
+  hasExplicitPlmDocumentAutoApplyQueryState,
   buildPlmWorkbenchResetHydratedPanelQueryPatch,
   buildPlmWorkbenchRoutePath,
   buildPlmWorkbenchTeamViewShareUrl,
@@ -4959,7 +4960,13 @@ const {
   buildShareUrl: (view) => buildPlmWorkbenchTeamViewShareUrl('documents', view, route.path),
   copyShareUrl: copyToClipboard,
   shouldAutoApplyDefault: () => (
-    !hasExplicitQueryKey(DOCUMENT_QUERY_KEYS)
+    !hasExplicitPlmDocumentAutoApplyQueryState(
+      applyPlmDeferredRouteQueryPatch(
+        route.query as Record<string, unknown>,
+        deferredRouteQueryPatch,
+      ),
+      defaultDocumentColumns,
+    )
     && !documentRole.value.trim()
     && !documentFilter.value.trim()
     && documentSortKey.value === 'updated'
