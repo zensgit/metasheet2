@@ -17,6 +17,57 @@ describe('ViewManager multitable CRUD contract', () => {
     vi.restoreAllMocks()
   })
 
+  it('loads gallery config through multitable context and restores legacy config shape', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: {
+        base: null,
+        sheet: { id: 'sheet_ops', name: 'Ops', baseId: 'base_ops' },
+        sheets: [{ id: 'sheet_ops', name: 'Ops', baseId: 'base_ops' }],
+        views: [
+          {
+            id: 'view_gallery',
+            sheetId: 'sheet_ops',
+            name: 'Gallery',
+            type: 'gallery',
+            filterInfo: { mode: 'all' },
+            sortInfo: { order: 'manual' },
+            groupInfo: {},
+            hiddenFieldIds: ['fld_hidden'],
+            config: {
+              description: 'Ops gallery',
+              cardTemplate: { titleField: 'fld_title', contentFields: ['fld_desc'], imageField: 'fld_image', tagFields: ['fld_tags'] },
+              layout: { columns: 4, cardSize: 'large', spacing: 'comfortable' },
+              display: { showTitle: true, showContent: true, showImage: true, showTags: true, truncateContent: false },
+            },
+          },
+        ],
+        capabilities: { canRead: true },
+      },
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchSpy)
+
+    const { ViewManager } = await import('../src/services/ViewManager')
+    const result = await ViewManager.getInstance().loadViewConfig<any>('view_gallery')
+
+    expect(result).toEqual(expect.objectContaining({
+      id: 'view_gallery',
+      tableId: 'sheet_ops',
+      name: 'Gallery',
+      type: 'gallery',
+      description: 'Ops gallery',
+      cardTemplate: expect.objectContaining({ titleField: 'fld_title' }),
+      layout: expect.objectContaining({ columns: 4 }),
+      display: expect.objectContaining({ truncateContent: false }),
+      filterInfo: { mode: 'all' },
+      hiddenFieldIds: ['fld_hidden'],
+    }))
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://unit.test/api/multitable/context?viewId=view_gallery',
+      expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer test-token' }) }),
+    )
+  })
+
   it('creates views through the multitable runtime endpoint', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       ok: true,
@@ -232,5 +283,89 @@ describe('ViewManager multitable CRUD contract', () => {
       'http://unit.test/api/multitable/views/view_form/submit',
       expect.objectContaining({ method: 'POST' }),
     )
+  })
+
+  it('saves calendar config through PATCH /api/multitable/views/:id and nests legacy fields into runtime config', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: {
+        view: {
+          id: 'view_calendar',
+          sheetId: 'sheet_ops',
+          name: 'Calendar',
+          type: 'calendar',
+          filterInfo: { mode: 'upcoming' },
+          sortInfo: {},
+          groupInfo: {},
+          hiddenFieldIds: [],
+          config: {
+            description: 'Ops calendar',
+            defaultView: 'week',
+            weekStartsOn: 1,
+            timeFormat: 24,
+            fields: {
+              title: 'title',
+              start: 'startDate',
+              startDate: 'startDate',
+              end: 'endDate',
+              endDate: 'endDate',
+              category: 'category',
+              location: 'location',
+            },
+            colorRules: [{ field: 'category', value: 'meeting', color: '#00f' }],
+          },
+        },
+      },
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchSpy)
+
+    const { ViewManager } = await import('../src/services/ViewManager')
+    const ok = await ViewManager.getInstance().saveViewConfig({
+      id: 'view_calendar',
+      name: 'Calendar',
+      type: 'calendar',
+      description: 'Ops calendar',
+      createdAt: new Date('2026-03-26T00:00:00Z'),
+      updatedAt: new Date('2026-03-26T00:00:00Z'),
+      createdBy: 'user_1',
+      tableId: 'sheet_ops',
+      defaultView: 'week',
+      weekStartsOn: 1,
+      timeFormat: 24,
+      fields: {
+        title: 'title',
+        start: 'startDate',
+        startDate: 'startDate',
+        end: 'endDate',
+        endDate: 'endDate',
+        category: 'category',
+        location: 'location',
+      },
+      colorRules: [{ field: 'category', value: 'meeting', color: '#00f' }],
+      config: {},
+      filterInfo: { mode: 'upcoming' },
+    } as any)
+
+    expect(ok).toBe(true)
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://unit.test/api/multitable/views/view_calendar',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: expect.stringContaining('"defaultView":"week"'),
+      }),
+    )
+    const [, init] = fetchSpy.mock.calls[0]!
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      name: 'Calendar',
+      type: 'calendar',
+      filterInfo: { mode: 'upcoming' },
+      config: expect.objectContaining({
+        description: 'Ops calendar',
+        defaultView: 'week',
+        weekStartsOn: 1,
+        timeFormat: 24,
+        colorRules: [{ field: 'category', value: 'meeting', color: '#00f' }],
+      }),
+    })
   })
 })

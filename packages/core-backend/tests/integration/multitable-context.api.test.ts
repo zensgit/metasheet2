@@ -182,6 +182,101 @@ describe('Multitable context API', () => {
     ])
   })
 
+  test('resolves context by viewId and returns the target view config', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_calendar'])
+          return {
+            rows: [{
+              id: 'view_calendar',
+              sheet_id: 'sheet_ops',
+              name: 'Calendar',
+              type: 'calendar',
+              filter_info: { mode: 'upcoming' },
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: { defaultView: 'week', colorRules: [{ field: 'category', value: 'meeting', color: '#00f' }] },
+            }],
+          }
+        }
+        if (sql.includes('FROM meta_sheets s') && sql.includes('LEFT JOIN meta_bases')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{
+              id: 'sheet_ops',
+              base_id: 'base_ops',
+              name: 'Ops',
+              description: 'Ops records',
+              base_ref_id: 'base_ops',
+              base_name: 'Ops Base',
+              base_icon: 'table',
+              base_color: '#1677ff',
+              base_owner_id: 'owner_1',
+              base_workspace_id: 'workspace_1',
+            }],
+          }
+        }
+        if (sql.includes('FROM meta_bases') && sql.includes('WHERE id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [{
+              id: 'base_ops',
+              name: 'Ops Base',
+              icon: 'table',
+              color: '#1677ff',
+              owner_id: 'owner_1',
+              workspace_id: 'workspace_1',
+            }],
+          }
+        }
+        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [
+              { id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: 'Ops records' },
+            ],
+          }
+        }
+        if (sql.includes('FROM meta_views') && sql.includes('WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{
+              id: 'view_calendar',
+              sheet_id: 'sheet_ops',
+              name: 'Calendar',
+              type: 'calendar',
+              filter_info: { mode: 'upcoming' },
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: { defaultView: 'week', colorRules: [{ field: 'category', value: 'meeting', color: '#00f' }] },
+            }],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/context')
+      .query({ viewId: 'view_calendar' })
+      .expect(200)
+
+    expect(response.body.ok).toBe(true)
+    expect(response.body.data.sheet).toMatchObject({ id: 'sheet_ops', baseId: 'base_ops', name: 'Ops' })
+    expect(response.body.data.views).toEqual([
+      expect.objectContaining({
+        id: 'view_calendar',
+        sheetId: 'sheet_ops',
+        type: 'calendar',
+        config: expect.objectContaining({ defaultView: 'week' }),
+      }),
+    ])
+  })
+
   test('creates a sheet under the legacy base when baseId is omitted', async () => {
     const { app, mockPool } = await createApp({
       tokenPerms: ['multitable:write'],
