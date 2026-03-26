@@ -65,4 +65,26 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
       shouldClear: true,
     })
   })
+
+  it('can preserve the selected key when an imported preset updates the stale route owner in place', () => {
+    expect(resolvePlmLocalFilterPresetRouteIdentity({
+      routePresetKey: 'bom:shared',
+      selectedPresetKey: 'bom:shared',
+      activePreset: {
+        key: 'bom:shared',
+        label: '共享 BOM',
+        field: 'path',
+        value: 'root/b',
+      },
+      currentState: {
+        field: 'path',
+        value: 'root/a',
+      },
+      preserveSelectedPresetKeyOnClear: true,
+    })).toEqual({
+      nextRoutePresetKey: '',
+      nextSelectedPresetKey: 'bom:shared',
+      shouldClear: true,
+    })
+  })
 })

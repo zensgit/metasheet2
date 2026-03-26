@@ -12,6 +12,7 @@ type PlmLocalFilterPresetRouteIdentityInput = {
     field: string
     value: string
   }
+  preserveSelectedPresetKeyOnClear?: boolean
 }
 
 export function resolvePlmLocalFilterPresetRouteIdentity(
@@ -42,7 +43,10 @@ export function resolvePlmLocalFilterPresetRouteIdentity(
 
   return {
     nextRoutePresetKey: '',
-    nextSelectedPresetKey: selectedPresetKey === routePresetKey ? '' : selectedPresetKey,
+    nextSelectedPresetKey:
+      input.preserveSelectedPresetKeyOnClear
+        ? selectedPresetKey
+        : selectedPresetKey === routePresetKey ? '' : selectedPresetKey,
     shouldClear: true,
   }
 }

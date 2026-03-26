@@ -3749,6 +3749,7 @@ function importBomFilterPresetShare(raw: string, mode: 'merge' | 'replace') {
   if (bomFilterPresetQuery.value && !presets.some((preset) => preset.key === bomFilterPresetQuery.value)) {
     syncBomFilterPresetQuery(undefined)
   }
+  reconcileBomLocalFilterPresetIdentityAfterImport()
   const importedCount = added + updated
   if (importedCount) {
     setDeepLinkMessage(
@@ -3789,6 +3790,7 @@ function importWhereUsedFilterPresetShare(raw: string, mode: 'merge' | 'replace'
   ) {
     syncWhereUsedFilterPresetQuery(undefined)
   }
+  reconcileWhereUsedLocalFilterPresetIdentityAfterImport()
   const importedCount = added + updated
   if (importedCount) {
     setDeepLinkMessage(
@@ -3853,6 +3855,7 @@ function importBomFilterPresetsFromText(raw: string) {
     if (bomFilterPresetQuery.value && !presets.some((preset) => preset.key === bomFilterPresetQuery.value)) {
       syncBomFilterPresetQuery(undefined)
     }
+    reconcileBomLocalFilterPresetIdentityAfterImport()
     const importedCount = added + updated
     if (importedCount) {
       setDeepLinkMessage(
@@ -3977,6 +3980,7 @@ function importWhereUsedFilterPresetsFromText(raw: string) {
     ) {
       syncWhereUsedFilterPresetQuery(undefined)
     }
+    reconcileWhereUsedLocalFilterPresetIdentityAfterImport()
     const importedCount = added + updated
     if (importedCount) {
       setDeepLinkMessage(
@@ -4062,6 +4066,42 @@ function clearBomLocalFilterPresetIdentity() {
 function clearWhereUsedLocalFilterPresetIdentity() {
   whereUsedFilterPresetKey.value = ''
   syncWhereUsedFilterPresetQuery(undefined)
+}
+
+function reconcileBomLocalFilterPresetIdentityAfterImport() {
+  const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+    routePresetKey: bomFilterPresetQuery.value,
+    selectedPresetKey: bomFilterPresetKey.value,
+    activePreset: activeBomLocalRoutePreset.value,
+    currentState: {
+      field: bomFilterField.value,
+      value: bomFilter.value,
+    },
+    preserveSelectedPresetKeyOnClear: true,
+  })
+  if (!nextIdentity.shouldClear) {
+    return
+  }
+  bomFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+  syncBomFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
+}
+
+function reconcileWhereUsedLocalFilterPresetIdentityAfterImport() {
+  const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+    routePresetKey: whereUsedFilterPresetQuery.value,
+    selectedPresetKey: whereUsedFilterPresetKey.value,
+    activePreset: activeWhereUsedLocalRoutePreset.value,
+    currentState: {
+      field: whereUsedFilterField.value,
+      value: whereUsedFilter.value,
+    },
+    preserveSelectedPresetKeyOnClear: true,
+  })
+  if (!nextIdentity.shouldClear) {
+    return
+  }
+  whereUsedFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+  syncWhereUsedFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
 }
 
 function hasProcessedTeamPresetChanges(result: PlmTeamFilterPresetBatchResult | null | undefined) {
