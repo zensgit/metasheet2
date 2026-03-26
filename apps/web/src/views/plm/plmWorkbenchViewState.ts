@@ -156,6 +156,18 @@ export function normalizePlmWorkbenchCollaborativeQuerySnapshot(value: unknown):
   return next
 }
 
+export function normalizePlmWorkbenchLocalRouteQuerySnapshot(value: unknown): Record<string, string> {
+  const next = normalizePlmWorkbenchQuerySnapshot(value)
+  delete next.approvalComment
+  const normalizedPanel = normalizePlmWorkbenchPanelScope(next.panel)
+  if (normalizedPanel) {
+    next.panel = normalizedPanel
+  } else {
+    delete next.panel
+  }
+  return next
+}
+
 export function hasExplicitPlmWorkbenchAutoApplyQueryState(value: unknown): boolean {
   const next = normalizePlmWorkbenchQuerySnapshot(value)
   delete next.approvalComment
@@ -329,6 +341,14 @@ export function buildPlmWorkbenchResetHydratedPanelQueryPatch() {
     approvalSort: '',
     approvalSortDir: '',
     approvalColumns: '',
+  }
+}
+
+export function buildPlmWorkbenchLegacyLocalDraftQueryPatch(value: unknown) {
+  const next = normalizePlmWorkbenchQuerySnapshot(value)
+  if (!next.approvalComment) return {}
+  return {
+    approvalComment: '',
   }
 }
 

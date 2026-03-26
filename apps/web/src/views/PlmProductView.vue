@@ -103,6 +103,7 @@ import {
   WORKBENCH_SCENE_RECOMMENDATION_OPTIONS,
 } from './plm/plmWorkbenchSceneCatalog'
 import {
+  buildPlmWorkbenchLegacyLocalDraftQueryPatch,
   hasExplicitPlmBomTeamPresetAutoApplyQueryState,
   hasExplicitPlmApprovalsAutoApplyQueryState,
   hasExplicitPlmCadAutoApplyQueryState,
@@ -115,6 +116,7 @@ import {
   matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
   normalizePlmWorkbenchCollaborativeQuerySnapshot,
+  normalizePlmWorkbenchLocalRouteQuerySnapshot,
   normalizePlmWorkbenchPanelScope,
   normalizePlmWorkbenchQuerySnapshot,
 } from './plm/plmWorkbenchViewState'
@@ -5294,7 +5296,6 @@ function formatDeepLinkTargets(panel?: string): string {
   const hasApprovalsState =
     approvalsStatus.value !== DEFAULT_APPROVAL_STATUS
     || Boolean(approvalsFilter.value.trim())
-    || Boolean(approvalComment.value.trim())
     || approvalSortKey.value !== 'created'
     || approvalSortDir.value !== 'desc'
     || !areColumnStatesEqual(approvalColumns.value, defaultApprovalColumns)
@@ -5342,7 +5343,6 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
   append('documentColumns', serializeColumnQuery(documentColumns.value, defaultDocumentColumns))
   append('approvalsStatus', approvalsStatus.value !== DEFAULT_APPROVAL_STATUS ? approvalsStatus.value : undefined)
   append('approvalsFilter', approvalsFilter.value)
-  append('approvalComment', approvalComment.value)
   append('approvalSort', approvalSortKey.value !== 'created' ? approvalSortKey.value : undefined)
   append('approvalSortDir', approvalSortDir.value !== 'desc' ? approvalSortDir.value : undefined)
   append('approvalColumns', serializeColumnQuery(approvalColumns.value, defaultApprovalColumns))
@@ -5399,7 +5399,9 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
 function buildDeepLinkUrl(panelOverride?: string): string {
   if (typeof window === 'undefined') return ''
   const base = `${window.location.origin}${route.path}`
-  const params = buildDeepLinkParams(true, panelOverride)
+  const params = normalizePlmWorkbenchLocalRouteQuerySnapshot(
+    buildDeepLinkParams(true, panelOverride),
+  )
   const search = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) {
     search.set(key, String(value))
@@ -5639,9 +5641,10 @@ async function applyQueryState() {
     if (approvalsFilterParam !== undefined) {
       approvalsFilter.value = approvalsFilterParam
     }
-    const approvalCommentParam = readQueryParam('approvalComment')
-    if (approvalCommentParam !== undefined) {
-      approvalComment.value = approvalCommentParam
+    if (readQueryParam('approvalComment') !== undefined) {
+      scheduleQuerySync(
+        buildPlmWorkbenchLegacyLocalDraftQueryPatch(route.query as Record<string, unknown>),
+      )
     }
     const approvalSortParam = readQueryParam('approvalSort')
     if (approvalSortParam !== undefined) {
@@ -6910,17 +6913,15 @@ watch(
   () => [
     approvalsStatus.value,
     approvalsFilter.value,
-    approvalComment.value,
     approvalSortKey.value,
     approvalSortDir.value,
     serializeColumnQuery(approvalColumns.value, defaultApprovalColumns),
   ],
-  ([status, filter, comment, sortKey, sortDir, columns]) => {
+  ([status, filter, sortKey, sortDir, columns]) => {
     scheduleQuerySync({
       approvalsTeamView: approvalsTeamViewQuery.value || undefined,
       approvalsStatus: status !== DEFAULT_APPROVAL_STATUS ? status : undefined,
       approvalsFilter: filter || undefined,
-      approvalComment: comment || undefined,
       approvalSort: sortKey !== 'created' ? sortKey : undefined,
       approvalSortDir: sortDir !== 'desc' ? sortDir : undefined,
       approvalColumns: columns,

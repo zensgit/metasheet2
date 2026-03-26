@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildPlmWorkbenchLegacyLocalDraftQueryPatch,
   buildPlmWorkbenchResetHydratedPanelQueryPatch,
   buildPlmWorkbenchResetOwnerQueryPatch,
   buildPlmWorkbenchRoutePath,
@@ -13,6 +14,7 @@ import {
   matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
   normalizePlmWorkbenchCollaborativeQuerySnapshot,
+  normalizePlmWorkbenchLocalRouteQuerySnapshot,
   normalizePlmWorkbenchPanelScope,
   normalizePlmWorkbenchQuerySnapshot,
 } from '../src/views/plm/plmWorkbenchViewState'
@@ -108,6 +110,25 @@ describe('plmWorkbenchViewState', () => {
     })
   })
 
+  it('normalizes local route snapshots without approval draft leakage', () => {
+    expect(
+      normalizePlmWorkbenchLocalRouteQuerySnapshot({
+        workbenchTeamView: ' workbench-view-1 ',
+        bomFilterPreset: 'bom-local-1',
+        whereUsedFilterPreset: 'where-local-1',
+        approvalsFilter: ' eco ',
+        approvalComment: 'ship-it',
+        panel: ' approvals, documents ',
+      }),
+    ).toEqual({
+      workbenchTeamView: 'workbench-view-1',
+      bomFilterPreset: 'bom-local-1',
+      whereUsedFilterPreset: 'where-local-1',
+      approvalsFilter: 'eco',
+      panel: 'documents,approvals',
+    })
+  })
+
   it('normalizes explicit panel scope to canonical collaborative order', () => {
     expect(normalizePlmWorkbenchPanelScope(' approvals, documents, approvals ')).toBe('documents,approvals')
     expect(normalizePlmWorkbenchPanelScope('all')).toBeUndefined()
@@ -139,6 +160,22 @@ describe('plmWorkbenchViewState', () => {
       approvalSortDir: '',
       approvalColumns: '',
     })
+  })
+
+  it('builds a cleanup patch for legacy local approval draft query state', () => {
+    expect(
+      buildPlmWorkbenchLegacyLocalDraftQueryPatch({
+        approvalsFilter: 'eco',
+        approvalComment: 'ship-it',
+      }),
+    ).toEqual({
+      approvalComment: '',
+    })
+    expect(
+      buildPlmWorkbenchLegacyLocalDraftQueryPatch({
+        approvalsFilter: 'eco',
+      }),
+    ).toEqual({})
   })
 
   it('detects workbench snapshot drift after manual query edits', () => {
