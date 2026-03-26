@@ -1395,6 +1395,52 @@ describe('plm-workbench routes', () => {
     })
   })
 
+  it('sets default team preset for the owner only', async () => {
+    routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
+      id: 'preset-default',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'bom',
+      name: 'BOM 默认预设',
+      name_key: 'bom 默认预设',
+      is_default: false,
+      archived_at: null,
+      state: JSON.stringify({ field: 'path', value: 'root/default', group: '机械' }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-09T00:10:00.000Z',
+    })
+    routeMocks.state.trxBuilder.execute.mockResolvedValueOnce(undefined)
+    routeMocks.state.trxBuilder.executeTakeFirstOrThrow.mockResolvedValueOnce({
+      id: 'preset-default',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'bom',
+      name: 'BOM 默认预设',
+      name_key: 'bom 默认预设',
+      is_default: true,
+      archived_at: null,
+      state: JSON.stringify({ field: 'path', value: 'root/default', group: '机械' }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-09T00:20:00.000Z',
+    })
+
+    const response = await request(app).post('/api/plm-workbench/filter-presets/team/preset-default/default')
+
+    expect(response.status).toBe(200)
+    expect(response.body.data).toMatchObject({
+      id: 'preset-default',
+      kind: 'bom',
+      isDefault: true,
+      canManage: true,
+    })
+    expect(routeMocks.db.transaction).toHaveBeenCalledTimes(1)
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('id', '=', 'preset-default')
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('tenant_id', '=', 'tenant-a')
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('scope', '=', 'team')
+  })
+
   it('sets default team view for the owner only', async () => {
     routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
       id: 'view-1',

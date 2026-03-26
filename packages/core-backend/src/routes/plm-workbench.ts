@@ -2128,11 +2128,14 @@ router.post(
         })
       }
 
+      const tenantId = req.user?.tenantId?.toString() || 'default'
       const presetId = req.params.id
       const preset = await dbAny
         .selectFrom('plm_filter_team_presets')
         .selectAll()
         .where('id', '=', presetId)
+        .where('tenant_id', '=', tenantId)
+        .where('scope', '=', 'team')
         .executeTakeFirst()
 
       if (!preset) {
