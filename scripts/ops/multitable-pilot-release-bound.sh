@@ -64,11 +64,16 @@ bash scripts/ops/multitable-pilot-handoff-release-bound.sh
 
 generated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 HANDOFF_RECOMMENDED_TEMPLATES_JSON="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(JSON.stringify(data.recommendedTemplates||{}))" "${HANDOFF_ROOT_ABS}/handoff.json")"
-HANDOFF_LOCAL_RUNNER_JSON="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(JSON.stringify(data.localRunner||null))" "${HANDOFF_ROOT_ABS}/handoff.json")"
-HANDOFF_LOCAL_RUNNER_AVAILABLE="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(String(data?.localRunner?.available===true?'true':'false'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
-HANDOFF_LOCAL_RUNNER_OK="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(String(data?.localRunner?.ok===false?'false':'true'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
-HANDOFF_LOCAL_RUNNER_BACKEND_MODE="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(String(data?.localRunner?.serviceModes?.backend||'unknown'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
-HANDOFF_LOCAL_RUNNER_WEB_MODE="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(String(data?.localRunner?.serviceModes?.web||'unknown'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_LOCAL_RUNNER_JSON="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const runner=data.pilotRunner||data.localRunner||null;process.stdout.write(JSON.stringify(runner))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_LOCAL_RUNNER_AVAILABLE="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const runner=data.pilotRunner||data.localRunner||null;process.stdout.write(String(runner?.available===true?'true':'false'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_LOCAL_RUNNER_OK="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const runner=data.pilotRunner||data.localRunner||null;process.stdout.write(String(runner?.ok===false?'false':'true'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_LOCAL_RUNNER_MODE="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const runner=data.pilotRunner||data.localRunner||null;process.stdout.write(String(runner?.runMode||'local'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_LOCAL_RUNNER_REPORT="$(node -e "const fs=require('fs');const path=require('path');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const runner=data.pilotRunner||data.localRunner||null;process.stdout.write(String(runner?.report||''))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_LOCAL_RUNNER_REPORT_MD="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const runner=data.pilotRunner||data.localRunner||null;process.stdout.write(String(runner?.reportMd||''))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_LOCAL_RUNNER_REPORT_BASENAME="$(node -e "const fs=require('fs');const path=require('path');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const runner=data.pilotRunner||data.localRunner||null;const report=runner?.report||'local-report.json';process.stdout.write(path.basename(report))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_LOCAL_RUNNER_REPORT_MD_BASENAME="$(node -e "const fs=require('fs');const path=require('path');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const runner=data.pilotRunner||data.localRunner||null;const report=runner?.reportMd||'local-report.md';process.stdout.write(path.basename(report))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_LOCAL_RUNNER_BACKEND_MODE="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const runner=data.pilotRunner||data.localRunner||null;process.stdout.write(String(runner?.serviceModes?.backend||'unknown'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
+HANDOFF_LOCAL_RUNNER_WEB_MODE="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));const runner=data.pilotRunner||data.localRunner||null;process.stdout.write(String(runner?.serviceModes?.web||'unknown'))" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_EMBED_HOST_ACCEPTANCE_JSON="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(JSON.stringify(data.embedHostAcceptance||null))" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_EMBED_HOST_PROTOCOL_JSON="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(JSON.stringify(data.embedHostProtocol||null))" "${HANDOFF_ROOT_ABS}/handoff.json")"
 HANDOFF_EMBED_HOST_NAVIGATION_JSON="$(node -e "const fs=require('fs');const file=process.argv[1];const data=JSON.parse(fs.readFileSync(file,'utf8'));process.stdout.write(JSON.stringify(data.embedHostNavigationProtection||null))" "${HANDOFF_ROOT_ABS}/handoff.json")"
@@ -197,6 +202,7 @@ printf '%s\n' \
   "  \"handoffMd\": \"${HANDOFF_ROOT_ABS}/handoff.md\"," \
   "  \"operatorCommandScript\": \"${REPORT_ROOT_ABS}/$(basename "${COMMANDS_SH}")\"," \
   "  \"recommendedTemplates\": ${HANDOFF_RECOMMENDED_TEMPLATES_JSON}," \
+  "  \"pilotRunner\": ${HANDOFF_LOCAL_RUNNER_JSON}," \
   "  \"localRunner\": ${HANDOFF_LOCAL_RUNNER_JSON}," \
   "  \"embedHostAcceptance\": ${HANDOFF_EMBED_HOST_ACCEPTANCE_JSON}," \
   "  \"embedHostProtocol\": ${HANDOFF_EMBED_HOST_PROTOCOL_JSON}," \
@@ -282,13 +288,14 @@ printf '%s\n' \
   "- Customer delivery receipt: \`${HANDOFF_ROOT_ABS}/docs/${CUSTOMER_DELIVERY_SIGNOFF_TEMPLATE_NAME}\`" \
   "- Feedback intake: \`${HANDOFF_ROOT_ABS}/docs/${FEEDBACK_TEMPLATE_NAME}\`" \
   '' \
-  '## Local Pilot Runner' \
+  '## Pilot Runner' \
   '' \
   "- Available: \`${HANDOFF_LOCAL_RUNNER_AVAILABLE}\`" \
   "- Status: **${HANDOFF_LOCAL_RUNNER_STATUS}**" \
+  "- Run mode: \`${HANDOFF_LOCAL_RUNNER_MODE}\`" \
   "- Backend mode: \`${HANDOFF_LOCAL_RUNNER_BACKEND_MODE}\`" \
   "- Web mode: \`${HANDOFF_LOCAL_RUNNER_WEB_MODE}\`" \
-  "- Detailed local runner summary remains in \`${HANDOFF_ROOT_ABS}/handoff.md\` and \`${READY_OUTPUT_ROOT_ABS}/readiness.md\`." \
+  "- Detailed pilot runner summary remains in \`${HANDOFF_ROOT_ABS}/handoff.md\` and \`${READY_OUTPUT_ROOT_ABS}/readiness.md\`." \
   '' \
   '## Operator Checklist' \
   '' \
@@ -334,8 +341,8 @@ printf '%s\n' \
   "- \`${READY_OUTPUT_ROOT_ABS}/readiness.md\`" \
   "- \`${READY_OUTPUT_ROOT_ABS}/readiness.json\`" \
   "- \`${READY_OUTPUT_ROOT_ABS}/gates/report.json\`" \
-  "- \`${READY_OUTPUT_ROOT_ABS}/smoke/local-report.json\`" \
-  "- \`${READY_OUTPUT_ROOT_ABS}/smoke/local-report.md\`" \
+  "- \`${READY_OUTPUT_ROOT_ABS}/smoke/${HANDOFF_LOCAL_RUNNER_REPORT_BASENAME}\`" \
+  "- \`${READY_OUTPUT_ROOT_ABS}/smoke/${HANDOFF_LOCAL_RUNNER_REPORT_MD_BASENAME}\`" \
   "- \`${HANDOFF_ROOT_ABS}/handoff.md\`" \
   "- \`${HANDOFF_ROOT_ABS}/handoff.json\`" \
   > "${REPORT_TMP_MD}"

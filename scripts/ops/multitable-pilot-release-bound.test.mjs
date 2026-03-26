@@ -47,6 +47,9 @@ function createFakeBash(binDir) {
     '  "localRunner": {',
     '    "available": true,',
     '    "ok": true,',
+    '    "runMode": "staging",',
+    '    "report": "/tmp/staging-report.json",',
+    '    "reportMd": "/tmp/staging-report.md",',
     '    "serviceModes": {',
     '      "backend": "reused",',
     '      "web": "started"',
@@ -122,6 +125,7 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
     const reportMd = fs.readFileSync(reportMdPath, 'utf8')
 
     assert.equal(report.embedHostAcceptance.ok, false)
+    assert.equal(report.pilotRunner.runMode, 'staging')
     assert.equal(report.localRunner.available, true)
     assert.equal(report.localRunner.serviceModes.backend, 'reused')
     assert.equal(report.localRunner.serviceModes.web, 'started')
@@ -134,7 +138,8 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
       ['api.embed-host.discard-unsaved-form-draft'],
     )
     assert.match(reportMd, /## Embed Host Acceptance/)
-    assert.match(reportMd, /## Local Pilot Runner/)
+    assert.match(reportMd, /## Pilot Runner/)
+    assert.match(reportMd, /Run mode: `staging`/)
     assert.match(reportMd, /Backend mode: `reused`/)
     assert.match(reportMd, /Web mode: `started`/)
     assert.match(reportMd, /Overall embed-host acceptance: \*\*FAIL\*\*/)

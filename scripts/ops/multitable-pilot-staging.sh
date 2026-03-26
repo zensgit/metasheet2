@@ -13,6 +13,7 @@ ENSURE_PLAYWRIGHT="${ENSURE_PLAYWRIGHT:-false}"
 HEADLESS="${HEADLESS:-true}"
 TIMEOUT_MS="${TIMEOUT_MS:-30000}"
 REPORT_NAME="${REPORT_NAME:-report.json}"
+RUNNER_REPORT_BASENAME="${RUNNER_REPORT_BASENAME:-staging-report}"
 
 echo "[multitable-pilot-staging] Using running services only" >&2
 echo "[multitable-pilot-staging] api_base=${API_BASE}" >&2
@@ -27,6 +28,8 @@ ENSURE_PLAYWRIGHT="${ENSURE_PLAYWRIGHT}" \
 HEADLESS="${HEADLESS}" \
 TIMEOUT_MS="${TIMEOUT_MS}" \
 REPORT_NAME="${REPORT_NAME}" \
+RUN_MODE=staging \
+RUNNER_REPORT_BASENAME="${RUNNER_REPORT_BASENAME}" \
 AUTO_START_SERVICES=false \
 REQUIRE_RUNNING_SERVICES=true \
 bash scripts/ops/multitable-pilot-local.sh

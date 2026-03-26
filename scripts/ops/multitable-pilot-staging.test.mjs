@@ -28,6 +28,8 @@ test('multitable pilot staging delegates to pilot-local with running-services-on
       '    printf "OUTPUT_ROOT=%s\\n" "${OUTPUT_ROOT:-}"',
       '    printf "API_BASE=%s\\n" "${API_BASE:-}"',
       '    printf "WEB_BASE=%s\\n" "${WEB_BASE:-}"',
+      '    printf "RUN_MODE=%s\\n" "${RUN_MODE:-}"',
+      '    printf "RUNNER_REPORT_BASENAME=%s\\n" "${RUNNER_REPORT_BASENAME:-}"',
       '    printf "AUTO_START_SERVICES=%s\\n" "${AUTO_START_SERVICES:-}"',
       '    printf "REQUIRE_RUNNING_SERVICES=%s\\n" "${REQUIRE_RUNNING_SERVICES:-}"',
       '    printf "ENSURE_PLAYWRIGHT=%s\\n" "${ENSURE_PLAYWRIGHT:-}"',
@@ -59,6 +61,8 @@ test('multitable pilot staging delegates to pilot-local with running-services-on
   assert.match(log, /OUTPUT_ROOT=\/tmp\/multitable-pilot-staging-output/)
   assert.match(log, /API_BASE=https:\/\/pilot\.example\.test\/api/)
   assert.match(log, /WEB_BASE=https:\/\/pilot\.example\.test\/app/)
+  assert.match(log, /RUN_MODE=staging/)
+  assert.match(log, /RUNNER_REPORT_BASENAME=staging-report/)
   assert.match(log, /AUTO_START_SERVICES=false/)
   assert.match(log, /REQUIRE_RUNNING_SERVICES=true/)
   assert.match(log, /ENSURE_PLAYWRIGHT=false/)

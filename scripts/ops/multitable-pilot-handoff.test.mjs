@@ -38,6 +38,7 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
         required: true,
         available: true,
         ok: true,
+        runMode: 'local',
         report: path.join(readinessRoot, 'smoke', 'local-report.json'),
         reportMd: path.join(readinessRoot, 'smoke', 'local-report.md'),
         runnerReport: path.join(readinessRoot, 'smoke', 'report.json'),
@@ -153,6 +154,7 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
     assert.equal(handoffJson.embedHostProtocol.ok, true)
     assert.equal(handoffJson.embedHostNavigationProtection.ok, false)
     assert.equal(handoffJson.embedHostDeferredReplay.ok, true)
+    assert.equal(handoffJson.pilotRunner.runMode, 'local')
     assert.equal(handoffJson.localRunner.available, true)
     assert.equal(handoffJson.localRunner.serviceModes.backend, 'reused')
     assert.equal(handoffJson.localRunner.serviceModes.web, 'started')
@@ -161,7 +163,8 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
       ['api.embed-host.discard-unsaved-form-draft'],
     )
     assert.match(handoffMd, /## Embed Host Acceptance/)
-    assert.match(handoffMd, /## Local Pilot Runner/)
+    assert.match(handoffMd, /## Pilot Runner/)
+    assert.match(handoffMd, /Run mode: `local`/)
     assert.match(handoffMd, /Backend mode: `reused`/)
     assert.match(handoffMd, /Web mode: `started`/)
     assert.match(handoffMd, /Overall embed-host acceptance: \*\*FAIL\*\*/)

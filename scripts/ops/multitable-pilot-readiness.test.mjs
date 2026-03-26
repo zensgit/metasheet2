@@ -90,6 +90,7 @@ function writeFixtureReport(tmpRoot) {
   }, null, 2))
   fs.writeFileSync(smokeLocalReportPath, JSON.stringify({
     ok: true,
+    runMode: 'local',
     serviceModes: {
       backend: 'reused',
       web: 'reused',
@@ -160,11 +161,13 @@ test('multitable pilot readiness surfaces local runner summary when the wrapper 
   const readiness = JSON.parse(fs.readFileSync(fixture.readinessJsonPath, 'utf8'))
   const readinessMd = fs.readFileSync(fixture.readinessMdPath, 'utf8')
   assert.equal(readiness.ok, true)
+  assert.equal(readiness.pilotRunner.runMode, 'local')
   assert.equal(readiness.localRunner.required, true)
   assert.equal(readiness.localRunner.available, true)
   assert.equal(readiness.localRunner.serviceModes.backend, 'reused')
   assert.equal(readiness.localRunner.serviceModes.web, 'reused')
-  assert.match(readinessMd, /## Local Pilot Runner/)
+  assert.match(readinessMd, /## Pilot Runner/)
+  assert.match(readinessMd, /Run mode: `local`/)
   assert.match(readinessMd, /Backend mode: `reused`/)
 })
 

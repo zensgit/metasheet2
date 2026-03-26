@@ -16,11 +16,13 @@ ENSURE_PLAYWRIGHT="${ENSURE_PLAYWRIGHT:-true}"
 HEADLESS="${HEADLESS:-true}"
 TIMEOUT_MS="${TIMEOUT_MS:-30000}"
 REPORT_NAME="${REPORT_NAME:-report.json}"
+RUN_MODE="${RUN_MODE:-local}"
+RUNNER_REPORT_BASENAME="${RUNNER_REPORT_BASENAME:-local-report}"
 AUTO_START_SERVICES="${AUTO_START_SERVICES:-true}"
 REQUIRE_RUNNING_SERVICES="${REQUIRE_RUNNING_SERVICES:-false}"
 SMOKE_REPORT_JSON="${OUTPUT_ROOT}/${REPORT_NAME}"
-LOCAL_REPORT_JSON="${LOCAL_REPORT_JSON:-${OUTPUT_ROOT}/local-report.json}"
-LOCAL_REPORT_MD="${LOCAL_REPORT_MD:-${OUTPUT_ROOT}/local-report.md}"
+LOCAL_REPORT_JSON="${LOCAL_REPORT_JSON:-${OUTPUT_ROOT}/${RUNNER_REPORT_BASENAME}.json}"
+LOCAL_REPORT_MD="${LOCAL_REPORT_MD:-${OUTPUT_ROOT}/${RUNNER_REPORT_BASENAME}.md}"
 BACKEND_MODE="reused"
 WEB_MODE="reused"
 
@@ -73,6 +75,7 @@ function write_local_report() {
   LOCAL_REPORT_MD_PATH="${LOCAL_REPORT_MD}" \
   RUNNER_REPORT_JSON_PATH="${SMOKE_REPORT_JSON}" \
   RUN_LABEL_VALUE="${RUN_LABEL}" \
+  RUN_MODE_VALUE="${RUN_MODE}" \
   RUNNER_SCRIPT_VALUE="${RUNNER_SCRIPT}" \
   OUTPUT_ROOT_VALUE="${OUTPUT_ROOT}" \
   API_BASE_VALUE="${API_BASE}" \
@@ -146,6 +149,7 @@ const runnerOk = runnerReport?.ok !== false
 const localReport = {
   ok: runnerOk && embedHostAcceptance.ok,
   runLabel: process.env.RUN_LABEL_VALUE,
+  runMode: process.env.RUN_MODE_VALUE || 'local',
   runnerScript: process.env.RUNNER_SCRIPT_VALUE,
   outputRoot: path.resolve(process.env.OUTPUT_ROOT_VALUE),
   apiBase: process.env.API_BASE_VALUE,
@@ -190,10 +194,11 @@ function evidenceSection(title, evidence) {
 }
 
 const lines = [
-  '# Multitable Pilot Local Report',
+  '# Multitable Pilot Runner Report',
   '',
   `- Overall: **${localReport.ok ? 'PASS' : 'FAIL'}**`,
   `- Run label: \`${localReport.runLabel}\``,
+  `- Run mode: \`${localReport.runMode}\``,
   `- Runner script: \`${localReport.runnerScript}\``,
   `- Output root: \`${localReport.outputRoot}\``,
   `- Runner report: \`${localReport.runnerReport.path}\``,

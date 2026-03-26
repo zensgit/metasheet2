@@ -6,8 +6,8 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '../..')
 
 const smokeReportPath = process.env.SMOKE_REPORT_JSON || ''
-const smokeLocalReportPath = process.env.SMOKE_LOCAL_REPORT_JSON || ''
-const smokeLocalReportMdPath = process.env.SMOKE_LOCAL_REPORT_MD || ''
+const smokeRunnerReportPath = process.env.SMOKE_RUNNER_REPORT_JSON || process.env.SMOKE_LOCAL_REPORT_JSON || ''
+const smokeRunnerReportMdPath = process.env.SMOKE_RUNNER_REPORT_MD || process.env.SMOKE_LOCAL_REPORT_MD || ''
 const profileReportPath = process.env.PROFILE_REPORT_JSON || ''
 const profileSummaryPath = process.env.PROFILE_SUMMARY_MD || ''
 const gateReportPath = process.env.GATE_REPORT_JSON || ''
@@ -230,6 +230,7 @@ function summarizeLocalRunnerArtifact(localReport, localReportPath, localReportM
       required,
       available: false,
       ok: !required,
+      runMode: 'local',
       report: localReportPath ? path.resolve(localReportPath) : null,
       reportMd: localReportMdPath ? path.resolve(localReportMdPath) : null,
       runnerReport: null,
@@ -248,6 +249,7 @@ function summarizeLocalRunnerArtifact(localReport, localReportPath, localReportM
     required,
     available: true,
     ok: Boolean(localReport.ok),
+    runMode: typeof localReport?.runMode === 'string' && localReport.runMode ? localReport.runMode : 'local',
     report: localReportPath ? path.resolve(localReportPath) : null,
     reportMd: localReportMdPath ? path.resolve(localReportMdPath) : null,
     runnerReport: localReport?.runnerReport?.path ?? null,
@@ -313,8 +315,8 @@ function summarizeOnPremReleaseGate(report, reportPath) {
 
 async function main() {
   const smoke = await readJson(smokeReportPath, 'SMOKE_REPORT_JSON')
-  const requireLocalRunnerReport = Boolean(smokeLocalReportPath)
-  const smokeLocalReport = smokeLocalReportPath ? await readOptionalJson(smokeLocalReportPath) : null
+  const requireLocalRunnerReport = Boolean(smokeRunnerReportPath)
+  const smokeLocalReport = smokeRunnerReportPath ? await readOptionalJson(smokeRunnerReportPath) : null
   const profile = await readJson(profileReportPath, 'PROFILE_REPORT_JSON')
   const profileSummary = await readOptionalText(profileSummaryPath)
   const gateReport = gateReportPath ? await readOptionalJson(gateReportPath) : null
@@ -330,8 +332,8 @@ async function main() {
   const managerRecovery = summarizeManagerRecovery(smoke)
   const localRunner = summarizeLocalRunnerArtifact(
     smokeLocalReport,
-    smokeLocalReportPath,
-    smokeLocalReportMdPath,
+    smokeRunnerReportPath,
+    smokeRunnerReportMdPath,
     requireLocalRunnerReport,
   )
   const embedHostProtocol = summarizeEmbedHostProtocol(smoke)
@@ -427,6 +429,7 @@ async function main() {
     signoffRecoveryPath,
     generatedAt: new Date().toISOString(),
   }
+  payload.pilotRunner = payload.localRunner
 
   const lines = [
     '# Multitable Pilot Readiness',
@@ -525,17 +528,18 @@ async function main() {
     `- api.grid.initial-load: ${fmtMs(profileSummaryData.apiGridInitialLoadMs)}`,
     `- api.grid.search-hit: ${fmtMs(profileSummaryData.apiGridSearchHitMs)}`,
     '',
-    '## Local Pilot Runner',
+    '## Pilot Runner',
     '',
     `- Required binding: \`${localRunner.required ? 'true' : 'false'}\``,
     `- Available: \`${localRunner.available ? 'true' : 'false'}\``,
     `- Status: **${localRunner.ok ? 'PASS' : 'FAIL'}**`,
+    `- Run mode: \`${localRunner.runMode}\``,
     `- Report: \`${localRunner.report ?? 'missing'}\``,
     `- Markdown: \`${localRunner.reportMd ?? 'missing'}\``,
     `- Raw runner report: \`${localRunner.runnerReport ?? 'missing'}\``,
     `- Backend mode: \`${localRunner.serviceModes.backend}\``,
     `- Web mode: \`${localRunner.serviceModes.web}\``,
-    `- Embed-host acceptance in local wrapper: **${localRunner.embedHostAcceptance.ok ? 'PASS' : 'FAIL'}**`,
+    `- Embed-host acceptance in wrapper: **${localRunner.embedHostAcceptance.ok ? 'PASS' : 'FAIL'}**`,
     '',
     '## Embed Host Protocol Evidence',
     '',
