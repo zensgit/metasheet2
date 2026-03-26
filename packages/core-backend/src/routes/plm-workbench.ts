@@ -1430,6 +1430,13 @@ router.patch(
         })
       }
 
+      if (view.archived_at) {
+        return res.status(409).json({
+          success: false,
+          error: 'Archived PLM team views cannot be renamed',
+        })
+      }
+
       if (normalizePlmWorkbenchTeamViewName(view.name) === name) {
         return res.json({
           success: true,

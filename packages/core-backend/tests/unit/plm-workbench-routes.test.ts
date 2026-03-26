@@ -484,6 +484,33 @@ describe('plm-workbench routes', () => {
     })
   })
 
+  it('rejects renaming archived team views', async () => {
+    routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
+      id: 'view-archived-rename',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'workbench',
+      name: '已归档工作台视图',
+      name_key: '已归档工作台视图',
+      is_default: false,
+      archived_at: '2026-03-09T00:21:00.000Z',
+      state: JSON.stringify({ query: { documentFilter: 'gear' } }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-09T00:20:00.000Z',
+    })
+
+    const response = await request(app)
+      .patch('/api/plm-workbench/views/team/view-archived-rename')
+      .send({ name: '不应该成功' })
+
+    expect(response.status).toBe(409)
+    expect(response.body).toEqual({
+      success: false,
+      error: 'Archived PLM team views cannot be renamed',
+    })
+  })
+
   it('duplicates a team view into a new owner copy', async () => {
     routeMocks.state.authUser = {
       id: 'owner-2',
