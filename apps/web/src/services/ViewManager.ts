@@ -6,7 +6,6 @@
 import type {
   BaseViewConfig,
   View,
-  ViewType,
   ViewState,
   ViewConfigResponse,
   ViewDataResponse,
@@ -17,6 +16,7 @@ import type {
 } from '../types/views'
 import { useAuth } from '../composables/useAuth'
 import { getApiBase } from '../utils/api'
+import { MultitableApiClient } from '../multitable/api/client'
 
 export class ViewManager {
   private static instance: ViewManager
@@ -39,6 +39,18 @@ export class ViewManager {
       ...this.auth.buildAuthHeaders(),
       ...additionalHeaders
     }
+  }
+
+  private createMultitableClient(): MultitableApiClient {
+    return new MultitableApiClient({
+      fetchFn: (path, init = {}) => {
+        const headers = this.buildHeaders((init.headers ?? {}) as Record<string, string>)
+        return fetch(`${getApiBase()}${path}`, {
+          ...init,
+          headers,
+        })
+      },
+    })
   }
 
   /**
@@ -233,7 +245,7 @@ export class ViewManager {
     try {
       const sheetId = typeof config.tableId === 'string' ? config.tableId : undefined
       if (!sheetId) return null
-      const view = await this.createView({
+      const result = await this.createMultitableClient().createView({
         ...config,
         sheetId,
         type: 'gallery',
@@ -242,8 +254,8 @@ export class ViewManager {
           layout: config.layout,
           display: config.display,
         },
-      } as unknown as View)
-      return view?.id ?? null
+      })
+      return result.view?.id ?? null
     } catch (error) {
       console.error('Failed to create gallery view:', error)
       return null
@@ -257,7 +269,7 @@ export class ViewManager {
     try {
       const sheetId = typeof config.tableId === 'string' ? config.tableId : undefined
       if (!sheetId) return null
-      const view = await this.createView({
+      const result = await this.createMultitableClient().createView({
         ...config,
         sheetId,
         type: 'form',
@@ -267,8 +279,8 @@ export class ViewManager {
           validation: config.validation,
           styling: config.styling,
         },
-      } as unknown as View)
-      return view?.id ?? null
+      })
+      return result.view?.id ?? null
     } catch (error) {
       console.error('Failed to create form view:', error)
       return null
@@ -277,34 +289,19 @@ export class ViewManager {
 
   async submitForm(viewId: string, data: Record<string, any>): Promise<FormSubmissionResponse> {
     try {
-      const response = await fetch(`${getApiBase()}/api/multitable/views/${viewId}/submit`, {
-        method: 'POST',
-        headers: this.buildHeaders(),
-        body: JSON.stringify({ data })
-      })
-
-      const result = await response.json()
-
-      if (result?.ok) {
-        const recordId = result.data?.record?.id
-        return {
-          success: true,
-          data: {
-            id: typeof recordId === 'string' ? recordId : '',
-            message: result.data?.mode === 'update' ? 'Form updated successfully' : 'Form submitted successfully',
-          },
-        }
-      }
-
+      const result = await this.createMultitableClient().submitForm(viewId, { data })
       return {
-        success: false,
-        error: result?.error?.message || 'Failed to submit form',
+        success: true,
+        data: {
+          id: result.record.id,
+          message: result.mode === 'update' ? 'Form updated successfully' : 'Form submitted successfully',
+        },
       }
     } catch (error) {
       console.error('Failed to submit form:', error)
       return {
         success: false,
-        error: 'Failed to submit form'
+        error: error instanceof Error ? error.message : 'Failed to submit form'
       }
     }
   }
@@ -351,16 +348,10 @@ export class ViewManager {
   /**
    * Create a new view configuration
    */
-  async createView(view: View): Promise<View | null> {
+  async createView(view: Record<string, unknown>): Promise<View | null> {
     try {
-      const response = await fetch(`${getApiBase()}/api/multitable/views`, {
-        method: 'POST',
-        headers: this.buildHeaders(),
-        body: JSON.stringify(view)
-      })
-
-      const result = await response.json()
-      return result.ok ? result.data?.view ?? null : null
+      const result = await this.createMultitableClient().createView(view as any)
+      return result.view as unknown as View
     } catch (error) {
       console.error('Failed to create view:', error)
       return null
@@ -372,20 +363,10 @@ export class ViewManager {
    */
   async deleteView(viewId: string): Promise<boolean> {
     try {
-      const response = await fetch(`${getApiBase()}/api/multitable/views/${viewId}`, {
-        method: 'DELETE',
-        headers: this.buildHeaders()
-      })
-
-      const result = await response.json()
-
-      if (result.ok) {
-        this.clearCache(viewId)
-        this.stateCache.delete(viewId)
-        return true
-      }
-
-      return false
+      await this.createMultitableClient().deleteView(viewId)
+      this.clearCache(viewId)
+      this.stateCache.delete(viewId)
+      return true
     } catch (error) {
       console.error('Failed to delete view:', error)
       return false
@@ -397,17 +378,8 @@ export class ViewManager {
    */
   async getTableViews(tableId: string): Promise<View[]> {
     try {
-      const response = await fetch(`${getApiBase()}/api/multitable/views?sheetId=${encodeURIComponent(tableId)}`, {
-        headers: this.buildHeaders()
-      })
-
-      const result = await response.json()
-
-      if (result.ok && Array.isArray(result.data?.views)) {
-        return result.data.views
-      }
-
-      return []
+      const result = await this.createMultitableClient().listViews(tableId)
+      return result.views as unknown as View[]
     } catch (error) {
       console.error('Failed to load table views:', error)
       return []
@@ -419,20 +391,9 @@ export class ViewManager {
    */
   async updateView(view: View): Promise<boolean> {
     try {
-      const response = await fetch(`${getApiBase()}/api/multitable/views/${view.id}`, {
-        method: 'PATCH',
-        headers: this.buildHeaders(),
-        body: JSON.stringify(view)
-      })
-
-      const result = await response.json()
-
-      if (result.ok) {
-        this.clearCache(view.id)
-        return true
-      }
-
-      return false
+      await this.createMultitableClient().updateView(view.id, view as any)
+      this.clearCache(view.id)
+      return true
     } catch (error) {
       console.error('Failed to update view:', error)
       return false

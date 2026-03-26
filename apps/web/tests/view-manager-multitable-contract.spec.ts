@@ -8,6 +8,7 @@ vi.mock('../src/composables/useAuth', () => ({
 
 vi.mock('../src/utils/api', () => ({
   getApiBase: () => 'http://unit.test',
+  apiFetch: vi.fn(),
 }))
 
 describe('ViewManager multitable CRUD contract', () => {
