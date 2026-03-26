@@ -1785,6 +1785,54 @@ describe('usePlmTeamFilterPresets', () => {
     expect(setMessage).toHaveBeenCalledWith('已将Where-Used本地预设提升为默认团队预设：共享父件')
   })
 
+  it('keeps the promoted team preset applied when defaulting fails after creation', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({ items: [] })
+    vi.mocked(savePlmTeamFilterPreset).mockResolvedValue({
+      id: 'preset-created',
+      kind: 'where-used',
+      scope: 'team',
+      name: '共享父件',
+      ownerUserId: 'dev-user',
+      canManage: true,
+      isDefault: false,
+      state: { field: 'parent_number', value: 'assy-01', group: '装配' },
+    })
+    vi.mocked(setPlmTeamFilterPresetDefault).mockRejectedValue(new Error('default failed'))
+
+    const trackedApply = vi.fn(() => 'applied')
+    const model = usePlmTeamFilterPresets({
+      kind: 'where-used',
+      label: 'Where-Used',
+      getCurrentPresetState: () => ({ field: 'all', value: '', group: '' }),
+      applyPreset: trackedApply,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetOwnerUserId.value = 'owner-stale'
+    const saved = await model.promoteFilterPresetToTeamDefault({
+      key: 'where-used:local-1',
+      label: '共享父件',
+      field: 'parent_number',
+      value: 'assy-01',
+      group: '装配',
+    })
+
+    expect(savePlmTeamFilterPreset).toHaveBeenCalledWith('where-used', '共享父件', {
+      field: 'parent_number',
+      value: 'assy-01',
+      group: '装配',
+    })
+    expect(setPlmTeamFilterPresetDefault).toHaveBeenCalledWith('preset-created')
+    expect(saved?.id).toBe('preset-created')
+    expect(model.teamPresetKey.value).toBe('preset-created')
+    expect(model.teamPresets.value.find((preset) => preset.id === 'preset-created')?.isDefault).toBe(false)
+    expect(model.teamPresetOwnerUserId.value).toBe('')
+    expect(model.teamPresetsError.value).toBe('default failed')
+    expect(setMessage).toHaveBeenCalledWith('已将Where-Used本地预设提升为团队预设，但设为默认失败：共享父件', true)
+  })
+
   it('batch archives manageable team presets and clears explicit identity for archived selections', async () => {
     const requestedPresetId = ref('preset-owned')
     const syncRequestedPresetId = vi.fn((value?: string) => {

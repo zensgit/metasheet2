@@ -415,14 +415,20 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       teamPresets.value = upsertTeamPreset(teamPresets.value, created)
       clearSingleTargetTakeoverSelection()
       applyPresetToTarget(created)
-
-      const defaulted = await setPlmTeamFilterPresetDefault(created.id)
-      teamPresets.value = applyDefaultPresetUpdate(teamPresets.value, defaulted)
-      applyPresetToTarget(defaulted)
-      lastAutoAppliedDefaultId.value = defaulted.id
-      clearTeamPresetDrafts()
-      options.setMessage(`已将${options.label}本地预设提升为默认团队预设：${defaulted.name}`)
-      return defaulted
+      try {
+        const defaulted = await setPlmTeamFilterPresetDefault(created.id)
+        teamPresets.value = applyDefaultPresetUpdate(teamPresets.value, defaulted)
+        applyPresetToTarget(defaulted)
+        lastAutoAppliedDefaultId.value = defaulted.id
+        clearTeamPresetDrafts()
+        options.setMessage(`已将${options.label}本地预设提升为默认团队预设：${defaulted.name}`)
+        return defaulted
+      } catch (error) {
+        teamPresetsError.value = getErrorMessage(error, `将${options.label}团队预设设为默认失败`)
+        clearTeamPresetDrafts()
+        options.setMessage(`已将${options.label}本地预设提升为团队预设，但设为默认失败：${created.name}`, true)
+        return created
+      }
     } catch (error) {
       teamPresetsError.value = getErrorMessage(error, `提升${options.label}默认团队预设失败`)
       options.setMessage(teamPresetsError.value, true)
