@@ -69,6 +69,8 @@ jobs:
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+          DEPLOY_IMAGE_OWNER: zensgit
+          DEPLOY_IMAGE_TAG: ${{ github.sha }}
           DRILL_FAIL_STAGE: ${{ github.event.inputs.drill_fail_stage || 'none' }}
         run: |
           set -euo pipefail
@@ -78,6 +80,8 @@ jobs:
           ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
+          DEPLOY_IMAGE_OWNER="${DEPLOY_IMAGE_OWNER:-zensgit}"
+          DEPLOY_IMAGE_TAG="${DEPLOY_IMAGE_TAG:-${GITHUB_SHA}}"
           DRILL_FAIL_STAGE="${DRILL_FAIL_STAGE:-none}"
           mkdir -p output/deploy
           deploy_log="output/deploy/deploy.log"
@@ -85,6 +89,8 @@ jobs:
             "set -euo pipefail"
             "DEPLOY_PATH=\"${DEPLOY_PATH:-metasheet2}\""
             "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}\""
+            "DEPLOY_IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER:-zensgit}\""
+            "DEPLOY_IMAGE_TAG=\"${DEPLOY_IMAGE_TAG:-${GITHUB_SHA}}\""
             "DRILL_FAIL_STAGE=\"${DRILL_FAIL_STAGE:-none}\""
             'if [[ "${DEPLOY_PATH}" == /* ]]; then'
             '  DEPLOY_REPO_PATH="${DEPLOY_PATH}"'
@@ -122,6 +128,8 @@ jobs:
             '  exit 125'
             'fi'
             'echo "[deploy] compose_cmd=${COMPOSE_CMD}"'
+            'echo "[deploy] image_owner=${DEPLOY_IMAGE_OWNER}"'
+            'echo "[deploy] image_tag=${DEPLOY_IMAGE_TAG}"'
             "# Preflight: validate production env/compose/nginx before (re)deploying containers."
             "echo \"=== ATTENDANCE PREFLIGHT START ===\""
             "preflight_rc=0"
@@ -133,8 +141,8 @@ jobs:
             'if [[ "$preflight_rc" != "0" ]]; then exit "$preflight_rc"; fi'
             "echo \"=== DEPLOY START ===\""
             'if [[ "${DRILL_FAIL_STAGE:-none}" == "deploy" ]]; then echo "[deploy][drill] intentional failure at deploy stage"; exit 91; fi'
-            'eval "${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" pull backend web"'
-            'eval "${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" up -d --no-deps --force-recreate backend web"'
+            'eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" pull backend web"'
+            'eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" up -d --no-deps --force-recreate backend web"'
             "echo \"=== DEPLOY END ===\""
             "# Ensure DB schema is up to date before smoke checks."
             "echo \"=== MIGRATE START ===\""
