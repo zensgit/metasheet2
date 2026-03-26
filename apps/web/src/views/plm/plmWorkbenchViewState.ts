@@ -111,6 +111,7 @@ export function normalizePlmWorkbenchCollaborativeQuerySnapshot(value: unknown):
   const next = stripPlmWorkbenchTeamViewIdentity(normalizePlmWorkbenchQuerySnapshot(value))
   delete next.bomFilterPreset
   delete next.whereUsedFilterPreset
+  delete next.approvalComment
   return next
 }
 

@@ -84,6 +84,7 @@ describe('plmWorkbenchViewState', () => {
         workbenchTeamView: 'view-1',
         bomFilterPreset: 'bom-local-1',
         whereUsedFilterPreset: 'where-local-1',
+        approvalComment: 'ship-it',
         bomFilter: 'gear',
         bomFilterField: 'path',
         whereUsedFilter: 'assy',
@@ -133,6 +134,22 @@ describe('plmWorkbenchViewState', () => {
     ).toBe(true)
   })
 
+  it('matches workbench snapshots even when only approval comments differ', () => {
+    expect(
+      matchPlmWorkbenchQuerySnapshot(
+        {
+          workbenchTeamView: 'view-1',
+          approvalsFilter: 'eco',
+          approvalComment: 'ship-it',
+        },
+        {
+          approvalsFilter: 'eco',
+          approvalComment: 'needs-review',
+        },
+      ),
+    ).toBe(true)
+  })
+
   it('builds a workbench team view share URL that preserves explicit identity and normalized query state', () => {
     expect(
       buildPlmWorkbenchTeamViewShareUrl(
@@ -154,6 +171,7 @@ describe('plmWorkbenchViewState', () => {
               bomFilterField: 'path',
               documentFilter: ' gear ',
               approvalsFilter: 'eco',
+              approvalComment: 'ship-it',
               ignored: 'value',
             },
           },

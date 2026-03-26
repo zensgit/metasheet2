@@ -94,7 +94,7 @@ describe('usePlmTeamFilterPresets', () => {
   })
 
   it('applies an explicitly requested team preset before falling back to default', async () => {
-    const requestedPresetId = ref('preset-explicit')
+    const requestedPresetId = ref(' preset-explicit ')
     const syncRequestedPresetId = vi.fn((value?: string) => {
       requestedPresetId.value = value || ''
     })

@@ -299,6 +299,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     try {
       const result = await listPlmTeamFilterPresets(options.kind)
       teamPresets.value = sortTeamPresets(result.items)
+      const requestedPresetId = options.requestedPresetId?.value.trim() || ''
       const presetMap = new Map(result.items.map((preset) => [preset.id, preset]))
       teamPresetSelection.value = teamPresetSelection.value.filter((id) => {
         const preset = presetMap.get(id)
@@ -309,13 +310,13 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
         teamPresetKey.value = ''
       }
       if (
-        options.requestedPresetId?.value
+        requestedPresetId
         && !result.items.some((preset) => (
-          preset.id === options.requestedPresetId?.value
+          preset.id === requestedPresetId
           && canApplyPlmCollaborativeEntry(preset)
         ))
       ) {
-        if (teamPresetKey.value && teamPresetKey.value !== options.requestedPresetId?.value) {
+        if (teamPresetKey.value && teamPresetKey.value !== requestedPresetId) {
           teamPresetKey.value = ''
           clearTeamPresetDrafts()
         }
