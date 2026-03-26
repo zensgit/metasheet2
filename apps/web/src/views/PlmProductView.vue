@@ -4225,6 +4225,7 @@ const {
     && bomFilterField.value === 'all'
     && !bomFilter.value.trim()
   ),
+  hasPendingExternalOwnerDrift: () => hasActiveBomLocalPresetOwner.value && Boolean(bomTeamPresetKey.value.trim()),
 })
 
 const activeBomRoutePreset = computed(() => {
@@ -4237,6 +4238,18 @@ const activeBomLocalRoutePreset = computed(() => {
   const presetKey = bomFilterPresetQuery.value.trim()
   if (!presetKey) return null
   return bomFilterPresets.value.find((entry) => entry.key === presetKey) || null
+})
+
+const hasActiveBomLocalPresetOwner = computed(() => {
+  const preset = activeBomLocalRoutePreset.value
+  if (!preset) return false
+  return matchPlmTeamFilterPresetStateSnapshot(
+    pickPlmTeamFilterPresetRouteOwnerState(preset),
+    {
+      field: bomFilterField.value,
+      value: bomFilter.value,
+    },
+  )
 })
 
 const {
@@ -4314,6 +4327,7 @@ const {
     && whereUsedFilterField.value === 'all'
     && !whereUsedFilter.value.trim()
   ),
+  hasPendingExternalOwnerDrift: () => hasActiveWhereUsedLocalPresetOwner.value && Boolean(whereUsedTeamPresetKey.value.trim()),
 })
 
 const activeWhereUsedRoutePreset = computed(() => {
@@ -4326,6 +4340,18 @@ const activeWhereUsedLocalRoutePreset = computed(() => {
   const presetKey = whereUsedFilterPresetQuery.value.trim()
   if (!presetKey) return null
   return whereUsedFilterPresets.value.find((entry) => entry.key === presetKey) || null
+})
+
+const hasActiveWhereUsedLocalPresetOwner = computed(() => {
+  const preset = activeWhereUsedLocalRoutePreset.value
+  if (!preset) return false
+  return matchPlmTeamFilterPresetStateSnapshot(
+    pickPlmTeamFilterPresetRouteOwnerState(preset),
+    {
+      field: whereUsedFilterField.value,
+      value: whereUsedFilter.value,
+    },
+  )
 })
 
 async function applyBomTeamPreset() {

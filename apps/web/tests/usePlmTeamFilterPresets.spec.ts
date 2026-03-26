@@ -1218,6 +1218,52 @@ describe('usePlmTeamFilterPresets', () => {
     expect(setMessage).toHaveBeenCalledWith('请先应用BOM团队预设，再执行管理操作。', true)
   })
 
+  it('blocks management actions while a local preset owner still owns the current state', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-local-owner-drift',
+          kind: 'bom',
+          scope: 'team',
+          name: '待取消默认 BOM 预设',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isDefault: true,
+          permissions: {
+            canApply: true,
+            canManage: true,
+            canRename: true,
+            canClearDefault: true,
+          },
+          state: { field: 'path', value: 'root/a', group: 'A组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/a', group: 'A组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+      hasPendingExternalOwnerDrift: () => true,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-local-owner-drift'
+    await nextTick()
+
+    expect(model.canApplyTeamPreset.value).toBe(true)
+    expect(model.canRenameTeamPreset.value).toBe(false)
+    expect(model.canClearTeamPresetDefault.value).toBe(false)
+
+    await model.clearTeamPresetDefault()
+
+    expect(clearPlmTeamFilterPresetDefault).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenCalledWith('请先应用BOM团队预设，再执行管理操作。', true)
+  })
+
   it('keeps readonly management controls hidden while the pending preset selector target stays applyable', async () => {
     const requestedPresetId = ref('preset-readonly-current')
     const syncRequestedPresetId = vi.fn((value?: string) => {

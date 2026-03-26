@@ -32,6 +32,7 @@ type UsePlmTeamFilterPresetsOptions = {
   applyPreset: (preset: FilterPreset) => void
   setMessage: (message: string, isError?: boolean) => void
   shouldAutoApplyDefault?: () => boolean
+  hasPendingExternalOwnerDrift?: () => boolean
   requestedPresetId?: Ref<string>
   syncRequestedPresetId?: (value?: string) => void
   buildShareUrl?: (preset: PlmTeamFilterPreset) => string
@@ -164,8 +165,12 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     && Boolean(selectedTeamPreset.value)
     && requestedTeamPreset.value?.id !== selectedTeamPreset.value?.id
   ))
+  const hasPendingExternalOwnerDrift = computed(() => Boolean(options.hasPendingExternalOwnerDrift?.()))
+  const hasPendingManagementSelection = computed(() => (
+    hasPendingApplySelection.value || hasPendingExternalOwnerDrift.value
+  ))
   const selectedManagementTarget = computed(() => (
-    hasPendingApplySelection.value ? null : selectedTeamPreset.value
+    hasPendingManagementSelection.value ? null : selectedTeamPreset.value
   ))
   const visibleManagementTarget = computed(() => (
     hasPendingApplySelection.value ? requestedTeamPreset.value : selectedTeamPreset.value
@@ -254,7 +259,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
   }
 
   function blockPendingApplyManagementAction() {
-    if (!hasPendingApplySelection.value) return false
+    if (!hasPendingManagementSelection.value) return false
     options.setMessage(`请先应用${options.label}团队预设，再执行管理操作。`, true)
     return true
   }
