@@ -173,4 +173,45 @@ describe('Multitable view config API', () => {
       cardFieldIds: ['fld_title', 'fld_owner'],
     }))
   })
+
+  test('deletes a view by id through DELETE /views/:viewId', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('DELETE FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_kanban'])
+          return { rows: [], rowCount: 1 }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .delete('/api/multitable/views/view_kanban')
+      .expect(200)
+
+    expect(response.body.ok).toBe(true)
+    expect(response.body.data).toEqual({ deleted: 'view_kanban' })
+  })
+
+  test('returns 404 when deleting a missing view through DELETE /views/:viewId', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('DELETE FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_missing'])
+          return { rows: [], rowCount: 0 }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .delete('/api/multitable/views/view_missing')
+      .expect(404)
+
+    expect(response.body.ok).toBe(false)
+    expect(response.body.error.code).toBe('NOT_FOUND')
+    expect(response.body.error.message).toBe('View not found: view_missing')
+  })
 })

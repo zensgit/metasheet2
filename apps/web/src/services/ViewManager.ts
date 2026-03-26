@@ -326,14 +326,14 @@ export class ViewManager {
    */
   async createView(view: View): Promise<View | null> {
     try {
-      const response = await fetch(`${getApiBase()}/api/views`, {
+      const response = await fetch(`${getApiBase()}/api/multitable/views`, {
         method: 'POST',
         headers: this.buildHeaders(),
         body: JSON.stringify(view)
       })
 
       const result = await response.json()
-      return result.success ? result.data : null
+      return result.ok ? result.data?.view ?? null : null
     } catch (error) {
       console.error('Failed to create view:', error)
       return null
@@ -345,14 +345,14 @@ export class ViewManager {
    */
   async deleteView(viewId: string): Promise<boolean> {
     try {
-      const response = await fetch(`${getApiBase()}/api/views/${viewId}`, {
+      const response = await fetch(`${getApiBase()}/api/multitable/views/${viewId}`, {
         method: 'DELETE',
         headers: this.buildHeaders()
       })
 
       const result = await response.json()
 
-      if (result.success) {
+      if (result.ok) {
         this.clearCache(viewId)
         this.stateCache.delete(viewId)
         return true
@@ -370,14 +370,14 @@ export class ViewManager {
    */
   async getTableViews(tableId: string): Promise<View[]> {
     try {
-      const response = await fetch(`${getApiBase()}/api/tables/${tableId}/views`, {
+      const response = await fetch(`${getApiBase()}/api/multitable/views?sheetId=${encodeURIComponent(tableId)}`, {
         headers: this.buildHeaders()
       })
 
       const result = await response.json()
 
-      if (result.success && Array.isArray(result.data)) {
-        return result.data
+      if (result.ok && Array.isArray(result.data?.views)) {
+        return result.data.views
       }
 
       return []
@@ -392,15 +392,15 @@ export class ViewManager {
    */
   async updateView(view: View): Promise<boolean> {
     try {
-      const response = await fetch(`${getApiBase()}/api/views/${view.id}`, {
-        method: 'PUT',
+      const response = await fetch(`${getApiBase()}/api/multitable/views/${view.id}`, {
+        method: 'PATCH',
         headers: this.buildHeaders(),
         body: JSON.stringify(view)
       })
 
       const result = await response.json()
 
-      if (result.success) {
+      if (result.ok) {
         this.clearCache(view.id)
         return true
       }
