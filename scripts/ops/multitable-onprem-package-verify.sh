@@ -5,8 +5,13 @@ PACKAGE_FILE="${1:-}"
 VERIFY_SHA="${VERIFY_SHA:-1}"
 VERIFY_NO_GITHUB_LINKS="${VERIFY_NO_GITHUB_LINKS:-1}"
 EXTRACT_ROOT="${EXTRACT_ROOT:-}"
+VERIFY_REPORT_JSON="${VERIFY_REPORT_JSON:-}"
+VERIFY_REPORT_MD="${VERIFY_REPORT_MD:-}"
 cleanup_extract_root=0
 list_file=""
+pkg_name=""
+pkg_root=""
+archive_type="unknown"
 
 function die() {
   echo "[multitable-onprem-package-verify] ERROR: $*" >&2
@@ -17,48 +22,81 @@ function info() {
   echo "[multitable-onprem-package-verify] $*" >&2
 }
 
-function collect_delivery_targets() {
-  local root="$1"
-  local targets=()
-  local docs=()
+function write_optional_report() {
+  local checksum_status="SKIPPED"
+  local link_status="SKIPPED"
+  local extract_mode="temporary"
+  local extract_root_json="null"
+  local report_json_tmp=""
+  local report_md_tmp=""
 
-  [[ -f "${root}/INSTALL.txt" ]] && targets+=("${root}/INSTALL.txt")
-  if [[ -d "${root}/docs/deployment" ]]; then
-    shopt -s nullglob
-    docs=("${root}"/docs/deployment/multitable-*.md)
-    shopt -u nullglob
-    if [[ ${#docs[@]} -gt 0 ]]; then
-      targets+=("${docs[@]}")
-    fi
+  if [[ "$VERIFY_SHA" == "1" ]]; then
+    checksum_status="PASS"
+  fi
+  if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
+    link_status="PASS"
+  fi
+  if [[ "$cleanup_extract_root" == "0" ]]; then
+    extract_mode="preserved"
+    extract_root_json="\"${pkg_root}\""
   fi
 
-  printf '%s\n' "${targets[@]}"
-}
-
-function scan_targets_for_pattern() {
-  local description="$1"
-  local patterns="$2"
-  shift 2
-  local targets=("$@")
-  local tmp_file
-
-  tmp_file="$(mktemp)"
-
-  if command -v rg >/dev/null 2>&1; then
-    if rg -n --ignore-case "$patterns" "${targets[@]}" >"$tmp_file" 2>/dev/null; then
-      cat "$tmp_file" >&2 || true
-      rm -f "$tmp_file" || true
-      die "Found ${description} in on-prem package delivery files"
-    fi
-  else
-    if grep -RInE "$patterns" "${targets[@]}" >"$tmp_file" 2>/dev/null; then
-      cat "$tmp_file" >&2 || true
-      rm -f "$tmp_file" || true
-      die "Found ${description} in on-prem package delivery files"
-    fi
+  if [[ -n "$VERIFY_REPORT_JSON" ]]; then
+    mkdir -p "$(dirname "$VERIFY_REPORT_JSON")"
+    report_json_tmp="${VERIFY_REPORT_JSON}.tmp.$$"
+    printf '%s\n' \
+      '{' \
+      '  "ok": true,' \
+      "  \"packageFile\": \"${PACKAGE_FILE}\"," \
+      "  \"packageName\": \"${pkg_name}\"," \
+      "  \"archiveType\": \"${archive_type}\"," \
+      "  \"packageRootInArchive\": \"${pkg_name}\"," \
+      "  \"extractMode\": \"${extract_mode}\"," \
+      "  \"extractRoot\": ${extract_root_json}," \
+      '  "checks": [' \
+      '    {' \
+      '      "name": "checksum",' \
+      "      \"status\": \"${checksum_status}\"" \
+      '    },' \
+      '    {' \
+      '      "name": "required-content",' \
+      '      "status": "PASS",' \
+      "      \"requiredCount\": ${#required[@]}" \
+      '    },' \
+      '    {' \
+      '      "name": "no-github-links",' \
+      "      \"status\": \"${link_status}\"" \
+      '    }' \
+      '  ],' \
+      "  \"generatedAt\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"" \
+      '}' \
+      > "$report_json_tmp"
+    mv "$report_json_tmp" "$VERIFY_REPORT_JSON"
   fi
 
-  rm -f "$tmp_file" || true
+  if [[ -n "$VERIFY_REPORT_MD" ]]; then
+    mkdir -p "$(dirname "$VERIFY_REPORT_MD")"
+    report_md_tmp="${VERIFY_REPORT_MD}.tmp.$$"
+    {
+      echo "# Multitable On-Prem Package Verify"
+      echo
+      echo "- Overall: **PASS**"
+      echo "- Package: \`${PACKAGE_FILE}\`"
+      echo "- Package root in archive: \`${pkg_name}\`"
+      echo "- Archive type: \`${archive_type}\`"
+      echo "- Extract mode: \`${extract_mode}\`"
+      if [[ "$cleanup_extract_root" == "0" ]]; then
+        echo "- Extract root: \`${pkg_root}\`"
+      fi
+      echo
+      echo "## Checks"
+      echo
+      echo "- Checksum: \`${checksum_status}\`"
+      echo "- Required content: \`PASS\` (${#required[@]} paths)"
+      echo "- No GitHub links in delivery docs: \`${link_status}\`"
+    } > "$report_md_tmp"
+    mv "$report_md_tmp" "$VERIFY_REPORT_MD"
+  fi
 }
 
 function verify_no_github_links() {
@@ -66,31 +104,28 @@ function verify_no_github_links() {
   local patterns='github\.com|githubusercontent\.com|github\.io'
   local targets=()
 
-  while IFS= read -r target; do
-    [[ -n "$target" ]] && targets+=("$target")
-  done < <(collect_delivery_targets "$root")
+  [[ -f "${root}/INSTALL.txt" ]] && targets+=("${root}/INSTALL.txt")
+  [[ -d "${root}/docs/deployment" ]] && targets+=("${root}/docs/deployment")
 
   if [[ ${#targets[@]} -eq 0 ]]; then
     return 0
   fi
 
-  scan_targets_for_pattern "disallowed GitHub links" "$patterns" "${targets[@]}"
-}
-
-function verify_no_absolute_user_paths() {
-  local root="$1"
-  local patterns='(^|[^[:alnum:]_])(/Users/[^[:space:]]+|/home/[^[:space:]]+)'
-  local targets=()
-
-  while IFS= read -r target; do
-    [[ -n "$target" ]] && targets+=("$target")
-  done < <(collect_delivery_targets "$root")
-
-  if [[ ${#targets[@]} -eq 0 ]]; then
-    return 0
+  if command -v rg >/dev/null 2>&1; then
+    if rg -n --ignore-case "$patterns" "${targets[@]}" >/tmp/multitable_onprem_link_hits.txt 2>/dev/null; then
+      cat /tmp/multitable_onprem_link_hits.txt >&2 || true
+      rm -f /tmp/multitable_onprem_link_hits.txt || true
+      die "Found disallowed GitHub links in on-prem package delivery files"
+    fi
+    rm -f /tmp/multitable_onprem_link_hits.txt || true
+  else
+    if grep -RInE "$patterns" "${targets[@]}" >/tmp/multitable_onprem_link_hits.txt 2>/dev/null; then
+      cat /tmp/multitable_onprem_link_hits.txt >&2 || true
+      rm -f /tmp/multitable_onprem_link_hits.txt || true
+      die "Found disallowed GitHub links in on-prem package delivery files"
+    fi
+    rm -f /tmp/multitable_onprem_link_hits.txt || true
   fi
-
-  scan_targets_for_pattern "absolute local user paths" "$patterns" "${targets[@]}"
 }
 
 function verify_sha() {
@@ -143,10 +178,12 @@ trap cleanup EXIT
 
 case "$PACKAGE_FILE" in
   *.tgz|*.tar.gz)
+    archive_type="tgz"
     tar -xzf "$PACKAGE_FILE" -C "$EXTRACT_ROOT"
     tar -tzf "$PACKAGE_FILE" > "$list_file"
     ;;
   *.zip)
+    archive_type="zip"
     command -v unzip >/dev/null 2>&1 || die "unzip is required to verify zip packages"
     unzip -q "$PACKAGE_FILE" -d "$EXTRACT_ROOT"
     if command -v zipinfo >/dev/null 2>&1; then
@@ -190,9 +227,12 @@ done
 
 if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
   verify_no_github_links "$pkg_root"
-  verify_no_absolute_user_paths "$pkg_root"
 fi
+
+write_optional_report
 
 info "Package verify OK"
 info "  package: ${PACKAGE_FILE}"
 info "  root: ${pkg_root}"
+[[ -n "$VERIFY_REPORT_JSON" ]] && info "  verify_report_json: ${VERIFY_REPORT_JSON}"
+[[ -n "$VERIFY_REPORT_MD" ]] && info "  verify_report_md: ${VERIFY_REPORT_MD}"

@@ -2,7 +2,7 @@
 
 Date: 2026-03-19  
 Audience: Pilot users, not platform engineers  
-Repo root: `<REPO_ROOT>`
+Repo: `/Users/huazhou/Downloads/Github/metasheet2-multitable`
 
 ## Before You Start
 
@@ -28,11 +28,12 @@ Use this path for table owners or coordinators.
 
 1. Open the grid link.
 2. Import a small CSV or TSV sample first.
-3. Use search to find one imported row.
-4. Open the row drawer.
-5. Assign one person in the owner/person field.
-6. Save or confirm the change if prompted.
-7. Search again by title and confirm the assigned person still shows up.
+3. If import reports a people mismatch or ambiguity, use `Select person` in the result panel instead of going back to the CSV immediately.
+4. Use search to find one imported row.
+5. Open the row drawer.
+6. Assign one person in the owner/person field.
+7. Save or confirm the change if prompted.
+8. Search again by title and confirm the assigned person still shows up.
 
 ## Intake Flow
 
@@ -51,6 +52,7 @@ Important:
 
 - Upload complete is not the same as save complete.
 - After upload finishes, you still need to click `Save`.
+- If person import can be repaired directly in the result panel, prefer that path before editing the source file.
 
 ## Conflict Retry
 
@@ -73,5 +75,5 @@ Report anything that made you hesitate, including:
 
 Use one of these:
 
-- `docs/deployment/multitable-pilot-feedback-template-20260319.md`
-- `.github/ISSUE_TEMPLATE/multitable-pilot-feedback.yml`
+- `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-pilot-feedback-template-20260319.md`
+- `/Users/huazhou/Downloads/Github/metasheet2-multitable/.github/ISSUE_TEMPLATE/multitable-pilot-feedback.yml`

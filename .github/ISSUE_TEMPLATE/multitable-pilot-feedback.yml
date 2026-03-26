@@ -17,7 +17,7 @@ body:
     id: owner
     attributes:
       label: Pilot owner
-      placeholder: '@owner'
+      placeholder: @owner
     validations:
       required: true
 

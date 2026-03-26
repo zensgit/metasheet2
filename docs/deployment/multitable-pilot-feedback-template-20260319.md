@@ -2,7 +2,7 @@
 
 Date: 2026-03-19  
 Scope: Feishu-style multitable internal pilot  
-Repo root: `<REPO_ROOT>`
+Repo: `/Users/huazhou/Downloads/Github/metasheet2-multitable`
 
 ## Pilot Metadata
 

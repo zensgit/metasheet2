@@ -92,6 +92,244 @@ async function run() {
     'Content-Type': 'application/json',
   }
 
+  const multitableBases = await fetchJsonWithRetry(`${apiBase}/api/multitable/bases`, { headers })
+  const basesOk = Boolean(multitableBases.res.ok && Array.isArray(multitableBases.json?.data?.bases))
+  record('api.multitable.bases', basesOk, { status: multitableBases.res.status })
+  if (!basesOk) {
+    throw new Error('Multitable bases check failed')
+  }
+
+  const smokeStamp = Date.now().toString(36)
+  const createBase = await fetchJson(`${apiBase}/api/multitable/bases`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ name: `Smoke Base ${smokeStamp}` }),
+  })
+  const smokeBase = createBase.json?.data?.base
+  const createBaseOk = Boolean(createBase.res.ok && smokeBase?.id)
+  record('api.multitable.create-base', createBaseOk, { status: createBase.res.status })
+  if (!createBaseOk) {
+    throw new Error('Multitable create base check failed')
+  }
+
+  const createSheet = await fetchJson(`${apiBase}/api/multitable/sheets`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      name: `Smoke Sheet ${smokeStamp}`,
+      baseId: smokeBase.id,
+      seed: true,
+    }),
+  })
+  const smokeSheet = createSheet.json?.data?.sheet
+  const createSheetOk = Boolean(createSheet.res.ok && smokeSheet?.id)
+  record('api.multitable.create-sheet', createSheetOk, { status: createSheet.res.status })
+  if (!createSheetOk) {
+    throw new Error('Multitable create sheet check failed')
+  }
+
+  const smokeSheetId = smokeSheet.id
+
+  const multitableViews = await fetchJsonWithRetry(
+    `${apiBase}/api/multitable/views?sheetId=${encodeURIComponent(smokeSheetId)}`,
+    { headers },
+  )
+  const viewsData = multitableViews.json?.data?.views
+  const multitableViewsOk = Boolean(multitableViews.res.ok && Array.isArray(viewsData) && viewsData.length > 0)
+  record('api.multitable.views', multitableViewsOk, {
+    status: multitableViews.res.status,
+    viewCount: Array.isArray(viewsData) ? viewsData.length : 0,
+  })
+  if (!multitableViewsOk) {
+    throw new Error('Multitable views check failed')
+  }
+
+  const multitableView = await fetchJsonWithRetry(
+    `${apiBase}/api/multitable/view?sheetId=${encodeURIComponent(smokeSheetId)}`,
+    { headers },
+  )
+  const viewData = multitableView.json?.data ?? {}
+  const viewOk = Boolean(
+    multitableView.res.ok
+      && Array.isArray(viewData.fields)
+      && viewData.fields.length > 0
+      && Array.isArray(viewData.rows)
+      && viewData.rows.length > 0
+      && (!viewData.view || viewData.view.sheetId === smokeSheetId),
+  )
+  record('api.multitable.view', viewOk, {
+    status: multitableView.res.status,
+    fieldCount: Array.isArray(viewData.fields) ? viewData.fields.length : 0,
+    rowCount: Array.isArray(viewData.rows) ? viewData.rows.length : 0,
+  })
+  if (!viewOk) {
+    throw new Error('Multitable view check failed')
+  }
+
+  const multitableFormContext = await fetchJsonWithRetry(
+    `${apiBase}/api/multitable/form-context?sheetId=${encodeURIComponent(smokeSheetId)}`,
+    { headers },
+  )
+  const formContextData = multitableFormContext.json?.data ?? {}
+  const formContextOk = Boolean(
+    multitableFormContext.res.ok
+      && formContextData.mode === 'form'
+      && formContextData.sheet?.id === smokeSheetId
+      && Array.isArray(formContextData.fields)
+      && formContextData.fields.length > 0,
+  )
+  record('api.multitable.form-context', formContextOk, {
+    status: multitableFormContext.res.status,
+    fieldCount: Array.isArray(formContextData.fields) ? formContextData.fields.length : 0,
+  })
+  if (!formContextOk) {
+    throw new Error('Multitable form context check failed')
+  }
+
+  const multitableRecordsSummary = await fetchJsonWithRetry(
+    `${apiBase}/api/multitable/records-summary?sheetId=${encodeURIComponent(smokeSheetId)}`,
+    { headers },
+  )
+  const recordsSummaryData = multitableRecordsSummary.json?.data ?? {}
+  const recordsSummaryOk = Boolean(
+    multitableRecordsSummary.res.ok
+      && Array.isArray(recordsSummaryData.records)
+      && recordsSummaryData.displayMap
+      && typeof recordsSummaryData.displayMap === 'object'
+      && recordsSummaryData.page
+      && typeof recordsSummaryData.page === 'object',
+  )
+  record('api.multitable.records-summary', recordsSummaryOk, {
+    status: multitableRecordsSummary.res.status,
+    recordCount: Array.isArray(recordsSummaryData.records) ? recordsSummaryData.records.length : 0,
+  })
+  if (!recordsSummaryOk) {
+    throw new Error('Multitable records summary check failed')
+  }
+
+  const preparePersonFields = await fetchJson(`${apiBase}/api/multitable/person-fields/prepare`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ sheetId: smokeSheetId }),
+  })
+  const prepareData = preparePersonFields.json?.data ?? {}
+  const prepareOk = Boolean(
+    preparePersonFields.res.ok
+      && prepareData.targetSheet?.id
+      && prepareData.targetSheet?.baseId === smokeBase.id
+      && prepareData.fieldProperty
+      && prepareData.fieldProperty.foreignSheetId === prepareData.targetSheet.id,
+  )
+  record('api.multitable.person-fields.prepare', prepareOk, {
+    status: preparePersonFields.res.status,
+    targetSheetId: prepareData.targetSheet?.id,
+  })
+  if (!prepareOk) {
+    throw new Error('Multitable person fields prepare check failed')
+  }
+
+  const multitableContext = await fetchJsonWithRetry(
+    `${apiBase}/api/multitable/context?baseId=${encodeURIComponent(smokeBase.id)}&sheetId=${encodeURIComponent(smokeSheet.id)}`,
+    { headers },
+  )
+  const contextData = multitableContext.json?.data ?? {}
+  const contextOk = Boolean(
+    multitableContext.res.ok
+      && contextData.sheet?.id === smokeSheet.id
+      && Array.isArray(contextData.sheets)
+      && contextData.sheets.some((sheet) => sheet?.id === smokeSheet.id),
+  )
+  record('api.multitable.context', contextOk, { status: multitableContext.res.status })
+  if (!contextOk) {
+    throw new Error('Multitable context check failed')
+  }
+
+  const multitableFields = await fetchJsonWithRetry(
+    `${apiBase}/api/multitable/fields?sheetId=${encodeURIComponent(smokeSheet.id)}`,
+    { headers },
+  )
+  const fieldsData = multitableFields.json?.data?.fields
+  const multitableFieldsOk = Boolean(multitableFields.res.ok && Array.isArray(fieldsData) && fieldsData.length > 0)
+  record('api.multitable.fields', multitableFieldsOk, { status: multitableFields.res.status, fieldCount: Array.isArray(fieldsData) ? fieldsData.length : 0 })
+  if (!multitableFieldsOk) {
+    throw new Error('Multitable fields check failed')
+  }
+
+  const titleField = Array.isArray(fieldsData)
+    ? fieldsData.find((field) => ['string', 'formula', 'lookup'].includes(field?.type))
+    : null
+
+  const createView = await fetchJson(`${apiBase}/api/multitable/views`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      sheetId: smokeSheet.id,
+      name: `Smoke Gallery ${smokeStamp}`,
+      type: 'gallery',
+    }),
+  })
+  const smokeView = createView.json?.data?.view
+  const createViewOk = Boolean(createView.res.ok && smokeView?.id)
+  record('api.multitable.create-view', createViewOk, {
+    status: createView.res.status,
+    viewId: smokeView?.id,
+  })
+  if (!createViewOk) {
+    throw new Error('Multitable create view check failed')
+  }
+
+  const smokeGalleryConfig = {
+    titleFieldId: titleField?.id ?? null,
+    coverFieldId: null,
+    fieldIds: [],
+    columns: 4,
+    cardSize: 'large',
+  }
+
+  const updateView = await fetchJson(`${apiBase}/api/multitable/views/${encodeURIComponent(smokeView.id)}`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({
+      config: smokeGalleryConfig,
+    }),
+  })
+  const updatedView = updateView.json?.data?.view
+  const updateViewOk = Boolean(
+    updateView.res.ok
+      && updatedView?.id === smokeView.id
+      && updatedView?.config?.columns === 4
+      && updatedView?.config?.cardSize === 'large',
+  )
+  record('api.multitable.update-view-config', updateViewOk, {
+    status: updateView.res.status,
+    viewId: updatedView?.id,
+  })
+  if (!updateViewOk) {
+    throw new Error('Multitable update view config check failed')
+  }
+
+  const persistedViews = await fetchJsonWithRetry(
+    `${apiBase}/api/multitable/views?sheetId=${encodeURIComponent(smokeSheet.id)}`,
+    { headers },
+  )
+  const persistedView = Array.isArray(persistedViews.json?.data?.views)
+    ? persistedViews.json.data.views.find((view) => view?.id === smokeView.id)
+    : null
+  const persistedViewOk = Boolean(
+    persistedViews.res.ok
+      && persistedView
+      && persistedView.config?.columns === 4
+      && persistedView.config?.cardSize === 'large'
+      && ((titleField?.id && persistedView.config?.titleFieldId === titleField.id) || (!titleField?.id && persistedView.config?.titleFieldId == null)),
+  )
+  record('api.multitable.view-config-persisted', persistedViewOk, {
+    status: persistedViews.res.status,
+    viewId: persistedView?.id,
+  })
+  if (!persistedViewOk) {
+    throw new Error('Multitable view config persistence check failed')
+  }
+
   const metaSheets = await fetchJsonWithRetry(`${apiBase}/api/univer-meta/sheets`, { headers })
   const sheetsOk = Boolean(metaSheets.res.ok && metaSheets.json?.ok)
   record('api.univer-meta.sheets', sheetsOk, { status: metaSheets.res.status, body: metaSheets.json })
