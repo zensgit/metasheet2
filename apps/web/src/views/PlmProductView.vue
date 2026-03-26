@@ -32,6 +32,7 @@ import PlmSearchPanel from '../components/plm/PlmSearchPanel.vue'
 import PlmSubstitutesPanel from '../components/plm/PlmSubstitutesPanel.vue'
 import PlmWhereUsedPanel from '../components/plm/PlmWhereUsedPanel.vue'
 import { plmService } from '../services/PlmService'
+import type { PlmTeamFilterPresetBatchResult } from '../services/plm/plmWorkbenchClient'
 import { copyListToClipboard, copyTextToClipboard } from './plm/plmClipboard'
 import { downloadCsvFile } from './plm/plmCsv'
 import type {
@@ -4050,6 +4051,10 @@ function clearWhereUsedLocalFilterPresetIdentity() {
   syncWhereUsedFilterPresetQuery(undefined)
 }
 
+function hasProcessedTeamPresetChanges(result: PlmTeamFilterPresetBatchResult | null | undefined) {
+  return Boolean(result?.processedIds.length)
+}
+
 function clearBomTeamPresetIdentity() {
   bomTeamPresetKey.value = ''
   bomTeamPresetQuery.value = ''
@@ -4259,40 +4264,73 @@ const activeWhereUsedLocalRoutePreset = computed(() => {
   return whereUsedFilterPresets.value.find((entry) => entry.key === presetKey) || null
 })
 
-function applyBomTeamPreset() {
-  clearBomLocalFilterPresetIdentity()
-  applyBomTeamPresetBase()
+async function applyBomTeamPreset() {
+  await runPlmLocalPresetOwnershipAction(
+    async () => applyBomTeamPresetBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function duplicateBomTeamPreset() {
-  clearBomLocalFilterPresetIdentity()
-  await duplicateBomTeamPresetBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => duplicateBomTeamPresetBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function archiveBomTeamPreset() {
-  clearBomLocalFilterPresetIdentity()
-  await archiveBomTeamPresetBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => archiveBomTeamPresetBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function restoreBomTeamPreset() {
-  clearBomLocalFilterPresetIdentity()
-  await restoreBomTeamPresetBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => restoreBomTeamPresetBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function renameBomTeamPreset() {
-  clearBomLocalFilterPresetIdentity()
-  await renameBomTeamPresetBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => renameBomTeamPresetBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function transferBomTeamPreset() {
-  clearBomLocalFilterPresetIdentity()
-  await transferBomTeamPresetBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => transferBomTeamPresetBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function saveBomTeamPreset() {
   await runPlmLocalPresetOwnershipAction(
     () => saveBomTeamPresetBase(),
-    { clearLocalOwner: clearBomLocalFilterPresetIdentity },
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
   )
 }
 
@@ -4327,59 +4365,112 @@ async function promoteBomFilterPresetToTeamDefault() {
 }
 
 async function setBomTeamPresetDefault() {
-  clearBomLocalFilterPresetIdentity()
-  await setBomTeamPresetDefaultBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => setBomTeamPresetDefaultBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function archiveBomTeamPresetSelection() {
-  clearBomLocalFilterPresetIdentity()
-  await archiveBomTeamPresetSelectionBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => archiveBomTeamPresetSelectionBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: hasProcessedTeamPresetChanges,
+    },
+  )
 }
 
 async function restoreBomTeamPresetSelection() {
-  clearBomLocalFilterPresetIdentity()
-  await restoreBomTeamPresetSelectionBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => restoreBomTeamPresetSelectionBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: hasProcessedTeamPresetChanges,
+    },
+  )
 }
 
 async function deleteBomTeamPresetSelection() {
-  clearBomLocalFilterPresetIdentity()
-  await deleteBomTeamPresetSelectionBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => deleteBomTeamPresetSelectionBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: hasProcessedTeamPresetChanges,
+    },
+  )
 }
 
-function applyWhereUsedTeamPreset() {
-  clearWhereUsedLocalFilterPresetIdentity()
-  applyWhereUsedTeamPresetBase()
+async function applyWhereUsedTeamPreset() {
+  await runPlmLocalPresetOwnershipAction(
+    async () => applyWhereUsedTeamPresetBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function duplicateWhereUsedTeamPreset() {
-  clearWhereUsedLocalFilterPresetIdentity()
-  await duplicateWhereUsedTeamPresetBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => duplicateWhereUsedTeamPresetBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function archiveWhereUsedTeamPreset() {
-  clearWhereUsedLocalFilterPresetIdentity()
-  await archiveWhereUsedTeamPresetBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => archiveWhereUsedTeamPresetBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function restoreWhereUsedTeamPreset() {
-  clearWhereUsedLocalFilterPresetIdentity()
-  await restoreWhereUsedTeamPresetBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => restoreWhereUsedTeamPresetBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function renameWhereUsedTeamPreset() {
-  clearWhereUsedLocalFilterPresetIdentity()
-  await renameWhereUsedTeamPresetBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => renameWhereUsedTeamPresetBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function transferWhereUsedTeamPreset() {
-  clearWhereUsedLocalFilterPresetIdentity()
-  await transferWhereUsedTeamPresetBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => transferWhereUsedTeamPresetBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function saveWhereUsedTeamPreset() {
   await runPlmLocalPresetOwnershipAction(
     () => saveWhereUsedTeamPresetBase(),
-    { clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity },
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
   )
 }
 
@@ -4414,23 +4505,43 @@ async function promoteWhereUsedFilterPresetToTeamDefault() {
 }
 
 async function setWhereUsedTeamPresetDefault() {
-  clearWhereUsedLocalFilterPresetIdentity()
-  await setWhereUsedTeamPresetDefaultBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => setWhereUsedTeamPresetDefaultBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
 }
 
 async function archiveWhereUsedTeamPresetSelection() {
-  clearWhereUsedLocalFilterPresetIdentity()
-  await archiveWhereUsedTeamPresetSelectionBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => archiveWhereUsedTeamPresetSelectionBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: hasProcessedTeamPresetChanges,
+    },
+  )
 }
 
 async function restoreWhereUsedTeamPresetSelection() {
-  clearWhereUsedLocalFilterPresetIdentity()
-  await restoreWhereUsedTeamPresetSelectionBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => restoreWhereUsedTeamPresetSelectionBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: hasProcessedTeamPresetChanges,
+    },
+  )
 }
 
 async function deleteWhereUsedTeamPresetSelection() {
-  clearWhereUsedLocalFilterPresetIdentity()
-  await deleteWhereUsedTeamPresetSelectionBase()
+  await runPlmLocalPresetOwnershipAction(
+    () => deleteWhereUsedTeamPresetSelectionBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: hasProcessedTeamPresetChanges,
+    },
+  )
 }
 
 function buildWorkbenchTeamViewState(): PlmWorkbenchViewQueryState {

@@ -442,7 +442,7 @@ describe('usePlmTeamFilterPresets', () => {
     expect(model.teamPresets.value).toHaveLength(1)
 
     model.teamPresetKey.value = 'preset-1'
-    model.applyTeamPreset()
+    const appliedPreset = model.applyTeamPreset()
 
     expect(applyPreset).toHaveBeenCalledWith({
       key: 'preset-1',
@@ -451,17 +451,19 @@ describe('usePlmTeamFilterPresets', () => {
       value: 'root/a',
       group: '机械',
     })
+    expect(appliedPreset?.id).toBe('preset-1')
 
     model.teamPresetName.value = '新团队预设'
     model.teamPresetGroup.value = '关键件'
     model.teamPresetOwnerUserId.value = 'owner-stale'
-    await model.saveTeamPreset()
+    const savedPreset = await model.saveTeamPreset()
 
     expect(savePlmTeamFilterPreset).toHaveBeenCalledWith('bom', '新团队预设', {
       field: 'all',
       value: 'motor',
       group: '关键件',
     })
+    expect(savedPreset?.id).toBe('preset-2')
     expect(model.teamPresetKey.value).toBe('preset-2')
     expect(model.teamPresetName.value).toBe('')
     expect(model.teamPresetGroup.value).toBe('')
@@ -483,6 +485,47 @@ describe('usePlmTeamFilterPresets', () => {
 
     expect(deletePlmTeamFilterPreset).toHaveBeenCalledWith('preset-1')
     expect(model.teamPresets.value.some((preset) => preset.id === 'preset-1')).toBe(false)
+  })
+
+  it('returns null when apply or save does not complete a team preset takeover', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-guarded',
+          kind: 'bom',
+          scope: 'team',
+          name: '不可应用预设',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: false,
+            canManage: true,
+          },
+          state: { field: 'path', value: 'root/guarded', group: '受限组' },
+        },
+      ],
+    })
+    vi.mocked(savePlmTeamFilterPreset).mockRejectedValue(new Error('save failed'))
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/local', group: '本地组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+
+    model.teamPresetKey.value = 'preset-guarded'
+    expect(model.applyTeamPreset()).toBeNull()
+
+    model.teamPresetName.value = '失败团队预设'
+    model.teamPresetGroup.value = '失败组'
+    expect(await model.saveTeamPreset()).toBeNull()
+    expect(model.teamPresetsError.value).toBe('save failed')
   })
 
   it('syncs requested preset id after save, set-default, and clear-default actions', async () => {

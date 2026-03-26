@@ -12,6 +12,7 @@ import {
   setPlmTeamFilterPresetDefault,
   transferPlmTeamFilterPreset,
   type PlmTeamFilterPresetBatchAction,
+  type PlmTeamFilterPresetBatchResult,
 } from '../../services/plm/plmWorkbenchClient'
 import type {
   FilterPreset,
@@ -336,7 +337,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
   async function saveTeamPreset() {
     if (!canSaveTeamPreset.value) {
       options.setMessage(`请输入${options.label}过滤条件和团队预设名称。`, true)
-      return
+      return null
     }
 
     teamPresetsLoading.value = true
@@ -355,9 +356,11 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       applyPresetToTarget(saved)
       clearTeamPresetDrafts()
       options.setMessage(`已保存${options.label}团队预设。`)
+      return saved
     } catch (error) {
       teamPresetsError.value = getErrorMessage(error, `保存${options.label}团队预设失败`)
       options.setMessage(teamPresetsError.value, true)
+      return null
     } finally {
       teamPresetsLoading.value = false
     }
@@ -442,25 +445,26 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     const preset = selectedTeamPreset.value
     if (!preset) {
       options.setMessage(`请选择${options.label}团队预设。`, true)
-      return
+      return null
     }
     if (!canApplyTeamPreset.value) {
       if (preset.isArchived) {
         options.setMessage(`请先恢复${options.label}团队预设，再执行应用。`, true)
-        return
+        return null
       }
       options.setMessage(`当前${options.label}团队预设不可应用。`, true)
-      return
+      return null
     }
 
     if (preset.isArchived) {
       options.setMessage(`请先恢复${options.label}团队预设，再执行应用。`, true)
-      return
+      return null
     }
 
     clearSingleTargetTakeoverSelection()
     applyPresetToTarget(preset)
     options.setMessage(`已应用${options.label}团队预设：${preset.name}`)
+    return preset
   }
 
   async function shareTeamPreset() {
@@ -504,11 +508,11 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     const preset = selectedTeamPreset.value
     if (!preset) {
       options.setMessage(`请选择${options.label}团队预设。`, true)
-      return
+      return null
     }
     if (!canDuplicateTeamPreset.value) {
       options.setMessage(`当前${options.label}团队预设不可复制。`, true)
-      return
+      return null
     }
 
     teamPresetsLoading.value = true
@@ -524,9 +528,11 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       applyPresetToTarget(duplicated)
       clearTeamPresetDrafts()
       options.setMessage(`已复制${options.label}团队预设：${duplicated.name}`)
+      return duplicated
     } catch (error) {
       teamPresetsError.value = getErrorMessage(error, `复制${options.label}团队预设失败`)
       options.setMessage(teamPresetsError.value, true)
+      return null
     } finally {
       teamPresetsLoading.value = false
     }
@@ -536,22 +542,22 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     const preset = selectedTeamPreset.value
     if (!preset) {
       options.setMessage(`请选择${options.label}团队预设。`, true)
-      return
+      return null
     }
     if (blockPendingApplyManagementAction()) {
-      return
+      return null
     }
     if (!teamPresetName.value.trim()) {
       options.setMessage(`请输入${options.label}团队预设名称。`, true)
-      return
+      return null
     }
     if (!canRenameTeamPreset.value) {
       if (preset.isArchived) {
         options.setMessage(`请先恢复${options.label}团队预设，再执行重命名。`, true)
-        return
+        return null
       }
       options.setMessage(`当前${options.label}团队预设不可重命名。`, true)
-      return
+      return null
     }
 
     teamPresetsLoading.value = true
@@ -566,9 +572,11 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       applyPresetToTarget(renamed)
       clearTeamPresetDrafts()
       options.setMessage(`已重命名${options.label}团队预设：${renamed.name}`)
+      return renamed
     } catch (error) {
       teamPresetsError.value = getErrorMessage(error, `重命名${options.label}团队预设失败`)
       options.setMessage(teamPresetsError.value, true)
+      return null
     } finally {
       teamPresetsLoading.value = false
     }
@@ -578,27 +586,27 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     const preset = selectedTeamPreset.value
     if (!preset) {
       options.setMessage(`请选择${options.label}团队预设。`, true)
-      return
+      return null
     }
     if (blockPendingApplyManagementAction()) {
-      return
+      return null
     }
     if (preset.isArchived) {
       options.setMessage(`请先恢复${options.label}团队预设，再执行转移所有者。`, true)
-      return
+      return null
     }
     const targetOwnerUserId = teamPresetOwnerUserId.value.trim()
     if (!targetOwnerUserId) {
       options.setMessage(`请输入${options.label}团队预设目标用户 ID。`, true)
-      return
+      return null
     }
     if (targetOwnerUserId === preset.ownerUserId) {
       options.setMessage(`${options.label}团队预设已经属于该用户。`)
-      return
+      return null
     }
     if (!canTransferTeamPresetTarget.value) {
       options.setMessage(`当前${options.label}团队预设不可转移。`, true)
-      return
+      return null
     }
 
     teamPresetsLoading.value = true
@@ -613,9 +621,11 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       applyPresetToTarget(saved)
       teamPresetOwnerUserId.value = ''
       options.setMessage(`已将${options.label}团队预设转移给：${saved.ownerUserId}`)
+      return saved
     } catch (error) {
       teamPresetsError.value = getErrorMessage(error, `转移${options.label}团队预设失败`)
       options.setMessage(teamPresetsError.value, true)
+      return null
     } finally {
       teamPresetsLoading.value = false
     }
@@ -665,18 +675,18 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     const preset = selectedTeamPreset.value
     if (!preset) {
       options.setMessage(`请选择${options.label}团队预设。`, true)
-      return
+      return null
     }
     if (blockPendingApplyManagementAction()) {
-      return
+      return null
     }
     if (!canSetTeamPresetDefault.value) {
       if (preset.isArchived) {
         options.setMessage(`请先恢复${options.label}团队预设，再设为默认。`, true)
-        return
+        return null
       }
       options.setMessage(`当前${options.label}团队预设不可设为默认。`, true)
-      return
+      return null
     }
 
     teamPresetsLoading.value = true
@@ -688,9 +698,11 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       applyPresetToTarget(saved)
       lastAutoAppliedDefaultId.value = saved.id
       options.setMessage(`已设为${options.label}默认团队预设：${saved.name}`)
+      return saved
     } catch (error) {
       teamPresetsError.value = getErrorMessage(error, `设置${options.label}默认团队预设失败`)
       options.setMessage(teamPresetsError.value, true)
+      return null
     } finally {
       teamPresetsLoading.value = false
     }
@@ -737,18 +749,18 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     const preset = selectedTeamPreset.value
     if (!preset) {
       options.setMessage(`请选择${options.label}团队预设。`, true)
-      return
+      return null
     }
     if (blockPendingApplyManagementAction()) {
-      return
+      return null
     }
     if (preset.isArchived) {
       options.setMessage(`${options.label}团队预设已归档。`)
-      return
+      return null
     }
     if (!canArchiveTeamPreset.value) {
       options.setMessage(`当前${options.label}团队预设不可归档。`, true)
-      return
+      return null
     }
 
     teamPresetsLoading.value = true
@@ -772,9 +784,11 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
         lastAutoAppliedDefaultId.value = ''
       }
       options.setMessage(`已归档${options.label}团队预设：${saved.name}`)
+      return saved
     } catch (error) {
       teamPresetsError.value = getErrorMessage(error, `归档${options.label}团队预设失败`)
       options.setMessage(teamPresetsError.value, true)
+      return null
     } finally {
       teamPresetsLoading.value = false
     }
@@ -784,18 +798,18 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     const preset = selectedTeamPreset.value
     if (!preset) {
       options.setMessage(`请选择${options.label}团队预设。`, true)
-      return
+      return null
     }
     if (blockPendingApplyManagementAction()) {
-      return
+      return null
     }
     if (!preset.isArchived) {
       options.setMessage(`${options.label}团队预设无需恢复。`)
-      return
+      return null
     }
     if (!canRestoreTeamPreset.value) {
       options.setMessage(`当前${options.label}团队预设不可恢复。`, true)
-      return
+      return null
     }
 
     teamPresetsLoading.value = true
@@ -807,9 +821,11 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       applyPresetToTarget(saved)
       clearTeamPresetDrafts()
       options.setMessage(`已恢复${options.label}团队预设：${saved.name}`)
+      return saved
     } catch (error) {
       teamPresetsError.value = getErrorMessage(error, `恢复${options.label}团队预设失败`)
       options.setMessage(teamPresetsError.value, true)
+      return null
     } finally {
       teamPresetsLoading.value = false
     }
@@ -826,7 +842,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
   async function runBatchTeamPresetAction(
     action: PlmTeamFilterPresetBatchAction,
     presetIds: string[],
-  ) {
+  ): Promise<PlmTeamFilterPresetBatchResult | null> {
     if (!presetIds.length) {
       const verbMap: Record<PlmTeamFilterPresetBatchAction, string> = {
         archive: '归档',
@@ -834,7 +850,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
         delete: '删除',
       }
       options.setMessage(`没有可${verbMap[action]}的${options.label}团队预设。`, true)
-      return
+      return null
     }
 
     teamPresetsLoading.value = true
@@ -901,24 +917,26 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       }
       const skippedPart = result.skippedIds.length ? `，跳过 ${result.skippedIds.length} 项` : ''
       options.setMessage(`已批量${actionLabelMap[action]}${options.label}团队预设 ${result.processedIds.length} 项${skippedPart}。`)
+      return result
     } catch (error) {
       teamPresetsError.value = getErrorMessage(error, `批量处理${options.label}团队预设失败`)
       options.setMessage(teamPresetsError.value, true)
+      return null
     } finally {
       teamPresetsLoading.value = false
     }
   }
 
   async function archiveTeamPresetSelection() {
-    await runBatchTeamPresetAction('archive', selectedBatchArchivableTeamPresetIds.value)
+    return runBatchTeamPresetAction('archive', selectedBatchArchivableTeamPresetIds.value)
   }
 
   async function restoreTeamPresetSelection() {
-    await runBatchTeamPresetAction('restore', selectedBatchRestorableTeamPresetIds.value)
+    return runBatchTeamPresetAction('restore', selectedBatchRestorableTeamPresetIds.value)
   }
 
   async function deleteTeamPresetSelection() {
-    await runBatchTeamPresetAction('delete', selectedBatchDeletableTeamPresetIds.value)
+    return runBatchTeamPresetAction('delete', selectedBatchDeletableTeamPresetIds.value)
   }
 
   return {
