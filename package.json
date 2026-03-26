@@ -41,6 +41,8 @@
     "verify:multitable-pilot": "node scripts/verify-multitable-live-smoke.mjs",
     "verify:multitable-pilot:local": "bash scripts/ops/multitable-pilot-local.sh",
     "verify:multitable-pilot:local:test": "node --test scripts/ops/multitable-pilot-local.test.mjs",
+    "verify:multitable-pilot:staging": "bash scripts/ops/multitable-pilot-staging.sh",
+    "verify:multitable-pilot:staging:test": "node --test scripts/ops/multitable-pilot-staging.test.mjs",
     "verify:multitable-pilot:readiness": "node scripts/ops/multitable-pilot-readiness.mjs",
     "verify:multitable-pilot:readiness:test": "node --test scripts/ops/multitable-pilot-readiness.test.mjs",
     "verify:multitable-pilot:ready:local": "bash scripts/ops/multitable-pilot-ready-local.sh",

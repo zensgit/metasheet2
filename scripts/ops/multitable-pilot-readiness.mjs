@@ -6,6 +6,8 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, '../..')
 
 const smokeReportPath = process.env.SMOKE_REPORT_JSON || ''
+const smokeLocalReportPath = process.env.SMOKE_LOCAL_REPORT_JSON || ''
+const smokeLocalReportMdPath = process.env.SMOKE_LOCAL_REPORT_MD || ''
 const profileReportPath = process.env.PROFILE_REPORT_JSON || ''
 const profileSummaryPath = process.env.PROFILE_SUMMARY_MD || ''
 const gateReportPath = process.env.GATE_REPORT_JSON || ''
@@ -222,6 +224,44 @@ function summarizeManagerRecovery(report) {
   }
 }
 
+function summarizeLocalRunnerArtifact(localReport, localReportPath, localReportMdPath, required) {
+  if (!localReport || typeof localReport !== 'object') {
+    return {
+      required,
+      available: false,
+      ok: !required,
+      report: localReportPath ? path.resolve(localReportPath) : null,
+      reportMd: localReportMdPath ? path.resolve(localReportMdPath) : null,
+      runnerReport: null,
+      serviceModes: {
+        backend: 'unknown',
+        web: 'unknown',
+      },
+      embedHostAcceptance: {
+        available: false,
+        ok: true,
+      },
+    }
+  }
+
+  return {
+    required,
+    available: true,
+    ok: Boolean(localReport.ok),
+    report: localReportPath ? path.resolve(localReportPath) : null,
+    reportMd: localReportMdPath ? path.resolve(localReportMdPath) : null,
+    runnerReport: localReport?.runnerReport?.path ?? null,
+    serviceModes: {
+      backend: localReport?.serviceModes?.backend ?? 'unknown',
+      web: localReport?.serviceModes?.web ?? 'unknown',
+    },
+    embedHostAcceptance: {
+      available: Boolean(localReport?.embedHostAcceptance?.available),
+      ok: localReport?.embedHostAcceptance?.ok !== false,
+    },
+  }
+}
+
 function summarizeProfile(report) {
   return {
     ok: Boolean(report.ok),
@@ -273,6 +313,8 @@ function summarizeOnPremReleaseGate(report, reportPath) {
 
 async function main() {
   const smoke = await readJson(smokeReportPath, 'SMOKE_REPORT_JSON')
+  const requireLocalRunnerReport = Boolean(smokeLocalReportPath)
+  const smokeLocalReport = smokeLocalReportPath ? await readOptionalJson(smokeLocalReportPath) : null
   const profile = await readJson(profileReportPath, 'PROFILE_REPORT_JSON')
   const profileSummary = await readOptionalText(profileSummaryPath)
   const gateReport = gateReportPath ? await readOptionalJson(gateReportPath) : null
@@ -286,6 +328,12 @@ async function main() {
   const peopleRepairReconcile = summarizePeopleRepairReconcile(smoke)
   const peopleImportRecovery = summarizePeopleImportRecovery(smoke)
   const managerRecovery = summarizeManagerRecovery(smoke)
+  const localRunner = summarizeLocalRunnerArtifact(
+    smokeLocalReport,
+    smokeLocalReportPath,
+    smokeLocalReportMdPath,
+    requireLocalRunnerReport,
+  )
   const embedHostProtocol = summarizeEmbedHostProtocol(smoke)
   const embedHostNavigationProtection = summarizeEmbedHostNavigationProtection(smoke)
   const embedHostDeferredReplay = summarizeEmbedHostDeferredReplay(smoke)
@@ -298,6 +346,7 @@ async function main() {
     throw new Error('REQUIRE_ONPREM_GATE=true but no on-prem release gate report was found')
   }
   const overallOk = smokeSummary.ok &&
+    localRunner.ok &&
     embedHostProtocol.ok &&
     embedHostNavigationProtection.ok &&
     embedHostDeferredReplay.ok &&
@@ -358,6 +407,7 @@ async function main() {
         'Confirm the config panel closes itself and no stale warning remains',
       ],
     },
+    localRunner,
     embedHostProtocol,
     embedHostNavigationProtection,
     embedHostDeferredReplay,
@@ -474,6 +524,18 @@ async function main() {
     `- ui.grid.search-hit: ${fmtMs(profileSummaryData.uiGridSearchHitMs)}`,
     `- api.grid.initial-load: ${fmtMs(profileSummaryData.apiGridInitialLoadMs)}`,
     `- api.grid.search-hit: ${fmtMs(profileSummaryData.apiGridSearchHitMs)}`,
+    '',
+    '## Local Pilot Runner',
+    '',
+    `- Required binding: \`${localRunner.required ? 'true' : 'false'}\``,
+    `- Available: \`${localRunner.available ? 'true' : 'false'}\``,
+    `- Status: **${localRunner.ok ? 'PASS' : 'FAIL'}**`,
+    `- Report: \`${localRunner.report ?? 'missing'}\``,
+    `- Markdown: \`${localRunner.reportMd ?? 'missing'}\``,
+    `- Raw runner report: \`${localRunner.runnerReport ?? 'missing'}\``,
+    `- Backend mode: \`${localRunner.serviceModes.backend}\``,
+    `- Web mode: \`${localRunner.serviceModes.web}\``,
+    `- Embed-host acceptance in local wrapper: **${localRunner.embedHostAcceptance.ok ? 'PASS' : 'FAIL'}**`,
     '',
     '## Embed Host Protocol Evidence',
     '',

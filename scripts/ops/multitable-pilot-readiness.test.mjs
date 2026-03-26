@@ -63,6 +63,8 @@ const embedHostDeferredReplayChecks = [
 
 function writeFixtureReport(tmpRoot) {
   const smokeReportPath = path.join(tmpRoot, 'smoke.json')
+  const smokeLocalReportPath = path.join(tmpRoot, 'local-report.json')
+  const smokeLocalReportMdPath = path.join(tmpRoot, 'local-report.md')
   const profileReportPath = path.join(tmpRoot, 'profile.json')
   const readinessMdPath = path.join(tmpRoot, 'readiness.md')
   const readinessJsonPath = path.join(tmpRoot, 'readiness.json')
@@ -86,9 +88,26 @@ function writeFixtureReport(tmpRoot) {
       'api.grid.search-hit': { durationMs: 9 },
     },
   }, null, 2))
+  fs.writeFileSync(smokeLocalReportPath, JSON.stringify({
+    ok: true,
+    serviceModes: {
+      backend: 'reused',
+      web: 'reused',
+    },
+    runnerReport: {
+      path: smokeReportPath,
+    },
+    embedHostAcceptance: {
+      available: true,
+      ok: true,
+    },
+  }, null, 2))
+  fs.writeFileSync(smokeLocalReportMdPath, '# local report\n')
 
   return {
     smokeReportPath,
+    smokeLocalReportPath,
+    smokeLocalReportMdPath,
     profileReportPath,
     readinessMdPath,
     readinessJsonPath,
@@ -117,6 +136,65 @@ test('multitable pilot readiness fails when gate report is missing by default', 
   assert.equal(readiness.ok, false)
   assert.equal(readiness.gates.required, true)
   assert.equal(readiness.gates.missingReport, true)
+})
+
+test('multitable pilot readiness surfaces local runner summary when the wrapper artifact is provided', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'multitable-readiness-local-runner-'))
+  const fixture = writeFixtureReport(tmpRoot)
+
+  execFileSync('node', ['scripts/ops/multitable-pilot-readiness.mjs'], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      SMOKE_REPORT_JSON: fixture.smokeReportPath,
+      SMOKE_LOCAL_REPORT_JSON: fixture.smokeLocalReportPath,
+      SMOKE_LOCAL_REPORT_MD: fixture.smokeLocalReportMdPath,
+      PROFILE_REPORT_JSON: fixture.profileReportPath,
+      READINESS_MD: fixture.readinessMdPath,
+      READINESS_JSON: fixture.readinessJsonPath,
+      REQUIRE_GATE_REPORT: 'false',
+    },
+    stdio: 'pipe',
+  })
+
+  const readiness = JSON.parse(fs.readFileSync(fixture.readinessJsonPath, 'utf8'))
+  const readinessMd = fs.readFileSync(fixture.readinessMdPath, 'utf8')
+  assert.equal(readiness.ok, true)
+  assert.equal(readiness.localRunner.required, true)
+  assert.equal(readiness.localRunner.available, true)
+  assert.equal(readiness.localRunner.serviceModes.backend, 'reused')
+  assert.equal(readiness.localRunner.serviceModes.web, 'reused')
+  assert.match(readinessMd, /## Local Pilot Runner/)
+  assert.match(readinessMd, /Backend mode: `reused`/)
+})
+
+test('multitable pilot readiness fails when a required local runner artifact is missing', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'multitable-readiness-local-runner-missing-'))
+  const fixture = writeFixtureReport(tmpRoot)
+  fs.rmSync(fixture.smokeLocalReportPath, { force: true })
+
+  assert.throws(() => {
+    execFileSync('node', ['scripts/ops/multitable-pilot-readiness.mjs'], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        SMOKE_REPORT_JSON: fixture.smokeReportPath,
+        SMOKE_LOCAL_REPORT_JSON: fixture.smokeLocalReportPath,
+        SMOKE_LOCAL_REPORT_MD: fixture.smokeLocalReportMdPath,
+        PROFILE_REPORT_JSON: fixture.profileReportPath,
+        READINESS_MD: fixture.readinessMdPath,
+        READINESS_JSON: fixture.readinessJsonPath,
+        REQUIRE_GATE_REPORT: 'false',
+      },
+      stdio: 'pipe',
+    })
+  })
+
+  const readiness = JSON.parse(fs.readFileSync(fixture.readinessJsonPath, 'utf8'))
+  assert.equal(readiness.ok, false)
+  assert.equal(readiness.localRunner.required, true)
+  assert.equal(readiness.localRunner.available, false)
+  assert.equal(readiness.localRunner.ok, false)
 })
 
 test('multitable pilot readiness fails when gate report records a failed step', () => {

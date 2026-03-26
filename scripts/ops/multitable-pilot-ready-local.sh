@@ -132,6 +132,8 @@ bash scripts/ops/multitable-pilot-release-gate.sh >"${GATE_ROOT}/release-gate.lo
 
 echo "[multitable-pilot-ready-local] Writing readiness summary" >&2
 SMOKE_REPORT_JSON="${SMOKE_ROOT}/report.json" \
+SMOKE_LOCAL_REPORT_JSON="${SMOKE_ROOT}/local-report.json" \
+SMOKE_LOCAL_REPORT_MD="${SMOKE_ROOT}/local-report.md" \
 PROFILE_REPORT_JSON="${PROFILE_ROOT}/report.json" \
 PROFILE_SUMMARY_MD="${PROFILE_ROOT}/summary.md" \
 GATE_REPORT_JSON="${GATE_REPORT_JSON}" \

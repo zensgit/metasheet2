@@ -44,6 +44,14 @@ function createFakeBash(binDir) {
     '  mkdir -p "${handoff_root}"',
     "  cat > \"${handoff_root}/handoff.json\" <<'JSON'",
     '{',
+    '  "localRunner": {',
+    '    "available": true,',
+    '    "ok": true,',
+    '    "serviceModes": {',
+    '      "backend": "reused",',
+    '      "web": "started"',
+    '    }',
+    '  },',
     '  "artifactChecks": {',
     '    "preflight": {',
     '      "preflightReportJsonDefault": "/opt/metasheet/output/preflight/multitable-onprem-preflight.json",',
@@ -114,6 +122,9 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
     const reportMd = fs.readFileSync(reportMdPath, 'utf8')
 
     assert.equal(report.embedHostAcceptance.ok, false)
+    assert.equal(report.localRunner.available, true)
+    assert.equal(report.localRunner.serviceModes.backend, 'reused')
+    assert.equal(report.localRunner.serviceModes.web, 'started')
     assert.equal(report.embedHostProtocol.available, true)
     assert.equal(report.embedHostProtocol.ok, true)
     assert.equal(report.embedHostNavigationProtection.ok, false)
@@ -123,6 +134,9 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
       ['api.embed-host.discard-unsaved-form-draft'],
     )
     assert.match(reportMd, /## Embed Host Acceptance/)
+    assert.match(reportMd, /## Local Pilot Runner/)
+    assert.match(reportMd, /Backend mode: `reused`/)
+    assert.match(reportMd, /Web mode: `started`/)
     assert.match(reportMd, /Overall embed-host acceptance: \*\*FAIL\*\*/)
     assert.match(reportMd, /Protocol evidence available: `true`/)
     assert.match(reportMd, /Navigation protection status: \*\*FAIL\*\*/)

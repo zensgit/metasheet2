@@ -34,6 +34,22 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
     writeFile(path.join(readinessRoot, 'readiness.md'), '# readiness\n')
     writeFile(path.join(readinessRoot, 'readiness.json'), JSON.stringify({
       ok: false,
+      localRunner: {
+        required: true,
+        available: true,
+        ok: true,
+        report: path.join(readinessRoot, 'smoke', 'local-report.json'),
+        reportMd: path.join(readinessRoot, 'smoke', 'local-report.md'),
+        runnerReport: path.join(readinessRoot, 'smoke', 'report.json'),
+        serviceModes: {
+          backend: 'reused',
+          web: 'started',
+        },
+        embedHostAcceptance: {
+          available: true,
+          ok: true,
+        },
+      },
       embedHostProtocol: {
         available: true,
         ok: true,
@@ -73,6 +89,8 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
     }, null, 2))
     writeFile(path.join(readinessRoot, 'gates', 'report.json'), JSON.stringify({ ok: true }, null, 2))
     writeFile(path.join(readinessRoot, 'smoke', 'report.json'), JSON.stringify({ ok: true }, null, 2))
+    writeFile(path.join(readinessRoot, 'smoke', 'local-report.json'), JSON.stringify({ ok: true }, null, 2))
+    writeFile(path.join(readinessRoot, 'smoke', 'local-report.md'), '# local report\n')
     writeFile(path.join(readinessRoot, 'profile', 'report.json'), JSON.stringify({ ok: true }, null, 2))
     writeFile(path.join(readinessRoot, 'profile', 'summary.md'), '# profile\n')
 
@@ -135,11 +153,17 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
     assert.equal(handoffJson.embedHostProtocol.ok, true)
     assert.equal(handoffJson.embedHostNavigationProtection.ok, false)
     assert.equal(handoffJson.embedHostDeferredReplay.ok, true)
+    assert.equal(handoffJson.localRunner.available, true)
+    assert.equal(handoffJson.localRunner.serviceModes.backend, 'reused')
+    assert.equal(handoffJson.localRunner.serviceModes.web, 'started')
     assert.deepEqual(
       handoffJson.embedHostNavigationProtection.missingChecks,
       ['api.embed-host.discard-unsaved-form-draft'],
     )
     assert.match(handoffMd, /## Embed Host Acceptance/)
+    assert.match(handoffMd, /## Local Pilot Runner/)
+    assert.match(handoffMd, /Backend mode: `reused`/)
+    assert.match(handoffMd, /Web mode: `started`/)
     assert.match(handoffMd, /Overall embed-host acceptance: \*\*FAIL\*\*/)
     assert.match(handoffMd, /### Embed Host Protocol Evidence/)
     assert.match(handoffMd, /### Embed Host Navigation Protection/)

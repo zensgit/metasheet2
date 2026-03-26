@@ -60,6 +60,43 @@ function summarizeEmbedEvidence(evidence) {
   }
 }
 
+function summarizeLocalRunner(localRunner) {
+  if (!localRunner || typeof localRunner !== 'object') {
+    return {
+      required: false,
+      available: false,
+      ok: true,
+      report: null,
+      reportMd: null,
+      runnerReport: null,
+      serviceModes: {
+        backend: 'unknown',
+        web: 'unknown',
+      },
+      embedHostAcceptance: {
+        available: false,
+        ok: true,
+      },
+    }
+  }
+  return {
+    required: Boolean(localRunner.required),
+    available: Boolean(localRunner.available),
+    ok: localRunner.ok !== false,
+    report: typeof localRunner.report === 'string' ? localRunner.report : null,
+    reportMd: typeof localRunner.reportMd === 'string' ? localRunner.reportMd : null,
+    runnerReport: typeof localRunner.runnerReport === 'string' ? localRunner.runnerReport : null,
+    serviceModes: {
+      backend: localRunner?.serviceModes?.backend ?? 'unknown',
+      web: localRunner?.serviceModes?.web ?? 'unknown',
+    },
+    embedHostAcceptance: {
+      available: Boolean(localRunner?.embedHostAcceptance?.available),
+      ok: localRunner?.embedHostAcceptance?.ok !== false,
+    },
+  }
+}
+
 function embedEvidenceSection(title, evidence) {
   return [
     title,
@@ -205,6 +242,8 @@ async function main() {
   const readinessJson = path.join(readinessRoot, 'readiness.json')
   const readinessGateReport = path.join(readinessRoot, 'gates', 'report.json')
   const smokeReport = path.join(readinessRoot, 'smoke', 'report.json')
+  const smokeLocalReport = path.join(readinessRoot, 'smoke', 'local-report.json')
+  const smokeLocalReportMd = path.join(readinessRoot, 'smoke', 'local-report.md')
   const profileReport = path.join(readinessRoot, 'profile', 'report.json')
   const profileSummary = path.join(readinessRoot, 'profile', 'summary.md')
   const smokeGridImport = path.join(readinessRoot, 'smoke', 'grid-import.png')
@@ -328,6 +367,7 @@ async function main() {
   const embedHostProtocol = summarizeEmbedEvidence(readinessPayload?.embedHostProtocol)
   const embedHostNavigationProtection = summarizeEmbedEvidence(readinessPayload?.embedHostNavigationProtection)
   const embedHostDeferredReplay = summarizeEmbedEvidence(readinessPayload?.embedHostDeferredReplay)
+  const localRunner = summarizeLocalRunner(readinessPayload?.localRunner)
   const embedHostAcceptance = {
     ok: embedHostProtocol.ok && embedHostNavigationProtection.ok && embedHostDeferredReplay.ok,
     protocol: embedHostProtocol,
@@ -340,6 +380,8 @@ async function main() {
     readinessJson: await safeCopy(readinessJson, path.join(handoffRoot, 'readiness.json')),
     readinessGateReport: await safeCopy(readinessGateReport, path.join(handoffRoot, 'gates', 'report.json')),
     smokeReport: await safeCopy(smokeReport, path.join(handoffRoot, 'smoke', 'report.json')),
+    smokeLocalReport: await safeCopy(smokeLocalReport, path.join(handoffRoot, 'smoke', 'local-report.json')),
+    smokeLocalReportMd: await safeCopy(smokeLocalReportMd, path.join(handoffRoot, 'smoke', 'local-report.md')),
     smokeGridImport: await safeCopy(smokeGridImport, path.join(handoffRoot, 'smoke', 'grid-import.png')),
     smokeImportMappingReconcile: await safeCopy(
       smokeImportMappingReconcile,
@@ -530,6 +572,7 @@ async function main() {
       preflightReportMd: defaultPreflightReportMd,
     },
     embedHostAcceptance,
+    localRunner,
     embedHostProtocol,
     embedHostNavigationProtection,
     embedHostDeferredReplay,
@@ -596,6 +639,7 @@ async function main() {
         readinessMd: copied.readinessMd,
         readinessJson: copied.readinessJson,
         readinessGateReport: copied.readinessGateReport,
+        localRunner,
         embedHostProtocol,
         embedHostNavigationProtection,
         embedHostDeferredReplay,
@@ -644,12 +688,26 @@ async function main() {
     ...embedEvidenceSection('### Embed Host Protocol Evidence', embedHostProtocol),
     ...embedEvidenceSection('### Embed Host Navigation Protection', embedHostNavigationProtection),
     ...embedEvidenceSection('### Embed Host Busy Deferred Replay', embedHostDeferredReplay),
+    '## Local Pilot Runner',
+    '',
+    `- Required in readiness: \`${localRunner.required ? 'true' : 'false'}\``,
+    `- Available in readiness: \`${localRunner.available ? 'true' : 'false'}\``,
+    `- Status: **${localRunner.ok ? 'PASS' : 'FAIL'}**`,
+    `- Backend mode: \`${localRunner.serviceModes.backend}\``,
+    `- Web mode: \`${localRunner.serviceModes.web}\``,
+    `- Wrapper embed-host acceptance: **${localRunner.embedHostAcceptance.ok ? 'PASS' : 'FAIL'}**`,
+    `- Local report json: \`${localRunner.report ?? 'missing'}\``,
+    `- Local report markdown: \`${localRunner.reportMd ?? 'missing'}\``,
+    `- Raw runner report: \`${localRunner.runnerReport ?? 'missing'}\``,
+    '',
     '## Included Files',
     '',
     `- readiness.md: ${copied.readinessMd ? '`present`' : '`missing`'}`,
     `- readiness.json: ${copied.readinessJson ? '`present`' : '`missing`'}`,
     `- gates/report.json: ${copied.readinessGateReport ? '`present`' : '`missing`'}`,
     `- smoke/report.json: ${copied.smokeReport ? '`present`' : '`missing`'}`,
+    `- smoke/local-report.json: ${copied.smokeLocalReport ? '`present`' : '`missing`'}`,
+    `- smoke/local-report.md: ${copied.smokeLocalReportMd ? '`present`' : '`missing`'}`,
     `- smoke/grid-import.png: ${copied.smokeGridImport ? '`present`' : '`missing`'}`,
     `- smoke/import-mapping-reconcile.png: ${copied.smokeImportMappingReconcile ? '`present`' : '`missing`'}`,
     `- smoke/import-people-repair-reconcile.png: ${copied.smokeImportPeopleRepairReconcile ? '`present`' : '`missing`'}`,
