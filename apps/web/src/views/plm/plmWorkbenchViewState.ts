@@ -240,6 +240,11 @@ export function buildPlmWorkbenchRoutePath(
   },
 ) {
   const params = new URLSearchParams()
+  const explicitWorkbenchTeamView = normalizeQueryValue(snapshot.workbenchTeamView)
+
+  if (explicitWorkbenchTeamView) {
+    params.set('workbenchTeamView', explicitWorkbenchTeamView)
+  }
 
   for (const [key, value] of Object.entries(normalizePlmWorkbenchCollaborativeQuerySnapshot(snapshot))) {
     params.set(key, value)

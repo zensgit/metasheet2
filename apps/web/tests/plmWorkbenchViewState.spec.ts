@@ -379,6 +379,7 @@ describe('plmWorkbenchViewState', () => {
     expect(buildPlmWorkbenchRoutePath(
       '/plm',
       {
+        workbenchTeamView: ' workbench-view-1 ',
         searchQuery: 'gear',
         panel: ' approvals, documents ',
         bomFilterPreset: 'bom-local-1',
@@ -387,6 +388,7 @@ describe('plmWorkbenchViewState', () => {
         whereUsedFilterPreset: 'where-local-1',
         whereUsedFilter: 'motor',
         approvalsFilter: 'eco',
+        approvalComment: 'ship-it',
         autoload: true,
       },
       {
@@ -395,7 +397,7 @@ describe('plmWorkbenchViewState', () => {
           sceneFocus: 'scene-1',
         },
       },
-    )).toBe('/plm?searchQuery=gear&panel=documents%2Capprovals&bomFilter=assy&bomFilterField=path&whereUsedFilter=motor&approvalsFilter=eco&autoload=true&sceneFocus=scene-1#audit')
+    )).toBe('/plm?workbenchTeamView=workbench-view-1&searchQuery=gear&panel=documents%2Capprovals&bomFilter=assy&bomFilterField=path&whereUsedFilter=motor&approvalsFilter=eco&autoload=true&sceneFocus=scene-1#audit')
   })
 
   it('builds audit team view share URLs with explicit team-view identity', () => {
