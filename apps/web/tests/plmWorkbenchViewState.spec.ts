@@ -253,6 +253,11 @@ describe('plmWorkbenchViewState', () => {
       '/plm',
       {
         searchQuery: 'gear',
+        bomFilterPreset: 'bom-local-1',
+        bomFilter: 'assy',
+        bomFilterField: 'path',
+        whereUsedFilterPreset: 'where-local-1',
+        whereUsedFilter: 'motor',
         approvalsFilter: 'eco',
         autoload: true,
       },
@@ -262,7 +267,7 @@ describe('plmWorkbenchViewState', () => {
           sceneFocus: 'scene-1',
         },
       },
-    )).toBe('/plm?searchQuery=gear&approvalsFilter=eco&autoload=true&sceneFocus=scene-1#audit')
+    )).toBe('/plm?searchQuery=gear&bomFilter=assy&bomFilterField=path&whereUsedFilter=motor&approvalsFilter=eco&autoload=true&sceneFocus=scene-1#audit')
   })
 
   it('builds audit team view share URLs with explicit team-view identity', () => {

@@ -153,7 +153,7 @@ export function buildPlmWorkbenchRoutePath(
 ) {
   const params = new URLSearchParams()
 
-  for (const [key, value] of Object.entries(normalizePlmWorkbenchQuerySnapshot(snapshot))) {
+  for (const [key, value] of Object.entries(normalizePlmWorkbenchCollaborativeQuerySnapshot(snapshot))) {
     params.set(key, value)
   }
 
