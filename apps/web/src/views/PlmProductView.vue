@@ -4490,14 +4490,18 @@ async function archiveBomTeamPresetSelection() {
 }
 
 async function restoreBomTeamPresetSelection() {
+  const hadLocalOwnerBeforeAction = hasActiveBomLocalPresetOwner.value
+  const activeTeamPresetIdBeforeAction = bomTeamPresetKey.value
+  const requestedTeamPresetIdBeforeAction = bomTeamPresetQuery.value
   await runPlmLocalPresetOwnershipAction(
     () => restoreBomTeamPresetSelectionBase(),
     {
       clearLocalOwner: clearBomLocalFilterPresetIdentity,
       shouldClear: (result) => shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore(
         result,
-        bomTeamPresetKey.value,
-        bomTeamPresetQuery.value,
+        activeTeamPresetIdBeforeAction,
+        requestedTeamPresetIdBeforeAction,
+        hadLocalOwnerBeforeAction,
       ),
     },
   )
@@ -4650,14 +4654,18 @@ async function archiveWhereUsedTeamPresetSelection() {
 }
 
 async function restoreWhereUsedTeamPresetSelection() {
+  const hadLocalOwnerBeforeAction = hasActiveWhereUsedLocalPresetOwner.value
+  const activeTeamPresetIdBeforeAction = whereUsedTeamPresetKey.value
+  const requestedTeamPresetIdBeforeAction = whereUsedTeamPresetQuery.value
   await runPlmLocalPresetOwnershipAction(
     () => restoreWhereUsedTeamPresetSelectionBase(),
     {
       clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
       shouldClear: (result) => shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore(
         result,
-        whereUsedTeamPresetKey.value,
-        whereUsedTeamPresetQuery.value,
+        activeTeamPresetIdBeforeAction,
+        requestedTeamPresetIdBeforeAction,
+        hadLocalOwnerBeforeAction,
       ),
     },
   )

@@ -32,7 +32,10 @@ export function shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore(
   result: { processedIds?: string[] } | null | undefined,
   activeTeamPresetId: string | null | undefined,
   requestedTeamPresetId: string | null | undefined,
+  hadLocalOwnerBeforeAction = false,
 ) {
+  if (hadLocalOwnerBeforeAction) return false
+
   const activeId = activeTeamPresetId?.trim() || ''
   if (!activeId) return false
 

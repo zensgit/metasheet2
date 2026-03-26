@@ -111,4 +111,15 @@ describe('plmLocalPresetOwnership', () => {
       ),
     ).toBe(true)
   })
+
+  it('keeps the local owner after batch restore when a local preset already owned the state before the action', () => {
+    expect(
+      shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore(
+        { processedIds: ['preset-b'] },
+        'preset-b',
+        '',
+        true,
+      ),
+    ).toBe(false)
+  })
 })

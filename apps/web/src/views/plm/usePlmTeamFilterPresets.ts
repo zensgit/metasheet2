@@ -864,6 +864,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     teamPresetsError.value = ''
     const selectedIdBeforeAction = teamPresetKey.value
     const requestedPresetIdBeforeAction = options.requestedPresetId?.value.trim() || ''
+    const hadExternalOwnerDriftBeforeAction = hasPendingExternalOwnerDrift.value
 
     try {
       const result = await batchPlmTeamFilterPresets(action, presetIds)
@@ -897,7 +898,9 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
             ? result.items.find((preset) => preset.id === restoreTargetId)
             : null
           if (restored) {
-            applyPresetToTarget(restored)
+            if (!hadExternalOwnerDriftBeforeAction) {
+              applyPresetToTarget(restored)
+            }
             clearTeamPresetDrafts()
           }
           if (!restored) {

@@ -2322,6 +2322,79 @@ describe('usePlmTeamFilterPresets', () => {
     expect(trackedApply).toHaveReturnedWith('preset-a')
   })
 
+  it('does not reapply a restored team preset while a local preset owner still owns the current state', async () => {
+    const requestedPresetId = ref('')
+    const syncRequestedPresetId = vi.fn((value?: string) => {
+      requestedPresetId.value = value || ''
+    })
+    const trackedApply = vi.fn()
+
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-local-restore',
+          kind: 'bom',
+          scope: 'team',
+          name: '待恢复 BOM 团队预设',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          isArchived: true,
+          archivedAt: '2026-03-26T08:00:00.000Z',
+          state: { field: 'path', value: 'root/team', group: '团队组' },
+        },
+      ],
+    })
+    vi.mocked(batchPlmTeamFilterPresets).mockResolvedValue({
+      action: 'restore',
+      processedIds: ['preset-local-restore'],
+      skippedIds: [],
+      items: [
+        {
+          id: 'preset-local-restore',
+          kind: 'bom',
+          scope: 'team',
+          name: '待恢复 BOM 团队预设',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          isArchived: false,
+          state: { field: 'path', value: 'root/team', group: '团队组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/local', group: '本地组' }),
+      applyPreset: trackedApply,
+      setMessage,
+      requestedPresetId,
+      syncRequestedPresetId,
+      shouldAutoApplyDefault: () => false,
+      hasPendingExternalOwnerDrift: () => true,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-local-restore'
+    model.teamPresetSelection.value = ['preset-local-restore']
+    model.teamPresetName.value = '待清空名称'
+    model.teamPresetGroup.value = '待清空分组'
+    model.teamPresetOwnerUserId.value = 'owner-stale'
+
+    await model.restoreTeamPresetSelection()
+
+    expect(batchPlmTeamFilterPresets).toHaveBeenCalledWith('restore', ['preset-local-restore'])
+    expect(trackedApply).not.toHaveBeenCalled()
+    expect(syncRequestedPresetId).not.toHaveBeenCalled()
+    expect(model.teamPresetKey.value).toBe('preset-local-restore')
+    expect(model.teamPresets.value.find((preset) => preset.id === 'preset-local-restore')?.isArchived).toBe(false)
+    expect(model.teamPresetName.value).toBe('')
+    expect(model.teamPresetGroup.value).toBe('')
+    expect(model.teamPresetOwnerUserId.value).toBe('')
+  })
+
   it('shares the current team preset through an explicit deep link without changing identity', async () => {
     const buildShareUrl = vi.fn(() => 'http://example.test/plm?panel=bom&bomTeamPreset=preset-share')
     const copyShareUrl = vi.fn(async () => true)
