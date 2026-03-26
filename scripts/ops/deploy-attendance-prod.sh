@@ -47,6 +47,7 @@ done
 
 run "${ROOT_DIR}/scripts/ops/attendance-preflight.sh"
 
+eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${COMPOSE_FILE}\" up -d postgres redis"
 eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${COMPOSE_FILE}\" pull backend web"
 eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${COMPOSE_FILE}\" up -d"
 
