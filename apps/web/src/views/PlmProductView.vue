@@ -100,6 +100,7 @@ import {
   buildPlmWorkbenchTeamViewShareUrl,
   matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
+  normalizePlmWorkbenchCollaborativeQuerySnapshot,
   normalizePlmWorkbenchQuerySnapshot,
   PLM_WORKBENCH_QUERY_KEYS,
 } from './plm/plmWorkbenchViewState'
@@ -4411,15 +4412,14 @@ async function deleteWhereUsedTeamPresetSelection() {
 }
 
 function buildWorkbenchTeamViewState(): PlmWorkbenchViewQueryState {
-  const query = normalizePlmWorkbenchQuerySnapshot(buildDeepLinkParams(true))
-  delete query.workbenchTeamView
+  const query = normalizePlmWorkbenchCollaborativeQuerySnapshot(buildDeepLinkParams(true))
   return {
     query,
   }
 }
 
 async function applyWorkbenchTeamViewState(state: PlmWorkbenchViewQueryState) {
-  const nextQuery = mergePlmWorkbenchRouteQuery(route.query, normalizePlmWorkbenchQuerySnapshot(state.query))
+  const nextQuery = mergePlmWorkbenchRouteQuery(route.query, normalizePlmWorkbenchCollaborativeQuerySnapshot(state.query))
   if (workbenchTeamViewQuery.value) {
     nextQuery.workbenchTeamView = workbenchTeamViewQuery.value
   }

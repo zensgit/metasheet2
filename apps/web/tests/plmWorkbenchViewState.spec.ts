@@ -4,6 +4,7 @@ import {
   buildPlmWorkbenchTeamViewShareUrl,
   matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
+  normalizePlmWorkbenchCollaborativeQuerySnapshot,
   normalizePlmWorkbenchQuerySnapshot,
 } from '../src/views/plm/plmWorkbenchViewState'
 
@@ -77,6 +78,23 @@ describe('plmWorkbenchViewState', () => {
     ).toBe(true)
   })
 
+  it('normalizes collaborative workbench snapshots without local preset ownership', () => {
+    expect(
+      normalizePlmWorkbenchCollaborativeQuerySnapshot({
+        workbenchTeamView: 'view-1',
+        bomFilterPreset: 'bom-local-1',
+        whereUsedFilterPreset: 'where-local-1',
+        bomFilter: 'gear',
+        bomFilterField: 'path',
+        whereUsedFilter: 'assy',
+      }),
+    ).toEqual({
+      bomFilter: 'gear',
+      bomFilterField: 'path',
+      whereUsedFilter: 'assy',
+    })
+  })
+
   it('detects workbench snapshot drift after manual query edits', () => {
     expect(
       matchPlmWorkbenchQuerySnapshot(
@@ -95,6 +113,26 @@ describe('plmWorkbenchViewState', () => {
     ).toBe(false)
   })
 
+  it('matches workbench snapshots even when one side still carries local preset ids', () => {
+    expect(
+      matchPlmWorkbenchQuerySnapshot(
+        {
+          workbenchTeamView: 'view-1',
+          bomFilterPreset: 'bom-local-1',
+          whereUsedFilterPreset: 'where-local-1',
+          bomFilter: 'gear',
+          bomFilterField: 'path',
+          whereUsedFilter: 'assy',
+        },
+        {
+          bomFilter: 'gear',
+          bomFilterField: 'path',
+          whereUsedFilter: 'assy',
+        },
+      ),
+    ).toBe(true)
+  })
+
   it('builds a workbench team view share URL that preserves explicit identity and normalized query state', () => {
     expect(
       buildPlmWorkbenchTeamViewShareUrl(
@@ -110,6 +148,10 @@ describe('plmWorkbenchViewState', () => {
           state: {
             query: {
               workbenchTeamView: 'stale-view',
+              bomFilterPreset: 'bom-local-1',
+              whereUsedFilterPreset: 'where-local-1',
+              bomFilter: 'gear',
+              bomFilterField: 'path',
               documentFilter: ' gear ',
               approvalsFilter: 'eco',
               ignored: 'value',
@@ -120,7 +162,7 @@ describe('plmWorkbenchViewState', () => {
         'https://example.test',
       ),
     ).toBe(
-      'https://example.test/plm?workbenchTeamView=workbench-view-1&documentFilter=gear&approvalsFilter=eco',
+      'https://example.test/plm?workbenchTeamView=workbench-view-1&bomFilter=gear&bomFilterField=path&documentFilter=gear&approvalsFilter=eco',
     )
   })
 

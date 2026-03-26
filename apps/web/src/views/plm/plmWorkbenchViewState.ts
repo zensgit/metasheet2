@@ -107,9 +107,16 @@ function stripPlmWorkbenchTeamViewIdentity(snapshot: Record<string, string>): Re
   return next
 }
 
+export function normalizePlmWorkbenchCollaborativeQuerySnapshot(value: unknown): Record<string, string> {
+  const next = stripPlmWorkbenchTeamViewIdentity(normalizePlmWorkbenchQuerySnapshot(value))
+  delete next.bomFilterPreset
+  delete next.whereUsedFilterPreset
+  return next
+}
+
 export function matchPlmWorkbenchQuerySnapshot(left: unknown, right: unknown): boolean {
-  const normalizedLeft = stripPlmWorkbenchTeamViewIdentity(normalizePlmWorkbenchQuerySnapshot(left))
-  const normalizedRight = stripPlmWorkbenchTeamViewIdentity(normalizePlmWorkbenchQuerySnapshot(right))
+  const normalizedLeft = normalizePlmWorkbenchCollaborativeQuerySnapshot(left)
+  const normalizedRight = normalizePlmWorkbenchCollaborativeQuerySnapshot(right)
 
   const leftKeys = Object.keys(normalizedLeft)
   const rightKeys = Object.keys(normalizedRight)
@@ -193,7 +200,7 @@ export function buildPlmWorkbenchTeamViewShareUrl<Kind extends PlmWorkbenchTeamV
   if (kind === 'workbench') {
     const workbenchView = view as PlmWorkbenchTeamView<'workbench'>
     params.set('workbenchTeamView', view.id)
-    const query = normalizePlmWorkbenchQuerySnapshot(workbenchView.state.query)
+    const query = normalizePlmWorkbenchCollaborativeQuerySnapshot(workbenchView.state.query)
     for (const [key, value] of Object.entries(query)) {
       if (key === 'workbenchTeamView') continue
       appendIfPresent(params, key, value)
