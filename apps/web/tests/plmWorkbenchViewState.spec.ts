@@ -387,6 +387,15 @@ describe('plmWorkbenchViewState', () => {
         ),
       ),
     ).toBe(false)
+
+    expect(
+      hasExplicitPlmBomTeamPresetAutoApplyQueryState(
+        applyPlmDeferredRouteQueryPatch(
+          {},
+          { bomFilterField: 'all' },
+        ),
+      ),
+    ).toBe(false)
   })
 
   it('treats deferred Where-Used preset blockers as explicit default auto-apply blockers', () => {
@@ -404,6 +413,15 @@ describe('plmWorkbenchViewState', () => {
         applyPlmDeferredRouteQueryPatch(
           { whereUsedFilterField: 'parent', whereUsedFilter: 'assy-01' },
           { whereUsedFilterField: '', whereUsedFilter: undefined },
+        ),
+      ),
+    ).toBe(false)
+
+    expect(
+      hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState(
+        applyPlmDeferredRouteQueryPatch(
+          {},
+          { whereUsedFilterField: 'all' },
         ),
       ),
     ).toBe(false)

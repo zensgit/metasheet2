@@ -84,18 +84,6 @@ export const PLM_WORKBENCH_TEAM_VIEW_OWNER_QUERY_KEYS = [
   'approvalsTeamView',
 ] as const
 
-export const PLM_BOM_TEAM_PRESET_AUTO_APPLY_QUERY_KEYS = [
-  'bomFilterPreset',
-  'bomFilter',
-  'bomFilterField',
-] as const
-
-export const PLM_WHERE_USED_TEAM_PRESET_AUTO_APPLY_QUERY_KEYS = [
-  'whereUsedFilterPreset',
-  'whereUsedFilter',
-  'whereUsedFilterField',
-] as const
-
 const PLM_WORKBENCH_QUERY_KEY_SET = new Set<string>(PLM_WORKBENCH_QUERY_KEYS)
 const PLM_WORKBENCH_PANEL_SCOPE_KEYS = [
   'search',
@@ -234,20 +222,40 @@ export function hasExplicitPlmDocumentAutoApplyQueryState(
   )
 }
 
-function hasExplicitPlmQueryKeys(
+function hasExplicitPlmFilterPresetAutoApplyQueryState(
   value: unknown,
-  keys: readonly string[],
+  options: {
+    teamPresetKey: string
+    filterPresetKey: string
+    filterKey: string
+    filterFieldKey: string
+  },
 ): boolean {
   const next = normalizePlmWorkbenchQuerySnapshot(value)
-  return keys.some((key) => Object.prototype.hasOwnProperty.call(next, key))
+  return Boolean(
+    next[options.teamPresetKey]
+    || next[options.filterPresetKey]
+    || next[options.filterKey]
+    || (next[options.filterFieldKey] && next[options.filterFieldKey] !== 'all')
+  )
 }
 
 export function hasExplicitPlmBomTeamPresetAutoApplyQueryState(value: unknown): boolean {
-  return hasExplicitPlmQueryKeys(value, PLM_BOM_TEAM_PRESET_AUTO_APPLY_QUERY_KEYS)
+  return hasExplicitPlmFilterPresetAutoApplyQueryState(value, {
+    teamPresetKey: 'bomTeamPreset',
+    filterPresetKey: 'bomFilterPreset',
+    filterKey: 'bomFilter',
+    filterFieldKey: 'bomFilterField',
+  })
 }
 
 export function hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState(value: unknown): boolean {
-  return hasExplicitPlmQueryKeys(value, PLM_WHERE_USED_TEAM_PRESET_AUTO_APPLY_QUERY_KEYS)
+  return hasExplicitPlmFilterPresetAutoApplyQueryState(value, {
+    teamPresetKey: 'whereUsedTeamPreset',
+    filterPresetKey: 'whereUsedFilterPreset',
+    filterKey: 'whereUsedFilter',
+    filterFieldKey: 'whereUsedFilterField',
+  })
 }
 
 export function buildPlmWorkbenchResetOwnerQueryPatch() {
