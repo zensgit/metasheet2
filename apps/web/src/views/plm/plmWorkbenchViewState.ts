@@ -159,6 +159,48 @@ export function normalizePlmWorkbenchCollaborativeQuerySnapshot(value: unknown):
 export function hasExplicitPlmWorkbenchAutoApplyQueryState(value: unknown): boolean {
   const next = normalizePlmWorkbenchQuerySnapshot(value)
   delete next.approvalComment
+  if (next.searchItemType === 'Part') {
+    delete next.searchItemType
+  }
+  if (next.searchLimit === '10') {
+    delete next.searchLimit
+  }
+  if (next.itemType === 'Part') {
+    delete next.itemType
+  }
+  if (next.whereUsedRecursive === 'true') {
+    delete next.whereUsedRecursive
+  }
+  if (next.whereUsedMaxLevels === '5') {
+    delete next.whereUsedMaxLevels
+  }
+  if (next.bomDepth === '2') {
+    delete next.bomDepth
+  }
+  if (next.bomView === 'table') {
+    delete next.bomView
+  }
+  if (next.compareLineKey === 'child_config') {
+    delete next.compareLineKey
+  }
+  if (next.compareMaxLevels === '10') {
+    delete next.compareMaxLevels
+  }
+  if (next.compareIncludeChildFields === 'true') {
+    delete next.compareIncludeChildFields
+  }
+  if (next.compareIncludeSubstitutes === 'false') {
+    delete next.compareIncludeSubstitutes
+  }
+  if (next.compareIncludeEffectivity === 'false') {
+    delete next.compareIncludeEffectivity
+  }
+  if (next.compareSync === 'true') {
+    delete next.compareSync
+  }
+  if (next.compareRelationshipProps === 'quantity,uom,find_num,refdes') {
+    delete next.compareRelationshipProps
+  }
   const normalizedPanel = normalizePlmWorkbenchPanelScope(next.panel)
   if (normalizedPanel) {
     next.panel = normalizedPanel
@@ -219,6 +261,17 @@ export function hasExplicitPlmDocumentAutoApplyQueryState(
     || (next.documentSort && next.documentSort !== 'updated')
     || (next.documentSortDir && next.documentSortDir !== 'desc')
     || hasExplicitPlmColumnQueryState(next.documentColumns, defaults),
+  )
+}
+
+export function hasExplicitPlmCadAutoApplyQueryState(value: unknown): boolean {
+  const next = normalizePlmWorkbenchQuerySnapshot(value)
+  return Boolean(
+    next.cadTeamView
+    || next.cadFileId
+    || next.cadOtherFileId
+    || next.cadReviewState
+    || next.cadReviewNote
   )
 }
 

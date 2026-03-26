@@ -104,6 +104,7 @@ import {
 import {
   hasExplicitPlmBomTeamPresetAutoApplyQueryState,
   hasExplicitPlmApprovalsAutoApplyQueryState,
+  hasExplicitPlmCadAutoApplyQueryState,
   hasExplicitPlmDocumentAutoApplyQueryState,
   buildPlmWorkbenchResetHydratedPanelQueryPatch,
   buildPlmWorkbenchRoutePath,
@@ -3287,14 +3288,6 @@ const DOCUMENT_QUERY_KEYS = [
   'documentColumns',
 ]
 
-const CAD_QUERY_KEYS = [
-  'cadTeamView',
-  'cadFileId',
-  'cadOtherFileId',
-  'cadReviewState',
-  'cadReviewNote',
-]
-
 const APPROVALS_QUERY_KEYS = [
   'approvalsTeamView',
   'approvalsStatus',
@@ -3304,14 +3297,6 @@ const APPROVALS_QUERY_KEYS = [
   'approvalSortDir',
   'approvalColumns',
 ]
-
-function hasExplicitQueryKey(keys: string[]) {
-  const effectiveQuery = applyPlmDeferredRouteQueryPatch(
-    route.query as Record<string, unknown>,
-    deferredRouteQueryPatch,
-  )
-  return keys.some((key) => Object.prototype.hasOwnProperty.call(effectiveQuery, key))
-}
 
 function hasExplicitWorkbenchQueryState() {
   return hasExplicitPlmWorkbenchAutoApplyQueryState(
@@ -5082,7 +5067,12 @@ const {
   buildShareUrl: (view) => buildPlmWorkbenchTeamViewShareUrl('cad', view, route.path),
   copyShareUrl: copyToClipboard,
   shouldAutoApplyDefault: () => (
-    !hasExplicitQueryKey(CAD_QUERY_KEYS)
+    !hasExplicitPlmCadAutoApplyQueryState(
+      applyPlmDeferredRouteQueryPatch(
+        route.query as Record<string, unknown>,
+        deferredRouteQueryPatch,
+      ),
+    )
     && !cadFileId.value.trim()
     && !cadOtherFileId.value.trim()
     && !cadReviewState.value.trim()

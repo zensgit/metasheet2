@@ -6,6 +6,7 @@ import {
   buildPlmWorkbenchTeamViewShareUrl,
   hasExplicitPlmBomTeamPresetAutoApplyQueryState,
   hasExplicitPlmApprovalsAutoApplyQueryState,
+  hasExplicitPlmCadAutoApplyQueryState,
   hasExplicitPlmDocumentAutoApplyQueryState,
   hasExplicitPlmWorkbenchAutoApplyQueryState,
   hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState,
@@ -272,6 +273,39 @@ describe('plmWorkbenchViewState', () => {
     ).toBe(true)
   })
 
+  it('ignores explicit default workbench query values when deciding workbench default auto-apply blockers', () => {
+    expect(
+      hasExplicitPlmWorkbenchAutoApplyQueryState({
+        searchItemType: 'Part',
+        searchLimit: '10',
+        itemType: 'Part',
+        whereUsedRecursive: 'true',
+        whereUsedMaxLevels: '5',
+        bomDepth: '2',
+        bomView: 'table',
+        compareLineKey: 'child_config',
+        compareMaxLevels: '10',
+        compareIncludeChildFields: 'true',
+        compareIncludeSubstitutes: 'false',
+        compareIncludeEffectivity: 'false',
+        compareSync: 'true',
+        compareRelationshipProps: 'quantity,uom,find_num,refdes',
+      }),
+    ).toBe(false)
+
+    expect(
+      hasExplicitPlmWorkbenchAutoApplyQueryState({
+        compareSync: 'false',
+      }),
+    ).toBe(true)
+
+    expect(
+      hasExplicitPlmWorkbenchAutoApplyQueryState({
+        bomView: 'tree',
+      }),
+    ).toBe(true)
+  })
+
   it('ignores explicit default approvals query values when deciding approvals default auto-apply blockers', () => {
     const defaultColumns = {
       status: true,
@@ -334,6 +368,21 @@ describe('plmWorkbenchViewState', () => {
     ).toBe(true)
   })
 
+  it('ignores explicit empty CAD query values when deciding CAD default auto-apply blockers', () => {
+    expect(
+      hasExplicitPlmCadAutoApplyQueryState({
+        cadReviewState: '',
+        cadReviewNote: '   ',
+      }),
+    ).toBe(false)
+
+    expect(
+      hasExplicitPlmCadAutoApplyQueryState({
+        cadFileId: 'cad-001',
+      }),
+    ).toBe(true)
+  })
+
   it('treats deferred document blockers with non-default state as explicit document auto-apply blockers', () => {
     const defaultColumns = {
       title: true,
@@ -365,6 +414,31 @@ describe('plmWorkbenchViewState', () => {
           },
         ),
         defaultColumns,
+      ),
+    ).toBe(true)
+  })
+
+  it('treats deferred CAD blockers with non-default state as explicit CAD auto-apply blockers', () => {
+    expect(
+      hasExplicitPlmCadAutoApplyQueryState(
+        applyPlmDeferredRouteQueryPatch(
+          {},
+          {
+            cadReviewState: '',
+            cadReviewNote: '   ',
+          },
+        ),
+      ),
+    ).toBe(false)
+
+    expect(
+      hasExplicitPlmCadAutoApplyQueryState(
+        applyPlmDeferredRouteQueryPatch(
+          {},
+          {
+            cadReviewState: 'approved',
+          },
+        ),
       ),
     ).toBe(true)
   })
