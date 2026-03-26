@@ -9,6 +9,7 @@ const smokeReportPath = process.env.SMOKE_REPORT_JSON || ''
 const profileReportPath = process.env.PROFILE_REPORT_JSON || ''
 const profileSummaryPath = process.env.PROFILE_SUMMARY_MD || ''
 const gateReportPath = process.env.GATE_REPORT_JSON || ''
+const requireGateReport = process.env.REQUIRE_GATE_REPORT !== 'false'
 const onPremGateReportPath = process.env.ONPREM_GATE_REPORT_JSON || ''
 const requireOnPremGate = process.env.REQUIRE_ONPREM_GATE === 'true'
 const requireExplicitOnPremGate = process.env.REQUIRE_EXPLICIT_ONPREM_GATE === 'true'
@@ -169,13 +170,28 @@ function summarizeProfile(report) {
   }
 }
 
-function summarizeGates(report) {
+function summarizeGates(report, reportPath, required) {
+  if (!report) {
+    return {
+      ok: !required,
+      required,
+      report: reportPath ? path.resolve(reportPath) : null,
+      checks: [],
+      missingChecks: [],
+      failedStep: null,
+      missingReport: true,
+    }
+  }
   const checks = Array.isArray(report?.checks) ? report.checks : []
   const missing = checks.filter((check) => !check.ok).map((check) => check.name)
   return {
     ok: Boolean(report?.ok) && missing.length === 0,
+    required,
+    report: reportPath ? path.resolve(reportPath) : null,
     checks,
     missingChecks: missing,
+    failedStep: report?.failedStep ?? null,
+    missingReport: false,
   }
 }
 
@@ -196,7 +212,7 @@ async function main() {
   const smoke = await readJson(smokeReportPath, 'SMOKE_REPORT_JSON')
   const profile = await readJson(profileReportPath, 'PROFILE_REPORT_JSON')
   const profileSummary = await readOptionalText(profileSummaryPath)
-  const gateReport = await readOptionalJson(gateReportPath)
+  const gateReport = gateReportPath ? await readOptionalJson(gateReportPath) : null
   const resolvedOnPremGateReportPath = await resolveOnPremGateReportPath()
   const onPremGateReport = resolvedOnPremGateReportPath
     ? await readJson(resolvedOnPremGateReportPath, 'ONPREM_GATE_REPORT_JSON')
@@ -208,7 +224,7 @@ async function main() {
   const peopleImportRecovery = summarizePeopleImportRecovery(smoke)
   const managerRecovery = summarizeManagerRecovery(smoke)
   const profileSummaryData = summarizeProfile(profile)
-  const gateSummary = gateReport ? summarizeGates(gateReport) : { ok: true, checks: [], missingChecks: [] }
+  const gateSummary = summarizeGates(gateReport, gateReportPath, requireGateReport)
   const onPremGateSummary = onPremGateReport
     ? summarizeOnPremReleaseGate(onPremGateReport, resolvedOnPremGateReportPath)
     : null
@@ -278,12 +294,7 @@ async function main() {
       summary: profileSummaryPath ? path.resolve(profileSummaryPath) : null,
       ...profileSummaryData,
     },
-    gates: gateReport
-      ? {
-          report: path.resolve(gateReportPath),
-          ...gateSummary,
-        }
-      : null,
+    gates: gateSummary,
     onPremReleaseGate: onPremGateSummary,
     onPremReleaseGateBinding: {
       required: requireOnPremGate,
@@ -399,21 +410,24 @@ async function main() {
     '',
   )
 
-  if (gateReport) {
-    lines.push(
-      '## Build & Test Gates',
-      '',
-      `- Status: **${gateSummary.ok ? 'PASS' : 'FAIL'}**`,
-      `- Report: \`${path.resolve(gateReportPath)}\``,
-      gateSummary.checks.length
-        ? `- Checks: ${gateSummary.checks.map((item) => `\`${item.name}\``).join(', ')}`
-        : '- Checks: none',
-      gateSummary.missingChecks.length
-        ? `- Failing checks: ${gateSummary.missingChecks.map((item) => `\`${item}\``).join(', ')}`
-        : '- Failing checks: none',
-      '',
-    )
-  }
+  lines.push(
+    '## Build & Test Gates',
+    '',
+    `- Status: **${gateSummary.ok ? 'PASS' : 'FAIL'}**`,
+    `- Required binding: \`${requireGateReport ? 'true' : 'false'}\``,
+    `- Report: \`${gateSummary.report ?? 'missing'}\``,
+    `- Missing report: \`${gateSummary.missingReport ? 'true' : 'false'}\``,
+    gateSummary.failedStep
+      ? `- Failed step: \`${gateSummary.failedStep}\``
+      : '- Failed step: none',
+    gateSummary.checks.length
+      ? `- Checks: ${gateSummary.checks.map((item) => `\`${item.name}\``).join(', ')}`
+      : '- Checks: none',
+    gateSummary.missingChecks.length
+      ? `- Failing checks: ${gateSummary.missingChecks.map((item) => `\`${item}\``).join(', ')}`
+      : '- Failing checks: none',
+    '',
+  )
 
   if (onPremGateSummary) {
     lines.push(

@@ -41,6 +41,7 @@
     "verify:multitable-pilot": "node scripts/verify-multitable-live-smoke.mjs",
     "verify:multitable-pilot:local": "bash scripts/ops/multitable-pilot-local.sh",
     "verify:multitable-pilot:readiness": "node scripts/ops/multitable-pilot-readiness.mjs",
+    "verify:multitable-pilot:readiness:test": "node --test scripts/ops/multitable-pilot-readiness.test.mjs",
     "verify:multitable-pilot:ready:local": "bash scripts/ops/multitable-pilot-ready-local.sh",
     "verify:multitable-pilot:ready:local:release-bound": "bash scripts/ops/multitable-pilot-ready-release-bound.sh",
     "verify:multitable-pilot:release-gate": "bash scripts/ops/multitable-pilot-release-gate.sh",

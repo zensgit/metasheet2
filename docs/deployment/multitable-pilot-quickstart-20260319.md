@@ -2,7 +2,7 @@
 
 Date: 2026-03-19  
 Audience: Pilot users, not platform engineers  
-Repo: `/Users/huazhou/Downloads/Github/metasheet2-multitable`
+Repo: `/Users/huazhou/Downloads/Github/metasheet2-multitable-next`
 
 ## Before You Start
 
@@ -75,5 +75,5 @@ Report anything that made you hesitate, including:
 
 Use one of these:
 
-- `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-pilot-feedback-template-20260319.md`
-- `/Users/huazhou/Downloads/Github/metasheet2-multitable/.github/ISSUE_TEMPLATE/multitable-pilot-feedback.yml`
+- `/Users/huazhou/Downloads/Github/metasheet2-multitable-next/docs/deployment/multitable-pilot-feedback-template-20260319.md`
+- `/Users/huazhou/Downloads/Github/metasheet2-multitable-next/.github/ISSUE_TEMPLATE/multitable-pilot-feedback.yml`

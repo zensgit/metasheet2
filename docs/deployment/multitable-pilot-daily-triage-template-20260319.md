@@ -10,6 +10,9 @@ Scope: Daily pilot issue review
 - Teams reviewed:
 - Build / branch / commit:
 - On-prem gate stamp:
+- Release gate result:
+- `gates/report.json` path:
+- Release gate failed step (if any):
 - Release-bound report:
 - Handoff artifact:
 
@@ -26,8 +29,9 @@ For each issue:
 7. Expected:
 8. Actual:
 9. Artifact path or issue link:
-10. Owner:
-11. Fix target: `today / 24h / backlog`
+10. Related gate evidence (`gates/report.json` / readiness / smoke path):
+11. Owner:
+12. Fix target: `today / 24h / backlog`
 
 ## Daily Decision
 
@@ -50,3 +54,4 @@ For each issue:
 - `output/playwright/multitable-pilot-handoff/<stamp>/handoff.md`
 - `output/playwright/multitable-pilot-handoff/<stamp>/release-bound/report.md`
 - `output/playwright/multitable-pilot-ready-local/<stamp>/readiness.md`
+- `output/playwright/multitable-pilot-ready-local/<stamp>/gates/report.json`

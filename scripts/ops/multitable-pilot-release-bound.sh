@@ -155,6 +155,7 @@ printf '%s\n' \
   "  \"readinessRoot\": \"${READY_OUTPUT_ROOT_ABS}\"," \
   "  \"readinessJson\": \"${READY_OUTPUT_ROOT_ABS}/readiness.json\"," \
   "  \"readinessMd\": \"${READY_OUTPUT_ROOT_ABS}/readiness.md\"," \
+  "  \"readinessGateReport\": \"${READY_OUTPUT_ROOT_ABS}/gates/report.json\"," \
   "  \"handoffRoot\": \"${HANDOFF_ROOT_ABS}\"," \
   "  \"handoffJson\": \"${HANDOFF_ROOT_ABS}/handoff.json\"," \
   "  \"handoffMd\": \"${HANDOFF_ROOT_ABS}/handoff.md\"," \
@@ -199,8 +200,8 @@ printf '%s\n' \
   '    },' \
   '    {' \
   '      "step": 2,' \
-  '      "title": "Share the readiness bundle with the pilot owner and confirm current checks",' \
-  "      \"artifact\": \"${READY_OUTPUT_ROOT_ABS}/readiness.md\"" \
+  '      "title": "Share the readiness bundle and canonical gate report with the pilot owner",' \
+  "      \"artifact\": \"${READY_OUTPUT_ROOT_ABS}/gates/report.json\"" \
   '    },' \
   '    {' \
   '      "step": 3,' \
@@ -227,6 +228,7 @@ printf '%s\n' \
   "- Generated at: \`${generated_at}\`" \
   "- On-prem gate report: \`${ONPREM_GATE_REPORT_JSON}\`" \
   "- Readiness root: \`${READY_OUTPUT_ROOT_ABS}\`" \
+  "- Readiness gate report: \`${READY_OUTPUT_ROOT_ABS}/gates/report.json\`" \
   "- Handoff root: \`${HANDOFF_ROOT_ABS}\`" \
   '' \
   '## Recommended Templates' \
@@ -242,7 +244,7 @@ printf '%s\n' \
   '## Operator Checklist' \
   '' \
   "- Review the bound on-prem gate report: \`${ONPREM_GATE_REPORT_JSON}\`" \
-  "- Share \`${READY_OUTPUT_ROOT_ABS}/readiness.md\` with the pilot owner and confirm the rollout still matches the bound gate." \
+  "- Share \`${READY_OUTPUT_ROOT_ABS}/readiness.md\` and \`${READY_OUTPUT_ROOT_ABS}/gates/report.json\` with the pilot owner and confirm the rollout still matches the bound gate." \
   "- Use \`${HANDOFF_ROOT_ABS}/handoff.md\` as the operating index for daily triage, checkpoint review, and sign-off follow-up." \
   "- Select the correct template from \`${HANDOFF_ROOT_ABS}/docs\` before running checkpoint, expansion, UAT, or customer delivery sign-off." \
   "- Collect \`${HANDOFF_PREFLIGHT_REPORT_JSON_DEFAULT}\` and \`${HANDOFF_PREFLIGHT_REPORT_MD_DEFAULT}\` before pilot sign-off or expansion review." \
@@ -271,6 +273,7 @@ printf '%s\n' \
   '' \
   "- \`${READY_OUTPUT_ROOT_ABS}/readiness.md\`" \
   "- \`${READY_OUTPUT_ROOT_ABS}/readiness.json\`" \
+  "- \`${READY_OUTPUT_ROOT_ABS}/gates/report.json\`" \
   "- \`${HANDOFF_ROOT_ABS}/handoff.md\`" \
   "- \`${HANDOFF_ROOT_ABS}/handoff.json\`" \
   > "${REPORT_TMP_MD}"

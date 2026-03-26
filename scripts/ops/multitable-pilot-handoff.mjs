@@ -160,6 +160,7 @@ async function main() {
 
   const readinessMd = path.join(readinessRoot, 'readiness.md')
   const readinessJson = path.join(readinessRoot, 'readiness.json')
+  const readinessGateReport = path.join(readinessRoot, 'gates', 'report.json')
   const smokeReport = path.join(readinessRoot, 'smoke', 'report.json')
   const profileReport = path.join(readinessRoot, 'profile', 'report.json')
   const profileSummary = path.join(readinessRoot, 'profile', 'summary.md')
@@ -283,6 +284,7 @@ async function main() {
   const copied = {
     readinessMd: await safeCopy(readinessMd, path.join(handoffRoot, 'readiness.md')),
     readinessJson: await safeCopy(readinessJson, path.join(handoffRoot, 'readiness.json')),
+    readinessGateReport: await safeCopy(readinessGateReport, path.join(handoffRoot, 'gates', 'report.json')),
     smokeReport: await safeCopy(smokeReport, path.join(handoffRoot, 'smoke', 'report.json')),
     smokeGridImport: await safeCopy(smokeGridImport, path.join(handoffRoot, 'smoke', 'grid-import.png')),
     smokeImportMappingReconcile: await safeCopy(
@@ -449,6 +451,7 @@ async function main() {
     `${preflightEnvTemplate}\n`,
   )
 
+  const readinessGateOk = copied.readinessMd && copied.readinessJson && copied.readinessGateReport
   const packageVerifyOk = copied.releaseJson && copied.releaseTgz && copied.releaseZip && copied.releaseTgzSha && copied.releaseZipSha && copied.releaseChecksumIndex && copied.packageVerifyScript
   const deployOk = copied.deployEasyScript && copied.packageInstallScript
   const preflightOk = copied.preflightScript && copied.repairHelperScript
@@ -456,7 +459,7 @@ async function main() {
   const onPremGateOk = copied.onPremGateReportJson && copied.onPremGateReportMd && copied.onPremGateOperatorCommands && copied.onPremGateVerifyTgzLog && copied.onPremGateVerifyZipLog && copied.onPremGateDeliveryLog && copied.onPremReleaseGateScript
 
   const manifest = {
-    ok: copied.readinessMd && copied.readinessJson && packageVerifyOk && deployOk && preflightOk && healthcheckOk && onPremGateOk,
+    ok: readinessGateOk && packageVerifyOk && deployOk && preflightOk && healthcheckOk && onPremGateOk,
     sourceReadinessRoot: readinessRoot,
     sourceReleaseRoot: RELEASE_ROOT,
     sourceOnPremGateReport: onPremGate?.reportPath ?? null,
@@ -468,6 +471,7 @@ async function main() {
     packageName: release.packageName,
     handoffRoot,
     expectedOperatorEvidence: {
+      readinessGateReport: path.join(handoffRoot, 'gates', 'report.json'),
       preflightReportJson: defaultPreflightReportJson,
       preflightReportMd: defaultPreflightReportMd,
     },
@@ -529,6 +533,12 @@ async function main() {
         deliveryJson: copied.deliveryJson,
         deliveryMd: copied.deliveryMd,
       },
+      readinessGate: {
+        ok: readinessGateOk,
+        readinessMd: copied.readinessMd,
+        readinessJson: copied.readinessJson,
+        readinessGateReport: copied.readinessGateReport,
+      },
     },
     recommendedTemplates: {
       quickstart: copied.quickstart ? path.join(handoffRoot, 'docs', path.basename(quickstartPath)) : null,
@@ -553,7 +563,7 @@ async function main() {
     `- On-prem explicit gate required: \`${requireExplicitOnPremGate ? 'true' : 'false'}\``,
     `- Package name: \`${release.packageName}\``,
     `- Handoff root: \`${handoffRoot}\``,
-    `- Readiness package copied: **${Boolean(copied.readinessMd && copied.readinessJson) ? 'YES' : 'NO'}**`,
+    `- Readiness package copied: **${Boolean(readinessGateOk) ? 'YES' : 'NO'}**`,
     '',
     '## Sign-Off Blockers',
     '',
@@ -569,6 +579,7 @@ async function main() {
     '',
     `- readiness.md: ${copied.readinessMd ? '`present`' : '`missing`'}`,
     `- readiness.json: ${copied.readinessJson ? '`present`' : '`missing`'}`,
+    `- gates/report.json: ${copied.readinessGateReport ? '`present`' : '`missing`'}`,
     `- smoke/report.json: ${copied.smokeReport ? '`present`' : '`missing`'}`,
     `- smoke/grid-import.png: ${copied.smokeGridImport ? '`present`' : '`missing`'}`,
     `- smoke/import-mapping-reconcile.png: ${copied.smokeImportMappingReconcile ? '`present`' : '`missing`'}`,
