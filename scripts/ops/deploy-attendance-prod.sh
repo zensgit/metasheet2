@@ -38,6 +38,13 @@ info "Compose cmd: ${COMPOSE_CMD}"
 info "Image owner: ${DEPLOY_IMAGE_OWNER}"
 info "Image tag:   ${DEPLOY_IMAGE_TAG}"
 
+for container_name in metasheet-backend metasheet-web; do
+  if docker ps -a --format '{{.Names}}' | grep -Fxq "${container_name}"; then
+    info "Removing existing container before recreate: ${container_name}"
+    docker rm -f "${container_name}"
+  fi
+done
+
 run "${ROOT_DIR}/scripts/ops/attendance-preflight.sh"
 
 eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${COMPOSE_FILE}\" pull backend web"
