@@ -89,6 +89,8 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
       },
     }, null, 2))
     writeFile(path.join(readinessRoot, 'gates', 'report.json'), JSON.stringify({ ok: true }, null, 2))
+    writeFile(path.join(readinessRoot, 'gates', 'report.md'), '# gate report\n')
+    writeFile(path.join(readinessRoot, 'gates', 'release-gate.log'), 'gate log\n')
     writeFile(path.join(readinessRoot, 'smoke', 'report.json'), JSON.stringify({ ok: true }, null, 2))
     writeFile(path.join(readinessRoot, 'smoke', 'report.md'), '# smoke report\n')
     writeFile(path.join(readinessRoot, 'smoke', 'local-report.json'), JSON.stringify({ ok: true }, null, 2))
@@ -157,6 +159,8 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
     assert.equal(handoffJson.embedHostDeferredReplay.ok, true)
     assert.equal(handoffJson.pilotRunner.runMode, 'local')
     assert.equal(handoffJson.localRunner.available, true)
+    assert.match(handoffJson.artifactChecks.readinessGate.readinessGateReportMd, /gates\/report\.md$/)
+    assert.match(handoffJson.artifactChecks.readinessGate.readinessGateLog, /gates\/release-gate\.log$/)
     assert.equal(handoffJson.localRunner.serviceModes.backend, 'reused')
     assert.equal(handoffJson.localRunner.serviceModes.web, 'started')
     assert.deepEqual(
@@ -172,6 +176,8 @@ test('multitable pilot handoff promotes embed-host readiness evidence into top-l
     assert.match(handoffMd, /### Embed Host Protocol Evidence/)
     assert.match(handoffMd, /### Embed Host Navigation Protection/)
     assert.match(handoffMd, /### Embed Host Busy Deferred Replay/)
+    assert.match(handoffMd, /gates\/report\.md: `present`/)
+    assert.match(handoffMd, /gates\/release-gate\.log: `present`/)
     assert.match(handoffMd, /smoke\/report\.md: `present`/)
   } finally {
     fs.rmSync(readinessRoot, { recursive: true, force: true })
@@ -225,6 +231,8 @@ test('multitable pilot handoff falls back to staging runner report names when st
       embedHostDeferredReplay: { available: true, ok: true, requiredWhenPresent: [], observedChecks: [], missingChecks: [] },
     }, null, 2))
     writeFile(path.join(readinessRoot, 'gates', 'report.json'), JSON.stringify({ ok: true }, null, 2))
+    writeFile(path.join(readinessRoot, 'gates', 'report.md'), '# gate report\n')
+    writeFile(path.join(readinessRoot, 'gates', 'release-gate.log'), 'gate log\n')
     writeFile(path.join(readinessRoot, 'smoke', 'report.json'), JSON.stringify({ ok: true }, null, 2))
     writeFile(path.join(readinessRoot, 'smoke', 'report.md'), '# smoke report\n')
     writeFile(path.join(readinessRoot, 'smoke', 'staging-report.json'), JSON.stringify({ ok: true, runMode: 'staging' }, null, 2))
@@ -289,6 +297,8 @@ test('multitable pilot handoff falls back to staging runner report names when st
     assert.equal(handoffJson.pilotRunner.runMode, 'staging')
     assert.match(handoffJson.pilotRunner.report, /staging-report\.json$/)
     assert.match(handoffJson.pilotRunner.reportMd, /staging-report\.md$/)
+    assert.equal(fs.existsSync(path.join(handoffRoot, 'gates', 'report.md')), true)
+    assert.equal(fs.existsSync(path.join(handoffRoot, 'gates', 'release-gate.log')), true)
     assert.equal(fs.existsSync(path.join(handoffRoot, 'smoke', 'report.md')), true)
     assert.equal(fs.existsSync(path.join(handoffRoot, 'smoke', 'staging-report.json')), true)
     assert.equal(fs.existsSync(path.join(handoffRoot, 'smoke', 'staging-report.md')), true)

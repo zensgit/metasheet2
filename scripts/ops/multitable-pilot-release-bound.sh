@@ -219,6 +219,8 @@ printf '%s\n' \
   "  \"readinessJson\": \"${READY_OUTPUT_ROOT_ABS}/readiness.json\"," \
   "  \"readinessMd\": \"${READY_OUTPUT_ROOT_ABS}/readiness.md\"," \
   "  \"readinessGateReport\": \"${READY_OUTPUT_ROOT_ABS}/gates/report.json\"," \
+  "  \"readinessGateReportMd\": \"${READY_OUTPUT_ROOT_ABS}/gates/report.md\"," \
+  "  \"readinessGateLog\": \"${READY_OUTPUT_ROOT_ABS}/gates/release-gate.log\"," \
   "  \"handoffRoot\": \"${HANDOFF_ROOT_ABS}\"," \
   "  \"handoffJson\": \"${HANDOFF_ROOT_ABS}/handoff.json\"," \
   "  \"handoffMd\": \"${HANDOFF_ROOT_ABS}/handoff.md\"," \
@@ -299,6 +301,8 @@ printf '%s\n' \
   "- On-prem gate report: \`${ONPREM_GATE_REPORT_JSON}\`" \
   "- Readiness root: \`${READY_OUTPUT_ROOT_ABS}\`" \
   "- Readiness gate report: \`${READY_OUTPUT_ROOT_ABS}/gates/report.json\`" \
+  "- Readiness gate markdown: \`${READY_OUTPUT_ROOT_ABS}/gates/report.md\`" \
+  "- Readiness gate log: \`${READY_OUTPUT_ROOT_ABS}/gates/release-gate.log\`" \
   "- Handoff root: \`${HANDOFF_ROOT_ABS}\`" \
   '' \
   '## Recommended Templates' \
@@ -324,6 +328,7 @@ printf '%s\n' \
   '' \
   "- Review the bound on-prem gate report: \`${ONPREM_GATE_REPORT_JSON}\`" \
   "- Share \`${READY_OUTPUT_ROOT_ABS}/readiness.md\` and \`${READY_OUTPUT_ROOT_ABS}/gates/report.json\` with the pilot owner and confirm the rollout still matches the bound gate." \
+  "- Use \`${READY_OUTPUT_ROOT_ABS}/gates/report.md\` and \`${READY_OUTPUT_ROOT_ABS}/gates/release-gate.log\` for operator-side diagnosis when gate checks fail or need replay justification." \
   "- Use \`${HANDOFF_ROOT_ABS}/handoff.md\` as the operating index for daily triage, checkpoint review, and sign-off follow-up." \
   "- Select the correct template from \`${HANDOFF_ROOT_ABS}/docs\` before running checkpoint, expansion, UAT, or customer delivery sign-off." \
   "- Collect \`${HANDOFF_PREFLIGHT_REPORT_JSON_DEFAULT}\` and \`${HANDOFF_PREFLIGHT_REPORT_MD_DEFAULT}\` before pilot sign-off or expansion review." \
@@ -364,6 +369,8 @@ printf '%s\n' \
   "- \`${READY_OUTPUT_ROOT_ABS}/readiness.md\`" \
   "- \`${READY_OUTPUT_ROOT_ABS}/readiness.json\`" \
   "- \`${READY_OUTPUT_ROOT_ABS}/gates/report.json\`" \
+  "- \`${READY_OUTPUT_ROOT_ABS}/gates/report.md\`" \
+  "- \`${READY_OUTPUT_ROOT_ABS}/gates/release-gate.log\`" \
   "- \`${READY_OUTPUT_ROOT_ABS}/smoke/report.md\`" \
   "- \`${READY_OUTPUT_ROOT_ABS}/smoke/${HANDOFF_LOCAL_RUNNER_REPORT_BASENAME}\`" \
   "- \`${READY_OUTPUT_ROOT_ABS}/smoke/${HANDOFF_LOCAL_RUNNER_REPORT_MD_BASENAME}\`" \

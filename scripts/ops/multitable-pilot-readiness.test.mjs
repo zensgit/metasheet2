@@ -67,6 +67,8 @@ function writeFixtureReport(tmpRoot) {
   const smokeLocalReportPath = path.join(tmpRoot, 'local-report.json')
   const smokeLocalReportMdPath = path.join(tmpRoot, 'local-report.md')
   const profileReportPath = path.join(tmpRoot, 'profile.json')
+  const gateReportMdPath = path.join(tmpRoot, 'gate-report.md')
+  const gateLogPath = path.join(tmpRoot, 'release-gate.log')
   const readinessMdPath = path.join(tmpRoot, 'readiness.md')
   const readinessJsonPath = path.join(tmpRoot, 'readiness.json')
 
@@ -107,6 +109,8 @@ function writeFixtureReport(tmpRoot) {
     },
   }, null, 2))
   fs.writeFileSync(smokeLocalReportMdPath, '# local report\n')
+  fs.writeFileSync(gateReportMdPath, '# gate report\n')
+  fs.writeFileSync(gateLogPath, 'gate log\n')
 
   return {
     smokeReportPath,
@@ -114,6 +118,8 @@ function writeFixtureReport(tmpRoot) {
     smokeLocalReportPath,
     smokeLocalReportMdPath,
     profileReportPath,
+    gateReportMdPath,
+    gateLogPath,
     readinessMdPath,
     readinessJsonPath,
   }
@@ -233,6 +239,8 @@ test('multitable pilot readiness fails when gate report records a failed step', 
         SMOKE_REPORT_MD: fixture.smokeReportMdPath,
         PROFILE_REPORT_JSON: fixture.profileReportPath,
         GATE_REPORT_JSON: gateReportPath,
+        GATE_REPORT_MD: fixture.gateReportMdPath,
+        GATE_LOG_PATH: fixture.gateLogPath,
         READINESS_MD: fixture.readinessMdPath,
         READINESS_JSON: fixture.readinessJsonPath,
       },
@@ -245,7 +253,47 @@ test('multitable pilot readiness fails when gate report records a failed step', 
   assert.equal(readiness.gates.required, true)
   assert.equal(readiness.gates.missingReport, false)
   assert.equal(readiness.gates.failedStep, 'core-backend.build')
+  assert.match(readiness.gates.reportMd, /gate-report\.md$/)
+  assert.match(readiness.gates.log, /release-gate\.log$/)
   assert.deepEqual(readiness.gates.missingChecks, ['core-backend.build'])
+})
+
+test('multitable pilot readiness falls back to canonical gate markdown and log paths from gate report json', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'multitable-readiness-gate-artifacts-'))
+  const fixture = writeFixtureReport(tmpRoot)
+  const gateReportPath = path.join(tmpRoot, 'gate-report.json')
+
+  fs.writeFileSync(gateReportPath, JSON.stringify({
+    ok: true,
+    reportPath: gateReportPath,
+    reportMdPath: fixture.gateReportMdPath,
+    logPath: fixture.gateLogPath,
+    checks: [
+      { name: 'web.build', ok: true, status: 'passed', command: 'pnpm --filter @metasheet/web build' },
+    ],
+  }, null, 2))
+
+  execFileSync('node', ['scripts/ops/multitable-pilot-readiness.mjs'], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      SMOKE_REPORT_JSON: fixture.smokeReportPath,
+      SMOKE_REPORT_MD: fixture.smokeReportMdPath,
+      PROFILE_REPORT_JSON: fixture.profileReportPath,
+      GATE_REPORT_JSON: gateReportPath,
+      READINESS_MD: fixture.readinessMdPath,
+      READINESS_JSON: fixture.readinessJsonPath,
+    },
+    stdio: 'pipe',
+  })
+
+  const readiness = JSON.parse(fs.readFileSync(fixture.readinessJsonPath, 'utf8'))
+  const readinessMd = fs.readFileSync(fixture.readinessMdPath, 'utf8')
+  assert.equal(readiness.ok, true)
+  assert.match(readiness.gates.reportMd, /gate-report\.md$/)
+  assert.match(readiness.gates.log, /release-gate\.log$/)
+  assert.match(readinessMd, /Markdown: `.*gate-report\.md`/)
+  assert.match(readinessMd, /Log: `.*release-gate\.log`/)
 })
 
 test('multitable pilot readiness can opt out of gate binding for ad hoc checks', () => {

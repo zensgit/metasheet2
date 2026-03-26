@@ -151,10 +151,11 @@ test('multitable pilot ready staging produces readiness with staging runner meta
       '#!/bin/bash',
       'set -euo pipefail',
       'if [[ "${1:-}" == "scripts/ops/multitable-pilot-release-gate.sh" ]]; then',
-      '  printf "RUN_MODE=%s\\n" "${RUN_MODE:-}" > "${FAKE_GATE_ENV_LOG}"',
+      '  printf "RUN_MODE=%s\\nREPORT_MD=%s\\nLOG_PATH=%s\\n" "${RUN_MODE:-}" "${REPORT_MD:-}" "${LOG_PATH:-}" > "${FAKE_GATE_ENV_LOG}"',
       '  mkdir -p "$(dirname "${REPORT_JSON}")"',
       "  printf '%s\\n' '{\"ok\":true,\"checks\":[]}' > \"${REPORT_JSON}\"",
       "  printf '%s\\n' '# gate' > \"${REPORT_MD}\"",
+      "  printf '%s\\n' 'gate log' > \"${LOG_PATH}\"",
       '  exit 0',
       'fi',
       'exec /bin/bash "$@"',
@@ -191,6 +192,8 @@ test('multitable pilot ready staging produces readiness with staging runner meta
   assert.match(readinessMd, /## Pilot Runner/)
   assert.match(readinessMd, /Run mode: `staging`/)
   assert.match(fs.readFileSync(gateEnvLogPath, 'utf8'), /RUN_MODE=staging/)
+  assert.match(fs.readFileSync(gateEnvLogPath, 'utf8'), /REPORT_MD=.*gates\/report\.md/)
+  assert.match(fs.readFileSync(gateEnvLogPath, 'utf8'), /LOG_PATH=.*gates\/release-gate\.log/)
 
   fs.rmSync(tmpRoot, { recursive: true, force: true })
 })

@@ -152,10 +152,11 @@ test('multitable pilot ready local accepts local baseline profile defaults and w
       '#!/bin/bash',
       'set -euo pipefail',
       'if [[ "${1:-}" == "scripts/ops/multitable-pilot-release-gate.sh" ]]; then',
-      '  printf "RUN_MODE=%s\\n" "${RUN_MODE:-}" > "${FAKE_GATE_ENV_LOG}"',
+      '  printf "RUN_MODE=%s\\nREPORT_MD=%s\\nLOG_PATH=%s\\n" "${RUN_MODE:-}" "${REPORT_MD:-}" "${LOG_PATH:-}" > "${FAKE_GATE_ENV_LOG}"',
       '  mkdir -p "$(dirname "${REPORT_JSON}")"',
       "  printf '%s\\n' '{\"ok\":true,\"checks\":[]}' > \"${REPORT_JSON}\"",
       "  printf '%s\\n' '# gate' > \"${REPORT_MD}\"",
+      "  printf '%s\\n' 'gate log' > \"${LOG_PATH}\"",
       '  exit 0',
       'fi',
       'exec /bin/bash "$@"',
@@ -193,6 +194,8 @@ test('multitable pilot ready local accepts local baseline profile defaults and w
   assert.match(readinessMd, /## Pilot Runner/)
   assert.match(readinessMd, /Run mode: `local`/)
   assert.match(fs.readFileSync(gateEnvLogPath, 'utf8'), /RUN_MODE=local/)
+  assert.match(fs.readFileSync(gateEnvLogPath, 'utf8'), /REPORT_MD=.*gates\/report\.md/)
+  assert.match(fs.readFileSync(gateEnvLogPath, 'utf8'), /LOG_PATH=.*gates\/release-gate\.log/)
   assert.match(profileSummary, /`ui\.grid\.open` \| 480\.00 ms \| 500\.00 ms \| PASS/)
   assert.match(profileSummary, /`api\.grid\.initial-load` \| 70\.00 ms \| 75\.00 ms \| PASS/)
   assert.match(profileSummary, /`api\.grid\.search-hit` \| 68\.00 ms \| 75\.00 ms \| PASS/)

@@ -12,6 +12,8 @@ const smokeRunnerReportMdPath = process.env.SMOKE_RUNNER_REPORT_MD || process.en
 const profileReportPath = process.env.PROFILE_REPORT_JSON || ''
 const profileSummaryPath = process.env.PROFILE_SUMMARY_MD || ''
 const gateReportPath = process.env.GATE_REPORT_JSON || ''
+const gateReportMdPath = process.env.GATE_REPORT_MD || ''
+const gateLogPath = process.env.GATE_LOG_PATH || ''
 const requireGateReport = process.env.REQUIRE_GATE_REPORT !== 'false'
 const onPremGateReportPath = process.env.ONPREM_GATE_REPORT_JSON || ''
 const requireOnPremGate = process.env.REQUIRE_ONPREM_GATE === 'true'
@@ -276,12 +278,17 @@ function summarizeProfile(report) {
   }
 }
 
-function summarizeGates(report, reportPath, required) {
+function summarizeGates(report, reportPath, reportMdPath, logPath, required) {
+  const canonicalReport = reportPath ? path.resolve(reportPath) : typeof report?.reportPath === "string" ? report.reportPath : null
+  const canonicalReportMd = reportMdPath ? path.resolve(reportMdPath) : typeof report?.reportMdPath === "string" ? report.reportMdPath : null
+  const canonicalLog = logPath ? path.resolve(logPath) : typeof report?.logPath === "string" ? report.logPath : null
   if (!report) {
     return {
       ok: !required,
       required,
-      report: reportPath ? path.resolve(reportPath) : null,
+      report: canonicalReport,
+      reportMd: canonicalReportMd,
+      log: canonicalLog,
       checks: [],
       missingChecks: [],
       failedStep: null,
@@ -293,7 +300,9 @@ function summarizeGates(report, reportPath, required) {
   return {
     ok: Boolean(report?.ok) && missing.length === 0,
     required,
-    report: reportPath ? path.resolve(reportPath) : null,
+    report: canonicalReport,
+    reportMd: canonicalReportMd,
+    log: canonicalLog,
     checks,
     missingChecks: missing,
     failedStep: report?.failedStep ?? null,
@@ -341,7 +350,7 @@ async function main() {
   const embedHostNavigationProtection = summarizeEmbedHostNavigationProtection(smoke)
   const embedHostDeferredReplay = summarizeEmbedHostDeferredReplay(smoke)
   const profileSummaryData = summarizeProfile(profile)
-  const gateSummary = summarizeGates(gateReport, gateReportPath, requireGateReport)
+  const gateSummary = summarizeGates(gateReport, gateReportPath, gateReportMdPath, gateLogPath, requireGateReport)
   const onPremGateSummary = onPremGateReport
     ? summarizeOnPremReleaseGate(onPremGateReport, resolvedOnPremGateReportPath)
     : null
@@ -592,6 +601,8 @@ async function main() {
     `- Status: **${gateSummary.ok ? 'PASS' : 'FAIL'}**`,
     `- Required binding: \`${requireGateReport ? 'true' : 'false'}\``,
     `- Report: \`${gateSummary.report ?? 'missing'}\``,
+    `- Markdown: \`${gateSummary.reportMd ?? 'missing'}\``,
+    `- Log: \`${gateSummary.log ?? 'missing'}\``,
     `- Missing report: \`${gateSummary.missingReport ? 'true' : 'false'}\``,
     gateSummary.failedStep
       ? `- Failed step: \`${gateSummary.failedStep}\``

@@ -250,6 +250,8 @@ async function main() {
   const readinessMd = path.join(readinessRoot, 'readiness.md')
   const readinessJson = path.join(readinessRoot, 'readiness.json')
   const readinessGateReport = path.join(readinessRoot, 'gates', 'report.json')
+  const readinessGateReportMd = path.join(readinessRoot, 'gates', 'report.md')
+  const readinessGateLog = path.join(readinessRoot, 'gates', 'release-gate.log')
   const smokeReport = path.join(readinessRoot, 'smoke', 'report.json')
   const smokeReportMd = path.join(readinessRoot, 'smoke', 'report.md')
   const profileReport = path.join(readinessRoot, 'profile', 'report.json')
@@ -397,6 +399,8 @@ async function main() {
     readinessMd: await safeCopy(readinessMd, path.join(handoffRoot, 'readiness.md')),
     readinessJson: await safeCopy(readinessJson, path.join(handoffRoot, 'readiness.json')),
     readinessGateReport: await safeCopy(readinessGateReport, path.join(handoffRoot, 'gates', 'report.json')),
+    readinessGateReportMd: await safeCopy(readinessGateReportMd, path.join(handoffRoot, 'gates', 'report.md')),
+    readinessGateLog: await safeCopy(readinessGateLog, path.join(handoffRoot, 'gates', 'release-gate.log')),
     smokeReport: await safeCopy(smokeReport, path.join(handoffRoot, 'smoke', 'report.json')),
     smokeReportMd: await safeCopy(smokeReportMd, path.join(handoffRoot, 'smoke', 'report.md')),
     smokeLocalReport: await safeCopy(smokeRunnerReport, path.join(handoffRoot, 'smoke', smokeRunnerReportBase)),
@@ -566,7 +570,7 @@ async function main() {
     `${preflightEnvTemplate}\n`,
   )
 
-  const readinessGateOk = copied.readinessMd && copied.readinessJson && copied.readinessGateReport
+  const readinessGateOk = copied.readinessMd && copied.readinessJson && copied.readinessGateReport && copied.readinessGateReportMd && copied.readinessGateLog
   const packageVerifyOk = copied.releaseJson && copied.releaseTgz && copied.releaseZip && copied.releaseTgzSha && copied.releaseZipSha && copied.releaseChecksumIndex && copied.packageVerifyScript
   const deployOk = copied.deployEasyScript && copied.packageInstallScript
   const preflightOk = copied.preflightScript && copied.repairHelperScript
@@ -659,6 +663,8 @@ async function main() {
         readinessMd: copied.readinessMd,
         readinessJson: copied.readinessJson,
         readinessGateReport: copied.readinessGateReport,
+        readinessGateReportMd: copied.readinessGateReportMd,
+        readinessGateLog: copied.readinessGateLog,
         smokeReport: copied.smokeReport,
         smokeReportMd: copied.smokeReportMd,
         localRunner: effectiveLocalRunner,
@@ -728,6 +734,8 @@ async function main() {
     `- readiness.md: ${copied.readinessMd ? '`present`' : '`missing`'}`,
     `- readiness.json: ${copied.readinessJson ? '`present`' : '`missing`'}`,
     `- gates/report.json: ${copied.readinessGateReport ? '`present`' : '`missing`'}`,
+    `- gates/report.md: ${copied.readinessGateReportMd ? '`present`' : '`missing`'}`,
+    `- gates/release-gate.log: ${copied.readinessGateLog ? '`present`' : '`missing`'}`,
     `- smoke/report.json: ${copied.smokeReport ? '`present`' : '`missing`'}`,
     `- smoke/report.md: ${copied.smokeReportMd ? '`present`' : '`missing`'}`,
     `- smoke/${smokeRunnerReportBase}: ${copied.smokeLocalReport ? '`present`' : '`missing`'}`,
