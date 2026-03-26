@@ -208,6 +208,7 @@ function normalizeTeamViewState<Kind extends PlmWorkbenchTeamViewKind>(
           : '',
       resourceType:
         resourceType === 'plm-team-preset-batch'
+        || resourceType === 'plm-team-preset-default'
         || resourceType === 'plm-team-view-batch'
         || resourceType === 'plm-team-view-default'
           ? resourceType
@@ -602,6 +603,7 @@ export async function batchPlmWorkbenchTeamViews<Kind extends PlmWorkbenchTeamVi
 
 export type PlmCollaborativeAuditResourceType =
   | 'plm-team-preset-batch'
+  | 'plm-team-preset-default'
   | 'plm-team-view-batch'
   | 'plm-team-view-default'
 export type PlmCollaborativeAuditAction = 'archive' | 'restore' | 'delete' | 'set-default' | 'clear-default'
@@ -694,6 +696,7 @@ function mapPlmCollaborativeAuditLogItem(value: unknown): PlmCollaborativeAuditL
   const record = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   const resourceType =
     record.resourceType === 'plm-team-preset-batch'
+    || record.resourceType === 'plm-team-preset-default'
     || record.resourceType === 'plm-team-view-batch'
     || record.resourceType === 'plm-team-view-default'
       ? record.resourceType
@@ -790,6 +793,7 @@ export async function getPlmCollaborativeAuditSummary(params?: {
         .map((row) => ({
           resourceType:
             row.resourceType === 'plm-team-preset-batch'
+            || row.resourceType === 'plm-team-preset-default'
             || row.resourceType === 'plm-team-view-batch'
             || row.resourceType === 'plm-team-view-default'
               ? row.resourceType

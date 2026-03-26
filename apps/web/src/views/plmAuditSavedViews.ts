@@ -33,6 +33,7 @@ function isPlmAuditRouteState(value: unknown): value is PlmAuditRouteState {
     && (
       record.resourceType === ''
       || record.resourceType === 'plm-team-preset-batch'
+      || record.resourceType === 'plm-team-preset-default'
       || record.resourceType === 'plm-team-view-batch'
       || record.resourceType === 'plm-team-view-default'
     )

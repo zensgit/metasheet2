@@ -88,6 +88,7 @@ export function parsePlmAuditRouteState(query: LocationQuery): PlmAuditRouteStat
         : '',
     resourceType:
       resourceType === 'plm-team-preset-batch'
+      || resourceType === 'plm-team-preset-default'
       || resourceType === 'plm-team-view-batch'
       || resourceType === 'plm-team-view-default'
         ? resourceType

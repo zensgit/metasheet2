@@ -65,6 +65,18 @@ describe('plmAuditQueryState', () => {
     })
   })
 
+  it('accepts team preset default audit resource filters', () => {
+    expect(parsePlmAuditRouteState({
+      auditAction: 'clear-default',
+      auditType: 'plm-team-preset-default',
+      auditKind: 'bom',
+    })).toMatchObject({
+      action: 'clear-default',
+      resourceType: 'plm-team-preset-default',
+      kind: 'bom',
+    })
+  })
+
   it('drops defaults when building a shareable route query', () => {
     const expectedFrom = normalizePlmAuditDateTimeTransport('2026-03-11T15:00')
     const expectedTo = normalizePlmAuditDateTimeTransport('2026-03-11T16:00')

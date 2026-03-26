@@ -17,6 +17,7 @@ export interface PlmTeamFilterPresetRowLike {
   name: string
   name_key: string
   is_default?: boolean | number | string | null
+  last_default_set_at?: Date | string | null
   archived_at?: Date | string | null
   state: unknown
   created_at: Date | string
@@ -143,6 +144,12 @@ export function mapPlmTeamFilterPresetRow(
     : undefined
 
   const isDefault = readBoolean(row.is_default)
+  const lastDefaultSetAt =
+    row.last_default_set_at instanceof Date
+      ? row.last_default_set_at.toISOString()
+      : typeof row.last_default_set_at === 'string' && row.last_default_set_at
+        ? row.last_default_set_at
+        : undefined
   const isArchived = Boolean(archivedAt)
   const permissions = buildPlmCollaborativePermissions({
     ownerUserId: row.owner_user_id,
@@ -161,6 +168,7 @@ export function mapPlmTeamFilterPresetRow(
     permissions,
     isDefault,
     isArchived,
+    lastDefaultSetAt,
     state: normalizePlmTeamFilterPresetState(parseStoredState(row.state)),
     archivedAt,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),

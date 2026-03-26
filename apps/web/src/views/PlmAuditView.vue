@@ -227,6 +227,7 @@
         <select v-model="resourceType">
           <option value="">{{ tr('All', '全部') }}</option>
           <option value="plm-team-preset-batch">{{ tr('Team preset batch', '团队预设批量') }}</option>
+          <option value="plm-team-preset-default">{{ tr('Team preset default', '团队预设默认') }}</option>
           <option value="plm-team-view-batch">{{ tr('Team view batch', '团队视图批量') }}</option>
           <option value="plm-team-view-default">{{ tr('Team default scene', '团队默认场景') }}</option>
         </select>
@@ -1906,6 +1907,7 @@ function actionLabel(value: string): string {
 
 function resourceTypeLabel(value: string): string {
   if (value === 'plm-team-preset-batch') return tr('Team preset batch', '团队预设批量')
+  if (value === 'plm-team-preset-default') return tr('Team preset default', '团队预设默认')
   if (value === 'plm-team-view-batch') return tr('Team view batch', '团队视图批量')
   if (value === 'plm-team-view-default') return tr('Team default scene', '团队默认场景')
   return value || '--'

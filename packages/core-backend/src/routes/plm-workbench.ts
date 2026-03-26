@@ -49,13 +49,19 @@ interface PlmWorkbenchTeamViewConflictBuilder {
 
 type PlmTeamPresetBatchAction = 'archive' | 'restore' | 'delete'
 type PlmTeamViewBatchAction = 'archive' | 'restore' | 'delete'
+type PlmTeamPresetDefaultAuditAction = 'set-default' | 'clear-default'
 type PlmTeamViewDefaultAuditAction = 'set-default' | 'clear-default'
 type PlmTeamViewLifecycleAuditAction = 'archive' | 'restore' | 'delete'
 type PlmTeamPresetLifecycleAuditAction = 'archive' | 'restore' | 'delete'
-type PlmCollaborativeAuditResourceType = 'plm-team-preset-batch' | 'plm-team-view-batch' | 'plm-team-view-default'
+type PlmCollaborativeAuditResourceType =
+  | 'plm-team-preset-batch'
+  | 'plm-team-preset-default'
+  | 'plm-team-view-batch'
+  | 'plm-team-view-default'
 const UUID_LIKE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const PLM_COLLABORATIVE_AUDIT_RESOURCE_TYPES: PlmCollaborativeAuditResourceType[] = [
   'plm-team-preset-batch',
+  'plm-team-preset-default',
   'plm-team-view-batch',
   'plm-team-view-default',
 ]
@@ -63,6 +69,7 @@ const PLM_COLLABORATIVE_AUDIT_RESOURCE_TYPES: PlmCollaborativeAuditResourceType[
 type PlmCollaborativeAuditAction =
   | PlmTeamPresetBatchAction
   | PlmTeamViewBatchAction
+  | PlmTeamPresetDefaultAuditAction
   | PlmTeamViewDefaultAuditAction
 
 interface PlmCollaborativeAuditEntry {
@@ -182,6 +189,7 @@ function normalizePlmAuditResourceType(value: unknown): PlmCollaborativeAuditRes
   const normalized = value.trim().toLowerCase()
   if (
     normalized === 'plm-team-preset-batch'
+    || normalized === 'plm-team-preset-default'
     || normalized === 'plm-team-view-batch'
     || normalized === 'plm-team-view-default'
   ) {
@@ -427,6 +435,46 @@ async function logPlmTeamPresetLifecycleAudit(params: {
   })
 }
 
+async function logPlmTeamPresetDefaultAudit(params: {
+  action: PlmTeamPresetDefaultAuditAction
+  tenantId: string
+  ownerUserId: string
+  presetId: string
+  kind: string
+  presetName: string
+}) {
+  logger.info('Processed PLM team preset default action', {
+    audit: 'plm-team-preset-default',
+    action: params.action,
+    tenantId: params.tenantId,
+    ownerUserId: params.ownerUserId,
+    presetId: params.presetId,
+    kind: params.kind,
+    presetName: params.presetName,
+    processedKinds: [params.kind],
+    processedTotal: 1,
+  })
+
+  await persistPlmCollaborativeAuditEvent({
+    route: '/api/plm-workbench/filter-presets/team/:id/default',
+    resourceType: 'plm-team-preset-default',
+    action: params.action,
+    ownerUserId: params.ownerUserId,
+    resourceId: params.presetId,
+    meta: {
+      tenantId: params.tenantId,
+      ownerUserId: params.ownerUserId,
+      audit: 'plm-team-preset-default',
+      kind: params.kind,
+      viewName: params.presetName,
+      processedKinds: [params.kind],
+      requestedTotal: 1,
+      processedTotal: 1,
+      skippedTotal: 0,
+    },
+  })
+}
+
 async function logPlmTeamViewBatchAudit(params: {
   action: PlmTeamViewBatchAction
   tenantId: string
@@ -591,6 +639,57 @@ async function attachPlmTeamViewDefaultSignals<T extends PlmWorkbenchTeamViewRow
     })) as T[]
   } catch (error: unknown) {
     logger.warn('Failed to load PLM team view default signals', error as Error)
+    return rows
+  }
+}
+
+async function attachPlmTeamPresetDefaultSignals<T extends PlmTeamFilterPresetRowLike>(
+  rows: T[],
+): Promise<T[]> {
+  const ids = Array.from(
+    new Set(
+      rows
+        .map((row) => String(row.id || '').trim())
+        .filter(Boolean),
+    ),
+  )
+
+  if (!ids.length) {
+    return rows
+  }
+
+  try {
+    const result = await pgQuery(
+      `SELECT resource_id, MAX(COALESCE(occurred_at, created_at)) AS last_default_set_at
+       FROM operation_audit_logs
+       WHERE resource_type = 'plm-team-preset-default'
+         AND action = 'set-default'
+         AND resource_id = ANY($1::text[])
+       GROUP BY resource_id`,
+      [ids],
+    )
+
+    const lastDefaultById = new Map<string, string>()
+    for (const row of result.rows as Array<Record<string, unknown>>) {
+      const resourceId = typeof row.resource_id === 'string' ? row.resource_id.trim() : ''
+      if (!resourceId) continue
+      const occurredAt =
+        row.last_default_set_at instanceof Date
+          ? row.last_default_set_at.toISOString()
+          : typeof row.last_default_set_at === 'string' && row.last_default_set_at.trim()
+            ? new Date(row.last_default_set_at).toISOString()
+            : ''
+      if (occurredAt) {
+        lastDefaultById.set(resourceId, occurredAt)
+      }
+    }
+
+    return rows.map((row) => ({
+      ...row,
+      last_default_set_at: lastDefaultById.get(String(row.id || '').trim()),
+    })) as T[]
+  } catch (error: unknown) {
+    logger.warn('Failed to load PLM team preset default signals', error as Error)
     return rows
   }
 }
@@ -1973,7 +2072,8 @@ router.get(
         .orderBy('is_default', 'desc')
         .orderBy('updated_at', 'desc')
         .execute()
-      const items = rows.map((row: PlmTeamFilterPresetRowLike) => mapPlmTeamFilterPresetRow(row, currentUserId))
+      const hydratedRows = await attachPlmTeamPresetDefaultSignals(rows as PlmTeamFilterPresetRowLike[])
+      const items = hydratedRows.map((row: PlmTeamFilterPresetRowLike) => mapPlmTeamFilterPresetRow(row, currentUserId))
       const defaultPreset = items.find((item) => item.isDefault && !item.isArchived) || null
       const activeTotal = items.filter((item) => !item.isArchived).length
       const archivedTotal = items.length - activeTotal
@@ -2236,9 +2336,20 @@ router.post(
           .executeTakeFirstOrThrow()
       })
 
+      await logPlmTeamPresetDefaultAudit({
+        action: 'set-default',
+        tenantId,
+        ownerUserId: currentUserId,
+        presetId,
+        kind: String(saved.kind || ''),
+        presetName: String(saved.name || ''),
+      })
+
+      const [hydratedSaved] = await attachPlmTeamPresetDefaultSignals([saved as PlmTeamFilterPresetRowLike])
+
       return res.json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: mapPlmTeamFilterPresetRow(hydratedSaved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to set default PLM team preset:', error as Error)
@@ -2306,9 +2417,20 @@ router.delete(
         .returningAll()
         .executeTakeFirstOrThrow()
 
+      await logPlmTeamPresetDefaultAudit({
+        action: 'clear-default',
+        tenantId,
+        ownerUserId: currentUserId,
+        presetId,
+        kind: String(saved.kind || ''),
+        presetName: String(saved.name || ''),
+      })
+
+      const [hydratedSaved] = await attachPlmTeamPresetDefaultSignals([saved as PlmTeamFilterPresetRowLike])
+
       return res.json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: mapPlmTeamFilterPresetRow(hydratedSaved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to clear default PLM team preset:', error as Error)

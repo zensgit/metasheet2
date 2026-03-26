@@ -1405,6 +1405,7 @@ describe('plmWorkbenchClient', () => {
           resourceTypes: [
             { resourceType: 'plm-team-view-batch', total: 5 },
             { resourceType: 'plm-team-preset-batch', total: 3 },
+            { resourceType: 'plm-team-preset-default', total: 2 },
             { resourceType: 'plm-team-view-default', total: 1 },
           ],
         },
@@ -1426,6 +1427,7 @@ describe('plmWorkbenchClient', () => {
       resourceTypes: [
         { resourceType: 'plm-team-view-batch', total: 5 },
         { resourceType: 'plm-team-preset-batch', total: 3 },
+        { resourceType: 'plm-team-preset-default', total: 2 },
         { resourceType: 'plm-team-view-default', total: 1 },
       ],
     })
@@ -1527,6 +1529,67 @@ describe('plmWorkbenchClient', () => {
     })
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/audit-logs?page=1&pageSize=20&action=set-default&resourceType=plm-team-view-default&kind=workbench'),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer test-token',
+        }),
+      }),
+    )
+  })
+
+  it('maps team preset default audit logs', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          items: [
+            {
+              id: 'audit-preset-default-1',
+              actorId: 'owner-1',
+              actorType: 'user',
+              action: 'clear-default',
+              resourceType: 'plm-team-preset-default',
+              resourceId: 'preset-1',
+              requestId: 'req-preset-default-1',
+              ip: '127.0.0.1',
+              userAgent: 'Vitest',
+              occurredAt: '2026-03-13T08:00:00.000Z',
+              meta: {
+                kind: 'bom',
+                viewName: 'BOM 默认预设',
+                processedKinds: ['bom'],
+                processedTotal: 1,
+              },
+            },
+          ],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+        },
+      }),
+    })
+
+    const result = await listPlmCollaborativeAuditLogs({
+      page: 1,
+      pageSize: 20,
+      action: 'clear-default',
+      resourceType: 'plm-team-preset-default',
+      kind: 'bom',
+    })
+
+    expect(result.items[0]).toMatchObject({
+      id: 'audit-preset-default-1',
+      action: 'clear-default',
+      resourceType: 'plm-team-preset-default',
+      meta: {
+        kind: 'bom',
+        viewName: 'BOM 默认预设',
+        processedKinds: ['bom'],
+      },
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plm-workbench/audit-logs?page=1&pageSize=20&action=clear-default&resourceType=plm-team-preset-default&kind=bom'),
       expect.objectContaining({
         headers: expect.objectContaining({
           Authorization: 'Bearer test-token',

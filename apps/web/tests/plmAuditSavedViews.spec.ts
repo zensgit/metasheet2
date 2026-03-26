@@ -131,6 +131,23 @@ describe('plmAuditSavedViews', () => {
     })
   })
 
+  it('keeps team preset default audit filters when saving and reading views', () => {
+    const storage = createMemoryStorage()
+
+    savePlmAuditSavedView('BOM Preset Defaults', {
+      ...sampleState,
+      kind: 'bom',
+      action: 'clear-default',
+      resourceType: 'plm-team-preset-default',
+    }, storage)
+
+    expect(readPlmAuditSavedViews(storage)[0]?.state).toMatchObject({
+      kind: 'bom',
+      action: 'clear-default',
+      resourceType: 'plm-team-preset-default',
+    })
+  })
+
   it('keeps scene context when saving and reading views', () => {
     const storage = createMemoryStorage()
 
