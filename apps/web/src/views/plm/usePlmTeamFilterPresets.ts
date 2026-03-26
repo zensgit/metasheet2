@@ -238,6 +238,9 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
   }, { flush: 'sync' })
 
   function applyPresetToTarget(preset: PlmTeamFilterPreset) {
+    if (!preset.isDefault) {
+      lastAutoAppliedDefaultId.value = ''
+    }
     teamPresetKey.value = preset.id
     options.syncRequestedPresetId?.(preset.id)
     options.applyPreset({

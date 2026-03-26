@@ -394,6 +394,118 @@ describe('usePlmTeamViews', () => {
     expect(setMessage).toHaveBeenLastCalledWith('已应用工作台默认团队视角：默认工作台视角')
   })
 
+  it('reapplies the default workbench team view after an explicit target becomes stale', async () => {
+    const requestedViewId = ref('')
+    const syncRequestedViewId = vi.fn((value?: string) => {
+      requestedViewId.value = value || ''
+    })
+    const workbenchApply = vi.fn(() => requestedViewId.value)
+
+    vi.mocked(listPlmWorkbenchTeamViews)
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: 'workbench-default',
+            kind: 'workbench',
+            scope: 'team',
+            name: '默认工作台视角',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            isDefault: true,
+            state: {
+              query: {
+                documentFilter: 'default-gear',
+              },
+            },
+          },
+          {
+            id: 'workbench-explicit',
+            kind: 'workbench',
+            scope: 'team',
+            name: '显式工作台视角',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            isDefault: false,
+            state: {
+              query: {
+                documentFilter: 'explicit-motor',
+              },
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: 'workbench-default',
+            kind: 'workbench',
+            scope: 'team',
+            name: '默认工作台视角',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            isDefault: true,
+            state: {
+              query: {
+                documentFilter: 'default-gear',
+              },
+            },
+          },
+          {
+            id: 'workbench-explicit',
+            kind: 'workbench',
+            scope: 'team',
+            name: '显式工作台视角',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            isDefault: false,
+            permissions: {
+              canApply: false,
+            },
+            state: {
+              query: {
+                documentFilter: 'explicit-motor',
+              },
+            },
+          },
+        ],
+      })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState: workbenchApply,
+      setMessage,
+      requestedViewId,
+      syncRequestedViewId,
+      shouldAutoApplyDefault: () => true,
+    })
+
+    await model.refreshTeamViews()
+    expect(model.teamViewKey.value).toBe('workbench-default')
+
+    model.teamViewKey.value = 'workbench-explicit'
+    model.applyTeamView()
+
+    expect(requestedViewId.value).toBe('workbench-explicit')
+
+    workbenchApply.mockClear()
+    syncRequestedViewId.mockClear()
+
+    await model.refreshTeamViews()
+
+    expect(model.teamViewKey.value).toBe('workbench-default')
+    expect(requestedViewId.value).toBe('workbench-default')
+    expect(syncRequestedViewId).toHaveBeenLastCalledWith('workbench-default')
+    expect(workbenchApply).toHaveBeenCalledWith({
+      query: {
+        documentFilter: 'default-gear',
+      },
+    })
+  })
+
   it('clears a stale team-view name draft when refresh removes the selected view', async () => {
     vi.mocked(listPlmWorkbenchTeamViews)
       .mockResolvedValueOnce({

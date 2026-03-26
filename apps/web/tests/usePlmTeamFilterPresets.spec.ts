@@ -148,6 +148,102 @@ describe('usePlmTeamFilterPresets', () => {
     expect(syncRequestedPresetId).toHaveBeenCalledWith('preset-explicit')
   })
 
+  it('reapplies the default team preset after an explicit preset becomes stale', async () => {
+    const requestedPresetId = ref('')
+    const syncRequestedPresetId = vi.fn((value?: string) => {
+      requestedPresetId.value = value || ''
+    })
+    const trackedApply = vi.fn(() => requestedPresetId.value)
+
+    vi.mocked(listPlmTeamFilterPresets)
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: 'preset-default',
+            kind: 'bom',
+            scope: 'team',
+            name: '默认 BOM',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            isDefault: true,
+            state: { field: 'path', value: 'root/default', group: '默认组' },
+          },
+          {
+            id: 'preset-explicit',
+            kind: 'bom',
+            scope: 'team',
+            name: '显式 BOM',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            isDefault: false,
+            state: { field: 'path', value: 'root/explicit', group: '显式组' },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: 'preset-default',
+            kind: 'bom',
+            scope: 'team',
+            name: '默认 BOM',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            isDefault: true,
+            state: { field: 'path', value: 'root/default', group: '默认组' },
+          },
+          {
+            id: 'preset-explicit',
+            kind: 'bom',
+            scope: 'team',
+            name: '显式 BOM',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            isDefault: false,
+            permissions: {
+              canApply: false,
+            },
+            state: { field: 'path', value: 'root/explicit', group: '显式组' },
+          },
+        ],
+      })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: '', group: '' }),
+      applyPreset: trackedApply,
+      setMessage,
+      shouldAutoApplyDefault: () => true,
+      requestedPresetId,
+      syncRequestedPresetId,
+    })
+
+    await model.refreshTeamPresets()
+    expect(model.teamPresetKey.value).toBe('preset-default')
+
+    model.teamPresetKey.value = 'preset-explicit'
+    model.applyTeamPreset()
+
+    expect(requestedPresetId.value).toBe('preset-explicit')
+
+    trackedApply.mockClear()
+    syncRequestedPresetId.mockClear()
+
+    await model.refreshTeamPresets()
+
+    expect(model.teamPresetKey.value).toBe('preset-default')
+    expect(requestedPresetId.value).toBe('preset-default')
+    expect(syncRequestedPresetId).toHaveBeenLastCalledWith('preset-default')
+    expect(trackedApply).toHaveBeenCalledWith({
+      key: 'preset-default',
+      label: '默认 BOM',
+      field: 'path',
+      value: 'root/default',
+      group: '默认组',
+    })
+  })
+
   it('clears stale requested and selected presets when refresh keeps them but removes applyability', async () => {
     const requestedPresetId = ref('preset-locked')
     const syncRequestedPresetId = vi.fn((value?: string) => {

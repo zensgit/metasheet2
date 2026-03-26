@@ -192,6 +192,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     if (teamViewKey.value && teamViewKey.value !== view.id) {
       teamViewOwnerUserId.value = ''
     }
+    if (!view.isDefault) {
+      lastAutoAppliedDefaultId.value = ''
+    }
     teamViewKey.value = view.id
     options.syncRequestedViewId?.(view.id)
     options.applyViewState(view.state)
