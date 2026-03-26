@@ -260,7 +260,14 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
           teamViewOwnerUserId.value = ''
         }
       }
-      if (options.requestedViewId?.value && !items.some((view) => view.id === options.requestedViewId?.value)) {
+      const requestedViewId = options.requestedViewId?.value.trim() || ''
+      if (
+        requestedViewId
+        && !items.some((view) => (
+          view.id === requestedViewId
+          && canApplyPlmCollaborativeEntry(view)
+        ))
+      ) {
         options.syncRequestedViewId?.(undefined)
       }
       maybeAutoApplyDefault(teamViews.value)

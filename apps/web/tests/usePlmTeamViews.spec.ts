@@ -394,6 +394,126 @@ describe('usePlmTeamViews', () => {
     expect(setMessage).toHaveBeenLastCalledWith('已应用工作台默认团队视角：默认工作台视角')
   })
 
+  it('clears a stale requested route owner when refresh keeps the id but removes applyability', async () => {
+    const requestedViewId = ref('workbench-applied')
+    const syncRequestedViewId = vi.fn((value?: string) => {
+      requestedViewId.value = value || ''
+    })
+
+    vi.mocked(listPlmWorkbenchTeamViews)
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: 'workbench-applied',
+            kind: 'workbench',
+            scope: 'team',
+            name: '已应用工作台视角',
+            ownerUserId: 'owner-a',
+            canManage: true,
+            isDefault: false,
+            permissions: {
+              canApply: true,
+              canManage: true,
+              canRename: true,
+            },
+            state: {
+              query: {
+                documentFilter: 'gear',
+              },
+            },
+          },
+          {
+            id: 'workbench-pending',
+            kind: 'workbench',
+            scope: 'team',
+            name: '待应用工作台视角',
+            ownerUserId: 'owner-b',
+            canManage: true,
+            isDefault: false,
+            permissions: {
+              canApply: true,
+              canManage: true,
+              canRename: true,
+            },
+            state: {
+              query: {
+                documentFilter: 'bolt',
+              },
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            id: 'workbench-applied',
+            kind: 'workbench',
+            scope: 'team',
+            name: '已应用工作台视角',
+            ownerUserId: 'owner-a',
+            canManage: true,
+            isDefault: false,
+            isArchived: true,
+            permissions: {
+              canApply: false,
+              canManage: true,
+              canRename: false,
+            },
+            state: {
+              query: {
+                documentFilter: 'gear',
+              },
+            },
+          },
+          {
+            id: 'workbench-pending',
+            kind: 'workbench',
+            scope: 'team',
+            name: '待应用工作台视角',
+            ownerUserId: 'owner-b',
+            canManage: true,
+            isDefault: false,
+            permissions: {
+              canApply: true,
+              canManage: true,
+              canRename: true,
+            },
+            state: {
+              query: {
+                documentFilter: 'bolt',
+              },
+            },
+          },
+        ],
+      })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      requestedViewId,
+      syncRequestedViewId,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-pending'
+    syncRequestedViewId.mockClear()
+
+    await model.refreshTeamViews()
+
+    expect(requestedViewId.value).toBe('')
+    expect(syncRequestedViewId).toHaveBeenLastCalledWith(undefined)
+    expect(model.teamViewKey.value).toBe('workbench-pending')
+    expect(model.showManagementActions.value).toBe(true)
+    expect(model.canManageSelectedTeamView.value).toBe(true)
+    expect(model.canTransferTargetTeamView.value).toBe(true)
+  })
+
   it('reapplies the default workbench team view after an explicit target becomes stale', async () => {
     const requestedViewId = ref('')
     const syncRequestedViewId = vi.fn((value?: string) => {
