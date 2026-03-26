@@ -816,6 +816,8 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
 
     teamPresetsLoading.value = true
     teamPresetsError.value = ''
+    const selectedIdBeforeAction = teamPresetKey.value
+    const requestedPresetIdBeforeAction = options.requestedPresetId?.value.trim() || ''
 
     try {
       const result = await batchPlmTeamFilterPresets(action, presetIds)
@@ -834,10 +836,20 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
 
       teamPresetSelection.value = teamPresetSelection.value.filter((id) => !processedSet.has(id))
 
-      const selectedId = teamPresetKey.value
-      if (selectedId && processedSet.has(selectedId)) {
+      const processedRequestedId = (
+        Boolean(requestedPresetIdBeforeAction)
+        && processedSet.has(requestedPresetIdBeforeAction)
+      )
+      if (selectedIdBeforeAction && processedSet.has(selectedIdBeforeAction)) {
         if (action === 'restore') {
-          const restored = result.items.find((preset) => preset.id === selectedId)
+          const restoreTargetId = processedRequestedId
+            ? requestedPresetIdBeforeAction
+            : requestedPresetIdBeforeAction
+              ? ''
+              : selectedIdBeforeAction
+          const restored = restoreTargetId
+            ? result.items.find((preset) => preset.id === restoreTargetId)
+            : null
           if (restored) {
             applyPresetToTarget(restored)
             teamPresetName.value = ''
@@ -850,14 +862,8 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
         }
       }
 
-      const requestedPresetId = options.requestedPresetId?.value.trim() || ''
-      if (requestedPresetId && processedSet.has(requestedPresetId)) {
-        if (action === 'restore') {
-          const restored = result.items.find((preset) => preset.id === requestedPresetId)
-          options.syncRequestedPresetId?.(restored?.id || undefined)
-        } else {
-          options.syncRequestedPresetId?.(undefined)
-        }
+      if (processedRequestedId && action !== 'restore') {
+        options.syncRequestedPresetId?.(undefined)
       }
 
       if (action !== 'restore' && lastAutoAppliedDefaultId.value && processedSet.has(lastAutoAppliedDefaultId.value)) {

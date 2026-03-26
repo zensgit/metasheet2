@@ -1663,6 +1663,83 @@ describe('usePlmTeamFilterPresets', () => {
     expect(model.teamPresets.value[0]?.isArchived).toBe(false)
   })
 
+  it('does not hijack the canonical preset route owner when batch restoring a pending local selector target', async () => {
+    const requestedPresetId = ref('preset-a')
+    const syncRequestedPresetId = vi.fn((value?: string) => {
+      requestedPresetId.value = value || ''
+    })
+    const trackedApply = vi.fn(() => requestedPresetId.value)
+
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-a',
+          kind: 'bom',
+          scope: 'team',
+          name: '已应用 BOM 预设',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          state: { field: 'path', value: 'root/a', group: 'A组' },
+        },
+        {
+          id: 'preset-b',
+          kind: 'bom',
+          scope: 'team',
+          name: '待恢复 BOM 预设',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          isArchived: true,
+          archivedAt: '2026-03-26T08:00:00.000Z',
+          state: { field: 'path', value: 'root/b', group: 'B组' },
+        },
+      ],
+    })
+    vi.mocked(batchPlmTeamFilterPresets).mockResolvedValue({
+      action: 'restore',
+      processedIds: ['preset-b'],
+      skippedIds: [],
+      items: [
+        {
+          id: 'preset-b',
+          kind: 'bom',
+          scope: 'team',
+          name: '待恢复 BOM 预设',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          isArchived: false,
+          state: { field: 'path', value: 'root/b', group: 'B组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/a', group: 'A组' }),
+      applyPreset: trackedApply,
+      setMessage,
+      requestedPresetId,
+      syncRequestedPresetId,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-b'
+    model.teamPresetSelection.value = ['preset-b']
+
+    await model.restoreTeamPresetSelection()
+
+    expect(batchPlmTeamFilterPresets).toHaveBeenCalledWith('restore', ['preset-b'])
+    expect(syncRequestedPresetId).not.toHaveBeenCalledWith('preset-b')
+    expect(requestedPresetId.value).toBe('preset-a')
+    expect(model.teamPresetKey.value).toBe('preset-b')
+    expect(model.teamPresets.value.find((preset) => preset.id === 'preset-b')?.isArchived).toBe(false)
+    expect(trackedApply).toHaveReturnedWith('preset-a')
+  })
+
   it('shares the current team preset through an explicit deep link without changing identity', async () => {
     const buildShareUrl = vi.fn(() => 'http://example.test/plm?panel=bom&bomTeamPreset=preset-share')
     const copyShareUrl = vi.fn(async () => true)
