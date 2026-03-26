@@ -118,13 +118,17 @@ jobs:
             'if [[ "${SKIP_HOST_SYNC}" == "true" ]]; then'
               '  echo "[host-sync] skipped (skip_host_sync=true)"'
               '  host_sync_rc=0'
+            'elif ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then'
+              '  echo "[host-sync][warn] DEPLOY_PATH is not a git repo: ${DEPLOY_PATH} (resolved: ${DEPLOY_REPO_PATH}); continuing with existing files"'
+              '  pwd'
+              '  ls -la || true'
+              '  host_sync_rc=0'
             "else"
               "  set +e"
               '  for attempt in $(seq 1 "$host_sync_attempts"); do'
               '    git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git fetch origin main && git checkout main && git pull --ff-only origin main'
               '    host_sync_rc=$?'
               '    echo "[host-sync] attempt=$attempt rc=$host_sync_rc"'
-              '    if [[ "$host_sync_rc" != "0" && "$attempt" == "1" ]]; then echo "[host-sync][error] not a git repo at ${DEPLOY_REPO_PATH}" ; pwd ; ls -la || true; fi'
               '    if [[ "$host_sync_rc" == "0" ]]; then break; fi'
               '    if [[ "$attempt" -lt "$host_sync_attempts" ]]; then sleep $((attempt * 2)); fi'
               '  done'
