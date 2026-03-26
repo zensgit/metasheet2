@@ -207,7 +207,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import type { MetaField, MetaFieldCreateType, MetaSheet } from '../types'
 import {
   normalizeStringArray,
@@ -237,6 +237,7 @@ const emit = defineEmits<{
   (e: 'create-field', input: { sheetId: string; name: string; type: string; property?: Record<string, unknown> }): void
   (e: 'update-field', fieldId: string, input: { name?: string; order?: number; type?: string; property?: Record<string, unknown> }): void
   (e: 'delete-field', fieldId: string): void
+  (e: 'update:dirty', dirty: boolean): void
 }>()
 
 const newFieldName = ref('')
@@ -656,13 +657,16 @@ const renameDirty = computed(() => {
   return editingName.value.trim() !== (props.fields.find((field) => field.id === editingId.value)?.name ?? '')
 })
 
+const hasPendingDrafts = computed(() => fieldConfigDirty.value ||
+  renameDirty.value ||
+  newFieldName.value.trim().length > 0 ||
+  newFieldType.value !== 'string' ||
+  newFieldDraftDirty.value)
+
+const managerDirty = computed(() => props.visible && hasPendingDrafts.value)
+
 function confirmDiscardFieldManagerChanges() {
-  const hasPendingDrafts = fieldConfigDirty.value ||
-    renameDirty.value ||
-    newFieldName.value.trim().length > 0 ||
-    newFieldType.value !== 'string' ||
-    newFieldDraftDirty.value
-  if (!hasPendingDrafts) return true
+  if (!hasPendingDrafts.value) return true
   return window.confirm('Discard unsaved field manager changes?')
 }
 
@@ -727,6 +731,18 @@ watch(
     if (dirty) fieldConfigLiveRefreshText.value = ''
   },
 )
+
+watch(
+  managerDirty,
+  (dirty) => {
+    emit('update:dirty', dirty)
+  },
+  { immediate: true },
+)
+
+onBeforeUnmount(() => {
+  emit('update:dirty', false)
+})
 </script>
 
 <style scoped>

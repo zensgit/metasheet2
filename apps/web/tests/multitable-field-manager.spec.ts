@@ -340,6 +340,37 @@ describe('MetaFieldManager', () => {
     app.unmount()
   })
 
+  it('emits dirty state while field manager drafts are unsaved', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const dirtySpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaFieldManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          sheets: [],
+          fields: [],
+          'onUpdate:dirty': dirtySpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+    expect(dirtySpy).toHaveBeenLastCalledWith(false)
+
+    const nameInput = container.querySelector('.meta-field-mgr__add-row .meta-field-mgr__input') as HTMLInputElement
+    nameInput.value = 'Unsaved'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+
+    expect(dirtySpy).toHaveBeenLastCalledWith(true)
+
+    app.unmount()
+  })
+
   it('blocks save until reload when configured field changes type upstream mid-edit', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)

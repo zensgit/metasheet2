@@ -10,6 +10,57 @@ async function flushUi(cycles = 4) {
 }
 
 describe('MetaFormView attachment flow', () => {
+  it('emits dirty state while the form has unsaved edits', async () => {
+    const dirtySpy = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFormView, {
+          fields: [
+            { id: 'fld_title', name: 'Title', type: 'string' },
+          ],
+          record: {
+            id: 'rec_1',
+            version: 1,
+            data: {
+              fld_title: 'Draft',
+            },
+          },
+          loading: false,
+          readOnly: false,
+          onSubmit: vi.fn(),
+          onOpenLinkPicker: vi.fn(),
+          'onUpdate:dirty': dirtySpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    expect(dirtySpy).toHaveBeenLastCalledWith(false)
+
+    const input = container.querySelector('#field_fld_title') as HTMLInputElement | null
+    input!.value = 'Revised'
+    input!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    expect(dirtySpy).toHaveBeenLastCalledWith(true)
+
+    const resetButton = container.querySelector('.meta-form-view__reset') as HTMLButtonElement | null
+    resetButton?.click()
+    await flushUi()
+
+    expect(dirtySpy).toHaveBeenLastCalledWith(false)
+    expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved changes?')
+
+    app.unmount()
+    container.remove()
+  })
+
   it('renders uploaded attachment summaries and submits attachment ids', async () => {
     const uploadFn = vi.fn().mockResolvedValue({
       id: 'att_brief',

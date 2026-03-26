@@ -15,7 +15,7 @@
     <div v-if="bases.length" class="mt-workbench__base-bar">
       <MetaBasePicker :bases="bases" :active-base-id="activeBaseId" :can-create="caps.canManageFields.value" @select="onSelectBase" @create="onCreateBase" />
     </div>
-    <MetaViewTabBar :sheets="workbench.sheets.value" :views="workbench.views.value" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="caps.canManageFields.value" @select-sheet="workbench.selectSheet" @select-view="workbench.selectView" @create-sheet="onCreateSheet" />
+    <MetaViewTabBar :sheets="workbench.sheets.value" :views="workbench.views.value" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="caps.canManageFields.value" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" />
     <div class="mt-workbench__actions">
       <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; Fields</button>
       <button v-if="caps.canManageViews.value" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
@@ -31,7 +31,7 @@
       :group-field-id="grid.groupFieldId.value"
       :search-text="searchText" :total-rows="grid.page.value.total" :row-density="rowDensity"
       @apply-sort-filter="grid.applySortFilter" @add-record="onAddRecord" @undo="grid.undo" @redo="grid.redo"
-      @set-group-field="grid.setGroupField" @export-csv="onExportCsv" @import="showImportModal = true" @update:search-text="onSearchTextUpdate"
+      @set-group-field="grid.setGroupField" @export-csv="onExportCsv" @import="onOpenImportModal" @update:search-text="onSearchTextUpdate"
       @print="onPrint" @set-row-density="rowDensity = $event" @auto-fit-columns="onAutoFitColumns"
     />
     <div class="mt-workbench__content">
@@ -49,7 +49,7 @@
           :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
           :upload-fn="uploadAttachmentFn"
           :delete-attachment-fn="deleteAttachmentFn"
-          @submit="onFormSubmit" @open-link-picker="openLinkPicker"
+          @submit="onFormSubmit" @open-link-picker="openLinkPicker" @update:dirty="formDirty = $event"
         />
         <MetaKanbanView
           v-else-if="activeViewType === 'kanban'"
@@ -115,8 +115,8 @@
         :record-ids="drawerRecordIds"
         :upload-fn="uploadAttachmentFn"
         :delete-attachment-fn="deleteAttachmentFn"
-        @close="selectedRecordId = null" @delete="onDeleteRecord" @patch="onDrawerPatch"
-        @toggle-comments="showComments = !showComments" @open-link-picker="openLinkPicker"
+        @close="onCloseDrawer" @delete="onDeleteRecord" @patch="onDrawerPatch"
+        @toggle-comments="onToggleComments" @open-link-picker="openLinkPicker"
         @navigate="onDrawerNavigate"
       />
       <MetaCommentsDrawer
@@ -124,7 +124,7 @@
         :loading="commentsState.loading.value" :can-comment="caps.canComment.value" :can-resolve="caps.canComment.value"
         :draft="commentDraft" :submitting="commentsState.submitting.value" :error="commentsState.error.value"
         :resolving-ids="commentsState.resolvingIds.value"
-        @close="showComments = false" @submit="onSubmitComment" @resolve="onResolveComment" @update:draft="commentDraft = $event"
+        @close="onCloseComments" @submit="onSubmitComment" @resolve="onResolveComment" @update:draft="commentDraft = $event"
       />
     </div>
     <div v-if="showShortcuts" class="mt-workbench__shortcuts-overlay" @click.self="showShortcuts = false">
@@ -152,6 +152,7 @@
       :field-resolvers="importFieldResolvers"
       :importing="importSubmitting"
       :result="importResult"
+      @update:dirty="importDirty = $event"
       @close="closeImportModal"
       @cancel-import="cancelImport"
       @import="onBulkImport"
@@ -161,11 +162,13 @@
     />
     <MetaFieldManager
       :visible="showFieldManager" :fields="workbench.fields.value" :sheets="workbench.sheets.value" :sheet-id="workbench.activeSheetId.value"
+      @update:dirty="fieldManagerDirty = $event"
       @close="showFieldManager = false" @create-field="onCreateField" @update-field="onUpdateField" @delete-field="onDeleteField"
     />
     <MetaViewManager
       :visible="showViewManager" :views="workbench.views.value" :fields="workbench.fields.value" :sheet-id="workbench.activeSheetId.value"
       :active-view-id="workbench.activeViewId.value"
+      @update:dirty="viewManagerDirty = $event"
       @close="showViewManager = false" @create-view="onCreateView" @update-view="onUpdateView" @delete-view="onDeleteView"
     />
   </div>
@@ -214,6 +217,14 @@ import { isLinkField, isPersonField } from '../utils/link-fields'
 import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue } from '../utils/people-import'
 
 const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; mode?: string; role?: MultitableRole }>()
+const emit = defineEmits<{
+  (e: 'external-context-result', payload: {
+    status: 'applied' | 'failed' | 'superseded'
+    context: { baseId: string; sheetId: string; viewId: string }
+    reason?: 'sync-failed' | 'superseded'
+    requestId?: string | number
+  }): void
+}>()
 
 const role = ref<MultitableRole>(props.role ?? 'editor')
 const workbench = useMultitableWorkbench({ initialBaseId: props.baseId, initialSheetId: props.sheetId, initialViewId: props.viewId })
@@ -239,6 +250,21 @@ const showShortcuts = ref(false)
 const showImportModal = ref(false)
 const importSubmitting = ref(false)
 const importAbortController = ref<AbortController | null>(null)
+const formDirty = ref(false)
+const fieldManagerDirty = ref(false)
+const viewManagerDirty = ref(false)
+const importDirty = ref(false)
+const pendingExternalContext = ref<{ context: { baseId: string; sheetId: string; viewId: string }; requestId?: string | number } | null>(null)
+const pendingExternalContextReason = ref<Extract<ExternalContextSyncReason, 'busy' | 'unsaved-drafts'> | null>(null)
+const pendingExternalContextNoticeKey = ref('')
+type ExternalContextSyncStatus = 'applied' | 'deferred' | 'blocked' | 'failed' | 'superseded'
+type ExternalContextSyncReason = 'busy' | 'unsaved-drafts' | 'user-cancelled' | 'sync-failed' | 'superseded'
+type ExternalContextSyncResult = {
+  status: ExternalContextSyncStatus
+  context: { baseId: string; sheetId: string; viewId: string }
+  reason?: ExternalContextSyncReason
+  requestId?: string | number
+}
 type ImportFailure = ImportBuildFailure & { rowIndex: number; retryable?: boolean }
 type ImportResult = {
   attempted: number
@@ -307,6 +333,25 @@ const conflictMessage = computed(() => {
   if (!current) return ''
   const versionPart = typeof current.serverVersion === 'number' ? ` Latest version is ${current.serverVersion}.` : ''
   return `${conflictFieldName.value} changed elsewhere.${versionPart} Reload the row or retry your edit.`
+})
+const hasUnsavedWorkbenchDrafts = computed(() => (
+  formDirty.value ||
+  fieldManagerDirty.value ||
+  viewManagerDirty.value ||
+  importDirty.value ||
+  commentDraft.value.trim().length > 0
+))
+const hasCommentDraft = computed(() => commentDraft.value.trim().length > 0)
+const hasRecordScopedDrafts = computed(() => formDirty.value || hasCommentDraft.value)
+const hasBlockingUnloadState = computed(() => (
+  hasUnsavedWorkbenchDrafts.value ||
+  formSubmitting.value ||
+  importSubmitting.value
+))
+const currentBlockingReason = computed<Extract<ExternalContextSyncReason, 'busy' | 'unsaved-drafts'> | null>(() => {
+  if (formSubmitting.value || importSubmitting.value) return 'busy'
+  if (hasUnsavedWorkbenchDrafts.value) return 'unsaved-drafts'
+  return null
 })
 
 function applyLocalLinkSummaries(recordId: string, fieldId: string, summaries: LinkedRecordSummary[]) {
@@ -530,6 +575,7 @@ async function loadCommentsForRecord(recordId: string) {
 }
 
 async function selectRecord(recordId: string, opts?: { openComments?: boolean }) {
+  if (recordId !== selectedRecordId.value && !confirmDiscardRecordChanges()) return
   selectedRecordId.value = recordId
   commentDraft.value = ''
   showComments.value = opts?.openComments === true
@@ -835,6 +881,7 @@ async function onDeleteView(viewId: string) {
 
 // --- Sheet management ---
 async function onCreateSheet(name: string) {
+  if (!confirmDiscardContextChanges()) return
   try {
     const res = await workbench.client.createSheet({ name, baseId: workbench.activeBaseId.value || undefined, seed: true })
     const ok = await workbench.syncExternalContext({
@@ -858,8 +905,209 @@ async function loadBases() {
 }
 
 async function onSelectBase(baseId: string) {
+  if (baseId === workbench.activeBaseId.value) return
+  if (!confirmDiscardContextChanges()) return
   const ok = await workbench.switchBase(baseId)
   if (!ok) showError(workbench.error.value ?? 'Failed to load base')
+}
+
+function onSelectSheet(sheetId: string) {
+  if (sheetId === workbench.activeSheetId.value) return
+  if (!confirmDiscardContextChanges()) return
+  workbench.selectSheet(sheetId)
+}
+
+function onSelectView(viewId: string) {
+  if (viewId === workbench.activeViewId.value) return
+  if (!confirmDiscardContextChanges()) return
+  workbench.selectView(viewId)
+}
+
+function onOpenImportModal() {
+  showImportModal.value = true
+}
+
+function onCloseDrawer() {
+  if (!confirmDiscardRecordChanges()) return
+  selectedRecordId.value = null
+  showComments.value = false
+  commentDraft.value = ''
+}
+
+function onToggleComments() {
+  if (showComments.value) {
+    if (!confirmDiscardCommentDraft()) return
+    showComments.value = false
+    commentDraft.value = ''
+    return
+  }
+  showComments.value = true
+}
+
+function onCloseComments() {
+  if (!confirmDiscardCommentDraft()) return
+  showComments.value = false
+  commentDraft.value = ''
+}
+
+function confirmDiscardContextChanges() {
+  if (!hasUnsavedWorkbenchDrafts.value) return true
+  return window.confirm('Discard unsaved changes before leaving the current sheet or view?')
+}
+
+function confirmDiscardRecordChanges() {
+  if (!hasRecordScopedDrafts.value) return true
+  return window.confirm('Discard unsaved record changes?')
+}
+
+function confirmDiscardCommentDraft() {
+  if (!hasCommentDraft.value) return true
+  return window.confirm('Discard unsaved comment draft?')
+}
+
+function discardWorkbenchDraftsForExternalContextChange() {
+  formDirty.value = false
+  fieldManagerDirty.value = false
+  viewManagerDirty.value = false
+  importDirty.value = false
+  commentDraft.value = ''
+  formSuccessMessage.value = null
+  formErrorMessage.value = null
+  formFieldErrors.value = {}
+  showComments.value = false
+  selectedRecordId.value = null
+  deepLinkedRecord.value = null
+  deepLinkedRecordLinkSummaries.value = {}
+  deepLinkedRecordAttachmentSummaries.value = {}
+  showImportModal.value = false
+  importResult.value = null
+  importAbortController.value = null
+}
+
+function confirmPageLeave() {
+  if (formSubmitting.value || importSubmitting.value) {
+    return window.confirm('Leave the multitable while the current save or import is still running?')
+  }
+  if (!hasUnsavedWorkbenchDrafts.value) return true
+  return window.confirm('Discard unsaved multitable changes before leaving this page?')
+}
+
+function normalizeExternalContext(input: { baseId?: string; sheetId?: string; viewId?: string }) {
+  return {
+    baseId: input.baseId ?? '',
+    sheetId: input.sheetId ?? '',
+    viewId: input.viewId ?? '',
+  }
+}
+
+function serializeExternalContext(input: { baseId: string; sheetId: string; viewId: string }) {
+  return `${input.baseId}::${input.sheetId}::${input.viewId}`
+}
+
+function externalContextMatchesWorkbench(input: { baseId: string; sheetId: string; viewId: string }) {
+  return input.baseId === (workbench.activeBaseId.value ?? '') &&
+    input.sheetId === (workbench.activeSheetId.value ?? '') &&
+    input.viewId === (workbench.activeViewId.value ?? '')
+}
+
+function getCurrentExternalContext() {
+  return {
+    baseId: workbench.activeBaseId.value ?? '',
+    sheetId: workbench.activeSheetId.value ?? '',
+    viewId: workbench.activeViewId.value ?? '',
+  }
+}
+
+async function applyExternalContext(input: { baseId: string; sheetId: string; viewId: string }) {
+  pendingExternalContext.value = null
+  pendingExternalContextReason.value = null
+  pendingExternalContextNoticeKey.value = ''
+  const ok = await workbench.syncExternalContext(input)
+  if (!ok) showError(workbench.error.value ?? 'Failed to sync workbench context')
+  return ok
+}
+
+function deferExternalContextSync(
+  input: { baseId: string; sheetId: string; viewId: string },
+  reason: Extract<ExternalContextSyncReason, 'busy' | 'unsaved-drafts'>,
+  requestId?: string | number,
+): ExternalContextSyncResult {
+  const previousPending = pendingExternalContext.value
+  const previousReason = pendingExternalContextReason.value
+  if (
+    previousPending &&
+    (previousPending.requestId !== requestId ||
+      serializeExternalContext(previousPending.context) !== serializeExternalContext(input))
+  ) {
+    emit('external-context-result', {
+      status: 'superseded',
+      context: previousPending.context,
+      reason: 'superseded',
+      requestId: previousPending.requestId,
+    })
+    if (previousReason === reason) {
+      pendingExternalContextNoticeKey.value = ''
+    }
+  }
+  pendingExternalContext.value = { context: input, requestId }
+  pendingExternalContextReason.value = reason
+  const noticeKey = `${reason}::${requestId ?? ''}::${serializeExternalContext(input)}`
+  if (pendingExternalContextNoticeKey.value !== noticeKey) {
+    pendingExternalContextNoticeKey.value = noticeKey
+    if (reason === 'busy') {
+      showError('Host multitable context change is waiting for the current save or import to finish.')
+    } else {
+      showError('Host multitable context changed while unsaved drafts are open. Resolve or discard changes to continue.')
+    }
+  }
+  return { status: 'deferred', context: input, reason, requestId }
+}
+
+function getEmbedHostState() {
+  return {
+    currentContext: getCurrentExternalContext(),
+    hasBlockingState: hasBlockingUnloadState.value,
+    blockingReason: currentBlockingReason.value,
+    hasUnsavedDrafts: hasUnsavedWorkbenchDrafts.value,
+    busy: formSubmitting.value || importSubmitting.value,
+    pendingContext: pendingExternalContext.value
+      ? {
+        ...pendingExternalContext.value.context,
+        requestId: pendingExternalContext.value.requestId,
+        reason: pendingExternalContextReason.value ?? undefined,
+      }
+      : null,
+  }
+}
+
+async function requestExternalContextSync(
+  input: { baseId?: string; sheetId?: string; viewId?: string },
+  options?: { confirmIfBlocked?: boolean; requestId?: string | number },
+): Promise<ExternalContextSyncResult> {
+  const nextContext = normalizeExternalContext(input)
+  if (externalContextMatchesWorkbench(nextContext)) {
+    pendingExternalContext.value = null
+    pendingExternalContextReason.value = null
+    pendingExternalContextNoticeKey.value = ''
+    return { status: 'applied', context: getCurrentExternalContext(), requestId: options?.requestId }
+  }
+  if (formSubmitting.value || importSubmitting.value) {
+    return deferExternalContextSync(nextContext, 'busy', options?.requestId)
+  }
+  if (hasUnsavedWorkbenchDrafts.value) {
+    if (!options?.confirmIfBlocked) {
+      return deferExternalContextSync(nextContext, 'unsaved-drafts', options?.requestId)
+    }
+    if (!confirmDiscardContextChanges()) {
+      return { status: 'blocked', context: nextContext, reason: 'user-cancelled', requestId: options?.requestId }
+    }
+    discardWorkbenchDraftsForExternalContextChange()
+  }
+  const ok = await applyExternalContext(nextContext)
+  if (!ok) {
+    return { status: 'failed', context: nextContext, reason: 'sync-failed', requestId: options?.requestId }
+  }
+  return { status: 'applied', context: getCurrentExternalContext(), requestId: options?.requestId }
 }
 
 async function onCreateBase(name: string) {
@@ -1033,10 +1281,9 @@ function onDrawerNavigate(recordId: string) {
 
 // --- Beforeunload: warn on unsaved changes ---
 function onBeforeUnload(e: BeforeUnloadEvent) {
-  if (formSubmitting.value) {
-    e.preventDefault()
-    e.returnValue = ''
-  }
+  if (!hasBlockingUnloadState.value) return
+  e.preventDefault()
+  e.returnValue = ''
 }
 
 function onGlobalKeydown(e: KeyboardEvent) {
@@ -1196,8 +1443,46 @@ watch(
   async ([baseId, sheetId, viewId], [prevBaseId, prevSheetId, prevViewId]) => {
     if (!workbenchReady.value) return
     if (baseId === prevBaseId && sheetId === prevSheetId && viewId === prevViewId) return
-    const ok = await workbench.syncExternalContext({ baseId, sheetId, viewId })
-    if (!ok) showError(workbench.error.value ?? 'Failed to sync workbench context')
+    await requestExternalContextSync({ baseId, sheetId, viewId })
+  },
+)
+
+watch(
+  [hasBlockingUnloadState, pendingExternalContext],
+  ([blocked, pending]) => {
+    if (!workbenchReady.value || blocked || !pending) return
+    if (externalContextMatchesWorkbench(pending.context)) {
+      pendingExternalContext.value = null
+      pendingExternalContextReason.value = null
+      pendingExternalContextNoticeKey.value = ''
+      emit('external-context-result', {
+        status: 'applied',
+        context: getCurrentExternalContext(),
+        requestId: pending.requestId,
+      })
+      return
+    }
+    const replay = pending
+    pendingExternalContext.value = null
+    pendingExternalContextReason.value = null
+    pendingExternalContextNoticeKey.value = ''
+    void (async () => {
+      const ok = await applyExternalContext(replay.context)
+      if (ok) {
+        emit('external-context-result', {
+          status: 'applied',
+          context: getCurrentExternalContext(),
+          requestId: replay.requestId,
+        })
+        return
+      }
+      emit('external-context-result', {
+        status: 'failed',
+        context: replay.context,
+        reason: 'sync-failed',
+        requestId: replay.requestId,
+      })
+    })()
   },
 )
 
@@ -1226,6 +1511,12 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
   stopDialogMetaRefresh()
+})
+
+defineExpose({
+  confirmPageLeave,
+  getEmbedHostState,
+  requestExternalContextSync,
 })
 </script>
 

@@ -137,6 +137,49 @@ describe('MetaImportModal', () => {
     container.remove()
   })
 
+  it('emits dirty state and confirms before closing an unsaved import draft', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const closeSpy = vi.fn()
+    const dirtySpy = vi.fn()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    const app = createApp({
+      render() {
+        return h(MetaImportModal, {
+          visible: true,
+          fields: [{ id: 'fld_name', name: 'Name', type: 'string' }],
+          importing: false,
+          result: null,
+          onClose: closeSpy,
+          onImport: vi.fn(),
+          'onUpdate:dirty': dirtySpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    expect(dirtySpy).toHaveBeenLastCalledWith(false)
+
+    const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+    textarea.value = 'Name\nAlice'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    expect(dirtySpy).toHaveBeenLastCalledWith(true)
+
+    ;(document.body.querySelector('.meta-import__close') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved import changes?')
+    expect(closeSpy).not.toHaveBeenCalled()
+
+    app.unmount()
+    container.remove()
+  })
+
   it('lets users repair people ambiguity inline and retry', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)

@@ -67,29 +67,172 @@ vi.mock('../src/multitable/import/bulk-import', () => ({
 vi.mock('../src/multitable/components/MetaViewTabBar.vue', () => ({
   default: defineComponent({
     name: 'MetaViewTabBar',
-    emits: ['create-sheet'],
+    emits: ['create-sheet', 'select-sheet', 'select-view'],
+    render() {
+      return h('div', [
+        h(
+          'button',
+          {
+            'data-create-sheet': 'true',
+            onClick: () => this.$emit('create-sheet', 'Sheet 2'),
+          },
+          'create-sheet',
+        ),
+        h(
+          'button',
+          {
+            'data-select-sheet': 'sheet_sales',
+            onClick: () => this.$emit('select-sheet', 'sheet_sales'),
+          },
+          'select-sheet',
+        ),
+        h(
+          'button',
+          {
+            'data-select-view': 'view_gallery',
+            onClick: () => this.$emit('select-view', 'view_gallery'),
+          },
+          'select-view',
+        ),
+      ])
+    },
+  }),
+}))
+vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
+  default: defineComponent({
+    name: 'MetaToolbar',
+    emits: ['import'],
     render() {
       return h(
         'button',
         {
-          'data-create-sheet': 'true',
-          onClick: () => this.$emit('create-sheet', 'Sheet 2'),
+          'data-open-import': 'true',
+          onClick: () => this.$emit('import'),
         },
-        'create-sheet',
+        'open-import',
       )
     },
   }),
 }))
-vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({ default: stubComponent('MetaToolbar') }))
-vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({ default: stubComponent('MetaGridTable') }))
-vi.mock('../src/multitable/components/MetaFormView.vue', () => ({ default: stubComponent('MetaFormView') }))
-vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({ default: stubComponent('MetaRecordDrawer') }))
-vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({ default: stubComponent('MetaCommentsDrawer') }))
+vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
+  default: defineComponent({
+    name: 'MetaGridTable',
+    emits: ['select-record'],
+    render() {
+      return h('div', [
+        h(
+          'button',
+          {
+            'data-select-record': 'rec_1',
+            onClick: () => this.$emit('select-record', 'rec_1'),
+          },
+          'select-record-1',
+        ),
+        h(
+          'button',
+          {
+            'data-select-record': 'rec_2',
+            onClick: () => this.$emit('select-record', 'rec_2'),
+          },
+          'select-record-2',
+        ),
+      ])
+    },
+  }),
+}))
+vi.mock('../src/multitable/components/MetaFormView.vue', () => ({
+  default: defineComponent({
+    name: 'MetaFormView',
+    emits: ['update:dirty'],
+    render() {
+      return h('div', [
+        h(
+          'button',
+          {
+            'data-form-dirty': 'true',
+            onClick: () => this.$emit('update:dirty', true),
+          },
+          'form-dirty',
+        ),
+      ])
+    },
+  }),
+}))
+vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
+  default: defineComponent({
+    name: 'MetaRecordDrawer',
+    props: {
+      visible: { type: Boolean, default: false },
+      record: { type: Object, default: null },
+    },
+    emits: ['close', 'toggle-comments', 'navigate'],
+    render() {
+      if (!this.$props.visible) return null
+      const recordId = (this.$props.record as { id?: string } | null)?.id ?? ''
+      return h('div', { 'data-record-drawer': recordId }, [
+        h(
+          'button',
+          {
+            'data-close-drawer': 'true',
+            onClick: () => this.$emit('close'),
+          },
+          'close-drawer',
+        ),
+        h(
+          'button',
+          {
+            'data-toggle-comments': 'true',
+            onClick: () => this.$emit('toggle-comments'),
+          },
+          'toggle-comments',
+        ),
+        h(
+          'button',
+          {
+            'data-navigate-record': 'rec_2',
+            onClick: () => this.$emit('navigate', 'rec_2'),
+          },
+          'navigate-record',
+        ),
+      ])
+    },
+  }),
+}))
+vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
+  default: defineComponent({
+    name: 'MetaCommentsDrawer',
+    props: {
+      visible: { type: Boolean, default: false },
+    },
+    emits: ['close', 'update:draft'],
+    render() {
+      if (!this.$props.visible) return null
+      return h('div', [
+        h(
+          'button',
+          {
+            'data-set-comment-draft': 'true',
+            onClick: () => this.$emit('update:draft', 'Need review'),
+          },
+          'set-comment-draft',
+        ),
+        h(
+          'button',
+          {
+            'data-close-comments': 'true',
+            onClick: () => this.$emit('close'),
+          },
+          'close-comments',
+        ),
+      ])
+    },
+  }),
+}))
 vi.mock('../src/multitable/components/MetaLinkPicker.vue', () => ({ default: stubComponent('MetaLinkPicker') }))
 vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({
   default: defineComponent({
     name: 'MetaFieldManager',
-    emits: ['create-field'],
+    emits: ['create-field', 'update:dirty'],
     render() {
       return h(
         'div',
@@ -115,6 +258,22 @@ vi.mock('../src/multitable/components/MetaFieldManager.vue', () => ({
             },
             'create-person-field-multi',
           ),
+          h(
+            'button',
+            {
+              'data-field-manager-dirty': 'true',
+              onClick: () => this.$emit('update:dirty', true),
+            },
+            'field-manager-dirty',
+          ),
+          h(
+            'button',
+            {
+              'data-field-manager-clean': 'true',
+              onClick: () => this.$emit('update:dirty', false),
+            },
+            'field-manager-clean',
+          ),
         ],
       )
     },
@@ -126,10 +285,18 @@ vi.mock('../src/multitable/components/MetaViewManager.vue', () => ({
     props: {
       visible: { type: Boolean, default: false },
     },
-    emits: ['close'],
+    emits: ['close', 'update:dirty'],
     render() {
       if (!this.$props.visible) return null
       return h('div', { 'data-view-manager': 'true' }, [
+        h(
+          'button',
+          {
+            'data-view-manager-dirty': 'true',
+            onClick: () => this.$emit('update:dirty', true),
+          },
+          'view-manager-dirty',
+        ),
         h(
           'button',
           {
@@ -214,7 +381,28 @@ vi.mock('../src/multitable/components/MetaTimelineView.vue', () => ({
     },
   }),
 }))
-vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({ default: stubComponent('MetaImportModal') }))
+vi.mock('../src/multitable/components/MetaImportModal.vue', () => ({
+  default: defineComponent({
+    name: 'MetaImportModal',
+    props: {
+      visible: { type: Boolean, default: false },
+    },
+    emits: ['update:dirty', 'close', 'cancel-import', 'import'],
+    render() {
+      if (!this.$props.visible) return null
+      return h('div', [
+        h(
+          'button',
+          {
+            'data-import-dirty': 'true',
+            onClick: () => this.$emit('update:dirty', true),
+          },
+          'import-dirty',
+        ),
+      ])
+    },
+  }),
+}))
 
 vi.mock('../src/multitable/components/MetaBasePicker.vue', () => ({
   default: defineComponent({
@@ -323,7 +511,10 @@ function createWorkbenchMock() {
 function createGridMock() {
   return {
     fields: ref([]),
-    rows: ref([]),
+    rows: ref([
+      { id: 'rec_1', version: 1, data: { fld_title: 'Alpha' } },
+      { id: 'rec_2', version: 1, data: { fld_title: 'Beta' } },
+    ]),
     loading: ref(false),
     currentPage: ref(1),
     totalPages: ref(1),
@@ -428,6 +619,36 @@ describe('MultitableWorkbench view wiring', () => {
     })
   })
 
+  it('defers external prop-driven context sync until unsaved drafts are cleared', async () => {
+    const hostState = mountWorkbench()
+    await flushUi()
+
+    const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    managerButtons.find((button) => button.textContent?.includes('Fields'))?.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-field-manager-dirty="true"]')!.click()
+    await flushUi()
+
+    workbenchMock.syncExternalContext.mockClear()
+
+    hostState.baseId = 'base_sales'
+    hostState.sheetId = 'sheet_sales'
+    hostState.viewId = 'view_gallery'
+    await flushUi()
+
+    expect(workbenchMock.syncExternalContext).not.toHaveBeenCalled()
+    expect(showErrorSpy).toHaveBeenCalledWith('Host multitable context changed while unsaved drafts are open. Resolve or discard changes to continue.')
+
+    container!.querySelector<HTMLButtonElement>('[data-field-manager-clean="true"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.syncExternalContext).toHaveBeenCalledWith({
+      baseId: 'base_sales',
+      sheetId: 'sheet_sales',
+      viewId: 'view_gallery',
+    })
+  })
+
   it('renders conflict recovery actions and wires reload / retry / dismiss', async () => {
     mountWorkbench()
     await flushUi()
@@ -477,6 +698,25 @@ describe('MultitableWorkbench view wiring', () => {
 
     expect(workbenchMock.switchBase).toHaveBeenCalledWith('base_sales')
     expect(showErrorSpy).toHaveBeenCalledWith('base switch failed')
+  })
+
+  it('prompts before switching sheets when context-level drafts are present', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    managerButtons.find((button) => button.textContent?.includes('Fields'))?.click()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-field-manager-dirty="true"]')!.click()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-select-sheet="sheet_sales"]')!.click()
+    await flushUi()
+
+    expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved changes before leaving the current sheet or view?')
+    expect(workbenchMock.selectSheet).not.toHaveBeenCalled()
   })
 
   it('creates a new sheet inside the switched base and syncs into the created sheet context', async () => {
@@ -604,6 +844,64 @@ describe('MultitableWorkbench view wiring', () => {
     expect(showSuccessSpy).toHaveBeenCalledWith('Timeline updated')
   })
 
+  it('prompts before switching records when record-scoped drafts are present', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-set-comment-draft="true"]')!.click()
+    await flushUi()
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    container!.querySelector<HTMLButtonElement>('[data-select-record="rec_2"]')!.click()
+    await flushUi()
+
+    expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved record changes?')
+    expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
+    expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeNull()
+  })
+
+  it('prompts before closing the comments drawer when a comment draft exists', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-set-comment-draft="true"]')!.click()
+    await flushUi()
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    container!.querySelector<HTMLButtonElement>('[data-close-comments="true"]')!.click()
+    await flushUi()
+
+    expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved comment draft?')
+    expect(container!.querySelector('[data-close-comments="true"]')).toBeTruthy()
+  })
+
+  it('prompts before closing the record drawer when record-scoped drafts are present', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-select-record="rec_1"]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-set-comment-draft="true"]')!.click()
+    await flushUi()
+
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    container!.querySelector<HTMLButtonElement>('[data-close-drawer="true"]')!.click()
+    await flushUi()
+
+    expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved record changes?')
+    expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
+  })
+
   it('refreshes sheet metadata while the view manager is open and stops after close', async () => {
     vi.useFakeTimers()
     mountWorkbench()
@@ -659,5 +957,50 @@ describe('MultitableWorkbench view wiring', () => {
 
     expect(workbenchMock.loadSheetMeta).toHaveBeenCalledTimes(2)
     expect(workbenchMock.loadSheetMeta).toHaveBeenLastCalledWith('sheet_sales')
+  })
+
+  it('blocks beforeunload when a child component reports unsaved drafts', async () => {
+    mountWorkbench({ viewId: 'view_grid' })
+    await flushUi()
+
+    const managerButtons = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')) as HTMLButtonElement[]
+    managerButtons.find((button) => button.textContent?.includes('Fields'))?.click()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-field-manager-dirty="true"]')!.click()
+    await flushUi()
+
+    const event = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent
+    Object.defineProperty(event, 'returnValue', {
+      value: undefined,
+      writable: true,
+      configurable: true,
+    })
+    window.dispatchEvent(event)
+
+    expect(event.defaultPrevented).toBe(true)
+    expect(event.returnValue).toBe('')
+  })
+
+  it('blocks beforeunload when the import modal reports an unsaved draft', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-import-dirty="true"]')!.click()
+    await flushUi()
+
+    const event = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent
+    Object.defineProperty(event, 'returnValue', {
+      value: undefined,
+      writable: true,
+      configurable: true,
+    })
+    window.dispatchEvent(event)
+
+    expect(event.defaultPrevented).toBe(true)
+    expect(event.returnValue).toBe('')
   })
 })

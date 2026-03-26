@@ -154,7 +154,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import MetaLinkPicker from './MetaLinkPicker.vue'
 import type { LinkedRecordSummary, MetaField } from '../types'
 import { buildImportedRecords, parseDelimitedText } from '../import/delimited'
@@ -193,6 +193,7 @@ const emit = defineEmits<{
   (e: 'close'): void
   (e: 'cancel-import'): void
   (e: 'import', payload: ImportBuildResult): void
+  (e: 'update:dirty', dirty: boolean): void
 }>()
 
 const step = ref<'paste' | 'preview' | 'importing' | 'result'>('paste')
@@ -323,6 +324,22 @@ const importDraftIssueText = computed(() => {
 const canImportPreview = computed(() => hasMappedFields.value && props.importing !== true && !hasImportDraftIssues.value)
 const canRetryFailedRows = computed(() => !props.importing && !hasImportDraftIssues.value && failedPreviewRows.value.length > 0)
 const canApplyFixes = computed(() => !props.importing && !hasImportDraftIssues.value)
+const importDraftDirty = computed(() => props.visible && (
+  rawText.value.trim().length > 0 ||
+  parsedHeaders.value.length > 0 ||
+  parsedRows.value.length > 0 ||
+  Object.keys(fieldMapping.value).length > 0 ||
+  pendingRecordCount.value > 0 ||
+  lastAttemptRecords.value.length > 0 ||
+  lastAttemptRowIndexes.value.length > 0 ||
+  Object.keys(manualFieldOverrides.value).length > 0 ||
+  Object.keys(manualOverrideSummaries.value).length > 0 ||
+  pickerTarget.value !== null ||
+  pickerVisible.value ||
+  parseError.value.length > 0 ||
+  step.value !== 'paste' ||
+  props.result !== null
+))
 
 function overrideKey(rowIndex: number, fieldId: string) {
   return `${rowIndex}:${fieldId}`
@@ -338,6 +355,14 @@ watch(() => props.visible, (visible, previousVisible) => {
     nextTick(() => textareaRef.value?.focus())
   }
 })
+
+watch(
+  importDraftDirty,
+  (dirty) => {
+    emit('update:dirty', dirty)
+  },
+  { immediate: true },
+)
 
 watch(pickerField, (field) => {
   if (!pickerVisible.value) return
@@ -419,6 +444,7 @@ function requestClose() {
     emit('cancel-import')
     return
   }
+  if (importDraftDirty.value && !window.confirm('Discard unsaved import changes?')) return
   emit('close')
 }
 
@@ -614,6 +640,10 @@ function resetState() {
   pickerVisible.value = false
   parseError.value = ''
 }
+
+onBeforeUnmount(() => {
+  emit('update:dirty', false)
+})
 </script>
 
 <style scoped>

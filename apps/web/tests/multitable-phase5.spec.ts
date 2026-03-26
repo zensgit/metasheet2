@@ -79,6 +79,73 @@ describe('EmbedHost postMessage protocol', () => {
     expect(msg.sheetId).toBeDefined()
   })
 
+  it('mt:navigate-result message structure is valid', () => {
+    const msg = {
+      type: 'mt:navigate-result',
+      status: 'superseded',
+      baseId: 'base_ops',
+      sheetId: 's2',
+      viewId: 'v3',
+      reason: 'superseded',
+      requestId: 'req_1',
+    }
+    expect(msg.type).toBe('mt:navigate-result')
+    expect(msg.type.startsWith('mt:')).toBe(true)
+    expect(['applied', 'deferred', 'blocked', 'failed', 'superseded']).toContain(msg.status)
+    expect(msg.reason).toBe('superseded')
+  })
+
+  it('mt:navigate-result supports retryable busy states too', () => {
+    const msg = {
+      type: 'mt:navigate-result',
+      status: 'deferred',
+      reason: 'busy',
+      baseId: 'base_ops',
+      sheetId: 's2',
+      viewId: 'v3',
+      requestId: 'req_1',
+    }
+    expect(msg.type).toBe('mt:navigate-result')
+    expect(msg.type.startsWith('mt:')).toBe(true)
+    expect(['applied', 'deferred', 'blocked', 'failed', 'superseded']).toContain(msg.status)
+    expect(msg.reason).toBe('busy')
+  })
+
+  it('mt:get-navigation-state message structure is valid', () => {
+    const msg = { type: 'mt:get-navigation-state', requestId: 'req_state' }
+    expect(msg.type).toBe('mt:get-navigation-state')
+    expect(msg.type.startsWith('mt:')).toBe(true)
+    expect(msg.requestId).toBe('req_state')
+  })
+
+  it('mt:navigation-state message structure is valid', () => {
+    const msg = {
+      type: 'mt:navigation-state',
+      requestId: 'req_state',
+      currentContext: {
+        baseId: 'base_ops',
+        sheetId: 'sheet_orders',
+        viewId: 'view_grid',
+      },
+      hasBlockingState: true,
+      blockingReason: 'unsaved-drafts',
+      hasUnsavedDrafts: true,
+      busy: false,
+      pendingContext: {
+        baseId: 'base_people',
+        sheetId: 'sheet_people',
+        viewId: 'view_gallery',
+        requestId: 'req_deferred',
+        reason: 'busy',
+      },
+    }
+    expect(msg.type).toBe('mt:navigation-state')
+    expect(msg.type.startsWith('mt:')).toBe(true)
+    expect(msg.currentContext.baseId).toBeDefined()
+    expect(msg.pendingContext?.reason).toBe('busy')
+    expect(['busy', 'unsaved-drafts']).toContain(msg.blockingReason)
+  })
+
   it('mt:select-record message structure is valid', () => {
     const msg = { type: 'mt:select-record', recordId: 'r5' }
     expect(msg.type.startsWith('mt:')).toBe(true)

@@ -123,7 +123,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import type {
   LinkedRecordSummary,
   MetaAttachment,
@@ -155,6 +155,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'submit', data: Record<string, unknown>): void
   (e: 'open-link-picker', field: MetaField): void
+  (e: 'update:dirty', dirty: boolean): void
 }>()
 
 const formData = reactive<Record<string, unknown>>({})
@@ -174,6 +175,7 @@ const hasUnsavedChanges = computed(() => {
 })
 
 const hasPendingAttachmentActions = computed(() => Object.keys(attachmentActivity.value).length > 0)
+const formDirty = computed(() => hasUnsavedChanges.value || hasPendingAttachmentActions.value)
 
 function syncFromRecord(record: MetaRecord | null | undefined) {
   Object.keys(formData).forEach((k) => delete formData[k])
@@ -187,6 +189,18 @@ watch(() => props.record, (record) => {
   attachmentOperationErrors.value = {}
   attachmentActivity.value = {}
 }, { immediate: true })
+
+watch(
+  formDirty,
+  (dirty) => {
+    emit('update:dirty', dirty)
+  },
+  { immediate: true },
+)
+
+onBeforeUnmount(() => {
+  emit('update:dirty', false)
+})
 
 function validate(): boolean {
   const errs: Record<string, string> = {}

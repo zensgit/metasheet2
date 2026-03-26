@@ -271,6 +271,38 @@ describe('MetaViewManager', () => {
     app.unmount()
   })
 
+  it('emits dirty state while view manager drafts are unsaved', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const dirtySpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaViewManager, {
+          visible: true,
+          sheetId: 'sheet_1',
+          activeViewId: 'view_grid',
+          fields: [{ id: 'fld_name', name: 'Name', type: 'string' }],
+          views: [{ id: 'view_grid', sheetId: 'sheet_1', name: 'Grid', type: 'grid' }],
+          'onUpdate:dirty': dirtySpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+    expect(dirtySpy).toHaveBeenLastCalledWith(false)
+
+    const nameInput = container.querySelector('.meta-view-mgr__add-row .meta-view-mgr__input') as HTMLInputElement
+    nameInput.value = 'Unsaved View'
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+
+    expect(dirtySpy).toHaveBeenLastCalledWith(true)
+
+    app.unmount()
+  })
+
   it('asks before switching rename target when current rename draft is dirty', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)

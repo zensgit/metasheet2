@@ -232,7 +232,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import type {
   MetaCalendarViewConfig,
   MetaField,
@@ -275,6 +275,7 @@ const emit = defineEmits<{
     groupInfo?: Record<string, unknown>
   }): void
   (e: 'delete-view', viewId: string): void
+  (e: 'update:dirty', dirty: boolean): void
 }>()
 
 const newViewName = ref('')
@@ -625,9 +626,11 @@ const renameDirty = computed(() => {
   return editingName.value.trim() !== (props.views.find((view) => view.id === editingId.value)?.name ?? '')
 })
 
+const hasPendingDrafts = computed(() => viewConfigDirty.value || newViewDraftDirty.value || renameDirty.value)
+const managerDirty = computed(() => props.visible && hasPendingDrafts.value)
+
 function confirmDiscardViewManagerChanges() {
-  const hasPendingDrafts = viewConfigDirty.value || newViewDraftDirty.value || renameDirty.value
-  if (!hasPendingDrafts) return true
+  if (!hasPendingDrafts.value) return true
   return window.confirm('Discard unsaved view manager changes?')
 }
 
@@ -688,6 +691,18 @@ watch(
     if (dirty) viewConfigLiveRefreshText.value = ''
   },
 )
+
+watch(
+  managerDirty,
+  (dirty) => {
+    emit('update:dirty', dirty)
+  },
+  { immediate: true },
+)
+
+onBeforeUnmount(() => {
+  emit('update:dirty', false)
+})
 </script>
 
 <style scoped>

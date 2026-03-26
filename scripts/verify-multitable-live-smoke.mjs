@@ -510,6 +510,486 @@ function multitableUrl(baseId, sheetId, viewId, extra = {}) {
   return `${webBase}/multitable/${encodeURIComponent(sheetId)}/${encodeURIComponent(viewId)}?${query.toString()}`
 }
 
+async function mountEmbedHostHarness(page, src) {
+  await page.goto(webBase, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+  await page.setContent(`
+    <!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <title>Multitable Embed Host Smoke</title>
+        <style>
+          html, body {
+            margin: 0;
+            height: 100%;
+            background: #0f172a;
+          }
+          body {
+            display: grid;
+            place-items: stretch;
+          }
+          iframe {
+            width: 100%;
+            height: 100%;
+            border: 0;
+            background: #ffffff;
+          }
+        </style>
+      </head>
+      <body>
+        <script>
+          window.__mtMessages = []
+          window.addEventListener('message', (event) => {
+            const payload = event?.data
+            if (!payload || typeof payload !== 'object') return
+            if (typeof payload.type !== 'string' || !payload.type.startsWith('mt:')) return
+            window.__mtMessages.push({
+              ...payload,
+              __origin: event.origin,
+            })
+          })
+          window.__mtClearMessages = () => {
+            window.__mtMessages = []
+          }
+          window.__mtGetMessages = () => window.__mtMessages.slice()
+          window.__mtPostMessage = (payload) => {
+            const iframe = document.getElementById('mt-embed-frame')
+            if (!(iframe instanceof HTMLIFrameElement) || !iframe.contentWindow) {
+              throw new Error('Embed host iframe unavailable')
+            }
+            iframe.contentWindow.postMessage(payload, window.location.origin)
+          }
+          window.__mtGetFrameLocation = () => {
+            const iframe = document.getElementById('mt-embed-frame')
+            if (!(iframe instanceof HTMLIFrameElement) || !iframe.contentWindow) return null
+            try {
+              return {
+                href: iframe.contentWindow.location.href,
+                pathname: iframe.contentWindow.location.pathname,
+                search: iframe.contentWindow.location.search,
+                origin: iframe.contentWindow.location.origin,
+              }
+            } catch {
+              return null
+            }
+          }
+        </script>
+      </body>
+    </html>
+  `)
+  await page.evaluate((iframeSrc) => {
+    const iframe = document.createElement('iframe')
+    iframe.id = 'mt-embed-frame'
+    iframe.title = 'Multitable Embed Smoke'
+    iframe.src = iframeSrc
+    document.body.appendChild(iframe)
+  }, src)
+}
+
+async function getEmbedHostMessages(page) {
+  return await page.evaluate(() => window.__mtGetMessages())
+}
+
+async function clearEmbedHostMessages(page) {
+  await page.evaluate(() => window.__mtClearMessages())
+}
+
+async function postEmbedHostMessage(page, payload) {
+  await page.evaluate((message) => window.__mtPostMessage(message), payload)
+}
+
+async function waitForEmbedHostMessage(page, predicate, description) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const messages = await getEmbedHostMessages(page)
+    const found = messages.find(predicate)
+    if (found) return found
+    await page.waitForTimeout(100)
+  }
+  throw new Error(`Timed out waiting for ${description}`)
+}
+
+async function getEmbedFrameLocation(page) {
+  return await page.evaluate(() => window.__mtGetFrameLocation())
+}
+
+async function waitForEmbedFrameContext(page, { baseId, sheetId, viewId }) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const location = await getEmbedFrameLocation(page)
+    if (location?.href) {
+      const url = new URL(location.href)
+      const pathParts = url.pathname.split('/').filter(Boolean)
+      const actualSheetId = pathParts.at(-2) ? decodeURIComponent(pathParts.at(-2)) : ''
+      const actualViewId = pathParts.at(-1) ? decodeURIComponent(pathParts.at(-1)) : ''
+      if (
+        actualSheetId === sheetId &&
+        actualViewId === viewId &&
+        url.searchParams.get('baseId') === baseId
+      ) {
+        return {
+          href: url.href,
+          pathname: url.pathname,
+          search: url.search,
+        }
+      }
+    }
+    await page.waitForTimeout(100)
+  }
+  throw new Error(`Timed out waiting for embed frame context ${baseId}/${sheetId}/${viewId}`)
+}
+
+async function verifyEmbedHostProtocol(page, {
+  baseId,
+  sheetId,
+  initialViewId,
+  targetViewId,
+}) {
+  await mountEmbedHostHarness(page, multitableUrl(baseId, sheetId, initialViewId, {
+    embedded: '1',
+    role: 'editor',
+  }))
+  await page.frameLocator('#mt-embed-frame').getByRole('searchbox', { name: 'Search records' }).waitFor({
+    state: 'visible',
+    timeout: timeoutMs,
+  })
+
+  const readyMessage = await waitForEmbedHostMessage(page, (message) => (
+    message?.type === 'mt:ready' &&
+    message.baseId === baseId &&
+    message.sheetId === sheetId &&
+    message.viewId === initialViewId
+  ), 'mt:ready')
+  const readyOk = readyMessage.__origin === new URL(webBase).origin
+  record('ui.embed-host.ready', readyOk, {
+    baseId,
+    sheetId,
+    viewId: initialViewId,
+    origin: readyMessage.__origin,
+  })
+  if (!readyOk) {
+    throw new Error('Embed host ready origin mismatch')
+  }
+
+  await clearEmbedHostMessages(page)
+  const initialStateRequestId = 'req_embed_state_initial'
+  await postEmbedHostMessage(page, {
+    type: 'mt:get-navigation-state',
+    requestId: initialStateRequestId,
+  })
+  const initialState = await waitForEmbedHostMessage(page, (message) => (
+    message?.type === 'mt:navigation-state' &&
+    message.requestId === initialStateRequestId
+  ), 'initial mt:navigation-state')
+  const initialStateOk = initialState.currentContext?.baseId === baseId &&
+    initialState.currentContext?.sheetId === sheetId &&
+    initialState.currentContext?.viewId === initialViewId &&
+    initialState.pendingContext == null
+  record('ui.embed-host.state-query.initial', initialStateOk, {
+    requestId: initialStateRequestId,
+    currentContext: initialState.currentContext,
+    pendingContext: initialState.pendingContext,
+  })
+  if (!initialStateOk) {
+    throw new Error('Embed host initial navigation state mismatch')
+  }
+
+  await clearEmbedHostMessages(page)
+  await postEmbedHostMessage(page, {
+    type: 'mt:navigate',
+    baseId,
+    sheetId,
+    viewId: targetViewId,
+  })
+  const appliedResult = await waitForEmbedHostMessage(page, (message) => (
+    message?.type === 'mt:navigate-result' &&
+    message.status === 'applied' &&
+    message.baseId === baseId &&
+    message.sheetId === sheetId &&
+    message.viewId === targetViewId
+  ), 'applied mt:navigate-result')
+  const generatedRequestId = appliedResult.requestId
+  const generatedRequestIdOk = typeof generatedRequestId === 'string' && generatedRequestId.startsWith('mt_nav_')
+  record('ui.embed-host.navigate.generated-request-id', generatedRequestIdOk, {
+    requestId: generatedRequestId,
+    targetViewId,
+  })
+  if (!generatedRequestIdOk) {
+    throw new Error('Embed host did not synthesize requestId for host navigate without requestId')
+  }
+  await waitForEmbedFrameContext(page, { baseId, sheetId, viewId: targetViewId })
+  const appliedNavigated = await waitForEmbedHostMessage(page, (message) => (
+    message?.type === 'mt:navigated' &&
+    message.requestId === generatedRequestId &&
+    message.baseId === baseId &&
+    message.sheetId === sheetId &&
+    message.viewId === targetViewId
+  ), 'applied mt:navigated')
+  record('ui.embed-host.navigate.applied', true, {
+    requestId: generatedRequestId,
+    resultStatus: appliedResult.status,
+    navigatedViewId: appliedNavigated.viewId,
+  })
+
+  await clearEmbedHostMessages(page)
+  const explicitRequestId = 'req_embed_back_to_grid'
+  await postEmbedHostMessage(page, {
+    type: 'mt:navigate',
+    baseId,
+    sheetId,
+    viewId: initialViewId,
+    requestId: explicitRequestId,
+  })
+  const explicitResult = await waitForEmbedHostMessage(page, (message) => (
+    message?.type === 'mt:navigate-result' &&
+    message.status === 'applied' &&
+    message.requestId === explicitRequestId &&
+    message.baseId === baseId &&
+    message.sheetId === sheetId &&
+    message.viewId === initialViewId
+  ), 'explicit mt:navigate-result')
+  await waitForEmbedFrameContext(page, { baseId, sheetId, viewId: initialViewId })
+  await waitForEmbedHostMessage(page, (message) => (
+    message?.type === 'mt:navigated' &&
+    message.requestId === explicitRequestId &&
+    message.baseId === baseId &&
+    message.sheetId === sheetId &&
+    message.viewId === initialViewId
+  ), 'explicit mt:navigated')
+  record('ui.embed-host.navigate.explicit-request-id', true, {
+    requestId: explicitRequestId,
+    resultStatus: explicitResult.status,
+    viewId: initialViewId,
+  })
+
+  await clearEmbedHostMessages(page)
+  const finalStateRequestId = 'req_embed_state_final'
+  await postEmbedHostMessage(page, {
+    type: 'mt:get-navigation-state',
+    requestId: finalStateRequestId,
+  })
+  const finalState = await waitForEmbedHostMessage(page, (message) => (
+    message?.type === 'mt:navigation-state' &&
+    message.requestId === finalStateRequestId
+  ), 'final mt:navigation-state')
+  const finalStateOk = finalState.currentContext?.baseId === baseId &&
+    finalState.currentContext?.sheetId === sheetId &&
+    finalState.currentContext?.viewId === initialViewId &&
+    finalState.pendingContext == null
+  record('ui.embed-host.state-query.final', finalStateOk, {
+    requestId: finalStateRequestId,
+    currentContext: finalState.currentContext,
+    pendingContext: finalState.pendingContext,
+  })
+  if (!finalStateOk) {
+    throw new Error('Embed host final navigation state mismatch')
+  }
+
+  await page.screenshot({
+    path: path.join(outputDir, 'embed-host-smoke.png'),
+    fullPage: true,
+  })
+
+  return {
+    generatedRequestId,
+    explicitRequestId,
+  }
+}
+
+async function verifyEmbedHostDirtyFormNavigation(page, {
+  token,
+  baseId,
+  sheetId,
+  formViewId,
+  targetViewId,
+  recordId,
+  titleFieldId,
+  originalTitle,
+}) {
+  await mountEmbedHostHarness(page, multitableUrl(baseId, sheetId, formViewId, {
+    embedded: '1',
+    role: 'editor',
+    mode: 'form',
+    recordId,
+  }))
+  const frame = page.frameLocator('#mt-embed-frame')
+  const titleInput = frame.locator(`#field_${titleFieldId}`)
+  await titleInput.waitFor({ state: 'visible', timeout: timeoutMs })
+
+  const readyMessage = await waitForEmbedHostMessage(page, (message) => (
+    message?.type === 'mt:ready' &&
+    message.baseId === baseId &&
+    message.sheetId === sheetId &&
+    message.viewId === formViewId
+  ), 'form mt:ready')
+  record('ui.embed-host.form-ready', readyMessage.__origin === new URL(webBase).origin, {
+    baseId,
+    sheetId,
+    viewId: formViewId,
+    recordId,
+    origin: readyMessage.__origin,
+  })
+
+  const draftTitle = `${originalTitle} draft`
+  await titleInput.fill(draftTitle)
+  const draftValue = await titleInput.inputValue()
+  const dirtyDraftOk = draftValue === draftTitle
+  record('ui.embed-host.form-draft', dirtyDraftOk, {
+    recordId,
+    fieldId: titleFieldId,
+    draftTitle,
+    draftValue,
+  })
+  if (!dirtyDraftOk) {
+    throw new Error('Embed host form draft input did not retain the edited value')
+  }
+
+  await clearEmbedHostMessages(page)
+  const blockedRequestId = 'req_embed_form_blocked'
+  const blockedDialogPromise = page.waitForEvent('dialog', { timeout: timeoutMs })
+  await postEmbedHostMessage(page, {
+    type: 'mt:navigate',
+    baseId,
+    sheetId,
+    viewId: targetViewId,
+    requestId: blockedRequestId,
+  })
+  const blockedDialog = await blockedDialogPromise
+  const blockedDialogOk = blockedDialog.message() === 'Discard unsaved changes before leaving the current sheet or view?'
+  record('ui.embed-host.navigate.blocked-dialog', blockedDialogOk, {
+    requestId: blockedRequestId,
+    message: blockedDialog.message(),
+  })
+  if (!blockedDialogOk) {
+    await blockedDialog.dismiss()
+    throw new Error(`Unexpected blocked navigation dialog message: ${blockedDialog.message()}`)
+  }
+  await blockedDialog.dismiss()
+  const blockedResult = await waitForEmbedHostMessage(page, (message) => (
+    message?.type === 'mt:navigate-result' &&
+    message.status === 'blocked' &&
+    message.requestId === blockedRequestId
+  ), 'blocked mt:navigate-result')
+  await page.waitForTimeout(200)
+  const blockedMessages = await getEmbedHostMessages(page)
+  const blockedNavigated = blockedMessages.some((message) => (
+    message?.type === 'mt:navigated' &&
+    message.requestId === blockedRequestId
+  ))
+  const blockedStateRequestId = 'req_embed_form_blocked_state'
+  await postEmbedHostMessage(page, {
+    type: 'mt:get-navigation-state',
+    requestId: blockedStateRequestId,
+  })
+  const blockedState = await waitForEmbedHostMessage(page, (message) => (
+    message?.type === 'mt:navigation-state' &&
+    message.requestId === blockedStateRequestId
+  ), 'blocked mt:navigation-state')
+  const blockedDraftValue = await titleInput.inputValue()
+  const blockedOk = blockedResult.reason === 'user-cancelled' &&
+    blockedResult.baseId === baseId &&
+    blockedResult.sheetId === sheetId &&
+    blockedResult.viewId === targetViewId &&
+    !blockedNavigated &&
+    blockedState.currentContext?.baseId === baseId &&
+    blockedState.currentContext?.sheetId === sheetId &&
+    blockedState.currentContext?.viewId === formViewId &&
+    blockedDraftValue === draftTitle
+  record('ui.embed-host.navigate.blocked', blockedOk, {
+    requestId: blockedRequestId,
+    resultReason: blockedResult.reason,
+    currentContext: blockedState.currentContext,
+    draftValue: blockedDraftValue,
+    blockedNavigated,
+  })
+  if (!blockedOk) {
+    throw new Error('Embed host blocked navigation did not keep the dirty form context stable')
+  }
+
+  await clearEmbedHostMessages(page)
+  const confirmRequestId = 'req_embed_form_confirmed'
+  const confirmDialogPromise = page.waitForEvent('dialog', { timeout: timeoutMs })
+  await postEmbedHostMessage(page, {
+    type: 'mt:navigate',
+    baseId,
+    sheetId,
+    viewId: targetViewId,
+    requestId: confirmRequestId,
+  })
+  const confirmDialog = await confirmDialogPromise
+  const confirmDialogOk = confirmDialog.message() === 'Discard unsaved changes before leaving the current sheet or view?'
+  record('ui.embed-host.navigate.confirm-dialog', confirmDialogOk, {
+    requestId: confirmRequestId,
+    message: confirmDialog.message(),
+  })
+  if (!confirmDialogOk) {
+    await confirmDialog.dismiss()
+    throw new Error(`Unexpected confirm navigation dialog message: ${confirmDialog.message()}`)
+  }
+  await confirmDialog.accept()
+  const confirmedResult = await waitForEmbedHostMessage(page, (message) => (
+    message?.type === 'mt:navigate-result' &&
+    message.status === 'applied' &&
+    message.requestId === confirmRequestId
+  ), 'confirmed mt:navigate-result')
+  await waitForEmbedFrameContext(page, { baseId, sheetId, viewId: targetViewId })
+  await waitForEmbedHostMessage(page, (message) => (
+    message?.type === 'mt:navigated' &&
+    message.requestId === confirmRequestId &&
+    message.baseId === baseId &&
+    message.sheetId === sheetId &&
+    message.viewId === targetViewId
+  ), 'confirmed mt:navigated')
+  const confirmedRecord = await fetchRecord(token, sheetId, recordId)
+  const discardedOk = confirmedRecord.record?.data?.[titleFieldId] === originalTitle
+  record('api.embed-host.discard-unsaved-form-draft', discardedOk, {
+    requestId: confirmRequestId,
+    recordId,
+    fieldId: titleFieldId,
+    expectedTitle: originalTitle,
+    persistedTitle: confirmedRecord.record?.data?.[titleFieldId],
+  })
+  if (!discardedOk) {
+    throw new Error('Embed host confirmed navigation unexpectedly persisted an unsaved form draft')
+  }
+
+  await clearEmbedHostMessages(page)
+  const finalStateRequestId = 'req_embed_form_final_state'
+  await postEmbedHostMessage(page, {
+    type: 'mt:get-navigation-state',
+    requestId: finalStateRequestId,
+  })
+  const finalState = await waitForEmbedHostMessage(page, (message) => (
+    message?.type === 'mt:navigation-state' &&
+    message.requestId === finalStateRequestId
+  ), 'confirmed final mt:navigation-state')
+  const finalStateOk = confirmedResult.baseId === baseId &&
+    confirmedResult.sheetId === sheetId &&
+    confirmedResult.viewId === targetViewId &&
+    finalState.currentContext?.baseId === baseId &&
+    finalState.currentContext?.sheetId === sheetId &&
+    finalState.currentContext?.viewId === targetViewId &&
+    finalState.pendingContext == null
+  record('ui.embed-host.navigate.confirmed', finalStateOk, {
+    requestId: confirmRequestId,
+    currentContext: finalState.currentContext,
+    pendingContext: finalState.pendingContext,
+  })
+  if (!finalStateOk) {
+    throw new Error('Embed host confirmed navigation did not land on the expected target context')
+  }
+
+  await page.screenshot({
+    path: path.join(outputDir, 'embed-host-form-blocked-confirmed.png'),
+    fullPage: true,
+  })
+
+  return {
+    blockedRequestId,
+    confirmRequestId,
+  }
+}
+
 function verifyDirectRouteEntry(page, {
   checkName,
   baseId,
@@ -2141,6 +2621,23 @@ async function run() {
         viewId: kanbanView.id,
       })
 
+      const embedHost = await verifyEmbedHostProtocol(page, {
+        baseId: base.id,
+        sheetId: sheet.id,
+        initialViewId: gridView.id,
+        targetViewId: galleryView.id,
+      })
+      const embedHostDirtyNavigation = await verifyEmbedHostDirtyFormNavigation(page, {
+        token,
+        baseId: base.id,
+        sheetId: sheet.id,
+        formViewId: formView.id,
+        targetViewId: galleryView.id,
+        recordId,
+        titleFieldId: titleField.id,
+        originalTitle: importedTitle,
+      })
+
       await verifyAttachmentDeleteClear(page, {
         token,
         baseId: base.id,
@@ -2205,6 +2702,10 @@ async function run() {
         retryRecordId: retried.row.id,
         manualFixRecordId: manualFixed.row.id,
         viewSubmitRecordId: viewSubmit.record.id,
+        embedHostGeneratedRequestId: embedHost.generatedRequestId,
+        embedHostExplicitRequestId: embedHost.explicitRequestId,
+        embedHostBlockedRequestId: embedHostDirtyNavigation.blockedRequestId,
+        embedHostConfirmedRequestId: embedHostDirtyNavigation.confirmRequestId,
       }
     } finally {
       await browser.close()
