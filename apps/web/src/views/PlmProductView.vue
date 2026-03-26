@@ -97,7 +97,7 @@ import {
   WORKBENCH_SCENE_RECOMMENDATION_OPTIONS,
 } from './plm/plmWorkbenchSceneCatalog'
 import {
-  buildPlmWorkbenchResetOwnerQueryPatch,
+  buildPlmWorkbenchResetHydratedPanelQueryPatch,
   buildPlmWorkbenchRoutePath,
   buildPlmWorkbenchTeamViewShareUrl,
   matchPlmWorkbenchQuerySnapshot,
@@ -1473,7 +1473,7 @@ function resetAll() {
   whereUsedPresetSelection.value = []
   whereUsedPresetBatchGroup.value = ''
   syncQueryParams({
-    ...buildPlmWorkbenchResetOwnerQueryPatch(),
+    ...buildPlmWorkbenchResetHydratedPanelQueryPatch(),
     searchQuery: '',
     searchItemType: '',
     searchLimit: undefined,

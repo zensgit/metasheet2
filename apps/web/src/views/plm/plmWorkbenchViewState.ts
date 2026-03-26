@@ -162,6 +162,21 @@ export function buildPlmWorkbenchResetOwnerQueryPatch() {
   ) as Record<(typeof PLM_WORKBENCH_TEAM_VIEW_OWNER_QUERY_KEYS)[number], ''>
 }
 
+export function buildPlmWorkbenchResetHydratedPanelQueryPatch() {
+  return {
+    ...buildPlmWorkbenchResetOwnerQueryPatch(),
+    documentSort: '',
+    documentSortDir: '',
+    documentColumns: '',
+    cadReviewState: '',
+    cadReviewNote: '',
+    approvalComment: '',
+    approvalSort: '',
+    approvalSortDir: '',
+    approvalColumns: '',
+  }
+}
+
 export function matchPlmWorkbenchQuerySnapshot(left: unknown, right: unknown): boolean {
   const normalizedLeft = normalizePlmWorkbenchCollaborativeQuerySnapshot(left)
   const normalizedRight = normalizePlmWorkbenchCollaborativeQuerySnapshot(right)

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildPlmWorkbenchResetHydratedPanelQueryPatch,
   buildPlmWorkbenchResetOwnerQueryPatch,
   buildPlmWorkbenchRoutePath,
   buildPlmWorkbenchTeamViewShareUrl,
@@ -112,6 +113,24 @@ describe('plmWorkbenchViewState', () => {
       documentTeamView: '',
       cadTeamView: '',
       approvalsTeamView: '',
+    })
+  })
+
+  it('builds a reset patch that clears hydrated panel query state', () => {
+    expect(buildPlmWorkbenchResetHydratedPanelQueryPatch()).toEqual({
+      workbenchTeamView: '',
+      documentTeamView: '',
+      cadTeamView: '',
+      approvalsTeamView: '',
+      documentSort: '',
+      documentSortDir: '',
+      documentColumns: '',
+      cadReviewState: '',
+      cadReviewNote: '',
+      approvalComment: '',
+      approvalSort: '',
+      approvalSortDir: '',
+      approvalColumns: '',
     })
   })
 
