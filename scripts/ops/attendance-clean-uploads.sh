@@ -24,6 +24,18 @@ function info() {
   echo "[attendance-clean-uploads] $*" >&2
 }
 
+function resolve_compose_cmd() {
+  if docker compose version >/dev/null 2>&1; then
+    echo "docker compose"
+    return 0
+  fi
+  if command -v docker-compose >/dev/null 2>&1; then
+    echo "docker-compose"
+    return 0
+  fi
+  return 1
+}
+
 function is_integer() {
   [[ "${1:-}" =~ ^[0-9]+$ ]]
 }
@@ -87,6 +99,11 @@ info "Compose:   ${COMPOSE_FILE}"
 info "Env file:  ${ENV_FILE}"
 info "Upload dir (container): ${UPLOAD_DIR}"
 info "Params: max_file_age_days=${MAX_FILE_AGE_DAYS} delete=${DELETE} confirm_delete=${CONFIRM_DELETE} max_delete_files=${MAX_DELETE_FILES} max_delete_gb=${MAX_DELETE_GB}"
+
+COMPOSE_CMD="$(resolve_compose_cmd || true)"
+if [[ -z "$COMPOSE_CMD" ]]; then
+  warn "Neither 'docker compose' nor 'docker-compose' is available"
+fi
 
 volume_line="$(
   grep -E "^[[:space:]]*-[[:space:]]*[^#]*:[[:space:]]*${UPLOAD_DIR}([[:space:]]|$|:)" "$COMPOSE_FILE" \
@@ -166,11 +183,12 @@ fi
 function run_cmd() {
   local cmd="$1"
   if [[ "$use_backend_exec" == "true" ]]; then
+    [[ -n "$COMPOSE_CMD" ]] || die "docker compose backend exec requested, but no compose command is available"
     local tmp_err out rc
     tmp_err="$(mktemp 2>/dev/null || echo "/tmp/attendance-clean-uploads-err-$$")"
     out=""
     set +e
-    out="$(docker compose -f "$COMPOSE_FILE" exec -T backend sh -lc "$cmd" < /dev/null 2>"$tmp_err")"
+    out="$(eval "${COMPOSE_CMD} -f \"${COMPOSE_FILE}\" exec -T backend sh -lc \"\$cmd\" < /dev/null" 2>"$tmp_err")"
     rc=$?
     set -e
     if [[ "$rc" != "0" ]]; then

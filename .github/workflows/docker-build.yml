@@ -113,6 +113,15 @@ jobs:
             '  echo "[deploy][warn] pwd=$(pwd)"'
             '  ls -la || true'
             'fi'
+            'if docker compose version >/dev/null 2>&1; then'
+            '  COMPOSE_CMD="docker compose"'
+            'elif command -v docker-compose >/dev/null 2>&1; then'
+            '  COMPOSE_CMD="docker-compose"'
+            'else'
+            '  echo "[deploy][error] neither '\''docker compose'\'' nor '\''docker-compose'\'' is available" >&2'
+            '  exit 125'
+            'fi'
+            'echo "[deploy] compose_cmd=${COMPOSE_CMD}"'
             "# Preflight: validate production env/compose/nginx before (re)deploying containers."
             "echo \"=== ATTENDANCE PREFLIGHT START ===\""
             "preflight_rc=0"
@@ -124,14 +133,14 @@ jobs:
             'if [[ "$preflight_rc" != "0" ]]; then exit "$preflight_rc"; fi'
             "echo \"=== DEPLOY START ===\""
             'if [[ "${DRILL_FAIL_STAGE:-none}" == "deploy" ]]; then echo "[deploy][drill] intentional failure at deploy stage"; exit 91; fi'
-            "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" pull backend web"
-            "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" up -d --no-deps --force-recreate backend web"
+            'eval "${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" pull backend web"'
+            'eval "${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" up -d --no-deps --force-recreate backend web"'
             "echo \"=== DEPLOY END ===\""
             "# Ensure DB schema is up to date before smoke checks."
             "echo \"=== MIGRATE START ===\""
             'if [[ "${DRILL_FAIL_STAGE:-none}" == "migrate" ]]; then echo "[deploy][drill] intentional failure at migrate stage"; exit 92; fi'
             "# Important: redirect stdin so docker compose exec can't consume the rest of this bash -s script."
-            "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" exec -T backend node packages/core-backend/dist/src/db/migrate.js < /dev/null"
+            'eval "${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" exec -T backend node packages/core-backend/dist/src/db/migrate.js < /dev/null"'
             "echo \"=== MIGRATE END ===\""
             "# Post-deploy smoke checks"
             "echo \"=== SMOKE START ===\""
