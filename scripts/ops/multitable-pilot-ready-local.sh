@@ -12,7 +12,6 @@ GATE_ROOT="${OUTPUT_ROOT}/gates"
 READINESS_MD="${OUTPUT_ROOT}/readiness.md"
 READINESS_JSON="${OUTPUT_ROOT}/readiness.json"
 GATE_REPORT_JSON="${OUTPUT_ROOT}/gates/report.json"
-GATE_REPORT_TMP="${OUTPUT_ROOT}/gates/report.tmp.json"
 ROW_COUNT="${ROW_COUNT:-2000}"
 PROFILE_RETRY_ON_FAIL="${PROFILE_RETRY_ON_FAIL:-true}"
 FALLBACK_OUTPUT_ROOT="${FALLBACK_OUTPUT_ROOT:-output/playwright/multitable-pilot-ready-local-current}"
@@ -62,7 +61,6 @@ if ! mkdir -p "$SMOKE_ROOT" "$PROFILE_ROOT" "$GATE_ROOT" 2>/dev/null; then
   READINESS_MD="${OUTPUT_ROOT}/readiness.md"
   READINESS_JSON="${OUTPUT_ROOT}/readiness.json"
   GATE_REPORT_JSON="${OUTPUT_ROOT}/gates/report.json"
-  GATE_REPORT_TMP="${OUTPUT_ROOT}/gates/report.tmp.json"
   PROFILE_RETRY_ON_FAIL="${PROFILE_RETRY_ON_FAIL:-true}"
   mkdir -p "$SMOKE_ROOT" "$PROFILE_ROOT" "$GATE_ROOT"
 fi
@@ -123,48 +121,11 @@ pnpm verify:multitable-grid-profile:summary; then
 fi
 
 echo "[multitable-pilot-ready-local] Running release gate" >&2
+REPORT_JSON="${GATE_REPORT_JSON}" \
+LOG_PATH="${GATE_ROOT}/release-gate.log" \
+PILOT_SMOKE_REPORT="${SMOKE_ROOT}/report.json" \
 SKIP_MULTITABLE_PILOT_SMOKE=true \
 bash scripts/ops/multitable-pilot-release-gate.sh >"${GATE_ROOT}/release-gate.log" 2>&1
-
-printf '%s\n' \
-  '{' \
-  '  "ok": true,' \
-  '  "checks": [' \
-  '    {' \
-  '      "name": "web.build",' \
-  '      "ok": true,' \
-  '      "command": "pnpm --filter @metasheet/web build",' \
-  "      \"log\": \"${GATE_ROOT}/release-gate.log\"" \
-  '    },' \
-  '    {' \
-  '      "name": "core-backend.build",' \
-  '      "ok": true,' \
-  '      "command": "pnpm --filter @metasheet/core-backend build",' \
-  "      \"log\": \"${GATE_ROOT}/release-gate.log\"" \
-  '    },' \
-  '    {' \
-  '      "name": "web.vitest.multitable",' \
-  '      "ok": true,' \
-  '      "command": "pnpm --filter @metasheet/web exec vitest run tests/multitable-field-manager.spec.ts tests/multitable-view-manager.spec.ts tests/multitable-import-modal.spec.ts tests/multitable-import.spec.ts tests/multitable-grid-attachment-editor.spec.ts tests/multitable-link-picker.spec.ts tests/multitable-gallery-view.spec.ts tests/multitable-calendar-view.spec.ts tests/multitable-kanban-view.spec.ts tests/multitable-timeline-view.spec.ts tests/multitable-workbench.spec.ts --reporter=dot",' \
-  "      \"log\": \"${GATE_ROOT}/release-gate.log\"" \
-  '    },' \
-  '    {' \
-  '      "name": "core-backend.integration.multitable",' \
-  '      "ok": true,' \
-  '      "command": "pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/multitable-context.api.test.ts tests/integration/multitable-record-form.api.test.ts tests/integration/views.multitable-adapter.api.test.ts --reporter=dot",' \
-  "      \"log\": \"${GATE_ROOT}/release-gate.log\"" \
-  '    },' \
-  '    {' \
-  '      "name": "release-gate.multitable.live-smoke",' \
-  '      "ok": true,' \
-  '      "command": "bash scripts/ops/multitable-pilot-release-gate.sh with SKIP_MULTITABLE_PILOT_SMOKE=true (live smoke executed earlier in multitable-pilot-ready-local)",' \
-  "      \"log\": \"${SMOKE_ROOT}/report.json\"" \
-  '    }' \
-  '  ],' \
-  "  \"generatedAt\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"" \
-  '}' \
-  > "${GATE_REPORT_TMP}"
-mv "${GATE_REPORT_TMP}" "${GATE_REPORT_JSON}"
 
 echo "[multitable-pilot-ready-local] Writing readiness summary" >&2
 SMOKE_REPORT_JSON="${SMOKE_ROOT}/report.json" \

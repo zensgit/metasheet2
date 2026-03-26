@@ -69,6 +69,7 @@ Pick only the next highest-value batch:
 Record the exact files used for this decision:
 
 - `output/playwright/multitable-pilot-ready-local/<stamp>/readiness.md`
+- `output/playwright/multitable-pilot-ready-local/<stamp>/gates/report.json`
 - `output/playwright/multitable-pilot-handoff/<stamp>/handoff.md`
 - `output/playwright/multitable-pilot-handoff/<stamp>/release-bound/report.md`
 - `output/releases/multitable-onprem/gates/<gate-stamp>/report.json`

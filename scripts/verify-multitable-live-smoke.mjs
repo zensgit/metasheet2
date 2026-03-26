@@ -17,10 +17,17 @@ const report = {
   startedAt: new Date().toISOString(),
   checks: [],
 }
+const recordedCheckNames = new Set()
 
 function record(name, ok, details = {}) {
   report.checks.push({ name, ok, ...details })
   if (!ok) report.ok = false
+}
+
+function recordOnce(name, ok, details = {}) {
+  if (recordedCheckNames.has(name)) return
+  recordedCheckNames.add(name)
+  record(name, ok, details)
 }
 
 function exactTextRegex(value) {
@@ -503,9 +510,41 @@ function multitableUrl(baseId, sheetId, viewId, extra = {}) {
   return `${webBase}/multitable/${encodeURIComponent(sheetId)}/${encodeURIComponent(viewId)}?${query.toString()}`
 }
 
+function verifyDirectRouteEntry(page, {
+  checkName,
+  baseId,
+  sheetId,
+  viewId,
+  extra = {},
+}) {
+  const expected = new URL(multitableUrl(baseId, sheetId, viewId, extra))
+  const current = new URL(page.url())
+  const expectedPairs = expected.searchParams
+  const currentPairs = current.searchParams
+  const expectedKeys = [...expectedPairs.keys()]
+  const ok = current.pathname === expected.pathname &&
+    expectedKeys.every((key) => currentPairs.get(key) === expectedPairs.get(key))
+
+  recordOnce(checkName, ok, {
+    expectedPath: expected.pathname,
+    actualPath: current.pathname,
+    expectedQuery: Object.fromEntries(expectedPairs.entries()),
+    actualQuery: Object.fromEntries(currentPairs.entries()),
+  })
+  if (!ok) {
+    throw new Error(`${checkName} failed: expected ${expected.pathname}${expected.search}, got ${current.pathname}${current.search}`)
+  }
+}
+
 async function importRecordViaGrid(page, { baseId, sheetId, viewId, csvPath, searchValue }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
   await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  verifyDirectRouteEntry(page, {
+    checkName: 'ui.route.grid-entry',
+    baseId,
+    sheetId,
+    viewId,
+  })
   await page.getByRole('button', { name: 'Import records' }).click()
   await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
   await page.locator('input.meta-import__file-input[type="file"]').setInputFiles(csvPath)
@@ -576,6 +615,12 @@ async function importRecordsViaGridWithRetry(page, {
   try {
     await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
     await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+    verifyDirectRouteEntry(page, {
+      checkName: 'ui.route.grid-entry',
+      baseId,
+      sheetId,
+      viewId,
+    })
     await page.locator('.meta-field-header__name').filter({ hasText: 'Title' }).first().waitFor({ state: 'visible', timeout: timeoutMs })
     await page.getByRole('button', { name: 'Import records' }).click()
     await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
@@ -614,6 +659,12 @@ async function importRecordViaGridWithPeopleManualFix(page, {
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
   await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  verifyDirectRouteEntry(page, {
+    checkName: 'ui.route.grid-entry',
+    baseId,
+    sheetId,
+    viewId,
+  })
   await page.getByRole('button', { name: 'Import records' }).click()
   await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
   await page.locator('input.meta-import__file-input[type="file"]').setInputFiles(csvPath)
@@ -658,6 +709,12 @@ async function verifyImportMappingReconcile(page, {
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
   await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  verifyDirectRouteEntry(page, {
+    checkName: 'ui.route.grid-entry',
+    baseId,
+    sheetId,
+    viewId,
+  })
   await page.getByRole('button', { name: 'Import records' }).click()
   await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
 
@@ -736,6 +793,12 @@ async function verifyPeopleRepairReconcile(page, {
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
   await page.getByRole('searchbox', { name: 'Search records' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  verifyDirectRouteEntry(page, {
+    checkName: 'ui.route.grid-entry',
+    baseId,
+    sheetId,
+    viewId,
+  })
   await page.getByRole('button', { name: 'Import records' }).click()
   await page.getByText('Import Records').waitFor({ state: 'visible', timeout: timeoutMs })
 
@@ -824,6 +887,13 @@ async function assignPersonViaDrawer(page, { searchValue, personFieldName, perso
 async function verifyFormUploadAndComments(page, { baseId, sheetId, viewId, recordId, attachmentFieldName, attachmentName }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId, { mode: 'form', recordId }), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
   await page.getByRole('button', { name: 'Save' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  verifyDirectRouteEntry(page, {
+    checkName: 'ui.route.form-entry',
+    baseId,
+    sheetId,
+    viewId,
+    extra: { mode: 'form', recordId },
+  })
 
   const uploadPath = path.join(outputDir, attachmentName)
   fs.writeFileSync(uploadPath, `multitable smoke ${new Date().toISOString()}\n`)
@@ -862,6 +932,13 @@ async function verifyFormAttachmentLifecycle(page, {
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId, { mode: 'form', recordId }), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
   await page.getByRole('button', { name: 'Save' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  verifyDirectRouteEntry(page, {
+    checkName: 'ui.route.form-entry',
+    baseId,
+    sheetId,
+    viewId,
+    extra: { mode: 'form', recordId },
+  })
 
   const uploads = attachmentNames.map((attachmentName) => {
     const uploadPath = path.join(outputDir, attachmentName)
@@ -923,6 +1000,13 @@ async function verifyAttachmentDeleteClear(page, {
 }) {
   await page.goto(multitableUrl(baseId, sheetId, viewId, { mode: 'form', recordId }), { waitUntil: 'domcontentloaded', timeout: timeoutMs })
   await page.getByRole('button', { name: 'Save' }).waitFor({ state: 'visible', timeout: timeoutMs })
+  verifyDirectRouteEntry(page, {
+    checkName: 'ui.route.form-entry',
+    baseId,
+    sheetId,
+    viewId,
+    extra: { mode: 'form', recordId },
+  })
 
   const attachmentField = page.locator('.meta-form-view__field').filter({ hasText: attachmentFieldName }).first()
   const initialRecord = await fetchRecord(token, sheetId, recordId)

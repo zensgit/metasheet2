@@ -71,6 +71,8 @@ function fmtMs(value) {
 
 function summarizeSmoke(report) {
   const requiredChecks = [
+    'ui.route.grid-entry',
+    'ui.route.form-entry',
     'ui.import.failed-retry',
     'ui.import.mapping-reconcile',
     'ui.import.people-repair-reconcile',

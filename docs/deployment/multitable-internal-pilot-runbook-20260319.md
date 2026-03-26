@@ -48,7 +48,8 @@ This runs, in order:
 1. `pnpm verify:multitable-pilot:local`
 2. `pnpm profile:multitable-grid:local`
 3. `pnpm verify:multitable-grid-profile:summary`
-4. `pnpm verify:multitable-pilot:readiness`
+4. `pnpm verify:multitable-pilot:release-gate`
+5. `pnpm verify:multitable-pilot:readiness`
 
 Artifacts are written under:
 
@@ -61,6 +62,7 @@ Key outputs:
 - `smoke/report.json`
 - `profile/report.json`
 - `profile/summary.md`
+- `gates/report.json`
 - `readiness.md`
 - `readiness.json`
 
@@ -187,6 +189,8 @@ If you use a real admin token, `RBAC_TOKEN_TRUST=true` is not required.
 
 Smoke must pass all of these:
 
+- `ui.route.grid-entry`
+- `ui.route.form-entry`
 - `ui.import.failed-retry`
 - `ui.import.people-manual-fix`
 - `api.import.people-manual-fix-hydration`
