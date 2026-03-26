@@ -159,10 +159,12 @@ write_release_gate_report() {
 
   REPORT_JSON_PATH="$REPORT_JSON" \
   REPORT_MD_PATH="$report_md_path" \
+  RELEASE_GATE_OUTPUT_ROOT="$OUTPUT_ROOT" \
   RELEASE_GATE_LOG_PATH="$LOG_PATH" \
   RELEASE_GATE_EXIT_CODE="$exit_code" \
   RELEASE_GATE_FAILED_STEP="$FAILED_STEP" \
   RELEASE_GATE_STEPS_FILE="$steps_file" \
+  PILOT_SMOKE_OUTPUT_ROOT_PATH="$PILOT_SMOKE_OUTPUT_ROOT" \
   PILOT_SMOKE_REPORT_PATH="$PILOT_SMOKE_REPORT" \
   PILOT_SMOKE_REPORT_MD_PATH="$PILOT_SMOKE_REPORT_MD" \
   RELEASE_GATE_RUN_MODE="$RUN_MODE" \
@@ -172,9 +174,11 @@ const path = require('path')
 
 const reportPath = process.env.REPORT_JSON_PATH
 const reportMdPath = process.env.REPORT_MD_PATH || null
+const outputRoot = process.env.RELEASE_GATE_OUTPUT_ROOT || null
 const fallbackLogPath = process.env.RELEASE_GATE_LOG_PATH || null
 const exitCode = Number(process.env.RELEASE_GATE_EXIT_CODE || '0')
 const failedStep = process.env.RELEASE_GATE_FAILED_STEP || null
+const smokeOutputRoot = process.env.PILOT_SMOKE_OUTPUT_ROOT_PATH || null
 const smokeReportPath = process.env.PILOT_SMOKE_REPORT_PATH || null
 const smokeReportMdPath = process.env.PILOT_SMOKE_REPORT_MD_PATH || null
 const runMode = process.env.RELEASE_GATE_RUN_MODE === 'staging' ? 'staging' : 'local'
@@ -262,6 +266,7 @@ const embedHostAcceptance = {
 const liveSmoke = {
   available: Boolean(smokeReport),
   ok: smokeReport ? Boolean(smokeReport.ok) : true,
+  outputRoot: smokeOutputRoot ? path.resolve(smokeOutputRoot) : null,
   report: smokeReportPath ? path.resolve(smokeReportPath) : null,
   reportMd: smokeReportMdPath ? path.resolve(smokeReportMdPath) : null,
   checkCount: smokeChecks.length,
@@ -278,6 +283,10 @@ const failingEvidence = [
 const report = {
   ok: exitCode === 0 && checks.every((check) => check.ok) && failingEvidence.length === 0,
   runMode,
+  outputRoot: outputRoot ? path.resolve(outputRoot) : null,
+  reportPath: reportPath ? path.resolve(reportPath) : null,
+  reportMdPath: reportMdPath ? path.resolve(reportMdPath) : null,
+  logPath: fallbackLogPath ? path.resolve(fallbackLogPath) : null,
   exitCode,
   failedStep,
   failingEvidence,
@@ -319,9 +328,11 @@ if (reportMdPath) {
     `- Overall: **${report.ok ? 'PASS' : 'FAIL'}**`,
     `- Run mode: \`${runMode}\``,
     `- Exit code: \`${exitCode}\``,
+    `- Output root: \`${report.outputRoot ?? 'missing'}\``,
     failedStep ? `- Failed step: \`${failedStep}\`` : '- Failed step: none',
-    reportPath ? `- JSON report: \`${path.resolve(reportPath)}\`` : '- JSON report: not written',
-    `- Markdown report: \`${path.resolve(reportMdPath)}\``,
+    report.reportPath ? `- JSON report: \`${report.reportPath}\`` : '- JSON report: not written',
+    `- Markdown report: \`${report.reportMdPath ?? 'missing'}\``,
+    `- Log path: \`${report.logPath ?? 'missing'}\``,
     '',
     '## Step Checks',
     '',
@@ -334,6 +345,7 @@ if (reportMdPath) {
     '',
     `- Available: \`${liveSmoke.available ? 'true' : 'false'}\``,
     `- Status: **${liveSmoke.ok ? 'PASS' : 'FAIL'}**`,
+    liveSmoke.outputRoot ? `- Output root: \`${liveSmoke.outputRoot}\`` : '- Output root: missing',
     liveSmoke.report ? `- Report: \`${liveSmoke.report}\`` : '- Report: missing',
     liveSmoke.reportMd ? `- Markdown: \`${liveSmoke.reportMd}\`` : '- Markdown: missing',
     `- Check count: \`${liveSmoke.checkCount}\``,
