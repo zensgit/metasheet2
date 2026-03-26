@@ -502,7 +502,7 @@ async function logPlmTeamViewLifecycleAudit(params: {
 
 async function attachPlmTeamViewDefaultSignals<T extends PlmWorkbenchTeamViewRowLike>(
   rows: T[],
-): Promise<Array<T & { last_default_set_at?: string }>> {
+): Promise<T[]> {
   const ids = Array.from(
     new Set(
       rows
@@ -544,7 +544,7 @@ async function attachPlmTeamViewDefaultSignals<T extends PlmWorkbenchTeamViewRow
     return rows.map((row) => ({
       ...row,
       last_default_set_at: lastDefaultById.get(String(row.id || '').trim()),
-    }))
+    })) as T[]
   } catch (error: unknown) {
     logger.warn('Failed to load PLM team view default signals', error as Error)
     return rows
