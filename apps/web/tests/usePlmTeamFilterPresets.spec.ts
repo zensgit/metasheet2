@@ -359,9 +359,15 @@ describe('usePlmTeamFilterPresets', () => {
     })
 
     model.teamPresetKey.value = 'preset-locked'
+    model.teamPresetName.value = '待清理团队预设'
+    model.teamPresetGroup.value = '待清理分组'
+    model.teamPresetOwnerUserId.value = 'owner-stale'
     await model.refreshTeamPresets()
 
     expect(model.teamPresetKey.value).toBe('')
+    expect(model.teamPresetName.value).toBe('')
+    expect(model.teamPresetGroup.value).toBe('')
+    expect(model.teamPresetOwnerUserId.value).toBe('')
     expect(requestedPresetId.value).toBe('')
     expect(syncRequestedPresetId).toHaveBeenLastCalledWith(undefined)
   })

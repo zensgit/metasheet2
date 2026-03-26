@@ -305,9 +305,12 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
         const preset = presetMap.get(id)
         return preset ? readTeamPresetPermissions(preset).canManage : false
       })
-      const selectedPreset = presetMap.get(teamPresetKey.value)
-      if (!selectedPreset || !canApplyPlmCollaborativeEntry(selectedPreset)) {
-        teamPresetKey.value = ''
+      if (teamPresetKey.value) {
+        const selectedPreset = presetMap.get(teamPresetKey.value)
+        if (!selectedPreset || !canApplyPlmCollaborativeEntry(selectedPreset)) {
+          teamPresetKey.value = ''
+          clearTeamPresetDrafts()
+        }
       }
       if (
         requestedPresetId
