@@ -116,16 +116,13 @@ function summarizeEmbedHostProtocol(report) {
     'ui.embed-host.navigate.explicit-request-id',
     'ui.embed-host.state-query.final',
   ]
-  const availableChecks = protocolChecks.filter((name) => checks.some((item) => item.name === name))
-  const available = availableChecks.length > 0
-  const missingChecks = available
-    ? protocolChecks.filter((name) => !checks.some((item) => item.name === name && item.ok))
-    : []
+  const observedChecks = protocolChecks.filter((name) => checks.some((item) => item.name === name))
+  const missingChecks = protocolChecks.filter((name) => !checks.some((item) => item.name === name && item.ok))
   return {
-    available,
-    ok: !available || missingChecks.length === 0,
-    requiredWhenPresent: protocolChecks,
-    observedChecks: availableChecks,
+    available: true,
+    ok: missingChecks.length === 0,
+    requiredChecks: protocolChecks,
+    observedChecks,
     missingChecks,
   }
 }
@@ -141,16 +138,13 @@ function summarizeEmbedHostNavigationProtection(report) {
     'ui.embed-host.navigate.confirmed',
     'api.embed-host.discard-unsaved-form-draft',
   ]
-  const availableChecks = protectionChecks.filter((name) => checks.some((item) => item.name === name))
-  const available = availableChecks.length > 0
-  const missingChecks = available
-    ? protectionChecks.filter((name) => !checks.some((item) => item.name === name && item.ok))
-    : []
+  const observedChecks = protectionChecks.filter((name) => checks.some((item) => item.name === name))
+  const missingChecks = protectionChecks.filter((name) => !checks.some((item) => item.name === name && item.ok))
   return {
-    available,
-    ok: !available || missingChecks.length === 0,
-    requiredWhenPresent: protectionChecks,
-    observedChecks: availableChecks,
+    available: true,
+    ok: missingChecks.length === 0,
+    requiredChecks: protectionChecks,
+    observedChecks,
     missingChecks,
   }
 }
@@ -460,9 +454,9 @@ async function main() {
     '',
     '## Embed Host Protocol Evidence',
     '',
-    `- Available in smoke: \`${embedHostProtocol.available ? 'true' : 'false'}\``,
+    '- Expected in smoke: `true`',
     `- Status: **${embedHostProtocol.ok ? 'PASS' : 'FAIL'}**`,
-    `- Required when present: ${embedHostProtocol.requiredWhenPresent.map((item) => `\`${item}\``).join(', ')}`,
+    `- Required checks: ${embedHostProtocol.requiredChecks.map((item) => `\`${item}\``).join(', ')}`,
     embedHostProtocol.observedChecks.length
       ? `- Observed checks: ${embedHostProtocol.observedChecks.map((item) => `\`${item}\``).join(', ')}`
       : '- Observed checks: none',
@@ -472,9 +466,9 @@ async function main() {
     '',
     '## Embed Host Navigation Protection',
     '',
-    `- Available in smoke: \`${embedHostNavigationProtection.available ? 'true' : 'false'}\``,
+    '- Expected in smoke: `true`',
     `- Status: **${embedHostNavigationProtection.ok ? 'PASS' : 'FAIL'}**`,
-    `- Required when present: ${embedHostNavigationProtection.requiredWhenPresent.map((item) => `\`${item}\``).join(', ')}`,
+    `- Required checks: ${embedHostNavigationProtection.requiredChecks.map((item) => `\`${item}\``).join(', ')}`,
     embedHostNavigationProtection.observedChecks.length
       ? `- Observed checks: ${embedHostNavigationProtection.observedChecks.map((item) => `\`${item}\``).join(', ')}`
       : '- Observed checks: none',

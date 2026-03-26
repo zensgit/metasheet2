@@ -61,7 +61,11 @@ function writeFixtureReport(tmpRoot) {
 
   fs.writeFileSync(smokeReportPath, JSON.stringify({
     ok: true,
-    checks: requiredSmokeChecks.map((name) => ({ name, ok: true })),
+    checks: [
+      ...requiredSmokeChecks,
+      ...embedHostProtocolChecks,
+      ...embedHostNavigationProtectionChecks,
+    ].map((name) => ({ name, ok: true })),
   }, null, 2))
   fs.writeFileSync(profileReportPath, JSON.stringify({
     ok: true,
@@ -167,15 +171,11 @@ test('multitable pilot readiness can opt out of gate binding for ad hoc checks',
   assert.equal(readiness.gates.missingReport, true)
 })
 
-test('multitable pilot readiness surfaces embed-host protocol evidence and fails if partial evidence is present', () => {
+test('multitable pilot readiness fails when required embed-host protocol evidence is missing', () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'multitable-readiness-embed-host-'))
   const fixture = writeFixtureReport(tmpRoot)
   const smoke = JSON.parse(fs.readFileSync(fixture.smokeReportPath, 'utf8'))
-  smoke.checks.push(
-    ...embedHostProtocolChecks
-      .filter((name) => name !== 'ui.embed-host.state-query.final')
-      .map((name) => ({ name, ok: true })),
-  )
+  smoke.checks = smoke.checks.filter((check) => check.name !== 'ui.embed-host.state-query.final')
   fs.writeFileSync(fixture.smokeReportPath, JSON.stringify(smoke, null, 2))
 
   assert.throws(() => {
@@ -199,15 +199,11 @@ test('multitable pilot readiness surfaces embed-host protocol evidence and fails
   assert.deepEqual(readiness.embedHostProtocol.missingChecks, ['ui.embed-host.state-query.final'])
 })
 
-test('multitable pilot readiness surfaces embed-host navigation protection evidence and fails if partial evidence is present', () => {
+test('multitable pilot readiness fails when required embed-host navigation protection evidence is missing', () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'multitable-readiness-embed-host-blocking-'))
   const fixture = writeFixtureReport(tmpRoot)
   const smoke = JSON.parse(fs.readFileSync(fixture.smokeReportPath, 'utf8'))
-  smoke.checks.push(
-    ...embedHostNavigationProtectionChecks
-      .filter((name) => name !== 'api.embed-host.discard-unsaved-form-draft')
-      .map((name) => ({ name, ok: true })),
-  )
+  smoke.checks = smoke.checks.filter((check) => check.name !== 'api.embed-host.discard-unsaved-form-draft')
   fs.writeFileSync(fixture.smokeReportPath, JSON.stringify(smoke, null, 2))
 
   assert.throws(() => {
