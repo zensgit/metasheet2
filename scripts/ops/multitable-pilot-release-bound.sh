@@ -7,13 +7,30 @@ cd "$ROOT_DIR"
 ONPREM_GATE_REPORT_JSON="${ONPREM_GATE_REPORT_JSON:-}"
 ONPREM_GATE_STAMP="${ONPREM_GATE_STAMP:-}"
 RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d-%H%M%S)}"
+RUN_MODE="${RUN_MODE:-local}"
 STAMP_WITH_SUFFIX="${RUN_STAMP}"
 if [[ "${STAMP_WITH_SUFFIX}" != *"-release-bound" ]]; then
   STAMP_WITH_SUFFIX="${STAMP_WITH_SUFFIX}-release-bound"
 fi
-READY_OUTPUT_ROOT="${READY_OUTPUT_ROOT:-output/playwright/multitable-pilot-ready-local/${STAMP_WITH_SUFFIX}}"
-HANDOFF_OUTPUT_ROOT="${HANDOFF_OUTPUT_ROOT:-output/playwright/multitable-pilot-handoff}"
-REPORT_ROOT="${REPORT_ROOT:-output/playwright/multitable-pilot-release-bound/${RUN_STAMP}}"
+READY_OUTPUT_ROOT_DEFAULT="output/playwright/multitable-pilot-ready-local/${STAMP_WITH_SUFFIX}"
+HANDOFF_OUTPUT_ROOT_DEFAULT="output/playwright/multitable-pilot-handoff"
+REPORT_ROOT_DEFAULT="output/playwright/multitable-pilot-release-bound/${RUN_STAMP}"
+RELEASE_BOUND_COMMAND="pnpm prepare:multitable-pilot:release-bound"
+REFRESH_READINESS_COMMAND="pnpm verify:multitable-pilot:ready:local:release-bound"
+REFRESH_HANDOFF_COMMAND="pnpm prepare:multitable-pilot:handoff:release-bound"
+
+if [[ "${RUN_MODE}" == "staging" ]]; then
+  READY_OUTPUT_ROOT_DEFAULT="output/playwright/multitable-pilot-ready-staging/${STAMP_WITH_SUFFIX}"
+  HANDOFF_OUTPUT_ROOT_DEFAULT="output/playwright/multitable-pilot-handoff-staging"
+  REPORT_ROOT_DEFAULT="output/playwright/multitable-pilot-release-bound-staging/${RUN_STAMP}"
+  RELEASE_BOUND_COMMAND="pnpm prepare:multitable-pilot:release-bound:staging"
+  REFRESH_READINESS_COMMAND="pnpm verify:multitable-pilot:ready:staging:release-bound"
+  REFRESH_HANDOFF_COMMAND="pnpm prepare:multitable-pilot:handoff:staging:release-bound"
+fi
+
+READY_OUTPUT_ROOT="${READY_OUTPUT_ROOT:-${READY_OUTPUT_ROOT_DEFAULT}}"
+HANDOFF_OUTPUT_ROOT="${HANDOFF_OUTPUT_ROOT:-${HANDOFF_OUTPUT_ROOT_DEFAULT}}"
+REPORT_ROOT="${REPORT_ROOT:-${REPORT_ROOT_DEFAULT}}"
 REPORT_JSON="${REPORT_ROOT}/report.json"
 REPORT_MD="${REPORT_ROOT}/report.md"
 REPORT_TMP_JSON="${REPORT_ROOT}/report.tmp.json"
@@ -36,7 +53,7 @@ fi
 
 if [[ -z "$ONPREM_GATE_REPORT_JSON" ]]; then
   echo "[multitable-pilot-release-bound] ERROR: set ONPREM_GATE_STAMP or ONPREM_GATE_REPORT_JSON" >&2
-  echo "[multitable-pilot-release-bound] Example: ONPREM_GATE_STAMP=20260323-083713 ENSURE_PLAYWRIGHT=false pnpm prepare:multitable-pilot:release-bound" >&2
+  echo "[multitable-pilot-release-bound] Example: ONPREM_GATE_STAMP=20260323-083713 ENSURE_PLAYWRIGHT=false ${RELEASE_BOUND_COMMAND}" >&2
   exit 1
 fi
 
@@ -52,12 +69,16 @@ REPORT_ROOT_ABS="${ROOT_DIR}/${REPORT_ROOT}"
 mkdir -p "${REPORT_ROOT_ABS}"
 
 echo "[multitable-pilot-release-bound] Running release-bound readiness" >&2
+echo "[multitable-pilot-release-bound] run_mode=${RUN_MODE}" >&2
 ONPREM_GATE_REPORT_JSON="${ONPREM_GATE_REPORT_JSON}" \
+RUN_MODE="${RUN_MODE}" \
 OUTPUT_ROOT="${READY_OUTPUT_ROOT}" \
 bash scripts/ops/multitable-pilot-ready-release-bound.sh
 
 echo "[multitable-pilot-release-bound] Running release-bound handoff" >&2
 ONPREM_GATE_REPORT_JSON="${ONPREM_GATE_REPORT_JSON}" \
+RUN_MODE="${RUN_MODE}" \
+PILOT_RUN_MODE="${RUN_MODE}" \
 READINESS_ROOT="${READY_OUTPUT_ROOT_ABS}" \
 HANDOFF_OUTPUT_ROOT="${HANDOFF_OUTPUT_ROOT}" \
 bash scripts/ops/multitable-pilot-handoff-release-bound.sh
@@ -164,17 +185,17 @@ USAGE
   rerun-release-bound)
     print_signoff_reminder
     cd "\${ROOT_DIR}"
-    exec env ONPREM_GATE_REPORT_JSON="\${ONPREM_GATE_REPORT_JSON}" ENSURE_PLAYWRIGHT=false pnpm prepare:multitable-pilot:release-bound
+    exec env ONPREM_GATE_REPORT_JSON="\${ONPREM_GATE_REPORT_JSON}" ENSURE_PLAYWRIGHT=false ${RELEASE_BOUND_COMMAND}
     ;;
   refresh-readiness)
     print_signoff_reminder
     cd "\${ROOT_DIR}"
-    exec env ONPREM_GATE_REPORT_JSON="\${ONPREM_GATE_REPORT_JSON}" OUTPUT_ROOT="\${READY_OUTPUT_ROOT}" pnpm verify:multitable-pilot:ready:local:release-bound
+    exec env ONPREM_GATE_REPORT_JSON="\${ONPREM_GATE_REPORT_JSON}" OUTPUT_ROOT="\${READY_OUTPUT_ROOT}" ${REFRESH_READINESS_COMMAND}
     ;;
   refresh-handoff)
     print_signoff_reminder
     cd "\${ROOT_DIR}"
-    exec env ONPREM_GATE_REPORT_JSON="\${ONPREM_GATE_REPORT_JSON}" READINESS_ROOT="\${READY_OUTPUT_ROOT}" pnpm prepare:multitable-pilot:handoff:release-bound
+    exec env ONPREM_GATE_REPORT_JSON="\${ONPREM_GATE_REPORT_JSON}" READINESS_ROOT="\${READY_OUTPUT_ROOT}" ${REFRESH_HANDOFF_COMMAND}
     ;;
   show-signoff-evidence)
     print_signoff_evidence
@@ -192,6 +213,7 @@ printf '%s\n' \
   '{' \
   '  "ok": true,' \
   "  \"generatedAt\": \"${generated_at}\"," \
+  "  \"runMode\": \"${RUN_MODE}\"," \
   "  \"onPremGateReportJson\": \"${ONPREM_GATE_REPORT_JSON}\"," \
   "  \"readinessRoot\": \"${READY_OUTPUT_ROOT_ABS}\"," \
   "  \"readinessJson\": \"${READY_OUTPUT_ROOT_ABS}/readiness.json\"," \
@@ -228,15 +250,15 @@ printf '%s\n' \
   '    },' \
   '    {' \
   '      "name": "rerunReleaseBound",' \
-  "      \"command\": \"ONPREM_GATE_REPORT_JSON=${ONPREM_GATE_REPORT_JSON} ENSURE_PLAYWRIGHT=false pnpm prepare:multitable-pilot:release-bound\"" \
+  "      \"command\": \"ONPREM_GATE_REPORT_JSON=${ONPREM_GATE_REPORT_JSON} ENSURE_PLAYWRIGHT=false ${RELEASE_BOUND_COMMAND}\"" \
   '    },' \
   '    {' \
   '      "name": "refreshReadiness",' \
-  "      \"command\": \"ONPREM_GATE_REPORT_JSON=${ONPREM_GATE_REPORT_JSON} OUTPUT_ROOT=${READY_OUTPUT_ROOT_ABS} pnpm verify:multitable-pilot:ready:local:release-bound\"" \
+  "      \"command\": \"ONPREM_GATE_REPORT_JSON=${ONPREM_GATE_REPORT_JSON} OUTPUT_ROOT=${READY_OUTPUT_ROOT_ABS} ${REFRESH_READINESS_COMMAND}\"" \
   '    },' \
   '    {' \
   '      "name": "refreshHandoff",' \
-  "      \"command\": \"ONPREM_GATE_REPORT_JSON=${ONPREM_GATE_REPORT_JSON} READINESS_ROOT=${READY_OUTPUT_ROOT_ABS} pnpm prepare:multitable-pilot:handoff:release-bound\"" \
+  "      \"command\": \"ONPREM_GATE_REPORT_JSON=${ONPREM_GATE_REPORT_JSON} READINESS_ROOT=${READY_OUTPUT_ROOT_ABS} ${REFRESH_HANDOFF_COMMAND}\"" \
   '    }' \
   '  ],' \
   '  "operatorChecklist": [' \
@@ -273,6 +295,7 @@ printf '%s\n' \
   '# Multitable Pilot Release-Bound Report' \
   '' \
   "- Generated at: \`${generated_at}\`" \
+  "- Run mode: \`${RUN_MODE}\`" \
   "- On-prem gate report: \`${ONPREM_GATE_REPORT_JSON}\`" \
   "- Readiness root: \`${READY_OUTPUT_ROOT_ABS}\`" \
   "- Readiness gate report: \`${READY_OUTPUT_ROOT_ABS}/gates/report.json\`" \
@@ -305,13 +328,13 @@ printf '%s\n' \
   "- Select the correct template from \`${HANDOFF_ROOT_ABS}/docs\` before running checkpoint, expansion, UAT, or customer delivery sign-off." \
   "- Collect \`${HANDOFF_PREFLIGHT_REPORT_JSON_DEFAULT}\` and \`${HANDOFF_PREFLIGHT_REPORT_MD_DEFAULT}\` before pilot sign-off or expansion review." \
   '' \
- '## Operator Commands' \
+  '## Operator Commands' \
   '' \
   "- Executable helper: \`${REPORT_ROOT_ABS}/$(basename "${COMMANDS_SH}")\`" \
   "- Show sign-off evidence: \`${REPORT_ROOT_ABS}/$(basename "${COMMANDS_SH}") show-signoff-evidence\`" \
-  "- Rerun bound packet: \`ONPREM_GATE_REPORT_JSON=${ONPREM_GATE_REPORT_JSON} ENSURE_PLAYWRIGHT=false pnpm prepare:multitable-pilot:release-bound\`" \
-  "- Refresh readiness only: \`ONPREM_GATE_REPORT_JSON=${ONPREM_GATE_REPORT_JSON} OUTPUT_ROOT=${READY_OUTPUT_ROOT_ABS} pnpm verify:multitable-pilot:ready:local:release-bound\`" \
-  "- Refresh handoff only: \`ONPREM_GATE_REPORT_JSON=${ONPREM_GATE_REPORT_JSON} READINESS_ROOT=${READY_OUTPUT_ROOT_ABS} pnpm prepare:multitable-pilot:handoff:release-bound\`" \
+  "- Rerun bound packet: \`ONPREM_GATE_REPORT_JSON=${ONPREM_GATE_REPORT_JSON} ENSURE_PLAYWRIGHT=false ${RELEASE_BOUND_COMMAND}\`" \
+  "- Refresh readiness only: \`ONPREM_GATE_REPORT_JSON=${ONPREM_GATE_REPORT_JSON} OUTPUT_ROOT=${READY_OUTPUT_ROOT_ABS} ${REFRESH_READINESS_COMMAND}\`" \
+  "- Refresh handoff only: \`ONPREM_GATE_REPORT_JSON=${ONPREM_GATE_REPORT_JSON} READINESS_ROOT=${READY_OUTPUT_ROOT_ABS} ${REFRESH_HANDOFF_COMMAND}\`" \
   '' \
   '## Expected Follow-up Evidence' \
   '' \

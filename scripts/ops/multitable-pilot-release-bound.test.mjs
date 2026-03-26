@@ -111,6 +111,7 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
         ...process.env,
         PATH: `${binDir}:${process.env.PATH}`,
         ONPREM_GATE_REPORT_JSON: gateReportPath,
+        RUN_MODE: 'staging',
         RUN_STAMP: stamp,
         READY_OUTPUT_ROOT: readyOutputRoot,
         HANDOFF_OUTPUT_ROOT: handoffOutputRoot,
@@ -125,6 +126,7 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
     const reportMd = fs.readFileSync(reportMdPath, 'utf8')
 
     assert.equal(report.embedHostAcceptance.ok, false)
+    assert.equal(report.runMode, 'staging')
     assert.equal(report.pilotRunner.runMode, 'staging')
     assert.equal(report.localRunner.available, true)
     assert.equal(report.localRunner.serviceModes.backend, 'reused')
@@ -140,6 +142,9 @@ test('multitable pilot release-bound promotes embed-host evidence into top-level
     assert.match(reportMd, /## Embed Host Acceptance/)
     assert.match(reportMd, /## Pilot Runner/)
     assert.match(reportMd, /Run mode: `staging`/)
+    assert.match(reportMd, /prepare:multitable-pilot:release-bound:staging/)
+    assert.match(reportMd, /verify:multitable-pilot:ready:staging:release-bound/)
+    assert.match(reportMd, /prepare:multitable-pilot:handoff:staging:release-bound/)
     assert.match(reportMd, /Backend mode: `reused`/)
     assert.match(reportMd, /Web mode: `started`/)
     assert.match(reportMd, /Overall embed-host acceptance: \*\*FAIL\*\*/)
