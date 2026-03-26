@@ -105,9 +105,9 @@ describe('API Utils', () => {
       window.localStorage.clear()
     })
 
-    it('returns Content-Type by default', () => {
+    it('does not set Content-Type by default', () => {
       const headers = authHeaders()
-      expect(headers['Content-Type']).toBe('application/json')
+      expect(headers).not.toHaveProperty('Content-Type')
       expect(headers).not.toHaveProperty('Authorization')
     })
 
@@ -212,6 +212,46 @@ describe('API Utils', () => {
 
       expect(window.localStorage.getItem('auth_token')).toBe('expired-token')
       expect(replace).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('apiFetch() content type handling', () => {
+    beforeEach(() => {
+      vi.restoreAllMocks()
+      vi.stubEnv('VITE_API_URL', 'https://api.example.com')
+    })
+
+    afterEach(() => {
+      vi.unstubAllEnvs()
+      vi.restoreAllMocks()
+    })
+
+    it('adds application/json automatically for non-FormData bodies', async () => {
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }))
+
+      await apiFetch('/api/multitable/context', {
+        method: 'POST',
+        body: JSON.stringify({ hello: 'world' }),
+      })
+
+      const [, init] = fetchMock.mock.calls[0] ?? []
+      expect(init?.headers).toBeInstanceOf(Headers)
+      expect((init?.headers as Headers).get('Content-Type')).toBe('application/json')
+    })
+
+    it('does not inject application/json for FormData bodies', async () => {
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }))
+      const formData = new FormData()
+      formData.append('file', new Blob(['hello'], { type: 'text/plain' }), 'hello.txt')
+
+      await apiFetch('/api/multitable/attachments', {
+        method: 'POST',
+        body: formData,
+      })
+
+      const [, init] = fetchMock.mock.calls[0] ?? []
+      expect(init?.headers).toBeInstanceOf(Headers)
+      expect((init?.headers as Headers).get('Content-Type')).toBeNull()
     })
   })
 })

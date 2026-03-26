@@ -572,10 +572,12 @@ export class MetaSheetServer {
       })
     })
 
+    // 路由：Multitable API（正式 meta schema）
+    this.app.use('/api/multitable', univerMetaRouter())
     // 路由：Univer Mock API（用于前端 POC，不依赖数据库；仅非生产环境启用）
     if (process.env.NODE_ENV !== 'production') {
       this.app.use('/api/univer-mock', univerMockRouter())
-      // DB-backed Meta API（用于把 POC 写回真实 meta schema；仅非生产环境启用）
+      // 保留旧别名，给仍在迁移中的前端开发线使用。
       this.app.use('/api/univer-meta', univerMetaRouter())
     }
 

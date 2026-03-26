@@ -36,10 +36,46 @@ export function useMultitableWorkbench(opts?: {
   const capabilities = ref<MetaCapabilities>({ ...EMPTY_CAPABILITIES })
   const loading = ref(false)
   const error = ref<string | null>(null)
+  const suppressedSheetMetaReloads = new Set<string>()
 
   const activeView = computed<MetaView | null>(
     () => views.value.find((v) => v.id === activeViewId.value) ?? null,
   )
+
+  type WorkbenchSnapshot = {
+    activeBaseId: string
+    activeSheetId: string
+    activeViewId: string
+    sheets: MetaSheet[]
+    fields: MetaField[]
+    views: MetaView[]
+    capabilities: MetaCapabilities
+  }
+
+  function snapshotState(): WorkbenchSnapshot {
+    return {
+      activeBaseId: activeBaseId.value,
+      activeSheetId: activeSheetId.value,
+      activeViewId: activeViewId.value,
+      sheets: [...sheets.value],
+      fields: [...fields.value],
+      views: [...views.value],
+      capabilities: { ...capabilities.value },
+    }
+  }
+
+  function restoreSnapshot(snapshot: WorkbenchSnapshot) {
+    activeBaseId.value = snapshot.activeBaseId
+    if (snapshot.activeSheetId && snapshot.activeSheetId !== activeSheetId.value) {
+      suppressedSheetMetaReloads.add(snapshot.activeSheetId)
+    }
+    activeSheetId.value = snapshot.activeSheetId
+    activeViewId.value = snapshot.activeViewId
+    sheets.value = [...snapshot.sheets]
+    fields.value = [...snapshot.fields]
+    views.value = [...snapshot.views]
+    capabilities.value = { ...snapshot.capabilities }
+  }
 
   function syncContextState(
     ctx: {
@@ -57,9 +93,12 @@ export function useMultitableWorkbench(opts?: {
     if (ctx.base?.id) activeBaseId.value = ctx.base.id
     if (ctx.sheet?.baseId) activeBaseId.value = ctx.sheet.baseId
     if (ctx.sheet?.id && ctx.sheet.description !== SYSTEM_PEOPLE_SHEET_DESCRIPTION) {
+      if (ctx.sheet.id !== activeSheetId.value) suppressedSheetMetaReloads.add(ctx.sheet.id)
       activeSheetId.value = ctx.sheet.id
     } else if (!sheets.value.find((sheet) => sheet.id === activeSheetId.value)) {
-      activeSheetId.value = sheets.value[0]?.id ?? ''
+      const fallbackSheetId = sheets.value[0]?.id ?? ''
+      if (fallbackSheetId && fallbackSheetId !== activeSheetId.value) suppressedSheetMetaReloads.add(fallbackSheetId)
+      activeSheetId.value = fallbackSheetId
     }
     const requestedViewId = typeof preferredViewId === 'string' ? preferredViewId.trim() : ''
     if (requestedViewId && views.value.some((view) => view.id === requestedViewId)) {
@@ -98,26 +137,31 @@ export function useMultitableWorkbench(opts?: {
     }
   }
 
-  async function loadSheetMeta(sheetId: string) {
-    if (!sheetId) return
+  async function loadSheetMeta(sheetId: string, opts?: { viewId?: string }): Promise<boolean> {
+    if (!sheetId) return false
     error.value = null
     try {
+      const requestedViewId = typeof opts?.viewId === 'string' && opts.viewId.trim()
+        ? opts.viewId.trim()
+        : activeViewId.value || undefined
       const [fData, ctx] = await Promise.all([
         client.listFields(sheetId),
         client.loadContext({
           sheetId,
-          viewId: activeViewId.value || undefined,
+          viewId: requestedViewId,
         }),
       ])
       fields.value = fData.fields ?? []
-      syncContextState(ctx, activeViewId.value)
+      syncContextState(ctx, requestedViewId)
+      return true
     } catch (e: any) {
       error.value = e.message ?? 'Failed to load sheet metadata'
+      return false
     }
   }
 
-  async function loadBaseContext(baseId: string, opts?: { sheetId?: string; viewId?: string }) {
-    if (!baseId) return
+  async function loadBaseContext(baseId: string, opts?: { sheetId?: string; viewId?: string }): Promise<boolean> {
+    if (!baseId) return false
     loading.value = true
     error.value = null
     try {
@@ -133,11 +177,82 @@ export function useMultitableWorkbench(opts?: {
       } else {
         fields.value = []
       }
+      return true
     } catch (e: any) {
       error.value = e.message ?? 'Failed to load base metadata'
+      return false
     } finally {
       loading.value = false
     }
+  }
+
+  async function switchBase(baseId: string, opts?: { sheetId?: string; viewId?: string }): Promise<boolean> {
+    if (!baseId) return false
+    const requestedSheetId = opts?.sheetId?.trim() ?? ''
+    const requestedViewId = opts?.viewId?.trim() ?? ''
+    if (
+      baseId === activeBaseId.value &&
+      (!requestedSheetId || requestedSheetId === activeSheetId.value) &&
+      (!requestedViewId || requestedViewId === activeViewId.value)
+    ) {
+      return true
+    }
+    const snapshot = snapshotState()
+    activeBaseId.value = baseId
+    const ok = await loadBaseContext(baseId, {
+      sheetId: requestedSheetId || undefined,
+      viewId: requestedViewId || undefined,
+    })
+    if (ok) return true
+    const failureMessage = error.value
+    restoreSnapshot(snapshot)
+    error.value = failureMessage ?? 'Failed to load base metadata'
+    return false
+  }
+
+  async function syncExternalContext(params: {
+    baseId?: string
+    sheetId?: string
+    viewId?: string
+  }): Promise<boolean> {
+    const nextBaseId = params.baseId?.trim() ?? ''
+    const nextSheetId = params.sheetId?.trim() ?? ''
+    const nextViewId = params.viewId?.trim() ?? ''
+
+    if (nextBaseId) {
+      return switchBase(nextBaseId, {
+        sheetId: nextSheetId || undefined,
+        viewId: nextViewId || undefined,
+      })
+    }
+
+    if (nextSheetId) {
+      if (
+        nextSheetId === activeSheetId.value &&
+        (!nextViewId || nextViewId === activeViewId.value)
+      ) {
+        return true
+      }
+      const snapshot = snapshotState()
+      const ok = await loadSheetMeta(nextSheetId, { viewId: nextViewId || undefined })
+      if (ok) return true
+      const failureMessage = error.value
+      restoreSnapshot(snapshot)
+      error.value = failureMessage ?? 'Failed to load sheet metadata'
+      return false
+    }
+
+    if (nextViewId && nextViewId !== activeViewId.value && activeSheetId.value) {
+      const snapshot = snapshotState()
+      const ok = await loadSheetMeta(activeSheetId.value, { viewId: nextViewId })
+      if (ok) return true
+      const failureMessage = error.value
+      restoreSnapshot(snapshot)
+      error.value = failureMessage ?? 'Failed to load sheet metadata'
+      return false
+    }
+
+    return true
   }
 
   function selectSheet(sheetId: string) {
@@ -157,7 +272,14 @@ export function useMultitableWorkbench(opts?: {
 
   watch(
     () => activeSheetId.value,
-    (id) => { if (id) loadSheetMeta(id) },
+    (id) => {
+      if (!id) return
+      if (suppressedSheetMetaReloads.has(id)) {
+        suppressedSheetMetaReloads.delete(id)
+        return
+      }
+      void loadSheetMeta(id)
+    },
     { immediate: false },
   )
 
@@ -176,6 +298,8 @@ export function useMultitableWorkbench(opts?: {
     loadSheets,
     loadBaseContext,
     loadSheetMeta,
+    switchBase,
+    syncExternalContext,
     selectBase,
     selectSheet,
     selectView,

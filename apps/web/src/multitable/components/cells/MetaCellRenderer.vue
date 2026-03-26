@@ -28,16 +28,17 @@
 
     <!-- link -->
     <template v-else-if="field.type === 'link'">
-      <span v-for="item in linkItems" :key="item.id" class="meta-cell-renderer__link">{{ item.display }}</span>
+      <span
+        v-for="item in linkItems"
+        :key="item.id"
+        class="meta-cell-renderer__link"
+        :class="{ 'meta-cell-renderer__link--person': isPersonLink }"
+      >{{ item.display }}</span>
     </template>
 
     <!-- attachment -->
     <template v-else-if="field.type === 'attachment'">
-      <span v-if="!attachmentIds.length" class="meta-cell-renderer--empty"></span>
-      <span v-for="attId in attachmentIds" :key="attId" class="meta-cell-renderer__attachment" :title="attId">
-        <span class="meta-cell-renderer__attachment-icon">{{ mimeIcon(attId) }}</span>
-        <span class="meta-cell-renderer__attachment-name">{{ attId }}</span>
-      </span>
+      <MetaAttachmentList :attachments="attachmentItems" variant="compact" empty-label="" />
     </template>
 
     <!-- lookup / rollup -->
@@ -47,15 +48,20 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { MetaField, LinkedRecordSummary } from '../../types'
+import type { MetaAttachment, MetaField, LinkedRecordSummary } from '../../types'
+import MetaAttachmentList from '../MetaAttachmentList.vue'
+import { isPersonField } from '../../utils/link-fields'
+import { formatFieldDisplay } from '../../utils/field-display'
 
-const props = defineProps<{ field: MetaField; value: unknown; linkSummaries?: LinkedRecordSummary[] }>()
+const props = defineProps<{ field: MetaField; value: unknown; linkSummaries?: LinkedRecordSummary[]; attachmentSummaries?: MetaAttachment[] }>()
 
 const displayValue = computed(() => {
-  const v = props.value
-  if (v === null || v === undefined) return ''
-  if (Array.isArray(v)) return v.join(', ')
-  return String(v)
+  return formatFieldDisplay({
+    field: props.field,
+    value: props.value,
+    linkSummaries: props.linkSummaries,
+    attachmentSummaries: props.attachmentSummaries,
+  })
 })
 
 const dateDisplay = computed(() => {
@@ -92,8 +98,16 @@ const linkItems = computed(() => {
       display: item.display || item.id,
     }))
   }
-  return linkIds.value.map((id) => ({ id, display: id }))
+  const fallbackLabel = formatFieldDisplay({
+    field: props.field,
+    value: props.value,
+    linkSummaries: props.linkSummaries,
+    attachmentSummaries: props.attachmentSummaries,
+  })
+  if (!linkIds.value.length) return []
+  return [{ id: '__link_summary__', display: fallbackLabel }]
 })
+const isPersonLink = computed(() => isPersonField(props.field))
 
 const attachmentIds = computed(() => {
   const v = props.value
@@ -102,10 +116,24 @@ const attachmentIds = computed(() => {
   return []
 })
 
-function mimeIcon(_id: string): string {
-  // Simple icon based on file extension heuristic
-  return '\uD83D\uDCCE' // paperclip emoji
-}
+const attachmentItems = computed<MetaAttachment[]>(() => {
+  if (props.attachmentSummaries?.length) return props.attachmentSummaries
+  if (!attachmentIds.value.length) return []
+  return [{
+    id: '__attachment_summary__',
+    filename: formatFieldDisplay({
+      field: props.field,
+      value: props.value,
+      linkSummaries: props.linkSummaries,
+      attachmentSummaries: props.attachmentSummaries,
+    }),
+    mimeType: 'application/octet-stream',
+    size: 0,
+    url: '',
+    thumbnailUrl: null,
+    uploadedAt: '',
+  }]
+})
 
 // Conditional formatting: subtle background hints
 const conditionalClass = computed(() => {
@@ -131,15 +159,11 @@ const conditionalClass = computed(() => {
   display: inline-block; padding: 1px 6px; background: #ecf5ff;
   color: #409eff; border-radius: 3px; font-size: 11px; margin-right: 4px;
 }
-.meta-cell-renderer__date { color: #606266; }
-.meta-cell-renderer__attachment {
-  display: inline-flex; align-items: center; gap: 2px;
-  padding: 1px 6px; background: #f0f4f8; border-radius: 3px;
-  font-size: 11px; margin-right: 4px; white-space: nowrap;
-  max-width: 120px; overflow: hidden; text-overflow: ellipsis;
+.meta-cell-renderer__link--person {
+  background: #eefbf3;
+  color: #227447;
 }
-.meta-cell-renderer__attachment-icon { font-size: 12px; }
-.meta-cell-renderer__attachment-name { overflow: hidden; text-overflow: ellipsis; }
+.meta-cell-renderer__date { color: #606266; }
 .meta-cell-renderer--empty { color: #ccc; }
 .meta-cell-renderer--positive { color: #67c23a; }
 .meta-cell-renderer--negative { color: #f56c6c; }
