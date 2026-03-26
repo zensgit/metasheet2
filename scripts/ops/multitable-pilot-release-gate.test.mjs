@@ -38,6 +38,11 @@ function createFakePnpm(binDir) {
     [
       '#!/usr/bin/env bash',
       'printf \'%s\\n\' "$*" >> "${FAKE_PNPM_LOG}"',
+      'if [[ -n "${FAKE_PNPM_SMOKE_REPORT_TEMPLATE:-}" && "$*" == *"verify:multitable-pilot"* ]]; then',
+      '  mkdir -p "${OUTPUT_ROOT}"',
+      '  cp "${FAKE_PNPM_SMOKE_REPORT_TEMPLATE}" "${OUTPUT_ROOT}/report.json"',
+      '  printf \'# smoke report\\n\' > "${SMOKE_REPORT_MD:-${REPORT_MD:-${OUTPUT_ROOT}/report.md}}"',
+      'fi',
       'if [[ -n "${FAKE_PNPM_FAIL_MATCH:-}" && "$*" == *"${FAKE_PNPM_FAIL_MATCH}"* ]]; then',
       '  exit 42',
       'fi',
@@ -129,6 +134,90 @@ test('multitable pilot release gate writes canonical gate report and keeps execu
     .filter((check) => check.status !== 'skipped')
     .map((check) => check.command)
   assert.deepEqual(reportCommands, executedCommands)
+})
+
+test('multitable pilot release gate writes deterministic local smoke artifacts when run directly', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'multitable-release-gate-direct-local-'))
+  const binDir = path.join(tmpRoot, 'bin')
+  fs.mkdirSync(binDir, { recursive: true })
+  createFakePnpm(binDir)
+
+  const outputRoot = path.join(tmpRoot, 'gate-output')
+  const fakePnpmLogPath = path.join(tmpRoot, 'fake-pnpm.log')
+  const smokeTemplatePath = path.join(tmpRoot, 'smoke-template.json')
+  fs.writeFileSync(smokeTemplatePath, JSON.stringify(createSmokeReport(), null, 2))
+
+  execFileSync('bash', ['scripts/ops/multitable-pilot-release-gate.sh'], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH}`,
+      FAKE_PNPM_LOG: fakePnpmLogPath,
+      FAKE_PNPM_SMOKE_REPORT_TEMPLATE: smokeTemplatePath,
+      OUTPUT_ROOT: outputRoot,
+    },
+    stdio: 'pipe',
+  })
+
+  const reportPath = path.join(outputRoot, 'report.json')
+  const reportMdPath = path.join(outputRoot, 'report.md')
+  const smokeReportPath = path.join(outputRoot, 'smoke', 'report.json')
+  const smokeReportMdPath = path.join(outputRoot, 'smoke', 'report.md')
+  const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'))
+  const reportMd = fs.readFileSync(reportMdPath, 'utf8')
+
+  assert.equal(report.ok, true)
+  assert.match(report.liveSmoke.report, /gate-output\/smoke\/report\.json$/)
+  assert.match(report.liveSmoke.reportMd, /gate-output\/smoke\/report\.md$/)
+  assert.equal(fs.existsSync(smokeReportPath), true)
+  assert.equal(fs.existsSync(smokeReportMdPath), true)
+  assert.match(reportMd, /JSON report: `.*gate-output\/report\.json`/)
+  assert.match(reportMd, /Report: `.*gate-output\/smoke\/report\.json`/)
+  assert.match(reportMd, /Markdown: `.*gate-output\/smoke\/report\.md`/)
+
+  const checksByName = new Map(report.checks.map((check) => [check.name, check]))
+  assert.equal(checksByName.get('release-gate.multitable.live-smoke')?.status, 'passed')
+  assert.equal(checksByName.get('release-gate.multitable.live-smoke')?.command, 'pnpm verify:multitable-pilot')
+})
+
+test('multitable pilot release gate writes deterministic staging smoke artifacts when run directly', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'multitable-release-gate-direct-staging-'))
+  const binDir = path.join(tmpRoot, 'bin')
+  fs.mkdirSync(binDir, { recursive: true })
+  createFakePnpm(binDir)
+
+  const outputRoot = path.join(tmpRoot, 'gate-output')
+  const fakePnpmLogPath = path.join(tmpRoot, 'fake-pnpm.log')
+  const smokeTemplatePath = path.join(tmpRoot, 'smoke-template.json')
+  fs.writeFileSync(smokeTemplatePath, JSON.stringify(createSmokeReport(), null, 2))
+
+  execFileSync('bash', ['scripts/ops/multitable-pilot-release-gate.sh'], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH}`,
+      FAKE_PNPM_LOG: fakePnpmLogPath,
+      FAKE_PNPM_SMOKE_REPORT_TEMPLATE: smokeTemplatePath,
+      OUTPUT_ROOT: outputRoot,
+      RUN_MODE: 'staging',
+    },
+    stdio: 'pipe',
+  })
+
+  const reportPath = path.join(outputRoot, 'report.json')
+  const smokeReportPath = path.join(outputRoot, 'smoke', 'report.json')
+  const smokeReportMdPath = path.join(outputRoot, 'smoke', 'report.md')
+  const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'))
+
+  assert.equal(report.runMode, 'staging')
+  assert.match(report.liveSmoke.report, /gate-output\/smoke\/report\.json$/)
+  assert.match(report.liveSmoke.reportMd, /gate-output\/smoke\/report\.md$/)
+  assert.equal(fs.existsSync(smokeReportPath), true)
+  assert.equal(fs.existsSync(smokeReportMdPath), true)
+
+  const checksByName = new Map(report.checks.map((check) => [check.name, check]))
+  assert.equal(checksByName.get('release-gate.multitable.live-smoke')?.status, 'passed')
+  assert.equal(checksByName.get('release-gate.multitable.live-smoke')?.command, 'pnpm verify:multitable-pilot:staging')
 })
 
 test('multitable pilot release gate switches skipped smoke metadata to staging mode when RUN_MODE=staging', () => {

@@ -4,17 +4,40 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+timestamp="$(date +%Y%m%d-%H%M%S)"
 API_BASE="${API_BASE:-http://127.0.0.1:7778}"
 WEB_BASE="${WEB_BASE:-http://127.0.0.1:8899}"
 HEADLESS="${HEADLESS:-true}"
 TIMEOUT_MS="${TIMEOUT_MS:-40000}"
 RUN_MODE="${RUN_MODE:-local}"
 SKIP_MULTITABLE_PILOT_SMOKE="${SKIP_MULTITABLE_PILOT_SMOKE:-false}"
+DEFAULT_OUTPUT_ROOT="output/playwright/multitable-pilot-release-gate/${timestamp}"
+if [[ "${RUN_MODE}" == "staging" ]]; then
+  DEFAULT_OUTPUT_ROOT="output/playwright/multitable-pilot-release-gate-staging/${timestamp}"
+fi
+OUTPUT_ROOT="${OUTPUT_ROOT:-}"
 REPORT_JSON="${REPORT_JSON:-}"
 REPORT_MD="${REPORT_MD:-}"
 LOG_PATH="${LOG_PATH:-}"
-PILOT_SMOKE_REPORT="${PILOT_SMOKE_REPORT:-}"
-PILOT_SMOKE_REPORT_MD="${PILOT_SMOKE_REPORT_MD:-}"
+if [[ -z "${OUTPUT_ROOT}" ]]; then
+  if [[ -n "${REPORT_JSON}" ]]; then
+    OUTPUT_ROOT="$(dirname "${REPORT_JSON}")"
+  elif [[ -n "${REPORT_MD}" ]]; then
+    OUTPUT_ROOT="$(dirname "${REPORT_MD}")"
+  elif [[ -n "${LOG_PATH}" ]]; then
+    OUTPUT_ROOT="$(dirname "${LOG_PATH}")"
+  else
+    OUTPUT_ROOT="${DEFAULT_OUTPUT_ROOT}"
+  fi
+fi
+REPORT_JSON="${REPORT_JSON:-${OUTPUT_ROOT}/report.json}"
+REPORT_MD="${REPORT_MD:-${OUTPUT_ROOT}/report.md}"
+LOG_PATH="${LOG_PATH:-${OUTPUT_ROOT}/release-gate.log}"
+PILOT_SMOKE_OUTPUT_ROOT="${PILOT_SMOKE_OUTPUT_ROOT:-${OUTPUT_ROOT}/smoke}"
+PILOT_SMOKE_REPORT="${PILOT_SMOKE_REPORT:-${PILOT_SMOKE_OUTPUT_ROOT}/report.json}"
+PILOT_SMOKE_REPORT_MD="${PILOT_SMOKE_REPORT_MD:-${PILOT_SMOKE_OUTPUT_ROOT}/report.md}"
+
+mkdir -p "$(dirname "${REPORT_JSON}")" "$(dirname "${REPORT_MD}")" "$(dirname "${LOG_PATH}")" "${PILOT_SMOKE_OUTPUT_ROOT}"
 
 export API_BASE WEB_BASE HEADLESS TIMEOUT_MS RUN_MODE
 
@@ -84,7 +107,7 @@ define_release_gate_steps() {
     ""
 
   local smoke_env
-  smoke_env="$(printf '{"API_BASE":"%s","WEB_BASE":"%s","HEADLESS":"%s","TIMEOUT_MS":"%s"}' "$API_BASE" "$WEB_BASE" "$HEADLESS" "$TIMEOUT_MS")"
+  smoke_env="$(printf '{"API_BASE":"%s","WEB_BASE":"%s","HEADLESS":"%s","TIMEOUT_MS":"%s","OUTPUT_ROOT":"%s","REPORT_MD":"%s","SMOKE_REPORT_MD":"%s","RUN_MODE":"%s"}' "$API_BASE" "$WEB_BASE" "$HEADLESS" "$TIMEOUT_MS" "$PILOT_SMOKE_OUTPUT_ROOT" "$PILOT_SMOKE_REPORT_MD" "$PILOT_SMOKE_REPORT_MD" "$RUN_MODE")"
 
   if [[ "$SKIP_MULTITABLE_PILOT_SMOKE" == "true" ]]; then
     add_release_gate_step \
@@ -342,13 +365,36 @@ run_release_gate_step() {
   local index="$1"
   local name="${STEP_NAMES[$index]}"
   local command="${STEP_COMMANDS[$index]}"
+  local env_json="${STEP_ENVS[$index]}"
 
   if [[ "${STEP_STATUSES[$index]}" == "skipped" ]]; then
     return 0
   fi
 
+  local -a env_args=()
+  if [[ -n "$env_json" ]]; then
+    while IFS= read -r env_arg; do
+      [[ -z "$env_arg" ]] && continue
+      env_args+=("$env_arg")
+    done < <(
+      RELEASE_GATE_ENV_JSON="$env_json" \
+      node <<'NODE'
+const raw = process.env.RELEASE_GATE_ENV_JSON
+if (!raw) process.exit(0)
+const envMap = JSON.parse(raw)
+for (const [key, value] of Object.entries(envMap)) {
+  process.stdout.write(`${key}=${String(value)}\n`)
+}
+NODE
+    )
+  fi
+
   set +e
-  bash -c "$command"
+  if [[ "${#env_args[@]}" -gt 0 ]]; then
+    env "${env_args[@]}" bash -c "$command"
+  else
+    bash -c "$command"
+  fi
   local step_exit=$?
   set -e
 

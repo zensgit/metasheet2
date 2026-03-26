@@ -182,7 +182,14 @@ Smoke must pass all of these:
 - `ui.grid.search-hydration`
 - `ui.conflict.retry`
 
-Grid profile thresholds:
+Grid profile thresholds for local readiness (`pnpm verify:multitable-pilot:ready:local`):
+
+- `ui.grid.open <= 500ms`
+- `ui.grid.search-hit <= 300ms`
+- `api.grid.initial-load <= 75ms`
+- `api.grid.search-hit <= 75ms`
+
+Grid profile thresholds for staging / release readiness:
 
 - `ui.grid.open <= 350ms`
 - `ui.grid.search-hit <= 300ms`
