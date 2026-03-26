@@ -379,6 +379,7 @@ describe('usePlmTeamFilterPresets', () => {
 
     model.teamPresetName.value = '新团队预设'
     model.teamPresetGroup.value = '关键件'
+    model.teamPresetOwnerUserId.value = 'owner-stale'
     await model.saveTeamPreset()
 
     expect(savePlmTeamFilterPreset).toHaveBeenCalledWith('bom', '新团队预设', {
@@ -387,6 +388,9 @@ describe('usePlmTeamFilterPresets', () => {
       group: '关键件',
     })
     expect(model.teamPresetKey.value).toBe('preset-2')
+    expect(model.teamPresetName.value).toBe('')
+    expect(model.teamPresetGroup.value).toBe('')
+    expect(model.teamPresetOwnerUserId.value).toBe('')
 
     model.teamPresetKey.value = 'preset-1'
     await model.setTeamPresetDefault()
@@ -1464,6 +1468,7 @@ describe('usePlmTeamFilterPresets', () => {
     })
 
     await model.refreshTeamPresets()
+    model.teamPresetOwnerUserId.value = 'owner-stale'
     const saved = await model.promoteFilterPresetToTeam({
       key: 'bom:local-1',
       label: '关键件',
@@ -1479,6 +1484,7 @@ describe('usePlmTeamFilterPresets', () => {
     })
     expect(saved?.id).toBe('preset-promoted')
     expect(model.teamPresetKey.value).toBe('preset-promoted')
+    expect(model.teamPresetOwnerUserId.value).toBe('')
     expect(setMessage).toHaveBeenCalledWith('已将BOM本地预设提升为团队预设：关键件 团队')
   })
 
@@ -1515,6 +1521,7 @@ describe('usePlmTeamFilterPresets', () => {
     })
 
     await model.refreshTeamPresets()
+    model.teamPresetOwnerUserId.value = 'owner-stale'
     const saved = await model.promoteFilterPresetToTeamDefault({
       key: 'where-used:local-1',
       label: '共享父件',
@@ -1532,6 +1539,7 @@ describe('usePlmTeamFilterPresets', () => {
     expect(saved?.id).toBe('preset-created')
     expect(model.teamPresetKey.value).toBe('preset-created')
     expect(model.teamPresets.value.find((preset) => preset.id === 'preset-created')?.isDefault).toBe(true)
+    expect(model.teamPresetOwnerUserId.value).toBe('')
     expect(setMessage).toHaveBeenCalledWith('已将Where-Used本地预设提升为默认团队预设：共享父件')
   })
 

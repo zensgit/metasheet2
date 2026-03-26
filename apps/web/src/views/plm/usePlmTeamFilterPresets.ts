@@ -345,8 +345,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       teamPresets.value = upsertTeamPreset(teamPresets.value, saved)
       clearSingleTargetTakeoverSelection()
       applyPresetToTarget(saved)
-      teamPresetName.value = ''
-      teamPresetGroup.value = ''
+      clearTeamPresetDrafts()
       options.setMessage(`已保存${options.label}团队预设。`)
     } catch (error) {
       teamPresetsError.value = getErrorMessage(error, `保存${options.label}团队预设失败`)
@@ -376,8 +375,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       teamPresets.value = upsertTeamPreset(teamPresets.value, saved)
       clearSingleTargetTakeoverSelection()
       applyPresetToTarget(saved)
-      teamPresetName.value = ''
-      teamPresetGroup.value = ''
+      clearTeamPresetDrafts()
       options.setMessage(`已将${options.label}本地预设提升为团队预设：${saved.name}`)
       return saved
     } catch (error) {
@@ -414,8 +412,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       teamPresets.value = applyDefaultPresetUpdate(teamPresets.value, defaulted)
       applyPresetToTarget(defaulted)
       lastAutoAppliedDefaultId.value = defaulted.id
-      teamPresetName.value = ''
-      teamPresetGroup.value = ''
+      clearTeamPresetDrafts()
       options.setMessage(`已将${options.label}本地预设提升为默认团队预设：${defaulted.name}`)
       return defaulted
     } catch (error) {
