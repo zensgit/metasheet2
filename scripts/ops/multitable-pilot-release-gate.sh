@@ -10,6 +10,7 @@ HEADLESS="${HEADLESS:-true}"
 TIMEOUT_MS="${TIMEOUT_MS:-40000}"
 SKIP_MULTITABLE_PILOT_SMOKE="${SKIP_MULTITABLE_PILOT_SMOKE:-false}"
 REPORT_JSON="${REPORT_JSON:-}"
+REPORT_MD="${REPORT_MD:-}"
 LOG_PATH="${LOG_PATH:-}"
 PILOT_SMOKE_REPORT="${PILOT_SMOKE_REPORT:-}"
 
@@ -96,8 +97,13 @@ define_release_gate_steps() {
 
 write_release_gate_report() {
   local exit_code="${1:-0}"
-  if [[ -z "$REPORT_JSON" ]]; then
+  if [[ -z "$REPORT_JSON" && -z "$REPORT_MD" ]]; then
     return 0
+  fi
+
+  local report_md_path="${REPORT_MD:-}"
+  if [[ -z "$report_md_path" && -n "$REPORT_JSON" ]]; then
+    report_md_path="$(dirname "$REPORT_JSON")/report.md"
   fi
 
   local steps_file
@@ -120,18 +126,22 @@ write_release_gate_report() {
   done
 
   REPORT_JSON_PATH="$REPORT_JSON" \
+  REPORT_MD_PATH="$report_md_path" \
   RELEASE_GATE_LOG_PATH="$LOG_PATH" \
   RELEASE_GATE_EXIT_CODE="$exit_code" \
   RELEASE_GATE_FAILED_STEP="$FAILED_STEP" \
   RELEASE_GATE_STEPS_FILE="$steps_file" \
+  PILOT_SMOKE_REPORT_PATH="$PILOT_SMOKE_REPORT" \
   node <<'NODE'
 const fs = require('fs')
 const path = require('path')
 
 const reportPath = process.env.REPORT_JSON_PATH
+const reportMdPath = process.env.REPORT_MD_PATH || null
 const fallbackLogPath = process.env.RELEASE_GATE_LOG_PATH || null
 const exitCode = Number(process.env.RELEASE_GATE_EXIT_CODE || '0')
 const failedStep = process.env.RELEASE_GATE_FAILED_STEP || null
+const smokeReportPath = process.env.PILOT_SMOKE_REPORT_PATH || null
 const rows = fs.readFileSync(process.env.RELEASE_GATE_STEPS_FILE, 'utf8').trimEnd()
 const checks = rows
   ? rows.split('\n').map((line) => {
@@ -149,16 +159,164 @@ const checks = rows
     })
   : []
 
+function readOptionalJson(filePath) {
+  if (!filePath) return null
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+const smokeReport = readOptionalJson(smokeReportPath)
+const smokeChecks = Array.isArray(smokeReport?.checks) ? smokeReport.checks : []
+const embedNamespaceSeen = smokeChecks.some((check) => /^(ui|api)\.embed-host\./.test(String(check?.name || '')))
+
+function summarizeEmbedEvidence(requiredWhenPresent) {
+  const observedChecks = requiredWhenPresent.filter((name) => smokeChecks.some((item) => item?.name === name))
+  const available = embedNamespaceSeen || observedChecks.length > 0
+  const missingChecks = available
+    ? requiredWhenPresent.filter((name) => !smokeChecks.some((item) => item?.name === name && item.ok))
+    : []
+  return {
+    available,
+    ok: !available || missingChecks.length === 0,
+    requiredWhenPresent,
+    observedChecks,
+    missingChecks,
+  }
+}
+
+const embedHostProtocol = summarizeEmbedEvidence([
+  'ui.embed-host.ready',
+  'ui.embed-host.state-query.initial',
+  'ui.embed-host.navigate.generated-request-id',
+  'ui.embed-host.navigate.applied',
+  'ui.embed-host.navigate.explicit-request-id',
+  'ui.embed-host.state-query.final',
+])
+
+const embedHostNavigationProtection = summarizeEmbedEvidence([
+  'ui.embed-host.form-ready',
+  'ui.embed-host.form-draft',
+  'ui.embed-host.navigate.blocked-dialog',
+  'ui.embed-host.navigate.blocked',
+  'ui.embed-host.navigate.confirm-dialog',
+  'ui.embed-host.navigate.confirmed',
+  'api.embed-host.discard-unsaved-form-draft',
+])
+
+const embedHostDeferredReplay = summarizeEmbedEvidence([
+  'ui.embed-host.navigate.deferred',
+  'ui.embed-host.navigate.superseded',
+  'ui.embed-host.state-query.deferred',
+  'ui.embed-host.navigate.replayed',
+  'api.embed-host.persisted-busy-form-save',
+])
+
+const embedEvidence = [embedHostProtocol, embedHostNavigationProtection, embedHostDeferredReplay]
+const embedHostAcceptance = {
+  available: embedEvidence.some((item) => item.available),
+  ok: embedEvidence.every((item) => item.ok),
+  protocol: embedHostProtocol,
+  navigationProtection: embedHostNavigationProtection,
+  deferredReplay: embedHostDeferredReplay,
+}
+
+const liveSmoke = {
+  available: Boolean(smokeReport),
+  ok: smokeReport ? Boolean(smokeReport.ok) : true,
+  report: smokeReportPath ? path.resolve(smokeReportPath) : null,
+  checkCount: smokeChecks.length,
+  failingChecks: smokeChecks.filter((item) => item && item.ok === false).map((item) => item.name),
+}
+
+const failingEvidence = [
+  liveSmoke.available && !liveSmoke.ok ? 'liveSmoke' : null,
+  embedHostProtocol.available && !embedHostProtocol.ok ? 'embedHostProtocol' : null,
+  embedHostNavigationProtection.available && !embedHostNavigationProtection.ok ? 'embedHostNavigationProtection' : null,
+  embedHostDeferredReplay.available && !embedHostDeferredReplay.ok ? 'embedHostDeferredReplay' : null,
+].filter(Boolean)
+
 const report = {
-  ok: exitCode === 0 && checks.every((check) => check.ok),
+  ok: exitCode === 0 && checks.every((check) => check.ok) && failingEvidence.length === 0,
   exitCode,
   failedStep,
+  failingEvidence,
   checks,
+  liveSmoke,
+  embedHostAcceptance,
+  embedHostProtocol,
+  embedHostNavigationProtection,
+  embedHostDeferredReplay,
   generatedAt: new Date().toISOString(),
 }
 
-fs.mkdirSync(path.dirname(reportPath), { recursive: true })
-fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`)
+if (reportPath) {
+  fs.mkdirSync(path.dirname(reportPath), { recursive: true })
+  fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`)
+}
+
+if (reportMdPath) {
+  const evidenceSection = (title, evidence) => [
+    title,
+    '',
+    `- Available in smoke: \`${evidence.available ? 'true' : 'false'}\``,
+    `- Status: **${evidence.ok ? 'PASS' : 'FAIL'}**`,
+    evidence.requiredWhenPresent.length
+      ? `- Required when present: ${evidence.requiredWhenPresent.map((item) => `\`${item}\``).join(', ')}`
+      : '- Required when present: none',
+    evidence.observedChecks.length
+      ? `- Observed checks: ${evidence.observedChecks.map((item) => `\`${item}\``).join(', ')}`
+      : '- Observed checks: none',
+    evidence.missingChecks.length
+      ? `- Missing checks: ${evidence.missingChecks.map((item) => `\`${item}\``).join(', ')}`
+      : '- Missing checks: none',
+    '',
+  ]
+
+  const lines = [
+    '# Multitable Pilot Release Gate',
+    '',
+    `- Overall: **${report.ok ? 'PASS' : 'FAIL'}**`,
+    `- Exit code: \`${exitCode}\``,
+    failedStep ? `- Failed step: \`${failedStep}\`` : '- Failed step: none',
+    reportPath ? `- JSON report: \`${path.resolve(reportPath)}\`` : '- JSON report: not written',
+    `- Markdown report: \`${path.resolve(reportMdPath)}\``,
+    '',
+    '## Step Checks',
+    '',
+    ...checks.map((check) => {
+      const suffix = check.status === 'skipped' && check.note ? `; ${check.note}` : ''
+      return `- \`${check.name}\`: **${check.ok ? 'PASS' : 'FAIL'}** (\`${check.status}\`)${suffix}`
+    }),
+    '',
+    '## Live Smoke Artifact',
+    '',
+    `- Available: \`${liveSmoke.available ? 'true' : 'false'}\``,
+    `- Status: **${liveSmoke.ok ? 'PASS' : 'FAIL'}**`,
+    liveSmoke.report ? `- Report: \`${liveSmoke.report}\`` : '- Report: missing',
+    `- Check count: \`${liveSmoke.checkCount}\``,
+    liveSmoke.failingChecks.length
+      ? `- Failing checks: ${liveSmoke.failingChecks.map((item) => `\`${item}\``).join(', ')}`
+      : '- Failing checks: none',
+    '',
+    '## Embed Host Acceptance',
+    '',
+    `- Available in smoke: \`${embedHostAcceptance.available ? 'true' : 'false'}\``,
+    `- Status: **${embedHostAcceptance.ok ? 'PASS' : 'FAIL'}**`,
+    failingEvidence.length
+      ? `- Failing evidence: ${failingEvidence.map((item) => `\`${item}\``).join(', ')}`
+      : '- Failing evidence: none',
+    '',
+    ...evidenceSection('### Embed Host Protocol Evidence', embedHostProtocol),
+    ...evidenceSection('### Embed Host Navigation Protection', embedHostNavigationProtection),
+    ...evidenceSection('### Embed Host Busy Deferred Replay', embedHostDeferredReplay),
+  ]
+
+  fs.mkdirSync(path.dirname(reportMdPath), { recursive: true })
+  fs.writeFileSync(reportMdPath, `${lines.join('\n')}\n`)
+}
 NODE
   rm -f "$steps_file"
 }

@@ -12,6 +12,7 @@ GATE_ROOT="${OUTPUT_ROOT}/gates"
 READINESS_MD="${OUTPUT_ROOT}/readiness.md"
 READINESS_JSON="${OUTPUT_ROOT}/readiness.json"
 GATE_REPORT_JSON="${OUTPUT_ROOT}/gates/report.json"
+GATE_REPORT_MD="${OUTPUT_ROOT}/gates/report.md"
 ROW_COUNT="${ROW_COUNT:-2000}"
 PROFILE_RETRY_ON_FAIL="${PROFILE_RETRY_ON_FAIL:-true}"
 FALLBACK_OUTPUT_ROOT="${FALLBACK_OUTPUT_ROOT:-output/playwright/multitable-pilot-ready-local-current}"
@@ -61,6 +62,7 @@ if ! mkdir -p "$SMOKE_ROOT" "$PROFILE_ROOT" "$GATE_ROOT" 2>/dev/null; then
   READINESS_MD="${OUTPUT_ROOT}/readiness.md"
   READINESS_JSON="${OUTPUT_ROOT}/readiness.json"
   GATE_REPORT_JSON="${OUTPUT_ROOT}/gates/report.json"
+  GATE_REPORT_MD="${OUTPUT_ROOT}/gates/report.md"
   PROFILE_RETRY_ON_FAIL="${PROFILE_RETRY_ON_FAIL:-true}"
   mkdir -p "$SMOKE_ROOT" "$PROFILE_ROOT" "$GATE_ROOT"
 fi
@@ -122,6 +124,7 @@ fi
 
 echo "[multitable-pilot-ready-local] Running release gate" >&2
 REPORT_JSON="${GATE_REPORT_JSON}" \
+REPORT_MD="${GATE_REPORT_MD}" \
 LOG_PATH="${GATE_ROOT}/release-gate.log" \
 PILOT_SMOKE_REPORT="${SMOKE_ROOT}/report.json" \
 SKIP_MULTITABLE_PILOT_SMOKE=true \
@@ -139,4 +142,6 @@ node scripts/ops/multitable-pilot-readiness.mjs
 echo "[multitable-pilot-ready-local] PASS: readiness complete" >&2
 echo "[multitable-pilot-ready-local] readiness_md=${READINESS_MD}" >&2
 echo "[multitable-pilot-ready-local] readiness_json=${READINESS_JSON}" >&2
+echo "[multitable-pilot-ready-local] gate_report_json=${GATE_REPORT_JSON}" >&2
+echo "[multitable-pilot-ready-local] gate_report_md=${GATE_REPORT_MD}" >&2
 print_signoff_recovery_path "${READINESS_JSON}"
