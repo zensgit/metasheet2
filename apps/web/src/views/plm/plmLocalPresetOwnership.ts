@@ -10,6 +10,7 @@ export type PlmLocalPresetTeamPresetActionKind =
   | 'rename'
   | 'transfer'
   | 'set-default'
+  | 'clear-default'
   | 'restore'
   | 'promote'
   | 'promote-default'

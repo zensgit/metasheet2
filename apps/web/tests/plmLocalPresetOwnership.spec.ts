@@ -80,6 +80,20 @@ describe('plmLocalPresetOwnership', () => {
     expect(clearLocalOwner).toHaveBeenCalledTimes(1)
   })
 
+  it('clears the local owner when clearing a team preset default reapplies a surviving target', async () => {
+    const clearLocalOwner = vi.fn()
+
+    await runPlmLocalPresetOwnershipAction(
+      async () => ({ id: 'preset-cleared-default' }),
+      {
+        clearLocalOwner,
+        shouldClear: (result) => shouldClearLocalPresetOwnerAfterTeamPresetAction('clear-default', result),
+      },
+    )
+
+    expect(clearLocalOwner).toHaveBeenCalledTimes(1)
+  })
+
   it('clears the local owner after batch restore only when the restored preset actually becomes the active owner', () => {
     expect(
       shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore(

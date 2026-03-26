@@ -87,6 +87,10 @@ import {
   canApplyPlmCollaborativeEntry,
   canSharePlmCollaborativeEntry,
 } from './plm/usePlmCollaborativePermissions'
+import {
+  mergePlmDeferredRouteQueryPatch,
+  resolvePlmDeferredRouteQueryPatch,
+} from './plm/plmRouteHydrationPatch'
 import { usePlmWhereUsedPanel } from './plm/usePlmWhereUsedPanel'
 import { usePlmWhereUsedState } from './plm/usePlmWhereUsedState'
 import {
@@ -470,9 +474,11 @@ const {
 })
 const isApplyingRouteQueryState = ref(false)
 let pendingRouteQueryHydration = false
+let deferredRouteQueryPatch: Record<string, string | number | boolean | undefined> | null = null
 
 function scheduleQuerySync(patch: Record<string, string | number | boolean | undefined>) {
   if (isApplyingRouteQueryState.value) {
+    deferredRouteQueryPatch = mergePlmDeferredRouteQueryPatch(deferredRouteQueryPatch, patch)
     return
   }
   scheduleBaseQuerySync(patch)
@@ -4134,7 +4140,7 @@ const {
   renameTeamPreset: renameBomTeamPresetBase,
   transferTeamPreset: transferBomTeamPresetBase,
   setTeamPresetDefault: setBomTeamPresetDefaultBase,
-  clearTeamPresetDefault: clearBomTeamPresetDefault,
+  clearTeamPresetDefault: clearBomTeamPresetDefaultBase,
   selectAllTeamPresets: selectAllBomTeamPresets,
   clearTeamPresetSelection: clearBomTeamPresetSelection,
   archiveTeamPresetSelection: archiveBomTeamPresetSelectionBase,
@@ -4223,7 +4229,7 @@ const {
   renameTeamPreset: renameWhereUsedTeamPresetBase,
   transferTeamPreset: transferWhereUsedTeamPresetBase,
   setTeamPresetDefault: setWhereUsedTeamPresetDefaultBase,
-  clearTeamPresetDefault: clearWhereUsedTeamPresetDefault,
+  clearTeamPresetDefault: clearWhereUsedTeamPresetDefaultBase,
   selectAllTeamPresets: selectAllWhereUsedTeamPresets,
   clearTeamPresetSelection: clearWhereUsedTeamPresetSelection,
   archiveTeamPresetSelection: archiveWhereUsedTeamPresetSelectionBase,
@@ -4381,6 +4387,16 @@ async function setBomTeamPresetDefault() {
   )
 }
 
+async function clearBomTeamPresetDefault() {
+  await runPlmLocalPresetOwnershipAction(
+    () => clearBomTeamPresetDefaultBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => shouldClearLocalPresetOwnerAfterTeamPresetAction('clear-default', saved),
+    },
+  )
+}
+
 async function archiveBomTeamPresetSelection() {
   await runPlmLocalPresetOwnershipAction(
     () => archiveBomTeamPresetSelectionBase(),
@@ -4527,6 +4543,16 @@ async function setWhereUsedTeamPresetDefault() {
     {
       clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
       shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function clearWhereUsedTeamPresetDefault() {
+  await runPlmLocalPresetOwnershipAction(
+    () => clearWhereUsedTeamPresetDefaultBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => shouldClearLocalPresetOwnerAfterTeamPresetAction('clear-default', saved),
     },
   )
 }
@@ -5677,9 +5703,20 @@ async function applyQueryState() {
     isApplyingRouteQueryState.value = false
   }
 
+  const { pendingPatch, flushPatch } = resolvePlmDeferredRouteQueryPatch(
+    deferredRouteQueryPatch,
+    pendingRouteQueryHydration,
+  )
+  deferredRouteQueryPatch = pendingPatch
+
   if (pendingRouteQueryHydration) {
     pendingRouteQueryHydration = false
     await applyQueryState()
+    return
+  }
+
+  if (flushPatch) {
+    syncQueryParams(flushPatch)
   }
 }
 
