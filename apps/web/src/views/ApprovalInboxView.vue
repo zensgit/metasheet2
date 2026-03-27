@@ -267,6 +267,7 @@ async function performAction(id: string, action: 'approve' | 'reject') {
       throw new Error(failure.message)
     }
     actionStatus.value = `${action === 'approve' ? 'Approved' : 'Rejected'} ${id}`
+    comment.value = ''
     await refreshInboxState({ preserveActionStatus: true })
   } catch (err) {
     error.value = err instanceof Error ? err.message : `Failed to ${action} approval`
