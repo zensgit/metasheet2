@@ -418,10 +418,17 @@ export type ApprovalHistoryEntry = UnknownRecord & {
   user_name?: string
   username?: string
   approver_name?: string
+  actor_name?: string | null
   user_id?: string | number
   approver_id?: string | number
+  actor_id?: string | number
   comment?: string
   note?: string
+  version?: string | number
+  from_version?: string | number
+  fromVersion?: string | number
+  to_version?: string | number
+  toVersion?: string | number
   approved_at?: string
   acted_at?: string
   created_at?: string
@@ -1065,6 +1072,7 @@ export type PlmApprovalsPanelModel = {
   getApprovalHistoryType: (entry: ApprovalHistoryEntry) => string
   getApprovalHistoryRole: (entry: ApprovalHistoryEntry) => string
   getApprovalHistoryUser: (entry: ApprovalHistoryEntry) => string
+  getApprovalHistoryVersion: (entry: ApprovalHistoryEntry) => string
   getApprovalHistoryComment: (entry: ApprovalHistoryEntry) => string
   getApprovalHistoryApprovedAt: (entry: ApprovalHistoryEntry) => string
   getApprovalHistoryCreatedAt: (entry: ApprovalHistoryEntry) => string

@@ -91,6 +91,7 @@
               <th>From</th>
               <th>To</th>
               <th>Actor</th>
+              <th>Version</th>
               <th>Occurred</th>
             </tr>
           </thead>
@@ -99,7 +100,8 @@
               <td>{{ record.action }}</td>
               <td>{{ record.from_status || '-' }}</td>
               <td>{{ record.to_status }}</td>
-              <td>{{ record.actor_name || record.actor_id }}</td>
+              <td>{{ formatHistoryActor(record) }}</td>
+              <td>{{ formatHistoryVersion(record) }}</td>
               <td>{{ formatDate(record.occurred_at || record.created_at) }}</td>
             </tr>
           </tbody>
@@ -111,6 +113,7 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import type { ApprovalHistoryEntry } from './plm/plmPanelModels'
 import { apiFetch } from '../utils/api'
 import {
   buildApprovalInboxActionPayload,
@@ -123,6 +126,10 @@ import {
   reconcileApprovalInboxConflictVersion,
   resolveApprovalInboxActionStatusAfterRefresh,
 } from './approvalInboxFeedback'
+import {
+  resolvePlmApprovalHistoryActorLabel,
+  resolvePlmApprovalHistoryVersionLabel,
+} from './plm/plmApprovalHistoryDisplay'
 
 interface ApprovalInstance {
   id: string
@@ -132,11 +139,10 @@ interface ApprovalInstance {
   updated_at?: string
 }
 
-interface ApprovalRecord {
+interface ApprovalRecord extends ApprovalHistoryEntry {
   id: string
   action: string
   actor_id: string
-  actor_name?: string | null
   from_status?: string | null
   to_status: string
   occurred_at?: string
@@ -158,6 +164,14 @@ function formatDate(value?: string) {
   if (!value) return '-'
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
+}
+
+function formatHistoryActor(record: ApprovalRecord) {
+  return resolvePlmApprovalHistoryActorLabel(record)
+}
+
+function formatHistoryVersion(record: ApprovalRecord) {
+  return resolvePlmApprovalHistoryVersionLabel(record)
 }
 
 async function loadHistory(id: string) {

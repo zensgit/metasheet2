@@ -223,6 +223,7 @@
             <th>审批类型</th>
             <th>角色</th>
             <th>用户</th>
+            <th>版本</th>
             <th>备注</th>
             <th>批准时间</th>
             <th>创建时间</th>
@@ -239,6 +240,7 @@
             <td>{{ panel.getApprovalHistoryType(entry) }}</td>
             <td>{{ panel.getApprovalHistoryRole(entry) }}</td>
             <td class="mono">{{ panel.getApprovalHistoryUser(entry) }}</td>
+            <td class="mono">{{ panel.getApprovalHistoryVersion(entry) }}</td>
             <td>{{ panel.getApprovalHistoryComment(entry) }}</td>
             <td>{{ panel.formatTime(panel.getApprovalHistoryApprovedAt(entry)) }}</td>
             <td>{{ panel.formatTime(panel.getApprovalHistoryCreatedAt(entry)) }}</td>

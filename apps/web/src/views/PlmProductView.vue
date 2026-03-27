@@ -151,6 +151,10 @@ import {
   resolvePlmApprovalActorIds,
 } from './plm/plmApprovalActionability'
 import {
+  resolvePlmApprovalHistoryActorLabel,
+  resolvePlmApprovalHistoryVersionLabel,
+} from './plm/plmApprovalHistoryDisplay'
+import {
   buildRecommendedWorkbenchSceneAuditQuery,
   buildWorkbenchAuditQuery,
 } from './plm/plmWorkbenchSceneAudit'
@@ -2900,7 +2904,11 @@ function getApprovalHistoryRole(entry: ApprovalHistoryEntry): string {
 }
 
 function getApprovalHistoryUser(entry: ApprovalHistoryEntry): string {
-  return normalizeText(entry?.user_id || entry?.userId, '-')
+  return resolvePlmApprovalHistoryActorLabel(entry)
+}
+
+function getApprovalHistoryVersion(entry: ApprovalHistoryEntry): string {
+  return resolvePlmApprovalHistoryVersionLabel(entry)
 }
 
 function getApprovalHistoryComment(entry: ApprovalHistoryEntry): string {
@@ -6746,6 +6754,7 @@ const approvalsPanel = {
   getApprovalHistoryType,
   getApprovalHistoryRole,
   getApprovalHistoryUser,
+  getApprovalHistoryVersion,
   getApprovalHistoryComment,
   getApprovalHistoryApprovedAt,
   getApprovalHistoryCreatedAt,
