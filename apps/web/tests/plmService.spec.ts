@@ -215,4 +215,27 @@ describe('plmService', () => {
       comment: 'needs revision',
     })
   })
+
+  it('preserves structured approval conflict metadata through the localized federation client', async () => {
+    apiPostMock.mockResolvedValueOnce({
+      ok: false,
+      data: null,
+      error: {
+        code: 'APPROVAL_VERSION_CONFLICT',
+        message: 'Approval instance version mismatch',
+        currentVersion: 9,
+      },
+    })
+
+    await expect(
+      plmService.approveApproval({
+        approvalId: 'APP-9',
+        version: 8,
+      }),
+    ).rejects.toMatchObject({
+      message: 'Approval instance version mismatch',
+      code: 'APPROVAL_VERSION_CONFLICT',
+      currentVersion: 9,
+    })
+  })
 })

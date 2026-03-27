@@ -33,14 +33,25 @@ function toRequestClient(clientOrOptions) {
     }
     return createClient(clientOrOptions);
 }
+function buildApiEnvelopeError(error, fallback) {
+    const nextError = new Error((error === null || error === void 0 ? void 0 : error.message) || fallback);
+    if (!error || typeof error !== 'object') {
+        return nextError;
+    }
+    Object.assign(nextError, error);
+    if (!nextError.message) {
+        nextError.message = fallback;
+    }
+    return nextError;
+}
 function unwrapData(response, fallback) {
     const envelope = response.json;
     if (response.status >= 400) {
-        throw new Error(envelope?.error?.message || fallback);
+        throw buildApiEnvelopeError(envelope?.error, fallback);
     }
     if (envelope && typeof envelope === 'object' && 'ok' in envelope) {
         if (envelope.ok === false) {
-            throw new Error(envelope.error?.message || fallback);
+            throw buildApiEnvelopeError(envelope.error, fallback);
         }
         return envelope.data;
     }

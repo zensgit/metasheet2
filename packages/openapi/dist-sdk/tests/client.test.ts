@@ -187,6 +187,33 @@ describe('createPlmFederationClient', () => {
     })
   })
 
+  it('preserves structured approval conflict metadata on mutation failures', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        ok: false,
+        error: {
+          code: 'APPROVAL_VERSION_CONFLICT',
+          message: 'Approval instance version mismatch',
+          currentVersion: 4,
+        },
+      }, { status: 409 }),
+    )
+
+    const client = createPlmFederationClient({
+      baseUrl: 'http://localhost:8910',
+      getToken: () => 'token-7',
+      fetch: fetchMock,
+    })
+
+    await expect(
+      client.approveApproval({ approvalId: 'ECO-42', version: 3 }),
+    ).rejects.toMatchObject({
+      message: 'Approval instance version mismatch',
+      code: 'APPROVAL_VERSION_CONFLICT',
+      currentVersion: 4,
+    })
+  })
+
   it('supports schema, substitute mutations, and CAD helpers', async () => {
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({ ok: true, data: { line_fields: [] } }))

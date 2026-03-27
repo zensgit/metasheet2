@@ -36,6 +36,10 @@ import type { PlmTeamFilterPresetBatchResult } from '../services/plm/plmWorkbenc
 import { copyListToClipboard, copyTextToClipboard } from './plm/plmClipboard'
 import { downloadCsvFile } from './plm/plmCsv'
 import { resolveApprovalActionVersion } from './approvalInboxActionPayload'
+import {
+  reconcileApprovalInboxConflictVersion,
+  resolveApprovalInboxThrownErrorRecord,
+} from './approvalInboxFeedback'
 import type {
   ApprovalEntry,
   ApprovalHistoryEntry,
@@ -2795,7 +2799,19 @@ async function approveApproval(entry: ApprovalEntry) {
     }
   } catch (error: any) {
     handleAuthError(error)
-    approvalActionError.value = error?.message || '审批通过失败'
+    const failure = resolveApprovalInboxThrownErrorRecord(error, '审批通过失败')
+    if (failure.code === 'APPROVAL_VERSION_CONFLICT') {
+      approvals.value = reconcileApprovalInboxConflictVersion(approvals.value, approvalId, failure.currentVersion)
+      await loadApprovals()
+      if (approvalHistoryFor.value === approvalId) {
+        await loadApprovalHistory()
+      }
+      if (!approvalActionError.value) {
+        approvalActionError.value = failure.message
+      }
+      return
+    }
+    approvalActionError.value = failure.message
   } finally {
     approvalActingId.value = ''
   }
@@ -2848,7 +2864,19 @@ async function rejectApproval(entry: ApprovalEntry) {
     }
   } catch (error: any) {
     handleAuthError(error)
-    approvalActionError.value = error?.message || '审批拒绝失败'
+    const failure = resolveApprovalInboxThrownErrorRecord(error, '审批拒绝失败')
+    if (failure.code === 'APPROVAL_VERSION_CONFLICT') {
+      approvals.value = reconcileApprovalInboxConflictVersion(approvals.value, approvalId, failure.currentVersion)
+      await loadApprovals()
+      if (approvalHistoryFor.value === approvalId) {
+        await loadApprovalHistory()
+      }
+      if (!approvalActionError.value) {
+        approvalActionError.value = failure.message
+      }
+      return
+    }
+    approvalActionError.value = failure.message
   } finally {
     approvalActingId.value = ''
   }

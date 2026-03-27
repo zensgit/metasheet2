@@ -6,6 +6,7 @@ import {
   resolveApprovalInboxActionStatusAfterRefresh,
   resolveApprovalInboxErrorRecord,
   resolveApprovalInboxErrorMessage,
+  resolveApprovalInboxThrownErrorRecord,
 } from '../src/views/approvalInboxFeedback'
 
 describe('approvalInboxFeedback', () => {
@@ -120,5 +121,30 @@ describe('approvalInboxFeedback', () => {
       { id: 'approval-1', version: 3, status: 'pending' },
       { id: 'approval-2', version: 4, status: 'pending' },
     ])
+  })
+
+  it('reads conflict metadata from thrown errors for product-view recovery', () => {
+    const conflict = new Error('Approval instance version mismatch') as Error & {
+      code?: string
+      currentVersion?: number
+    }
+    conflict.code = 'APPROVAL_VERSION_CONFLICT'
+    conflict.currentVersion = 6
+
+    expect(
+      resolveApprovalInboxThrownErrorRecord(conflict, '审批通过失败'),
+    ).toEqual({
+      code: 'APPROVAL_VERSION_CONFLICT',
+      currentVersion: 6,
+      message: 'Approval instance version mismatch',
+    })
+
+    expect(
+      resolveApprovalInboxThrownErrorRecord(null, '审批通过失败'),
+    ).toEqual({
+      code: null,
+      currentVersion: null,
+      message: '审批通过失败',
+    })
   })
 })

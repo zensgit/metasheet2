@@ -18,8 +18,8 @@ interface ApprovalInboxErrorRecord {
 }
 
 interface ApprovalInboxVersionedEntry {
-  id: string
-  version: number
+  id?: string | number
+  version?: string | number
 }
 
 export function resolveApprovalInboxErrorMessage(payload: unknown, fallback: string) {
@@ -73,6 +73,31 @@ export function resolveApprovalInboxErrorRecord(
   }
 }
 
+export function resolveApprovalInboxThrownErrorRecord(
+  error: unknown,
+  fallback: string,
+): ApprovalInboxErrorRecord {
+  if (!error || typeof error !== 'object') {
+    return {
+      code: null,
+      currentVersion: null,
+      message: fallback,
+    }
+  }
+
+  const record = error as Record<string, unknown>
+  return {
+    code: typeof record.code === 'string' && record.code.trim() ? record.code : null,
+    currentVersion:
+      typeof record.currentVersion === 'number' && Number.isInteger(record.currentVersion)
+        ? record.currentVersion
+        : null,
+    message: typeof record.message === 'string' && record.message.trim()
+      ? record.message.trim()
+      : fallback,
+  }
+}
+
 export async function readApprovalInboxError(response: ApprovalInboxErrorResponse) {
   return (await readApprovalInboxErrorRecord(response)).message
 }
@@ -103,11 +128,11 @@ export function reconcileApprovalInboxConflictVersion<T extends ApprovalInboxVer
   }
 
   return approvals.map((entry) =>
-    entry.id === approvalId && entry.version !== currentVersion
+    String(entry.id ?? '') === approvalId && Number(entry.version) !== currentVersion
       ? {
           ...entry,
           version: currentVersion,
-        }
+        } as T
       : entry,
   )
 }
