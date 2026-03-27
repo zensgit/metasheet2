@@ -90,6 +90,22 @@ describe('plmWorkbenchViewState', () => {
     ).toBe(true)
   })
 
+  it('matches workbench snapshots while ignoring autoload-only differences', () => {
+    expect(
+      matchPlmWorkbenchQuerySnapshot(
+        {
+          productId: 'prod-100',
+          documentFilter: 'gear',
+          autoload: true,
+        },
+        {
+          productId: 'prod-100',
+          documentFilter: 'gear',
+        },
+      ),
+    ).toBe(true)
+  })
+
   it('normalizes collaborative workbench snapshots without local preset ownership', () => {
     expect(
       normalizePlmWorkbenchCollaborativeQuerySnapshot({

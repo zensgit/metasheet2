@@ -391,6 +391,8 @@ export function buildPlmWorkbenchLegacyLocalDraftQueryPatch(value: unknown) {
 export function matchPlmWorkbenchQuerySnapshot(left: unknown, right: unknown): boolean {
   const normalizedLeft = normalizePlmWorkbenchCollaborativeQuerySnapshot(left)
   const normalizedRight = normalizePlmWorkbenchCollaborativeQuerySnapshot(right)
+  delete normalizedLeft.autoload
+  delete normalizedRight.autoload
 
   const leftKeys = Object.keys(normalizedLeft)
   const rightKeys = Object.keys(normalizedRight)
