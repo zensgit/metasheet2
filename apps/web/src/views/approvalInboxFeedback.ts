@@ -5,6 +5,12 @@ export function resolveApprovalInboxActionStatusAfterRefresh(
   return preserveActionStatus ? currentStatus : ''
 }
 
+interface ApprovalInboxErrorResponse {
+  status: number
+  statusText: string
+  json: () => Promise<unknown>
+}
+
 export function resolveApprovalInboxErrorMessage(payload: unknown, fallback: string) {
   if (!payload || typeof payload !== 'object') {
     return fallback
@@ -25,4 +31,14 @@ export function resolveApprovalInboxErrorMessage(payload: unknown, fallback: str
   }
 
   return fallback
+}
+
+export async function readApprovalInboxError(response: ApprovalInboxErrorResponse) {
+  const fallback = `${response.status} ${response.statusText}`
+  try {
+    const payload = await response.json()
+    return resolveApprovalInboxErrorMessage(payload, fallback)
+  } catch {
+    return fallback
+  }
 }

@@ -118,8 +118,8 @@ import {
   resolveApprovalActionVersion,
 } from './approvalInboxActionPayload'
 import {
+  readApprovalInboxError,
   resolveApprovalInboxActionStatusAfterRefresh,
-  resolveApprovalInboxErrorMessage,
 } from './approvalInboxFeedback'
 
 interface ApprovalInstance {
@@ -165,7 +165,7 @@ async function loadHistory(id: string) {
 
   try {
     const response = await apiFetch(`/api/approvals/${encodeURIComponent(id)}/history`)
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
+    if (!response.ok) throw new Error(await readApprovalInboxError(response))
     const payload = await response.json()
     history.value = Array.isArray(payload?.data?.items)
       ? payload.data.items
@@ -177,16 +177,6 @@ async function loadHistory(id: string) {
     history.value = []
   } finally {
     historyLoading.value = false
-  }
-}
-
-async function readApprovalInboxError(response: Response) {
-  const fallback = `${response.status} ${response.statusText}`
-  try {
-    const payload = await response.json()
-    return resolveApprovalInboxErrorMessage(payload, fallback)
-  } catch {
-    return fallback
   }
 }
 

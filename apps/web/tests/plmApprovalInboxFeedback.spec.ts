@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  readApprovalInboxError,
   resolveApprovalInboxActionStatusAfterRefresh,
   resolveApprovalInboxErrorMessage,
 } from '../src/views/approvalInboxFeedback'
@@ -34,5 +35,30 @@ describe('approvalInboxFeedback', () => {
     ).toBe('Rejection reason is required')
 
     expect(resolveApprovalInboxErrorMessage(null, '500 Internal Server Error')).toBe('500 Internal Server Error')
+  })
+
+  it('reads structured response errors for history and action flows alike', async () => {
+    await expect(
+      readApprovalInboxError({
+        status: 409,
+        statusText: 'Conflict',
+        json: async () => ({
+          ok: false,
+          error: {
+            message: 'Approval history is unavailable for archived approvals',
+          },
+        }),
+      }),
+    ).resolves.toBe('Approval history is unavailable for archived approvals')
+
+    await expect(
+      readApprovalInboxError({
+        status: 500,
+        statusText: 'Internal Server Error',
+        json: async () => {
+          throw new Error('invalid json')
+        },
+      }),
+    ).resolves.toBe('500 Internal Server Error')
   })
 })
