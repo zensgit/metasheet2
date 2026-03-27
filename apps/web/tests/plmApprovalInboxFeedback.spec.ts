@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  readApprovalInboxErrorRecord,
   readApprovalInboxError,
+  reconcileApprovalInboxConflictVersion,
   resolveApprovalInboxActionStatusAfterRefresh,
+  resolveApprovalInboxErrorRecord,
   resolveApprovalInboxErrorMessage,
 } from '../src/views/approvalInboxFeedback'
 
@@ -60,5 +63,62 @@ describe('approvalInboxFeedback', () => {
         },
       }),
     ).resolves.toBe('500 Internal Server Error')
+  })
+
+  it('exposes approval version conflict metadata for retry recovery', () => {
+    expect(
+      resolveApprovalInboxErrorRecord(
+        {
+          ok: false,
+          error: {
+            code: 'APPROVAL_VERSION_CONFLICT',
+            message: 'Approval instance version mismatch',
+            currentVersion: 7,
+          },
+        },
+        '409 Conflict',
+      ),
+    ).toEqual({
+      code: 'APPROVAL_VERSION_CONFLICT',
+      currentVersion: 7,
+      message: 'Approval instance version mismatch',
+    })
+  })
+
+  it('reads structured conflict metadata from action responses', async () => {
+    await expect(
+      readApprovalInboxErrorRecord({
+        status: 409,
+        statusText: 'Conflict',
+        json: async () => ({
+          ok: false,
+          error: {
+            code: 'APPROVAL_VERSION_CONFLICT',
+            message: 'Approval instance version mismatch',
+            currentVersion: 5,
+          },
+        }),
+      }),
+    ).resolves.toEqual({
+      code: 'APPROVAL_VERSION_CONFLICT',
+      currentVersion: 5,
+      message: 'Approval instance version mismatch',
+    })
+  })
+
+  it('reconciles stale approval versions without mutating other rows', () => {
+    expect(
+      reconcileApprovalInboxConflictVersion(
+        [
+          { id: 'approval-1', version: 2, status: 'pending' },
+          { id: 'approval-2', version: 4, status: 'pending' },
+        ],
+        'approval-1',
+        3,
+      ),
+    ).toEqual([
+      { id: 'approval-1', version: 3, status: 'pending' },
+      { id: 'approval-2', version: 4, status: 'pending' },
+    ])
   })
 })

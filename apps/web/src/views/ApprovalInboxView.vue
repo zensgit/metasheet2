@@ -118,7 +118,9 @@ import {
   resolveApprovalActionVersion,
 } from './approvalInboxActionPayload'
 import {
+  readApprovalInboxErrorRecord,
   readApprovalInboxError,
+  reconcileApprovalInboxConflictVersion,
   resolveApprovalInboxActionStatusAfterRefresh,
 } from './approvalInboxFeedback'
 
@@ -228,7 +230,18 @@ async function performAction(id: string, action: 'approve' | 'reject') {
       method: 'POST',
       body: JSON.stringify(buildApprovalInboxActionPayload(action, comment.value, version)),
     })
-    if (!response.ok) throw new Error(await readApprovalInboxError(response))
+    if (!response.ok) {
+      const failure = await readApprovalInboxErrorRecord(response)
+      if (failure.code === 'APPROVAL_VERSION_CONFLICT') {
+        approvals.value = reconcileApprovalInboxConflictVersion(approvals.value, id, failure.currentVersion)
+        await refreshInboxState()
+        if (!error.value) {
+          error.value = failure.message
+        }
+        return
+      }
+      throw new Error(failure.message)
+    }
     actionStatus.value = `${action === 'approve' ? 'Approved' : 'Rejected'} ${id}`
     await refreshInboxState({ preserveActionStatus: true })
   } catch (err) {
