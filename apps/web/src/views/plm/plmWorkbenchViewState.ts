@@ -171,6 +171,7 @@ export function normalizePlmWorkbenchLocalRouteQuerySnapshot(value: unknown): Re
 export function hasExplicitPlmWorkbenchAutoApplyQueryState(value: unknown): boolean {
   const next = normalizePlmWorkbenchQuerySnapshot(value)
   delete next.approvalComment
+  delete next.autoload
   if (next.searchItemType === 'Part') {
     delete next.searchItemType
   }

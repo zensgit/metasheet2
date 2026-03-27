@@ -280,6 +280,16 @@ describe('plmWorkbenchViewState', () => {
         panel: 'approvals,documents',
       }),
     ).toBe(true)
+    expect(
+      hasExplicitPlmWorkbenchAutoApplyQueryState({
+        autoload: 'true',
+      }),
+    ).toBe(false)
+    expect(
+      hasExplicitPlmWorkbenchAutoApplyQueryState({
+        autoload: 'false',
+      }),
+    ).toBe(false)
   })
 
   it('does not treat approval comments as explicit approvals auto-apply blockers', () => {
