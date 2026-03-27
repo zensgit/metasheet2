@@ -135,6 +135,7 @@ import {
   pickPlmTeamFilterPresetRouteOwnerState,
 } from './plm/plmTeamFilterPresetStateMatch'
 import { resolvePlmHydratedTeamPresetOwnerTakeover } from './plm/plmHydratedTeamPresetOwnerTakeover'
+import { resolvePlmHydratedLocalFilterPresetTakeover } from './plm/plmHydratedLocalFilterPresetTakeover'
 import {
   buildPlmLocalFilterPresetRouteOwnerWatchKey,
   resolvePlmLocalFilterPresetRouteIdentity,
@@ -5772,6 +5773,15 @@ async function applyQueryState() {
     }
     const whereUsedFilterPresetParam = readQueryParam('whereUsedFilterPreset')
     if (whereUsedFilterPresetParam !== undefined) {
+      const hydratedTakeover = resolvePlmHydratedLocalFilterPresetTakeover({
+        routePresetKey: whereUsedFilterPresetParam,
+        localSelectorKey: whereUsedFilterPresetKey.value,
+        localNameDraft: whereUsedFilterPresetName.value,
+        localGroupDraft: whereUsedFilterPresetGroup.value,
+      })
+      whereUsedFilterPresetKey.value = hydratedTakeover.nextSelectorKey
+      whereUsedFilterPresetName.value = hydratedTakeover.nextNameDraft
+      whereUsedFilterPresetGroup.value = hydratedTakeover.nextGroupDraft
       whereUsedFilterPresetQuery.value = whereUsedFilterPresetParam
     }
     const whereUsedTeamPresetParam = readQueryParam('whereUsedTeamPreset')
@@ -5809,6 +5819,15 @@ async function applyQueryState() {
     }
     const bomFilterPresetParam = readQueryParam('bomFilterPreset')
     if (bomFilterPresetParam !== undefined) {
+      const hydratedTakeover = resolvePlmHydratedLocalFilterPresetTakeover({
+        routePresetKey: bomFilterPresetParam,
+        localSelectorKey: bomFilterPresetKey.value,
+        localNameDraft: bomFilterPresetName.value,
+        localGroupDraft: bomFilterPresetGroup.value,
+      })
+      bomFilterPresetKey.value = hydratedTakeover.nextSelectorKey
+      bomFilterPresetName.value = hydratedTakeover.nextNameDraft
+      bomFilterPresetGroup.value = hydratedTakeover.nextGroupDraft
       bomFilterPresetQuery.value = bomFilterPresetParam
     }
     const bomTeamPresetParam = readQueryParam('bomTeamPreset')
