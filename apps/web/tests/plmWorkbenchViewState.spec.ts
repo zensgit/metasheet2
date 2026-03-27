@@ -544,6 +544,14 @@ describe('plmWorkbenchViewState', () => {
         ),
       ),
     ).toBe(false)
+
+    const bomShouldAutoApplyDefault = !hasExplicitPlmBomTeamPresetAutoApplyQueryState(
+      applyPlmDeferredRouteQueryPatch(
+        {},
+        { bomFilterField: 'path' },
+      ),
+    ) && !''.trim()
+    expect(bomShouldAutoApplyDefault).toBe(true)
   })
 
   it('treats deferred Where-Used preset blockers as explicit default auto-apply blockers', () => {
@@ -582,6 +590,14 @@ describe('plmWorkbenchViewState', () => {
         ),
       ),
     ).toBe(false)
+
+    const whereUsedShouldAutoApplyDefault = !hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState(
+      applyPlmDeferredRouteQueryPatch(
+        {},
+        { whereUsedFilterField: 'parent' },
+      ),
+    ) && !''.trim()
+    expect(whereUsedShouldAutoApplyDefault).toBe(true)
   })
 
   it('builds a workbench team view share URL that preserves explicit identity and normalized query state', () => {

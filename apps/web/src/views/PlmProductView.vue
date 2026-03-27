@@ -4291,7 +4291,6 @@ const {
         deferredRouteQueryPatch,
       ),
     )
-    && bomFilterField.value === 'all'
     && !bomFilter.value.trim()
   ),
   hasPendingExternalOwnerDrift: () => hasActiveBomLocalPresetOwner.value && Boolean(bomTeamPresetKey.value.trim()),
@@ -4396,7 +4395,6 @@ const {
         deferredRouteQueryPatch,
       ),
     )
-    && whereUsedFilterField.value === 'all'
     && !whereUsedFilter.value.trim()
   ),
   hasPendingExternalOwnerDrift: () => hasActiveWhereUsedLocalPresetOwner.value && Boolean(whereUsedTeamPresetKey.value.trim()),
