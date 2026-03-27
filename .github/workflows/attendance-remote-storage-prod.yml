@@ -54,6 +54,9 @@ jobs:
       file_count: ${{ steps.remote_storage.outputs.file_count }}
       oldest_file_days: ${{ steps.remote_storage.outputs.oldest_file_days }}
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Remote storage check (with host sync logs)
         id: remote_storage
         continue-on-error: true
