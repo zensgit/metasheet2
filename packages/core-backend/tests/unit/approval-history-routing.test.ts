@@ -57,8 +57,10 @@ describe('approval history routing', () => {
       .mockResolvedValueOnce({
         rows: [
           {
+            id: 'rec-1',
             occurred_at: '2026-03-26T10:00:00.000Z',
             actor_id: 'user-2',
+            actor_name: 'Reviewer Two',
             action: 'approve',
             comment: 'lgtm',
             from_status: 'pending',
@@ -76,8 +78,10 @@ describe('approval history routing', () => {
       data: {
         items: [
           {
+            id: 'rec-1',
             occurred_at: '2026-03-26T10:00:00.000Z',
             actor_id: 'user-2',
+            actor_name: 'Reviewer Two',
             action: 'approve',
             comment: 'lgtm',
             from_status: 'pending',
