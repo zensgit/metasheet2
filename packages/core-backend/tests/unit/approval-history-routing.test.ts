@@ -66,6 +66,8 @@ describe('approval history routing', () => {
             from_status: 'pending',
             to_status: 'approved',
             version: 2,
+            from_version: 1,
+            to_version: 2,
           },
         ],
       })
@@ -87,6 +89,8 @@ describe('approval history routing', () => {
             from_status: 'pending',
             to_status: 'approved',
             version: 2,
+            from_version: 1,
+            to_version: 2,
           },
         ],
         page: 2,
@@ -101,7 +105,7 @@ describe('approval history routing', () => {
     )
     expect(pgState.pool.query).toHaveBeenNthCalledWith(
       2,
-      expect.stringContaining('LIMIT $2 OFFSET $3'),
+      expect.stringContaining('COALESCE(to_version, version) AS version'),
       ['inst-1', 1, 1],
     )
   })
