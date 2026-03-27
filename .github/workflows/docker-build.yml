@@ -130,7 +130,7 @@ jobs:
             'echo "[deploy] compose_cmd=${COMPOSE_CMD}"'
             'echo "[deploy] image_owner=${DEPLOY_IMAGE_OWNER}"'
             'echo "[deploy] image_tag=${DEPLOY_IMAGE_TAG}"'
-            'for CONTAINER_NAME in metasheet-backend metasheet-web; do'
+            'for CONTAINER_NAME in metasheet-postgres metasheet-redis metasheet-backend metasheet-web; do'
             '  if docker ps -a --format "{{.Names}}" | grep -Fxq "${CONTAINER_NAME}"; then'
             '    echo "[deploy][warn] removing existing container ${CONTAINER_NAME} before recreate"'
             '    docker rm -f "${CONTAINER_NAME}"'
