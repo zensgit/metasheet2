@@ -211,7 +211,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     canShare: canShareTeamPreset,
     canDelete: canDeleteTeamPreset,
     canArchive: canArchiveTeamPreset,
-    canRestore: canRestoreTeamPreset,
+    canRestore: canRestoreTeamPresetManagement,
     canRename: canRenameTeamPreset,
     canTransferTarget: canTransferTeamPresetTarget,
     canTransfer: canTransferTeamPreset,
@@ -221,6 +221,15 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     selectedEntry: selectedManagementTarget,
     nameRef: teamPresetName,
     ownerUserIdRef: teamPresetOwnerUserId,
+  })
+  const canRestoreTeamPreset = computed(() => {
+    if (hasPendingApplySelection.value) return false
+    const preset = selectedTeamPreset.value
+    if (!preset) return false
+    if (hasPendingExternalOwnerDrift.value) {
+      return readTeamPresetPermissions(preset).canRestore
+    }
+    return canRestoreTeamPresetManagement.value
   })
   const canApplyTeamPreset = computed(() => canApplyPlmCollaborativeEntry(selectedTeamPreset.value))
   const canDuplicateTeamPreset = computed(() => (
@@ -258,10 +267,19 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     })
   }
 
-  function blockPendingApplyManagementAction() {
-    if (!hasPendingManagementSelection.value) return false
-    options.setMessage(`请先应用${options.label}团队预设，再执行管理操作。`, true)
-    return true
+  function blockPendingApplyManagementAction(action: 'generic' | 'restore' = 'generic') {
+    if (hasPendingApplySelection.value) {
+      options.setMessage(`请先应用${options.label}团队预设，再执行管理操作。`, true)
+      return true
+    }
+    if (!hasPendingExternalOwnerDrift.value) {
+      return false
+    }
+    if (action !== 'restore') {
+      options.setMessage(`请先应用${options.label}团队预设，再执行管理操作。`, true)
+      return true
+    }
+    return false
   }
 
   function clearSingleTargetTakeoverSelection() {
@@ -807,7 +825,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`请选择${options.label}团队预设。`, true)
       return null
     }
-    if (blockPendingApplyManagementAction()) {
+    if (blockPendingApplyManagementAction('restore')) {
       return null
     }
     if (!preset.isArchived) {
@@ -821,11 +839,14 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
 
     teamPresetsLoading.value = true
     teamPresetsError.value = ''
+    const hadExternalOwnerDriftBeforeAction = hasPendingExternalOwnerDrift.value
 
     try {
       const saved = await restorePlmTeamFilterPreset(preset.id)
       teamPresets.value = replaceTeamPreset(teamPresets.value, saved)
-      applyPresetToTarget(saved)
+      if (!hadExternalOwnerDriftBeforeAction) {
+        applyPresetToTarget(saved)
+      }
       clearTeamPresetDrafts()
       options.setMessage(`已恢复${options.label}团队预设：${saved.name}`)
       return saved

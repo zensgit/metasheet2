@@ -144,6 +144,7 @@ import {
   runPlmLocalPresetOwnershipAction,
   shouldClearLocalPresetOwnerAfterTeamPresetAction,
   shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore,
+  shouldClearLocalPresetOwnerAfterTeamPresetSingleRestore,
 } from './plm/plmLocalPresetOwnership'
 import {
   canActOnPlmApproval,
@@ -4464,11 +4465,15 @@ async function archiveBomTeamPreset() {
 }
 
 async function restoreBomTeamPreset() {
+  const hadLocalOwnerBeforeAction = hasActiveBomLocalPresetOwner.value
   await runPlmLocalPresetOwnershipAction(
     () => restoreBomTeamPresetBase(),
     {
       clearLocalOwner: clearBomLocalFilterPresetIdentity,
-      shouldClear: (saved) => Boolean(saved),
+      shouldClear: (saved) => shouldClearLocalPresetOwnerAfterTeamPresetSingleRestore(
+        saved,
+        hadLocalOwnerBeforeAction,
+      ),
     },
   )
 }
@@ -4628,11 +4633,15 @@ async function archiveWhereUsedTeamPreset() {
 }
 
 async function restoreWhereUsedTeamPreset() {
+  const hadLocalOwnerBeforeAction = hasActiveWhereUsedLocalPresetOwner.value
   await runPlmLocalPresetOwnershipAction(
     () => restoreWhereUsedTeamPresetBase(),
     {
       clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
-      shouldClear: (saved) => Boolean(saved),
+      shouldClear: (saved) => shouldClearLocalPresetOwnerAfterTeamPresetSingleRestore(
+        saved,
+        hadLocalOwnerBeforeAction,
+      ),
     },
   )
 }

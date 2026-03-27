@@ -28,6 +28,14 @@ export function shouldClearLocalPresetOwnerAfterTeamPresetAction(
   return Boolean(result)
 }
 
+export function shouldClearLocalPresetOwnerAfterTeamPresetSingleRestore(
+  result: unknown,
+  hadLocalOwnerBeforeAction = false,
+) {
+  if (hadLocalOwnerBeforeAction) return false
+  return Boolean(result)
+}
+
 export function shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore(
   result: { processedIds?: string[] } | null | undefined,
   activeTeamPresetId: string | null | undefined,

@@ -1264,6 +1264,74 @@ describe('usePlmTeamFilterPresets', () => {
     expect(setMessage).toHaveBeenCalledWith('请先应用BOM团队预设，再执行管理操作。', true)
   })
 
+  it('allows restoring an archived preset while a local preset owner still owns the current state', async () => {
+    const trackedApply = vi.fn()
+
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-local-restore',
+          kind: 'bom',
+          scope: 'team',
+          name: '待恢复 BOM 团队预设',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isDefault: false,
+          isArchived: true,
+          permissions: {
+            canApply: false,
+            canManage: true,
+            canRestore: true,
+          },
+          state: { field: 'path', value: 'root/team', group: '团队组' },
+        },
+      ],
+    })
+    vi.mocked(restorePlmTeamFilterPreset).mockResolvedValue({
+      id: 'preset-local-restore',
+      kind: 'bom',
+      scope: 'team',
+      name: '待恢复 BOM 团队预设',
+      ownerUserId: 'owner-a',
+      canManage: true,
+      isDefault: false,
+      isArchived: false,
+      permissions: {
+        canApply: true,
+        canManage: true,
+      },
+      state: { field: 'path', value: 'root/team', group: '团队组' },
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/local', group: '本地组' }),
+      applyPreset: trackedApply,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+      hasPendingExternalOwnerDrift: () => true,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-local-restore'
+    model.teamPresetName.value = '待清空名称'
+    model.teamPresetGroup.value = '待清空分组'
+    model.teamPresetOwnerUserId.value = 'owner-stale'
+
+    expect(model.canRestoreTeamPreset.value).toBe(true)
+
+    await model.restoreTeamPreset()
+
+    expect(restorePlmTeamFilterPreset).toHaveBeenCalledWith('preset-local-restore')
+    expect(trackedApply).not.toHaveBeenCalled()
+    expect(model.teamPresetKey.value).toBe('preset-local-restore')
+    expect(model.teamPresetName.value).toBe('')
+    expect(model.teamPresetGroup.value).toBe('')
+    expect(model.teamPresetOwnerUserId.value).toBe('')
+    expect(model.teamPresets.value.find((preset) => preset.id === 'preset-local-restore')?.isArchived).toBe(false)
+  })
+
   it('keeps readonly management controls hidden while the pending preset selector target stays applyable', async () => {
     const requestedPresetId = ref('preset-readonly-current')
     const syncRequestedPresetId = vi.fn((value?: string) => {
