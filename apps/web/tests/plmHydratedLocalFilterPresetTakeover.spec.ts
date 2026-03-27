@@ -8,11 +8,15 @@ describe('plmHydratedLocalFilterPresetTakeover', () => {
       localSelectorKey: 'bom:route-a',
       localNameDraft: 'A 预设草稿',
       localGroupDraft: 'A 分组草稿',
+      localSelectionKeys: ['bom:route-a', 'bom:other'],
+      localBatchGroupDraft: '批量分组',
     })).toEqual({
       shouldClearLocalSelector: true,
       nextSelectorKey: '',
       nextNameDraft: '',
       nextGroupDraft: '',
+      nextSelectionKeys: [],
+      nextBatchGroupDraft: '',
     })
   })
 
@@ -22,11 +26,33 @@ describe('plmHydratedLocalFilterPresetTakeover', () => {
       localSelectorKey: 'bom:route-a',
       localNameDraft: 'A 预设草稿',
       localGroupDraft: 'A 分组草稿',
+      localSelectionKeys: ['bom:route-a'],
+      localBatchGroupDraft: '批量分组',
     })).toEqual({
       shouldClearLocalSelector: false,
       nextSelectorKey: 'bom:route-a',
       nextNameDraft: 'A 预设草稿',
       nextGroupDraft: 'A 分组草稿',
+      nextSelectionKeys: ['bom:route-a'],
+      nextBatchGroupDraft: '批量分组',
+    })
+  })
+
+  it('preserves batch management state when hydration has no explicit route owner', () => {
+    expect(resolvePlmHydratedLocalFilterPresetTakeover({
+      routePresetKey: '',
+      localSelectorKey: 'bom:route-a',
+      localNameDraft: 'A 预设草稿',
+      localGroupDraft: 'A 分组草稿',
+      localSelectionKeys: ['bom:route-a'],
+      localBatchGroupDraft: '批量分组',
+    })).toEqual({
+      shouldClearLocalSelector: false,
+      nextSelectorKey: 'bom:route-a',
+      nextNameDraft: 'A 预设草稿',
+      nextGroupDraft: 'A 分组草稿',
+      nextSelectionKeys: ['bom:route-a'],
+      nextBatchGroupDraft: '批量分组',
     })
   })
 })

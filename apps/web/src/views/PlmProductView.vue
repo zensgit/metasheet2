@@ -5778,10 +5778,14 @@ async function applyQueryState() {
         localSelectorKey: whereUsedFilterPresetKey.value,
         localNameDraft: whereUsedFilterPresetName.value,
         localGroupDraft: whereUsedFilterPresetGroup.value,
+        localSelectionKeys: whereUsedPresetSelection.value,
+        localBatchGroupDraft: whereUsedPresetBatchGroup.value,
       })
       whereUsedFilterPresetKey.value = hydratedTakeover.nextSelectorKey
       whereUsedFilterPresetName.value = hydratedTakeover.nextNameDraft
       whereUsedFilterPresetGroup.value = hydratedTakeover.nextGroupDraft
+      whereUsedPresetSelection.value = hydratedTakeover.nextSelectionKeys
+      whereUsedPresetBatchGroup.value = hydratedTakeover.nextBatchGroupDraft
       whereUsedFilterPresetQuery.value = whereUsedFilterPresetParam
     }
     const whereUsedTeamPresetParam = readQueryParam('whereUsedTeamPreset')
@@ -5824,10 +5828,14 @@ async function applyQueryState() {
         localSelectorKey: bomFilterPresetKey.value,
         localNameDraft: bomFilterPresetName.value,
         localGroupDraft: bomFilterPresetGroup.value,
+        localSelectionKeys: bomPresetSelection.value,
+        localBatchGroupDraft: bomPresetBatchGroup.value,
       })
       bomFilterPresetKey.value = hydratedTakeover.nextSelectorKey
       bomFilterPresetName.value = hydratedTakeover.nextNameDraft
       bomFilterPresetGroup.value = hydratedTakeover.nextGroupDraft
+      bomPresetSelection.value = hydratedTakeover.nextSelectionKeys
+      bomPresetBatchGroup.value = hydratedTakeover.nextBatchGroupDraft
       bomFilterPresetQuery.value = bomFilterPresetParam
     }
     const bomTeamPresetParam = readQueryParam('bomTeamPreset')

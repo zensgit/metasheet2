@@ -3,6 +3,8 @@ type PlmHydratedLocalFilterPresetTakeoverOptions = {
   localSelectorKey: string
   localNameDraft: string
   localGroupDraft: string
+  localSelectionKeys: string[]
+  localBatchGroupDraft: string
 }
 
 export function resolvePlmHydratedLocalFilterPresetTakeover(
@@ -17,5 +19,7 @@ export function resolvePlmHydratedLocalFilterPresetTakeover(
     nextSelectorKey: shouldClearLocalSelector ? '' : options.localSelectorKey,
     nextNameDraft: shouldClearLocalSelector ? '' : options.localNameDraft,
     nextGroupDraft: shouldClearLocalSelector ? '' : options.localGroupDraft,
+    nextSelectionKeys: shouldClearLocalSelector ? [] : options.localSelectionKeys,
+    nextBatchGroupDraft: shouldClearLocalSelector ? '' : options.localBatchGroupDraft,
   }
 }
