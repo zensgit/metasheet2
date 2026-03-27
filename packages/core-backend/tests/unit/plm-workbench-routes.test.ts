@@ -451,7 +451,7 @@ describe('plm-workbench routes', () => {
         kind: 'workbench',
         name: '旧工作台视图',
         name_key: '旧工作台视图',
-        is_default: false,
+        is_default: true,
         state: JSON.stringify({ query: { documentFilter: 'gear' } }),
         created_at: '2026-03-09T00:00:00.000Z',
         updated_at: '2026-03-09T00:12:00.000Z',
@@ -466,10 +466,18 @@ describe('plm-workbench routes', () => {
       kind: 'workbench',
       name: '新工作台视图',
       name_key: '新工作台视图',
-      is_default: false,
+      is_default: true,
       state: JSON.stringify({ query: { documentFilter: 'gear' } }),
       created_at: '2026-03-09T00:00:00.000Z',
       updated_at: '2026-03-09T00:20:00.000Z',
+    })
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [
+        {
+          resource_id: 'view-rename',
+          last_default_set_at: '2026-03-09T00:11:00.000Z',
+        },
+      ],
     })
 
     const response = await request(app)
@@ -481,6 +489,8 @@ describe('plm-workbench routes', () => {
       id: 'view-rename',
       kind: 'workbench',
       name: '新工作台视图',
+      isDefault: true,
+      lastDefaultSetAt: '2026-03-09T00:11:00.000Z',
     })
   })
 
@@ -963,7 +973,7 @@ describe('plm-workbench routes', () => {
         kind: 'bom',
         name: '旧团队预设',
         name_key: '旧团队预设',
-        is_default: false,
+        is_default: true,
         state: JSON.stringify({ field: 'path', value: 'root/a', group: '机械' }),
         created_at: '2026-03-09T00:00:00.000Z',
         updated_at: '2026-03-09T00:12:00.000Z',
@@ -978,10 +988,18 @@ describe('plm-workbench routes', () => {
       kind: 'bom',
       name: '新团队预设',
       name_key: '新团队预设',
-      is_default: false,
+      is_default: true,
       state: JSON.stringify({ field: 'path', value: 'root/a', group: '机械' }),
       created_at: '2026-03-09T00:00:00.000Z',
       updated_at: '2026-03-09T00:20:00.000Z',
+    })
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [
+        {
+          resource_id: 'preset-rename',
+          last_default_set_at: '2026-03-09T00:11:00.000Z',
+        },
+      ],
     })
 
     const response = await request(app)
@@ -993,6 +1011,8 @@ describe('plm-workbench routes', () => {
       id: 'preset-rename',
       kind: 'bom',
       name: '新团队预设',
+      isDefault: true,
+      lastDefaultSetAt: '2026-03-09T00:11:00.000Z',
     })
   })
 
@@ -1392,6 +1412,14 @@ describe('plm-workbench routes', () => {
           updated_at: '2026-03-11T10:00:00.000Z',
         },
       ])
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [
+        {
+          resource_id: '11111111-1111-4111-8111-111111111111',
+          last_default_set_at: '2026-03-10T07:30:00.000Z',
+        },
+      ],
+    })
 
     const response = await request(app)
       .post('/api/plm-workbench/filter-presets/team/batch')
@@ -1419,6 +1447,7 @@ describe('plm-workbench routes', () => {
       id: '11111111-1111-4111-8111-111111111111',
       isArchived: true,
       isDefault: false,
+      lastDefaultSetAt: '2026-03-10T07:30:00.000Z',
     })
   })
 

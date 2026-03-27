@@ -694,6 +694,38 @@ async function attachPlmTeamPresetDefaultSignals<T extends PlmTeamFilterPresetRo
   }
 }
 
+async function mapHydratedPlmTeamViewRows(
+  rows: PlmWorkbenchTeamViewRowLike[],
+  currentUserId?: string | null,
+) {
+  const hydratedRows = await attachPlmTeamViewDefaultSignals(rows)
+  return hydratedRows.map((row: PlmWorkbenchTeamViewRowLike) => mapPlmWorkbenchTeamViewRow(row, currentUserId))
+}
+
+async function mapHydratedPlmTeamViewRow(
+  row: PlmWorkbenchTeamViewRowLike,
+  currentUserId?: string | null,
+) {
+  const [mapped] = await mapHydratedPlmTeamViewRows([row], currentUserId)
+  return mapped
+}
+
+async function mapHydratedPlmTeamPresetRows(
+  rows: PlmTeamFilterPresetRowLike[],
+  currentUserId?: string | null,
+) {
+  const hydratedRows = await attachPlmTeamPresetDefaultSignals(rows)
+  return hydratedRows.map((row: PlmTeamFilterPresetRowLike) => mapPlmTeamFilterPresetRow(row, currentUserId))
+}
+
+async function mapHydratedPlmTeamPresetRow(
+  row: PlmTeamFilterPresetRowLike,
+  currentUserId?: string | null,
+) {
+  const [mapped] = await mapHydratedPlmTeamPresetRows([row], currentUserId)
+  return mapped
+}
+
 router.get(
   '/api/plm-workbench/audit-logs',
   authenticate,
@@ -974,8 +1006,7 @@ router.get(
         .orderBy('is_default', 'desc')
         .orderBy('updated_at', 'desc')
         .execute()
-      const hydratedRows = await attachPlmTeamViewDefaultSignals(rows as PlmWorkbenchTeamViewRowLike[])
-      const items = hydratedRows.map((row: PlmWorkbenchTeamViewRowLike) => mapPlmWorkbenchTeamViewRow(row, currentUserId))
+      const items = await mapHydratedPlmTeamViewRows(rows as PlmWorkbenchTeamViewRowLike[], currentUserId)
       const defaultView = items.find((item) => item.isDefault && !item.isArchived) || null
       const activeTotal = items.filter((item) => !item.isArchived).length
       const archivedTotal = items.length - activeTotal
@@ -1115,7 +1146,7 @@ router.post(
           .where('id', 'in', processedIds)
           .returningAll()
           .execute()
-        items = savedRows.map((row: PlmWorkbenchTeamViewRowLike) => mapPlmWorkbenchTeamViewRow(row, currentUserId))
+        items = await mapHydratedPlmTeamViewRows(savedRows as PlmWorkbenchTeamViewRowLike[], currentUserId)
       } else {
         const savedRows = await dbAny
           .updateTable('plm_workbench_team_views')
@@ -1128,7 +1159,7 @@ router.post(
           .where('id', 'in', processedIds)
           .returningAll()
           .execute()
-        items = savedRows.map((row: PlmWorkbenchTeamViewRowLike) => mapPlmWorkbenchTeamViewRow(row, currentUserId))
+        items = await mapHydratedPlmTeamViewRows(savedRows as PlmWorkbenchTeamViewRowLike[], currentUserId)
       }
 
       await logPlmTeamViewBatchAudit({
@@ -1247,11 +1278,9 @@ router.post(
         viewName: String(view.name || ''),
       })
 
-      const [hydratedSaved] = await attachPlmTeamViewDefaultSignals([saved as PlmWorkbenchTeamViewRowLike])
-
       return res.json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(hydratedSaved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to set default PLM team view:', error as Error)
@@ -1328,11 +1357,9 @@ router.delete(
         viewName: String(view.name || ''),
       })
 
-      const [hydratedSaved] = await attachPlmTeamViewDefaultSignals([saved as PlmWorkbenchTeamViewRowLike])
-
       return res.json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(hydratedSaved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to clear default PLM team view:', error as Error)
@@ -1464,11 +1491,9 @@ router.post(
         })
       }
 
-      const [hydratedSaved] = await attachPlmTeamViewDefaultSignals([saved as PlmWorkbenchTeamViewRowLike])
-
       return res.status(201).json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(hydratedSaved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to save PLM team view:', error as Error)
@@ -1539,7 +1564,7 @@ router.patch(
       if (normalizePlmWorkbenchTeamViewName(view.name) === name) {
         return res.json({
           success: true,
-          data: mapPlmWorkbenchTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
+          data: await mapHydratedPlmTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
         })
       }
 
@@ -1574,7 +1599,7 @@ router.patch(
 
       return res.json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to rename PLM team view:', error as Error)
@@ -1686,7 +1711,7 @@ router.post(
 
       return res.status(201).json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to duplicate PLM team view:', error as Error)
@@ -1758,7 +1783,7 @@ router.post(
       if (targetOwnerUserId === currentUserId) {
         return res.json({
           success: true,
-          data: mapPlmWorkbenchTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
+          data: await mapHydratedPlmTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
         })
       }
 
@@ -1806,7 +1831,7 @@ router.post(
 
       return res.json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to transfer PLM team view:', error as Error)
@@ -1930,7 +1955,7 @@ router.post(
       if (view.archived_at) {
         return res.json({
           success: true,
-          data: mapPlmWorkbenchTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
+          data: await mapHydratedPlmTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
         })
       }
 
@@ -1956,7 +1981,7 @@ router.post(
 
       return res.json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to archive PLM team view:', error as Error)
@@ -2010,7 +2035,7 @@ router.post(
       if (!view.archived_at) {
         return res.json({
           success: true,
-          data: mapPlmWorkbenchTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
+          data: await mapHydratedPlmTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
         })
       }
 
@@ -2035,7 +2060,7 @@ router.post(
 
       return res.json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to restore PLM team view:', error as Error)
@@ -2072,8 +2097,7 @@ router.get(
         .orderBy('is_default', 'desc')
         .orderBy('updated_at', 'desc')
         .execute()
-      const hydratedRows = await attachPlmTeamPresetDefaultSignals(rows as PlmTeamFilterPresetRowLike[])
-      const items = hydratedRows.map((row: PlmTeamFilterPresetRowLike) => mapPlmTeamFilterPresetRow(row, currentUserId))
+      const items = await mapHydratedPlmTeamPresetRows(rows as PlmTeamFilterPresetRowLike[], currentUserId)
       const defaultPreset = items.find((item) => item.isDefault && !item.isArchived) || null
       const activeTotal = items.filter((item) => !item.isArchived).length
       const archivedTotal = items.length - activeTotal
@@ -2213,7 +2237,7 @@ router.post(
           .where('id', 'in', processedIds)
           .returningAll()
           .execute()
-        items = saved.map((row: PlmTeamFilterPresetRowLike) => mapPlmTeamFilterPresetRow(row, currentUserId))
+        items = await mapHydratedPlmTeamPresetRows(saved as PlmTeamFilterPresetRowLike[], currentUserId)
       } else {
         const saved = await dbAny
           .updateTable('plm_filter_team_presets')
@@ -2226,7 +2250,7 @@ router.post(
           .where('id', 'in', processedIds)
           .returningAll()
           .execute()
-        items = saved.map((row: PlmTeamFilterPresetRowLike) => mapPlmTeamFilterPresetRow(row, currentUserId))
+        items = await mapHydratedPlmTeamPresetRows(saved as PlmTeamFilterPresetRowLike[], currentUserId)
       }
 
       await logPlmTeamPresetBatchAudit({
@@ -2345,11 +2369,9 @@ router.post(
         presetName: String(saved.name || ''),
       })
 
-      const [hydratedSaved] = await attachPlmTeamPresetDefaultSignals([saved as PlmTeamFilterPresetRowLike])
-
       return res.json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(hydratedSaved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to set default PLM team preset:', error as Error)
@@ -2426,11 +2448,9 @@ router.delete(
         presetName: String(saved.name || ''),
       })
 
-      const [hydratedSaved] = await attachPlmTeamPresetDefaultSignals([saved as PlmTeamFilterPresetRowLike])
-
       return res.json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(hydratedSaved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to clear default PLM team preset:', error as Error)
@@ -2507,7 +2527,7 @@ router.post(
 
       return res.status(201).json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to save PLM team preset:', error as Error)
@@ -2605,7 +2625,7 @@ router.patch(
 
       return res.json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to rename PLM team preset:', error as Error)
@@ -2710,7 +2730,7 @@ router.post(
 
       return res.status(201).json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to duplicate PLM team preset:', error as Error)
@@ -2782,7 +2802,7 @@ router.post(
       if (targetOwnerUserId === currentUserId) {
         return res.json({
           success: true,
-          data: mapPlmTeamFilterPresetRow(preset as PlmTeamFilterPresetRowLike, currentUserId),
+          data: await mapHydratedPlmTeamPresetRow(preset as PlmTeamFilterPresetRowLike, currentUserId),
         })
       }
 
@@ -2830,7 +2850,7 @@ router.post(
 
       return res.json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to transfer PLM team preset:', error as Error)
@@ -2954,7 +2974,7 @@ router.post(
       if (preset.archived_at) {
         return res.json({
           success: true,
-          data: mapPlmTeamFilterPresetRow(preset as PlmTeamFilterPresetRowLike, currentUserId),
+          data: await mapHydratedPlmTeamPresetRow(preset as PlmTeamFilterPresetRowLike, currentUserId),
         })
       }
 
@@ -2980,7 +3000,7 @@ router.post(
 
       return res.json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to archive PLM team preset:', error as Error)
@@ -3034,7 +3054,7 @@ router.post(
       if (!preset.archived_at) {
         return res.json({
           success: true,
-          data: mapPlmTeamFilterPresetRow(preset as PlmTeamFilterPresetRowLike, currentUserId),
+          data: await mapHydratedPlmTeamPresetRow(preset as PlmTeamFilterPresetRowLike, currentUserId),
         })
       }
 
@@ -3059,7 +3079,7 @@ router.post(
 
       return res.json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to restore PLM team preset:', error as Error)
