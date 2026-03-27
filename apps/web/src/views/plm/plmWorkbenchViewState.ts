@@ -297,11 +297,13 @@ function hasExplicitPlmFilterPresetAutoApplyQueryState(
   },
 ): boolean {
   const next = normalizePlmWorkbenchQuerySnapshot(value)
+  const filterValue = next[options.filterKey]
+  const filterFieldValue = next[options.filterFieldKey]
   return Boolean(
     next[options.teamPresetKey]
     || next[options.filterPresetKey]
-    || next[options.filterKey]
-    || (next[options.filterFieldKey] && next[options.filterFieldKey] !== 'all')
+    || filterValue
+    || (filterValue && filterFieldValue && filterFieldValue !== 'all')
   )
 }
 
