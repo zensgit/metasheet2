@@ -106,6 +106,18 @@ function normalizeQueryValue(value: unknown): string {
   return ''
 }
 
+export function resolvePlmFilterFieldQueryValue(
+  filterValue: unknown,
+  filterFieldValue: unknown,
+): string | undefined {
+  const normalizedFilter = normalizeQueryValue(filterValue)
+  const normalizedFilterField = normalizeQueryValue(filterFieldValue)
+  if (!normalizedFilter || !normalizedFilterField || normalizedFilterField === 'all') {
+    return undefined
+  }
+  return normalizedFilterField
+}
+
 export function normalizePlmWorkbenchQuerySnapshot(value: unknown): Record<string, string> {
   if (!value || typeof value !== 'object') return {}
 
@@ -122,6 +134,22 @@ function stripPlmWorkbenchTeamViewIdentity(snapshot: Record<string, string>): Re
   const next = { ...snapshot }
   delete next.workbenchTeamView
   return next
+}
+
+function normalizePlmFilterFieldQueryState(
+  snapshot: Record<string, string>,
+  filterKey: 'bomFilter' | 'whereUsedFilter',
+  filterFieldKey: 'bomFilterField' | 'whereUsedFilterField',
+) {
+  const normalizedFilterField = resolvePlmFilterFieldQueryValue(
+    snapshot[filterKey],
+    snapshot[filterFieldKey],
+  )
+  if (normalizedFilterField) {
+    snapshot[filterFieldKey] = normalizedFilterField
+  } else {
+    delete snapshot[filterFieldKey]
+  }
 }
 
 export function normalizePlmWorkbenchPanelScope(value: unknown): string | undefined {
@@ -146,6 +174,8 @@ export function normalizePlmWorkbenchCollaborativeQuerySnapshot(value: unknown):
   delete next.bomFilterPreset
   delete next.whereUsedFilterPreset
   delete next.approvalComment
+  normalizePlmFilterFieldQueryState(next, 'bomFilter', 'bomFilterField')
+  normalizePlmFilterFieldQueryState(next, 'whereUsedFilter', 'whereUsedFilterField')
   const normalizedPanel = normalizePlmWorkbenchPanelScope(next.panel)
   if (normalizedPanel) {
     next.panel = normalizedPanel
@@ -158,6 +188,8 @@ export function normalizePlmWorkbenchCollaborativeQuerySnapshot(value: unknown):
 export function normalizePlmWorkbenchLocalRouteQuerySnapshot(value: unknown): Record<string, string> {
   const next = normalizePlmWorkbenchQuerySnapshot(value)
   delete next.approvalComment
+  normalizePlmFilterFieldQueryState(next, 'bomFilter', 'bomFilterField')
+  normalizePlmFilterFieldQueryState(next, 'whereUsedFilter', 'whereUsedFilterField')
   const normalizedPanel = normalizePlmWorkbenchPanelScope(next.panel)
   if (normalizedPanel) {
     next.panel = normalizedPanel

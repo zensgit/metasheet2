@@ -110,6 +110,27 @@ describe('plmWorkbenchViewState', () => {
     })
   })
 
+  it('drops field-only BOM and Where-Used filter state from canonical snapshots', () => {
+    expect(
+      normalizePlmWorkbenchCollaborativeQuerySnapshot({
+        workbenchTeamView: 'view-1',
+        bomFilterField: 'path',
+        whereUsedFilterField: 'parent',
+      }),
+    ).toEqual({})
+
+    expect(
+      normalizePlmWorkbenchLocalRouteQuerySnapshot({
+        workbenchTeamView: ' workbench-view-1 ',
+        bomFilterField: 'path',
+        whereUsedFilterField: 'parent',
+        approvalComment: 'ship-it',
+      }),
+    ).toEqual({
+      workbenchTeamView: 'workbench-view-1',
+    })
+  })
+
   it('normalizes local route snapshots without approval draft leakage', () => {
     expect(
       normalizePlmWorkbenchLocalRouteQuerySnapshot({
@@ -619,6 +640,7 @@ describe('plmWorkbenchViewState', () => {
               whereUsedFilterPreset: 'where-local-1',
               bomFilter: 'gear',
               bomFilterField: 'path',
+              whereUsedFilterField: 'parent',
               panel: ' approvals, documents ',
               documentFilter: ' gear ',
               approvalsFilter: 'eco',
@@ -739,6 +761,18 @@ describe('plmWorkbenchViewState', () => {
         },
       },
     )).toBe('/plm?workbenchTeamView=workbench-view-1&searchQuery=gear&panel=documents%2Capprovals&bomFilter=assy&bomFilterField=path&whereUsedFilter=motor&approvalsFilter=eco&autoload=true&sceneFocus=scene-1#audit')
+  })
+
+  it('omits field-only filter state from return paths', () => {
+    expect(buildPlmWorkbenchRoutePath(
+      '/plm',
+      {
+        workbenchTeamView: ' workbench-view-1 ',
+        panel: ' product ',
+        bomFilterField: 'path',
+        whereUsedFilterField: 'parent',
+      },
+    )).toBe('/plm?workbenchTeamView=workbench-view-1&panel=product')
   })
 
   it('builds audit team view share URLs with explicit team-view identity', () => {

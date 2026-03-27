@@ -120,6 +120,7 @@ import {
   matchPlmWorkbenchQuerySnapshot,
   mergePlmWorkbenchRouteQuery,
   normalizePlmWorkbenchCollaborativeQuerySnapshot,
+  resolvePlmFilterFieldQueryValue,
   normalizePlmWorkbenchLocalRouteQuerySnapshot,
   normalizePlmWorkbenchPanelScope,
   normalizePlmWorkbenchQuerySnapshot,
@@ -5404,13 +5405,19 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
   append('whereUsedFilterPreset', whereUsedFilterPresetQuery.value)
   append('whereUsedTeamPreset', whereUsedTeamPresetQuery.value)
   append('whereUsedFilter', whereUsedFilter.value)
-  append('whereUsedFilterField', whereUsedFilterField.value !== 'all' ? whereUsedFilterField.value : undefined)
+  append(
+    'whereUsedFilterField',
+    resolvePlmFilterFieldQueryValue(whereUsedFilter.value, whereUsedFilterField.value),
+  )
   append('bomDepth', bomDepth.value !== DEFAULT_BOM_DEPTH ? bomDepth.value : undefined)
   append('bomEffectiveAt', bomEffectiveAt.value)
   append('bomFilterPreset', bomFilterPresetQuery.value)
   append('bomTeamPreset', bomTeamPresetQuery.value)
   append('bomFilter', bomFilter.value)
-  append('bomFilterField', bomFilterField.value !== 'all' ? bomFilterField.value : undefined)
+  append(
+    'bomFilterField',
+    resolvePlmFilterFieldQueryValue(bomFilter.value, bomFilterField.value),
+  )
   append('bomView', bomView.value !== 'table' ? bomView.value : undefined)
   if (bomView.value === 'tree' && bomCollapsed.value.size) {
     const collapsedValue = serializeBomCollapsed(bomCollapsed.value)
@@ -7115,11 +7122,11 @@ watch(
   ([whereUsed, whereUsedField, compareValue, substituteValue, bomFilterValue, bomFilterFieldValue]) => {
     scheduleQuerySync({
       whereUsedFilter: whereUsed || undefined,
-      whereUsedFilterField: whereUsedField !== 'all' ? whereUsedField : undefined,
+      whereUsedFilterField: resolvePlmFilterFieldQueryValue(whereUsed, whereUsedField),
       compareFilter: compareValue || undefined,
       substitutesFilter: substituteValue || undefined,
       bomFilter: bomFilterValue || undefined,
-      bomFilterField: bomFilterFieldValue !== 'all' ? bomFilterFieldValue : undefined,
+      bomFilterField: resolvePlmFilterFieldQueryValue(bomFilterValue, bomFilterFieldValue),
     })
   }
 )
