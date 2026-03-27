@@ -273,9 +273,10 @@ export function buildTeamFilterPresetShareUrl(
   if (!resolvedOrigin) return ''
   const base = `${resolvedOrigin}${basePath}`
   const params = new URLSearchParams()
+  const normalizedPanel = kind === 'bom' && panel === 'bom' ? 'product' : panel
 
-  if (panel) {
-    params.set('panel', panel)
+  if (normalizedPanel) {
+    params.set('panel', normalizedPanel)
   }
 
   if (kind === 'bom') {
@@ -294,6 +295,40 @@ export function buildTeamFilterPresetShareUrl(
 
   const query = params.toString()
   return query ? `${base}?${query}` : base
+}
+
+export function resolveFilterPresetCatalogDraftState(input: {
+  availablePresets: Array<Pick<FilterPreset, 'key'>>
+  selectedPresetKey: string
+  routePresetKey?: string
+  nameDraft?: string
+  groupDraft?: string
+}) {
+  const availablePresetKeys = new Set(
+    input.availablePresets
+      .map((preset) => preset.key.trim())
+      .filter(Boolean),
+  )
+  const selectedPresetKey = input.selectedPresetKey.trim()
+  const routePresetKey = String(input.routePresetKey || '').trim()
+  const nextSelectedPresetKey = (
+    selectedPresetKey && availablePresetKeys.has(selectedPresetKey)
+      ? selectedPresetKey
+      : ''
+  )
+  const nextRoutePresetKey = (
+    routePresetKey && availablePresetKeys.has(routePresetKey)
+      ? routePresetKey
+      : ''
+  )
+  const shouldPreserveDrafts = Boolean(nextSelectedPresetKey)
+
+  return {
+    nextSelectedPresetKey,
+    nextRoutePresetKey,
+    nextNameDraft: shouldPreserveDrafts ? input.nameDraft || '' : '',
+    nextGroupDraft: shouldPreserveDrafts ? input.groupDraft || '' : '',
+  }
 }
 
 export function confirmFilterPresetImport(

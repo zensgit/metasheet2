@@ -165,6 +165,7 @@ import {
   mergeImportedFilterPresets,
   parseFilterPresetImport,
   persistFilterPresets,
+  resolveFilterPresetCatalogDraftState,
   resolveFilterPresetShareMode,
   upsertFilterPreset,
 } from './plm/plmFilterPresetUtils'
@@ -3868,12 +3869,17 @@ function importBomFilterPresetsFromText(raw: string) {
     bomFilterPresets.value = presets
     persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, presets)
     bomFilterPresetImportText.value = ''
-    if (!presets.some((preset) => preset.key === bomFilterPresetKey.value)) {
-      bomFilterPresetKey.value = ''
-    }
-    if (bomFilterPresetQuery.value && !presets.some((preset) => preset.key === bomFilterPresetQuery.value)) {
-      syncBomFilterPresetQuery(undefined)
-    }
+    const nextSelection = resolveFilterPresetCatalogDraftState({
+      availablePresets: presets,
+      selectedPresetKey: bomFilterPresetKey.value,
+      routePresetKey: bomFilterPresetQuery.value,
+      nameDraft: bomFilterPresetName.value,
+      groupDraft: bomFilterPresetGroup.value,
+    })
+    bomFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+    bomFilterPresetName.value = nextSelection.nextNameDraft
+    bomFilterPresetGroup.value = nextSelection.nextGroupDraft
+    syncBomFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
     reconcileBomLocalFilterPresetIdentityAfterImport()
     const importedCount = added + updated
     if (importedCount) {
@@ -3936,8 +3942,17 @@ function clearBomFilterPresets() {
   if (!bomFilterPresets.value.length) return
   bomFilterPresets.value = []
   persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, [])
-  bomFilterPresetKey.value = ''
-  syncBomFilterPresetQuery(undefined)
+  const nextSelection = resolveFilterPresetCatalogDraftState({
+    availablePresets: [],
+    selectedPresetKey: bomFilterPresetKey.value,
+    routePresetKey: bomFilterPresetQuery.value,
+    nameDraft: bomFilterPresetName.value,
+    groupDraft: bomFilterPresetGroup.value,
+  })
+  bomFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+  bomFilterPresetName.value = nextSelection.nextNameDraft
+  bomFilterPresetGroup.value = nextSelection.nextGroupDraft
+  syncBomFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
   bomFilterPresetGroupFilter.value = 'all'
   setDeepLinkMessage('已清空 BOM 过滤预设。')
 }
@@ -3990,15 +4005,17 @@ function importWhereUsedFilterPresetsFromText(raw: string) {
     whereUsedFilterPresets.value = presets
     persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, presets)
     whereUsedFilterPresetImportText.value = ''
-    if (!presets.some((preset) => preset.key === whereUsedFilterPresetKey.value)) {
-      whereUsedFilterPresetKey.value = ''
-    }
-    if (
-      whereUsedFilterPresetQuery.value
-      && !presets.some((preset) => preset.key === whereUsedFilterPresetQuery.value)
-    ) {
-      syncWhereUsedFilterPresetQuery(undefined)
-    }
+    const nextSelection = resolveFilterPresetCatalogDraftState({
+      availablePresets: presets,
+      selectedPresetKey: whereUsedFilterPresetKey.value,
+      routePresetKey: whereUsedFilterPresetQuery.value,
+      nameDraft: whereUsedFilterPresetName.value,
+      groupDraft: whereUsedFilterPresetGroup.value,
+    })
+    whereUsedFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+    whereUsedFilterPresetName.value = nextSelection.nextNameDraft
+    whereUsedFilterPresetGroup.value = nextSelection.nextGroupDraft
+    syncWhereUsedFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
     reconcileWhereUsedLocalFilterPresetIdentityAfterImport()
     const importedCount = added + updated
     if (importedCount) {
@@ -4061,8 +4078,17 @@ function clearWhereUsedFilterPresets() {
   if (!whereUsedFilterPresets.value.length) return
   whereUsedFilterPresets.value = []
   persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, [])
-  whereUsedFilterPresetKey.value = ''
-  syncWhereUsedFilterPresetQuery(undefined)
+  const nextSelection = resolveFilterPresetCatalogDraftState({
+    availablePresets: [],
+    selectedPresetKey: whereUsedFilterPresetKey.value,
+    routePresetKey: whereUsedFilterPresetQuery.value,
+    nameDraft: whereUsedFilterPresetName.value,
+    groupDraft: whereUsedFilterPresetGroup.value,
+  })
+  whereUsedFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+  whereUsedFilterPresetName.value = nextSelection.nextNameDraft
+  whereUsedFilterPresetGroup.value = nextSelection.nextGroupDraft
+  syncWhereUsedFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
   whereUsedFilterPresetGroupFilter.value = 'all'
   setDeepLinkMessage('已清空 Where-Used 过滤预设。')
 }

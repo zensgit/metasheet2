@@ -13,6 +13,7 @@ import {
   parseFilterPresetImport,
   persistFilterPresets,
   renameFilterPreset,
+  resolveFilterPresetCatalogDraftState,
   resolveFilterPresetShareMode,
   upsertFilterPreset,
 } from '../src/views/plm/plmFilterPresetUtils'
@@ -119,7 +120,7 @@ describe('plmFilterPresetUtils', () => {
     )
 
     const bomParams = new URL(bomUrl).searchParams
-    expect(bomParams.get('panel')).toBe('bom')
+    expect(bomParams.get('panel')).toBe('product')
     expect(bomParams.get('bomTeamPreset')).toBe('bom-team-1')
     expect(bomParams.get('bomFilter')).toBe('root/a')
     expect(bomParams.get('bomFilterField')).toBe('path')
@@ -129,6 +130,40 @@ describe('plmFilterPresetUtils', () => {
     expect(whereUsedParams.get('whereUsedTeamPreset')).toBe('wu-team-1')
     expect(whereUsedParams.get('whereUsedFilter')).toBe('assy-01')
     expect(whereUsedParams.get('whereUsedFilterField')).toBeNull()
+  })
+
+  it('clears stale local preset drafts when the selected preset disappears from the catalog', () => {
+    expect(resolveFilterPresetCatalogDraftState({
+      availablePresets: [
+        { key: 'bom:2' },
+      ],
+      selectedPresetKey: ' bom:1 ',
+      routePresetKey: ' bom:1 ',
+      nameDraft: '旧 BOM 预设',
+      groupDraft: '机械',
+    })).toEqual({
+      nextSelectedPresetKey: '',
+      nextRoutePresetKey: '',
+      nextNameDraft: '',
+      nextGroupDraft: '',
+    })
+  })
+
+  it('preserves local preset drafts when the selected preset survives but the route owner goes stale', () => {
+    expect(resolveFilterPresetCatalogDraftState({
+      availablePresets: [
+        { key: 'bom:2' },
+      ],
+      selectedPresetKey: ' bom:2 ',
+      routePresetKey: ' bom:1 ',
+      nameDraft: '新的 BOM 预设',
+      groupDraft: '电机',
+    })).toEqual({
+      nextSelectedPresetKey: 'bom:2',
+      nextRoutePresetKey: '',
+      nextNameDraft: '新的 BOM 预设',
+      nextGroupDraft: '电机',
+    })
   })
 
   it('duplicates and renames presets while preserving explicit identity semantics', () => {
