@@ -232,8 +232,12 @@ jobs:
               awk '
                 /^=== HOST SYNC START ===$/ { printing=1; next }
                 /^=== HOST SYNC END ===$/ { printing=0 }
-                printing { print }
-              ' "$metrics_log" | head -n 80
+                printing {
+                  print
+                  count++
+                  if (count >= 80) exit
+                }
+              ' "$metrics_log"
             )"
 
             if [[ -z "${host_sync_block}" ]]; then
@@ -274,13 +278,18 @@ jobs:
               awk '
                 /^=== ATTENDANCE METRICS START ===$/ { printing=1; next }
                 /^=== ATTENDANCE METRICS END ===$/ { printing=0; after=1; next }
-                printing { print; next }
+                printing {
+                  print
+                  count++
+                  if (count >= 120) exit
+                  next
+                }
                 after {
                   print
                   count++
                   if (count >= 20) exit
                 }
-              ' "$metrics_log" | head -n 140
+              ' "$metrics_log"
             )"
 
             if [[ -z "${metrics_block}" ]]; then

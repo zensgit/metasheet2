@@ -184,8 +184,12 @@ jobs:
               awk '
                 /^=== HOST SYNC START ===$/ { printing=1; next }
                 /^=== HOST SYNC END ===$/ { printing=0 }
-                printing { print }
-              ' "$preflight_log" | head -n 80
+                printing {
+                  print
+                  count++
+                  if (count >= 80) exit
+                }
+              ' "$preflight_log"
             )"
 
             if [[ -z "${host_sync_block}" ]]; then
@@ -228,7 +232,12 @@ jobs:
               awk '
                 /^=== ATTENDANCE PREFLIGHT START ===$/ { printing=1; next }
                 /^=== ATTENDANCE PREFLIGHT END ===$/ { printing=0; after=1; next }
-                printing { print; next }
+                printing {
+                  print
+                  count++
+                  if (count >= 120) exit
+                  next
+                }
                 after {
                   # Include a small post-block tail to capture "Preflight OK" even when
                   # stdout/stderr interleaving moves it after the END marker.
@@ -236,7 +245,7 @@ jobs:
                   count++
                   if (count >= 20) exit
                 }
-              ' "$preflight_log" | head -n 140
+              ' "$preflight_log"
             )"
 
             if [[ -z "${preflight_block}" ]]; then
