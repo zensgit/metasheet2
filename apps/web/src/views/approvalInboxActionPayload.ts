@@ -22,6 +22,19 @@ export function resolveApprovalActionVersion(
   return null
 }
 
+export function canActOnApprovalInboxEntry(
+  input: { version?: unknown } | null | undefined,
+): boolean {
+  return resolveApprovalActionVersion(input) !== null
+}
+
+export function formatApprovalInboxVersion(
+  input: { version?: unknown } | null | undefined,
+): string {
+  const version = resolveApprovalActionVersion(input)
+  return version === null ? '-' : String(version)
+}
+
 export function canSubmitApprovalInboxAction(
   action: ApprovalInboxAction,
   comment: string,

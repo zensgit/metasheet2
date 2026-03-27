@@ -38,7 +38,7 @@
             >
               <td class="mono">{{ approval.id }}</td>
               <td>{{ approval.status }}</td>
-              <td>{{ approval.version }}</td>
+              <td>{{ formatPendingVersion(approval) }}</td>
               <td>{{ formatDate(approval.updated_at || approval.created_at) }}</td>
               <td>
                 <div class="approval-inbox__actions">
@@ -48,7 +48,7 @@
                   <button
                     class="btn btn--ghost btn--mini"
                     type="button"
-                    :disabled="actingId === approval.id"
+                    :disabled="actingId === approval.id || !canActOnApproval(approval)"
                     @click="approve(approval.id)"
                   >
                     Approve
@@ -56,7 +56,7 @@
                   <button
                     class="btn btn--ghost btn--mini"
                     type="button"
-                    :disabled="actingId === approval.id || !canSubmitApprovalInboxAction('reject', comment)"
+                    :disabled="actingId === approval.id || !canActOnApproval(approval) || !canSubmitApprovalInboxAction('reject', comment)"
                     @click="reject(approval.id)"
                   >
                     Reject
@@ -117,7 +117,9 @@ import type { ApprovalHistoryEntry } from './plm/plmPanelModels'
 import { apiFetch } from '../utils/api'
 import {
   buildApprovalInboxActionPayload,
+  canActOnApprovalInboxEntry,
   canSubmitApprovalInboxAction,
+  formatApprovalInboxVersion,
   resolveApprovalActionVersion,
 } from './approvalInboxActionPayload'
 import {
@@ -134,7 +136,7 @@ import {
 interface ApprovalInstance {
   id: string
   status: string
-  version: number
+  version?: string | number
   created_at?: string
   updated_at?: string
 }
@@ -172,6 +174,14 @@ function formatHistoryActor(record: ApprovalRecord) {
 
 function formatHistoryVersion(record: ApprovalRecord) {
   return resolvePlmApprovalHistoryVersionLabel(record)
+}
+
+function formatPendingVersion(approval: ApprovalInstance) {
+  return formatApprovalInboxVersion(approval)
+}
+
+function canActOnApproval(approval: ApprovalInstance) {
+  return canActOnApprovalInboxEntry(approval)
 }
 
 async function loadHistory(id: string) {

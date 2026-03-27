@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildApprovalInboxActionPayload,
+  canActOnApprovalInboxEntry,
   canSubmitApprovalInboxAction,
+  formatApprovalInboxVersion,
   normalizeApprovalInboxComment,
   resolveApprovalActionVersion,
 } from '../src/views/approvalInboxActionPayload'
@@ -43,5 +45,15 @@ describe('plmApprovalInboxActionPayload', () => {
     expect(resolveApprovalActionVersion({ version: -1 })).toBeNull()
     expect(resolveApprovalActionVersion({ version: 'NaN' })).toBeNull()
     expect(resolveApprovalActionVersion(null)).toBeNull()
+  })
+
+  it('formats inbox versions and actionability from the resolved optimistic-lock version', () => {
+    expect(formatApprovalInboxVersion({ version: 3 })).toBe('3')
+    expect(formatApprovalInboxVersion({ version: ' 4 ' })).toBe('4')
+    expect(formatApprovalInboxVersion({ version: '' })).toBe('-')
+    expect(canActOnApprovalInboxEntry({ version: 3 })).toBe(true)
+    expect(canActOnApprovalInboxEntry({ version: ' 4 ' })).toBe(true)
+    expect(canActOnApprovalInboxEntry({ version: '' })).toBe(false)
+    expect(canActOnApprovalInboxEntry(null)).toBe(false)
   })
 })
