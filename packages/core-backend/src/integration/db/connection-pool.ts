@@ -202,6 +202,17 @@ class PoolManager {
       this.logger.warn('DATABASE_URL not set; database pool will use driver defaults and may fail to connect')
     }
 
+    const sslDisabledByEnv = ['false', '0', 'off', 'no'].includes((process.env.DB_SSL || '').trim().toLowerCase())
+    const ssl =
+      process.env.NODE_ENV === 'production' && !sslDisabledByEnv
+        ? {
+            rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false',
+            ca: process.env.DB_SSL_CA,
+            cert: process.env.DB_SSL_CERT,
+            key: process.env.DB_SSL_KEY,
+          }
+        : false
+
     this.main = this.createPool(
       'main',
       {
@@ -217,12 +228,7 @@ class PoolManager {
         // Note: acquireTimeoutMillis is not a valid pg Pool option, removing to fix compilation
 
         // SSL配置
-        ssl: process.env.NODE_ENV === 'production' ? {
-          rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false',
-          ca: process.env.DB_SSL_CA,
-          cert: process.env.DB_SSL_CERT,
-          key: process.env.DB_SSL_KEY,
-        } : false,
+        ssl,
 
         // 查询配置
         query_timeout: parseInt(process.env.DB_QUERY_TIMEOUT || '30000', 10), // 查询超时
