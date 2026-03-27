@@ -40,7 +40,6 @@ export const PLM_WORKBENCH_QUERY_KEYS = [
   'documentColumns',
   'approvalsStatus',
   'approvalsFilter',
-  'approvalComment',
   'approvalSort',
   'approvalSortDir',
   'approvalColumns',
@@ -346,8 +345,10 @@ export function buildPlmWorkbenchResetHydratedPanelQueryPatch() {
 }
 
 export function buildPlmWorkbenchLegacyLocalDraftQueryPatch(value: unknown) {
-  const next = normalizePlmWorkbenchQuerySnapshot(value)
-  if (!next.approvalComment) return {}
+  if (!value || typeof value !== 'object') return {}
+  if (!('approvalComment' in (value as Record<string, unknown>))) return {}
+  const normalized = normalizeQueryValue((value as Record<string, unknown>).approvalComment)
+  if (!normalized) return {}
   return {
     approvalComment: '',
   }

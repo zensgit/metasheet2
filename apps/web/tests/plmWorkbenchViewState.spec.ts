@@ -129,6 +129,17 @@ describe('plmWorkbenchViewState', () => {
     })
   })
 
+  it('ignores legacy approval drafts in canonical query snapshots', () => {
+    expect(
+      normalizePlmWorkbenchQuerySnapshot({
+        approvalsFilter: ' eco ',
+        approvalComment: 'ship-it',
+      }),
+    ).toEqual({
+      approvalsFilter: 'eco',
+    })
+  })
+
   it('normalizes explicit panel scope to canonical collaborative order', () => {
     expect(normalizePlmWorkbenchPanelScope(' approvals, documents, approvals ')).toBe('documents,approvals')
     expect(normalizePlmWorkbenchPanelScope('all')).toBeUndefined()
@@ -176,6 +187,13 @@ describe('plmWorkbenchViewState', () => {
         approvalsFilter: 'eco',
       }),
     ).toEqual({})
+    expect(
+      buildPlmWorkbenchLegacyLocalDraftQueryPatch({
+        approvalComment: ['ship-it'],
+      }),
+    ).toEqual({
+      approvalComment: '',
+    })
   })
 
   it('detects workbench snapshot drift after manual query edits', () => {
