@@ -38,7 +38,7 @@ info "Compose cmd: ${COMPOSE_CMD}"
 info "Image owner: ${DEPLOY_IMAGE_OWNER}"
 info "Image tag:   ${DEPLOY_IMAGE_TAG}"
 
-for container_name in metasheet-backend metasheet-web; do
+for container_name in metasheet-postgres metasheet-redis metasheet-backend metasheet-web; do
   if docker ps -a --format '{{.Names}}' | grep -Fxq "${container_name}"; then
     info "Removing existing container before recreate: ${container_name}"
     docker rm -f "${container_name}"
