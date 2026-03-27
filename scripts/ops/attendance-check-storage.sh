@@ -193,7 +193,15 @@ function run_cmd() {
     tmp_err="$(mktemp 2>/dev/null || echo "/tmp/attendance-storage-err-$$")"
     out=""
     set +e
-    out="$(eval "${COMPOSE_CMD} -f \"${COMPOSE_FILE}\" exec -T backend sh -lc \"\$cmd\" < /dev/null" 2>"$tmp_err")"
+    if [[ "$COMPOSE_CMD" == "docker compose" ]]; then
+      out="$(docker compose -f "$COMPOSE_FILE" exec -T backend sh -lc "$cmd" < /dev/null 2>"$tmp_err")"
+    elif [[ "$COMPOSE_CMD" == "docker-compose" ]]; then
+      out="$(docker-compose -f "$COMPOSE_FILE" exec -T backend sh -lc "$cmd" < /dev/null 2>"$tmp_err")"
+    else
+      echo "[attendance-storage] ERROR: unsupported compose command: ${COMPOSE_CMD}" >&2
+      rm -f "$tmp_err" || true
+      return 125
+    fi
     rc=$?
     set -e
     if [[ "$rc" != "0" ]]; then
