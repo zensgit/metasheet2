@@ -5,7 +5,7 @@
         <h1>Approval Inbox</h1>
         <p>Platform approvals that already live behind `/api/approvals/*`.</p>
       </div>
-      <button class="btn btn--ghost" type="button" :disabled="loading" @click="refresh">
+      <button class="btn btn--ghost" type="button" :disabled="loading" @click="refreshInbox">
         {{ loading ? 'Refreshing...' : 'Refresh' }}
       </button>
     </header>
@@ -117,6 +117,10 @@ import {
   canSubmitApprovalInboxAction,
   resolveApprovalActionVersion,
 } from './approvalInboxActionPayload'
+import {
+  resolveApprovalInboxActionStatusAfterRefresh,
+  resolveApprovalInboxErrorMessage,
+} from './approvalInboxFeedback'
 
 interface ApprovalInstance {
   id: string
@@ -176,14 +180,27 @@ async function loadHistory(id: string) {
   }
 }
 
-async function refresh() {
+async function readApprovalInboxError(response: Response) {
+  const fallback = `${response.status} ${response.statusText}`
+  try {
+    const payload = await response.json()
+    return resolveApprovalInboxErrorMessage(payload, fallback)
+  } catch {
+    return fallback
+  }
+}
+
+async function refreshInboxState(options?: { preserveActionStatus?: boolean }) {
   loading.value = true
   error.value = ''
-  actionStatus.value = ''
+  actionStatus.value = resolveApprovalInboxActionStatusAfterRefresh(
+    actionStatus.value,
+    options?.preserveActionStatus ?? false,
+  )
 
   try {
     const response = await apiFetch('/api/approvals/pending?limit=50&offset=0')
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
+    if (!response.ok) throw new Error(await readApprovalInboxError(response))
     const payload = await response.json()
     approvals.value = Array.isArray(payload?.data) ? payload.data : []
     if (selectedApprovalId.value) {
@@ -195,6 +212,10 @@ async function refresh() {
   } finally {
     loading.value = false
   }
+}
+
+function refreshInbox() {
+  void refreshInboxState()
 }
 
 async function performAction(id: string, action: 'approve' | 'reject') {
@@ -217,9 +238,9 @@ async function performAction(id: string, action: 'approve' | 'reject') {
       method: 'POST',
       body: JSON.stringify(buildApprovalInboxActionPayload(action, comment.value, version)),
     })
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
+    if (!response.ok) throw new Error(await readApprovalInboxError(response))
     actionStatus.value = `${action === 'approve' ? 'Approved' : 'Rejected'} ${id}`
-    await refresh()
+    await refreshInboxState({ preserveActionStatus: true })
   } catch (err) {
     error.value = err instanceof Error ? err.message : `Failed to ${action} approval`
   } finally {
@@ -239,7 +260,9 @@ function reject(id: string) {
   void performAction(id, 'reject')
 }
 
-onMounted(refresh)
+onMounted(() => {
+  refreshInbox()
+})
 </script>
 
 <style scoped>
