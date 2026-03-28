@@ -2,7 +2,7 @@
  * API utilities for frontend-backend communication
  */
 
-import { normalizePreLoginRedirect } from './authRedirect'
+import { normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './authRedirect'
 
 // Vite environment type declaration
 declare global {
@@ -95,6 +95,7 @@ function buildLoginRedirectUrl(): string {
   if (typeof window === 'undefined') return '/login'
   const current = `${window.location.pathname || ''}${window.location.search || ''}${window.location.hash || ''}` || '/'
   if (current.startsWith('/login')) return '/login'
+  if (shouldSkipPreLoginRedirectQuery(current)) return '/login'
   const redirect = normalizePreLoginRedirect(current)
   return `/login?redirect=${encodeURIComponent(redirect)}`
 }

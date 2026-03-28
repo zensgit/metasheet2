@@ -1650,6 +1650,69 @@ describe('Attendance Plugin Integration', () => {
     expect(createdRuleSet?.config?.rule?.timezone).toBe('Asia/Shanghai')
   })
 
+  it('returns 404 for valid-but-missing approval flow and rule set ids while keeping malformed ids at 400', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-missing-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const missingApprovalFlowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/${randomUuidV4()}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(missingApprovalFlowRes.status).toBe(404)
+    expect((missingApprovalFlowRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('NOT_FOUND')
+
+    const invalidApprovalFlowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/not-a-uuid`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(invalidApprovalFlowRes.status).toBe(400)
+    expect((invalidApprovalFlowRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
+
+    const missingRuleSetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets/${randomUuidV4()}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Missing Rule Set ${runSuffix}`,
+        version: 1,
+        scope: 'org',
+        config: { source: 'manual' },
+      }),
+    })
+    expect(missingRuleSetRes.status).toBe(404)
+    expect((missingRuleSetRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('NOT_FOUND')
+
+    const invalidRuleSetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets/not-a-uuid`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Invalid Rule Set ${runSuffix}`,
+        version: 1,
+        scope: 'org',
+        config: { source: 'manual' },
+      }),
+    })
+    expect(invalidRuleSetRes.status).toBe(400)
+    expect((invalidRuleSetRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
+  })
+
   it('rejects invalid CSV upload payloads with 400 before creating upload handles', async () => {
     if (!baseUrl) return
 

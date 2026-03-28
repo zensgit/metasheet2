@@ -4,6 +4,10 @@ function isSafeInAppRedirect(value: string): boolean {
   return value.startsWith('/') && !value.startsWith('//')
 }
 
+function normalizeRedirectPathForComparison(value: string): string {
+  return value.split('#', 1)[0]?.split('?', 1)[0] || value
+}
+
 export function normalizePostLoginRedirect(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const normalized = value.trim()
@@ -18,4 +22,12 @@ export function normalizePreLoginRedirect(value: unknown, fallback = DEFAULT_AUT
   if (!isSafeInAppRedirect(normalized)) return fallback
   if (normalized === '/' || normalized.startsWith('/login')) return fallback
   return normalized
+}
+
+export function shouldSkipPreLoginRedirectQuery(value: unknown): boolean {
+  if (typeof value !== 'string') return true
+  const normalized = value.trim()
+  if (!isSafeInAppRedirect(normalized)) return true
+  const pathOnly = normalizeRedirectPathForComparison(normalized)
+  return pathOnly === '/' || pathOnly === '/login'
 }
