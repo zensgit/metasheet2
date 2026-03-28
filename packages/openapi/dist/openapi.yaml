@@ -7465,6 +7465,37 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/attendance/payroll-cycles/{id}/export:
+    x-plugin: plugin-attendance
+    get:
+      summary: Export payroll cycle summary (CSV compatibility alias)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: userId
+          schema:
+            type: string
+        - in: query
+          name: orgId
+          schema:
+            type: string
+      responses:
+        '200':
+          description: CSV export
+          content:
+            text/csv:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /api/audit-logs:
     get:
       summary: Admin-only audit log query
