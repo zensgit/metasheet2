@@ -3329,6 +3329,7 @@ describe('usePlmTeamViews', () => {
     await model.refreshTeamViews()
     model.teamViewKey.value = 'document-view-1'
     model.teamViewSelection.value = ['document-view-1']
+    model.teamViewName.value = '待清理名称'
     model.teamViewOwnerUserId.value = 'owner-2'
     syncRequestedViewId.mockClear()
     applyViewState.mockClear()
@@ -3338,6 +3339,7 @@ describe('usePlmTeamViews', () => {
     expect(transferPlmWorkbenchTeamView).toHaveBeenCalledWith('documents', 'document-view-1', 'owner-2')
     expect(syncRequestedViewId).toHaveBeenLastCalledWith('document-view-1')
     expect(requestedViewId.value).toBe('document-view-1')
+    expect(model.teamViewName.value).toBe('')
     expect(model.teamViewOwnerUserId.value).toBe('')
     expect(model.teamViews.value[0]).toMatchObject({
       id: 'document-view-1',

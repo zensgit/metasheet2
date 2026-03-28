@@ -682,9 +682,11 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       teamPresets.value = replaceTeamPreset(teamPresets.value, saved)
       if (!readTeamPresetPermissions(saved).canManage) {
         teamPresetSelection.value = teamPresetSelection.value.filter((id) => id !== saved.id)
+        clearTeamPresetDrafts()
+      } else {
+        teamPresetOwnerUserId.value = ''
       }
       applyPresetToTarget(saved)
-      teamPresetOwnerUserId.value = ''
       options.setMessage(`已将${options.label}团队预设转移给：${saved.ownerUserId}`)
       return saved
     } catch (error) {

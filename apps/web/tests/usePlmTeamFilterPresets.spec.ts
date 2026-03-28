@@ -1316,6 +1316,8 @@ describe('usePlmTeamFilterPresets', () => {
 
     model.teamPresetKey.value = 'preset-transfer'
     model.teamPresetSelection.value = ['preset-transfer']
+    model.teamPresetName.value = '临时草稿'
+    model.teamPresetGroup.value = '临时分组'
     model.teamPresetOwnerUserId.value = 'owner-b'
     expect(model.canTransferTeamPreset.value).toBe(true)
     await model.transferTeamPreset()
@@ -1324,6 +1326,8 @@ describe('usePlmTeamFilterPresets', () => {
     expect(syncRequestedPresetId).toHaveBeenLastCalledWith('preset-transfer')
     expect(trackedApply).toHaveReturnedWith('preset-transfer')
     expect(model.teamPresetKey.value).toBe('preset-transfer')
+    expect(model.teamPresetName.value).toBe('')
+    expect(model.teamPresetGroup.value).toBe('')
     expect(model.teamPresetSelection.value).toEqual([])
     expect(model.teamPresetOwnerUserId.value).toBe('')
     expect(model.showManagementActions.value).toBe(false)
