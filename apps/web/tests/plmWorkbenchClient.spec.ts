@@ -1324,6 +1324,77 @@ describe('plmWorkbenchClient', () => {
     )
   })
 
+  it('maps mixed-kind batch team view items using each runtime kind', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          action: 'delete',
+          processedIds: ['view-cad-a', 'view-approval-a'],
+          skippedIds: [],
+          items: [
+            {
+              id: 'view-cad-a',
+              kind: 'cad',
+              name: 'CAD 批量 A',
+              ownerUserId: 'owner-1',
+              canManage: true,
+              isDefault: false,
+              isArchived: false,
+              state: {
+                fileId: 'cad-a',
+                otherFileId: '',
+                reviewState: 'approved',
+                reviewNote: 'ok',
+              },
+            },
+            {
+              id: 'view-approval-a',
+              kind: 'approvals',
+              name: '审批批量 A',
+              ownerUserId: 'owner-1',
+              canManage: true,
+              isDefault: false,
+              isArchived: false,
+              state: {
+                status: 'pending',
+                filter: 'eco',
+                sortKey: 'created',
+                sortDir: 'desc',
+                columns: { id: true },
+              },
+            },
+          ],
+        },
+      }),
+    })
+
+    const result = await batchPlmWorkbenchTeamViews('documents', 'delete', ['view-cad-a', 'view-approval-a'])
+
+    expect(result.items).toMatchObject([
+      {
+        id: 'view-cad-a',
+        kind: 'cad',
+        state: {
+          fileId: 'cad-a',
+          reviewState: 'approved',
+        },
+      },
+      {
+        id: 'view-approval-a',
+        kind: 'approvals',
+        state: {
+          status: 'pending',
+          filter: 'eco',
+          sortKey: 'created',
+          sortDir: 'desc',
+          columns: { id: true },
+        },
+      },
+    ])
+  })
+
   it('lists collaborative audit logs with normalized metadata', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,

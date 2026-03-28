@@ -238,11 +238,29 @@ function normalizeTeamViewState<Kind extends PlmWorkbenchTeamViewKind>(
   } as PlmWorkbenchTeamViewStateByKind[Kind]
 }
 
+function normalizeTeamViewKind(
+  value: unknown,
+  fallback: PlmWorkbenchTeamViewKind,
+): PlmWorkbenchTeamViewKind {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if (
+    normalized === 'documents'
+    || normalized === 'cad'
+    || normalized === 'approvals'
+    || normalized === 'workbench'
+    || normalized === 'audit'
+  ) {
+    return normalized
+  }
+  return fallback
+}
+
 function mapTeamView<Kind extends PlmWorkbenchTeamViewKind>(
   kind: Kind,
   item: unknown,
 ): PlmWorkbenchTeamView<Kind> {
   const record = item && typeof item === 'object' ? item as Record<string, unknown> : {}
+  const resolvedKind = normalizeTeamViewKind(record.kind, kind)
   const isArchived = Boolean(record.isArchived)
   const isDefault = Boolean(record.isDefault)
   const canManage = Boolean(record.canManage)
@@ -262,7 +280,7 @@ function mapTeamView<Kind extends PlmWorkbenchTeamViewKind>(
 
   return {
     id: typeof record.id === 'string' ? record.id : '',
-    kind,
+    kind: resolvedKind as Kind,
     scope: 'team',
     name: typeof record.name === 'string' ? record.name : '',
     ownerUserId: typeof record.ownerUserId === 'string' ? record.ownerUserId : '',
@@ -271,7 +289,7 @@ function mapTeamView<Kind extends PlmWorkbenchTeamViewKind>(
     isDefault,
     isArchived,
     lastDefaultSetAt: typeof record.lastDefaultSetAt === 'string' ? record.lastDefaultSetAt : undefined,
-    state: normalizeTeamViewState(kind, record.state),
+    state: normalizeTeamViewState(resolvedKind as Kind, record.state),
     archivedAt: typeof record.archivedAt === 'string' ? record.archivedAt : undefined,
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined,
