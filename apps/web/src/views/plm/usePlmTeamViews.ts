@@ -628,7 +628,6 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       return
     }
     const view = selectedTeamView.value
-    const targetOwnerUserId = teamViewOwnerUserId.value.trim()
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
@@ -637,16 +636,22 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`请先恢复${options.label}团队视角，再执行转移所有者。`, true)
       return
     }
+    if (!canTransferTargetTeamView.value) {
+      options.setMessage(
+        canManageSelectedTeamView.value
+          ? `当前${options.label}团队视角不可转移所有者。`
+          : `仅创建者可转移${options.label}团队视角。`,
+        true,
+      )
+      return
+    }
+    const targetOwnerUserId = teamViewOwnerUserId.value.trim()
     if (!targetOwnerUserId) {
       options.setMessage(`请输入${options.label}团队视角目标用户 ID。`, true)
       return
     }
     if (targetOwnerUserId === view.ownerUserId) {
       options.setMessage(`${options.label}团队视角已经属于该用户。`)
-      return
-    }
-    if (!canManageSelectedTeamView.value) {
-      options.setMessage(`仅创建者可转移${options.label}团队视角。`, true)
       return
     }
     if (!canTransferTeamView.value) {

@@ -223,6 +223,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     return Boolean(teamPresetName.value.trim() && current.value.trim())
   })
   const {
+    canManageSelectedEntry: canManageSelectedTeamPreset,
     canShare: canShareTeamPreset,
     canDelete: canDeleteTeamPreset,
     canArchive: canArchiveTeamPreset,
@@ -641,6 +642,15 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`请先恢复${options.label}团队预设，再执行转移所有者。`, true)
       return null
     }
+    if (!canTransferTeamPresetTarget.value) {
+      options.setMessage(
+        canManageSelectedTeamPreset.value
+          ? `当前${options.label}团队预设不可转移所有者。`
+          : `仅创建者可转移${options.label}团队预设。`,
+        true,
+      )
+      return null
+    }
     const targetOwnerUserId = teamPresetOwnerUserId.value.trim()
     if (!targetOwnerUserId) {
       options.setMessage(`请输入${options.label}团队预设目标用户 ID。`, true)
@@ -650,11 +660,6 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`${options.label}团队预设已经属于该用户。`)
       return null
     }
-    if (!canTransferTeamPresetTarget.value) {
-      options.setMessage(`当前${options.label}团队预设不可转移。`, true)
-      return null
-    }
-
     teamPresetsLoading.value = true
     teamPresetsError.value = ''
 

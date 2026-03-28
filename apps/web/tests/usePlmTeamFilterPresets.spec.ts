@@ -1171,6 +1171,50 @@ describe('usePlmTeamFilterPresets', () => {
     expect(model.canShareTeamPreset.value).toBe(false)
   })
 
+  it('blocks readonly team preset transfer before validating the owner input', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-readonly-transfer',
+          kind: 'bom',
+          scope: 'team',
+          name: '只读 BOM 预设',
+          ownerUserId: 'owner-b',
+          canManage: false,
+          isDefault: false,
+          permissions: {
+            canManage: false,
+            canApply: true,
+            canTransfer: false,
+          },
+          state: { field: 'path', value: 'root/readonly', group: '共享组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/readonly', group: '共享组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-readonly-transfer'
+    await nextTick()
+
+    expect(model.teamPresetOwnerUserId.value).toBe('')
+    expect(model.canTransferTargetTeamPreset.value).toBe(false)
+    expect(model.canTransferTeamPreset.value).toBe(false)
+
+    await model.transferTeamPreset()
+
+    expect(transferPlmTeamFilterPreset).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenLastCalledWith('仅创建者可转移BOM团队预设。', true)
+  })
+
   it('clears rename, group, and owner drafts when switching the selected team preset', async () => {
     vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
       items: [
