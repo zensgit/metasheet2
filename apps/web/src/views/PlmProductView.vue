@@ -137,6 +137,7 @@ import {
   resolvePlmHydratedRemovedTeamPresetOwner,
   resolvePlmHydratedTeamPresetOwnerTakeover,
 } from './plm/plmHydratedTeamPresetOwnerTakeover'
+import { resolvePlmHydratedRouteQueryTransition } from './plm/plmHydratedRouteQueryTransition'
 import { resolvePlmHydratedLocalFilterPresetTakeover } from './plm/plmHydratedLocalFilterPresetTakeover'
 import {
   buildPlmLocalFilterPresetRouteOwnerWatchKey,
@@ -5666,6 +5667,16 @@ async function applyQueryState() {
   isApplyingRouteQueryState.value = true
 
   try {
+    const previousHydratedRouteQuery = {
+      workbenchTeamView: workbenchTeamViewQuery.value,
+      documentTeamView: documentTeamViewQuery.value,
+      cadTeamView: cadTeamViewQuery.value,
+      approvalsTeamView: approvalsTeamViewQuery.value,
+      whereUsedFilterPreset: whereUsedFilterPresetQuery.value,
+      whereUsedTeamPreset: whereUsedTeamPresetQuery.value,
+      bomFilterPreset: bomFilterPresetQuery.value,
+      bomTeamPreset: bomTeamPresetQuery.value,
+    }
     productId.value = ''
     productItemNumber.value = ''
     itemType.value = DEFAULT_ITEM_TYPE
@@ -5747,18 +5758,22 @@ async function applyQueryState() {
       searchLimit.value = clamped
     }
     const workbenchTeamViewParam = readQueryParam('workbenchTeamView')
-    if (workbenchTeamViewParam !== undefined) {
+    const workbenchTeamViewTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.workbenchTeamView,
+      nextRouteValue: workbenchTeamViewParam,
+    })
+    if (workbenchTeamViewTransition.kind === 'apply') {
       applyHydratedTeamViewOwnerTakeover({
-        routeOwnerId: workbenchTeamViewParam,
+        routeOwnerId: workbenchTeamViewTransition.routeValue,
         teamViewKey: workbenchTeamViewKey,
         teamViewName: workbenchTeamViewName,
         teamViewOwnerUserId: workbenchTeamViewOwnerUserId,
         teamViewSelection: workbenchTeamViewSelection,
       })
-      workbenchTeamViewQuery.value = workbenchTeamViewParam
-    } else if (workbenchTeamViewQuery.value) {
+      workbenchTeamViewQuery.value = workbenchTeamViewTransition.routeValue
+    } else if (workbenchTeamViewTransition.kind === 'remove') {
       applyHydratedRemovedTeamViewOwner({
-        removedRouteOwnerId: workbenchTeamViewQuery.value,
+        removedRouteOwnerId: workbenchTeamViewTransition.removedRouteValue,
         teamViewQuery: workbenchTeamViewQuery,
         teamViewKey: workbenchTeamViewKey,
         teamViewName: workbenchTeamViewName,
@@ -5769,18 +5784,22 @@ async function applyQueryState() {
     const sceneFocus = readWorkbenchSceneFocus(route.query)
     sceneCatalogAutoFocusSceneId.value = sceneFocus || ''
     const documentTeamViewParam = readQueryParam('documentTeamView')
-    if (documentTeamViewParam !== undefined) {
+    const documentTeamViewTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.documentTeamView,
+      nextRouteValue: documentTeamViewParam,
+    })
+    if (documentTeamViewTransition.kind === 'apply') {
       applyHydratedTeamViewOwnerTakeover({
-        routeOwnerId: documentTeamViewParam,
+        routeOwnerId: documentTeamViewTransition.routeValue,
         teamViewKey: documentTeamViewKey,
         teamViewName: documentTeamViewName,
         teamViewOwnerUserId: documentTeamViewOwnerUserId,
         teamViewSelection: documentTeamViewSelection,
       })
-      documentTeamViewQuery.value = documentTeamViewParam
-    } else if (documentTeamViewQuery.value) {
+      documentTeamViewQuery.value = documentTeamViewTransition.routeValue
+    } else if (documentTeamViewTransition.kind === 'remove') {
       applyHydratedRemovedTeamViewOwner({
-        removedRouteOwnerId: documentTeamViewQuery.value,
+        removedRouteOwnerId: documentTeamViewTransition.removedRouteValue,
         teamViewQuery: documentTeamViewQuery,
         teamViewKey: documentTeamViewKey,
         teamViewName: documentTeamViewName,
@@ -5789,18 +5808,22 @@ async function applyQueryState() {
       })
     }
     const cadTeamViewParam = readQueryParam('cadTeamView')
-    if (cadTeamViewParam !== undefined) {
+    const cadTeamViewTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.cadTeamView,
+      nextRouteValue: cadTeamViewParam,
+    })
+    if (cadTeamViewTransition.kind === 'apply') {
       applyHydratedTeamViewOwnerTakeover({
-        routeOwnerId: cadTeamViewParam,
+        routeOwnerId: cadTeamViewTransition.routeValue,
         teamViewKey: cadTeamViewKey,
         teamViewName: cadTeamViewName,
         teamViewOwnerUserId: cadTeamViewOwnerUserId,
         teamViewSelection: cadTeamViewSelection,
       })
-      cadTeamViewQuery.value = cadTeamViewParam
-    } else if (cadTeamViewQuery.value) {
+      cadTeamViewQuery.value = cadTeamViewTransition.routeValue
+    } else if (cadTeamViewTransition.kind === 'remove') {
       applyHydratedRemovedTeamViewOwner({
-        removedRouteOwnerId: cadTeamViewQuery.value,
+        removedRouteOwnerId: cadTeamViewTransition.removedRouteValue,
         teamViewQuery: cadTeamViewQuery,
         teamViewKey: cadTeamViewKey,
         teamViewName: cadTeamViewName,
@@ -5809,18 +5832,22 @@ async function applyQueryState() {
       })
     }
     const approvalsTeamViewParam = readQueryParam('approvalsTeamView')
-    if (approvalsTeamViewParam !== undefined) {
+    const approvalsTeamViewTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.approvalsTeamView,
+      nextRouteValue: approvalsTeamViewParam,
+    })
+    if (approvalsTeamViewTransition.kind === 'apply') {
       applyHydratedTeamViewOwnerTakeover({
-        routeOwnerId: approvalsTeamViewParam,
+        routeOwnerId: approvalsTeamViewTransition.routeValue,
         teamViewKey: approvalsTeamViewKey,
         teamViewName: approvalsTeamViewName,
         teamViewOwnerUserId: approvalsTeamViewOwnerUserId,
         teamViewSelection: approvalsTeamViewSelection,
       })
-      approvalsTeamViewQuery.value = approvalsTeamViewParam
-    } else if (approvalsTeamViewQuery.value) {
+      approvalsTeamViewQuery.value = approvalsTeamViewTransition.routeValue
+    } else if (approvalsTeamViewTransition.kind === 'remove') {
       applyHydratedRemovedTeamViewOwner({
-        removedRouteOwnerId: approvalsTeamViewQuery.value,
+        removedRouteOwnerId: approvalsTeamViewTransition.removedRouteValue,
         teamViewQuery: approvalsTeamViewQuery,
         teamViewKey: approvalsTeamViewKey,
         teamViewName: approvalsTeamViewName,
@@ -5935,9 +5962,13 @@ async function applyQueryState() {
       whereUsedMaxLevels.value = Math.max(1, Math.floor(whereUsedMaxLevelsParam))
     }
     const whereUsedFilterPresetParam = readQueryParam('whereUsedFilterPreset')
-    if (whereUsedFilterPresetParam !== undefined) {
+    const whereUsedFilterPresetTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.whereUsedFilterPreset,
+      nextRouteValue: whereUsedFilterPresetParam,
+    })
+    if (whereUsedFilterPresetTransition.kind === 'apply') {
       const hydratedTakeover = resolvePlmHydratedLocalFilterPresetTakeover({
-        routePresetKey: whereUsedFilterPresetParam,
+        routePresetKey: whereUsedFilterPresetTransition.routeValue,
         localSelectorKey: whereUsedFilterPresetKey.value,
         localNameDraft: whereUsedFilterPresetName.value,
         localGroupDraft: whereUsedFilterPresetGroup.value,
@@ -5949,10 +5980,10 @@ async function applyQueryState() {
       whereUsedFilterPresetGroup.value = hydratedTakeover.nextGroupDraft
       whereUsedPresetSelection.value = hydratedTakeover.nextSelectionKeys
       whereUsedPresetBatchGroup.value = hydratedTakeover.nextBatchGroupDraft
-      whereUsedFilterPresetQuery.value = whereUsedFilterPresetParam
-    } else if (whereUsedFilterPresetQuery.value) {
+      whereUsedFilterPresetQuery.value = whereUsedFilterPresetTransition.routeValue
+    } else if (whereUsedFilterPresetTransition.kind === 'remove') {
       const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
-        routePresetKey: whereUsedFilterPresetQuery.value,
+        routePresetKey: whereUsedFilterPresetTransition.removedRouteValue,
         selectedPresetKey: whereUsedFilterPresetKey.value,
         nameDraft: whereUsedFilterPresetName.value,
         groupDraft: whereUsedFilterPresetGroup.value,
@@ -5972,19 +6003,23 @@ async function applyQueryState() {
       whereUsedFilterPresetQuery.value = nextIdentity.nextRoutePresetKey
     }
     const whereUsedTeamPresetParam = readQueryParam('whereUsedTeamPreset')
-    if (whereUsedTeamPresetParam !== undefined) {
+    const whereUsedTeamPresetTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.whereUsedTeamPreset,
+      nextRouteValue: whereUsedTeamPresetParam,
+    })
+    if (whereUsedTeamPresetTransition.kind === 'apply') {
       applyHydratedTeamPresetOwnerTakeover({
-        routeOwnerId: whereUsedTeamPresetParam,
+        routeOwnerId: whereUsedTeamPresetTransition.routeValue,
         teamPresetKey: whereUsedTeamPresetKey,
         teamPresetName: whereUsedTeamPresetName,
         teamPresetGroup: whereUsedTeamPresetGroup,
         teamPresetOwnerUserId: whereUsedTeamPresetOwnerUserId,
         teamPresetSelection: whereUsedTeamPresetSelection,
       })
-      whereUsedTeamPresetQuery.value = whereUsedTeamPresetParam
-    } else if (whereUsedTeamPresetQuery.value) {
+      whereUsedTeamPresetQuery.value = whereUsedTeamPresetTransition.routeValue
+    } else if (whereUsedTeamPresetTransition.kind === 'remove') {
       applyHydratedRemovedTeamPresetOwner({
-        removedRouteOwnerId: whereUsedTeamPresetQuery.value,
+        removedRouteOwnerId: whereUsedTeamPresetTransition.removedRouteValue,
         teamPresetQuery: whereUsedTeamPresetQuery,
         teamPresetKey: whereUsedTeamPresetKey,
         teamPresetName: whereUsedTeamPresetName,
@@ -6015,9 +6050,13 @@ async function applyQueryState() {
       bomEffectiveAt.value = bomEffectiveAtParam
     }
     const bomFilterPresetParam = readQueryParam('bomFilterPreset')
-    if (bomFilterPresetParam !== undefined) {
+    const bomFilterPresetTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.bomFilterPreset,
+      nextRouteValue: bomFilterPresetParam,
+    })
+    if (bomFilterPresetTransition.kind === 'apply') {
       const hydratedTakeover = resolvePlmHydratedLocalFilterPresetTakeover({
-        routePresetKey: bomFilterPresetParam,
+        routePresetKey: bomFilterPresetTransition.routeValue,
         localSelectorKey: bomFilterPresetKey.value,
         localNameDraft: bomFilterPresetName.value,
         localGroupDraft: bomFilterPresetGroup.value,
@@ -6029,10 +6068,10 @@ async function applyQueryState() {
       bomFilterPresetGroup.value = hydratedTakeover.nextGroupDraft
       bomPresetSelection.value = hydratedTakeover.nextSelectionKeys
       bomPresetBatchGroup.value = hydratedTakeover.nextBatchGroupDraft
-      bomFilterPresetQuery.value = bomFilterPresetParam
-    } else if (bomFilterPresetQuery.value) {
+      bomFilterPresetQuery.value = bomFilterPresetTransition.routeValue
+    } else if (bomFilterPresetTransition.kind === 'remove') {
       const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
-        routePresetKey: bomFilterPresetQuery.value,
+        routePresetKey: bomFilterPresetTransition.removedRouteValue,
         selectedPresetKey: bomFilterPresetKey.value,
         nameDraft: bomFilterPresetName.value,
         groupDraft: bomFilterPresetGroup.value,
@@ -6052,19 +6091,23 @@ async function applyQueryState() {
       bomFilterPresetQuery.value = nextIdentity.nextRoutePresetKey
     }
     const bomTeamPresetParam = readQueryParam('bomTeamPreset')
-    if (bomTeamPresetParam !== undefined) {
+    const bomTeamPresetTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.bomTeamPreset,
+      nextRouteValue: bomTeamPresetParam,
+    })
+    if (bomTeamPresetTransition.kind === 'apply') {
       applyHydratedTeamPresetOwnerTakeover({
-        routeOwnerId: bomTeamPresetParam,
+        routeOwnerId: bomTeamPresetTransition.routeValue,
         teamPresetKey: bomTeamPresetKey,
         teamPresetName: bomTeamPresetName,
         teamPresetGroup: bomTeamPresetGroup,
         teamPresetOwnerUserId: bomTeamPresetOwnerUserId,
         teamPresetSelection: bomTeamPresetSelection,
       })
-      bomTeamPresetQuery.value = bomTeamPresetParam
-    } else if (bomTeamPresetQuery.value) {
+      bomTeamPresetQuery.value = bomTeamPresetTransition.routeValue
+    } else if (bomTeamPresetTransition.kind === 'remove') {
       applyHydratedRemovedTeamPresetOwner({
-        removedRouteOwnerId: bomTeamPresetQuery.value,
+        removedRouteOwnerId: bomTeamPresetTransition.removedRouteValue,
         teamPresetQuery: bomTeamPresetQuery,
         teamPresetKey: bomTeamPresetKey,
         teamPresetName: bomTeamPresetName,
