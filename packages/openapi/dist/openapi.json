@@ -1024,6 +1024,16 @@
           "source": {
             "type": "string"
           },
+          "defaultProfileId": {
+            "type": "string",
+            "nullable": true
+          },
+          "csvTemplateUrl": {
+            "type": "string"
+          },
+          "csvTemplateFilename": {
+            "type": "string"
+          },
           "mapping": {
             "type": "object"
           },

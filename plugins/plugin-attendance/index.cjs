@@ -325,10 +325,14 @@ function buildImportTemplatePayloadExample(profile) {
 }
 
 function buildAttendanceImportTemplateData(profile) {
+  const query = profile?.id ? `?profileId=${encodeURIComponent(profile.id)}` : ''
   return {
     source: typeof profile?.source === 'string' && profile.source.trim()
       ? profile.source.trim()
       : 'dingtalk',
+    defaultProfileId: profile?.id ?? null,
+    csvTemplateUrl: `/api/attendance/import/template.csv${query}`,
+    csvTemplateFilename: buildImportTemplateFilename(profile),
     mapping: {
       columns: IMPORT_MAPPING_COLUMNS,
     },
@@ -362,6 +366,44 @@ function buildImportTemplateFilename(profile) {
     .replace(/[^a-z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '')
   return `attendance-import-template-${seed || 'attendance'}.csv`
+}
+
+function normalizeImportPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload ?? {}
+  const next = { ...payload }
+  if (next.csvFileId === undefined) next.csvFileId = next.fileId ?? next.csv_file_id
+  if (next.mappingProfileId === undefined) next.mappingProfileId = next.profileId ?? next.mapping_profile_id
+  if (next.userId === undefined) next.userId = next.user_id
+  if (next.orgId === undefined) next.orgId = next.org_id
+  if (next.commitToken === undefined) next.commitToken = next.commit_token
+  if (next.previewLimit === undefined) next.previewLimit = next.preview_limit
+  if (next.returnItems === undefined) next.returnItems = next.return_items
+  if (next.itemsLimit === undefined) next.itemsLimit = next.items_limit
+  if (next.ruleSetId === undefined) next.ruleSetId = next.rule_set_id
+  if (next.userMap === undefined) next.userMap = next.user_map
+  if (next.userMapKeyField === undefined) next.userMapKeyField = next.user_map_key_field
+  if (next.userMapSourceFields === undefined) next.userMapSourceFields = next.user_map_source_fields
+  if (next.groupSync === undefined) next.groupSync = next.group_sync
+  if (next.batchMeta === undefined) next.batchMeta = next.batch_meta
+  if (next.csvText === undefined) next.csvText = next.csv_text
+  if (next.csvOptions === undefined) next.csvOptions = next.csv_options
+  if (next.idempotencyKey === undefined) next.idempotencyKey = next.idempotency_key
+  return next
+}
+
+function resolveImportProfileForPayload(payload) {
+  const profile = findImportProfile(payload?.mappingProfileId)
+  if (profile) return profile
+  const source = typeof payload?.source === 'string' ? payload.source.trim() : ''
+  const hasCsvInput = (
+    typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()
+  ) || (
+    typeof payload?.csvText === 'string' && payload.csvText.trim()
+  )
+  if (hasCsvInput && (!source || source === 'csv' || source === 'dingtalk_csv')) {
+    return getDefaultImportTemplateProfile()
+  }
+  return null
 }
 
 const IMPORT_COMMIT_TOKEN_TTL_MS = 10 * 60 * 1000
@@ -1894,6 +1936,116 @@ async function readImportCsvHeaderFromFile(csvPath, delimiter = ',') {
     return true
   })
   return header
+}
+
+function readImportCsvHeaderFromText(csvText, delimiter = ',') {
+  if (typeof csvText !== 'string' || !csvText.trim()) return []
+  let header = []
+  iterateCsvRows(csvText, delimiter, (rawRow) => {
+    const normalized = rawRow.map(normalizeCsvHeaderValue)
+    if (normalized.some((cell) => cell && String(cell).trim().length > 0)) {
+      header = normalized
+      return false
+    }
+    return true
+  })
+  return header
+}
+
+function summarizeImportDiagnosticValues(values, maxItems = 6) {
+  const normalized = Array.isArray(values)
+    ? values
+      .map((value) => String(value ?? '').trim())
+      .filter(Boolean)
+    : []
+  if (!normalized.length) return ''
+  if (normalized.length <= maxItems) return normalized.join(', ')
+  return `${normalized.slice(0, maxItems).join(', ')} (+${normalized.length - maxItems} more)`
+}
+
+function buildImportHeaderDiagnostics({ header, mapping, profile }) {
+  const columns = Array.isArray(header)
+    ? header.map(normalizeCsvHeaderValue).filter(Boolean)
+    : []
+  if (!columns.length) return null
+
+  const normalizedHeaderLookup = new Set(columns.map(normalizeImportHeaderLookupKey).filter(Boolean))
+  const matchedMappings = []
+  const matchedHeaderKeys = new Set()
+  for (const entry of Array.isArray(mapping) ? mapping : []) {
+    if (!entry || typeof entry !== 'object') continue
+    const sourceField = normalizeCsvHeaderValue(entry.sourceField)
+    const targetField = typeof entry.targetField === 'string' ? entry.targetField.trim() : ''
+    if (!sourceField || !targetField) continue
+    const lookupKey = normalizeImportHeaderLookupKey(sourceField)
+    if (!lookupKey || !normalizedHeaderLookup.has(lookupKey)) continue
+    matchedHeaderKeys.add(lookupKey)
+    matchedMappings.push(`${sourceField}→${targetField}`)
+  }
+
+  const templateColumns = resolveImportTemplateColumns(profile)
+  const missingTemplateColumns = templateColumns.filter((column) => {
+    const lookupKey = normalizeImportHeaderLookupKey(column)
+    return lookupKey && !normalizedHeaderLookup.has(lookupKey)
+  })
+  const unmatchedHeaders = columns.filter((column) => {
+    const lookupKey = normalizeImportHeaderLookupKey(column)
+    return lookupKey && !matchedHeaderKeys.has(lookupKey)
+  })
+
+  return {
+    columns,
+    matchedMappings,
+    missingTemplateColumns,
+    unmatchedHeaders,
+  }
+}
+
+async function resolveImportHeaderDiagnostics({ payload, orgId, mapping, profile, readUploadHeader }) {
+  const delimiter = payload?.csvOptions?.delimiter || ','
+  let header = []
+  const csvFileId = typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()
+    ? payload.csvFileId.trim()
+    : (typeof payload?.fileId === 'string' && payload.fileId.trim() ? payload.fileId.trim() : '')
+  if (csvFileId) {
+    if (typeof readUploadHeader === 'function') {
+      header = await readUploadHeader(csvFileId, delimiter)
+    }
+  } else if (typeof payload?.csvText === 'string' && payload.csvText.trim()) {
+    header = readImportCsvHeaderFromText(payload.csvText, delimiter)
+  }
+  return buildImportHeaderDiagnostics({ header, mapping, profile })
+}
+
+function buildImportHeaderWarnings(diagnostics) {
+  if (!diagnostics) return []
+  const warnings = []
+  if (diagnostics.columns.length) {
+    warnings.push(`Detected CSV columns: ${summarizeImportDiagnosticValues(diagnostics.columns)}`)
+  }
+  if (diagnostics.matchedMappings.length) {
+    warnings.push(`Recognized import columns: ${summarizeImportDiagnosticValues(diagnostics.matchedMappings)}`)
+  }
+  if (diagnostics.missingTemplateColumns.length) {
+    warnings.push(`Template columns missing: ${summarizeImportDiagnosticValues(diagnostics.missingTemplateColumns)}`)
+  }
+  if (diagnostics.unmatchedHeaders.length) {
+    warnings.push(`Unmapped CSV columns: ${summarizeImportDiagnosticValues(diagnostics.unmatchedHeaders)}`)
+  }
+  return warnings
+}
+
+function buildImportEmptyRowsMessage({ operation, payload, headerDiagnostics }) {
+  const base = operation === 'preview' ? 'No rows to preview' : 'No rows to import'
+  if (headerDiagnostics?.columns?.length) {
+    return `${base}. CSV contains the header row but no non-empty data rows were parsed. Detected columns: ${summarizeImportDiagnosticValues(headerDiagnostics.columns)}`
+  }
+  const hasCsvSource = typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()
+    || typeof payload?.csvText === 'string' && payload.csvText.trim()
+  if (hasCsvSource) {
+    return `${base}. CSV content did not yield any non-empty rows.`
+  }
+  return `${base}. Provide csvText, csvFileId, rows, entries, or source column data.`
 }
 
 async function validateImportUploadCsvOrThrow({ csvPath, csvOptions }) {
@@ -6813,7 +6965,7 @@ module.exports = {
       commitToken: z.string().optional(),
       batchMeta: z.record(z.unknown()).optional(),
       columns: z.array(importColumnSchema).optional(),
-      data: z.object({
+	      data: z.object({
         column_vals: z.array(z.object({
           column_vo: z.object({ id: z.union([z.string(), z.number()]) }).optional(),
           column_vals: z.array(z.object({
@@ -6823,6 +6975,7 @@ module.exports = {
         })).optional(),
 	      }).optional(),
 	      csvFileId: z.string().uuid().optional(),
+	      fileId: z.string().uuid().optional(),
 	      csvText: z.string().optional(),
 	      csvOptions: z.object({
 	        delimiter: z.string().optional(),
@@ -6885,6 +7038,13 @@ module.exports = {
 		      return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text)
 		    }
 
+		    const resolveImportUploadFileId = (payload) => {
+		      const primary = typeof payload?.csvFileId === 'string' ? payload.csvFileId.trim() : ''
+		      if (primary) return primary
+		      const alias = typeof payload?.fileId === 'string' ? payload.fileId.trim() : ''
+		      return alias || ''
+		    }
+
 		    class ImportUploadMeter extends Transform {
 		      constructor(maxBytes) {
 		        super()
@@ -6937,7 +7097,7 @@ module.exports = {
 
 		    const loadImportUploadMetaOrThrow = async ({ orgId, fileId }) => {
 		      if (!isUuidLike(fileId)) {
-		        throw new HttpError(400, 'VALIDATION_ERROR', 'csvFileId must be a UUID')
+		        throw new HttpError(400, 'VALIDATION_ERROR', 'csvFileId/fileId must be a UUID')
 		      }
 		      const meta = await loadImportUploadMeta({ orgId, fileId })
 		      if (!meta) {
@@ -7019,8 +7179,9 @@ module.exports = {
 	      let csvWarnings = []
 	      let csvFileId = null
 		      if (Array.isArray(payload.rows)) return { rows: payload.rows, csvWarnings, csvFileId }
-		      if (typeof payload.csvFileId === 'string' && payload.csvFileId.trim()) {
-		        csvFileId = payload.csvFileId.trim()
+		      const resolvedCsvFileId = resolveImportUploadFileId(payload)
+		      if (resolvedCsvFileId) {
+		        csvFileId = resolvedCsvFileId
 		        const { csvText } = await readImportUploadCsvText({ orgId, fileId: csvFileId })
 		        const result = buildRowsFromCsv({ csvText, csvOptions: payload.csvOptions })
 		        ensureCsvRowsWithinLimit(result)
@@ -7067,8 +7228,8 @@ module.exports = {
 	    })
 
 	    const resolveAsyncImportRowSource = async ({ payload, orgId, fallbackUserId }) => {
-	      if (typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()) {
-	        const csvFileId = payload.csvFileId.trim()
+	      const csvFileId = resolveImportUploadFileId(payload)
+	      if (csvFileId) {
 	        await loadImportUploadMetaOrThrow({ orgId, fileId: csvFileId })
 	        const { csvPath } = getImportUploadPaths({ orgId, fileId: csvFileId })
 	        return {
@@ -7084,12 +7245,12 @@ module.exports = {
 	          },
 	        }
 	      }
-	      const { rows, csvWarnings, csvFileId } = await resolveImportRows({
+	      const { rows, csvWarnings, csvFileId: resolvedCsvFileId } = await resolveImportRows({
 	        payload,
 	        orgId,
 	        fallbackUserId,
 	      })
-	      return createMaterializedImportRowSource({ rows, csvWarnings, csvFileId })
+	      return createMaterializedImportRowSource({ rows, csvWarnings, csvFileId: resolvedCsvFileId })
 	    }
 
 	    // ============================================================
@@ -7138,6 +7299,11 @@ module.exports = {
 		      if (!payload || typeof payload !== 'object') return {}
 		      const next = { ...payload }
 		      const jobType = next.__jobType === 'preview' ? 'preview' : 'commit'
+		      const csvFileId = resolveImportUploadFileId(next)
+		      if (csvFileId) {
+		        next.csvFileId = csvFileId
+		      }
+		      delete next.fileId
 		      // Never persist single-use tokens in the job payload.
 		      delete next.commitToken
 		      // If a server-side upload reference is present, avoid persisting duplicate CSV payloads.
@@ -7426,8 +7592,9 @@ module.exports = {
 		    const estimateImportPayloadRowCount = async ({ payload, orgId }) => {
 		      if (Array.isArray(payload?.rows)) return payload.rows.length
 		      if (Array.isArray(payload?.entries)) return payload.entries.length
-		      if (typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()) {
-		        const meta = await loadImportUploadMetaOrThrow({ orgId, fileId: payload.csvFileId.trim() })
+		      const csvFileId = resolveImportUploadFileId(payload)
+		      if (csvFileId) {
+		        const meta = await loadImportUploadMetaOrThrow({ orgId, fileId: csvFileId })
 		        const hint = Number(meta?.rowCount ?? 0)
 		        return Number.isFinite(hint) && hint > 0 ? hint : 0
 		      }
@@ -7523,7 +7690,7 @@ module.exports = {
 	    }
 
 	    const buildAsyncPreviewResult = async ({ payload, requesterId, orgId }) => {
-	      const profile = findImportProfile(payload.mappingProfileId)
+	      const profile = resolveImportProfileForPayload(payload)
 	      const requiredFields = profile?.requiredFields ?? []
 	      const punchRequiredFields = profile?.punchRequiredFields ?? []
 	      const rowSource = await resolveAsyncImportRowSource({
@@ -7941,7 +8108,7 @@ module.exports = {
 	        if (rows.length) ruleSetConfig = normalizeMetadata(rows[0].config)
 	      }
 
-	      const profile = findImportProfile(payload.mappingProfileId)
+	      const profile = resolveImportProfileForPayload(payload)
 	      const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
 	      const mapping = payload.mapping?.columns
 	        ?? payload.mapping?.fields
@@ -12377,6 +12544,20 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error } })
           return
         }
+        const format = String(req.query?.format ?? '').trim().toLowerCase()
+        const acceptHeader = String(req.headers.accept ?? '').toLowerCase()
+        if (format === 'csv' || acceptHeader.includes('text/csv')) {
+          const csvText = buildImportTemplateCsv(profile)
+          if (!csvText) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Import template has no CSV columns' } })
+            return
+          }
+
+          res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+          res.setHeader('Content-Disposition', `attachment; filename="${buildImportTemplateFilename(profile)}"`)
+          res.send(csvText)
+          return
+        }
         res.json({
           ok: true,
           data: buildAttendanceImportTemplateData(profile),
@@ -12520,7 +12701,7 @@ module.exports = {
       'POST',
       '/api/attendance/import/preview',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = importPayloadSchema.safeParse(req.body ?? {})
+        const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -12585,7 +12766,7 @@ module.exports = {
             if (rows.length) ruleSetConfig = normalizeMetadata(rows[0].config)
           }
 
-          const profile = findImportProfile(parsed.data.mappingProfileId)
+          const profile = resolveImportProfileForPayload(parsed.data)
           const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
           const mapping = parsed.data.mapping?.columns
             ?? parsed.data.mapping?.fields
@@ -12595,15 +12776,39 @@ module.exports = {
             ?? []
           const requiredFields = profile?.requiredFields ?? []
           const punchRequiredFields = profile?.punchRequiredFields ?? []
+          const headerDiagnostics = await resolveImportHeaderDiagnostics({
+            payload: parsed.data,
+            orgId,
+            mapping,
+            profile,
+            readUploadHeader: async (csvFileId, delimiter) => {
+              const { csvText } = await readImportUploadCsvText({ orgId, fileId: csvFileId })
+              return readImportCsvHeaderFromText(csvText, delimiter)
+            },
+          })
 
-	          const { rows, csvWarnings } = await resolveImportRows({
+	          const { rows, csvWarnings: rawCsvWarnings } = await resolveImportRows({
 	            payload: parsed.data,
 	            orgId,
 	            fallbackUserId: parsed.data.userId ?? userId,
 	          })
+          const csvWarnings = Array.from(new Set([
+            ...rawCsvWarnings,
+            ...buildImportHeaderWarnings(headerDiagnostics),
+          ]))
 
 	          if (rows.length === 0) {
-	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to preview' } })
+	            res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: buildImportEmptyRowsMessage({
+                    operation: 'preview',
+                    payload: parsed.data,
+                    headerDiagnostics,
+                  }),
+                },
+              })
 	            return
 	          }
 
@@ -12972,7 +13177,7 @@ module.exports = {
             })
           }
 
-          const combinedWarnings = [...csvWarnings, ...groupWarnings]
+          const combinedWarnings = Array.from(new Set([...csvWarnings, ...groupWarnings]))
           const previewFailedRows = Math.max(0, Number(previewStats.invalid ?? 0) + Number(previewStats.duplicates ?? 0))
           const previewEngine = resolveImportEngineFromMeta(parsed.data, rows.length)
           const previewElapsedMs = Math.max(0, Date.now() - previewStartedAtMs)
@@ -13018,7 +13223,7 @@ module.exports = {
       'POST',
       '/api/attendance/import/commit',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = importPayloadSchema.safeParse(req.body ?? {})
+        const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -13116,7 +13321,7 @@ module.exports = {
             if (rows.length) ruleSetConfig = normalizeMetadata(rows[0].config)
           }
 
-          const profile = findImportProfile(parsed.data.mappingProfileId)
+          const profile = resolveImportProfileForPayload(parsed.data)
           const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
           const mapping = parsed.data.mapping?.columns
             ?? parsed.data.mapping?.fields
@@ -13126,15 +13331,39 @@ module.exports = {
             ?? []
           const requiredFields = profile?.requiredFields ?? []
           const punchRequiredFields = profile?.punchRequiredFields ?? []
+          const headerDiagnostics = await resolveImportHeaderDiagnostics({
+            payload: parsed.data,
+            orgId,
+            mapping,
+            profile,
+            readUploadHeader: async (csvFileId, delimiter) => {
+              const { csvText } = await readImportUploadCsvText({ orgId, fileId: csvFileId })
+              return readImportCsvHeaderFromText(csvText, delimiter)
+            },
+          })
 
-	          const { rows, csvWarnings, csvFileId } = await resolveImportRows({
+	          const { rows, csvWarnings: rawCsvWarnings, csvFileId } = await resolveImportRows({
 	            payload: parsed.data,
 	            orgId,
 	            fallbackUserId: parsed.data.userId ?? requesterId,
 	          })
+          const csvWarnings = Array.from(new Set([
+            ...rawCsvWarnings,
+            ...buildImportHeaderWarnings(headerDiagnostics),
+          ]))
 
 	          if (rows.length === 0) {
-	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to import' } })
+	            res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: buildImportEmptyRowsMessage({
+                    operation: 'commit',
+                    payload: parsed.data,
+                    headerDiagnostics,
+                  }),
+                },
+              })
 	            return
 	          }
 	          const importEngine = resolveImportEngineByRowCount(rows.length)
@@ -13999,7 +14228,7 @@ module.exports = {
           return
         }
 
-        const parsed = importPayloadSchema.safeParse(req.body ?? {})
+        const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -14065,8 +14294,9 @@ module.exports = {
 	          let total = 0
 	          if (Array.isArray(parsed.data.rows)) total = parsed.data.rows.length
 	          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
-	          else if (typeof parsed.data.csvFileId === 'string' && parsed.data.csvFileId.trim()) {
-	            const meta = await loadImportUploadMeta({ orgId, fileId: parsed.data.csvFileId.trim() })
+	          else if (resolveImportUploadFileId(parsed.data)) {
+	            const csvFileId = resolveImportUploadFileId(parsed.data)
+	            const meta = await loadImportUploadMeta({ orgId, fileId: csvFileId })
 	            if (!meta) {
 	              throw new HttpError(404, 'NOT_FOUND', 'Import upload not found')
 	            }
@@ -14151,7 +14381,7 @@ module.exports = {
           return
         }
 
-        const parsed = importPayloadSchema.safeParse(req.body ?? {})
+        const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -14218,8 +14448,9 @@ module.exports = {
 	          let total = 0
 	          if (Array.isArray(parsed.data.rows)) total = parsed.data.rows.length
 	          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
-	          else if (typeof parsed.data.csvFileId === 'string' && parsed.data.csvFileId.trim()) {
-	            const meta = await loadImportUploadMeta({ orgId, fileId: parsed.data.csvFileId.trim() })
+	          else if (resolveImportUploadFileId(parsed.data)) {
+	            const csvFileId = resolveImportUploadFileId(parsed.data)
+	            const meta = await loadImportUploadMeta({ orgId, fileId: csvFileId })
 	            if (!meta) {
 	              throw new HttpError(404, 'NOT_FOUND', 'Import upload not found')
 	            }
@@ -14328,7 +14559,7 @@ module.exports = {
       'POST',
       '/api/attendance/import',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = importPayloadSchema.safeParse(req.body ?? {})
+        const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -14391,7 +14622,7 @@ module.exports = {
             if (rows.length) ruleSetConfig = normalizeMetadata(rows[0].config)
           }
 
-          const profile = findImportProfile(parsed.data.mappingProfileId)
+          const profile = resolveImportProfileForPayload(parsed.data)
           const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
           const mapping = parsed.data.mapping?.columns
             ?? parsed.data.mapping?.fields
@@ -15142,13 +15373,13 @@ module.exports = {
               skipped = []
             } else {
               const importResponse = await (async () => {
-                const parsedImport = importPayloadSchema.safeParse(payload)
+                const parsedImport = importPayloadSchema.safeParse(normalizeImportPayload(payload))
                 if (!parsedImport.success) throw new Error(parsedImport.error.message)
                 const importUserId = payload.userId ?? requesterId
                 const importOrgId = orgId
                 const importRows = Array.isArray(parsedImport.data.rows) ? parsedImport.data.rows : []
                 let ruleSetConfig = null
-                const profile = findImportProfile(parsedImport.data.mappingProfileId)
+                const profile = resolveImportProfileForPayload(parsedImport.data)
                 const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
                 const mapping = parsedImport.data.mapping?.columns
                   ?? parsedImport.data.mapping?.fields
