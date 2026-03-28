@@ -1484,6 +1484,13 @@ describe('plmWorkbenchClient', () => {
           pageSize: 25,
           total: 40,
         },
+        metadata: {
+          resourceTypes: [
+            'plm-team-preset-batch',
+            'plm-team-view-default',
+            'invalid-type',
+          ],
+        },
       }),
     })
 
@@ -1499,6 +1506,10 @@ describe('plmWorkbenchClient', () => {
       page: 2,
       pageSize: 25,
       total: 40,
+      resourceTypes: [
+        'plm-team-preset-batch',
+        'plm-team-view-default',
+      ],
       items: [
         {
           id: 'audit-1',

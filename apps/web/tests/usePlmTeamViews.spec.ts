@@ -2518,6 +2518,85 @@ describe('usePlmTeamViews', () => {
     expect(setMessage).toHaveBeenNthCalledWith(7, '当前工作台团队视角不可恢复。', true)
   })
 
+  it('clears owner draft after restoring a single archived team view', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-restore-single',
+          kind: 'workbench',
+          scope: 'team',
+          name: '已归档视角',
+          ownerUserId: 'owner-1',
+          canManage: true,
+          isDefault: false,
+          isArchived: true,
+          permissions: {
+            canManage: true,
+            canApply: false,
+            canRestore: true,
+          },
+          state: {
+            query: {
+              documentFilter: 'gear',
+            },
+          },
+        },
+      ],
+    })
+    vi.mocked(restorePlmWorkbenchTeamView).mockResolvedValue({
+      id: 'workbench-restore-single',
+      kind: 'workbench',
+      scope: 'team',
+      name: '已恢复视角',
+      ownerUserId: 'owner-1',
+      canManage: true,
+      isDefault: false,
+      isArchived: false,
+      permissions: {
+        canManage: true,
+        canApply: true,
+        canRestore: false,
+      },
+      state: {
+        query: {
+          documentFilter: 'gear',
+        },
+      },
+    })
+
+    const requestedViewId = ref('workbench-restore-single')
+    const syncRequestedViewId = vi.fn((value?: string) => {
+      requestedViewId.value = value || ''
+    })
+    const workbenchApply = vi.fn()
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {
+          documentFilter: 'gear',
+        },
+      }),
+      applyViewState: workbenchApply,
+      setMessage,
+      requestedViewId,
+      syncRequestedViewId,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-restore-single'
+    model.teamViewName.value = '待清空名称'
+    model.teamViewOwnerUserId.value = 'stale-owner'
+
+    await model.restoreTeamView()
+
+    expect(restorePlmWorkbenchTeamView).toHaveBeenCalledWith('workbench', 'workbench-restore-single')
+    expect(model.teamViewName.value).toBe('')
+    expect(model.teamViewOwnerUserId.value).toBe('')
+    expect(workbenchApply).toHaveBeenCalled()
+  })
+
   it('separates transfer target availability from transfer submission readiness', async () => {
     vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
       items: [

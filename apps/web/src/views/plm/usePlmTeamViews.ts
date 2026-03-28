@@ -469,6 +469,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       teamViews.value = replaceTeamView(teamViews.value, saved)
       applyView(saved)
       teamViewName.value = ''
+      teamViewOwnerUserId.value = ''
       options.setMessage(`已恢复${options.label}团队视角：${saved.name}`)
     } catch (error) {
       teamViewsError.value = getErrorMessage(error, `恢复${options.label}团队视角失败`)

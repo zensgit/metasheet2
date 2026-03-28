@@ -776,6 +776,15 @@ export async function listPlmCollaborativeAuditLogs(params: PlmCollaborativeAudi
     page: typeof payload.page === 'number' ? payload.page : Number(search.get('page') || 1),
     pageSize: typeof payload.pageSize === 'number' ? payload.pageSize : Number(search.get('pageSize') || 50),
     total: typeof payload.total === 'number' ? payload.total : 0,
+    resourceTypes: Array.isArray(payload.metadata?.resourceTypes)
+      ? payload.metadata.resourceTypes
+        .filter((value): value is PlmCollaborativeAuditResourceType => (
+          value === 'plm-team-preset-batch'
+          || value === 'plm-team-preset-default'
+          || value === 'plm-team-view-batch'
+          || value === 'plm-team-view-default'
+        ))
+      : [],
   }
 }
 
