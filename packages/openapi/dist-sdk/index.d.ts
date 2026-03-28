@@ -8100,7 +8100,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["ErrorResponse"];
+                        "application/json": components["schemas"]["DirectErrorResponse"];
                     };
                 };
             };
@@ -8156,7 +8156,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["ErrorResponse"];
+                        "application/json": components["schemas"]["DirectErrorResponse"];
                     };
                 };
             };
@@ -8223,7 +8223,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["ErrorResponse"];
+                        "application/json": components["schemas"]["DirectErrorResponse"];
                     };
                 };
             };
@@ -11993,6 +11993,11 @@ export interface components {
                 code?: string;
                 message?: string;
             };
+        };
+        DirectErrorResponse: {
+            /** @default false */
+            success: boolean;
+            error?: string;
         };
         User: {
             id?: string;

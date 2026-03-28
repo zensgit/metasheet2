@@ -31,6 +31,14 @@ components:
               type: string
             message:
               type: string
+    DirectErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          default: false
+        error:
+          type: string
     User:
       type: object
       properties:
@@ -9656,7 +9664,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/DirectErrorResponse'
   /api/plm-workbench/audit-logs/export.csv:
     get:
       summary: Export PLM workbench collaborative audit logs as CSV
@@ -9727,7 +9735,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/DirectErrorResponse'
   /api/plm-workbench/audit-logs/summary:
     get:
       summary: Get PLM workbench collaborative audit summary
@@ -9797,7 +9805,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/DirectErrorResponse'
   /api/plm-workbench/views/team:
     get:
       summary: List PLM workbench team views

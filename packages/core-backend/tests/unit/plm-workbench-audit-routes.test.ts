@@ -297,4 +297,43 @@ describe('plm-workbench audit routes', () => {
     expect(exportResponse.text).toContain('plm-team-view-default')
     expect(exportResponse.text).toContain('采购团队场景')
   })
+
+  it('returns direct string error envelopes for audit log failures', async () => {
+    auditRouteMocks.query.mockRejectedValueOnce(new Error('boom-list'))
+
+    const response = await request(app)
+      .get('/api/plm-workbench/audit-logs?page=1&pageSize=20')
+
+    expect(response.status).toBe(500)
+    expect(response.body).toEqual({
+      success: false,
+      error: 'Failed to load PLM collaborative audit logs',
+    })
+  })
+
+  it('returns direct string error envelopes for audit summary failures', async () => {
+    auditRouteMocks.query.mockRejectedValueOnce(new Error('boom-summary'))
+
+    const response = await request(app)
+      .get('/api/plm-workbench/audit-logs/summary?windowMinutes=120&limit=5')
+
+    expect(response.status).toBe(500)
+    expect(response.body).toEqual({
+      success: false,
+      error: 'Failed to load PLM collaborative audit summary',
+    })
+  })
+
+  it('returns direct string error envelopes for audit csv export failures', async () => {
+    auditRouteMocks.query.mockRejectedValueOnce(new Error('boom-export'))
+
+    const response = await request(app)
+      .get('/api/plm-workbench/audit-logs/export.csv?limit=10')
+
+    expect(response.status).toBe(500)
+    expect(response.body).toEqual({
+      success: false,
+      error: 'Failed to export PLM collaborative audit logs',
+    })
+  })
 })

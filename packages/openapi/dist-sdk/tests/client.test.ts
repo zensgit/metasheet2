@@ -595,4 +595,36 @@ describe('createPlmWorkbenchClient', () => {
       accept: 'text/csv',
     })
   })
+
+  it('preserves direct audit route string errors across list, summary, and csv helpers', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({
+        success: false,
+        error: 'Failed to load PLM collaborative audit logs',
+      }, { status: 500 }))
+      .mockResolvedValueOnce(jsonResponse({
+        success: false,
+        error: 'Failed to load PLM collaborative audit summary',
+      }, { status: 500 }))
+      .mockResolvedValueOnce(jsonResponse({
+        success: false,
+        error: 'Failed to export PLM collaborative audit logs',
+      }, { status: 500 }))
+
+    const client = createPlmWorkbenchClient({
+      baseUrl: 'http://localhost:8910',
+      getToken: () => 'token-audit-errors',
+      fetch: fetchMock,
+    })
+
+    await expect(client.listCollaborativeAuditLogs({})).rejects.toMatchObject({
+      message: 'Failed to load PLM collaborative audit logs',
+    })
+    await expect(client.getCollaborativeAuditSummary()).rejects.toMatchObject({
+      message: 'Failed to load PLM collaborative audit summary',
+    })
+    await expect(client.exportCollaborativeAuditLogsCsv({})).rejects.toMatchObject({
+      message: 'Failed to export PLM collaborative audit logs',
+    })
+  })
 })

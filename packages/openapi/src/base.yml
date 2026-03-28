@@ -31,6 +31,14 @@ components:
               type: string
             message:
               type: string
+    DirectErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          default: false
+        error:
+          type: string
     User:
       type: object
       properties:

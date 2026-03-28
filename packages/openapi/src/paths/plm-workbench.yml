@@ -209,7 +209,7 @@ paths:
           description: Internal Server Error
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              schema: { $ref: '#/components/schemas/DirectErrorResponse' }
 
   /api/plm-workbench/audit-logs/export.csv:
     get:
@@ -264,7 +264,7 @@ paths:
           description: Internal Server Error
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              schema: { $ref: '#/components/schemas/DirectErrorResponse' }
 
   /api/plm-workbench/audit-logs/summary:
     get:
@@ -301,7 +301,7 @@ paths:
           description: Internal Server Error
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              schema: { $ref: '#/components/schemas/DirectErrorResponse' }
 
   /api/plm-workbench/views/team:
     get:
