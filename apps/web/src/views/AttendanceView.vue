@@ -12534,6 +12534,17 @@ const holidaySectionBindings = {
     grid-template-columns: 1fr;
   }
 
+  .attendance__table--records {
+    min-width: 100%;
+  }
+
+  .attendance__table-actions .attendance__btn,
+  .attendance__admin-actions .attendance__btn,
+  .attendance__request-actions .attendance__btn {
+    width: auto;
+    flex: 0 0 auto;
+  }
+
   .attendance__request-meta {
     flex-direction: column;
     gap: 4px;

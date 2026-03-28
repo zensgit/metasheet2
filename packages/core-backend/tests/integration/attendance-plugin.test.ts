@@ -2228,6 +2228,295 @@ describe('Attendance Plugin Integration', () => {
     }
   })
 
+  it('supports request item lookup, update, and delete aliases for self-service follow-up', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-request-item-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const requestedInAt = new Date().toISOString()
+    const requestCreateRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        workDate,
+        requestType: 'missed_check_in',
+        requestedInAt,
+        reason: 'Initial request',
+      }),
+    })
+    expect(requestCreateRes.status).toBe(201)
+    const createdRequest = (requestCreateRes.body as { data?: { request?: { id?: string; work_date?: string; workDate?: string } } } | undefined)?.data?.request
+    expect(createdRequest?.work_date).toBe(workDate)
+    expect(createdRequest?.workDate).toBe(workDate)
+    const requestId = createdRequest?.id
+    expect(requestId).toBeTruthy()
+    if (!requestId) return
+
+    const requestGetRes = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(requestGetRes.status).toBe(200)
+    expect((requestGetRes.body as { data?: { request?: { id?: string; work_date?: string; workDate?: string } } } | undefined)?.data?.request?.id).toBe(requestId)
+    expect((requestGetRes.body as { data?: { request?: { work_date?: string; workDate?: string } } } | undefined)?.data?.request?.work_date).toBe(workDate)
+    expect((requestGetRes.body as { data?: { request?: { work_date?: string; workDate?: string } } } | undefined)?.data?.request?.workDate).toBe(workDate)
+
+    const requestUpdateRes = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        reason: 'Updated request reason',
+        requestedInAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      }),
+    })
+    expect(requestUpdateRes.status).toBe(200)
+    const updatedRequest = (requestUpdateRes.body as { data?: { request?: { reason?: string } } } | undefined)?.data?.request
+    expect(updatedRequest?.reason).toBe('Updated request reason')
+
+    const requestDeleteRes = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(requestDeleteRes.status).toBe(200)
+    expect((requestDeleteRes.body as { data?: { status?: string } } | undefined)?.data?.status).toBe('cancelled')
+
+    const requestGetAfterDeleteRes = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(requestGetAfterDeleteRes.status).toBe(200)
+    expect((requestGetAfterDeleteRes.body as { data?: { request?: { status?: string } } } | undefined)?.data?.request?.status).toBe('cancelled')
+  })
+
+  it('supports holiday item lookup and rejects invalid holiday date/type payloads before write', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const uniqueSeed = Array.from(runSuffix).reduce((total, ch) => total + ch.charCodeAt(0), 0)
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-holiday-item-${runSuffix}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const holidayDate = [
+      String(2040 + (uniqueSeed % 10)).padStart(4, '0'),
+      String(((uniqueSeed * 3) % 12) + 1).padStart(2, '0'),
+      String(((uniqueSeed * 7) % 28) + 1).padStart(2, '0'),
+    ].join('-')
+    const holidayCreateRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        date: holidayDate,
+        name: `Holiday Item ${runSuffix}`,
+        type: 'holiday',
+      }),
+    })
+    expect(holidayCreateRes.status).toBe(201)
+    const holidayId = (holidayCreateRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(holidayId).toBeTruthy()
+    if (!holidayId) return
+
+    const holidayGetRes = await requestJson(`${baseUrl}/api/attendance/holidays/${holidayId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(holidayGetRes.status).toBe(200)
+    expect((holidayGetRes.body as { data?: { id?: string; name?: string; type?: string } } | undefined)?.data?.id).toBe(holidayId)
+    expect((holidayGetRes.body as { data?: { type?: string } } | undefined)?.data?.type).toBe('holiday')
+
+    const holidayUpdateRes = await requestJson(`${baseUrl}/api/attendance/holidays/${holidayId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Holiday Item Updated ${runSuffix}`,
+        type: 'working_day_override',
+      }),
+    })
+    expect(holidayUpdateRes.status).toBe(200)
+    const updatedHoliday = (holidayUpdateRes.body as { data?: { name?: string; type?: string; isWorkingDay?: boolean } } | undefined)?.data
+    expect(updatedHoliday?.name).toBe(`Holiday Item Updated ${runSuffix}`)
+    expect(updatedHoliday?.type).toBe('working_day_override')
+    expect(updatedHoliday?.isWorkingDay).toBe(true)
+
+    const invalidHolidayDateRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        date: 'invalid',
+        name: 'Invalid holiday date',
+      }),
+    })
+    expect(invalidHolidayDateRes.status).toBe(400)
+
+    const invalidHolidayTypeRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        date: '2029-08-18',
+        name: 'Invalid holiday type',
+        type: 'invalid_type',
+      }),
+    })
+    expect(invalidHolidayTypeRes.status).toBe(400)
+  })
+
+  it('supports approval flow, rule set, and payroll cycle item lookup routes', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const uniqueSeed = Array.from(runSuffix).reduce((total, ch) => total + ch.charCodeAt(0), 0)
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-item-lookup-${runSuffix}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const approvalFlowCreateRes = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Lookup Flow ${runSuffix}`,
+        requestType: 'leave',
+        steps: [{ level: 1, approverRole: 'manager', approverUserIds: ['manager-user'] }],
+        isActive: true,
+      }),
+    })
+    expect(approvalFlowCreateRes.status).toBe(201)
+    const approvalFlowId = (approvalFlowCreateRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(approvalFlowId).toBeTruthy()
+    if (!approvalFlowId) return
+
+    const approvalFlowGetRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/${approvalFlowId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(approvalFlowGetRes.status).toBe(200)
+    const approvalFlow = (approvalFlowGetRes.body as { data?: { id?: string; steps?: Array<{ approverUserIds?: string[] }> } } | undefined)?.data
+    expect(approvalFlow?.id).toBe(approvalFlowId)
+    expect(approvalFlow?.steps?.[0]?.approverUserIds?.[0]).toBe('manager-user')
+
+    const ruleSetCreateRes = await requestJson(`${baseUrl}/api/attendance/rule-sets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Lookup Rule Set ${runSuffix}`,
+        scope: 'org',
+        config: { source: 'lookup-test' },
+      }),
+    })
+    expect(ruleSetCreateRes.status).toBe(201)
+    const ruleSetId = (ruleSetCreateRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(ruleSetId).toBeTruthy()
+    if (!ruleSetId) return
+
+    const ruleSetGetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets/${ruleSetId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(ruleSetGetRes.status).toBe(200)
+    const ruleSet = (ruleSetGetRes.body as { data?: { id?: string; name?: string; config?: { source?: string } } } | undefined)?.data
+    expect(ruleSet?.id).toBe(ruleSetId)
+    expect(ruleSet?.name).toBe(`Lookup Rule Set ${runSuffix}`)
+    expect(ruleSet?.config?.source).toBe('lookup-test')
+
+    const payrollTemplateRes = await requestJson(`${baseUrl}/api/attendance/payroll-templates`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Lookup Payroll Template ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        startDay: 1,
+        endDay: 31,
+        endMonthOffset: 0,
+        autoGenerate: false,
+      }),
+    })
+    expect(payrollTemplateRes.status).toBe(201)
+    const payrollTemplateId = (payrollTemplateRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(payrollTemplateId).toBeTruthy()
+    if (!payrollTemplateId) return
+
+    const payrollAnchorDate = [
+      String(2045 + (uniqueSeed % 10)).padStart(4, '0'),
+      String(((uniqueSeed * 5) % 12) + 1).padStart(2, '0'),
+      '01',
+    ].join('-')
+    const payrollCycleCreateRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId: payrollTemplateId,
+        anchorDate: payrollAnchorDate,
+        status: 'open',
+      }),
+    })
+    expect(payrollCycleCreateRes.status).toBe(201)
+    const payrollCycleId = (payrollCycleCreateRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(payrollCycleId).toBeTruthy()
+    if (!payrollCycleId) return
+
+    const payrollCycleGetRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/${payrollCycleId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(payrollCycleGetRes.status).toBe(200)
+    const payrollCycle = (payrollCycleGetRes.body as { data?: { id?: string; templateId?: string | null; startDate?: string; endDate?: string } } | undefined)?.data
+    expect(payrollCycle?.id).toBe(payrollCycleId)
+    expect(payrollCycle?.templateId).toBe(payrollTemplateId)
+    expect(payrollCycle?.startDate).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(payrollCycle?.endDate).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  })
+
   it('rejects negative leave type daily_minutes aliases, empty holiday names, and exposes holiday type fields', async () => {
     if (!baseUrl) return
 

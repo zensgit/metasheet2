@@ -765,6 +765,31 @@ function normalizeDateOnlyStrict(value) {
   return date.toISOString().slice(0, 10) === normalized ? normalized : null
 }
 
+function normalizeDateOnlyValue(value) {
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null
+    const localMidnight =
+      value.getHours() === 0
+      && value.getMinutes() === 0
+      && value.getSeconds() === 0
+      && value.getMilliseconds() === 0
+    const utcMidnight =
+      value.getUTCHours() === 0
+      && value.getUTCMinutes() === 0
+      && value.getUTCSeconds() === 0
+      && value.getUTCMilliseconds() === 0
+    if (localMidnight && !utcMidnight) {
+      return [
+        String(value.getFullYear()).padStart(4, '0'),
+        String(value.getMonth() + 1).padStart(2, '0'),
+        String(value.getDate()).padStart(2, '0'),
+      ].join('-')
+    }
+    return value.toISOString().slice(0, 10)
+  }
+  return normalizeDateOnlyStrict(value)
+}
+
 function normalizeUuidString(value) {
   if (typeof value !== 'string') return null
   const normalized = value.trim()
@@ -2523,8 +2548,8 @@ function mapPayrollCycleRow(row) {
     orgId: row.org_id ?? DEFAULT_ORG_ID,
     templateId: row.template_id ?? null,
     name: row.name ?? null,
-    startDate: row.start_date,
-    endDate: row.end_date,
+    startDate: normalizeDateOnly(row.start_date) ?? row.start_date,
+    endDate: normalizeDateOnly(row.end_date) ?? row.end_date,
     status: row.status ?? 'open',
     metadata: normalizeMetadata(row.metadata),
   }
@@ -2768,6 +2793,16 @@ function normalizeMetadata(value) {
     }
   }
   return typeof value === 'object' ? value : {}
+}
+
+function mapAttendanceRequestRow(row) {
+  const workDate = normalizeDateOnly(row?.work_date) ?? (typeof row?.work_date === 'string' ? row.work_date.slice(0, 10) : row?.work_date ?? null)
+  return {
+    ...row,
+    workDate,
+    work_date: workDate,
+    metadata: normalizeMetadata(row?.metadata),
+  }
 }
 
 function normalizeObjectPayload(value) {
@@ -6539,6 +6574,7 @@ module.exports = {
     const holidayCreateSchema = z.object({
       date: z.string().min(1),
       name: z.string().trim().min(1),
+      type: z.enum(['holiday', 'working_day_override']).optional(),
       isWorkingDay: z.boolean().optional(),
       orgId: z.string().optional(),
     })
@@ -9413,178 +9449,232 @@ module.exports = {
       })
     )
 
+    const requestWriteSchema = z.object({
+      workDate: z.string().optional(),
+      date: z.string().optional(),
+      requestType: z.string().optional(),
+      type: z.string().optional(),
+      requestedInAt: z.string().optional(),
+      requested_in_at: z.string().optional(),
+      clockIn: z.string().optional(),
+      requestedOutAt: z.string().optional(),
+      requested_out_at: z.string().optional(),
+      clockOut: z.string().optional(),
+      reason: z.string().optional(),
+      leaveTypeId: z.string().optional(),
+      leaveTypeCode: z.string().optional(),
+      overtimeRuleId: z.string().optional(),
+      overtimeRuleName: z.string().optional(),
+      minutes: z.coerce.number().int().min(0).optional(),
+      attachmentUrl: z.string().optional(),
+      approvalFlowId: z.string().optional(),
+      orgId: z.string().optional(),
+    })
+
+    function normalizeRequestReferenceInput(value, fallback = null) {
+      if (value === undefined) return normalizeOptionalText(fallback)
+      return normalizeOptionalText(value)
+    }
+
+    async function ensureAttendanceRequestAccess(requestRow, requesterId, actionLabel) {
+      if (requestRow.user_id === requesterId) return
+      const allowed = await canAccessOtherUsers(requesterId)
+      if (!allowed) {
+        throw new HttpError(403, 'FORBIDDEN', `No access to ${actionLabel}`)
+      }
+    }
+
+    async function resolveAttendanceRequestDraft(parsedData, existingRequest = null) {
+      const orgId = existingRequest?.org_id ?? DEFAULT_ORG_ID
+      const existingMetadata = normalizeMetadata(existingRequest?.metadata)
+      const existingLeaveType = normalizeMetadata(existingMetadata.leaveType)
+      const existingOvertimeRule = normalizeMetadata(existingMetadata.overtimeRule)
+      const existingApprovalFlow = normalizeMetadata(existingMetadata.approvalFlow)
+
+      const workDate = normalizeDateOnlyValue(
+        firstDefinedValue(parsedData.workDate, parsedData.date, existingRequest?.work_date)
+      )
+      if (!workDate) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'workDate must use YYYY-MM-DD format')
+      }
+
+      const requestType = firstDefinedValue(parsedData.requestType, parsedData.type, existingRequest?.request_type)
+      if (!REQUEST_TYPES.includes(requestType)) {
+        throw new HttpError(400, 'VALIDATION_ERROR', `requestType must be one of: ${REQUEST_TYPES.join(', ')}`)
+      }
+
+      const requestedInSource = firstDefinedValue(
+        parsedData.requestedInAt,
+        parsedData.requested_in_at,
+        parsedData.clockIn,
+        existingRequest?.requested_in_at,
+      )
+      const requestedOutSource = firstDefinedValue(
+        parsedData.requestedOutAt,
+        parsedData.requested_out_at,
+        parsedData.clockOut,
+        existingRequest?.requested_out_at,
+      )
+      const requestedInAt = parseDateInput(requestedInSource)
+      const requestedOutAt = parseDateInput(requestedOutSource)
+
+      if (requestedInAt && requestedOutAt && requestedOutAt <= requestedInAt) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'requestedOutAt must be after requestedInAt')
+      }
+      if (requestType === 'missed_check_in' && !requestedInAt) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'requestedInAt required')
+      }
+      if (requestType === 'missed_check_out' && !requestedOutAt) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'requestedOutAt required')
+      }
+      if (requestType === 'time_correction' && !requestedInAt && !requestedOutAt) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'requestedInAt or requestedOutAt required')
+      }
+
+      let durationMinutes = parsedData.minutes !== undefined
+        ? parsedData.minutes
+        : (Number(existingMetadata.minutes ?? null) || null)
+      if (!durationMinutes) {
+        durationMinutes = calculateDurationMinutes(requestedInAt, requestedOutAt)
+      }
+
+      let leaveType = null
+      let overtimeRule = null
+      if (requestType === 'leave') {
+        leaveType = await loadLeaveType(db, orgId, {
+          id: normalizeRequestReferenceInput(parsedData.leaveTypeId, existingLeaveType.id),
+          code: normalizeRequestReferenceInput(parsedData.leaveTypeCode, existingLeaveType.code),
+        })
+        if (!leaveType) {
+          throw new HttpError(404, 'NOT_FOUND', 'Leave type not found')
+        }
+        if (!leaveType.isActive) {
+          throw new HttpError(400, 'INVALID_STATE', 'Leave type inactive')
+        }
+        if (!durationMinutes) {
+          durationMinutes = leaveType.defaultMinutesPerDay
+        }
+      } else if (requestType === 'overtime') {
+        overtimeRule = await loadOvertimeRule(db, orgId, {
+          id: normalizeRequestReferenceInput(parsedData.overtimeRuleId, existingOvertimeRule.id),
+          name: normalizeRequestReferenceInput(parsedData.overtimeRuleName, existingOvertimeRule.name),
+        })
+        if (!overtimeRule) {
+          throw new HttpError(404, 'NOT_FOUND', 'Overtime rule not found')
+        }
+        if (!overtimeRule.isActive) {
+          throw new HttpError(400, 'INVALID_STATE', 'Overtime rule inactive')
+        }
+        if (!durationMinutes) {
+          throw new HttpError(400, 'VALIDATION_ERROR', 'Duration required for overtime')
+        }
+        durationMinutes = applyOvertimeRule(durationMinutes, overtimeRule)
+      }
+
+      if ((requestType === 'leave' || requestType === 'overtime') && (!durationMinutes || durationMinutes <= 0)) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'Duration required')
+      }
+
+      const approvalFlow = await loadApprovalFlow(db, orgId, {
+        requestType,
+        flowId: normalizeRequestReferenceInput(parsedData.approvalFlowId, existingApprovalFlow.id),
+      })
+
+      const reason = parsedData.reason === undefined
+        ? normalizeOptionalText(existingRequest?.reason)
+        : normalizeOptionalText(parsedData.reason)
+      const attachmentUrl = parsedData.attachmentUrl === undefined
+        ? normalizeOptionalText(existingMetadata.attachmentUrl)
+        : normalizeOptionalText(parsedData.attachmentUrl)
+
+      const metadata = {}
+      if (durationMinutes) metadata.minutes = durationMinutes
+      if (leaveType) {
+        metadata.leaveType = {
+          id: leaveType.id,
+          code: leaveType.code,
+          name: leaveType.name,
+          paid: leaveType.paid,
+          requiresApproval: leaveType.requiresApproval,
+          requiresAttachment: leaveType.requiresAttachment,
+          defaultMinutesPerDay: leaveType.defaultMinutesPerDay,
+        }
+      }
+      if (overtimeRule) {
+        metadata.overtimeRule = {
+          id: overtimeRule.id,
+          name: overtimeRule.name,
+          minMinutes: overtimeRule.minMinutes,
+          roundingMinutes: overtimeRule.roundingMinutes,
+          maxMinutesPerDay: overtimeRule.maxMinutesPerDay,
+          requiresApproval: overtimeRule.requiresApproval,
+        }
+      }
+      if (attachmentUrl) metadata.attachmentUrl = attachmentUrl
+      if (approvalFlow) {
+        metadata.approvalFlow = {
+          id: approvalFlow.id,
+          name: approvalFlow.name,
+          steps: approvalFlow.steps,
+          currentStep: 0,
+        }
+      }
+
+      return {
+        orgId,
+        workDate,
+        requestType,
+        requestedInAt,
+        requestedOutAt,
+        reason,
+        metadata,
+      }
+    }
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/requests',
       withPermission('attendance:write', async (req, res) => {
-        const schema = z.object({
-          workDate: z.string().optional(),
-          date: z.string().optional(),
-          requestType: z.string().optional(),
-          type: z.string().optional(),
-          requestedInAt: z.string().optional(),
-          requested_in_at: z.string().optional(),
-          clockIn: z.string().optional(),
-          requestedOutAt: z.string().optional(),
-          requested_out_at: z.string().optional(),
-          clockOut: z.string().optional(),
-          reason: z.string().optional(),
-          leaveTypeId: z.string().optional(),
-          leaveTypeCode: z.string().optional(),
-          overtimeRuleId: z.string().optional(),
-          overtimeRuleName: z.string().optional(),
-          minutes: z.coerce.number().int().min(0).optional(),
-          attachmentUrl: z.string().optional(),
-          approvalFlowId: z.string().optional(),
-          orgId: z.string().optional(),
-        })
-
-        const parsed = schema.safeParse(req.body)
+        const parsed = requestWriteSchema.safeParse(req.body)
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-		        const userId = getUserId(req)
-		        if (!userId) {
-		          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-		          return
-		        }
-
-		        const orgId = getOrgId(req)
-		        const workDate = normalizeDateOnlyStrict(parsed.data.workDate ?? parsed.data.date)
-		        if (!workDate) {
-		          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'workDate must use YYYY-MM-DD format' } })
-		          return
-		        }
-		        const requestedInAt = parseDateInput(parsed.data.requestedInAt ?? parsed.data.requested_in_at ?? parsed.data.clockIn)
-		        const requestedOutAt = parseDateInput(parsed.data.requestedOutAt ?? parsed.data.requested_out_at ?? parsed.data.clockOut)
-        if (requestedInAt && requestedOutAt && requestedOutAt <= requestedInAt) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedOutAt must be after requestedInAt' } })
+        const userId = getUserId(req)
+        if (!userId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
         }
 
-        const requestType = parsed.data.requestType ?? parsed.data.type
-        if (!REQUEST_TYPES.includes(requestType)) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `requestType must be one of: ${REQUEST_TYPES.join(', ')}` } })
-          return
-        }
-        if (requestType === 'missed_check_in' && !requestedInAt) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedInAt required' } })
-          return
-        }
-        if (requestType === 'missed_check_out' && !requestedOutAt) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedOutAt required' } })
-          return
-        }
-        if (requestType === 'time_correction' && !requestedInAt && !requestedOutAt) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedInAt or requestedOutAt required' } })
-          return
-        }
-
-        let durationMinutes = parsed.data.minutes ?? null
-        if (!durationMinutes) {
-          durationMinutes = calculateDurationMinutes(requestedInAt, requestedOutAt)
-        }
-
-        let leaveType = null
-        let overtimeRule = null
-        if (requestType === 'leave') {
-          leaveType = await loadLeaveType(db, orgId, {
-            id: parsed.data.leaveTypeId,
-            code: parsed.data.leaveTypeCode,
-          })
-          if (!leaveType) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Leave type not found' } })
+        const orgId = getOrgId(req)
+        let draft
+        try {
+          draft = await resolveAttendanceRequestDraft(parsed.data, { org_id: orgId })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
-          if (!leaveType.isActive) {
-            res.status(400).json({ ok: false, error: { code: 'INVALID_STATE', message: 'Leave type inactive' } })
-            return
-          }
-          if (!durationMinutes) {
-            durationMinutes = leaveType.defaultMinutesPerDay
-          }
-        } else if (requestType === 'overtime') {
-          overtimeRule = await loadOvertimeRule(db, orgId, {
-            id: parsed.data.overtimeRuleId,
-            name: parsed.data.overtimeRuleName,
-          })
-          if (!overtimeRule) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Overtime rule not found' } })
-            return
-          }
-          if (!overtimeRule.isActive) {
-            res.status(400).json({ ok: false, error: { code: 'INVALID_STATE', message: 'Overtime rule inactive' } })
-            return
-          }
-          if (!durationMinutes) {
-            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Duration required for overtime' } })
-            return
-          }
-          durationMinutes = applyOvertimeRule(durationMinutes, overtimeRule)
-        }
-
-        if ((requestType === 'leave' || requestType === 'overtime') && (!durationMinutes || durationMinutes <= 0)) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Duration required' } })
-          return
-        }
-
-	        const approvalFlow = await loadApprovalFlow(db, orgId, {
-	          requestType,
-	          flowId: parsed.data.approvalFlowId,
-	        })
-	        const metadata = {}
-        if (durationMinutes) metadata.minutes = durationMinutes
-        if (leaveType) {
-          metadata.leaveType = {
-            id: leaveType.id,
-            code: leaveType.code,
-            name: leaveType.name,
-            paid: leaveType.paid,
-            requiresApproval: leaveType.requiresApproval,
-            requiresAttachment: leaveType.requiresAttachment,
-            defaultMinutesPerDay: leaveType.defaultMinutesPerDay,
-          }
-        }
-        if (overtimeRule) {
-          metadata.overtimeRule = {
-            id: overtimeRule.id,
-            name: overtimeRule.name,
-            minMinutes: overtimeRule.minMinutes,
-            roundingMinutes: overtimeRule.roundingMinutes,
-            maxMinutesPerDay: overtimeRule.maxMinutesPerDay,
-            requiresApproval: overtimeRule.requiresApproval,
-          }
-        }
-        if (parsed.data.attachmentUrl) {
-          metadata.attachmentUrl = parsed.data.attachmentUrl
-        }
-        if (approvalFlow) {
-          metadata.approvalFlow = {
-            id: approvalFlow.id,
-            name: approvalFlow.name,
-            steps: approvalFlow.steps,
-            currentStep: 0,
-          }
+          throw error
         }
 
         const approvalId = `apv_${randomUUID()}`
 
-	        try {
-	          const request = await db.transaction(async (trx) => {
-	            await acquireAttendanceRequestLock(trx, orgId, userId, workDate, requestType)
-	            const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
-	              orgId,
-	              userId,
-	              workDate,
-	              requestType,
-	            })
-	            if (duplicateRequest) {
-	              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
-	            }
-	            await trx.query(
-	              'INSERT INTO approval_instances (id, status, version) VALUES ($1, $2, $3)',
+        try {
+          const request = await db.transaction(async (trx) => {
+            await acquireAttendanceRequestLock(trx, orgId, userId, draft.workDate, draft.requestType)
+            const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
+              orgId,
+              userId,
+              workDate: draft.workDate,
+              requestType: draft.requestType,
+            })
+            if (duplicateRequest) {
+              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+            }
+            await trx.query(
+              'INSERT INTO approval_instances (id, status, version) VALUES ($1, $2, $3)',
               [approvalId, 'pending', 0]
             )
 
@@ -9593,39 +9683,39 @@ module.exports = {
                (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
                RETURNING *`,
-	              [
-	                randomUUID(),
-	                userId,
-	                orgId,
-	                workDate,
-	                requestType,
-	                requestedInAt,
-                requestedOutAt,
-                parsed.data.reason ?? null,
+              [
+                randomUUID(),
+                userId,
+                orgId,
+                draft.workDate,
+                draft.requestType,
+                draft.requestedInAt,
+                draft.requestedOutAt,
+                draft.reason,
                 'pending',
                 approvalId,
-                JSON.stringify(metadata),
+                JSON.stringify(draft.metadata),
               ]
             )
 
             return rows[0]
           })
 
-	          emitEvent('attendance.requested', {
-	            orgId,
-	            userId,
-	            workDate,
-	            requestType,
-	          })
-	          res.status(201).json({ ok: true, data: { request } })
-	        } catch (error) {
-	          if (error instanceof HttpError) {
-	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
-	            return
-	          }
-	          if (isDatabaseSchemaError(error)) {
-	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-	            return
+          emitEvent('attendance.requested', {
+            orgId,
+            userId,
+            workDate: draft.workDate,
+            requestType: draft.requestType,
+          })
+          res.status(201).json({ ok: true, data: { request: mapAttendanceRequestRow(request) } })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
           }
           logger.error('Attendance request creation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create request' } })
@@ -9707,7 +9797,7 @@ module.exports = {
             params
           )
 
-	          res.json({ ok: true, success: true, data: { items: rows, total, page, pageSize } })
+          res.json({ ok: true, success: true, data: { items: rows.map(mapAttendanceRequestRow), total, page, pageSize } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -9715,6 +9805,137 @@ module.exports = {
           }
           logger.error('Attendance request list failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list requests' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/requests/:id',
+      withPermission('attendance:read', async (req, res) => {
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_requests WHERE id = $1',
+            [req.params.id]
+          )
+          if (rows.length === 0) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } })
+            return
+          }
+          await ensureAttendanceRequestAccess(rows[0], requesterId, 'view request')
+          res.json({ ok: true, data: { request: mapAttendanceRequestRow(rows[0]) } })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance request item failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load request' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/requests/:id',
+      withPermission('attendance:write', async (req, res) => {
+        const parsed = requestWriteSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+
+        try {
+          const request = await db.transaction(async (trx) => {
+            const requestRows = await trx.query(
+              'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
+              [req.params.id]
+            )
+            if (requestRows.length === 0) {
+              throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+            }
+
+            const existingRequest = requestRows[0]
+            await ensureAttendanceRequestAccess(existingRequest, requesterId, 'edit request')
+            if (existingRequest.status !== 'pending') {
+              throw new HttpError(400, 'INVALID_STATUS', 'Only pending requests can be edited')
+            }
+
+            const draft = await resolveAttendanceRequestDraft(parsed.data, existingRequest)
+            await acquireAttendanceRequestLock(trx, existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType)
+            const duplicateRows = await trx.query(
+              `SELECT id
+               FROM attendance_requests
+               WHERE org_id = $1
+                 AND user_id = $2
+                 AND work_date = $3
+                 AND request_type = $4
+                 AND status IN ('pending', 'approved')
+                 AND id <> $5
+               LIMIT 1`,
+              [existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType, req.params.id]
+            )
+            if (duplicateRows.length > 0) {
+              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+            }
+
+            const rows = await trx.query(
+              `UPDATE attendance_requests
+               SET work_date = $2,
+                   request_type = $3,
+                   requested_in_at = $4,
+                   requested_out_at = $5,
+                   reason = $6,
+                   metadata = $7::jsonb,
+                   updated_at = now()
+               WHERE id = $1
+               RETURNING *`,
+              [
+                req.params.id,
+                draft.workDate,
+                draft.requestType,
+                draft.requestedInAt,
+                draft.requestedOutAt,
+                draft.reason,
+                JSON.stringify(draft.metadata),
+              ]
+            )
+            return rows[0]
+          })
+
+          emitEvent('attendance.request.updated', {
+            requestId: request.id,
+            orgId: request.org_id ?? DEFAULT_ORG_ID,
+            userId: request.user_id,
+          })
+          res.json({ ok: true, data: { request: mapAttendanceRequestRow(request) } })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance request update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update request' } })
         }
       })
     )
@@ -10098,6 +10319,12 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/requests/:id/cancel',
+      withPermission('attendance:write', async (req, res) => cancelRequest(req, res))
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/requests/:id',
       withPermission('attendance:write', async (req, res) => cancelRequest(req, res))
     )
 
@@ -10716,6 +10943,35 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/approval-flows/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const flowId = normalizeUuidString(req.params.id)
+        if (!flowId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const flow = await loadApprovalFlow(db, orgId, { flowId })
+          if (!flow) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Approval flow not found' } })
+            return
+          }
+          res.json({ ok: true, data: flow })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance approval flow lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load approval flow' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/approval-flows',
       withPermission('attendance:admin', async (req, res) => {
@@ -10764,6 +11020,35 @@ module.exports = {
           }
           logger.error('Attendance approval flow creation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create approval flow' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/approval-flows/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const flowId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_approval_flows WHERE id = $1 AND org_id = $2',
+            [flowId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Approval flow not found' } })
+            return
+          }
+
+          res.json({ ok: true, data: mapApprovalFlowRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance approval flow lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load approval flow' } })
         }
       })
     )
@@ -11524,6 +11809,38 @@ module.exports = {
 
     context.api.http.addRoute(
       'GET',
+      '/api/attendance/rule-sets/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const ruleSetId = normalizeUuidString(req.params.id)
+        if (!ruleSetId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_rule_sets WHERE id = $1 AND org_id = $2',
+            [ruleSetId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rule set not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapRuleSetRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rule set lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load rule set' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
       '/api/attendance/rule-templates',
       withPermission('attendance:admin', async (_req, res) => {
         const orgId = getOrgId(_req)
@@ -11826,6 +12143,35 @@ module.exports = {
           }
           logger.error('Attendance rule set creation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create rule set' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/rule-sets/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const ruleSetId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_rule_sets WHERE id = $1 AND org_id = $2',
+            [ruleSetId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rule set not found' } })
+            return
+          }
+
+          res.json({ ok: true, data: mapRuleSetRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rule set lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load rule set' } })
         }
       })
     )
@@ -15872,6 +16218,35 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/payroll-cycles/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const payrollCycleId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2',
+            [payrollCycleId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll cycle not found' } })
+            return
+          }
+
+          res.json({ ok: true, data: mapPayrollCycleRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll cycle lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load payroll cycle' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/payroll-cycles',
       withPermission('attendance:admin', async (req, res) => {
@@ -16084,6 +16459,35 @@ module.exports = {
           }
           logger.error('Attendance payroll cycle generation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to generate payroll cycles' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/payroll-cycles/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const cycleId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2',
+            [cycleId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll cycle not found' } })
+            return
+          }
+
+          res.json({ ok: true, data: mapPayrollCycleRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll cycle lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load payroll cycle' } })
         }
       })
     )
@@ -17386,6 +17790,63 @@ module.exports = {
       })
     )
 
+    function resolveHolidayWritePayload(input, existing = null) {
+      const dateInput = input.date !== undefined ? input.date : existing?.holiday_date
+      const date = normalizeDateOnlyValue(dateInput)
+      if (!date) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'Holiday date must use YYYY-MM-DD format')
+      }
+
+      const rawName = input.name !== undefined ? input.name : existing?.name
+      const name = typeof rawName === 'string' ? rawName.trim() : ''
+      if (!name) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'Holiday name is required')
+      }
+
+      const type = input.type
+      let isWorkingDay = input.isWorkingDay
+      if (type) {
+        const derivedWorkingDay = type === 'working_day_override'
+        if (isWorkingDay !== undefined && isWorkingDay !== derivedWorkingDay) {
+          throw new HttpError(400, 'VALIDATION_ERROR', 'type and isWorkingDay must describe the same holiday state')
+        }
+        isWorkingDay = derivedWorkingDay
+      }
+      if (isWorkingDay === undefined) {
+        isWorkingDay = existing ? Boolean(existing.is_working_day) : false
+      }
+
+      return { date, name, isWorkingDay }
+    }
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/holidays/:id',
+      withPermission('attendance:read', async (req, res) => {
+        const orgId = getOrgId(req)
+        const holidayId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'SELECT id, org_id, holiday_date, name, is_working_day FROM attendance_holidays WHERE id = $1 AND org_id = $2',
+            [holidayId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Holiday not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapHolidayRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance holiday lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load holiday' } })
+        }
+      })
+    )
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/holidays/sync',
@@ -17462,13 +17923,9 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const payload = {
-          date: parsed.data.date,
-          name: parsed.data.name.trim(),
-          isWorkingDay: parsed.data.isWorkingDay ?? false,
-        }
 
         try {
+          const payload = resolveHolidayWritePayload(parsed.data)
           const rows = await db.query(
             `INSERT INTO attendance_holidays
              (id, org_id, holiday_date, name, is_working_day)
@@ -17488,6 +17945,10 @@ module.exports = {
         } catch (error) {
           if (error?.code === '23505') {
             res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Holiday already exists' } })
+            return
+          }
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
           if (isDatabaseSchemaError(error)) {
@@ -17524,11 +17985,7 @@ module.exports = {
           }
 
           const existing = existingRows[0]
-          const payload = {
-            date: parsed.data.date ?? existing.holiday_date,
-            name: parsed.data.name ?? existing.name,
-            isWorkingDay: parsed.data.isWorkingDay ?? existing.is_working_day,
-          }
+          const payload = resolveHolidayWritePayload(parsed.data, existing)
 
           const rows = await db.query(
             `UPDATE attendance_holidays
@@ -17547,6 +18004,10 @@ module.exports = {
         } catch (error) {
           if (error?.code === '23505') {
             res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Holiday already exists' } })
+            return
+          }
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
           if (isDatabaseSchemaError(error)) {
