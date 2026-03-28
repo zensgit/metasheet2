@@ -80,6 +80,7 @@ function mapTeamPreset(item: unknown): PlmTeamFilterPreset {
     permissions,
     isDefault,
     isArchived,
+    lastDefaultSetAt: typeof record.lastDefaultSetAt === 'string' ? record.lastDefaultSetAt : undefined,
     state: normalizeState(record.state),
     archivedAt: typeof record.archivedAt === 'string' ? record.archivedAt : undefined,
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : undefined,

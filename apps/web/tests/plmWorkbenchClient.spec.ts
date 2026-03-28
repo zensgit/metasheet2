@@ -72,6 +72,7 @@ describe('plmWorkbenchClient', () => {
               canClearDefault: true,
             },
             isDefault: true,
+            lastDefaultSetAt: '2026-03-28T09:00:00.000Z',
             state: { field: 'path', value: 'root/a', group: '机械' },
           },
         ],
@@ -103,6 +104,7 @@ describe('plmWorkbenchClient', () => {
         canClearDefault: true,
       },
       isDefault: true,
+      lastDefaultSetAt: '2026-03-28T09:00:00.000Z',
       state: { field: 'path', value: 'root/a', group: '机械' },
     })
     expect(result.metadata).toEqual({
@@ -143,6 +145,7 @@ describe('plmWorkbenchClient', () => {
             ownerUserId: 'dev-user',
             canManage: true,
             isDefault: true,
+            lastDefaultSetAt: '2026-03-28T10:00:00.000Z',
             state: { field: 'parent', value: 'assy', group: '装配' },
           },
         }),
@@ -188,6 +191,7 @@ describe('plmWorkbenchClient', () => {
       name: '上游父件',
     })
     expect(defaulted.isDefault).toBe(true)
+    expect(defaulted.lastDefaultSetAt).toBe('2026-03-28T10:00:00.000Z')
     expect(cleared.isDefault).toBe(false)
     expect(deleted).toMatchObject({
       id: 'preset-2',
