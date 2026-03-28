@@ -5875,6 +5875,26 @@ async function applyQueryState() {
       whereUsedPresetSelection.value = hydratedTakeover.nextSelectionKeys
       whereUsedPresetBatchGroup.value = hydratedTakeover.nextBatchGroupDraft
       whereUsedFilterPresetQuery.value = whereUsedFilterPresetParam
+    } else if (whereUsedFilterPresetQuery.value) {
+      const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+        routePresetKey: whereUsedFilterPresetQuery.value,
+        selectedPresetKey: whereUsedFilterPresetKey.value,
+        nameDraft: whereUsedFilterPresetName.value,
+        groupDraft: whereUsedFilterPresetGroup.value,
+        selectionKeys: whereUsedPresetSelection.value,
+        batchGroupDraft: whereUsedPresetBatchGroup.value,
+        activePreset: null,
+        currentState: {
+          field: whereUsedFilterField.value,
+          value: whereUsedFilter.value,
+        },
+      })
+      whereUsedFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+      whereUsedFilterPresetName.value = nextIdentity.nextNameDraft
+      whereUsedFilterPresetGroup.value = nextIdentity.nextGroupDraft
+      whereUsedPresetSelection.value = nextIdentity.nextSelectionKeys
+      whereUsedPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
+      whereUsedFilterPresetQuery.value = nextIdentity.nextRoutePresetKey
     }
     const whereUsedTeamPresetParam = readQueryParam('whereUsedTeamPreset')
     if (whereUsedTeamPresetParam !== undefined) {
@@ -5925,6 +5945,26 @@ async function applyQueryState() {
       bomPresetSelection.value = hydratedTakeover.nextSelectionKeys
       bomPresetBatchGroup.value = hydratedTakeover.nextBatchGroupDraft
       bomFilterPresetQuery.value = bomFilterPresetParam
+    } else if (bomFilterPresetQuery.value) {
+      const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+        routePresetKey: bomFilterPresetQuery.value,
+        selectedPresetKey: bomFilterPresetKey.value,
+        nameDraft: bomFilterPresetName.value,
+        groupDraft: bomFilterPresetGroup.value,
+        selectionKeys: bomPresetSelection.value,
+        batchGroupDraft: bomPresetBatchGroup.value,
+        activePreset: null,
+        currentState: {
+          field: bomFilterField.value,
+          value: bomFilter.value,
+        },
+      })
+      bomFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+      bomFilterPresetName.value = nextIdentity.nextNameDraft
+      bomFilterPresetGroup.value = nextIdentity.nextGroupDraft
+      bomPresetSelection.value = nextIdentity.nextSelectionKeys
+      bomPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
+      bomFilterPresetQuery.value = nextIdentity.nextRoutePresetKey
     }
     const bomTeamPresetParam = readQueryParam('bomTeamPreset')
     if (bomTeamPresetParam !== undefined) {

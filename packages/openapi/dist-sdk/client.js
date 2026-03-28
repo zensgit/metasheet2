@@ -34,7 +34,7 @@ function toRequestClient(clientOrOptions) {
     return createClient(clientOrOptions);
 }
 function buildApiEnvelopeError(error, fallback) {
-    const nextError = new Error((error === null || error === void 0 ? void 0 : error.message) || fallback);
+    const nextError = new Error(error?.message || fallback);
     if (!error || typeof error !== 'object') {
         return nextError;
     }

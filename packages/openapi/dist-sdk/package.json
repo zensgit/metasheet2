@@ -15,11 +15,24 @@
       "default": "./client.js"
     }
   },
-  "files": ["index.js", "index.d.ts", "client.js", "client.d.ts", "README.md"],
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "client.js",
+    "client.d.ts",
+    "README.md"
+  ],
   "scripts": {
     "build": "node ./scripts/build.mjs",
     "test": "vitest run tests/client.test.ts --watch=false"
   },
-  "keywords": ["metasheet","sdk","openapi"],
-  "license": "UNLICENSED"
+  "keywords": [
+    "metasheet",
+    "sdk",
+    "openapi"
+  ],
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "openapi-typescript": "^7.13.0"
+  }
 }

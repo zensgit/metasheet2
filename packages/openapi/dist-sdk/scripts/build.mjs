@@ -6,16 +6,29 @@ const root = path.resolve(process.cwd(), '..')
 const dist = path.resolve(root, 'dist')
 const outDir = path.resolve(process.cwd(), '.')
 
-const sdkSrc = path.join(dist, 'sdk.ts')
-if (!fs.existsSync(sdkSrc)) {
-  console.error('sdk.ts not found, run openapi build first')
+const openapiSrc = path.join(dist, 'openapi.yaml')
+if (!fs.existsSync(openapiSrc)) {
+  console.error('openapi.yaml not found, run openapi build first')
   process.exit(1)
 }
 const jsOut = path.join(outDir, 'index.js')
 const dtsOut = path.join(outDir, 'index.d.ts')
-const src = fs.readFileSync(sdkSrc, 'utf8')
-fs.writeFileSync(dtsOut, src)
 fs.writeFileSync(jsOut, `// ESM stub exports types only\nexport {};\n`)
+
+execFileSync(
+  'pnpm',
+  [
+    'exec',
+    'openapi-typescript',
+    openapiSrc,
+    '--output',
+    dtsOut,
+  ],
+  {
+    cwd: process.cwd(),
+    stdio: 'inherit',
+  },
+)
 
 execFileSync(
   'pnpm',

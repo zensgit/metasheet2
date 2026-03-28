@@ -4,7 +4,7 @@ Generated TypeScript types plus a small runtime client for MetaSheet V2.
 
 ## Build
 
-- Build OpenAPI first: `pnpm --dir packages/openapi build`
+- Build OpenAPI first: `pnpm exec tsx packages/openapi/tools/build.ts`
 - Package SDK: `pnpm --dir packages/openapi/dist-sdk build`
 
 ## Type usage

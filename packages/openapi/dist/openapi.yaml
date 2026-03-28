@@ -1625,21 +1625,83 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Pagination'
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                              example: rec-1
+                            occurred_at:
+                              type: string
+                              format: date-time
+                              example: '2025-09-19T09:12:00Z'
+                            actor_id:
+                              type: string
+                              example: u1
+                            actor_name:
+                              type: string
+                              example: Reviewer One
+                            action:
+                              type: string
+                              example: approve
+                            comment:
+                              type: string
+                              example: LGTM
+                            from_status:
+                              type: string
+                              example: PENDING
+                            to_status:
+                              type: string
+                              example: APPROVED
+                            version:
+                              type: integer
+                              example: 1
+                            from_version:
+                              type: integer
+                              nullable: true
+                              example: 0
+                            to_version:
+                              type: integer
+                              example: 1
+                      page:
+                        type: integer
+                        example: 1
+                      pageSize:
+                        type: integer
+                        example: 50
+                      total:
+                        type: integer
+                        example: 4
               examples:
                 sample:
                   value:
-                    items:
-                      - occurred_at: '2025-09-19T09:12:00Z'
-                        actor_id: u1
-                        action: approve
-                        comment: LGTM
-                        from_status: PENDING
-                        to_status: APPROVED
-                        version: 1
-                    page: 1
-                    pageSize: 50
-                    total: 4
+                    ok: true
+                    data:
+                      items:
+                        - id: rec-1
+                          occurred_at: '2025-09-19T09:12:00Z'
+                          actor_id: u1
+                          actor_name: Reviewer One
+                          action: approve
+                          comment: LGTM
+                          from_status: PENDING
+                          to_status: APPROVED
+                          version: 1
+                          from_version: 0
+                          to_version: 1
+                      page: 1
+                      pageSize: 50
+                      total: 4
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
