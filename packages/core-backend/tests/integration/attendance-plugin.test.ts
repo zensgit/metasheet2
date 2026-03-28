@@ -1026,6 +1026,45 @@ describe('Attendance Plugin Integration', () => {
     }
   })
 
+  it('honors authenticated admin claims for attendance admin routes when RBAC_BYPASS is disabled', async () => {
+    if (!baseUrl) return
+
+    const originalRbacBypass = process.env.RBAC_BYPASS
+    process.env.RBAC_BYPASS = 'false'
+
+    try {
+      const testUserId = `attendance-admin-claims-${Date.now().toString(36)}`
+      const tokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=*:*`
+      )
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      expect(token).toBeTruthy()
+      if (!token) return
+
+      const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      expect(settingsRes.status).toBe(200)
+      const settingsBody = settingsRes.body as { ok?: boolean; data?: Record<string, unknown> } | undefined
+      expect(settingsBody?.ok).toBe(true)
+      expect(settingsBody?.data).toBeTruthy()
+
+      const groupsRes = await requestJson(`${baseUrl}/api/attendance/groups`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      expect(groupsRes.status).toBe(200)
+      const groupsBody = groupsRes.body as { ok?: boolean; data?: { items?: unknown[] } } | undefined
+      expect(groupsBody?.ok).toBe(true)
+      expect(Array.isArray(groupsBody?.data?.items)).toBe(true)
+    } finally {
+      process.env.RBAC_BYPASS = originalRbacBypass
+    }
+  })
+
   it('serves attendance import templates as JSON and CSV', async () => {
     if (!baseUrl) return
 

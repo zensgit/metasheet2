@@ -6555,6 +6555,35 @@ function createRbacHelpers(db, logger) {
     }
   }
 
+  function normalizePermissionCodes(value) {
+    if (!Array.isArray(value)) return []
+    return value
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean)
+  }
+
+  function hasPermissionCode(permissionCodes, permissionCode) {
+    if (permissionCodes.includes(permissionCode) || permissionCodes.includes('*:*')) return true
+    const resource = permissionCode.split(':')[0]
+    return resource ? permissionCodes.includes(`${resource}:*`) : false
+  }
+
+  function requestUserIsAdmin(user) {
+    if (!user || typeof user !== 'object') return false
+    if (String(user.role || '').trim() === 'admin') return true
+    return normalizePermissionCodes(user.roles).includes('admin')
+  }
+
+  function requestUserHasPermission(user, permission) {
+    if (!user || typeof user !== 'object') return false
+    if (requestUserIsAdmin(user)) return true
+    const permissionCodes = Array.from(new Set([
+      ...normalizePermissionCodes(user.permissions),
+      ...normalizePermissionCodes(user.perms),
+    ]))
+    return hasPermissionCode(permissionCodes, permission)
+  }
+
   function withPermission(permission, handler) {
     return async (req, res, next) => {
       const userId = getUserId(req)
@@ -6569,6 +6598,10 @@ function createRbacHelpers(db, logger) {
       }
 
       try {
+        if (requestUserHasPermission(req.user, permission)) {
+          await handler(req, res, next)
+          return
+        }
         const admin = await isAdmin(userId)
         if (!admin) {
           const allowed = await userHasPermission(userId, permission)
