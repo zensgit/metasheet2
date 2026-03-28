@@ -2781,6 +2781,25 @@ function firstDefinedValue(...values) {
   return undefined
 }
 
+function tryParseJsonPayload(value) {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (!trimmed) return value
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return value
+  }
+}
+
+function normalizeNumericPayload(value) {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (!trimmed) return value
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) ? parsed : value
+}
+
 function normalizeGroupMembersPayload(value) {
   const payload = normalizeObjectPayload(value)
   return {
@@ -2827,10 +2846,11 @@ function normalizeApprovalStepPayload(value) {
 
 function normalizeApprovalFlowPayload(value) {
   const payload = normalizeObjectPayload(value)
+  const normalizedSteps = tryParseJsonPayload(payload.steps)
   return {
     ...payload,
-    requestType: firstDefinedValue(payload.requestType, payload.request_type),
-    steps: Array.isArray(payload.steps) ? payload.steps.map(normalizeApprovalStepPayload) : payload.steps,
+    requestType: firstDefinedValue(payload.requestType, payload.request_type, payload.type),
+    steps: Array.isArray(normalizedSteps) ? normalizedSteps.map(normalizeApprovalStepPayload) : normalizedSteps,
     isActive: firstDefinedValue(payload.isActive, payload.is_active),
   }
 }
@@ -2858,8 +2878,11 @@ function normalizeRotationAssignmentPayload(value) {
 
 function normalizeRuleSetPayload(value) {
   const payload = normalizeObjectPayload(value)
+  const normalizedConfig = tryParseJsonPayload(payload.config)
   return {
     ...payload,
+    version: normalizeNumericPayload(payload.version),
+    config: normalizedConfig,
     isDefault: firstDefinedValue(payload.isDefault, payload.is_default),
   }
 }

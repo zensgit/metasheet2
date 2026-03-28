@@ -1591,6 +1591,65 @@ describe('Attendance Plugin Integration', () => {
     expect(invalidAssignmentRes.status).toBe(400)
   })
 
+  it('accepts compatibility payload aliases for approval flow and rule set create routes', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-compat-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const approvalFlowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Compat Approval ${runSuffix}`,
+        type: 'leave',
+        steps: JSON.stringify([
+          {
+            name: '直属主管',
+            approver_user_ids: [testUserId],
+          },
+        ]),
+        is_active: true,
+      }),
+    })
+    expect(approvalFlowRes.status).toBe(201)
+    const createdFlow = (approvalFlowRes.body as { data?: { requestType?: string; steps?: Array<{ approverUserIds?: string[] }> } } | undefined)?.data
+    expect(createdFlow?.requestType).toBe('leave')
+    expect(createdFlow?.steps?.[0]?.approverUserIds).toEqual([testUserId])
+
+    const ruleSetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Compat Rule Set ${runSuffix}`,
+        scope: 'org',
+        version: '2',
+        is_default: false,
+        config: JSON.stringify({
+          source: 'manual',
+          rule: { timezone: 'Asia/Shanghai' },
+        }),
+      }),
+    })
+    expect(ruleSetRes.status).toBe(201)
+    const createdRuleSet = (ruleSetRes.body as { data?: { version?: number; config?: { source?: string; rule?: { timezone?: string } } } } | undefined)?.data
+    expect(createdRuleSet?.version).toBe(2)
+    expect(createdRuleSet?.config?.source).toBe('manual')
+    expect(createdRuleSet?.config?.rule?.timezone).toBe('Asia/Shanghai')
+  })
+
   it('rejects invalid CSV upload payloads with 400 before creating upload handles', async () => {
     if (!baseUrl) return
 
