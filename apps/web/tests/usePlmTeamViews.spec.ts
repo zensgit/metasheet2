@@ -2138,10 +2138,12 @@ describe('usePlmTeamViews', () => {
     expect(model.canRenameTeamView.value).toBe(false)
 
     model.teamViewName.value = '我的工作台'
+    model.teamViewOwnerUserId.value = 'rename-owner-stale'
     await model.renameTeamView()
 
     expect(renamePlmWorkbenchTeamView).toHaveBeenCalledWith('workbench', 'workbench-copy', '我的工作台')
     expect(model.teamViews.value.find((view) => view.id === 'workbench-copy')?.name).toBe('我的工作台')
+    expect(model.teamViewOwnerUserId.value).toBe('')
     expect(syncRequestedViewId).toHaveBeenLastCalledWith('workbench-copy')
     expect(workbenchApply).toHaveLastReturnedWith('workbench-copy')
   })

@@ -505,6 +505,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       teamViewSelection.value = []
       applyView(duplicated)
       teamViewName.value = ''
+      teamViewOwnerUserId.value = ''
       options.setMessage(`已复制${options.label}团队视角：${duplicated.name}`)
     } catch (error) {
       teamViewsError.value = getErrorMessage(error, `复制${options.label}团队视角失败`)
@@ -595,6 +596,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       teamViews.value = replaceTeamView(teamViews.value, renamed)
       applyView(renamed)
       teamViewName.value = ''
+      teamViewOwnerUserId.value = ''
       options.setMessage(`已重命名${options.label}团队视角：${renamed.name}`)
     } catch (error) {
       teamViewsError.value = getErrorMessage(error, `重命名${options.label}团队视角失败`)
