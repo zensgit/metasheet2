@@ -18,24 +18,6 @@ import type {
   PlmWorkbenchTeamViewStateByKind,
 } from '../../views/plm/plmPanelModels'
 
-interface Envelope<T> {
-  success?: boolean
-  data?: T
-  error?: string | { message?: string }
-}
-
-function extractErrorMessage(payload: unknown, fallback: string): string {
-  if (!payload || typeof payload !== 'object') return fallback
-  const record = payload as Record<string, unknown>
-
-  if (typeof record.error === 'string' && record.error.trim()) return record.error
-  if (record.error && typeof record.error === 'object') {
-    const nested = record.error as Record<string, unknown>
-    if (typeof nested.message === 'string' && nested.message.trim()) return nested.message
-  }
-  return fallback
-}
-
 function normalizeState(value: unknown): PlmTeamFilterPresetState {
   const record = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   const field = typeof record.field === 'string' && record.field.trim() ? record.field.trim() : 'all'
@@ -324,21 +306,6 @@ const plmWorkbenchRequestClient = {
 } satisfies RequestClient
 
 const rawPlmWorkbenchClient = createPlmWorkbenchClient(plmWorkbenchRequestClient)
-
-async function requestJson<T = unknown>(path: string, options?: RequestInit): Promise<Envelope<T>> {
-  const response = await apiFetch(path, options)
-  const payload = await response.json().catch(() => ({})) as Envelope<T>
-
-  if (!response.ok) {
-    throw new Error(extractErrorMessage(payload, `API error: ${response.status}`))
-  }
-
-  if (payload.success === false) {
-    throw new Error(extractErrorMessage(payload, '请求失败'))
-  }
-
-  return payload
-}
 
 export async function listPlmTeamFilterPresets(kind: PlmTeamFilterPresetKind) {
   const payload = await rawPlmWorkbenchClient.listTeamFilterPresets<unknown>(kind)

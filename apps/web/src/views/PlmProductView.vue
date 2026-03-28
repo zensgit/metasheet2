@@ -123,7 +123,6 @@ import {
   resolvePlmFilterFieldQueryValue,
   normalizePlmWorkbenchLocalRouteQuerySnapshot,
   normalizePlmWorkbenchPanelScope,
-  normalizePlmWorkbenchQuerySnapshot,
 } from './plm/plmWorkbenchViewState'
 import {
   matchPlmTeamViewStateSnapshot,
@@ -3344,25 +3343,6 @@ function parseQueryNumber(value?: string): number | undefined {
   if (!Number.isFinite(parsed)) return undefined
   return parsed
 }
-
-const DOCUMENT_QUERY_KEYS = [
-  'documentTeamView',
-  'documentRole',
-  'documentFilter',
-  'documentSort',
-  'documentSortDir',
-  'documentColumns',
-]
-
-const APPROVALS_QUERY_KEYS = [
-  'approvalsTeamView',
-  'approvalsStatus',
-  'approvalsFilter',
-  'approvalComment',
-  'approvalSort',
-  'approvalSortDir',
-  'approvalColumns',
-]
 
 function hasExplicitWorkbenchQueryState() {
   return hasExplicitPlmWorkbenchAutoApplyQueryState(
