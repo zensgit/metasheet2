@@ -1,4 +1,14 @@
 paths:
+  /api/approvals/pending:
+    get:
+      summary: Get pending approvals for current actor
+      security:
+        - bearerAuth: []
+      responses:
+        '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/approvals/{id}:
     get:
       summary: Get approval instance
@@ -11,7 +21,10 @@ paths:
           schema: { type: string }
       responses:
         '200': { description: OK }
-        '404': { description: Not found }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/approvals/{id}/approve:
     post:
       summary: Approve instance with optimistic locking

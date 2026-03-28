@@ -94,6 +94,24 @@ describe('approvals routes', () => {
     })
   })
 
+  it('returns a structured 401 when pending approvals cannot resolve the actor id', async () => {
+    authState.user = {
+      tenantId: 'tenant-a',
+      name: 'Owner One',
+    }
+
+    const response = await request(app).get('/api/approvals/pending')
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'APPROVAL_USER_REQUIRED',
+        message: 'User ID not found in token',
+      },
+    })
+  })
+
   it('returns a 409 conflict for stale approve versions', async () => {
     pgState.client.query
       .mockResolvedValueOnce({})
@@ -137,6 +155,23 @@ describe('approvals routes', () => {
     const response = await request(app)
       .post('/api/approvals/apr-missing/approve')
       .send({ version: 0 })
+
+    expect(response.status).toBe(404)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'APPROVAL_NOT_FOUND',
+        message: 'Approval instance not found',
+      },
+    })
+  })
+
+  it('returns a structured 404 when fetching a missing approval instance', async () => {
+    pgState.pool.query.mockResolvedValueOnce({
+      rows: [],
+    })
+
+    const response = await request(app).get('/api/approvals/apr-missing')
 
     expect(response.status).toBe(404)
     expect(response.body).toEqual({

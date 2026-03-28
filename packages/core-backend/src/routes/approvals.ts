@@ -115,7 +115,12 @@ export function approvalsRouter(): Router {
         return res.json({ data: [], total: 0, degraded: true })
       }
       logger.error('Failed to get pending approvals', error instanceof Error ? error : undefined)
-      res.status(500).json({ error: 'Failed to get pending approvals' })
+      res.status(500).json(
+        approvalErrorResponse(
+          'APPROVAL_PENDING_LIST_FAILED',
+          'Failed to get pending approvals',
+        ),
+      )
     }
   })
 
@@ -389,7 +394,9 @@ export function approvalsRouter(): Router {
   r.get('/api/approvals/:id', authenticate, async (req: Request, res: Response) => {
     try {
       if (!pool) {
-        return res.status(503).json({ error: 'Database not available' })
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
       }
 
       const { id } = req.params
@@ -400,7 +407,9 @@ export function approvalsRouter(): Router {
       )
 
       if (result.rows.length === 0) {
-        return res.status(404).json({ error: 'Approval instance not found' })
+        return res.status(404).json(
+          approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),
+        )
       }
 
       res.json(result.rows[0])
@@ -410,10 +419,15 @@ export function approvalsRouter(): Router {
           logger.warn('Approvals service degraded - tables not found')
           approvalsDegraded = true
         }
-        return res.status(404).json({ error: 'Not found', degraded: true })
+        return res.status(404).json({
+          ...approvalErrorResponse('APPROVAL_NOT_FOUND', 'Not found'),
+          degraded: true,
+        })
       }
       logger.error('Failed to get approval', error instanceof Error ? error : undefined)
-      res.status(500).json({ error: 'Failed to get approval' })
+      res.status(500).json(
+        approvalErrorResponse('APPROVAL_FETCH_FAILED', 'Failed to get approval'),
+      )
     }
   })
 
