@@ -901,6 +901,7 @@ import {
   buildPlmAuditTeamViewShareEntryNotice,
   findPlmAuditTeamViewShareEntryView,
   isPlmAuditSharedLinkEntry,
+  resolvePlmAuditTeamViewShareEntryActionFeedback,
   resolvePlmAuditSharedEntryTakeoverSelection,
   resolvePlmAuditTeamViewShareEntryActionTarget,
   resolvePlmAuditSharedEntryRouteSyncDecision,
@@ -2884,9 +2885,18 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
     auditTeamViewShareEntryTarget.value,
     selectedAuditTeamView.value,
   )
-  if (!view) return
 
   if (actionKind === 'save-local') {
+    const feedback = resolvePlmAuditTeamViewShareEntryActionFeedback({
+      actionKind,
+      target: view,
+      tr,
+    })
+    if (feedback) {
+      setStatus(feedback.message, feedback.kind)
+      return
+    }
+    if (!view) return
     const canonicalRouteState = parsePlmAuditRouteState(route.query)
     await saveCurrentLocalViewWithFollowup(
       buildPlmAuditSharedEntrySavedViewName(view, tr),
@@ -2902,12 +2912,32 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
   }
 
   if (actionKind === 'duplicate') {
+    const feedback = resolvePlmAuditTeamViewShareEntryActionFeedback({
+      actionKind,
+      target: view,
+      tr,
+    })
+    if (feedback) {
+      setStatus(feedback.message, feedback.kind)
+      return
+    }
+    if (!view) return
     await duplicateAuditTeamViewEntry(view, {
       allowDraftName: false,
     })
     return
   }
 
+  const feedback = resolvePlmAuditTeamViewShareEntryActionFeedback({
+    actionKind,
+    target: view,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
   const ok = await setAuditTeamViewDefaultEntry(view)
   if (ok) clearAuditTeamViewShareEntry()
 }

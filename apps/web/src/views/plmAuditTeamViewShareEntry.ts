@@ -1,4 +1,8 @@
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
+import {
+  canDuplicatePlmCollaborativeEntry,
+  canSetDefaultPlmCollaborativeEntry,
+} from './plm/usePlmCollaborativePermissions'
 
 export type PlmAuditTeamViewShareEntryActionKind = 'save-local' | 'duplicate' | 'set-default' | 'dismiss'
 
@@ -24,6 +28,11 @@ export type PlmAuditTeamViewShareEntryNotice = {
 export type PlmAuditSharedEntryRouteSyncDecision = {
   shouldSync: boolean
   replace: boolean
+}
+
+export type PlmAuditTeamViewShareEntryActionFeedback = {
+  kind: 'info' | 'error'
+  message: string
 }
 
 export function shouldResolvePlmAuditSharedEntryOnQueryChange(options: {
@@ -92,6 +101,68 @@ export function buildPlmAuditTeamViewShareEntryNotice(
     ),
     actions,
   }
+}
+
+export function resolvePlmAuditTeamViewShareEntryActionFeedback(options: {
+  actionKind: Exclude<PlmAuditTeamViewShareEntryActionKind, 'dismiss'>
+  target: PlmWorkbenchTeamView<'audit'> | null | undefined
+  tr: (en: string, zh: string) => string
+}): PlmAuditTeamViewShareEntryActionFeedback | null {
+  const target = options.target || null
+  const { tr } = options
+
+  if (!target) {
+    return {
+      kind: 'error',
+      message: tr('Current shared audit team view action is unavailable.', '当前分享的审计团队视图动作不可用。'),
+    }
+  }
+
+  if (options.actionKind === 'save-local') {
+    if (target.isArchived) {
+      return {
+        kind: 'error',
+        message: tr('Restore the audit team view before saving it locally.', '请先恢复审计团队视图，再保存为本地视图。'),
+      }
+    }
+    return null
+  }
+
+  if (options.actionKind === 'duplicate') {
+    if (target.isArchived) {
+      return {
+        kind: 'error',
+        message: tr('Restore the audit team view before duplicating it.', '请先恢复审计团队视图，再执行复制。'),
+      }
+    }
+    if (!canDuplicatePlmCollaborativeEntry(target)) {
+      return {
+        kind: 'error',
+        message: tr('Current shared audit team view cannot be duplicated.', '当前分享的审计团队视图不可复制。'),
+      }
+    }
+    return null
+  }
+
+  if (target.isDefault) {
+    return {
+      kind: 'info',
+      message: tr('Audit team view already set as default.', '审计团队视图已设为默认。'),
+    }
+  }
+  if (target.isArchived) {
+    return {
+      kind: 'error',
+      message: tr('Restore the audit team view before setting it as default.', '请先恢复审计团队视图，再设为默认。'),
+    }
+  }
+  if (!canSetDefaultPlmCollaborativeEntry(target)) {
+    return {
+      kind: 'error',
+      message: tr('Current shared audit team view cannot be set as default.', '当前分享的审计团队视图不可设为默认。'),
+    }
+  }
+  return null
 }
 
 export function buildPlmAuditSharedEntrySavedViewName(

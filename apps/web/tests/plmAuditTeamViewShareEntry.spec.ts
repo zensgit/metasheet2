@@ -15,6 +15,7 @@ import {
   shouldTakeOverPlmAuditSharedEntryOnSourceAction,
   shouldResolvePlmAuditSharedEntryOnQueryChange,
   reducePlmAuditTeamViewShareEntry,
+  resolvePlmAuditTeamViewShareEntryActionFeedback,
 } from '../src/views/plmAuditTeamViewShareEntry'
 
 function tr(en: string, zh: string) {
@@ -127,6 +128,107 @@ describe('plmAuditTeamViewShareEntry', () => {
         emphasis: 'secondary',
       },
     ])
+  })
+
+  it('returns explicit feedback when a shared-entry action target is unavailable', () => {
+    expect(resolvePlmAuditTeamViewShareEntryActionFeedback({
+      actionKind: 'duplicate',
+      target: null,
+      tr,
+    })).toEqual({
+      kind: 'error',
+      message: 'Current shared audit team view action is unavailable.|当前分享的审计团队视图动作不可用。',
+    })
+  })
+
+  it('returns explicit feedback when a shared-entry action is archived or no-op', () => {
+    expect(resolvePlmAuditTeamViewShareEntryActionFeedback({
+      actionKind: 'save-local',
+      target: {
+        id: 'audit-view-3',
+        kind: 'audit',
+        scope: 'team',
+        name: 'Archived',
+        ownerUserId: 'owner-a',
+        canManage: true,
+        permissions: {
+          canManage: true,
+          canApply: false,
+          canDuplicate: false,
+          canShare: false,
+          canDelete: true,
+          canArchive: false,
+          canRestore: true,
+          canRename: false,
+          canTransfer: false,
+          canSetDefault: false,
+          canClearDefault: false,
+        },
+        isDefault: true,
+        isArchived: true,
+        state: {
+          page: 1,
+          q: '',
+          actorId: '',
+          kind: '',
+          action: '',
+          resourceType: '',
+          from: '',
+          to: '',
+          windowMinutes: 180,
+        },
+        createdAt: '2026-03-19T09:00:00.000Z',
+        updatedAt: '2026-03-19T10:00:00.000Z',
+      },
+      tr,
+    })).toEqual({
+      kind: 'error',
+      message: 'Restore the audit team view before saving it locally.|请先恢复审计团队视图，再保存为本地视图。',
+    })
+
+    expect(resolvePlmAuditTeamViewShareEntryActionFeedback({
+      actionKind: 'set-default',
+      target: {
+        id: 'audit-view-4',
+        kind: 'audit',
+        scope: 'team',
+        name: 'Default',
+        ownerUserId: 'owner-a',
+        canManage: true,
+        permissions: {
+          canManage: true,
+          canApply: true,
+          canDuplicate: true,
+          canShare: true,
+          canDelete: true,
+          canArchive: true,
+          canRestore: false,
+          canRename: true,
+          canTransfer: true,
+          canSetDefault: false,
+          canClearDefault: true,
+        },
+        isDefault: true,
+        isArchived: false,
+        state: {
+          page: 1,
+          q: '',
+          actorId: '',
+          kind: '',
+          action: '',
+          resourceType: '',
+          from: '',
+          to: '',
+          windowMinutes: 180,
+        },
+        createdAt: '2026-03-19T09:00:00.000Z',
+        updatedAt: '2026-03-19T10:00:00.000Z',
+      },
+      tr,
+    })).toEqual({
+      kind: 'info',
+      message: 'Audit team view already set as default.|审计团队视图已设为默认。',
+    })
   })
 
   it('builds the default local saved-view name for shared entries', () => {
