@@ -55,3 +55,12 @@ export function shouldFocusPlmAuditSavedViewPromotionRecommendation(
 ) {
   return resolvePlmAuditSavedViewPromotionBehavior(source).shouldFocusRecommendation
 }
+
+export function shouldClearPlmAuditSavedViewPromotionFormDrafts(
+  source: PlmAuditSavedViewShareFollowupSource | null | undefined,
+  options?: {
+    isDefault?: boolean
+  },
+) {
+  return resolvePlmAuditSavedViewPromotionBehavior(source, options).shouldShowDefaultFollowup
+}

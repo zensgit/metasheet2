@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPlmAuditSavedViewTeamPromotionDraft,
   resolvePlmAuditSavedViewPromotionBehavior,
+  shouldClearPlmAuditSavedViewPromotionFormDrafts,
   shouldFocusPlmAuditSavedViewPromotionRecommendation,
 } from '../src/views/plmAuditSavedViewPromotion'
 import type { PlmAuditSavedView } from '../src/views/plmAuditSavedViews'
@@ -81,6 +82,10 @@ describe('plmAuditSavedViewPromotion', () => {
       shouldShowDefaultFollowup: true,
     })
 
+    expect(shouldClearPlmAuditSavedViewPromotionFormDrafts('shared-entry', {
+      isDefault: true,
+    })).toBe(true)
+
     expect(resolvePlmAuditSavedViewPromotionBehavior('scene-context', {
       isDefault: true,
     })).toEqual({
@@ -89,6 +94,10 @@ describe('plmAuditSavedViewPromotion', () => {
       shouldShowDefaultFollowup: true,
     })
 
+    expect(shouldClearPlmAuditSavedViewPromotionFormDrafts('scene-context', {
+      isDefault: true,
+    })).toBe(true)
+
     expect(resolvePlmAuditSavedViewPromotionBehavior(null, {
       isDefault: true,
     })).toEqual({
@@ -96,6 +105,10 @@ describe('plmAuditSavedViewPromotion', () => {
       shouldFocusRecommendation: false,
       shouldShowDefaultFollowup: true,
     })
+
+    expect(shouldClearPlmAuditSavedViewPromotionFormDrafts(null, {
+      isDefault: true,
+    })).toBe(true)
   })
 
   it('keeps non-default promotions on the recommendation or collaboration path', () => {
@@ -110,5 +123,8 @@ describe('plmAuditSavedViewPromotion', () => {
       shouldFocusRecommendation: false,
       shouldShowDefaultFollowup: false,
     })
+
+    expect(shouldClearPlmAuditSavedViewPromotionFormDrafts('shared-entry')).toBe(false)
+    expect(shouldClearPlmAuditSavedViewPromotionFormDrafts(null)).toBe(false)
   })
 })

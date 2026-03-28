@@ -851,6 +851,7 @@ import {
 import {
   buildPlmAuditSavedViewTeamPromotionDraft,
   resolvePlmAuditSavedViewPromotionBehavior,
+  shouldClearPlmAuditSavedViewPromotionFormDrafts,
 } from './plmAuditSavedViewPromotion'
 import {
   buildPlmAuditSavedViewContextBadge,
@@ -3429,6 +3430,9 @@ async function promoteSavedViewToTeam(
     upsertAuditTeamView(saved)
     applyAuditTeamViewHandoffAttention()
     applyAuditTeamViewState(saved)
+    if (shouldClearPlmAuditSavedViewPromotionFormDrafts(followupSource, options)) {
+      clearAuditCompletedTeamViewFormDrafts()
+    }
     const collaborationHandoff = buildPlmAuditTeamViewCollaborationHandoff(
       saved,
       {
