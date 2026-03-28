@@ -5427,6 +5427,8 @@ paths:
                     type: boolean
                   data:
                     $ref: '#/components/schemas/AttendanceApprovalFlow'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -6141,6 +6143,8 @@ paths:
                     type: boolean
                   data:
                     $ref: '#/components/schemas/AttendanceRuleSet'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -7291,6 +7295,8 @@ paths:
                     type: boolean
                   data:
                     $ref: '#/components/schemas/AttendancePayrollCycle'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':

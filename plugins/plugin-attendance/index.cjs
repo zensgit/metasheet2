@@ -11029,7 +11029,11 @@ module.exports = {
       '/api/attendance/approval-flows/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const flowId = req.params.id
+        const flowId = normalizeUuidString(req.params.id)
+        if (!flowId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -12152,7 +12156,11 @@ module.exports = {
       '/api/attendance/rule-sets/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const ruleSetId = req.params.id
+        const ruleSetId = normalizeUuidString(req.params.id)
+        if (!ruleSetId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -16468,7 +16476,11 @@ module.exports = {
       '/api/attendance/payroll-cycles/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const cycleId = req.params.id
+        const cycleId = normalizeUuidString(req.params.id)
+        if (!cycleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(

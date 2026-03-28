@@ -1,83 +1,74 @@
-# Attendance v2.7.1 Item Lookup Follow-up Design
+# Attendance v2.7.1 Item Lookups Design
 
 Date: 2026-03-29
 Branch: `codex/attendance-v271-followup-20260329`
 
 ## Context
 
-After the first v2.7.1 follow-up slice, the remaining high-confidence backend gap was not holidays/requests anymore. The next repeated pattern from the test report was that several admin-managed resources still supported list and write operations but not item lookup:
+The broader v2.7.1 test pass still reported a shared item-route gap across admin-managed attendance resources:
 
 - approval flows
 - rule sets
 - payroll cycles
 
-The same report also noted that attendance request payloads still surfaced `work_date` with a timestamp in some responses, even though record APIs had already standardized on `YYYY-MM-DD`.
+At the same time, request payloads had already moved toward normalized `YYYY-MM-DD` dates in other attendance responses, but request item responses still needed to stay strictly date-only.
+
+Current OpenAPI already describes item lookup endpoints for these resources. This slice makes runtime behavior match that contract and locks the date semantics in tests.
 
 ## Goals
 
-- Add item-level `GET /:id` parity for approval flows, rule sets, and payroll cycles.
-- Normalize attendance request `work_date` in API responses to date-only format.
-- Keep this slice backend-only except for OpenAPI regeneration.
+- Ensure approval flows support stable item lookup.
+- Ensure rule sets support stable item lookup.
+- Ensure payroll cycles support stable item lookup.
+- Keep request `work_date` / `workDate` normalized to `YYYY-MM-DD`.
 
 ## Non-goals
 
-- Changing import preview into a `GET /preview/:fileId` route.
-- Adding a compatibility alias for `/api/metrics/prom`.
-- Reworking approval-flow authorization behavior beyond item lookup.
+- CSV import/template workflow redesign.
+- Metrics path compatibility aliases.
+- Auth/user-management endpoint expansion.
 
 ## Design
 
 ### 1. Item lookup parity
 
-Add three routes to the attendance plugin:
+Use the existing item endpoints for:
 
-- `GET /api/attendance/approval-flows/:id`
-- `GET /api/attendance/rule-sets/:id`
-- `GET /api/attendance/payroll-cycles/:id`
+- `/api/attendance/approval-flows/:id`
+- `/api/attendance/rule-sets/:id`
+- `/api/attendance/payroll-cycles/:id`
 
-Each route:
+Behavior requirements:
 
-- uses the same org scoping as the list/update/delete handlers
-- reuses the existing row mappers
-- returns `404` when the id does not exist in the current org
-- returns `503` for schema-not-ready cases, matching surrounding route families
+- valid item id returns `200`
+- missing item id returns `404`
+- malformed UUID returns `400` where the module already uses UUID validation semantics
 
-This keeps behavior consistent with the already-restored request, holiday, and rotation-rule item routes.
+This keeps item lookup behavior aligned with the update/delete paths already present in the same modules.
 
 ### 2. Request date normalization
 
-Update `mapAttendanceRequestRow()` so both:
+Attendance request responses should expose:
 
 - `work_date`
 - `workDate`
 
-resolve to canonical `YYYY-MM-DD`.
+Both values must remain the same date-only string. The response shape should not leak timestamp-formatted database values back to clients.
 
-This keeps self-service request payloads aligned with the rest of the attendance surface without breaking existing snake_case consumers.
+### 3. Contract drift handling
 
-### 3. Payroll cycle response normalization
-
-Normalize `startDate` and `endDate` in `mapPayrollCycleRow()` using the same date-only helper already used in other attendance mappers. This prevents item lookup from reintroducing timestamp-shaped date fields for payroll cycles.
-
-### 4. Contract alignment
-
-Update OpenAPI source and generated artifacts so the newly restored item routes are reflected in:
-
-- `packages/openapi/src/paths/attendance.yml`
-- generated `packages/openapi/dist/*`
+No OpenAPI shape change is required for this slice because the contract already advertises these item endpoints. Verification should instead prove runtime parity and confirm that rebuilding OpenAPI does not introduce further source changes.
 
 ## Files
 
 - `plugins/plugin-attendance/index.cjs`
-- `packages/openapi/src/paths/attendance.yml`
-- `packages/openapi/dist/combined.openapi.yml`
-- `packages/openapi/dist/openapi.json`
-- `packages/openapi/dist/openapi.yaml`
 - `packages/core-backend/tests/integration/attendance-plugin.test.ts`
 
 ## Risks and mitigations
 
-- Item routes could diverge from existing row shapes.
-  - Mitigation: reuse `mapApprovalFlowRow`, `mapRuleSetRow`, and `mapPayrollCycleRow`.
-- Request date normalization could break callers that were reading the timestamp form.
-  - Mitigation: preserve `work_date` while adding aligned `workDate`, both normalized to the same date-only value.
+- Item lookup could silently diverge from update/delete semantics.
+  - Mitigation: cover create -> get -> missing lookup in focused integration tests.
+- Payroll cycle item lookup could accept malformed ids differently from neighboring modules.
+  - Mitigation: keep the route behavior narrow and only guarantee `200/404` parity for this slice.
+- Request date formatting could regress again if future mapping changes bypass the request response mapper.
+  - Mitigation: assert both `work_date` and `workDate` in the request item test.
