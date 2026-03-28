@@ -151,7 +151,7 @@ jobs:
               '  storage_rc="$host_sync_rc"'
             "else"
               "  set +e"
-              "  COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\" ENV_FILE=\"docker/app.env\" MAX_FS_USED_PCT=\"${MAX_FS_USED_PCT}\" MAX_UPLOAD_DIR_GB=\"${MAX_UPLOAD_DIR_GB}\" MAX_OLDEST_FILE_DAYS=\"${MAX_OLDEST_FILE_DAYS}\" \"${storage_script_path}\""
+              "  COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE}\" ENV_FILE=\"docker/app.env\" MAX_FS_USED_PCT=\"${MAX_FS_USED_PCT}\" MAX_UPLOAD_DIR_GB=\"${MAX_UPLOAD_DIR_GB}\" MAX_OLDEST_FILE_DAYS=\"${MAX_OLDEST_FILE_DAYS}\" \"\${storage_script_path}\""
               '  storage_rc=$?'
               "  set -e"
             "fi"
