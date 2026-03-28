@@ -945,6 +945,7 @@ import {
   isSelectablePlmAuditTeamView,
   type PlmAuditTeamViewLifecycleActionKind,
 } from './plmAuditTeamViewManagement'
+import { resolvePlmAuditTeamViewManagementFeedback } from './plmAuditTeamViewManagementFeedback'
 import {
   buildPlmAuditSceneContextBanner,
   buildPlmAuditSceneFilterHighlight,
@@ -2311,7 +2312,22 @@ async function renameAuditTeamView() {
 
 async function setAuditTeamViewDefault() {
   const view = canonicalAuditTeamViewManagementTarget.value
-  if (!view || auditTeamViewManagementTargetLocked.value || !canSetAuditTeamViewDefault.value) return
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'set-default',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
 
   await setAuditTeamViewDefaultEntry(view)
 }
@@ -2565,7 +2581,22 @@ async function runRecommendedAuditTeamViewSecondaryAction(view: PlmRecommendedAu
 
 async function clearAuditTeamViewDefault() {
   const view = canonicalAuditTeamViewManagementTarget.value
-  if (!view || auditTeamViewManagementTargetLocked.value || !canClearAuditTeamViewDefault.value) return
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'clear-default',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
 
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
@@ -2746,19 +2777,64 @@ async function runAuditSavedViewShareFollowupAction(actionKind: PlmAuditSavedVie
 
 async function archiveAuditTeamView() {
   const view = canonicalAuditTeamViewManagementTarget.value
-  if (!view || auditTeamViewManagementTargetLocked.value || !canArchiveAuditTeamView.value) return
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'archive',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
   await runAuditTeamViewLifecycleAction(view.id, 'archive')
 }
 
 async function restoreAuditTeamView() {
   const view = canonicalAuditTeamViewManagementTarget.value
-  if (!view || auditTeamViewManagementTargetLocked.value || !canRestoreAuditTeamView.value) return
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'restore',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
   await runAuditTeamViewLifecycleAction(view.id, 'restore')
 }
 
 async function deleteAuditTeamView() {
   const view = canonicalAuditTeamViewManagementTarget.value
-  if (!view || auditTeamViewManagementTargetLocked.value || !canDeleteAuditTeamView.value) return
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'delete',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
   await runAuditTeamViewLifecycleAction(view.id, 'delete')
 }
 
