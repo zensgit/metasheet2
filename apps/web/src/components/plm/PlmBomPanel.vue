@@ -380,6 +380,7 @@
               name="plmBomTeamPresetOwnerUserId"
               class="deep-link-input"
               placeholder="目标用户 ID"
+              :disabled="!panel.canTransferTargetBomTeamPreset.value || panel.bomTeamPresetsLoading.value"
             />
             <button
               class="btn ghost mini"

@@ -977,6 +977,9 @@ describe('usePlmTeamFilterPresets', () => {
     model.teamPresetKey.value = 'preset-archived-transfer'
     model.teamPresetOwnerUserId.value = 'owner-b'
 
+    expect(model.canTransferTargetTeamPreset.value).toBe(false)
+    expect(model.canTransferTeamPreset.value).toBe(false)
+
     await model.transferTeamPreset()
 
     expect(transferPlmTeamFilterPreset).not.toHaveBeenCalled()

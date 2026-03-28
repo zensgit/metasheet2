@@ -398,6 +398,7 @@
               name="plmWhereUsedTeamPresetOwnerUserId"
               class="deep-link-input"
               placeholder="目标用户 ID"
+              :disabled="!panel.canTransferTargetWhereUsedTeamPreset.value || panel.whereUsedTeamPresetsLoading.value"
             />
             <button
               class="btn ghost mini"

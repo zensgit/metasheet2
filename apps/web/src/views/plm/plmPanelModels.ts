@@ -1305,6 +1305,7 @@ export type PlmBomPanelModel = {
   canArchiveBomTeamPreset: ComputedRef<boolean>
   canRestoreBomTeamPreset: ComputedRef<boolean>
   canRenameBomTeamPreset: ComputedRef<boolean>
+  canTransferTargetBomTeamPreset: ComputedRef<boolean>
   canTransferBomTeamPreset: ComputedRef<boolean>
   canSetBomTeamPresetDefault: ComputedRef<boolean>
   canClearBomTeamPresetDefault: ComputedRef<boolean>
@@ -1441,6 +1442,7 @@ export type PlmWhereUsedPanelModel = {
   canArchiveWhereUsedTeamPreset: ComputedRef<boolean>
   canRestoreWhereUsedTeamPreset: ComputedRef<boolean>
   canRenameWhereUsedTeamPreset: ComputedRef<boolean>
+  canTransferTargetWhereUsedTeamPreset: ComputedRef<boolean>
   canTransferWhereUsedTeamPreset: ComputedRef<boolean>
   canSetWhereUsedTeamPresetDefault: ComputedRef<boolean>
   canClearWhereUsedTeamPresetDefault: ComputedRef<boolean>

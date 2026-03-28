@@ -228,8 +228,8 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     canArchive: canArchiveTeamPreset,
     canRestore: canRestoreTeamPresetManagement,
     canRename: canRenameTeamPreset,
-    canTransferTarget: canTransferTeamPresetTarget,
-    canTransfer: canTransferTeamPreset,
+    canTransferTarget: canTransferTeamPresetTargetBase,
+    canTransfer: canTransferTeamPresetBase,
     canSetDefault: canSetTeamPresetDefault,
     canClearDefault: canClearTeamPresetDefault,
   } = usePlmCollaborativePermissions({
@@ -237,6 +237,14 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     nameRef: teamPresetName,
     ownerUserIdRef: teamPresetOwnerUserId,
   })
+  const canTransferTeamPresetTarget = computed(() => {
+    const preset = selectedTeamPreset.value
+    if (!preset || preset.isArchived) return false
+    return canTransferTeamPresetTargetBase.value
+  })
+  const canTransferTeamPreset = computed(() => (
+    canTransferTeamPresetTarget.value && canTransferTeamPresetBase.value
+  ))
   const canRestoreTeamPreset = computed(() => {
     if (hasPendingApplySelection.value) return false
     const preset = selectedTeamPreset.value
@@ -1002,6 +1010,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     canArchiveTeamPreset,
     canRestoreTeamPreset,
     canRenameTeamPreset,
+    canTransferTargetTeamPreset: canTransferTeamPresetTarget,
     canTransferTeamPreset,
     canSetTeamPresetDefault,
     canClearTeamPresetDefault,
