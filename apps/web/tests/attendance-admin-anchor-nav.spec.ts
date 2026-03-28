@@ -122,7 +122,7 @@ describe('Attendance admin anchor navigation', () => {
       item => item.textContent?.trim() || '',
     )
 
-    expect(groupLabels).toEqual(['Workspace', 'Policies', 'Organization', 'Data & Payroll', 'Scheduling'])
+    expect(groupLabels).toEqual(['Workspace', 'Scheduling', 'Organization', 'Policies', 'Data & Payroll'])
     expect(labels).toHaveLength(22)
     expect(labels).toEqual(
       expect.arrayContaining([
@@ -137,8 +137,10 @@ describe('Attendance admin anchor navigation', () => {
     )
     expect(labels).not.toContain('Holiday overrides')
     expect(labels).not.toContain('Template Versions')
-    expect(container!.querySelector('.attendance__admin-nav-scope-badge')).toBeNull()
-    expect(container!.querySelector('.attendance__admin-nav-current')?.textContent).toContain('Workspace · Settings')
+    expect(container!.querySelector('.attendance__admin-nav-current')).toBeNull()
+    expect(container!.querySelector('#attendance-admin-nav-filter')).toBeNull()
+    expect(container!.querySelector('.attendance__admin-nav-actions')).toBeNull()
+    expect(container!.querySelector('[data-admin-anchor-recent]')).toBeNull()
   })
 
   it('collapses and expands admin anchor groups', async () => {
@@ -183,7 +185,7 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeNull()
   })
 
-  it('scrolls to the selected anchor target, keeps the rail item visible, and marks it active', async () => {
+  it('scrolls the focused right content back to the top region, keeps the rail item visible, and marks it active', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
@@ -197,12 +199,13 @@ describe('Attendance admin anchor navigation', () => {
 
     expect(scrollIntoViewSpy).toHaveBeenCalled()
     const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
-    expect(scrolledTargets.some(target => target.id === 'attendance-admin-import-batches')).toBe(true)
+    expect(scrolledTargets.some(target => target.id === 'attendance-admin-import-batches')).toBe(false)
+    expect(scrolledTargets.some(target => target.dataset.adminContent === 'true')).toBe(true)
     expect(scrolledTargets.some(target => target.dataset.adminAnchor === 'attendance-admin-import-batches')).toBe(true)
     expect(window.location.hash).toBe('#attendance-admin-import-batches')
     expect(button?.getAttribute('aria-current')).toBe('true')
     expect(button?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
-    expect(container!.querySelector('.attendance__admin-nav-current')?.textContent).toContain('Data & Payroll · Import batches')
+    expect(container!.querySelector('[data-admin-shortcut="attendance-admin-import-batches"]')?.textContent).toContain('Data & Payroll · Import batches')
   })
 
   it('focuses the right pane on the active admin section by default and can reveal all sections on demand', async () => {
@@ -225,14 +228,25 @@ describe('Attendance admin anchor navigation', () => {
     expect(settingsSection?.style.display).toBe('none')
     expect(holidaysSection?.style.display).not.toBe('none')
 
-    const revealAllButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-header .attendance__btn'))
-      .find(button => button.textContent?.includes('Show all sections'))
+    const revealAllButton = container!.querySelector<HTMLButtonElement>('[data-admin-focus-toggle="true"]')
     expect(revealAllButton).toBeTruthy()
     revealAllButton!.click()
     await flushUi(2)
 
     expect(settingsSection?.style.display).not.toBe('none')
     expect(holidaysSection?.style.display).not.toBe('none')
+  })
+
+  it('renders a sticky current-section bar in the right pane', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const currentSectionBar = container!.querySelector<HTMLElement>('[data-admin-current-section="true"]')
+    expect(currentSectionBar).toBeTruthy()
+    expect(currentSectionBar?.textContent).toContain('Current section')
+    expect(currentSectionBar?.textContent).toContain('Workspace · Settings')
+    expect(currentSectionBar?.querySelector('[data-admin-focus-toggle="true"]')?.textContent).toContain('Show all sections')
   })
 
   it('restores the live user picker, structured rule builder, and holiday month calendar interactions', async () => {
@@ -339,26 +353,26 @@ describe('Attendance admin anchor navigation', () => {
     expect(importSection!.querySelector('.attendance__template-guide')).toBeTruthy()
   })
 
-  it('filters anchor items with the quick-find input', async () => {
+  it('surfaces recent shortcuts at the top of the admin content instead of inside the left rail', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
-    const input = container!.querySelector<HTMLInputElement>('#attendance-admin-nav-filter')
-    expect(input).toBeTruthy()
-    input!.value = 'payroll'
-    input!.dispatchEvent(new Event('input', { bubbles: true }))
+    const payrollTemplates = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-payroll-templates"]')
+    const payrollCycles = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-payroll-cycles"]')
+    expect(payrollTemplates).toBeTruthy()
+    expect(payrollCycles).toBeTruthy()
+
+    payrollTemplates!.click()
+    await flushUi(2)
+    payrollCycles!.click()
     await flushUi(2)
 
-    const labels = Array.from(container!.querySelectorAll('.attendance__admin-nav-link')).map(
+    const labels = Array.from(container!.querySelectorAll('[data-admin-shortcut]')).map(
       item => item.textContent?.trim() || '',
     )
-    const groupLabels = Array.from(container!.querySelectorAll('.attendance__admin-nav-group-title')).map(
-      item => item.textContent?.trim() || '',
-    )
-    expect(groupLabels).toEqual(['Data & Payroll'])
-    expect(labels).toEqual(['Payroll Templates', 'Payroll Cycles'])
-    expect(container!.textContent).toContain('2/22 items')
+    expect(labels).toEqual(['Data & Payroll · Payroll Cycles', 'Data & Payroll · Payroll Templates'])
+    expect(container!.querySelector('[data-admin-anchor-recent]')).toBeNull()
   })
 
   it('restores the hashed admin anchor on first load', async () => {
@@ -378,46 +392,17 @@ describe('Attendance admin anchor navigation', () => {
     expect(window.location.hash).toBe('#attendance-admin-approval-flows')
   })
 
-  it('supports expand all and collapse all controls', async () => {
+  it('does not render the removed left-rail clutter controls', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
-    const controls = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-nav-actions .attendance__btn'))
-    const expandAll = controls.find(button => button.textContent?.includes('Expand all'))
-    const collapseAll = controls.find(button => button.textContent?.includes('Collapse all'))
-    expect(expandAll).toBeTruthy()
-    expect(collapseAll).toBeTruthy()
-
-    collapseAll!.click()
-    await flushUi(2)
-    expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeNull()
-    expect(container!.querySelector('[data-admin-anchor-group="policies"] [aria-expanded="false"]')).toBeTruthy()
-
-    expandAll!.click()
-    await flushUi(2)
-    expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeTruthy()
-    expect(container!.querySelector('[data-admin-anchor-group="policies"] [aria-expanded="true"]')).toBeTruthy()
-  })
-
-  it('copies the current admin section deep link', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
-    app.mount(container!)
-    await flushUi()
-
-    const target = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-import-batches"]')
-    target!.click()
-    await flushUi(2)
-
-    const copyButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-nav-actions .attendance__btn'))
-      .find(button => button.textContent?.includes('Copy current link'))
-    expect(copyButton).toBeTruthy()
-    copyButton!.click()
-    await flushUi(2)
-
-    expect(clipboardWriteTextSpy).toHaveBeenCalledTimes(1)
-    expect(clipboardWriteTextSpy.mock.calls[0]?.[0]).toContain('#attendance-admin-import-batches')
-    expect(container!.textContent).toContain('Current admin section link copied.')
+    expect(container!.querySelector('#attendance-admin-nav-filter')).toBeNull()
+    expect(container!.querySelector('.attendance__admin-nav-actions')).toBeNull()
+    expect(container!.textContent).not.toContain('Quick find')
+    expect(container!.textContent).not.toContain('Expand all')
+    expect(container!.textContent).not.toContain('Collapse all')
+    expect(container!.textContent).not.toContain('Copy current link')
   })
 
   it('tracks recent admin sections as operators move across the console', async () => {
@@ -435,7 +420,7 @@ describe('Attendance admin anchor navigation', () => {
     approvalFlows!.click()
     await flushUi(2)
 
-    const labels = Array.from(container!.querySelectorAll('[data-admin-anchor-recent]')).map(
+    const labels = Array.from(container!.querySelectorAll('[data-admin-shortcut]')).map(
       item => item.textContent?.trim() || '',
     )
     expect(labels).toEqual(['Policies · Approval Flows', 'Data & Payroll · Import batches'])
@@ -461,7 +446,7 @@ describe('Attendance admin anchor navigation', () => {
     app.mount(container!)
     await flushUi()
 
-    const labels = Array.from(container!.querySelectorAll('[data-admin-anchor-recent]')).map(
+    const labels = Array.from(container!.querySelectorAll('[data-admin-shortcut]')).map(
       item => item.textContent?.trim() || '',
     )
     expect(labels).toEqual(['Policies · Approval Flows', 'Data & Payroll · Import batches'])
@@ -479,12 +464,12 @@ describe('Attendance admin anchor navigation', () => {
     approvalFlows!.click()
     await flushUi(2)
 
-    const clearButton = container!.querySelector<HTMLButtonElement>('[data-admin-recents-clear="true"]')
+    const clearButton = container!.querySelector<HTMLButtonElement>('[data-admin-shortcuts-clear="true"]')
     expect(clearButton).toBeTruthy()
     clearButton!.click()
     await flushUi(2)
 
-    expect(container!.querySelector('[data-admin-anchor-recent]')).toBeNull()
+    expect(container!.querySelector('[data-admin-shortcut]')).toBeNull()
     expect(window.localStorage.getItem(scopedAdminNavStorageKey(ADMIN_NAV_RECENTS_STORAGE_KEY))).toBe('[]')
     expect(container!.textContent).toContain('Recent admin shortcuts cleared.')
   })
@@ -529,16 +514,13 @@ describe('Attendance admin anchor navigation', () => {
     vm.orgId = 'org-b'
     await flushUi(3)
 
-    const labels = Array.from(container!.querySelectorAll('[data-admin-anchor-recent]')).map(
+    const labels = Array.from(container!.querySelectorAll('[data-admin-shortcut]')).map(
       item => item.textContent?.trim() || '',
     )
     expect(labels).toEqual(['Data & Payroll · Payroll Cycles', 'Data & Payroll · Import batches'])
-    expect(container!.querySelector('.attendance__admin-nav-scope-badge')?.textContent?.trim()).toBe('org-b')
-    expect(container!.textContent).toContain('Switched to navigation memory for org-b.')
     expect(scrollIntoViewSpy).toHaveBeenCalled()
     const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
     expect(scrolledTargets.some(target => target.id === 'attendance-admin-payroll-cycles')).toBe(true)
-    expect(container!.querySelector('.attendance__admin-nav-current')?.textContent).toContain('Data & Payroll · Payroll Cycles')
   })
 
   it('collapses the grouped rail behind a toggle on narrow screens', async () => {

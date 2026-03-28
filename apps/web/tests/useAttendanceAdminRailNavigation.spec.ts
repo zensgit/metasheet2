@@ -52,7 +52,7 @@ describe('useAttendanceAdminRailNavigation', () => {
     container = null
   })
 
-  function mountHost() {
+  function mountHost(options?: { focused?: boolean }) {
     const items: AdminSectionNavItem[] = [
       { id: 'attendance-admin-settings', label: 'Settings' },
       { id: 'attendance-admin-approval-flows', label: 'Approval Flows' },
@@ -61,6 +61,7 @@ describe('useAttendanceAdminRailNavigation', () => {
       setup() {
         const showAdmin = ref(true)
         const adminForbidden = ref(false)
+        const adminFocusCurrentSectionOnly = ref(options?.focused ?? false)
         const adminNavStorageScope = ref('default')
         const adminActiveSectionId = ref(items[0].id)
         const isCompactAdminNav = ref(false)
@@ -68,6 +69,7 @@ describe('useAttendanceAdminRailNavigation', () => {
         const { adminSectionBinding, scrollToAdminSection } = useAttendanceAdminRailNavigation({
           showAdmin,
           adminForbidden,
+          adminFocusCurrentSectionOnly,
           adminNavStorageScope,
           adminActiveSectionId,
           adminSectionNavItems: ref(items),
@@ -109,6 +111,26 @@ describe('useAttendanceAdminRailNavigation', () => {
     const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
     expect(scrolledTargets.some(target => target.id === 'attendance-admin-approval-flows')).toBe(true)
     expect(scrolledTargets.some(target => target.dataset.adminAnchor === 'attendance-admin-approval-flows')).toBe(true)
+  })
+
+  it('scrolls only the content pane in focused mode when selecting a section', async () => {
+    const vm = mountHost({ focused: true })
+    await flushUi()
+
+    const content = document.createElement('div')
+    content.dataset.adminContent = 'true'
+    const target = document.getElementById('attendance-admin-approval-flows')
+    expect(target).toBeTruthy()
+    content.appendChild(target!)
+    container!.appendChild(content)
+    scrollIntoViewSpy.mockClear()
+
+    vm.scrollToAdminSection('attendance-admin-approval-flows')
+    await flushUi()
+
+    const scrolledTargets = scrollIntoViewSpy.mock.instances as HTMLElement[]
+    expect(scrolledTargets.some(element => element.dataset.adminContent === 'true')).toBe(true)
+    expect(scrolledTargets.some(element => element.id === 'attendance-admin-approval-flows')).toBe(false)
   })
 
   it('closes compact nav after selecting a section', async () => {

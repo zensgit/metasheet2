@@ -461,9 +461,6 @@
           <div class="attendance__admin-header">
             <h3>{{ tr('Admin Console', '管理控制台') }}</h3>
             <div class="attendance__admin-actions">
-              <button class="attendance__btn" type="button" @click="adminFocusedMode = !adminFocusedMode">
-                {{ adminFocusedMode ? tr('Show all sections', '显示全部区块') : tr('Focus current section', '仅显示当前区块') }}
-              </button>
               <button class="attendance__btn" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
                 {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
               </button>
@@ -490,33 +487,82 @@
             </button>
           </div>
           <div v-if="adminForbidden" class="attendance__empty">{{ tr('Admin permissions required to manage attendance settings.', '需要管理员权限才能管理考勤设置。') }}</div>
-          <div v-else class="attendance__admin-shell">
+          <template v-else>
+            <div v-if="visibleRecentAdminSectionNavItems.length > 0" class="attendance__admin-shortcuts">
+              <div class="attendance__admin-shortcuts-header">
+                <div class="attendance__admin-shortcuts-title">
+                  <strong>{{ tr('Recent', '最近访问') }}</strong>
+                  <span>{{ tr('Jump back without searching the left rail.', '不用再回左侧查找，直接跳转。') }}</span>
+                </div>
+                <button
+                  class="attendance__btn attendance__btn--inline"
+                  type="button"
+                  data-admin-shortcuts-clear="true"
+                  @click="clearRecentAdminSections"
+                >
+                  {{ tr('Clear', '清空') }}
+                </button>
+              </div>
+              <div class="attendance__admin-shortcuts-items">
+                <button
+                  v-for="item in visibleRecentAdminSectionNavItems"
+                  :key="`shortcut-${item.id}`"
+                  class="attendance__admin-shortcut"
+                  :class="{ 'attendance__admin-shortcut--active': adminActiveSectionId === item.id }"
+                  :data-admin-shortcut="item.id"
+                  type="button"
+                  @click="selectAdminSection(item.id)"
+                >
+                  {{ item.contextLabel }}
+                </button>
+              </div>
+            </div>
+            <div class="attendance__admin-shell">
             <AttendanceAdminRail
               :tr="tr"
-              :admin-section-nav-count-label="adminSectionNavCountLabel"
-              :admin-nav-storage-scope="adminNavStorageScope"
-              :admin-nav-default-storage-scope="adminNavDefaultStorageScope"
-              :admin-nav-scope-feedback="adminNavScopeFeedback"
               :active-admin-section-context-label="activeAdminSectionContextLabel"
               :is-compact-admin-nav="isCompactAdminNav"
               :admin-compact-nav-open="adminCompactNavOpen"
-              :admin-section-filter="adminSectionFilter"
-              :admin-section-filter-active="adminSectionFilterActive"
-              :all-admin-section-groups-expanded="allAdminSectionGroupsExpanded"
-              :all-admin-section-groups-collapsed="allAdminSectionGroupsCollapsed"
-              :visible-recent-admin-section-nav-items="visibleRecentAdminSectionNavItems"
               :visible-admin-section-nav-groups="visibleAdminSectionNavGroups"
               :admin-active-section-id="adminActiveSectionId"
               @update:compact-nav-open="adminCompactNavOpen = $event"
-              @update:section-filter="adminSectionFilter = $event"
-              @expand-all="expandAllAdminSectionGroups"
-              @collapse-all="collapseAllAdminSectionGroups"
-              @copy-current-link="copyCurrentAdminSectionLink"
-              @clear-recents="clearRecentAdminSections"
               @toggle-group="toggleAdminSectionGroup"
               @select-section="selectAdminSection"
             />
-            <div class="attendance__admin-content" :class="{ 'attendance__admin-content--focused': adminFocusedMode }">
+            <div
+              class="attendance__admin-content"
+              :class="{ 'attendance__admin-content--focused': adminFocusedMode }"
+              data-admin-content="true"
+            >
+            <div
+              class="attendance__admin-current-section"
+              :class="{ 'attendance__admin-current-section--expanded': !adminFocusedMode }"
+              data-admin-current-section="true"
+            >
+              <div class="attendance__admin-current-section-copy">
+                <span class="attendance__admin-current-section-eyebrow">
+                  {{ adminFocusedMode ? tr('Current section', '当前区块') : tr('Browse sections', '浏览区块') }}
+                </span>
+                <strong>{{ activeAdminSectionContextLabel }}</strong>
+                <span>
+                  {{
+                    adminFocusedMode
+                      ? tr('Choose another item on the left and the right pane will return here immediately.', '点击左侧其他区块后，右侧会立即回到这里。')
+                      : tr('All sections are visible. Focus mode brings you back to the active block.', '当前显示全部区块；切回聚焦模式可回到当前区块。')
+                  }}
+                </span>
+              </div>
+              <div class="attendance__admin-current-section-actions">
+                <button
+                  class="attendance__btn attendance__btn--inline"
+                  type="button"
+                  data-admin-focus-toggle="true"
+                  @click="adminFocusedMode = !adminFocusedMode"
+                >
+                  {{ adminFocusedMode ? tr('Show all sections', '显示全部区块') : tr('Focus current section', '仅显示当前区块') }}
+                </button>
+              </div>
+            </div>
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
               class="attendance__admin-section"
@@ -3825,7 +3871,8 @@
               />
             </div>
             </div>
-          </div>
+            </div>
+          </template>
         </div>
       </section>
     </template>
@@ -4922,6 +4969,7 @@ const {
 } = useAttendanceAdminRailNavigation({
   showAdmin,
   adminForbidden,
+  adminFocusCurrentSectionOnly: adminFocusedMode,
   adminNavStorageScope,
   adminActiveSectionId,
   adminSectionNavItems,
@@ -12101,8 +12149,129 @@ const holidaySectionBindings = {
   align-items: start;
 }
 
+.attendance__admin-shortcuts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid #dbeafe;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.attendance__admin-shortcuts-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.attendance__admin-shortcuts-title {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.attendance__admin-shortcuts-title strong {
+  color: #1f2937;
+  font-size: 13px;
+}
+
+.attendance__admin-shortcuts-title span {
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.attendance__admin-shortcuts-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attendance__admin-shortcut {
+  padding: 8px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.attendance__admin-shortcut:hover {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.attendance__admin-shortcut--active {
+  border-color: #93c5fd;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
 .attendance__admin-content {
   min-width: 0;
+}
+
+.attendance__admin-current-section {
+  position: sticky;
+  top: 12px;
+  z-index: 6;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid #bfdbfe;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(10px);
+}
+
+.attendance__admin-current-section--expanded {
+  border-color: #dbeafe;
+}
+
+.attendance__admin-current-section-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.attendance__admin-current-section-copy strong {
+  color: #0f172a;
+  font-size: 15px;
+}
+
+.attendance__admin-current-section-copy span:last-child {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.attendance__admin-current-section-eyebrow {
+  color: #2563eb;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.attendance__admin-current-section-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .attendance__admin-content--focused .attendance__admin-section + .attendance__admin-section {
@@ -12532,6 +12701,29 @@ const holidaySectionBindings = {
 
   .attendance__admin-shell {
     grid-template-columns: 1fr;
+  }
+
+  .attendance__admin-shortcuts-header {
+    flex-direction: column;
+  }
+
+  .attendance__admin-current-section {
+    top: 8px;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .attendance__admin-current-section-actions {
+    width: 100%;
+  }
+
+  .attendance__admin-shortcuts-items {
+    flex-direction: column;
+  }
+
+  .attendance__admin-shortcut {
+    width: 100%;
+    text-align: left;
   }
 
   .attendance__table--records {

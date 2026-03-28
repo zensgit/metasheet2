@@ -312,7 +312,7 @@ describe('Attendance admin regressions', () => {
     app.mount(container!)
     await flushUi()
 
-    const toggle = container!.querySelector<HTMLButtonElement>('.attendance__admin-actions .attendance__btn')
+    const toggle = container!.querySelector<HTMLButtonElement>('[data-admin-focus-toggle="true"]')
     expect(toggle?.textContent).toContain('Show all sections')
 
     toggle!.click()
@@ -334,7 +334,7 @@ describe('Attendance admin regressions', () => {
     expect(toggle?.textContent).toContain('Show all sections')
     expect(window.getComputedStyle(settings!).display).toBe('none')
     expect(window.getComputedStyle(groupMembers!).display).not.toBe('none')
-    expect(container!.querySelector('.attendance__admin-nav-current')?.textContent).toContain('Organization · Group members')
+    expect(container!.querySelector('[data-admin-shortcut="attendance-admin-group-members"]')?.textContent).toContain('Organization · Group members')
     expect(container!.textContent).toContain('User picker')
     expect(container!.textContent).toContain('Append selected user')
   })
@@ -360,7 +360,7 @@ describe('Attendance admin regressions', () => {
     expect(visibleEditButton).toBeTruthy()
     expect(window.getComputedStyle(leaveTypeSection!).display).toBe('none')
 
-    const toggle = container!.querySelector<HTMLButtonElement>('.attendance__admin-header .attendance__admin-actions .attendance__btn')
+    const toggle = container!.querySelector<HTMLButtonElement>('[data-admin-focus-toggle="true"]')
     expect(toggle?.textContent).toContain('Show all sections')
     toggle!.click()
     await flushUi(2)

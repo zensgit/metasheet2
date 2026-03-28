@@ -86,13 +86,16 @@ describe('AttendanceAdminRail', () => {
     mountRail()
     await flushUi()
 
-    expect(container!.querySelector('.attendance__admin-nav-current')?.textContent).toContain('Workspace · Settings')
+    expect(container!.querySelector('.attendance__admin-nav-header')?.textContent).toContain('Jump to')
     expect(container!.querySelector('.attendance__admin-nav-group-title')?.textContent).toContain('Workspace')
-    expect(container!.querySelector('[data-admin-anchor-recent="attendance-admin-approval-flows"]')?.textContent).toContain('Policies · Approval Flows')
-    expect(container!.querySelector('[data-admin-recents-clear="true"]')).toBeTruthy()
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-settings"]')?.textContent).toContain('Settings')
+    expect(container!.querySelector('.attendance__admin-nav-current')).toBeNull()
+    expect(container!.querySelector('#attendance-admin-nav-filter')).toBeNull()
+    expect(container!.querySelector('.attendance__admin-nav-actions')).toBeNull()
+    expect(container!.querySelector('[data-admin-anchor-recent]')).toBeNull()
   })
 
-  it('emits interaction events for the extracted rail surface', async () => {
+  it('emits interaction events for compact toggle, grouped sections, and item selection', async () => {
     const handlers = mountRail({ isCompactAdminNav: true, adminCompactNavOpen: true })
     await flushUi()
 
@@ -102,27 +105,11 @@ describe('AttendanceAdminRail', () => {
     await flushUi()
     expect(handlers['onUpdate:compactNavOpen']).toHaveBeenCalledWith(false)
 
-    const filter = container!.querySelector<HTMLInputElement>('#attendance-admin-nav-filter')!
-    filter.value = 'pay'
-    filter.dispatchEvent(new Event('input', { bubbles: true }))
-    await flushUi()
-    expect(handlers['onUpdate:sectionFilter']).toHaveBeenCalledWith('pay')
-
     container!.querySelector<HTMLButtonElement>('.attendance__admin-nav-group-header')!.click()
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-settings"]')!.click()
-    container!.querySelector<HTMLButtonElement>('[data-admin-anchor-recent="attendance-admin-approval-flows"]')!.click()
-    container!.querySelector<HTMLButtonElement>('[data-admin-recents-clear="true"]')!.click()
-    container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-nav-actions .attendance__btn')[0]!.click()
-    container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-nav-actions .attendance__btn')[1]!.click()
-    container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-nav-actions .attendance__btn')[2]!.click()
     await flushUi()
 
     expect(handlers.onToggleGroup).toHaveBeenCalledWith('workspace')
     expect(handlers.onSelectSection).toHaveBeenCalledWith('attendance-admin-settings')
-    expect(handlers.onSelectSection).toHaveBeenCalledWith('attendance-admin-approval-flows')
-    expect(handlers.onClearRecents).toHaveBeenCalled()
-    expect(handlers.onExpandAll).toHaveBeenCalled()
-    expect(handlers.onCollapseAll).toHaveBeenCalled()
-    expect(handlers.onCopyCurrentLink).toHaveBeenCalled()
   })
 })
