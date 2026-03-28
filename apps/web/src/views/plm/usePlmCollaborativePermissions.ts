@@ -62,7 +62,7 @@ export function canDuplicatePlmCollaborativeEntry(entry: CollaborativeEntry) {
 
 export function canSetDefaultPlmCollaborativeEntry(entry: CollaborativeEntry) {
   if (!entry) return false
-  if (entry.isArchived) {
+  if (entry.isArchived || entry.isDefault) {
     return false
   }
   if (typeof entry.permissions?.canSetDefault === 'boolean') {
@@ -123,6 +123,7 @@ export function usePlmCollaborativePermissions<TEntry extends CollaborativeEntry
   const canArchive = computed(() => {
     const entry = options.selectedEntry.value
     if (!entry) return false
+    if (entry.isArchived) return false
     if (typeof entry.permissions?.canArchive === 'boolean') {
       return entry.permissions.canArchive
     }
@@ -131,6 +132,7 @@ export function usePlmCollaborativePermissions<TEntry extends CollaborativeEntry
   const canRestore = computed(() => {
     const entry = options.selectedEntry.value
     if (!entry) return false
+    if (!entry.isArchived) return false
     if (typeof entry.permissions?.canRestore === 'boolean') {
       return entry.permissions.canRestore
     }
@@ -167,7 +169,7 @@ export function usePlmCollaborativePermissions<TEntry extends CollaborativeEntry
   const canClearDefault = computed(() => {
     const entry = options.selectedEntry.value
     if (!entry) return false
-    if (entry.isArchived) return false
+    if (entry.isArchived || !entry.isDefault) return false
     if (typeof entry.permissions?.canClearDefault === 'boolean') {
       return entry.permissions.canClearDefault
     }

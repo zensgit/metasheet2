@@ -243,4 +243,52 @@ describe('usePlmCollaborativePermissions', () => {
 
     expect(model.canClearDefault.value).toBe(false)
   })
+
+  it('hard-blocks lifecycle and default toggles when current state disagrees with explicit permissions', () => {
+    const selectedEntry = ref({
+      canManage: true,
+      isArchived: false,
+      isDefault: false,
+      ownerUserId: 'owner-a',
+      permissions: {
+        canArchive: true,
+        canRestore: true,
+        canSetDefault: true,
+        canClearDefault: true,
+      },
+    })
+
+    const model = usePlmCollaborativePermissions({
+      selectedEntry: computed(() => selectedEntry.value),
+      nameRef: ref('条目'),
+      ownerUserIdRef: ref('owner-b'),
+    })
+
+    expect(model.canArchive.value).toBe(true)
+    expect(model.canRestore.value).toBe(false)
+    expect(model.canSetDefault.value).toBe(true)
+    expect(model.canClearDefault.value).toBe(false)
+    expect(canSetDefaultPlmCollaborativeEntry(selectedEntry.value)).toBe(true)
+
+    selectedEntry.value = {
+      ...selectedEntry.value,
+      isDefault: true,
+    }
+
+    expect(model.canSetDefault.value).toBe(false)
+    expect(model.canClearDefault.value).toBe(true)
+    expect(canSetDefaultPlmCollaborativeEntry(selectedEntry.value)).toBe(false)
+
+    selectedEntry.value = {
+      ...selectedEntry.value,
+      isArchived: true,
+      isDefault: false,
+    }
+
+    expect(model.canArchive.value).toBe(false)
+    expect(model.canRestore.value).toBe(true)
+    expect(model.canSetDefault.value).toBe(false)
+    expect(model.canClearDefault.value).toBe(false)
+    expect(canSetDefaultPlmCollaborativeEntry(selectedEntry.value)).toBe(false)
+  })
 })
