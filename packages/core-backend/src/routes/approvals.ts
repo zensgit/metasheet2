@@ -56,6 +56,16 @@ function approvalVersionConflictResponse(currentVersion: number) {
   }
 }
 
+function approvalErrorResponse(code: string, message: string) {
+  return {
+    ok: false,
+    error: {
+      code,
+      message,
+    },
+  }
+}
+
 export function approvalsRouter(): Router {
   const r = Router()
 
@@ -63,12 +73,16 @@ export function approvalsRouter(): Router {
   r.get('/api/approvals/pending', authenticate, async (req: Request, res: Response) => {
     try {
       if (!pool) {
-        return res.status(503).json({ error: 'Database not available' })
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
       }
 
       const userId = req.user?.sub || req.user?.userId
       if (!userId) {
-        return res.status(401).json({ error: 'User ID not found in token' })
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
       }
 
       const limit = parseInt(req.query.limit as string) || 50
@@ -109,7 +123,9 @@ export function approvalsRouter(): Router {
   r.post('/api/approvals/:id/approve', authenticate, async (req: Request, res: Response) => {
     try {
       if (!pool) {
-        return res.status(503).json({ error: 'Database not available' })
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
       }
 
       const { id } = req.params
@@ -121,7 +137,9 @@ export function approvalsRouter(): Router {
       const userName = req.user?.name || req.user?.email || userId
 
       if (!userId) {
-        return res.status(401).json({ error: 'User ID not found in token' })
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
       }
 
       if (requestedVersion === null) {
@@ -147,7 +165,9 @@ export function approvalsRouter(): Router {
 
         if (instanceResult.rows.length === 0) {
           await client.query('ROLLBACK')
-          return res.status(404).json({ error: 'Approval instance not found' })
+          return res.status(404).json(
+            approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),
+          )
         }
 
         const instance = instanceResult.rows[0]
@@ -158,7 +178,12 @@ export function approvalsRouter(): Router {
 
         if (instance.status !== 'pending') {
           await client.query('ROLLBACK')
-          return res.status(400).json({ error: `Cannot approve: current status is ${instance.status}` })
+          return res.status(400).json(
+            approvalErrorResponse(
+              'APPROVAL_STATUS_INVALID',
+              `Cannot approve: current status is ${instance.status}`,
+            ),
+          )
         }
 
         const newVersion = instance.version + 1
@@ -217,7 +242,9 @@ export function approvalsRouter(): Router {
         return res.json({ success: true, id: req.params.id, degraded: true })
       }
       logger.error('Failed to approve request', error instanceof Error ? error : undefined)
-      res.status(500).json({ error: 'Failed to approve request' })
+      res.status(500).json(
+        approvalErrorResponse('APPROVAL_APPROVE_FAILED', 'Failed to approve request'),
+      )
     }
   })
 
@@ -225,7 +252,9 @@ export function approvalsRouter(): Router {
   r.post('/api/approvals/:id/reject', authenticate, async (req: Request, res: Response) => {
     try {
       if (!pool) {
-        return res.status(503).json({ error: 'Database not available' })
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
       }
 
       const { id } = req.params
@@ -238,7 +267,9 @@ export function approvalsRouter(): Router {
       const userName = req.user?.name || req.user?.email || userId
 
       if (!userId) {
-        return res.status(401).json({ error: 'User ID not found in token' })
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
       }
 
       if (requestedVersion === null) {
@@ -252,7 +283,9 @@ export function approvalsRouter(): Router {
       }
 
       if (!reason) {
-        return res.status(400).json({ error: 'Rejection reason is required' })
+        return res.status(400).json(
+          approvalErrorResponse('APPROVAL_REJECTION_REASON_REQUIRED', 'Rejection reason is required'),
+        )
       }
 
       // Start transaction
@@ -268,7 +301,9 @@ export function approvalsRouter(): Router {
 
         if (instanceResult.rows.length === 0) {
           await client.query('ROLLBACK')
-          return res.status(404).json({ error: 'Approval instance not found' })
+          return res.status(404).json(
+            approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),
+          )
         }
 
         const instance = instanceResult.rows[0]
@@ -279,7 +314,12 @@ export function approvalsRouter(): Router {
 
         if (instance.status !== 'pending') {
           await client.query('ROLLBACK')
-          return res.status(400).json({ error: `Cannot reject: current status is ${instance.status}` })
+          return res.status(400).json(
+            approvalErrorResponse(
+              'APPROVAL_STATUS_INVALID',
+              `Cannot reject: current status is ${instance.status}`,
+            ),
+          )
         }
 
         const newVersion = instance.version + 1
@@ -339,7 +379,9 @@ export function approvalsRouter(): Router {
         return res.json({ success: true, id: req.params.id, degraded: true })
       }
       logger.error('Failed to reject request', error instanceof Error ? error : undefined)
-      res.status(500).json({ error: 'Failed to reject request' })
+      res.status(500).json(
+        approvalErrorResponse('APPROVAL_REJECT_FAILED', 'Failed to reject request'),
+      )
     }
   })
 

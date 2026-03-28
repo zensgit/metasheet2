@@ -54,6 +54,7 @@ paths:
                       version: { type: integer, example: 1 }
                       prevVersion: { type: integer, example: 0 }
         '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: Version conflict
           content:
@@ -69,6 +70,7 @@ paths:
                       currentVersion: 1
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/approvals/{id}/reject:
     post:
       summary: Reject instance with optimistic locking
@@ -113,6 +115,7 @@ paths:
                       version: { type: integer, example: 2 }
                       prevVersion: { type: integer, example: 1 }
         '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: Version conflict
           content:
@@ -128,6 +131,7 @@ paths:
                       currentVersion: 2
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /api/approvals/{id}/return:
     post:
       summary: Return instance with optimistic locking

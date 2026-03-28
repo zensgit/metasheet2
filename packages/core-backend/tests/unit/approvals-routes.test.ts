@@ -74,6 +74,26 @@ describe('approvals routes', () => {
     expect(pgState.pool.connect).not.toHaveBeenCalled()
   })
 
+  it('returns a structured 401 when the token omits the approval actor id', async () => {
+    authState.user = {
+      tenantId: 'tenant-a',
+      name: 'Owner One',
+    }
+
+    const response = await request(app)
+      .post('/api/approvals/apr-1/approve')
+      .send({ version: 0 })
+
+    expect(response.status).toBe(401)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'APPROVAL_USER_REQUIRED',
+        message: 'User ID not found in token',
+      },
+    })
+  })
+
   it('returns a 409 conflict for stale approve versions', async () => {
     pgState.client.query
       .mockResolvedValueOnce({})
@@ -104,6 +124,58 @@ describe('approvals routes', () => {
       },
     })
     expect(pgState.client.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns a structured 404 when the approval instance does not exist', async () => {
+    pgState.client.query
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        rows: [],
+      })
+      .mockResolvedValueOnce({})
+
+    const response = await request(app)
+      .post('/api/approvals/apr-missing/approve')
+      .send({ version: 0 })
+
+    expect(response.status).toBe(404)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'APPROVAL_NOT_FOUND',
+        message: 'Approval instance not found',
+      },
+    })
+  })
+
+  it('returns a structured validation error when approve hits a non-pending instance', async () => {
+    pgState.client.query
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'apr-1',
+            status: 'approved',
+            version: 1,
+            created_at: new Date('2026-03-26T10:00:00.000Z'),
+            updated_at: new Date('2026-03-26T10:05:00.000Z'),
+          },
+        ],
+      })
+      .mockResolvedValueOnce({})
+
+    const response = await request(app)
+      .post('/api/approvals/apr-1/approve')
+      .send({ version: 1 })
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'APPROVAL_STATUS_INVALID',
+        message: 'Cannot approve: current status is approved',
+      },
+    })
   })
 
   it('returns the optimistic-lock success envelope for approve', async () => {
@@ -226,5 +298,20 @@ describe('approvals routes', () => {
         null,
       ],
     )
+  })
+
+  it('returns a structured validation error when reject omits the reason', async () => {
+    const response = await request(app)
+      .post('/api/approvals/apr-1/reject')
+      .send({ version: 4, comment: '   ' })
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'APPROVAL_REJECTION_REASON_REQUIRED',
+        message: 'Rejection reason is required',
+      },
+    })
   })
 })
