@@ -3,6 +3,7 @@ type PlmHydratedTeamViewOwnerTakeoverOptions = {
   localSelectorId: string
   localNameDraft: string
   localOwnerUserIdDraft: string
+  localSelectionIds: string[]
 }
 
 type PlmHydratedRemovedTeamViewOwnerOptions = {
@@ -10,6 +11,7 @@ type PlmHydratedRemovedTeamViewOwnerOptions = {
   localSelectorId: string
   localNameDraft: string
   localOwnerUserIdDraft: string
+  localSelectionIds: string[]
 }
 
 export function resolvePlmHydratedTeamViewOwnerTakeover(
@@ -17,13 +19,31 @@ export function resolvePlmHydratedTeamViewOwnerTakeover(
 ) {
   const routeOwnerId = options.routeOwnerId.trim()
   const localSelectorId = options.localSelectorId.trim()
-  const shouldClearLocalSelector = Boolean(routeOwnerId && localSelectorId && routeOwnerId !== localSelectorId)
+  const localSelectionIds = Array.from(new Set(
+    options.localSelectionIds
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  ))
+  const nextSelectionIds = !routeOwnerId
+    ? localSelectionIds
+    : localSelectorId && localSelectorId !== routeOwnerId
+      ? []
+      : localSelectionIds.filter((entry) => entry === routeOwnerId)
+  const shouldClearDrafts = Boolean(routeOwnerId && localSelectorId && routeOwnerId !== localSelectorId)
+  const shouldClearLocalSelector = Boolean(
+    routeOwnerId
+    && (
+      (localSelectorId && localSelectorId !== routeOwnerId)
+      || nextSelectionIds.length !== localSelectionIds.length
+    ),
+  )
 
   return {
     shouldClearLocalSelector,
-    nextSelectorId: shouldClearLocalSelector ? '' : options.localSelectorId,
-    nextNameDraft: shouldClearLocalSelector ? '' : options.localNameDraft,
-    nextOwnerUserIdDraft: shouldClearLocalSelector ? '' : options.localOwnerUserIdDraft,
+    nextSelectorId: shouldClearDrafts ? '' : options.localSelectorId,
+    nextNameDraft: shouldClearDrafts ? '' : options.localNameDraft,
+    nextOwnerUserIdDraft: shouldClearDrafts ? '' : options.localOwnerUserIdDraft,
+    nextSelectionIds,
   }
 }
 
@@ -32,14 +52,26 @@ export function resolvePlmHydratedRemovedTeamViewOwner(
 ) {
   const removedRouteOwnerId = options.removedRouteOwnerId.trim()
   const localSelectorId = options.localSelectorId.trim()
-  const shouldClearLocalSelector = Boolean(
+  const localSelectionIds = Array.from(new Set(
+    options.localSelectionIds
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  ))
+  const shouldClearDrafts = Boolean(
     removedRouteOwnerId && (!localSelectorId || localSelectorId === removedRouteOwnerId),
+  )
+  const nextSelectionIds = removedRouteOwnerId
+    ? localSelectionIds.filter((entry) => entry !== removedRouteOwnerId)
+    : localSelectionIds
+  const shouldClearLocalSelector = Boolean(
+    shouldClearDrafts || nextSelectionIds.length !== localSelectionIds.length,
   )
 
   return {
     shouldClearLocalSelector,
-    nextSelectorId: shouldClearLocalSelector ? '' : options.localSelectorId,
-    nextNameDraft: shouldClearLocalSelector ? '' : options.localNameDraft,
-    nextOwnerUserIdDraft: shouldClearLocalSelector ? '' : options.localOwnerUserIdDraft,
+    nextSelectorId: shouldClearDrafts ? '' : options.localSelectorId,
+    nextNameDraft: shouldClearDrafts ? '' : options.localNameDraft,
+    nextOwnerUserIdDraft: shouldClearDrafts ? '' : options.localOwnerUserIdDraft,
+    nextSelectionIds,
   }
 }

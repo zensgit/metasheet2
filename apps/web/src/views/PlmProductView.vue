@@ -5586,19 +5586,20 @@ function applyHydratedTeamViewOwnerTakeover(options: {
   teamViewKey: { value: string }
   teamViewName: { value: string }
   teamViewOwnerUserId: { value: string }
-  clearTeamViewSelection: () => void
+  teamViewSelection: { value: string[] }
 }) {
   const takeover = resolvePlmHydratedTeamViewOwnerTakeover({
     routeOwnerId: options.routeOwnerId,
     localSelectorId: options.teamViewKey.value,
     localNameDraft: options.teamViewName.value,
     localOwnerUserIdDraft: options.teamViewOwnerUserId.value,
+    localSelectionIds: options.teamViewSelection.value,
   })
   if (!takeover.shouldClearLocalSelector) return
   options.teamViewKey.value = takeover.nextSelectorId
   options.teamViewName.value = takeover.nextNameDraft
   options.teamViewOwnerUserId.value = takeover.nextOwnerUserIdDraft
-  options.clearTeamViewSelection()
+  options.teamViewSelection.value = takeover.nextSelectionIds
 }
 
 function applyHydratedRemovedTeamViewOwner(options: {
@@ -5607,20 +5608,21 @@ function applyHydratedRemovedTeamViewOwner(options: {
   teamViewKey: { value: string }
   teamViewName: { value: string }
   teamViewOwnerUserId: { value: string }
-  clearTeamViewSelection: () => void
+  teamViewSelection: { value: string[] }
 }) {
   const takeover = resolvePlmHydratedRemovedTeamViewOwner({
     removedRouteOwnerId: options.removedRouteOwnerId,
     localSelectorId: options.teamViewKey.value,
     localNameDraft: options.teamViewName.value,
     localOwnerUserIdDraft: options.teamViewOwnerUserId.value,
+    localSelectionIds: options.teamViewSelection.value,
   })
   options.teamViewQuery.value = ''
   if (!takeover.shouldClearLocalSelector) return
   options.teamViewKey.value = takeover.nextSelectorId
   options.teamViewName.value = takeover.nextNameDraft
   options.teamViewOwnerUserId.value = takeover.nextOwnerUserIdDraft
-  options.clearTeamViewSelection()
+  options.teamViewSelection.value = takeover.nextSelectionIds
 }
 
 function applyHydratedTeamPresetOwnerTakeover(options: {
@@ -5767,7 +5769,7 @@ async function applyQueryState() {
         teamViewKey: workbenchTeamViewKey,
         teamViewName: workbenchTeamViewName,
         teamViewOwnerUserId: workbenchTeamViewOwnerUserId,
-        clearTeamViewSelection: clearWorkbenchTeamViewSelection,
+        teamViewSelection: workbenchTeamViewSelection,
       })
       workbenchTeamViewQuery.value = workbenchTeamViewParam
     } else if (workbenchTeamViewQuery.value) {
@@ -5777,7 +5779,7 @@ async function applyQueryState() {
         teamViewKey: workbenchTeamViewKey,
         teamViewName: workbenchTeamViewName,
         teamViewOwnerUserId: workbenchTeamViewOwnerUserId,
-        clearTeamViewSelection: clearWorkbenchTeamViewSelection,
+        teamViewSelection: workbenchTeamViewSelection,
       })
     }
     const sceneFocus = readWorkbenchSceneFocus(route.query)
@@ -5789,7 +5791,7 @@ async function applyQueryState() {
         teamViewKey: documentTeamViewKey,
         teamViewName: documentTeamViewName,
         teamViewOwnerUserId: documentTeamViewOwnerUserId,
-        clearTeamViewSelection: clearDocumentTeamViewSelection,
+        teamViewSelection: documentTeamViewSelection,
       })
       documentTeamViewQuery.value = documentTeamViewParam
     } else if (documentTeamViewQuery.value) {
@@ -5799,7 +5801,7 @@ async function applyQueryState() {
         teamViewKey: documentTeamViewKey,
         teamViewName: documentTeamViewName,
         teamViewOwnerUserId: documentTeamViewOwnerUserId,
-        clearTeamViewSelection: clearDocumentTeamViewSelection,
+        teamViewSelection: documentTeamViewSelection,
       })
     }
     const cadTeamViewParam = readQueryParam('cadTeamView')
@@ -5809,7 +5811,7 @@ async function applyQueryState() {
         teamViewKey: cadTeamViewKey,
         teamViewName: cadTeamViewName,
         teamViewOwnerUserId: cadTeamViewOwnerUserId,
-        clearTeamViewSelection: clearCadTeamViewSelection,
+        teamViewSelection: cadTeamViewSelection,
       })
       cadTeamViewQuery.value = cadTeamViewParam
     } else if (cadTeamViewQuery.value) {
@@ -5819,7 +5821,7 @@ async function applyQueryState() {
         teamViewKey: cadTeamViewKey,
         teamViewName: cadTeamViewName,
         teamViewOwnerUserId: cadTeamViewOwnerUserId,
-        clearTeamViewSelection: clearCadTeamViewSelection,
+        teamViewSelection: cadTeamViewSelection,
       })
     }
     const approvalsTeamViewParam = readQueryParam('approvalsTeamView')
@@ -5829,7 +5831,7 @@ async function applyQueryState() {
         teamViewKey: approvalsTeamViewKey,
         teamViewName: approvalsTeamViewName,
         teamViewOwnerUserId: approvalsTeamViewOwnerUserId,
-        clearTeamViewSelection: clearApprovalsTeamViewSelection,
+        teamViewSelection: approvalsTeamViewSelection,
       })
       approvalsTeamViewQuery.value = approvalsTeamViewParam
     } else if (approvalsTeamViewQuery.value) {
@@ -5839,7 +5841,7 @@ async function applyQueryState() {
         teamViewKey: approvalsTeamViewKey,
         teamViewName: approvalsTeamViewName,
         teamViewOwnerUserId: approvalsTeamViewOwnerUserId,
-        clearTeamViewSelection: clearApprovalsTeamViewSelection,
+        teamViewSelection: approvalsTeamViewSelection,
       })
     }
     const documentRoleParam = readQueryParam('documentRole')

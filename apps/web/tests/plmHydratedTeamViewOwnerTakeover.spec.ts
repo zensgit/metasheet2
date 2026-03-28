@@ -11,11 +11,13 @@ describe('plmHydratedTeamViewOwnerTakeover', () => {
       localSelectorId: 'document-view-a',
       localNameDraft: 'Rename A',
       localOwnerUserIdDraft: 'user-a',
+      localSelectionIds: ['document-view-a'],
     })).toEqual({
       shouldClearLocalSelector: true,
       nextSelectorId: '',
       nextNameDraft: '',
       nextOwnerUserIdDraft: '',
+      nextSelectionIds: [],
     })
   })
 
@@ -25,11 +27,13 @@ describe('plmHydratedTeamViewOwnerTakeover', () => {
       localSelectorId: 'document-view-a',
       localNameDraft: 'Rename A',
       localOwnerUserIdDraft: 'user-a',
+      localSelectionIds: ['document-view-a'],
     })).toEqual({
       shouldClearLocalSelector: false,
       nextSelectorId: 'document-view-a',
       nextNameDraft: 'Rename A',
       nextOwnerUserIdDraft: 'user-a',
+      nextSelectionIds: ['document-view-a'],
     })
   })
 
@@ -39,11 +43,29 @@ describe('plmHydratedTeamViewOwnerTakeover', () => {
       localSelectorId: 'document-view-a',
       localNameDraft: 'Rename A',
       localOwnerUserIdDraft: 'user-a',
+      localSelectionIds: ['document-view-a'],
     })).toEqual({
       shouldClearLocalSelector: false,
       nextSelectorId: 'document-view-a',
       nextNameDraft: 'Rename A',
       nextOwnerUserIdDraft: 'user-a',
+      nextSelectionIds: ['document-view-a'],
+    })
+  })
+
+  it('trims stale batch selection when hydration keeps the same selector but swaps route owner', () => {
+    expect(resolvePlmHydratedTeamViewOwnerTakeover({
+      routeOwnerId: 'document-view-b',
+      localSelectorId: 'document-view-b',
+      localNameDraft: 'Rename B',
+      localOwnerUserIdDraft: 'user-b',
+      localSelectionIds: ['document-view-a', 'document-view-b'],
+    })).toEqual({
+      shouldClearLocalSelector: true,
+      nextSelectorId: 'document-view-b',
+      nextNameDraft: 'Rename B',
+      nextOwnerUserIdDraft: 'user-b',
+      nextSelectionIds: ['document-view-b'],
     })
   })
 
@@ -53,11 +75,13 @@ describe('plmHydratedTeamViewOwnerTakeover', () => {
       localSelectorId: 'document-view-a',
       localNameDraft: 'Rename A',
       localOwnerUserIdDraft: 'user-a',
+      localSelectionIds: ['document-view-a'],
     })).toEqual({
       shouldClearLocalSelector: true,
       nextSelectorId: '',
       nextNameDraft: '',
       nextOwnerUserIdDraft: '',
+      nextSelectionIds: [],
     })
   })
 
@@ -67,11 +91,13 @@ describe('plmHydratedTeamViewOwnerTakeover', () => {
       localSelectorId: 'document-view-b',
       localNameDraft: 'Rename B',
       localOwnerUserIdDraft: 'user-b',
+      localSelectionIds: ['document-view-a', 'document-view-b'],
     })).toEqual({
-      shouldClearLocalSelector: false,
+      shouldClearLocalSelector: true,
       nextSelectorId: 'document-view-b',
       nextNameDraft: 'Rename B',
       nextOwnerUserIdDraft: 'user-b',
+      nextSelectionIds: ['document-view-b'],
     })
   })
 })
