@@ -392,6 +392,12 @@ describe('plmWorkbenchClient', () => {
             },
           ],
         },
+        metadata: {
+          requestedTotal: 2,
+          processedTotal: 1,
+          skippedTotal: 1,
+          processedKinds: ['bom'],
+        },
       }),
     })
 
@@ -410,6 +416,12 @@ describe('plmWorkbenchClient', () => {
           }),
         }),
       ],
+      metadata: {
+        requestedTotal: 2,
+        processedTotal: 1,
+        skippedTotal: 1,
+        processedKinds: ['bom'],
+      },
     })
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/filter-presets/team/batch'),
@@ -1292,6 +1304,12 @@ describe('plmWorkbenchClient', () => {
             },
           ],
         },
+        metadata: {
+          requestedTotal: 2,
+          processedTotal: 1,
+          skippedTotal: 1,
+          processedKinds: ['documents'],
+        },
       }),
     })
 
@@ -1311,6 +1329,12 @@ describe('plmWorkbenchClient', () => {
           }),
         }),
       ],
+      metadata: {
+        requestedTotal: 2,
+        processedTotal: 1,
+        skippedTotal: 1,
+        processedKinds: ['documents'],
+      },
     })
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/views/team/batch'),

@@ -1,3 +1,8 @@
+import {
+  createPlmWorkbenchClient,
+  type ClientResponse,
+  type RequestClient,
+} from '@metasheet/sdk/client'
 import { apiFetch } from '../../utils/api'
 import { normalizePlmAuditDateTimeTransport } from '../../views/plmAuditDateTimeTransport'
 import type {
@@ -296,6 +301,30 @@ function mapTeamView<Kind extends PlmWorkbenchTeamViewKind>(
   }
 }
 
+const request = async <T = unknown>(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<ClientResponse<T>> => {
+  const response = await apiFetch(path, {
+    method,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const json = await response.json().catch(() => ({} as T))
+
+  return {
+    status: response.status,
+    json,
+  }
+}
+
+const plmWorkbenchRequestClient = {
+  request,
+  requestWithRetry: request,
+} satisfies RequestClient
+
+const rawPlmWorkbenchClient = createPlmWorkbenchClient(plmWorkbenchRequestClient)
+
 async function requestJson<T = unknown>(path: string, options?: RequestInit): Promise<Envelope<T>> {
   const response = await apiFetch(path, options)
   const payload = await response.json().catch(() => ({})) as Envelope<T>
@@ -312,8 +341,8 @@ async function requestJson<T = unknown>(path: string, options?: RequestInit): Pr
 }
 
 export async function listPlmTeamFilterPresets(kind: PlmTeamFilterPresetKind) {
-  const payload = await requestJson<unknown[]>(`/api/plm-workbench/filter-presets/team?kind=${encodeURIComponent(kind)}`)
-  const items = Array.isArray(payload.data) ? payload.data.map(mapTeamPreset).filter((item) => item.id && item.name) : []
+  const payload = await rawPlmWorkbenchClient.listTeamFilterPresets<unknown>(kind)
+  const items = Array.isArray(payload) ? payload.map(mapTeamPreset).filter((item) => item.id && item.name) : []
   return { items }
 }
 
@@ -322,95 +351,59 @@ export async function savePlmTeamFilterPreset(
   name: string,
   state: PlmTeamFilterPresetState,
 ): Promise<PlmTeamFilterPreset> {
-  const payload = await requestJson<unknown>('/api/plm-workbench/filter-presets/team', {
-    method: 'POST',
-    body: JSON.stringify({
-      kind,
-      name,
-      state,
-    }),
+  const payload = await rawPlmWorkbenchClient.saveTeamFilterPreset<unknown, PlmTeamFilterPresetState>({
+    kind,
+    name,
+    state,
   })
 
-  return mapTeamPreset(payload.data)
+  return mapTeamPreset(payload)
 }
 
 export async function renamePlmTeamFilterPreset(
   presetId: string,
   name: string,
 ): Promise<PlmTeamFilterPreset> {
-  const payload = await requestJson<unknown>(`/api/plm-workbench/filter-presets/team/${presetId}`, {
-    method: 'PATCH',
-    body: JSON.stringify({ name }),
-  })
-
-  return mapTeamPreset(payload.data)
+  return mapTeamPreset(await rawPlmWorkbenchClient.renameTeamFilterPreset<unknown>(presetId, name))
 }
 
 export async function duplicatePlmTeamFilterPreset(
   presetId: string,
   name?: string,
 ): Promise<PlmTeamFilterPreset> {
-  const payload = await requestJson<unknown>(`/api/plm-workbench/filter-presets/team/${presetId}/duplicate`, {
-    method: 'POST',
-    body: JSON.stringify(name ? { name } : {}),
-  })
-
-  return mapTeamPreset(payload.data)
+  return mapTeamPreset(await rawPlmWorkbenchClient.duplicateTeamFilterPreset<unknown>(presetId, name))
 }
 
 export async function transferPlmTeamFilterPreset(
   presetId: string,
   ownerUserId: string,
 ): Promise<PlmTeamFilterPreset> {
-  const payload = await requestJson<unknown>(`/api/plm-workbench/filter-presets/team/${presetId}/transfer`, {
-    method: 'POST',
-    body: JSON.stringify({ ownerUserId }),
-  })
-
-  return mapTeamPreset(payload.data)
+  return mapTeamPreset(await rawPlmWorkbenchClient.transferTeamFilterPreset<unknown>(presetId, ownerUserId))
 }
 
 export async function deletePlmTeamFilterPreset(presetId: string) {
-  const payload = await requestJson<{ id?: string; message?: string }>(`/api/plm-workbench/filter-presets/team/${presetId}`, {
-    method: 'DELETE',
-  })
+  const payload = await rawPlmWorkbenchClient.deleteTeamFilterPreset<{ id?: string; message?: string }>(presetId)
 
   return {
-    id: payload.data?.id || presetId,
-    message: payload.data?.message || 'PLM team preset deleted successfully',
+    id: payload.id || presetId,
+    message: payload.message || 'PLM team preset deleted successfully',
   }
 }
 
 export async function setPlmTeamFilterPresetDefault(presetId: string): Promise<PlmTeamFilterPreset> {
-  const payload = await requestJson<unknown>(`/api/plm-workbench/filter-presets/team/${presetId}/default`, {
-    method: 'POST',
-  })
-
-  return mapTeamPreset(payload.data)
+  return mapTeamPreset(await rawPlmWorkbenchClient.setTeamFilterPresetDefault<unknown>(presetId))
 }
 
 export async function clearPlmTeamFilterPresetDefault(presetId: string): Promise<PlmTeamFilterPreset> {
-  const payload = await requestJson<unknown>(`/api/plm-workbench/filter-presets/team/${presetId}/default`, {
-    method: 'DELETE',
-  })
-
-  return mapTeamPreset(payload.data)
+  return mapTeamPreset(await rawPlmWorkbenchClient.clearTeamFilterPresetDefault<unknown>(presetId))
 }
 
 export async function archivePlmTeamFilterPreset(presetId: string): Promise<PlmTeamFilterPreset> {
-  const payload = await requestJson<unknown>(`/api/plm-workbench/filter-presets/team/${presetId}/archive`, {
-    method: 'POST',
-  })
-
-  return mapTeamPreset(payload.data)
+  return mapTeamPreset(await rawPlmWorkbenchClient.archiveTeamFilterPreset<unknown>(presetId))
 }
 
 export async function restorePlmTeamFilterPreset(presetId: string): Promise<PlmTeamFilterPreset> {
-  const payload = await requestJson<unknown>(`/api/plm-workbench/filter-presets/team/${presetId}/restore`, {
-    method: 'POST',
-  })
-
-  return mapTeamPreset(payload.data)
+  return mapTeamPreset(await rawPlmWorkbenchClient.restoreTeamFilterPreset<unknown>(presetId))
 }
 
 export type PlmTeamFilterPresetBatchAction = 'archive' | 'restore' | 'delete'
@@ -420,36 +413,57 @@ export type PlmTeamFilterPresetBatchResult = {
   processedIds: string[]
   skippedIds: string[]
   items: PlmTeamFilterPreset[]
+  metadata?: {
+    requestedTotal?: number
+    processedTotal?: number
+    skippedTotal?: number
+    processedKinds?: string[]
+  }
 }
 
 export async function batchPlmTeamFilterPresets(
   action: PlmTeamFilterPresetBatchAction,
   ids: string[],
 ): Promise<PlmTeamFilterPresetBatchResult> {
-  const payload = await requestJson<{
-    action?: string
-    processedIds?: string[]
-    skippedIds?: string[]
-    items?: unknown[]
-  }>('/api/plm-workbench/filter-presets/team/batch', {
-    method: 'POST',
-    body: JSON.stringify({
-      action,
-      ids,
-    }),
-  })
+  const payload = await rawPlmWorkbenchClient.batchTeamFilterPresets<{
+    id?: string
+    kind?: string
+    name?: string
+    ownerUserId?: string
+    canManage?: boolean
+    permissions?: unknown
+    isDefault?: boolean
+    isArchived?: boolean
+    state?: unknown
+    archivedAt?: string
+    createdAt?: string
+    updatedAt?: string
+  }>(
+    action,
+    ids,
+  )
 
   return {
     action,
-    processedIds: Array.isArray(payload.data?.processedIds) ? payload.data.processedIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0) : [],
-    skippedIds: Array.isArray(payload.data?.skippedIds) ? payload.data.skippedIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0) : [],
-    items: Array.isArray(payload.data?.items) ? payload.data.items.map(mapTeamPreset).filter((item) => item.id && item.name) : [],
+    processedIds: Array.isArray(payload.processedIds) ? payload.processedIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0) : [],
+    skippedIds: Array.isArray(payload.skippedIds) ? payload.skippedIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0) : [],
+    items: Array.isArray(payload.items) ? payload.items.map(mapTeamPreset).filter((item) => item.id && item.name) : [],
+    metadata: payload.metadata && typeof payload.metadata === 'object'
+      ? {
+        requestedTotal: typeof payload.metadata.requestedTotal === 'number' ? payload.metadata.requestedTotal : undefined,
+        processedTotal: typeof payload.metadata.processedTotal === 'number' ? payload.metadata.processedTotal : undefined,
+        skippedTotal: typeof payload.metadata.skippedTotal === 'number' ? payload.metadata.skippedTotal : undefined,
+        processedKinds: Array.isArray(payload.metadata.processedKinds)
+          ? payload.metadata.processedKinds.filter((kind): kind is string => typeof kind === 'string' && kind.trim().length > 0)
+          : undefined,
+      }
+      : undefined,
   }
 }
 
 export async function listPlmWorkbenchTeamViews<Kind extends PlmWorkbenchTeamViewKind>(kind: Kind) {
-  const payload = await requestJson<unknown[]>(`/api/plm-workbench/views/team?kind=${encodeURIComponent(kind)}`)
-  const items = Array.isArray(payload.data) ? payload.data.map((item) => mapTeamView(kind, item)).filter((item) => item.id && item.name) : []
+  const payload = await rawPlmWorkbenchClient.listTeamViews<unknown>(kind)
+  const items = Array.isArray(payload) ? payload.map((item) => mapTeamView(kind, item)).filter((item) => item.id && item.name) : []
   return { items }
 }
 
@@ -462,32 +476,22 @@ export async function savePlmWorkbenchTeamView<Kind extends PlmWorkbenchTeamView
   },
 ): Promise<PlmWorkbenchTeamView<Kind>> {
   const normalizedState = kind === 'audit' ? normalizeTeamViewState(kind, state) : state
-  const body: Record<string, unknown> = {
+  const payload = await rawPlmWorkbenchClient.saveTeamView<unknown, PlmWorkbenchTeamViewStateByKind[Kind]>({
     kind,
     name,
     state: normalizedState,
-  }
-
-  if (typeof options?.isDefault === 'boolean') {
-    body.isDefault = options.isDefault
-  }
-
-  const payload = await requestJson<unknown>('/api/plm-workbench/views/team', {
-    method: 'POST',
-    body: JSON.stringify(body),
+    isDefault: options?.isDefault,
   })
 
-  return mapTeamView(kind, payload.data)
+  return mapTeamView(kind, payload)
 }
 
 export async function deletePlmWorkbenchTeamView(viewId: string) {
-  const payload = await requestJson<{ id?: string; message?: string }>(`/api/plm-workbench/views/team/${viewId}`, {
-    method: 'DELETE',
-  })
+  const payload = await rawPlmWorkbenchClient.deleteTeamView<{ id?: string; message?: string }>(viewId)
 
   return {
-    id: payload.data?.id || viewId,
-    message: payload.data?.message || 'PLM team view deleted successfully',
+    id: payload.id || viewId,
+    message: payload.message || 'PLM team view deleted successfully',
   }
 }
 
@@ -496,12 +500,7 @@ export async function renamePlmWorkbenchTeamView<Kind extends PlmWorkbenchTeamVi
   viewId: string,
   name: string,
 ): Promise<PlmWorkbenchTeamView<Kind>> {
-  const payload = await requestJson<unknown>(`/api/plm-workbench/views/team/${viewId}`, {
-    method: 'PATCH',
-    body: JSON.stringify({ name }),
-  })
-
-  return mapTeamView(kind, payload.data)
+  return mapTeamView(kind, await rawPlmWorkbenchClient.renameTeamView<unknown>(viewId, name))
 }
 
 export async function duplicatePlmWorkbenchTeamView<Kind extends PlmWorkbenchTeamViewKind>(
@@ -509,12 +508,7 @@ export async function duplicatePlmWorkbenchTeamView<Kind extends PlmWorkbenchTea
   viewId: string,
   name?: string,
 ): Promise<PlmWorkbenchTeamView<Kind>> {
-  const payload = await requestJson<unknown>(`/api/plm-workbench/views/team/${viewId}/duplicate`, {
-    method: 'POST',
-    body: JSON.stringify(name ? { name } : {}),
-  })
-
-  return mapTeamView(kind, payload.data)
+  return mapTeamView(kind, await rawPlmWorkbenchClient.duplicateTeamView<unknown>(viewId, name))
 }
 
 export async function transferPlmWorkbenchTeamView<Kind extends PlmWorkbenchTeamViewKind>(
@@ -522,56 +516,35 @@ export async function transferPlmWorkbenchTeamView<Kind extends PlmWorkbenchTeam
   viewId: string,
   ownerUserId: string,
 ): Promise<PlmWorkbenchTeamView<Kind>> {
-  const payload = await requestJson<unknown>(`/api/plm-workbench/views/team/${viewId}/transfer`, {
-    method: 'POST',
-    body: JSON.stringify({ ownerUserId }),
-  })
-
-  return mapTeamView(kind, payload.data)
+  return mapTeamView(kind, await rawPlmWorkbenchClient.transferTeamView<unknown>(viewId, ownerUserId))
 }
 
 export async function setPlmWorkbenchTeamViewDefault<Kind extends PlmWorkbenchTeamViewKind>(
   kind: Kind,
   viewId: string,
 ): Promise<PlmWorkbenchTeamView<Kind>> {
-  const payload = await requestJson<unknown>(`/api/plm-workbench/views/team/${viewId}/default`, {
-    method: 'POST',
-  })
-
-  return mapTeamView(kind, payload.data)
+  return mapTeamView(kind, await rawPlmWorkbenchClient.setTeamViewDefault<unknown>(viewId))
 }
 
 export async function clearPlmWorkbenchTeamViewDefault<Kind extends PlmWorkbenchTeamViewKind>(
   kind: Kind,
   viewId: string,
 ): Promise<PlmWorkbenchTeamView<Kind>> {
-  const payload = await requestJson<unknown>(`/api/plm-workbench/views/team/${viewId}/default`, {
-    method: 'DELETE',
-  })
-
-  return mapTeamView(kind, payload.data)
+  return mapTeamView(kind, await rawPlmWorkbenchClient.clearTeamViewDefault<unknown>(viewId))
 }
 
 export async function archivePlmWorkbenchTeamView<Kind extends PlmWorkbenchTeamViewKind>(
   kind: Kind,
   viewId: string,
 ): Promise<PlmWorkbenchTeamView<Kind>> {
-  const payload = await requestJson<unknown>(`/api/plm-workbench/views/team/${viewId}/archive`, {
-    method: 'POST',
-  })
-
-  return mapTeamView(kind, payload.data)
+  return mapTeamView(kind, await rawPlmWorkbenchClient.archiveTeamView<unknown>(viewId))
 }
 
 export async function restorePlmWorkbenchTeamView<Kind extends PlmWorkbenchTeamViewKind>(
   kind: Kind,
   viewId: string,
 ): Promise<PlmWorkbenchTeamView<Kind>> {
-  const payload = await requestJson<unknown>(`/api/plm-workbench/views/team/${viewId}/restore`, {
-    method: 'POST',
-  })
-
-  return mapTeamView(kind, payload.data)
+  return mapTeamView(kind, await rawPlmWorkbenchClient.restoreTeamView<unknown>(viewId))
 }
 
 export type PlmWorkbenchTeamViewBatchAction = 'archive' | 'restore' | 'delete'
@@ -583,6 +556,12 @@ export type PlmWorkbenchTeamViewBatchResult<
   processedIds: string[]
   skippedIds: string[]
   items: PlmWorkbenchTeamView<Kind>[]
+  metadata?: {
+    requestedTotal?: number
+    processedTotal?: number
+    skippedTotal?: number
+    processedKinds?: string[]
+  }
 }
 
 export async function batchPlmWorkbenchTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
@@ -590,32 +569,36 @@ export async function batchPlmWorkbenchTeamViews<Kind extends PlmWorkbenchTeamVi
   action: PlmWorkbenchTeamViewBatchAction,
   ids: string[],
 ): Promise<PlmWorkbenchTeamViewBatchResult<Kind>> {
-  const payload = await requestJson<{
+  const payload = await rawPlmWorkbenchClient.batchTeamViews<{
     action?: string
     processedIds?: string[]
     skippedIds?: string[]
     items?: unknown[]
-  }>('/api/plm-workbench/views/team/batch', {
-    method: 'POST',
-    body: JSON.stringify({
-      action,
-      ids,
-    }),
-  })
+  }>(action, ids)
 
   return {
     action,
-    processedIds: Array.isArray(payload.data?.processedIds)
-      ? payload.data.processedIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+    processedIds: Array.isArray(payload.processedIds)
+      ? payload.processedIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
       : [],
-    skippedIds: Array.isArray(payload.data?.skippedIds)
-      ? payload.data.skippedIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+    skippedIds: Array.isArray(payload.skippedIds)
+      ? payload.skippedIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
       : [],
-    items: Array.isArray(payload.data?.items)
-      ? payload.data.items
+    items: Array.isArray(payload.items)
+      ? payload.items
         .map((item) => mapTeamView(kind, item))
         .filter((item) => item.id && item.name)
       : [],
+    metadata: payload.metadata && typeof payload.metadata === 'object'
+      ? {
+        requestedTotal: typeof payload.metadata.requestedTotal === 'number' ? payload.metadata.requestedTotal : undefined,
+        processedTotal: typeof payload.metadata.processedTotal === 'number' ? payload.metadata.processedTotal : undefined,
+        skippedTotal: typeof payload.metadata.skippedTotal === 'number' ? payload.metadata.skippedTotal : undefined,
+        processedKinds: Array.isArray(payload.metadata.processedKinds)
+          ? payload.metadata.processedKinds.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+          : undefined,
+      }
+      : undefined,
   }
 }
 

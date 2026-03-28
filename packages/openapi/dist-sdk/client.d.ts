@@ -23,6 +23,12 @@ export interface ApiEnvelope<T> {
     data?: T;
     error?: ApiError;
 }
+export interface DirectApiEnvelope<T, M = unknown> {
+    success?: boolean;
+    data?: T;
+    metadata?: M;
+    error?: string | ApiError;
+}
 export interface PaginationOptions {
     limit?: number;
     offset?: number;
@@ -85,6 +91,32 @@ export interface PlmApprovalActionParams {
     reason?: string;
     comment?: string;
 }
+export type PlmWorkbenchTeamViewKind = 'documents' | 'cad' | 'approvals' | 'workbench' | 'audit';
+export type PlmTeamFilterPresetKind = 'bom' | 'where-used';
+export type PlmWorkbenchBatchAction = 'archive' | 'restore' | 'delete';
+export interface PlmWorkbenchBatchResult<T = Record<string, unknown>> {
+    action?: string;
+    processedIds?: string[];
+    skippedIds?: string[];
+    items?: T[];
+    metadata?: {
+        requestedTotal?: number;
+        processedTotal?: number;
+        skippedTotal?: number;
+        processedKinds?: string[];
+    };
+}
+export interface SavePlmWorkbenchTeamViewParams<TState = unknown> {
+    kind: PlmWorkbenchTeamViewKind;
+    name: string;
+    state: TState;
+    isDefault?: boolean;
+}
+export interface SavePlmTeamFilterPresetParams<TState = unknown> {
+    kind: PlmTeamFilterPresetKind;
+    name: string;
+    state: TState;
+}
 export interface AddPlmSubstituteParams {
     bomLineId: string;
     substituteItemId: string;
@@ -127,4 +159,28 @@ export declare function createPlmFederationClient(clientOrOptions: ClientOptions
     updateCadProperties<T = Record<string, unknown>>(params: UpdatePlmCadPayload): Promise<T>;
     updateCadViewState<T = Record<string, unknown>>(params: UpdatePlmCadPayload): Promise<T>;
     updateCadReview<T = Record<string, unknown>>(params: UpdatePlmCadPayload): Promise<T>;
+};
+export declare function createPlmWorkbenchClient(clientOrOptions: ClientOptions | RequestClient): {
+    listTeamViews<T = Record<string, unknown>>(kind: PlmWorkbenchTeamViewKind): Promise<T[]>;
+    saveTeamView<T = Record<string, unknown>, TState = unknown>(params: SavePlmWorkbenchTeamViewParams<TState>): Promise<T>;
+    renameTeamView<T = Record<string, unknown>>(id: string, name: string): Promise<T>;
+    deleteTeamView<T = Record<string, unknown>>(id: string): Promise<T>;
+    duplicateTeamView<T = Record<string, unknown>>(id: string, name?: string): Promise<T>;
+    transferTeamView<T = Record<string, unknown>>(id: string, ownerUserId: string): Promise<T>;
+    setTeamViewDefault<T = Record<string, unknown>>(id: string): Promise<T>;
+    clearTeamViewDefault<T = Record<string, unknown>>(id: string): Promise<T>;
+    archiveTeamView<T = Record<string, unknown>>(id: string): Promise<T>;
+    restoreTeamView<T = Record<string, unknown>>(id: string): Promise<T>;
+    batchTeamViews<T = Record<string, unknown>>(action: PlmWorkbenchBatchAction, ids: string[]): Promise<PlmWorkbenchBatchResult<T>>;
+    listTeamFilterPresets<T = Record<string, unknown>>(kind: PlmTeamFilterPresetKind): Promise<T[]>;
+    saveTeamFilterPreset<T = Record<string, unknown>, TState = unknown>(params: SavePlmTeamFilterPresetParams<TState>): Promise<T>;
+    renameTeamFilterPreset<T = Record<string, unknown>>(id: string, name: string): Promise<T>;
+    deleteTeamFilterPreset<T = Record<string, unknown>>(id: string): Promise<T>;
+    duplicateTeamFilterPreset<T = Record<string, unknown>>(id: string, name?: string): Promise<T>;
+    transferTeamFilterPreset<T = Record<string, unknown>>(id: string, ownerUserId: string): Promise<T>;
+    setTeamFilterPresetDefault<T = Record<string, unknown>>(id: string): Promise<T>;
+    clearTeamFilterPresetDefault<T = Record<string, unknown>>(id: string): Promise<T>;
+    archiveTeamFilterPreset<T = Record<string, unknown>>(id: string): Promise<T>;
+    restoreTeamFilterPreset<T = Record<string, unknown>>(id: string): Promise<T>;
+    batchTeamFilterPresets<T = Record<string, unknown>>(action: PlmWorkbenchBatchAction, ids: string[]): Promise<PlmWorkbenchBatchResult<T>>;
 };

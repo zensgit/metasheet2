@@ -57,6 +57,46 @@ function unwrapData(response, fallback) {
     }
     return response.json;
 }
+function buildDirectApiError(error, fallback) {
+    if (typeof error === 'string' && error.trim()) {
+        return new Error(error.trim());
+    }
+    const nextError = new Error(error && typeof error === 'object' && typeof error.message === 'string'
+        ? error.message
+        : fallback);
+    if (!error || typeof error !== 'object') {
+        return nextError;
+    }
+    Object.assign(nextError, error);
+    if (!nextError.message) {
+        nextError.message = fallback;
+    }
+    return nextError;
+}
+function unwrapDirectData(response, fallback) {
+    return unwrapDirectEnvelope(response, fallback).data;
+}
+function unwrapDirectEnvelope(response, fallback) {
+    const envelope = response.json;
+    const directError = envelope && typeof envelope === 'object' && 'error' in envelope
+        ? envelope.error
+        : undefined;
+    if (response.status >= 400) {
+        throw buildDirectApiError(directError, fallback);
+    }
+    if (envelope && typeof envelope === 'object' && ('success' in envelope || 'data' in envelope || 'error' in envelope)) {
+        if (envelope.success === false) {
+            throw buildDirectApiError(directError, fallback);
+        }
+        return {
+            data: envelope.data,
+            metadata: envelope.metadata,
+        };
+    }
+    return {
+        data: response.json,
+    };
+}
 async function requestPlmQuery(client, body, fallback) {
     const response = await client.request('POST', '/api/federation/plm/query', body);
     return unwrapData(response, fallback);
@@ -68,6 +108,14 @@ async function requestPlmMutate(client, body, fallback) {
 async function requestPlmGet(client, path, fallback) {
     const response = await client.request('GET', path);
     return unwrapData(response, fallback);
+}
+async function requestDirectApi(client, method, path, fallback, body) {
+    const response = await client.request(method, path, body);
+    return unwrapDirectData(response, fallback);
+}
+async function requestDirectEnvelope(client, method, path, fallback, body) {
+    const response = await client.request(method, path, body);
+    return unwrapDirectEnvelope(response, fallback);
 }
 export function createClient(opts) {
     const f = opts.fetch || fetch;
@@ -286,6 +334,85 @@ export function createPlmFederationClient(clientOrOptions) {
                 fileId: params.fileId,
                 payload: params.payload,
             }, 'Failed to update PLM CAD review');
+        },
+    };
+}
+export function createPlmWorkbenchClient(clientOrOptions) {
+    const client = toRequestClient(clientOrOptions);
+    return {
+        async listTeamViews(kind) {
+            return requestDirectApi(client, 'GET', withQuery('/api/plm-workbench/views/team', { kind }), 'Failed to load PLM team views');
+        },
+        async saveTeamView(params) {
+            return requestDirectApi(client, 'POST', '/api/plm-workbench/views/team', 'Failed to save PLM team view', params);
+        },
+        async renameTeamView(id, name) {
+            return requestDirectApi(client, 'PATCH', `/api/plm-workbench/views/team/${encodeURIComponent(id)}`, 'Failed to rename PLM team view', { name });
+        },
+        async deleteTeamView(id) {
+            return requestDirectApi(client, 'DELETE', `/api/plm-workbench/views/team/${encodeURIComponent(id)}`, 'Failed to delete PLM team view');
+        },
+        async duplicateTeamView(id, name) {
+            return requestDirectApi(client, 'POST', `/api/plm-workbench/views/team/${encodeURIComponent(id)}/duplicate`, 'Failed to duplicate PLM team view', name ? { name } : {});
+        },
+        async transferTeamView(id, ownerUserId) {
+            return requestDirectApi(client, 'POST', `/api/plm-workbench/views/team/${encodeURIComponent(id)}/transfer`, 'Failed to transfer PLM team view', { ownerUserId });
+        },
+        async setTeamViewDefault(id) {
+            return requestDirectApi(client, 'POST', `/api/plm-workbench/views/team/${encodeURIComponent(id)}/default`, 'Failed to set PLM team view default');
+        },
+        async clearTeamViewDefault(id) {
+            return requestDirectApi(client, 'DELETE', `/api/plm-workbench/views/team/${encodeURIComponent(id)}/default`, 'Failed to clear PLM team view default');
+        },
+        async archiveTeamView(id) {
+            return requestDirectApi(client, 'POST', `/api/plm-workbench/views/team/${encodeURIComponent(id)}/archive`, 'Failed to archive PLM team view');
+        },
+        async restoreTeamView(id) {
+            return requestDirectApi(client, 'POST', `/api/plm-workbench/views/team/${encodeURIComponent(id)}/restore`, 'Failed to restore PLM team view');
+        },
+        async batchTeamViews(action, ids) {
+            const response = await requestDirectEnvelope(client, 'POST', '/api/plm-workbench/views/team/batch', 'Failed to batch update PLM team views', { action, ids });
+            return {
+                ...response.data,
+                metadata: response.metadata,
+            };
+        },
+        async listTeamFilterPresets(kind) {
+            return requestDirectApi(client, 'GET', withQuery('/api/plm-workbench/filter-presets/team', { kind }), 'Failed to load PLM team filter presets');
+        },
+        async saveTeamFilterPreset(params) {
+            return requestDirectApi(client, 'POST', '/api/plm-workbench/filter-presets/team', 'Failed to save PLM team filter preset', params);
+        },
+        async renameTeamFilterPreset(id, name) {
+            return requestDirectApi(client, 'PATCH', `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}`, 'Failed to rename PLM team filter preset', { name });
+        },
+        async deleteTeamFilterPreset(id) {
+            return requestDirectApi(client, 'DELETE', `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}`, 'Failed to delete PLM team filter preset');
+        },
+        async duplicateTeamFilterPreset(id, name) {
+            return requestDirectApi(client, 'POST', `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}/duplicate`, 'Failed to duplicate PLM team filter preset', name ? { name } : {});
+        },
+        async transferTeamFilterPreset(id, ownerUserId) {
+            return requestDirectApi(client, 'POST', `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}/transfer`, 'Failed to transfer PLM team filter preset', { ownerUserId });
+        },
+        async setTeamFilterPresetDefault(id) {
+            return requestDirectApi(client, 'POST', `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}/default`, 'Failed to set PLM team filter preset default');
+        },
+        async clearTeamFilterPresetDefault(id) {
+            return requestDirectApi(client, 'DELETE', `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}/default`, 'Failed to clear PLM team filter preset default');
+        },
+        async archiveTeamFilterPreset(id) {
+            return requestDirectApi(client, 'POST', `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}/archive`, 'Failed to archive PLM team filter preset');
+        },
+        async restoreTeamFilterPreset(id) {
+            return requestDirectApi(client, 'POST', `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}/restore`, 'Failed to restore PLM team filter preset');
+        },
+        async batchTeamFilterPresets(action, ids) {
+            const response = await requestDirectEnvelope(client, 'POST', '/api/plm-workbench/filter-presets/team/batch', 'Failed to batch update PLM team filter presets', { action, ids });
+            return {
+                ...response.data,
+                metadata: response.metadata,
+            };
         },
     };
 }

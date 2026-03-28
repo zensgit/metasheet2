@@ -40,6 +40,13 @@ export interface ApiEnvelope<T> {
   error?: ApiError
 }
 
+export interface DirectApiEnvelope<T, M = unknown> {
+  success?: boolean
+  data?: T
+  metadata?: M
+  error?: string | ApiError
+}
+
 export interface PaginationOptions {
   limit?: number
   offset?: number
@@ -111,6 +118,43 @@ export interface PlmApprovalActionParams {
   version: number
   reason?: string
   comment?: string
+}
+
+export type PlmWorkbenchTeamViewKind =
+  | 'documents'
+  | 'cad'
+  | 'approvals'
+  | 'workbench'
+  | 'audit'
+
+export type PlmTeamFilterPresetKind = 'bom' | 'where-used'
+
+export type PlmWorkbenchBatchAction = 'archive' | 'restore' | 'delete'
+
+export interface PlmWorkbenchBatchResult<T = Record<string, unknown>> {
+  action?: string
+  processedIds?: string[]
+  skippedIds?: string[]
+  items?: T[]
+  metadata?: {
+    requestedTotal?: number
+    processedTotal?: number
+    skippedTotal?: number
+    processedKinds?: string[]
+  }
+}
+
+export interface SavePlmWorkbenchTeamViewParams<TState = unknown> {
+  kind: PlmWorkbenchTeamViewKind
+  name: string
+  state: TState
+  isDefault?: boolean
+}
+
+export interface SavePlmTeamFilterPresetParams<TState = unknown> {
+  kind: PlmTeamFilterPresetKind
+  name: string
+  state: TState
 }
 
 export interface AddPlmSubstituteParams {
@@ -204,6 +248,59 @@ function unwrapData<T>(response: ClientResponse<ApiEnvelope<T>>, fallback: strin
   return response.json as unknown as T
 }
 
+function buildDirectApiError(error: string | ApiError | undefined, fallback: string): Error {
+  if (typeof error === 'string' && error.trim()) {
+    return new Error(error.trim())
+  }
+
+  const nextError = new Error(
+    error && typeof error === 'object' && typeof error.message === 'string'
+      ? error.message
+      : fallback,
+  ) as Error & ApiError
+  if (!error || typeof error !== 'object') {
+    return nextError
+  }
+
+  Object.assign(nextError, error)
+  if (!nextError.message) {
+    nextError.message = fallback
+  }
+  return nextError
+}
+
+function unwrapDirectData<T>(response: ClientResponse<DirectApiEnvelope<T>>, fallback: string): T {
+  return unwrapDirectEnvelope(response, fallback).data
+}
+
+function unwrapDirectEnvelope<T, M = unknown>(
+  response: ClientResponse<DirectApiEnvelope<T, M>>,
+  fallback: string,
+): { data: T; metadata?: M } {
+  const envelope = response.json
+  const directError = envelope && typeof envelope === 'object' && 'error' in envelope
+    ? (envelope as DirectApiEnvelope<T, M>).error
+    : undefined
+
+  if (response.status >= 400) {
+    throw buildDirectApiError(directError, fallback)
+  }
+
+  if (envelope && typeof envelope === 'object' && ('success' in envelope || 'data' in envelope || 'error' in envelope)) {
+    if ((envelope as DirectApiEnvelope<T, M>).success === false) {
+      throw buildDirectApiError(directError, fallback)
+    }
+    return {
+      data: (envelope as DirectApiEnvelope<T, M>).data as T,
+      metadata: (envelope as DirectApiEnvelope<T, M>).metadata,
+    }
+  }
+
+  return {
+    data: response.json as unknown as T,
+  }
+}
+
 async function requestPlmQuery<T>(
   client: RequestClient,
   body: Record<string, unknown>,
@@ -229,6 +326,28 @@ async function requestPlmGet<T>(
 ): Promise<T> {
   const response = await client.request<ApiEnvelope<T>>('GET', path)
   return unwrapData(response, fallback)
+}
+
+async function requestDirectApi<T>(
+  client: RequestClient,
+  method: string,
+  path: string,
+  fallback: string,
+  body?: unknown,
+): Promise<T> {
+  const response = await client.request<DirectApiEnvelope<T>>(method, path, body)
+  return unwrapDirectData(response, fallback)
+}
+
+async function requestDirectEnvelope<T, M = unknown>(
+  client: RequestClient,
+  method: string,
+  path: string,
+  fallback: string,
+  body?: unknown,
+): Promise<{ data: T; metadata?: M }> {
+  const response = await client.request<DirectApiEnvelope<T, M>>(method, path, body)
+  return unwrapDirectEnvelope(response, fallback)
 }
 
 export function createClient(opts: ClientOptions): RequestClient {
@@ -616,6 +735,266 @@ export function createPlmFederationClient(clientOrOptions: ClientOptions | Reque
         },
         'Failed to update PLM CAD review',
       )
+    },
+  }
+}
+
+export function createPlmWorkbenchClient(clientOrOptions: ClientOptions | RequestClient) {
+  const client = toRequestClient(clientOrOptions)
+
+  return {
+    async listTeamViews<T = Record<string, unknown>>(
+      kind: PlmWorkbenchTeamViewKind,
+    ): Promise<T[]> {
+      return requestDirectApi<T[]>(
+        client,
+        'GET',
+        withQuery('/api/plm-workbench/views/team', { kind }),
+        'Failed to load PLM team views',
+      )
+    },
+
+    async saveTeamView<T = Record<string, unknown>, TState = unknown>(
+      params: SavePlmWorkbenchTeamViewParams<TState>,
+    ): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'POST',
+        '/api/plm-workbench/views/team',
+        'Failed to save PLM team view',
+        params,
+      )
+    },
+
+    async renameTeamView<T = Record<string, unknown>>(
+      id: string,
+      name: string,
+    ): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'PATCH',
+        `/api/plm-workbench/views/team/${encodeURIComponent(id)}`,
+        'Failed to rename PLM team view',
+        { name },
+      )
+    },
+
+    async deleteTeamView<T = Record<string, unknown>>(id: string): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'DELETE',
+        `/api/plm-workbench/views/team/${encodeURIComponent(id)}`,
+        'Failed to delete PLM team view',
+      )
+    },
+
+    async duplicateTeamView<T = Record<string, unknown>>(
+      id: string,
+      name?: string,
+    ): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'POST',
+        `/api/plm-workbench/views/team/${encodeURIComponent(id)}/duplicate`,
+        'Failed to duplicate PLM team view',
+        name ? { name } : {},
+      )
+    },
+
+    async transferTeamView<T = Record<string, unknown>>(
+      id: string,
+      ownerUserId: string,
+    ): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'POST',
+        `/api/plm-workbench/views/team/${encodeURIComponent(id)}/transfer`,
+        'Failed to transfer PLM team view',
+        { ownerUserId },
+      )
+    },
+
+    async setTeamViewDefault<T = Record<string, unknown>>(id: string): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'POST',
+        `/api/plm-workbench/views/team/${encodeURIComponent(id)}/default`,
+        'Failed to set PLM team view default',
+      )
+    },
+
+    async clearTeamViewDefault<T = Record<string, unknown>>(id: string): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'DELETE',
+        `/api/plm-workbench/views/team/${encodeURIComponent(id)}/default`,
+        'Failed to clear PLM team view default',
+      )
+    },
+
+    async archiveTeamView<T = Record<string, unknown>>(id: string): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'POST',
+        `/api/plm-workbench/views/team/${encodeURIComponent(id)}/archive`,
+        'Failed to archive PLM team view',
+      )
+    },
+
+    async restoreTeamView<T = Record<string, unknown>>(id: string): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'POST',
+        `/api/plm-workbench/views/team/${encodeURIComponent(id)}/restore`,
+        'Failed to restore PLM team view',
+      )
+    },
+
+    async batchTeamViews<T = Record<string, unknown>>(
+      action: PlmWorkbenchBatchAction,
+      ids: string[],
+    ): Promise<PlmWorkbenchBatchResult<T>> {
+      const response = await requestDirectEnvelope<
+        Omit<PlmWorkbenchBatchResult<T>, 'metadata'>,
+        PlmWorkbenchBatchResult<T>['metadata']
+      >(
+        client,
+        'POST',
+        '/api/plm-workbench/views/team/batch',
+        'Failed to batch update PLM team views',
+        { action, ids },
+      )
+      return {
+        ...response.data,
+        metadata: response.metadata,
+      }
+    },
+
+    async listTeamFilterPresets<T = Record<string, unknown>>(
+      kind: PlmTeamFilterPresetKind,
+    ): Promise<T[]> {
+      return requestDirectApi<T[]>(
+        client,
+        'GET',
+        withQuery('/api/plm-workbench/filter-presets/team', { kind }),
+        'Failed to load PLM team filter presets',
+      )
+    },
+
+    async saveTeamFilterPreset<T = Record<string, unknown>, TState = unknown>(
+      params: SavePlmTeamFilterPresetParams<TState>,
+    ): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'POST',
+        '/api/plm-workbench/filter-presets/team',
+        'Failed to save PLM team filter preset',
+        params,
+      )
+    },
+
+    async renameTeamFilterPreset<T = Record<string, unknown>>(
+      id: string,
+      name: string,
+    ): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'PATCH',
+        `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}`,
+        'Failed to rename PLM team filter preset',
+        { name },
+      )
+    },
+
+    async deleteTeamFilterPreset<T = Record<string, unknown>>(id: string): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'DELETE',
+        `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}`,
+        'Failed to delete PLM team filter preset',
+      )
+    },
+
+    async duplicateTeamFilterPreset<T = Record<string, unknown>>(
+      id: string,
+      name?: string,
+    ): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'POST',
+        `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}/duplicate`,
+        'Failed to duplicate PLM team filter preset',
+        name ? { name } : {},
+      )
+    },
+
+    async transferTeamFilterPreset<T = Record<string, unknown>>(
+      id: string,
+      ownerUserId: string,
+    ): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'POST',
+        `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}/transfer`,
+        'Failed to transfer PLM team filter preset',
+        { ownerUserId },
+      )
+    },
+
+    async setTeamFilterPresetDefault<T = Record<string, unknown>>(id: string): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'POST',
+        `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}/default`,
+        'Failed to set PLM team filter preset default',
+      )
+    },
+
+    async clearTeamFilterPresetDefault<T = Record<string, unknown>>(id: string): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'DELETE',
+        `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}/default`,
+        'Failed to clear PLM team filter preset default',
+      )
+    },
+
+    async archiveTeamFilterPreset<T = Record<string, unknown>>(id: string): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'POST',
+        `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}/archive`,
+        'Failed to archive PLM team filter preset',
+      )
+    },
+
+    async restoreTeamFilterPreset<T = Record<string, unknown>>(id: string): Promise<T> {
+      return requestDirectApi<T>(
+        client,
+        'POST',
+        `/api/plm-workbench/filter-presets/team/${encodeURIComponent(id)}/restore`,
+        'Failed to restore PLM team filter preset',
+      )
+    },
+
+    async batchTeamFilterPresets<T = Record<string, unknown>>(
+      action: PlmWorkbenchBatchAction,
+      ids: string[],
+    ): Promise<PlmWorkbenchBatchResult<T>> {
+      const response = await requestDirectEnvelope<
+        Omit<PlmWorkbenchBatchResult<T>, 'metadata'>,
+        PlmWorkbenchBatchResult<T>['metadata']
+      >(
+        client,
+        'POST',
+        '/api/plm-workbench/filter-presets/team/batch',
+        'Failed to batch update PLM team filter presets',
+        { action, ids },
+      )
+      return {
+        ...response.data,
+        metadata: response.metadata,
+      }
     },
   }
 }

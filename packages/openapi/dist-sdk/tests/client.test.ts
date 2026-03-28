@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { createPlmFederationClient } from '../client.js'
+import { createPlmFederationClient, createPlmWorkbenchClient } from '../client.js'
 
 function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -285,6 +285,153 @@ describe('createPlmFederationClient', () => {
       operation: 'cad_review_update',
       fileId: 'FILE-1',
       payload: { state: 'approved' },
+    })
+  })
+})
+
+describe('createPlmWorkbenchClient', () => {
+  it('supports team view list and mutation helpers', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({
+        success: true,
+        data: [{ id: 'view-1', kind: 'documents', name: 'Docs' }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        success: true,
+        data: { id: 'view-1', kind: 'documents', name: 'Docs updated' },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        success: true,
+        data: { id: 'view-2', kind: 'documents', name: 'Docs copy' },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        success: true,
+        data: {
+          action: 'archive',
+          processedIds: ['view-1'],
+          skippedIds: ['view-2'],
+          items: [{ id: 'view-1', kind: 'documents', name: 'Docs archived' }],
+        },
+        metadata: {
+          requestedTotal: 2,
+          processedTotal: 1,
+          skippedTotal: 1,
+          processedKinds: ['documents'],
+        },
+      }))
+
+    const client = createPlmWorkbenchClient({
+      baseUrl: 'http://localhost:8910/',
+      getToken: () => 'token-workbench',
+      fetch: fetchMock,
+    })
+
+    await expect(client.listTeamViews('documents')).resolves.toEqual([
+      { id: 'view-1', kind: 'documents', name: 'Docs' },
+    ])
+    await expect(client.renameTeamView('view-1', 'Docs updated')).resolves.toEqual({
+      id: 'view-1',
+      kind: 'documents',
+      name: 'Docs updated',
+    })
+    await expect(client.duplicateTeamView('view-1')).resolves.toEqual({
+      id: 'view-2',
+      kind: 'documents',
+      name: 'Docs copy',
+    })
+    await expect(client.batchTeamViews('archive', ['view-1', 'view-2'])).resolves.toEqual({
+      action: 'archive',
+      processedIds: ['view-1'],
+      skippedIds: ['view-2'],
+      items: [{ id: 'view-1', kind: 'documents', name: 'Docs archived' }],
+      metadata: {
+        requestedTotal: 2,
+        processedTotal: 1,
+        skippedTotal: 1,
+        processedKinds: ['documents'],
+      },
+    })
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'http://localhost:8910/api/plm-workbench/views/team?kind=documents',
+    )
+    expect(fetchMock.mock.calls[1]?.[1]?.method).toBe('PATCH')
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      name: 'Docs updated',
+    })
+    expect(fetchMock.mock.calls[2]?.[1]?.method).toBe('POST')
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({})
+    expect(fetchMock.mock.calls[3]?.[1]?.method).toBe('POST')
+    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toEqual({
+      action: 'archive',
+      ids: ['view-1', 'view-2'],
+    })
+  })
+
+  it('supports team preset save/default/delete helpers and preserves structured errors', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({
+        success: true,
+        data: { id: 'preset-1', kind: 'bom', name: 'BOM preset' },
+      }, { status: 201 }))
+      .mockResolvedValueOnce(jsonResponse({
+        success: true,
+        data: { id: 'preset-1', kind: 'bom', name: 'BOM preset', isDefault: true },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        success: true,
+        data: { id: 'preset-1', message: 'deleted' },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        success: false,
+        error: {
+          code: 'PLM_TEAM_PRESET_ARCHIVED',
+          message: 'Archived presets cannot be transferred',
+        },
+      }, { status: 409 }))
+
+    const client = createPlmWorkbenchClient({
+      baseUrl: 'http://localhost:8910',
+      getToken: () => 'token-preset',
+      fetch: fetchMock,
+    })
+
+    await expect(client.saveTeamFilterPreset({
+      kind: 'bom',
+      name: 'BOM preset',
+      state: { field: 'path', value: 'root/a', group: '机械' },
+    })).resolves.toEqual({
+      id: 'preset-1',
+      kind: 'bom',
+      name: 'BOM preset',
+    })
+    await expect(client.setTeamFilterPresetDefault('preset-1')).resolves.toEqual({
+      id: 'preset-1',
+      kind: 'bom',
+      name: 'BOM preset',
+      isDefault: true,
+    })
+    await expect(client.deleteTeamFilterPreset('preset-1')).resolves.toEqual({
+      id: 'preset-1',
+      message: 'deleted',
+    })
+    await expect(client.transferTeamFilterPreset('preset-1', 'user-2')).rejects.toMatchObject({
+      message: 'Archived presets cannot be transferred',
+      code: 'PLM_TEAM_PRESET_ARCHIVED',
+    })
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:8910/api/plm-workbench/filter-presets/team')
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe('POST')
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      kind: 'bom',
+      name: 'BOM preset',
+      state: { field: 'path', value: 'root/a', group: '机械' },
+    })
+    expect(fetchMock.mock.calls[1]?.[1]?.method).toBe('POST')
+    expect(fetchMock.mock.calls[2]?.[1]?.method).toBe('DELETE')
+    expect(fetchMock.mock.calls[3]?.[1]?.method).toBe('POST')
+    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toEqual({
+      ownerUserId: 'user-2',
     })
   })
 })
