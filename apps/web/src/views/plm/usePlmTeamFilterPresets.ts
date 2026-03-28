@@ -530,7 +530,12 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
         options.setMessage(`请先恢复${options.label}团队预设，再执行分享。`, true)
         return
       }
-      options.setMessage(`当前${options.label}团队预设不可分享。`, true)
+      options.setMessage(
+        canManageSelectedTeamPreset.value
+          ? `当前${options.label}团队预设不可分享。`
+          : `仅创建者可分享${options.label}团队预设。`,
+        true,
+      )
       return
     }
     if (!options.buildShareUrl || !options.copyShareUrl) {

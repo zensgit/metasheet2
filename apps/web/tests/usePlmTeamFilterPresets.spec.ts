@@ -1021,6 +1021,70 @@ describe('usePlmTeamFilterPresets', () => {
     expect(setMessage).toHaveBeenLastCalledWith('当前Where-Used团队预设不可恢复。', true)
   })
 
+  it('reports share gating precisely for readonly and explicitly unshareable team presets', async () => {
+    const buildShareUrl = vi.fn(() => 'http://example.test/plm?bomTeamPreset=preset-share-locked')
+    const copyShareUrl = vi.fn().mockResolvedValue(true)
+
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-share-readonly',
+          kind: 'bom',
+          scope: 'team',
+          name: '只读分享预设',
+          ownerUserId: 'owner-a',
+          canManage: false,
+          isDefault: false,
+          permissions: {
+            canManage: false,
+            canApply: true,
+            canShare: false,
+          },
+          state: { field: 'path', value: 'root/readonly', group: '只读组' },
+        },
+        {
+          id: 'preset-share-locked',
+          kind: 'bom',
+          scope: 'team',
+          name: '受限分享预设',
+          ownerUserId: 'owner-b',
+          canManage: false,
+          isDefault: false,
+          permissions: {
+            canManage: true,
+            canApply: true,
+            canShare: false,
+          },
+          state: { field: 'path', value: 'root/locked', group: '受限组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/readonly', group: '只读组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+      buildShareUrl,
+      copyShareUrl,
+    })
+
+    await model.refreshTeamPresets()
+
+    model.teamPresetKey.value = 'preset-share-readonly'
+    await model.shareTeamPreset()
+
+    model.teamPresetKey.value = 'preset-share-locked'
+    await model.shareTeamPreset()
+
+    expect(buildShareUrl).not.toHaveBeenCalled()
+    expect(copyShareUrl).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenNthCalledWith(1, '仅创建者可分享BOM团队预设。', true)
+    expect(setMessage).toHaveBeenNthCalledWith(2, '当前BOM团队预设不可分享。', true)
+  })
+
   it('blocks transferring archived team presets before validating the target owner input', async () => {
     vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
       items: [
