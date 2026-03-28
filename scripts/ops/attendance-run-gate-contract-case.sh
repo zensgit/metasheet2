@@ -164,12 +164,64 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
   dashboard_invalid_upsert="${case_dir}/dashboard.invalid.upsert.json"
   dashboard_invalid_locale="${case_dir}/dashboard.invalid.locale.json"
   dashboard_invalid_cleanup="${case_dir}/dashboard.invalid.cleanup.json"
+  dashboard_invalid_remote_channels="${case_dir}/dashboard.invalid.remote-channels.json"
 
   cat >"$dashboard_valid" <<'EOF'
 {
   "p0Status": "pass",
   "overallStatus": "pass",
   "gates": {
+    "preflight": {
+      "completed": {
+        "id": 200010,
+        "conclusion": "success"
+      },
+      "signalChannels": {
+        "latestScheduledCompleted": {
+          "id": 199910,
+          "conclusion": "failure"
+        },
+        "latestManualCompleted": {
+          "id": 200010,
+          "conclusion": "success"
+        },
+        "manualRecovery": true
+      }
+    },
+    "metrics": {
+      "completed": {
+        "id": 200011,
+        "conclusion": "success"
+      },
+      "signalChannels": {
+        "latestScheduledCompleted": {
+          "id": 199911,
+          "conclusion": "failure"
+        },
+        "latestManualCompleted": {
+          "id": 200011,
+          "conclusion": "success"
+        },
+        "manualRecovery": true
+      }
+    },
+    "storage": {
+      "completed": {
+        "id": 200012,
+        "conclusion": "success"
+      },
+      "signalChannels": {
+        "latestScheduledCompleted": {
+          "id": 199912,
+          "conclusion": "failure"
+        },
+        "latestManualCompleted": {
+          "id": 200012,
+          "conclusion": "success"
+        },
+        "manualRecovery": true
+      }
+    },
     "strict": {
       "completed": {
         "id": 200001,
@@ -198,6 +250,17 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
       "completed": {
         "id": 200005,
         "conclusion": "success"
+      },
+      "signalChannels": {
+        "latestScheduledCompleted": {
+          "id": 199905,
+          "conclusion": "success"
+        },
+        "latestManualCompleted": {
+          "id": 199805,
+          "conclusion": "success"
+        },
+        "manualRecovery": false
       }
     },
     "localeZh": {
@@ -212,6 +275,39 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
     "strict": {
       "summaryPresent": true,
       "summaryValid": true
+    },
+    "preflight": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 200010,
+      "signalBranch": "main",
+      "latestScheduledRunId": 199910,
+      "latestScheduledConclusion": "failure",
+      "latestManualRunId": 200010,
+      "latestManualConclusion": "success",
+      "manualRecovery": "true"
+    },
+    "metrics": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 200011,
+      "signalBranch": "main",
+      "latestScheduledRunId": 199911,
+      "latestScheduledConclusion": "failure",
+      "latestManualRunId": 200011,
+      "latestManualConclusion": "success",
+      "manualRecovery": "true"
+    },
+    "storage": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 200012,
+      "signalBranch": "main",
+      "latestScheduledRunId": 199912,
+      "latestScheduledConclusion": "failure",
+      "latestManualRunId": 200012,
+      "latestManualConclusion": "success",
+      "manualRecovery": "true"
     },
     "perf": {
       "status": "PASS",
@@ -259,7 +355,13 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
       "status": "PASS",
       "reasonCode": null,
       "runId": 200005,
-      "staleCount": "0"
+      "staleCount": "0",
+      "signalBranch": "main",
+      "latestScheduledRunId": 199905,
+      "latestScheduledConclusion": "success",
+      "latestManualRunId": 199805,
+      "latestManualConclusion": "success",
+      "manualRecovery": "false"
     },
     "localeZh": {
       "status": "PASS",
@@ -284,6 +386,18 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
   }
 }
 EOF
+
+  cp "$dashboard_valid" "$dashboard_invalid_remote_channels"
+  python3 - <<'PY' "$dashboard_invalid_remote_channels"
+import json, sys
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8') as f:
+    data = json.load(f)
+data['gateFlat']['preflight']['manualRecovery'] = 'maybe'
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+PY
 
   cat >"$dashboard_invalid_locale_legacy" <<'EOF'
 {
@@ -1095,6 +1209,8 @@ EOF
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_locale"
   expect_fail "dashboard cleanup gateFlat contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_cleanup"
+  expect_fail "dashboard remote signal channel contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_remote_channels"
 
   info "OK: dashboard contract case passed"
   exit 0

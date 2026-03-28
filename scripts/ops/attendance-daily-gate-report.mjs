@@ -15,6 +15,8 @@ import fs from 'fs/promises'
 import path from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+
+import { buildSignalChannels } from './attendance-daily-gate-signal-channels.mjs'
 import { fileURLToPath } from 'url'
 
 const token = String(process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '').trim()
@@ -780,6 +782,14 @@ function formatRun(run) {
   }
 }
 
+function formatSignalChannelCell(run) {
+  if (!run?.id) return '-'
+  const conclusion = String(run.conclusion || 'unknown').trim() || 'unknown'
+  const updatedAt = String(run.updatedAt || '').trim() || 'unknown-time'
+  if (run.url) return `[#${run.id}](${run.url}) ${conclusion} @ ${updatedAt}`
+  return `#${run.id} ${conclusion} @ ${updatedAt}`
+}
+
 function isPerfGateName(name) {
   return name === 'Perf Baseline' || name === 'Perf Long Run' || name === 'Perf High Scale'
 }
@@ -996,6 +1006,19 @@ function renderMarkdown({
     const status = gate.ok ? 'PASS' : 'FAIL'
     const link = completed.url ? `[run](${completed.url})` : '-'
     lines.push(`| ${gate.name} | ${gate.severity} | ${runId} | ${conclusion} | ${reason} | ${updatedAt} | ${status} | ${link} |`)
+  }
+
+  lines.push('')
+  lines.push('## Remote Signal Channels')
+  lines.push('')
+  lines.push('| Gate | Latest Scheduled Completed | Latest Manual Replay | Recovery Note |')
+  lines.push('|---|---|---|---|')
+  for (const gate of [preflightGate, metricsGate, storageGate, cleanupGate]) {
+    const channels = gate?.signalChannels || {}
+    const latestScheduled = formatSignalChannelCell(channels.latestScheduledCompleted)
+    const latestManual = formatSignalChannelCell(channels.latestManualCompleted)
+    const recovery = channels.manualRecovery ? '`MANUAL_RECOVERY_AFTER_SCHEDULED_FAILURE`' : '-'
+    lines.push(`| ${gate.name} | ${latestScheduled} | ${latestManual} | ${recovery} |`)
   }
 
   lines.push('')
@@ -1766,6 +1789,23 @@ async function run() {
     fetchError: contractRuns.error,
   })
 
+  preflightGate.signalChannels = buildSignalChannels({
+    list: preflightList,
+    excludeConclusions: completedRunExcludeConclusions,
+  })
+  metricsGate.signalChannels = buildSignalChannels({
+    list: metricsList,
+    excludeConclusions: completedRunExcludeConclusions,
+  })
+  storageGate.signalChannels = buildSignalChannels({
+    list: storageList,
+    excludeConclusions: completedRunExcludeConclusions,
+  })
+  cleanupGate.signalChannels = buildSignalChannels({
+    list: cleanupList,
+    excludeConclusions: completedRunExcludeConclusions,
+  })
+
   const hasRunFailed = (gate) => Array.isArray(gate?.findings) && gate.findings.some((f) => f && f.code === 'RUN_FAILED')
 
   // Best-effort: enrich gate metadata from workflow artifacts.
@@ -2204,6 +2244,11 @@ async function run() {
 
     if (gate.name === 'Remote Preflight' || gate.name === 'Host Metrics' || gate.name === 'Storage Health' || gate.name === 'Upload Cleanup') {
       flat.signalBranch = gate?.sourceBranch ?? null
+      flat.latestScheduledRunId = gate?.signalChannels?.latestScheduledCompleted?.id ?? null
+      flat.latestScheduledConclusion = gate?.signalChannels?.latestScheduledCompleted?.conclusion ?? null
+      flat.latestManualRunId = gate?.signalChannels?.latestManualCompleted?.id ?? null
+      flat.latestManualConclusion = gate?.signalChannels?.latestManualCompleted?.conclusion ?? null
+      flat.manualRecovery = gate?.signalChannels?.manualRecovery === true ? 'true' : 'false'
     }
 
     return flat
