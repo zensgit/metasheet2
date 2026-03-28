@@ -75,6 +75,14 @@ describe('plmWorkbenchClient', () => {
             state: { field: 'path', value: 'root/a', group: '机械' },
           },
         ],
+        metadata: {
+          total: 3,
+          activeTotal: 2,
+          archivedTotal: 1,
+          tenantId: 'tenant-a',
+          kind: 'bom',
+          defaultPresetId: 'preset-1',
+        },
       }),
     })
 
@@ -96,6 +104,14 @@ describe('plmWorkbenchClient', () => {
       },
       isDefault: true,
       state: { field: 'path', value: 'root/a', group: '机械' },
+    })
+    expect(result.metadata).toEqual({
+      total: 3,
+      activeTotal: 2,
+      archivedTotal: 1,
+      tenantId: 'tenant-a',
+      kind: 'bom',
+      defaultPresetId: 'preset-1',
     })
   })
 
@@ -465,6 +481,14 @@ describe('plmWorkbenchClient', () => {
               },
             },
           ],
+          metadata: {
+            total: 4,
+            activeTotal: 3,
+            archivedTotal: 1,
+            tenantId: 'tenant-a',
+            kind: 'documents',
+            defaultViewId: 'view-1',
+          },
         }),
       })
       .mockResolvedValueOnce({
@@ -558,6 +582,14 @@ describe('plmWorkbenchClient', () => {
       kind: 'documents',
       isDefault: true,
       lastDefaultSetAt: '2026-03-19T10:00:00.000Z',
+    })
+    expect(listed.metadata).toEqual({
+      total: 4,
+      activeTotal: 3,
+      archivedTotal: 1,
+      tenantId: 'tenant-a',
+      kind: 'documents',
+      defaultViewId: 'view-1',
     })
     expect(saved).toMatchObject({
       id: 'view-2',

@@ -141,6 +141,26 @@ export interface PlmWorkbenchBatchResult<T = Record<string, unknown>> {
         processedKinds?: string[];
     };
 }
+export interface PlmTeamViewListMetadata {
+    total?: number;
+    activeTotal?: number;
+    archivedTotal?: number;
+    tenantId?: string;
+    kind?: PlmWorkbenchTeamViewKind;
+    defaultViewId?: string | null;
+}
+export interface PlmTeamFilterPresetListMetadata {
+    total?: number;
+    activeTotal?: number;
+    archivedTotal?: number;
+    tenantId?: string;
+    kind?: PlmTeamFilterPresetKind;
+    defaultPresetId?: string | null;
+}
+export interface PlmDirectListResponse<T = Record<string, unknown>, M = Record<string, unknown>> {
+    items: T[];
+    metadata?: M;
+}
 export interface SavePlmWorkbenchTeamViewParams<TState = unknown> {
     kind: PlmWorkbenchTeamViewKind;
     name: string;
@@ -196,7 +216,7 @@ export declare function createPlmFederationClient(clientOrOptions: ClientOptions
     updateCadReview<T = Record<string, unknown>>(params: UpdatePlmCadPayload): Promise<T>;
 };
 export declare function createPlmWorkbenchClient(clientOrOptions: ClientOptions | RequestClient): {
-    listTeamViews<T = Record<string, unknown>>(kind: PlmWorkbenchTeamViewKind): Promise<T[]>;
+    listTeamViews<T = Record<string, unknown>>(kind: PlmWorkbenchTeamViewKind): Promise<PlmDirectListResponse<T, PlmTeamViewListMetadata>>;
     saveTeamView<T = Record<string, unknown>, TState = unknown>(params: SavePlmWorkbenchTeamViewParams<TState>): Promise<T>;
     renameTeamView<T = Record<string, unknown>>(id: string, name: string): Promise<T>;
     deleteTeamView<T = Record<string, unknown>>(id: string): Promise<T>;
@@ -207,7 +227,7 @@ export declare function createPlmWorkbenchClient(clientOrOptions: ClientOptions 
     archiveTeamView<T = Record<string, unknown>>(id: string): Promise<T>;
     restoreTeamView<T = Record<string, unknown>>(id: string): Promise<T>;
     batchTeamViews<T = Record<string, unknown>>(action: PlmWorkbenchBatchAction, ids: string[]): Promise<PlmWorkbenchBatchResult<T>>;
-    listTeamFilterPresets<T = Record<string, unknown>>(kind: PlmTeamFilterPresetKind): Promise<T[]>;
+    listTeamFilterPresets<T = Record<string, unknown>>(kind: PlmTeamFilterPresetKind): Promise<PlmDirectListResponse<T, PlmTeamFilterPresetListMetadata>>;
     saveTeamFilterPreset<T = Record<string, unknown>, TState = unknown>(params: SavePlmTeamFilterPresetParams<TState>): Promise<T>;
     renameTeamFilterPreset<T = Record<string, unknown>>(id: string, name: string): Promise<T>;
     deleteTeamFilterPreset<T = Record<string, unknown>>(id: string): Promise<T>;

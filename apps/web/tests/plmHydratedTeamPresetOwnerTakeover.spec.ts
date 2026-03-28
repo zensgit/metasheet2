@@ -12,12 +12,14 @@ describe('plmHydratedTeamPresetOwnerTakeover', () => {
       localNameDraft: 'Rename A',
       localGroupDraft: 'A组',
       localOwnerUserIdDraft: 'owner-a',
+      localSelectionIds: ['team-preset-a', 'team-preset-b'],
     })).toEqual({
       shouldClearLocalSelector: true,
       nextSelectorId: '',
       nextNameDraft: '',
       nextGroupDraft: '',
       nextOwnerUserIdDraft: '',
+      nextSelectionIds: [],
     })
   })
 
@@ -28,12 +30,14 @@ describe('plmHydratedTeamPresetOwnerTakeover', () => {
       localNameDraft: 'Rename A',
       localGroupDraft: 'A组',
       localOwnerUserIdDraft: 'owner-a',
+      localSelectionIds: ['team-preset-a', 'team-preset-b'],
     })).toEqual({
-      shouldClearLocalSelector: false,
+      shouldClearLocalSelector: true,
       nextSelectorId: 'team-preset-a',
       nextNameDraft: 'Rename A',
       nextGroupDraft: 'A组',
       nextOwnerUserIdDraft: 'owner-a',
+      nextSelectionIds: ['team-preset-a'],
     })
   })
 
@@ -44,12 +48,14 @@ describe('plmHydratedTeamPresetOwnerTakeover', () => {
       localNameDraft: 'Rename A',
       localGroupDraft: 'A组',
       localOwnerUserIdDraft: 'owner-a',
+      localSelectionIds: ['team-preset-a'],
     })).toEqual({
       shouldClearLocalSelector: false,
       nextSelectorId: 'team-preset-a',
       nextNameDraft: 'Rename A',
       nextGroupDraft: 'A组',
       nextOwnerUserIdDraft: 'owner-a',
+      nextSelectionIds: ['team-preset-a'],
     })
   })
 
@@ -60,12 +66,14 @@ describe('plmHydratedTeamPresetOwnerTakeover', () => {
       localNameDraft: 'Rename A',
       localGroupDraft: 'A组',
       localOwnerUserIdDraft: 'owner-a',
+      localSelectionIds: ['team-preset-a', 'team-preset-b'],
     })).toEqual({
       shouldClearLocalSelector: true,
       nextSelectorId: '',
       nextNameDraft: '',
       nextGroupDraft: '',
       nextOwnerUserIdDraft: '',
+      nextSelectionIds: ['team-preset-b'],
     })
   })
 
@@ -76,12 +84,50 @@ describe('plmHydratedTeamPresetOwnerTakeover', () => {
       localNameDraft: 'Rename B',
       localGroupDraft: 'B组',
       localOwnerUserIdDraft: 'owner-b',
+      localSelectionIds: ['team-preset-a', 'team-preset-b'],
     })).toEqual({
-      shouldClearLocalSelector: false,
+      shouldClearLocalSelector: true,
       nextSelectorId: 'team-preset-b',
       nextNameDraft: 'Rename B',
       nextGroupDraft: 'B组',
       nextOwnerUserIdDraft: 'owner-b',
+      nextSelectionIds: ['team-preset-b'],
+    })
+  })
+
+  it('preserves the hydrated owner in batch selection when selector already targets it', () => {
+    expect(resolvePlmHydratedTeamPresetOwnerTakeover({
+      routeOwnerId: 'team-preset-b',
+      localSelectorId: 'team-preset-b',
+      localNameDraft: 'Rename B',
+      localGroupDraft: 'B组',
+      localOwnerUserIdDraft: 'owner-b',
+      localSelectionIds: ['team-preset-a', 'team-preset-b'],
+    })).toEqual({
+      shouldClearLocalSelector: true,
+      nextSelectorId: 'team-preset-b',
+      nextNameDraft: 'Rename B',
+      nextGroupDraft: 'B组',
+      nextOwnerUserIdDraft: 'owner-b',
+      nextSelectionIds: ['team-preset-b'],
+    })
+  })
+
+  it('preserves pending local selection when a different hydrated owner is removed', () => {
+    expect(resolvePlmHydratedRemovedTeamPresetOwner({
+      removedRouteOwnerId: 'team-preset-a',
+      localSelectorId: 'team-preset-b',
+      localNameDraft: 'Rename B',
+      localGroupDraft: 'B组',
+      localOwnerUserIdDraft: 'owner-b',
+      localSelectionIds: ['team-preset-a', 'team-preset-b'],
+    })).toEqual({
+      shouldClearLocalSelector: true,
+      nextSelectorId: 'team-preset-b',
+      nextNameDraft: 'Rename B',
+      nextGroupDraft: 'B组',
+      nextOwnerUserIdDraft: 'owner-b',
+      nextSelectionIds: ['team-preset-b'],
     })
   })
 })

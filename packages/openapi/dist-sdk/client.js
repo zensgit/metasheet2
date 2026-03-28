@@ -341,7 +341,11 @@ export function createPlmWorkbenchClient(clientOrOptions) {
     const client = toRequestClient(clientOrOptions);
     return {
         async listTeamViews(kind) {
-            return requestDirectApi(client, 'GET', withQuery('/api/plm-workbench/views/team', { kind }), 'Failed to load PLM team views');
+            const response = await requestDirectEnvelope(client, 'GET', withQuery('/api/plm-workbench/views/team', { kind }), 'Failed to load PLM team views');
+            return {
+                items: Array.isArray(response.data) ? response.data : [],
+                metadata: response.metadata,
+            };
         },
         async saveTeamView(params) {
             return requestDirectApi(client, 'POST', '/api/plm-workbench/views/team', 'Failed to save PLM team view', params);
@@ -378,7 +382,11 @@ export function createPlmWorkbenchClient(clientOrOptions) {
             };
         },
         async listTeamFilterPresets(kind) {
-            return requestDirectApi(client, 'GET', withQuery('/api/plm-workbench/filter-presets/team', { kind }), 'Failed to load PLM team filter presets');
+            const response = await requestDirectEnvelope(client, 'GET', withQuery('/api/plm-workbench/filter-presets/team', { kind }), 'Failed to load PLM team filter presets');
+            return {
+                items: Array.isArray(response.data) ? response.data : [],
+                metadata: response.metadata,
+            };
         },
         async saveTeamFilterPreset(params) {
             return requestDirectApi(client, 'POST', '/api/plm-workbench/filter-presets/team', 'Failed to save PLM team filter preset', params);

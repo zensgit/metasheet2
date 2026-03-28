@@ -295,6 +295,14 @@ describe('createPlmWorkbenchClient', () => {
       .mockResolvedValueOnce(jsonResponse({
         success: true,
         data: [{ id: 'view-1', kind: 'documents', name: 'Docs' }],
+        metadata: {
+          total: 3,
+          activeTotal: 2,
+          archivedTotal: 1,
+          tenantId: 'tenant-a',
+          kind: 'documents',
+          defaultViewId: 'view-1',
+        },
       }))
       .mockResolvedValueOnce(jsonResponse({
         success: true,
@@ -326,9 +334,17 @@ describe('createPlmWorkbenchClient', () => {
       fetch: fetchMock,
     })
 
-    await expect(client.listTeamViews('documents')).resolves.toEqual([
-      { id: 'view-1', kind: 'documents', name: 'Docs' },
-    ])
+    await expect(client.listTeamViews('documents')).resolves.toEqual({
+      items: [{ id: 'view-1', kind: 'documents', name: 'Docs' }],
+      metadata: {
+        total: 3,
+        activeTotal: 2,
+        archivedTotal: 1,
+        tenantId: 'tenant-a',
+        kind: 'documents',
+        defaultViewId: 'view-1',
+      },
+    })
     await expect(client.renameTeamView('view-1', 'Docs updated')).resolves.toEqual({
       id: 'view-1',
       kind: 'documents',
@@ -432,6 +448,40 @@ describe('createPlmWorkbenchClient', () => {
     expect(fetchMock.mock.calls[3]?.[1]?.method).toBe('POST')
     expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toEqual({
       ownerUserId: 'user-2',
+    })
+  })
+
+  it('supports team preset list metadata helpers', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({
+        success: true,
+        data: [{ id: 'preset-1', kind: 'bom', name: 'BOM preset' }],
+        metadata: {
+          total: 4,
+          activeTotal: 3,
+          archivedTotal: 1,
+          tenantId: 'tenant-a',
+          kind: 'bom',
+          defaultPresetId: 'preset-1',
+        },
+      }))
+
+    const client = createPlmWorkbenchClient({
+      baseUrl: 'http://localhost:8910',
+      getToken: () => 'token-preset',
+      fetch: fetchMock,
+    })
+
+    await expect(client.listTeamFilterPresets('bom')).resolves.toEqual({
+      items: [{ id: 'preset-1', kind: 'bom', name: 'BOM preset' }],
+      metadata: {
+        total: 4,
+        activeTotal: 3,
+        archivedTotal: 1,
+        tenantId: 'tenant-a',
+        kind: 'bom',
+        defaultPresetId: 'preset-1',
+      },
     })
   })
 

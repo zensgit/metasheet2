@@ -189,6 +189,29 @@ export interface PlmWorkbenchBatchResult<T = Record<string, unknown>> {
   }
 }
 
+export interface PlmTeamViewListMetadata {
+  total?: number
+  activeTotal?: number
+  archivedTotal?: number
+  tenantId?: string
+  kind?: PlmWorkbenchTeamViewKind
+  defaultViewId?: string | null
+}
+
+export interface PlmTeamFilterPresetListMetadata {
+  total?: number
+  activeTotal?: number
+  archivedTotal?: number
+  tenantId?: string
+  kind?: PlmTeamFilterPresetKind
+  defaultPresetId?: string | null
+}
+
+export interface PlmDirectListResponse<T = Record<string, unknown>, M = Record<string, unknown>> {
+  items: T[]
+  metadata?: M
+}
+
 export interface SavePlmWorkbenchTeamViewParams<TState = unknown> {
   kind: PlmWorkbenchTeamViewKind
   name: string
@@ -790,13 +813,17 @@ export function createPlmWorkbenchClient(clientOrOptions: ClientOptions | Reques
   return {
     async listTeamViews<T = Record<string, unknown>>(
       kind: PlmWorkbenchTeamViewKind,
-    ): Promise<T[]> {
-      return requestDirectApi<T[]>(
+    ): Promise<PlmDirectListResponse<T, PlmTeamViewListMetadata>> {
+      const response = await requestDirectEnvelope<T[], PlmTeamViewListMetadata>(
         client,
         'GET',
         withQuery('/api/plm-workbench/views/team', { kind }),
         'Failed to load PLM team views',
       )
+      return {
+        items: Array.isArray(response.data) ? response.data : [],
+        metadata: response.metadata,
+      }
     },
 
     async saveTeamView<T = Record<string, unknown>, TState = unknown>(
@@ -917,13 +944,17 @@ export function createPlmWorkbenchClient(clientOrOptions: ClientOptions | Reques
 
     async listTeamFilterPresets<T = Record<string, unknown>>(
       kind: PlmTeamFilterPresetKind,
-    ): Promise<T[]> {
-      return requestDirectApi<T[]>(
+    ): Promise<PlmDirectListResponse<T, PlmTeamFilterPresetListMetadata>> {
+      const response = await requestDirectEnvelope<T[], PlmTeamFilterPresetListMetadata>(
         client,
         'GET',
         withQuery('/api/plm-workbench/filter-presets/team', { kind }),
         'Failed to load PLM team filter presets',
       )
+      return {
+        items: Array.isArray(response.data) ? response.data : [],
+        metadata: response.metadata,
+      }
     },
 
     async saveTeamFilterPreset<T = Record<string, unknown>, TState = unknown>(

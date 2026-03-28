@@ -5611,7 +5611,7 @@ function applyHydratedTeamPresetOwnerTakeover(options: {
   teamPresetName: { value: string }
   teamPresetGroup: { value: string }
   teamPresetOwnerUserId: { value: string }
-  clearTeamPresetSelection: () => void
+  teamPresetSelection: { value: string[] }
 }) {
   const takeover = resolvePlmHydratedTeamPresetOwnerTakeover({
     routeOwnerId: options.routeOwnerId,
@@ -5619,13 +5619,14 @@ function applyHydratedTeamPresetOwnerTakeover(options: {
     localNameDraft: options.teamPresetName.value,
     localGroupDraft: options.teamPresetGroup.value,
     localOwnerUserIdDraft: options.teamPresetOwnerUserId.value,
+    localSelectionIds: options.teamPresetSelection.value,
   })
   if (!takeover.shouldClearLocalSelector) return
   options.teamPresetKey.value = takeover.nextSelectorId
   options.teamPresetName.value = takeover.nextNameDraft
   options.teamPresetGroup.value = takeover.nextGroupDraft
   options.teamPresetOwnerUserId.value = takeover.nextOwnerUserIdDraft
-  options.clearTeamPresetSelection()
+  options.teamPresetSelection.value = takeover.nextSelectionIds
 }
 
 function applyHydratedRemovedTeamPresetOwner(options: {
@@ -5635,7 +5636,7 @@ function applyHydratedRemovedTeamPresetOwner(options: {
   teamPresetName: { value: string }
   teamPresetGroup: { value: string }
   teamPresetOwnerUserId: { value: string }
-  clearTeamPresetSelection: () => void
+  teamPresetSelection: { value: string[] }
 }) {
   const takeover = resolvePlmHydratedRemovedTeamPresetOwner({
     removedRouteOwnerId: options.removedRouteOwnerId,
@@ -5643,6 +5644,7 @@ function applyHydratedRemovedTeamPresetOwner(options: {
     localNameDraft: options.teamPresetName.value,
     localGroupDraft: options.teamPresetGroup.value,
     localOwnerUserIdDraft: options.teamPresetOwnerUserId.value,
+    localSelectionIds: options.teamPresetSelection.value,
   })
   options.teamPresetQuery.value = ''
   if (!takeover.shouldClearLocalSelector) return
@@ -5650,7 +5652,7 @@ function applyHydratedRemovedTeamPresetOwner(options: {
   options.teamPresetName.value = takeover.nextNameDraft
   options.teamPresetGroup.value = takeover.nextGroupDraft
   options.teamPresetOwnerUserId.value = takeover.nextOwnerUserIdDraft
-  options.clearTeamPresetSelection()
+  options.teamPresetSelection.value = takeover.nextSelectionIds
 }
 
 async function applyQueryState() {
@@ -5975,7 +5977,7 @@ async function applyQueryState() {
         teamPresetName: whereUsedTeamPresetName,
         teamPresetGroup: whereUsedTeamPresetGroup,
         teamPresetOwnerUserId: whereUsedTeamPresetOwnerUserId,
-        clearTeamPresetSelection: clearWhereUsedTeamPresetSelection,
+        teamPresetSelection: whereUsedTeamPresetSelection,
       })
       whereUsedTeamPresetQuery.value = whereUsedTeamPresetParam
     } else if (whereUsedTeamPresetQuery.value) {
@@ -5986,7 +5988,7 @@ async function applyQueryState() {
         teamPresetName: whereUsedTeamPresetName,
         teamPresetGroup: whereUsedTeamPresetGroup,
         teamPresetOwnerUserId: whereUsedTeamPresetOwnerUserId,
-        clearTeamPresetSelection: clearWhereUsedTeamPresetSelection,
+        teamPresetSelection: whereUsedTeamPresetSelection,
       })
     }
     const whereUsedFilterParam = readQueryParam('whereUsedFilter')
@@ -6055,7 +6057,7 @@ async function applyQueryState() {
         teamPresetName: bomTeamPresetName,
         teamPresetGroup: bomTeamPresetGroup,
         teamPresetOwnerUserId: bomTeamPresetOwnerUserId,
-        clearTeamPresetSelection: clearBomTeamPresetSelection,
+        teamPresetSelection: bomTeamPresetSelection,
       })
       bomTeamPresetQuery.value = bomTeamPresetParam
     } else if (bomTeamPresetQuery.value) {
@@ -6066,7 +6068,7 @@ async function applyQueryState() {
         teamPresetName: bomTeamPresetName,
         teamPresetGroup: bomTeamPresetGroup,
         teamPresetOwnerUserId: bomTeamPresetOwnerUserId,
-        clearTeamPresetSelection: clearBomTeamPresetSelection,
+        teamPresetSelection: bomTeamPresetSelection,
       })
     }
     const bomFilterParam = readQueryParam('bomFilter')

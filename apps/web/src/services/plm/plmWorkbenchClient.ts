@@ -309,8 +309,28 @@ const rawPlmWorkbenchClient = createPlmWorkbenchClient(plmWorkbenchRequestClient
 
 export async function listPlmTeamFilterPresets(kind: PlmTeamFilterPresetKind) {
   const payload = await rawPlmWorkbenchClient.listTeamFilterPresets<unknown>(kind)
-  const items = Array.isArray(payload) ? payload.map(mapTeamPreset).filter((item) => item.id && item.name) : []
-  return { items }
+  const items = payload.items.map(mapTeamPreset).filter((item) => item.id && item.name)
+  return {
+    items,
+    metadata: payload.metadata && typeof payload.metadata === 'object'
+      ? {
+        total: typeof payload.metadata.total === 'number' ? payload.metadata.total : undefined,
+        activeTotal: typeof payload.metadata.activeTotal === 'number' ? payload.metadata.activeTotal : undefined,
+        archivedTotal: typeof payload.metadata.archivedTotal === 'number' ? payload.metadata.archivedTotal : undefined,
+        tenantId: typeof payload.metadata.tenantId === 'string' ? payload.metadata.tenantId : undefined,
+        kind:
+          payload.metadata.kind === 'bom'
+          || payload.metadata.kind === 'where-used'
+            ? payload.metadata.kind
+            : undefined,
+        defaultPresetId:
+          payload.metadata.defaultPresetId === null
+          || typeof payload.metadata.defaultPresetId === 'string'
+            ? payload.metadata.defaultPresetId
+            : undefined,
+      }
+      : undefined,
+  }
 }
 
 export async function savePlmTeamFilterPreset(
@@ -430,8 +450,31 @@ export async function batchPlmTeamFilterPresets(
 
 export async function listPlmWorkbenchTeamViews<Kind extends PlmWorkbenchTeamViewKind>(kind: Kind) {
   const payload = await rawPlmWorkbenchClient.listTeamViews<unknown>(kind)
-  const items = Array.isArray(payload) ? payload.map((item) => mapTeamView(kind, item)).filter((item) => item.id && item.name) : []
-  return { items }
+  const items = payload.items.map((item) => mapTeamView(kind, item)).filter((item) => item.id && item.name)
+  return {
+    items,
+    metadata: payload.metadata && typeof payload.metadata === 'object'
+      ? {
+        total: typeof payload.metadata.total === 'number' ? payload.metadata.total : undefined,
+        activeTotal: typeof payload.metadata.activeTotal === 'number' ? payload.metadata.activeTotal : undefined,
+        archivedTotal: typeof payload.metadata.archivedTotal === 'number' ? payload.metadata.archivedTotal : undefined,
+        tenantId: typeof payload.metadata.tenantId === 'string' ? payload.metadata.tenantId : undefined,
+        kind:
+          payload.metadata.kind === 'documents'
+          || payload.metadata.kind === 'cad'
+          || payload.metadata.kind === 'approvals'
+          || payload.metadata.kind === 'workbench'
+          || payload.metadata.kind === 'audit'
+            ? payload.metadata.kind
+            : undefined,
+        defaultViewId:
+          payload.metadata.defaultViewId === null
+          || typeof payload.metadata.defaultViewId === 'string'
+            ? payload.metadata.defaultViewId
+            : undefined,
+      }
+      : undefined,
+  }
 }
 
 export async function savePlmWorkbenchTeamView<Kind extends PlmWorkbenchTeamViewKind>(
