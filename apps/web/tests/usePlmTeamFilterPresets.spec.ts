@@ -1631,6 +1631,66 @@ describe('usePlmTeamFilterPresets', () => {
     expect(setMessage).toHaveBeenCalledWith('请先应用BOM团队预设，再执行管理操作。', true)
   })
 
+  it('surfaces no-op feedback for default team preset toggles', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-default-current',
+          kind: 'bom',
+          scope: 'team',
+          name: '当前默认预设',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isDefault: true,
+          permissions: {
+            canApply: true,
+            canManage: true,
+            canSetDefault: false,
+            canClearDefault: true,
+          },
+          state: { field: 'path', value: 'root/default', group: '默认组' },
+        },
+        {
+          id: 'preset-default-other',
+          kind: 'bom',
+          scope: 'team',
+          name: '普通预设',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canApply: true,
+            canManage: true,
+            canSetDefault: true,
+            canClearDefault: false,
+          },
+          state: { field: 'path', value: 'root/other', group: '普通组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'all', value: '' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-default-current'
+    await model.setTeamPresetDefault()
+
+    model.teamPresetKey.value = 'preset-default-other'
+    await model.clearTeamPresetDefault()
+
+    expect(setPlmTeamFilterPresetDefault).not.toHaveBeenCalled()
+    expect(clearPlmTeamFilterPresetDefault).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenNthCalledWith(1, 'BOM团队预设已设为默认。')
+    expect(setMessage).toHaveBeenNthCalledWith(2, '当前BOM团队预设尚未设为默认。')
+  })
+
   it('requires a selected team preset before delete', async () => {
     const model = usePlmTeamFilterPresets({
       kind: 'bom',

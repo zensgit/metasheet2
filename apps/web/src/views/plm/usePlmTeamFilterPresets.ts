@@ -756,6 +756,10 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
       options.setMessage(`仅创建者可设置${options.label}默认团队预设。`, true)
       return null
     }
+    if (preset.isDefault) {
+      options.setMessage(`${options.label}团队预设已设为默认。`)
+      return null
+    }
     if (!canSetTeamPresetDefault.value) {
       if (preset.isArchived) {
         options.setMessage(`请先恢复${options.label}团队预设，再设为默认。`, true)
@@ -795,6 +799,10 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     }
     if (!canManageSelectedTeamPreset.value) {
       options.setMessage(`仅创建者可取消${options.label}默认团队预设。`, true)
+      return null
+    }
+    if (!preset.isDefault) {
+      options.setMessage(`当前${options.label}团队预设尚未设为默认。`)
       return null
     }
     if (!canClearTeamPresetDefault.value) {

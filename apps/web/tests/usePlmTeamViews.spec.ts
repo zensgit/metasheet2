@@ -1555,6 +1555,76 @@ describe('usePlmTeamViews', () => {
     })
   })
 
+  it('surfaces no-op feedback for default team view toggles', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-default-current',
+          kind: 'workbench',
+          scope: 'team',
+          name: '当前默认视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: true,
+          permissions: {
+            canManage: true,
+            canApply: true,
+            canSetDefault: false,
+            canClearDefault: true,
+          },
+          state: {
+            query: {
+              documentFilter: 'default-doc',
+            },
+          },
+        },
+        {
+          id: 'workbench-default-other',
+          kind: 'workbench',
+          scope: 'team',
+          name: '普通视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canManage: true,
+            canApply: true,
+            canSetDefault: true,
+            canClearDefault: false,
+          },
+          state: {
+            query: {
+              documentFilter: 'other-doc',
+            },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-default-current'
+    await model.setTeamViewDefault()
+
+    model.teamViewKey.value = 'workbench-default-other'
+    await model.clearTeamViewDefault()
+
+    expect(setPlmWorkbenchTeamViewDefault).not.toHaveBeenCalled()
+    expect(clearPlmWorkbenchTeamViewDefault).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenNthCalledWith(1, '工作台团队视角已设为默认。')
+    expect(setMessage).toHaveBeenNthCalledWith(2, '当前工作台团队视角尚未设为默认。')
+  })
+
   it('clears stale batch selections before saving a new workbench team view', async () => {
     const requestedViewId = ref('workbench-current')
     const syncRequestedViewId = vi.fn((value?: string) => {

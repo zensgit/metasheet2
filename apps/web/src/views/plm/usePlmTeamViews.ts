@@ -621,6 +621,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`请先恢复${options.label}团队视角，再设为默认。`, true)
       return
     }
+    if (view.isDefault) {
+      options.setMessage(`${options.label}团队视角已设为默认。`)
+      return
+    }
     if (!canSetTeamViewDefault.value) {
       options.setMessage(`当前${options.label}团队视角不可设为默认。`, true)
       return
@@ -712,6 +716,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     }
     if (view.isArchived) {
       options.setMessage(`请先恢复${options.label}团队视角，再取消默认。`, true)
+      return
+    }
+    if (!view.isDefault) {
+      options.setMessage(`当前${options.label}团队视角尚未设为默认。`)
       return
     }
     if (!canClearTeamViewDefault.value) {
