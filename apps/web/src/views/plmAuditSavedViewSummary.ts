@@ -28,6 +28,11 @@ export type PlmAuditSavedViewContextBadge = {
   } | null
 }
 
+export type PlmAuditSavedViewContextActionFeedback = {
+  kind: 'error'
+  message: string
+}
+
 function isSameSceneContextTarget(
   left: Pick<PlmAuditRouteState, 'q' | 'sceneId' | 'sceneName' | 'sceneOwnerUserId'>,
   right: Pick<PlmAuditRouteState, 'q' | 'sceneId' | 'sceneName' | 'sceneOwnerUserId'>,
@@ -88,6 +93,27 @@ export function buildPlmAuditSavedViewContextBadge(
     value: token.value,
     active: token.active,
     quickAction,
+  }
+}
+
+export function resolvePlmAuditSavedViewContextActionFeedback(options: {
+  badge: PlmAuditSavedViewContextBadge | null | undefined
+  tr: (en: string, zh: string) => string
+}): PlmAuditSavedViewContextActionFeedback | null {
+  const badge = options.badge || null
+  const { tr } = options
+  if (!badge?.quickAction) {
+    return {
+      kind: 'error',
+      message: tr('Current saved view context action is unavailable.', '当前保存视图上下文动作不可用。'),
+    }
+  }
+  if (!badge.quickAction.disabled) {
+    return null
+  }
+  return {
+    kind: 'error',
+    message: badge.quickAction.hint,
   }
 }
 

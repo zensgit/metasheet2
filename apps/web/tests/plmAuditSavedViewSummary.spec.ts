@@ -3,6 +3,7 @@ import type { PlmAuditRouteState } from '../src/views/plmAuditQueryState'
 import {
   buildPlmAuditSavedViewContextBadge,
   buildPlmAuditSavedViewSummary,
+  resolvePlmAuditSavedViewContextActionFeedback,
 } from '../src/views/plmAuditSavedViewSummary'
 
 function tr(en: string, zh: string) {
@@ -149,5 +150,38 @@ describe('plmAuditSavedViewSummary', () => {
       sceneName: '采购团队场景',
       sceneOwnerUserId: 'owner-a',
     }, tr, (value) => value, (value) => value)).toContain('Scene|场景: 采购团队场景')
+  })
+
+  it('returns explicit feedback when a saved-view context quick action is disabled', () => {
+    const badge = buildPlmAuditSavedViewContextBadge({
+      ...sampleState,
+      q: 'scene-1',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+    }, tr, {
+      q: 'scene-1',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+    })
+
+    expect(resolvePlmAuditSavedViewContextActionFeedback({
+      badge,
+      tr,
+    })).toEqual({
+      kind: 'error',
+      message: 'Current audit is already using this scene query.|当前审计已使用这个场景查询。',
+    })
+  })
+
+  it('returns unavailable feedback when a saved-view context badge has no quick action', () => {
+    expect(resolvePlmAuditSavedViewContextActionFeedback({
+      badge: null,
+      tr,
+    })).toEqual({
+      kind: 'error',
+      message: 'Current saved view context action is unavailable.|当前保存视图上下文动作不可用。',
+    })
   })
 })

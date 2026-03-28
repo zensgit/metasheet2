@@ -853,6 +853,7 @@ import {
 } from './plmAuditSavedViewPromotion'
 import {
   buildPlmAuditSavedViewContextBadge,
+  resolvePlmAuditSavedViewContextActionFeedback,
   buildPlmAuditSavedViewSummary,
 } from './plmAuditSavedViewSummary'
 import { shouldShowPlmAuditPersistentReturnToScene } from './plmAuditReturnToScene'
@@ -2144,7 +2145,14 @@ function runSavedViewContextAction(
   actionKind: 'owner' | 'scene' | 'reapply-scene',
 ) {
   const badge = savedViewContextBadge(view)
-  if (badge?.quickAction?.disabled) return
+  const feedback = resolvePlmAuditSavedViewContextActionFeedback({
+    badge,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
   const nextState = buildSavedViewContextState(view, actionKind)
   applySavedViewTakeover('context-action', nextState.teamViewId)
   void syncRouteState(nextState, false, {
