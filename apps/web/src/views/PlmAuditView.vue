@@ -980,6 +980,7 @@ import { copyTextToClipboard } from './plm/plmClipboard'
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
 import {
   canDuplicatePlmCollaborativeEntry,
+  canRenamePlmCollaborativeEntry,
   canSharePlmCollaborativeEntry,
   canSetDefaultPlmCollaborativeEntry,
   usePlmCollaborativePermissions,
@@ -1193,6 +1194,9 @@ const canSubmitAuditTeamViewRename = computed(() => shouldEnablePlmAuditTeamView
   canonicalTeamViewId: canonicalAuditTeamViewManagementTargetId.value,
   draftOwnerTeamViewId: auditTeamViewNameOwnerId.value,
 }))
+const canRenameAuditTeamViewTarget = computed(() => canRenamePlmCollaborativeEntry(
+  canonicalAuditTeamViewManagementTarget.value,
+))
 const auditTeamViewCollaborationDraftTarget = computed(() => findPlmAuditTeamViewCollaborationDraftView(
   auditTeamViews.value,
   auditTeamViewCollaborationDraft.value,
@@ -2226,21 +2230,93 @@ async function saveAuditTeamView() {
 
 async function applyAuditTeamView() {
   const view = auditTeamViewApplyTarget.value
-  if (!view || !canApplyAuditTeamView.value) return
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'apply',
+    target: view,
+    managementTargetLocked: false,
+    canApply: canApplyAuditTeamView.value,
+    canDuplicate: false,
+    canShare: false,
+    canRenameTarget: false,
+    canRename: false,
+    canTransferTarget: false,
+    canTransfer: false,
+    canDelete: false,
+    canArchive: false,
+    canRestore: false,
+    canSetDefault: false,
+    canClearDefault: false,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
 
   await applyAuditTeamViewEntry(view)
 }
 
 async function shareAuditTeamView() {
   const view = canonicalAuditTeamViewManagementTarget.value
-  if (!view || auditTeamViewManagementTargetLocked.value || !canShareAuditTeamView.value) return
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'share',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canApply: canApplyAuditTeamView.value,
+    canDuplicate: canDuplicatePlmCollaborativeEntry(view),
+    canShare: canShareAuditTeamView.value,
+    canRenameTarget: canRenameAuditTeamViewTarget.value,
+    canRename: canSubmitAuditTeamViewRename.value,
+    canTransferTarget: canTransferAuditTeamViewTarget.value,
+    canTransfer: canTransferAuditTeamView.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    draftName: auditTeamViewName.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
 
   await shareAuditTeamViewEntry(view)
 }
 
 async function duplicateAuditTeamView() {
-  if (auditTeamViewManagementTargetLocked.value) return
-  await duplicateAuditTeamViewEntry(canonicalAuditTeamViewManagementTarget.value)
+  const view = canonicalAuditTeamViewManagementTarget.value
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'duplicate',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canApply: canApplyAuditTeamView.value,
+    canDuplicate: canDuplicatePlmCollaborativeEntry(view),
+    canShare: canShareAuditTeamView.value,
+    canRenameTarget: canRenameAuditTeamViewTarget.value,
+    canRename: canSubmitAuditTeamViewRename.value,
+    canTransferTarget: canTransferAuditTeamViewTarget.value,
+    canTransfer: canTransferAuditTeamView.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    draftName: auditTeamViewName.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
+
+  await duplicateAuditTeamViewEntry(view)
 }
 
 async function duplicateAuditTeamViewEntry(
@@ -2285,7 +2361,31 @@ async function duplicateAuditTeamViewEntry(
 
 async function renameAuditTeamView() {
   const view = canonicalAuditTeamViewManagementTarget.value
-  if (!view || auditTeamViewManagementTargetLocked.value || !canSubmitAuditTeamViewRename.value) return
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'rename',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canApply: canApplyAuditTeamView.value,
+    canDuplicate: canDuplicatePlmCollaborativeEntry(view),
+    canShare: canShareAuditTeamView.value,
+    canRenameTarget: canRenameAuditTeamViewTarget.value,
+    canRename: canSubmitAuditTeamViewRename.value,
+    canTransferTarget: canTransferAuditTeamViewTarget.value,
+    canTransfer: canTransferAuditTeamView.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    draftName: auditTeamViewName.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
 
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
@@ -2334,7 +2434,31 @@ async function setAuditTeamViewDefault() {
 
 async function transferAuditTeamView() {
   const view = canonicalAuditTeamViewManagementTarget.value
-  if (!view || auditTeamViewManagementTargetLocked.value || !canTransferAuditTeamView.value) return
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'transfer',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canApply: canApplyAuditTeamView.value,
+    canDuplicate: canDuplicatePlmCollaborativeEntry(view),
+    canShare: canShareAuditTeamView.value,
+    canRenameTarget: canRenameAuditTeamViewTarget.value,
+    canRename: canSubmitAuditTeamViewRename.value,
+    canTransferTarget: canTransferAuditTeamViewTarget.value,
+    canTransfer: canTransferAuditTeamView.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    draftName: auditTeamViewName.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
 
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''

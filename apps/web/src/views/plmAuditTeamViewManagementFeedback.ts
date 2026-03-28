@@ -9,6 +9,11 @@ export type PlmAuditTeamViewManagementFeedback = {
 }
 
 export type PlmAuditTeamViewManagementActionKind =
+  | 'apply'
+  | 'duplicate'
+  | 'share'
+  | 'rename'
+  | 'transfer'
   | 'set-default'
   | 'clear-default'
   | 'archive'
@@ -17,7 +22,7 @@ export type PlmAuditTeamViewManagementActionKind =
 
 type AuditTeamViewManagementTarget = Pick<
   PlmWorkbenchTeamView<'audit'>,
-  'canManage' | 'isArchived' | 'isDefault' | 'permissions'
+  'canManage' | 'isArchived' | 'isDefault' | 'ownerUserId' | 'permissions'
 >
 
 function buildFeedback(
@@ -31,11 +36,20 @@ export function resolvePlmAuditTeamViewManagementFeedback(options: {
   actionKind: PlmAuditTeamViewManagementActionKind
   target: AuditTeamViewManagementTarget | null | undefined
   managementTargetLocked: boolean
+  canApply?: boolean
+  canDuplicate?: boolean
+  canShare?: boolean
+  canRenameTarget?: boolean
+  canRename?: boolean
+  canTransferTarget?: boolean
+  canTransfer?: boolean
   canDelete: boolean
   canArchive: boolean
   canRestore: boolean
   canSetDefault: boolean
   canClearDefault: boolean
+  draftName?: string
+  draftOwnerUserId?: string
   tr: (en: string, zh: string) => string
 }): PlmAuditTeamViewManagementFeedback | null {
   const target = options.target || null
@@ -45,7 +59,7 @@ export function resolvePlmAuditTeamViewManagementFeedback(options: {
     return buildFeedback('error', tr('Select an audit team view first.', '请先选择审计团队视图。'))
   }
 
-  if (options.managementTargetLocked) {
+  if (options.actionKind !== 'apply' && options.managementTargetLocked) {
     return buildFeedback(
       'error',
       tr(
@@ -53,6 +67,109 @@ export function resolvePlmAuditTeamViewManagementFeedback(options: {
         '请先应用所选团队视图，再执行管理动作。',
       ),
     )
+  }
+
+  if (options.actionKind === 'apply') {
+    if (!options.canApply) {
+      return buildFeedback(
+        'error',
+        target.isArchived
+          ? tr('Restore the audit team view before applying it.', '请先恢复审计团队视图，再执行应用。')
+          : tr('Current audit team view cannot be applied.', '当前审计团队视图不可应用。'),
+      )
+    }
+    return null
+  }
+
+  if (options.actionKind === 'duplicate') {
+    if (!options.canDuplicate) {
+      return buildFeedback(
+        'error',
+        tr('Current audit team view cannot be duplicated.', '当前审计团队视图不可复制。'),
+      )
+    }
+    return null
+  }
+
+  if (options.actionKind === 'share') {
+    if (target.isArchived) {
+      return buildFeedback(
+        'error',
+        tr('Restore the audit team view before sharing it.', '请先恢复审计团队视图，再执行分享。'),
+      )
+    }
+    if (!options.canShare) {
+      return buildFeedback(
+        'error',
+        canManagePlmAuditTeamView(target)
+          ? tr('Current audit team view cannot be shared.', '当前审计团队视图不可分享。')
+          : tr('Only the creator can share this audit team view.', '仅创建者可分享审计团队视图。'),
+      )
+    }
+    return null
+  }
+
+  if (options.actionKind === 'rename') {
+    if (!options.canRenameTarget) {
+      return buildFeedback(
+        'error',
+        target.isArchived
+          ? tr('Restore the audit team view before renaming it.', '请先恢复审计团队视图，再执行重命名。')
+          : canManagePlmAuditTeamView(target)
+            ? tr('Current audit team view cannot be renamed.', '当前审计团队视图不可重命名。')
+            : tr('Only the creator can rename this audit team view.', '仅创建者可重命名审计团队视图。'),
+      )
+    }
+    if (!options.draftName?.trim()) {
+      return buildFeedback(
+        'error',
+        tr('Enter an audit team view name.', '请输入审计团队视图名称。'),
+      )
+    }
+    if (!options.canRename) {
+      return buildFeedback(
+        'error',
+        tr('Current audit team view cannot be renamed.', '当前审计团队视图不可重命名。'),
+      )
+    }
+    return null
+  }
+
+  if (options.actionKind === 'transfer') {
+    if (target.isArchived) {
+      return buildFeedback(
+        'error',
+        tr('Restore the audit team view before transferring ownership.', '请先恢复审计团队视图，再执行转移所有者。'),
+      )
+    }
+    if (!options.canTransferTarget) {
+      return buildFeedback(
+        'error',
+        canManagePlmAuditTeamView(target)
+          ? tr('Current audit team view cannot transfer ownership.', '当前审计团队视图不可转移所有者。')
+          : tr('Only the creator can transfer this audit team view.', '仅创建者可转移审计团队视图。'),
+      )
+    }
+    const targetOwnerUserId = options.draftOwnerUserId?.trim() || ''
+    if (!targetOwnerUserId) {
+      return buildFeedback(
+        'error',
+        tr('Enter the audit team view target user ID.', '请输入审计团队视图目标用户 ID。'),
+      )
+    }
+    if (targetOwnerUserId === target.ownerUserId) {
+      return buildFeedback(
+        'info',
+        tr('Audit team view already belongs to this user.', '审计团队视图已经属于该用户。'),
+      )
+    }
+    if (!options.canTransfer) {
+      return buildFeedback(
+        'error',
+        tr('Current audit team view cannot transfer ownership.', '当前审计团队视图不可转移所有者。'),
+      )
+    }
+    return null
   }
 
   if (!canManagePlmAuditTeamView(target)) {
