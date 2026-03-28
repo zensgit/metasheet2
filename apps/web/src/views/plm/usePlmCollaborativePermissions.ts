@@ -32,10 +32,13 @@ function resolveCanManage(entry: CollaborativeEntry) {
 
 export function canSharePlmCollaborativeEntry(entry: CollaborativeEntry) {
   if (!entry) return false
+  if (entry.isArchived) {
+    return false
+  }
   if (typeof entry.permissions?.canShare === 'boolean') {
     return entry.permissions.canShare
   }
-  return resolveCanManage(entry) && !entry.isArchived
+  return resolveCanManage(entry)
 }
 
 export function canApplyPlmCollaborativeEntry(entry: CollaborativeEntry) {
@@ -59,18 +62,24 @@ export function canDuplicatePlmCollaborativeEntry(entry: CollaborativeEntry) {
 
 export function canSetDefaultPlmCollaborativeEntry(entry: CollaborativeEntry) {
   if (!entry) return false
+  if (entry.isArchived) {
+    return false
+  }
   if (typeof entry.permissions?.canSetDefault === 'boolean') {
     return entry.permissions.canSetDefault
   }
-  return resolveCanManage(entry) && !entry.isArchived && !entry.isDefault
+  return resolveCanManage(entry) && !entry.isDefault
 }
 
 export function canRenamePlmCollaborativeEntry(entry: CollaborativeEntry) {
   if (!entry) return false
+  if (entry.isArchived) {
+    return false
+  }
   if (typeof entry.permissions?.canRename === 'boolean') {
     return entry.permissions.canRename
   }
-  return resolveCanManage(entry) && !entry.isArchived
+  return resolveCanManage(entry)
 }
 
 type UsePlmCollaborativePermissionsOptions<TEntry extends CollaborativeEntry> = {
@@ -134,10 +143,11 @@ export function usePlmCollaborativePermissions<TEntry extends CollaborativeEntry
   const canTransferTarget = computed(() => {
     const entry = options.selectedEntry.value
     if (!entry) return false
+    if (entry.isArchived) return false
     return (
       typeof entry.permissions?.canTransfer === 'boolean'
         ? entry.permissions.canTransfer
-        : canManageSelectedEntry.value && !entry.isArchived
+        : canManageSelectedEntry.value
     )
   })
   const canTransfer = computed(() => {
@@ -157,10 +167,11 @@ export function usePlmCollaborativePermissions<TEntry extends CollaborativeEntry
   const canClearDefault = computed(() => {
     const entry = options.selectedEntry.value
     if (!entry) return false
+    if (entry.isArchived) return false
     if (typeof entry.permissions?.canClearDefault === 'boolean') {
       return entry.permissions.canClearDefault
     }
-    return canManageSelectedEntry.value && !entry.isArchived && Boolean(entry.isDefault)
+    return canManageSelectedEntry.value && Boolean(entry.isDefault)
   })
 
   watch(

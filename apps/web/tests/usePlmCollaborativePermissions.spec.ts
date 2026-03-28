@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   canApplyPlmCollaborativeEntry,
   canDuplicatePlmCollaborativeEntry,
+  canRenamePlmCollaborativeEntry,
   canSharePlmCollaborativeEntry,
   canSetDefaultPlmCollaborativeEntry,
   usePlmCollaborativePermissions,
@@ -200,5 +201,46 @@ describe('usePlmCollaborativePermissions', () => {
     }
 
     expect(model.canApply.value).toBe(false)
+  })
+
+  it('hard-blocks archived management actionability even when explicit permissions stay enabled', () => {
+    const selectedEntry = ref({
+      canManage: true,
+      isArchived: true,
+      isDefault: false,
+      ownerUserId: 'owner-a',
+      permissions: {
+        canManage: true,
+        canShare: true,
+        canRename: true,
+        canTransfer: true,
+        canSetDefault: true,
+        canClearDefault: true,
+      },
+    })
+    const nameRef = ref('归档条目')
+    const ownerUserIdRef = ref('owner-b')
+
+    const model = usePlmCollaborativePermissions({
+      selectedEntry: computed(() => selectedEntry.value),
+      nameRef,
+      ownerUserIdRef,
+    })
+
+    expect(canSharePlmCollaborativeEntry(selectedEntry.value)).toBe(false)
+    expect(canRenamePlmCollaborativeEntry(selectedEntry.value)).toBe(false)
+    expect(canSetDefaultPlmCollaborativeEntry(selectedEntry.value)).toBe(false)
+    expect(model.canShare.value).toBe(false)
+    expect(model.canRename.value).toBe(false)
+    expect(model.canTransferTarget.value).toBe(false)
+    expect(model.canTransfer.value).toBe(false)
+    expect(model.canSetDefault.value).toBe(false)
+
+    selectedEntry.value = {
+      ...selectedEntry.value,
+      isDefault: true,
+    }
+
+    expect(model.canClearDefault.value).toBe(false)
   })
 })
