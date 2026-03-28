@@ -343,7 +343,7 @@ describe('plmAuditTeamViewOwnership', () => {
     })
   })
 
-  it('clears rename and transfer drafts after successful audit team-view lifecycle mutations', () => {
+  it('clears rename and transfer drafts after successful audit team-view save and lifecycle mutations', () => {
     expect(resolvePlmAuditCompletedTeamViewFormDraftState()).toEqual({
       draftTeamViewName: '',
       draftTeamViewNameOwnerId: '',

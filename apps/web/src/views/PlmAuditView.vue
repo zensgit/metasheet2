@@ -1684,7 +1684,7 @@ async function persistAuditTeamView(
     upsertAuditTeamView(saved)
     applyAuditManagedTeamViewAttention()
     applyAuditTeamViewState(saved)
-    setAuditTeamViewNameDraft('', '')
+    clearAuditCompletedTeamViewFormDrafts()
     focusedAuditTeamViewId.value = saved.id
     await syncRouteState(savedState)
     setStatus(successMessage || tr('Audit team view saved.', '审计团队视图已保存。'))
