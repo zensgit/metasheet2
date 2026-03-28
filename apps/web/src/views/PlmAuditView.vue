@@ -943,6 +943,7 @@ import {
   canApplyPlmAuditTeamView,
   canManagePlmAuditTeamView,
   isSelectablePlmAuditTeamView,
+  resolvePlmAuditTeamViewBatchActionFeedback,
   type PlmAuditTeamViewLifecycleActionKind,
 } from './plmAuditTeamViewManagement'
 import { resolvePlmAuditTeamViewManagementFeedback } from './plmAuditTeamViewManagementFeedback'
@@ -3042,7 +3043,18 @@ async function runAuditTeamViewLifecycleAction(
 
 async function runAuditTeamViewBatchAction(actionKind: PlmAuditTeamViewLifecycleActionKind) {
   const batchAction = auditTeamViewBatchActions.value.find((item) => item.kind === actionKind)
-  if (!batchAction || batchAction.disabled) return
+  const feedback = resolvePlmAuditTeamViewBatchActionFeedback({
+    actionKind,
+    batchAction,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!batchAction) {
+    return
+  }
 
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''

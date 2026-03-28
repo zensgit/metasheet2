@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { buildPlmAuditTeamViewManagement } from '../src/views/plmAuditTeamViewManagement'
+import {
+  buildPlmAuditTeamViewManagement,
+  resolvePlmAuditTeamViewBatchActionFeedback,
+} from '../src/views/plmAuditTeamViewManagement'
 import type { PlmWorkbenchTeamView } from '../src/views/plm/plmPanelModels'
 
 function tr(en: string, zh: string) {
@@ -183,5 +186,47 @@ describe('plmAuditTeamViewManagement', () => {
         eligibleCount: 0,
       }),
     ])
+  })
+
+  it('returns explicit feedback when a batch action is disabled', () => {
+    const model = buildPlmAuditTeamViewManagement([
+      createAuditTeamView({
+        id: 'readonly-view',
+        canManage: false,
+        permissions: {
+          canManage: false,
+          canApply: true,
+          canDuplicate: true,
+          canShare: false,
+          canDelete: false,
+          canArchive: false,
+          canRestore: false,
+          canRename: false,
+          canTransfer: false,
+          canSetDefault: false,
+          canClearDefault: false,
+        },
+      }),
+    ], ['readonly-view'], tr)
+
+    expect(resolvePlmAuditTeamViewBatchActionFeedback({
+      actionKind: 'archive',
+      batchAction: model.batchActions[0],
+      tr,
+    })).toEqual({
+      kind: 'error',
+      message: 'None of the selected views can be archived.|所选视图都不能归档。',
+    })
+  })
+
+  it('returns unavailable feedback when the batch action is missing', () => {
+    expect(resolvePlmAuditTeamViewBatchActionFeedback({
+      actionKind: 'delete',
+      batchAction: null,
+      tr,
+    })).toEqual({
+      kind: 'error',
+      message: 'Current batch delete action is unavailable.|当前批量删除不可用。',
+    })
   })
 })

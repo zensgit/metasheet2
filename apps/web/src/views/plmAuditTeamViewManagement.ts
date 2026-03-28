@@ -31,11 +31,41 @@ export type PlmAuditTeamViewBatchAction = {
   eligibleIds: string[]
 }
 
+export type PlmAuditTeamViewBatchActionFeedback = {
+  kind: 'error'
+  message: string
+}
+
 export type PlmAuditTeamViewManagementModel = {
   items: PlmAuditTeamViewManagementItem[]
   batchActions: PlmAuditTeamViewBatchAction[]
   selectedCount: number
   selectableCount: number
+}
+
+export function resolvePlmAuditTeamViewBatchActionFeedback(options: {
+  actionKind: PlmAuditTeamViewLifecycleActionKind
+  batchAction: PlmAuditTeamViewBatchAction | null | undefined
+  tr: (en: string, zh: string) => string
+}): PlmAuditTeamViewBatchActionFeedback | null {
+  const { actionKind, batchAction, tr } = options
+  if (!batchAction) {
+    return {
+      kind: 'error',
+      message: actionKind === 'archive'
+        ? tr('Current batch archive action is unavailable.', '当前批量归档不可用。')
+        : actionKind === 'restore'
+          ? tr('Current batch restore action is unavailable.', '当前批量恢复不可用。')
+          : tr('Current batch delete action is unavailable.', '当前批量删除不可用。'),
+    }
+  }
+  if (!batchAction.disabled) {
+    return null
+  }
+  return {
+    kind: 'error',
+    message: batchAction.hint,
+  }
 }
 
 export function canManagePlmAuditTeamView(
