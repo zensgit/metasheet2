@@ -73,6 +73,18 @@ function buildDirectApiError(error, fallback) {
     }
     return nextError;
 }
+function parseRecord(value) {
+    if (!value.trim()) {
+        return undefined;
+    }
+    try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === 'object' ? parsed : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
 function unwrapDirectData(response, fallback) {
     return unwrapDirectEnvelope(response, fallback).data;
 }
@@ -117,12 +129,27 @@ async function requestDirectEnvelope(client, method, path, fallback, body) {
     const response = await client.request(method, path, body);
     return unwrapDirectEnvelope(response, fallback);
 }
+async function requestDirectText(client, method, path, fallback, body, headers) {
+    if (!client.requestText) {
+        throw new Error(fallback);
+    }
+    const response = await client.requestText(method, path, body, headers);
+    if (response.status >= 400) {
+        const envelope = parseRecord(response.text);
+        const directError = envelope && 'error' in envelope
+            ? envelope.error
+            : undefined;
+        throw buildDirectApiError(directError, response.text.trim() || fallback);
+    }
+    return response;
+}
 export function createClient(opts) {
     const f = opts.fetch || fetch;
-    async function request(method, path, body, ifMatch) {
+    async function buildHeaders(body, ifMatch, extraHeaders) {
         const token = await opts.getToken();
         const headers = {
             authorization: `Bearer ${token}`,
+            ...(extraHeaders || {}),
         };
         if (body !== undefined) {
             headers['content-type'] = 'application/json';
@@ -130,6 +157,10 @@ export function createClient(opts) {
         if (ifMatch) {
             headers['if-match'] = ifMatch;
         }
+        return headers;
+    }
+    async function request(method, path, body, ifMatch) {
+        const headers = await buildHeaders(body, ifMatch);
         const res = await f(joinUrl(opts.baseUrl, path), {
             method,
             headers,
@@ -138,6 +169,22 @@ export function createClient(opts) {
         const etag = res.headers.get('etag') || undefined;
         const json = await res.json().catch(() => ({}));
         return { status: res.status, etag, json };
+    }
+    async function requestText(method, path, body, extraHeaders) {
+        const headers = await buildHeaders(body, undefined, extraHeaders);
+        const res = await f(joinUrl(opts.baseUrl, path), {
+            method,
+            headers,
+            body: body !== undefined ? JSON.stringify(body) : undefined,
+        });
+        const etag = res.headers.get('etag') || undefined;
+        const text = await res.text();
+        return {
+            status: res.status,
+            etag,
+            text,
+            contentDisposition: res.headers.get('content-disposition') || undefined,
+        };
     }
     async function requestWithRetry(method, path, body, etag, retries = 1) {
         const response = await request(method, path, body, etag);
@@ -148,7 +195,7 @@ export function createClient(opts) {
         }
         return response;
     }
-    return { request, requestWithRetry };
+    return { request, requestWithRetry, requestText };
 }
 export function createPlmFederationClient(clientOrOptions) {
     const client = toRequestClient(clientOrOptions);
@@ -447,6 +494,23 @@ export function createPlmWorkbenchClient(clientOrOptions) {
                 windowMinutes: params.windowMinutes,
                 limit: params.limit,
             }), 'Failed to load PLM collaborative audit summary');
+        },
+        async exportCollaborativeAuditLogsCsv(params = {}) {
+            const response = await requestDirectText(client, 'GET', withQuery('/api/plm-workbench/audit-logs/export.csv', {
+                q: params.q,
+                actorId: params.actorId,
+                action: params.action,
+                resourceType: params.resourceType,
+                kind: params.kind,
+                from: params.from,
+                to: params.to,
+                limit: params.limit,
+            }), 'Failed to export PLM collaborative audit logs', undefined, { accept: 'text/csv' });
+            const filename = response.contentDisposition?.match(/filename=\"?([^\";]+)\"?/)?.[1] || 'plm-collaborative-audit.csv';
+            return {
+                filename,
+                csvText: response.text,
+            };
         },
     };
 }

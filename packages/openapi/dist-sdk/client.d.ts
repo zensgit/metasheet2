@@ -9,9 +9,16 @@ export interface ClientResponse<T = unknown> {
     etag?: string;
     json: T;
 }
+export interface ClientTextResponse {
+    status: number;
+    etag?: string;
+    text: string;
+    contentDisposition?: string;
+}
 export interface RequestClient {
     request: <T = unknown>(method: string, path: string, body?: unknown, ifMatch?: string) => Promise<ClientResponse<T>>;
     requestWithRetry: <T = unknown>(method: string, path: string, body?: unknown, etag?: string, retries?: number) => Promise<ClientResponse<T>>;
+    requestText?: (method: string, path: string, body?: unknown, headers?: Record<string, string>) => Promise<ClientTextResponse>;
 }
 export interface ApiError {
     code?: string;
@@ -110,6 +117,9 @@ export interface GetPlmCollaborativeAuditSummaryParams {
     windowMinutes?: number;
     limit?: number;
 }
+export interface ExportPlmCollaborativeAuditLogsParams extends ListPlmCollaborativeAuditLogsParams {
+    limit?: number;
+}
 export interface PlmCollaborativeAuditLogsResponse<T = Record<string, unknown>> {
     items: T[];
     page?: number;
@@ -128,6 +138,10 @@ export interface PlmCollaborativeAuditSummaryResponse {
     windowMinutes?: number;
     actions?: PlmCollaborativeAuditSummaryRow[];
     resourceTypes?: PlmCollaborativeAuditSummaryRow[];
+}
+export interface PlmCollaborativeAuditCsvExportResponse {
+    filename: string;
+    csvText: string;
 }
 export interface PlmWorkbenchBatchResult<T = Record<string, unknown>> {
     action?: string;
@@ -240,4 +254,5 @@ export declare function createPlmWorkbenchClient(clientOrOptions: ClientOptions 
     batchTeamFilterPresets<T = Record<string, unknown>>(action: PlmWorkbenchBatchAction, ids: string[]): Promise<PlmWorkbenchBatchResult<T>>;
     listCollaborativeAuditLogs<T = Record<string, unknown>>(params?: ListPlmCollaborativeAuditLogsParams): Promise<PlmCollaborativeAuditLogsResponse<T>>;
     getCollaborativeAuditSummary(params?: GetPlmCollaborativeAuditSummaryParams): Promise<PlmCollaborativeAuditSummaryResponse>;
+    exportCollaborativeAuditLogsCsv(params?: ExportPlmCollaborativeAuditLogsParams): Promise<PlmCollaborativeAuditCsvExportResponse>;
 };

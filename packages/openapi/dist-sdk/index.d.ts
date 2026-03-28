@@ -8113,6 +8113,62 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/plm-workbench/audit-logs/export.csv": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Export PLM workbench collaborative audit logs as CSV */
+        get: {
+            parameters: {
+                query?: {
+                    q?: string;
+                    actorId?: string;
+                    action?: "archive" | "restore" | "delete" | "set-default" | "clear-default";
+                    resourceType?: "plm-team-preset-batch" | "plm-team-preset-default" | "plm-team-view-batch" | "plm-team-view-default";
+                    kind?: string;
+                    from?: string;
+                    to?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description CSV export */
+                200: {
+                    headers: {
+                        "Content-Disposition"?: string;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/csv": string;
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                /** @description Internal Server Error */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/plm-workbench/audit-logs/summary": {
         parameters: {
             query?: never;

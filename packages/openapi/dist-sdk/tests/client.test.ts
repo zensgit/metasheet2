@@ -12,6 +12,10 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   })
 }
 
+function textResponse(body: string, init: ResponseInit = {}): Response {
+  return new Response(body, init)
+}
+
 describe('createPlmFederationClient', () => {
   it('posts products query with pagination and filters', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
@@ -551,5 +555,44 @@ describe('createPlmWorkbenchClient', () => {
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
       'http://localhost:8910/api/plm-workbench/audit-logs/summary?windowMinutes=180&limit=6',
     )
+  })
+
+  it('supports collaborative audit csv export helpers', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      textResponse('occurredAt,action\n2026-03-11T03:00:00.000Z,archive\n', {
+        status: 200,
+        headers: {
+          'content-type': 'text/csv; charset=utf-8',
+          'content-disposition': 'attachment; filename="plm-audit.csv"',
+        },
+      }),
+    )
+
+    const client = createPlmWorkbenchClient({
+      baseUrl: 'http://localhost:8910',
+      getToken: () => 'token-audit-export',
+      fetch: fetchMock,
+    })
+
+    await expect(client.exportCollaborativeAuditLogsCsv({
+      q: 'documents',
+      actorId: 'dev-user',
+      action: 'archive',
+      resourceType: 'plm-team-view-batch',
+      kind: 'documents',
+      limit: 2000,
+    })).resolves.toEqual({
+      filename: 'plm-audit.csv',
+      csvText: 'occurredAt,action\n2026-03-11T03:00:00.000Z,archive\n',
+    })
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'http://localhost:8910/api/plm-workbench/audit-logs/export.csv?q=documents&actorId=dev-user&action=archive&resourceType=plm-team-view-batch&kind=documents&limit=2000',
+    )
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe('GET')
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({
+      authorization: 'Bearer token-audit-export',
+      accept: 'text/csv',
+    })
   })
 })

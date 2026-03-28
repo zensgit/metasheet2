@@ -5,6 +5,7 @@ import type { paths } from '../index.js'
 describe('plm-workbench OpenAPI paths', () => {
   it('exposes core team view routes in generated SDK types', () => {
     expectTypeOf<paths['/api/plm-workbench/audit-logs']>().toBeObject()
+    expectTypeOf<paths['/api/plm-workbench/audit-logs/export.csv']>().toBeObject()
     expectTypeOf<paths['/api/plm-workbench/audit-logs/summary']>().toBeObject()
     expectTypeOf<paths['/api/plm-workbench/views/team']>().toBeObject()
     expectTypeOf<paths['/api/plm-workbench/views/team/{id}']>().toBeObject()

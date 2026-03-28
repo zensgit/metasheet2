@@ -12,6 +12,13 @@ export interface ClientResponse<T = unknown> {
   json: T
 }
 
+export interface ClientTextResponse {
+  status: number
+  etag?: string
+  text: string
+  contentDisposition?: string
+}
+
 export interface RequestClient {
   request: <T = unknown>(
     method: string,
@@ -26,6 +33,12 @@ export interface RequestClient {
     etag?: string,
     retries?: number,
   ) => Promise<ClientResponse<T>>
+  requestText?: (
+    method: string,
+    path: string,
+    body?: unknown,
+    headers?: Record<string, string>,
+  ) => Promise<ClientTextResponse>
 }
 
 export interface ApiError {
@@ -154,6 +167,10 @@ export interface GetPlmCollaborativeAuditSummaryParams {
   limit?: number
 }
 
+export interface ExportPlmCollaborativeAuditLogsParams extends ListPlmCollaborativeAuditLogsParams {
+  limit?: number
+}
+
 export interface PlmCollaborativeAuditLogsResponse<T = Record<string, unknown>> {
   items: T[]
   page?: number
@@ -174,6 +191,11 @@ export interface PlmCollaborativeAuditSummaryResponse {
   windowMinutes?: number
   actions?: PlmCollaborativeAuditSummaryRow[]
   resourceTypes?: PlmCollaborativeAuditSummaryRow[]
+}
+
+export interface PlmCollaborativeAuditCsvExportResponse {
+  filename: string
+  csvText: string
 }
 
 export interface PlmWorkbenchBatchResult<T = Record<string, unknown>> {
@@ -337,6 +359,19 @@ function buildDirectApiError(error: string | ApiError | undefined, fallback: str
   return nextError
 }
 
+function parseRecord(value: string): Record<string, unknown> | undefined {
+  if (!value.trim()) {
+    return undefined
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function unwrapDirectData<T>(response: ClientResponse<DirectApiEnvelope<T>>, fallback: string): T {
   return unwrapDirectEnvelope(response, fallback).data
 }
@@ -418,18 +453,42 @@ async function requestDirectEnvelope<T, M = unknown>(
   return unwrapDirectEnvelope(response, fallback)
 }
 
+async function requestDirectText(
+  client: RequestClient,
+  method: string,
+  path: string,
+  fallback: string,
+  body?: unknown,
+  headers?: Record<string, string>,
+): Promise<ClientTextResponse> {
+  if (!client.requestText) {
+    throw new Error(fallback)
+  }
+
+  const response = await client.requestText(method, path, body, headers)
+  if (response.status >= 400) {
+    const envelope = parseRecord(response.text)
+    const directError = envelope && 'error' in envelope
+      ? (envelope as DirectApiEnvelope<unknown>).error
+      : undefined
+    throw buildDirectApiError(directError, response.text.trim() || fallback)
+  }
+
+  return response
+}
+
 export function createClient(opts: ClientOptions): RequestClient {
   const f = opts.fetch || fetch
 
-  async function request<T = unknown>(
-    method: string,
-    path: string,
+  async function buildHeaders(
     body?: unknown,
     ifMatch?: string,
-  ): Promise<ClientResponse<T>> {
+    extraHeaders?: Record<string, string>,
+  ): Promise<Record<string, string>> {
     const token = await opts.getToken()
     const headers: Record<string, string> = {
       authorization: `Bearer ${token}`,
+      ...(extraHeaders || {}),
     }
 
     if (body !== undefined) {
@@ -438,6 +497,17 @@ export function createClient(opts: ClientOptions): RequestClient {
     if (ifMatch) {
       headers['if-match'] = ifMatch
     }
+
+    return headers
+  }
+
+  async function request<T = unknown>(
+    method: string,
+    path: string,
+    body?: unknown,
+    ifMatch?: string,
+  ): Promise<ClientResponse<T>> {
+    const headers = await buildHeaders(body, ifMatch)
 
     const res = await f(joinUrl(opts.baseUrl, path), {
       method,
@@ -448,6 +518,29 @@ export function createClient(opts: ClientOptions): RequestClient {
     const json = await res.json().catch(() => ({} as T))
 
     return { status: res.status, etag, json }
+  }
+
+  async function requestText(
+    method: string,
+    path: string,
+    body?: unknown,
+    extraHeaders?: Record<string, string>,
+  ): Promise<ClientTextResponse> {
+    const headers = await buildHeaders(body, undefined, extraHeaders)
+    const res = await f(joinUrl(opts.baseUrl, path), {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    })
+    const etag = res.headers.get('etag') || undefined
+    const text = await res.text()
+
+    return {
+      status: res.status,
+      etag,
+      text,
+      contentDisposition: res.headers.get('content-disposition') || undefined,
+    }
   }
 
   async function requestWithRetry<T = unknown>(
@@ -466,7 +559,7 @@ export function createClient(opts: ClientOptions): RequestClient {
     return response
   }
 
-  return { request, requestWithRetry }
+  return { request, requestWithRetry, requestText }
 }
 
 export function createPlmFederationClient(clientOrOptions: ClientOptions | RequestClient) {
@@ -1123,6 +1216,34 @@ export function createPlmWorkbenchClient(clientOrOptions: ClientOptions | Reques
         }),
         'Failed to load PLM collaborative audit summary',
       )
+    },
+
+    async exportCollaborativeAuditLogsCsv(
+      params: ExportPlmCollaborativeAuditLogsParams = {},
+    ): Promise<PlmCollaborativeAuditCsvExportResponse> {
+      const response = await requestDirectText(
+        client,
+        'GET',
+        withQuery('/api/plm-workbench/audit-logs/export.csv', {
+          q: params.q,
+          actorId: params.actorId,
+          action: params.action,
+          resourceType: params.resourceType,
+          kind: params.kind,
+          from: params.from,
+          to: params.to,
+          limit: params.limit,
+        }),
+        'Failed to export PLM collaborative audit logs',
+        undefined,
+        { accept: 'text/csv' },
+      )
+
+      const filename = response.contentDisposition?.match(/filename=\"?([^\";]+)\"?/)?.[1] || 'plm-collaborative-audit.csv'
+      return {
+        filename,
+        csvText: response.text,
+      }
     },
   }
 }

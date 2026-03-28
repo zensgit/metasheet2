@@ -1,6 +1,7 @@
 import {
   createPlmWorkbenchClient,
   type ClientResponse,
+  type ClientTextResponse,
   type RequestClient,
 } from '@metasheet/sdk/client'
 import { apiFetch } from '../../utils/api'
@@ -301,9 +302,29 @@ const request = async <T = unknown>(
   }
 }
 
+const requestText = async (
+  method: string,
+  path: string,
+  body?: unknown,
+  headers?: Record<string, string>,
+): Promise<ClientTextResponse> => {
+  const response = await apiFetch(path, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+
+  return {
+    status: typeof response.status === 'number' ? response.status : response.ok === false ? 500 : 200,
+    text: await response.text(),
+    contentDisposition: response.headers.get('content-disposition') || undefined,
+  }
+}
+
 const plmWorkbenchRequestClient = {
   request,
   requestWithRetry: request,
+  requestText,
 } satisfies RequestClient
 
 const rawPlmWorkbenchClient = createPlmWorkbenchClient(plmWorkbenchRequestClient)
@@ -762,24 +783,16 @@ export async function exportPlmCollaborativeAuditLogsCsv(params: PlmCollaborativ
   const search = buildPlmCollaborativeAuditSearch(params)
   if (typeof params.limit === 'number') search.set('limit', String(params.limit))
 
-  const response = await apiFetch(`/api/plm-workbench/audit-logs/export.csv?${search.toString()}`, {
-    headers: {
-      Accept: 'text/csv',
-    },
+  return rawPlmWorkbenchClient.exportCollaborativeAuditLogsCsv({
+    q: search.get('q') || undefined,
+    actorId: search.get('actorId') || undefined,
+    action: search.get('action') || undefined,
+    resourceType: (search.get('resourceType') as PlmCollaborativeAuditResourceType | '') || undefined,
+    kind: search.get('kind') || undefined,
+    from: search.get('from') || undefined,
+    to: search.get('to') || undefined,
+    limit: search.has('limit') ? Number(search.get('limit')) : undefined,
   })
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => '')
-    throw new Error(text.slice(0, 200) || `Export failed (HTTP ${response.status})`)
-  }
-
-  const csvText = await response.text()
-  const disposition = response.headers.get('content-disposition') || ''
-  const filename = disposition.match(/filename="?([^";]+)"?/)?.[1] || 'plm-collaborative-audit.csv'
-  return {
-    filename,
-    csvText,
-  }
 }
 
 export async function getPlmCollaborativeAuditSummary(params?: {

@@ -1569,6 +1569,7 @@ describe('plmWorkbenchClient', () => {
   it('exports collaborative audit logs as csv', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
+      status: 200,
       headers: {
         get: (name: string) => name.toLowerCase() === 'content-disposition'
           ? 'attachment; filename="plm-audit.csv"'

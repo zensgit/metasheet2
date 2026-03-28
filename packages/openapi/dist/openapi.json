@@ -15331,6 +15331,122 @@
         }
       }
     },
+    "/api/plm-workbench/audit-logs/export.csv": {
+      "get": {
+        "summary": "Export PLM workbench collaborative audit logs as CSV",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "actorId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "archive",
+                "restore",
+                "delete",
+                "set-default",
+                "clear-default"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "resourceType",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "plm-team-preset-batch",
+                "plm-team-preset-default",
+                "plm-team-view-batch",
+                "plm-team-view-default"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV export",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/plm-workbench/audit-logs/summary": {
       "get": {
         "summary": "Get PLM workbench collaborative audit summary",
