@@ -395,6 +395,137 @@ function validate_cleanup_gate() {
 
 validate_cleanup_gate
 
+function validate_remote_signal_gate() {
+  local gate_key="$1"
+  local gate_label="$2"
+
+  local gate_object_exists
+  local gate_status
+  local gate_run_id
+  local gate_completed_run_id
+  local gate_signal_branch
+  local gate_latest_scheduled_run_id
+  local gate_latest_scheduled_conclusion
+  local gate_latest_manual_run_id
+  local gate_latest_manual_conclusion
+  local gate_manual_recovery
+  local signal_channels_exists
+  local signal_scheduled_id
+  local signal_scheduled_conclusion
+  local signal_manual_id
+  local signal_manual_conclusion
+  local signal_manual_recovery
+
+  gate_object_exists="$(jq -r --arg gate "$gate_key" 'if (.gateFlat[$gate] | type == "object") then "true" else "false" end' "$report_json")"
+  [[ "$gate_object_exists" == "true" ]] || return 0
+
+  gate_status="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].status // empty' "$report_json")"
+  case "$gate_status" in
+    PASS|FAIL)
+      ;;
+    *)
+      die "${gate_label} contract failed: invalid gateFlat.${gate_key}.status=${gate_status:-<empty>} (expected PASS|FAIL)"
+      ;;
+  esac
+
+  gate_run_id="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate] | if has("runId") and .runId != null then (.runId | tostring) else "" end' "$report_json")"
+  gate_completed_run_id="$(jq -r --arg gate "$gate_key" '.gates[$gate].completed | if type == "object" and has("id") and .id != null then (.id | tostring) else "" end' "$report_json")"
+  if [[ -n "$gate_run_id" && -n "$gate_completed_run_id" && "$gate_run_id" != "$gate_completed_run_id" ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.runId=${gate_run_id} mismatches gates.${gate_key}.completed.id=${gate_completed_run_id}"
+  fi
+
+  gate_signal_branch="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].signalBranch // empty' "$report_json")"
+  if [[ -n "$gate_signal_branch" && "$gate_signal_branch" =~ [[:space:]] ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.signalBranch contains whitespace"
+  fi
+
+  gate_latest_scheduled_run_id="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate] | if has("latestScheduledRunId") and .latestScheduledRunId != null then (.latestScheduledRunId | tostring) else "" end' "$report_json")"
+  if [[ -n "$gate_latest_scheduled_run_id" && ! "$gate_latest_scheduled_run_id" =~ ^[0-9]+$ ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.latestScheduledRunId=${gate_latest_scheduled_run_id} (expected integer when present)"
+  fi
+
+  gate_latest_manual_run_id="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate] | if has("latestManualRunId") and .latestManualRunId != null then (.latestManualRunId | tostring) else "" end' "$report_json")"
+  if [[ -n "$gate_latest_manual_run_id" && ! "$gate_latest_manual_run_id" =~ ^[0-9]+$ ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.latestManualRunId=${gate_latest_manual_run_id} (expected integer when present)"
+  fi
+
+  gate_latest_scheduled_conclusion="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].latestScheduledConclusion // empty' "$report_json")"
+  if [[ -n "$gate_latest_scheduled_conclusion" && "$gate_latest_scheduled_conclusion" =~ [[:space:]] ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.latestScheduledConclusion=${gate_latest_scheduled_conclusion} (expected single token when present)"
+  fi
+
+  gate_latest_manual_conclusion="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate].latestManualConclusion // empty' "$report_json")"
+  if [[ -n "$gate_latest_manual_conclusion" && "$gate_latest_manual_conclusion" =~ [[:space:]] ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.latestManualConclusion=${gate_latest_manual_conclusion} (expected single token when present)"
+  fi
+
+  gate_manual_recovery="$(jq -r --arg gate "$gate_key" '.gateFlat[$gate] | if has("manualRecovery") and .manualRecovery != null then (.manualRecovery | tostring) else "" end' "$report_json")"
+  case "$gate_manual_recovery" in
+    ""|true|false)
+      ;;
+    *)
+      die "${gate_label} contract failed: gateFlat.${gate_key}.manualRecovery=${gate_manual_recovery} (expected true|false when present)"
+      ;;
+  esac
+
+  signal_channels_exists="$(jq -r --arg gate "$gate_key" 'if (.gates[$gate].signalChannels | type == "object") then "true" else "false" end' "$report_json")"
+  [[ "$signal_channels_exists" == "true" ]] || return 0
+
+  signal_scheduled_id="$(jq -r --arg gate "$gate_key" '.gates[$gate].signalChannels.latestScheduledCompleted | if type == "object" and has("id") and .id != null then (.id | tostring) else "" end' "$report_json")"
+  if [[ -n "$signal_scheduled_id" && ! "$signal_scheduled_id" =~ ^[0-9]+$ ]]; then
+    die "${gate_label} contract failed: gates.${gate_key}.signalChannels.latestScheduledCompleted.id=${signal_scheduled_id} (expected integer when present)"
+  fi
+
+  signal_manual_id="$(jq -r --arg gate "$gate_key" '.gates[$gate].signalChannels.latestManualCompleted | if type == "object" and has("id") and .id != null then (.id | tostring) else "" end' "$report_json")"
+  if [[ -n "$signal_manual_id" && ! "$signal_manual_id" =~ ^[0-9]+$ ]]; then
+    die "${gate_label} contract failed: gates.${gate_key}.signalChannels.latestManualCompleted.id=${signal_manual_id} (expected integer when present)"
+  fi
+
+  signal_scheduled_conclusion="$(jq -r --arg gate "$gate_key" '.gates[$gate].signalChannels.latestScheduledCompleted.conclusion // empty' "$report_json")"
+  if [[ -n "$signal_scheduled_conclusion" && "$signal_scheduled_conclusion" =~ [[:space:]] ]]; then
+    die "${gate_label} contract failed: gates.${gate_key}.signalChannels.latestScheduledCompleted.conclusion=${signal_scheduled_conclusion} (expected single token when present)"
+  fi
+
+  signal_manual_conclusion="$(jq -r --arg gate "$gate_key" '.gates[$gate].signalChannels.latestManualCompleted.conclusion // empty' "$report_json")"
+  if [[ -n "$signal_manual_conclusion" && "$signal_manual_conclusion" =~ [[:space:]] ]]; then
+    die "${gate_label} contract failed: gates.${gate_key}.signalChannels.latestManualCompleted.conclusion=${signal_manual_conclusion} (expected single token when present)"
+  fi
+
+  signal_manual_recovery="$(jq -r --arg gate "$gate_key" '.gates[$gate].signalChannels | if has("manualRecovery") and .manualRecovery != null then (.manualRecovery | tostring) else "" end' "$report_json")"
+  case "$signal_manual_recovery" in
+    true|false)
+      ;;
+    *)
+      die "${gate_label} contract failed: gates.${gate_key}.signalChannels.manualRecovery=${signal_manual_recovery:-<empty>} (expected true|false)"
+      ;;
+  esac
+
+  if [[ -n "$gate_latest_scheduled_run_id" && -n "$signal_scheduled_id" && "$gate_latest_scheduled_run_id" != "$signal_scheduled_id" ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.latestScheduledRunId=${gate_latest_scheduled_run_id} mismatches gates.${gate_key}.signalChannels.latestScheduledCompleted.id=${signal_scheduled_id}"
+  fi
+
+  if [[ -n "$gate_latest_manual_run_id" && -n "$signal_manual_id" && "$gate_latest_manual_run_id" != "$signal_manual_id" ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.latestManualRunId=${gate_latest_manual_run_id} mismatches gates.${gate_key}.signalChannels.latestManualCompleted.id=${signal_manual_id}"
+  fi
+
+  if [[ -n "$gate_latest_scheduled_conclusion" && -n "$signal_scheduled_conclusion" && "$gate_latest_scheduled_conclusion" != "$signal_scheduled_conclusion" ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.latestScheduledConclusion=${gate_latest_scheduled_conclusion} mismatches gates.${gate_key}.signalChannels.latestScheduledCompleted.conclusion=${signal_scheduled_conclusion}"
+  fi
+
+  if [[ -n "$gate_latest_manual_conclusion" && -n "$signal_manual_conclusion" && "$gate_latest_manual_conclusion" != "$signal_manual_conclusion" ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.latestManualConclusion=${gate_latest_manual_conclusion} mismatches gates.${gate_key}.signalChannels.latestManualCompleted.conclusion=${signal_manual_conclusion}"
+  fi
+
+  if [[ -n "$gate_manual_recovery" && "$gate_manual_recovery" != "$signal_manual_recovery" ]]; then
+    die "${gate_label} contract failed: gateFlat.${gate_key}.manualRecovery=${gate_manual_recovery} mismatches gates.${gate_key}.signalChannels.manualRecovery=${signal_manual_recovery}"
+  fi
+}
+
+validate_remote_signal_gate "preflight" "Remote Preflight"
+validate_remote_signal_gate "metrics" "Host Metrics"
+validate_remote_signal_gate "storage" "Storage Health"
+validate_remote_signal_gate "cleanup" "Upload Cleanup"
+
 cleanup_status="$(jq -r '.gateFlat.cleanup.status // empty' "$report_json")"
 perf_status="$(jq -r '.gateFlat.perf.status // empty' "$report_json")"
 longrun_status="$(jq -r '.gateFlat.longrun.status // empty' "$report_json")"
