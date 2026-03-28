@@ -19,6 +19,7 @@ import {
   resolvePlmAuditCompletedTeamViewBatchCollaborationDraft,
   resolvePlmAuditCompletedTeamViewCollaborationDraft,
   resolvePlmAuditSavedViewTakeoverCollaborationState,
+  resolvePlmAuditTeamViewCollaborationActionFeedback,
   resolvePlmAuditTeamViewCollaborationFollowupActionFeedback,
   resolvePlmAuditTeamViewFollowupSelection,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
@@ -172,6 +173,37 @@ describe('plmAuditTeamViewCollaboration', () => {
           emphasis: 'secondary',
         },
       ],
+    })
+  })
+
+  it('returns explicit feedback when a collaboration draft disappears or loses its target', () => {
+    expect(resolvePlmAuditTeamViewCollaborationActionFeedback({
+      actionKind: 'share',
+      draft: null,
+      target: null,
+      tr,
+    })).toEqual({
+      kind: 'error',
+      message: 'Current audit team-view collaboration action is unavailable.|当前审计团队视图协作动作不可用。',
+    })
+
+    expect(resolvePlmAuditTeamViewCollaborationActionFeedback({
+      actionKind: 'set-default',
+      draft: {
+        teamViewId: 'audit-view-2',
+        teamViewName: 'Promoted view',
+        teamViewOwnerUserId: '',
+        focusTargetId: 'plm-audit-team-view-controls',
+        statusMessage: 'ready',
+        source: 'saved-view-promotion',
+        sourceSavedViewId: 'saved-view-2',
+      },
+      target: null,
+      tr,
+    })).toEqual({
+      kind: 'error',
+      message:
+        'Audit team view is no longer available. Recreate the collaboration flow before continuing.|审计团队视图已不存在。请先重新建立协作流程，再继续执行。',
     })
   })
 

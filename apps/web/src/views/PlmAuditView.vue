@@ -879,6 +879,7 @@ import {
   findPlmAuditTeamViewCollaborationFollowupView,
   prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
+  resolvePlmAuditTeamViewCollaborationActionFeedback,
   resolvePlmAuditCompletedTeamViewBatchCollaborationDraft,
   resolvePlmAuditCompletedTeamViewCollaborationDraft,
   resolvePlmAuditTeamViewCollaborationFollowupActionFeedback,
@@ -2789,8 +2790,9 @@ async function clearAuditTeamViewDefault() {
 }
 
 async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewCollaborationActionKind) {
-  const source = auditTeamViewCollaborationDraft.value?.source
-  const sourceSavedViewId = auditTeamViewCollaborationDraft.value?.sourceSavedViewId
+  const draft = auditTeamViewCollaborationDraft.value
+  const source = draft?.source
+  const sourceSavedViewId = draft?.sourceSavedViewId
 
   if (actionKind === 'dismiss') {
     dismissAuditTeamViewCollaborationDraft()
@@ -2801,6 +2803,19 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
     auditTeamViewCollaborationDraftTarget.value,
     selectedAuditTeamView.value,
   )
+  const feedback = resolvePlmAuditTeamViewCollaborationActionFeedback({
+    actionKind,
+    draft,
+    target: view,
+    tr,
+  })
+  if (feedback) {
+    if (draft && !view) {
+      clearAuditTeamViewCollaborationDraft()
+    }
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
   if (!view) return
 
   if (actionKind === 'share') {
