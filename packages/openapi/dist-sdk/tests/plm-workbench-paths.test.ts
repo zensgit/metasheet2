@@ -8,6 +8,10 @@ describe('plm-workbench OpenAPI paths', () => {
     expectTypeOf<paths['/api/plm-workbench/views/team/{id}']>().toBeObject()
     expectTypeOf<paths['/api/plm-workbench/views/team/batch']>().toBeObject()
     expectTypeOf<paths['/api/plm-workbench/views/team/{id}/default']>().toBeObject()
+    expectTypeOf<paths['/api/plm-workbench/views/team/{id}/duplicate']>().toBeObject()
+    expectTypeOf<paths['/api/plm-workbench/views/team/{id}/transfer']>().toBeObject()
+    expectTypeOf<paths['/api/plm-workbench/views/team/{id}/archive']>().toBeObject()
+    expectTypeOf<paths['/api/plm-workbench/views/team/{id}/restore']>().toBeObject()
   })
 
   it('exposes core team preset routes in generated SDK types', () => {
@@ -15,5 +19,9 @@ describe('plm-workbench OpenAPI paths', () => {
     expectTypeOf<paths['/api/plm-workbench/filter-presets/team/{id}']>().toBeObject()
     expectTypeOf<paths['/api/plm-workbench/filter-presets/team/batch']>().toBeObject()
     expectTypeOf<paths['/api/plm-workbench/filter-presets/team/{id}/default']>().toBeObject()
+    expectTypeOf<paths['/api/plm-workbench/filter-presets/team/{id}/duplicate']>().toBeObject()
+    expectTypeOf<paths['/api/plm-workbench/filter-presets/team/{id}/transfer']>().toBeObject()
+    expectTypeOf<paths['/api/plm-workbench/filter-presets/team/{id}/archive']>().toBeObject()
+    expectTypeOf<paths['/api/plm-workbench/filter-presets/team/{id}/restore']>().toBeObject()
   })
 })
