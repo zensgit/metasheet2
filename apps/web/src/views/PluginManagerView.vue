@@ -347,6 +347,50 @@ onMounted(() => {
   color: #666;
 }
 
+.plugin-admin__integrations {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.integration-card {
+  background: #fff;
+  border: 1px solid #e5e5e5;
+  border-radius: 12px;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.integration-card__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.integration-card__header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.integration-card__sub,
+.integration-card__ops {
+  margin: 0;
+  color: #666;
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.integration-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: #666;
+  font-size: 12px;
+}
+
 .plugin-admin__grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));

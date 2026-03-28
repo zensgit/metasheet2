@@ -30,6 +30,15 @@ import {
 describe('plmWorkbenchClient', () => {
   const fetchMock = vi.fn()
 
+  function getRequestHeaders(callIndex: number): Headers {
+    const options = fetchMock.mock.calls[callIndex]?.[1] as RequestInit | undefined
+    return new Headers(options?.headers)
+  }
+
+  function expectAuthHeader(callIndex: number): void {
+    expect(getRequestHeaders(callIndex).get('authorization')).toBe('Bearer test-token')
+  }
+
   beforeEach(() => {
     fetchMock.mockReset()
     vi.stubGlobal('fetch', fetchMock)
@@ -73,12 +82,9 @@ describe('plmWorkbenchClient', () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/filter-presets/team?kind=bom'),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer test-token',
-        }),
-      }),
+      expect.any(Object),
     )
+    expectAuthHeader(0)
     expect(result.items[0]).toMatchObject({
       id: 'preset-1',
       kind: 'bom',
@@ -567,12 +573,9 @@ describe('plmWorkbenchClient', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       expect.stringContaining('/api/plm-workbench/views/team?kind=documents'),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer test-token',
-        }),
-      }),
+      expect.any(Object),
     )
+    expectAuthHeader(0)
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
       expect.stringContaining('/api/plm-workbench/views/team/view-2/default'),
@@ -782,12 +785,9 @@ describe('plmWorkbenchClient', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       expect.stringContaining('/api/plm-workbench/views/team?kind=audit'),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer test-token',
-        }),
-      }),
+      expect.any(Object),
     )
+    expectAuthHeader(0)
   })
 
   it('normalizes local audit datetime filters before saving team views', async () => {
@@ -1477,12 +1477,9 @@ describe('plmWorkbenchClient', () => {
     })
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/audit-logs?page=2&pageSize=25&q=bom&action=archive&resourceType=plm-team-preset-batch'),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer test-token',
-        }),
-      }),
+      expect.any(Object),
     )
+    expectAuthHeader(0)
   })
 
   it('loads collaborative audit summary buckets', async () => {
@@ -1528,12 +1525,9 @@ describe('plmWorkbenchClient', () => {
     })
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/audit-logs/summary?windowMinutes=180&limit=6'),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer test-token',
-        }),
-      }),
+      expect.any(Object),
     )
+    expectAuthHeader(0)
   })
 
   it('exports collaborative audit logs as csv', async () => {
@@ -1562,13 +1556,10 @@ describe('plmWorkbenchClient', () => {
     })
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/audit-logs/export.csv?q=documents&actorId=dev-user&action=archive&resourceType=plm-team-view-batch&kind=documents&limit=2000'),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Accept: 'text/csv',
-          Authorization: 'Bearer test-token',
-        }),
-      }),
+      expect.any(Object),
     )
+    expect(getRequestHeaders(0).get('accept')).toBe('text/csv')
+    expectAuthHeader(0)
   })
 
   it('maps default-scene audit logs', async () => {
@@ -1624,12 +1615,9 @@ describe('plmWorkbenchClient', () => {
     })
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/audit-logs?page=1&pageSize=20&action=set-default&resourceType=plm-team-view-default&kind=workbench'),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer test-token',
-        }),
-      }),
+      expect.any(Object),
     )
+    expectAuthHeader(0)
   })
 
   it('maps team preset default audit logs', async () => {
@@ -1685,11 +1673,8 @@ describe('plmWorkbenchClient', () => {
     })
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/audit-logs?page=1&pageSize=20&action=clear-default&resourceType=plm-team-preset-default&kind=bom'),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer test-token',
-        }),
-      }),
+      expect.any(Object),
     )
+    expectAuthHeader(0)
   })
 })

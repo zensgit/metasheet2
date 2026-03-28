@@ -83,10 +83,27 @@ components:
       properties:
         id:
           type: string
+        targetType:
+          type: string
+          nullable: true
+        targetId:
+          type: string
+          nullable: true
+        targetFieldId:
+          type: string
+          nullable: true
+        containerType:
+          type: string
+          nullable: true
+        containerId:
+          type: string
+          nullable: true
         spreadsheetId:
           type: string
+          nullable: true
         rowId:
           type: string
+          nullable: true
         fieldId:
           type: string
           nullable: true
@@ -353,6 +370,8 @@ components:
           type: string
         name:
           type: string
+        paid:
+          type: boolean
         requiresApproval:
           type: boolean
         requiresAttachment:
@@ -389,8 +408,18 @@ components:
           type: array
           items:
             type: string
+        approver_user_ids:
+          type: array
+          deprecated: true
+          items:
+            type: string
         approverRoleIds:
           type: array
+          items:
+            type: string
+        approver_role_ids:
+          type: array
+          deprecated: true
           items:
             type: string
     AttendanceApprovalFlow:
@@ -434,19 +463,40 @@ components:
           type: string
         orgId:
           type: string
+        org_id:
+          type: string
+          deprecated: true
         userId:
           type: string
+        user_id:
+          type: string
+          deprecated: true
         rotationRuleId:
           type: string
+        rotation_rule_id:
+          type: string
+          deprecated: true
         startDate:
           type: string
           format: date
+        start_date:
+          type: string
+          format: date
+          deprecated: true
         endDate:
           type: string
           format: date
           nullable: true
+        end_date:
+          type: string
+          format: date
+          nullable: true
+          deprecated: true
         isActive:
           type: boolean
+        is_active:
+          type: boolean
+          deprecated: true
     AttendanceRotationAssignmentItem:
       type: object
       properties:
@@ -543,6 +593,48 @@ components:
           type: object
         isDefault:
           type: boolean
+    AttendanceGroup:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        name:
+          type: string
+        code:
+          type: string
+        timezone:
+          type: string
+        ruleSetId:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+    AttendanceGroupMember:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        groupId:
+          type: string
+        userId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
     AttendancePayrollTemplate:
       type: object
       properties:
@@ -596,8 +688,39 @@ components:
           type: string
         mapping:
           type: object
+        mappingProfiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttendanceImportMappingProfile'
         payloadExample:
           type: object
+    AttendanceImportMappingProfile:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        source:
+          type: string
+          nullable: true
+        mapping:
+          type: object
+          nullable: true
+        requiredFields:
+          type: array
+          items:
+            type: string
+        userMapKeyField:
+          type: string
+          nullable: true
+        userMapSourceFields:
+          type: array
+          items:
+            type: string
     AttendanceImportPreviewItem:
       type: object
       properties:
@@ -640,11 +763,180 @@ components:
           type: array
           items:
             type: string
+    AttendanceImportPreviewStats:
+      type: object
+      properties:
+        invalid:
+          type: integer
+        duplicates:
+          type: integer
+    AttendanceImportPreviewData:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AttendanceImportPreviewItem' }
+        total:
+          type: integer
+        rowCount:
+          type: integer
+        truncated:
+          type: boolean
+        previewLimit:
+          type: integer
+        mappingUsed:
+          type: array
+          items: { type: object }
+        csvWarnings:
+          type: array
+          items: { type: string }
+        groupWarnings:
+          type: array
+          items: { type: string }
+        asyncSimplified:
+          type: boolean
+        stats:
+          $ref: '#/components/schemas/AttendanceImportPreviewStats'
+    AttendanceImportRequest:
+      type: object
+      properties:
+        source:
+          type: string
+        orgId:
+          type: string
+        userId:
+          type: string
+        timezone:
+          type: string
+        ruleSetId:
+          type: string
+        mappingProfileId:
+          type: string
+        commitToken:
+          type: string
+        idempotencyKey:
+          type: string
+        engine:
+          type: object
+        mapping:
+          type: object
+        columns:
+          type: array
+          items: { type: object }
+        data:
+          type: object
+        csvText:
+          type: string
+        csvFileId:
+          type: string
+        csvOptions:
+          type: object
+        rows:
+          type: array
+          items: { type: object }
+        entries:
+          type: array
+          items: { type: object }
+        userMap:
+          type: object
+        userMapKeyField:
+          type: string
+        userMapSourceFields:
+          type: array
+          items: { type: string }
+        statusMap:
+          type: object
+        mode:
+          type: string
+    AttendanceImportJob:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        batchId:
+          type: string
+          nullable: true
+        createdBy:
+          type: string
+          nullable: true
+        idempotencyKey:
+          type: string
+          nullable: true
+        kind:
+          type: string
+        status:
+          type: string
+        engine:
+          type: string
+          nullable: true
+        chunkConfig:
+          type: object
+          nullable: true
+        recordUpsertStrategy:
+          type: string
+          nullable: true
+        progress:
+          type: integer
+        total:
+          type: integer
+        progressPercent:
+          type: integer
+        processedRows:
+          type: integer
+        failedRows:
+          type: integer
+        skippedCount:
+          type: integer
+        skippedRows:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        elapsedMs:
+          type: integer
+        throughputRowsPerSec:
+          type: number
+          format: float
+        error:
+          type: string
+          nullable: true
+        preview:
+          $ref: '#/components/schemas/AttendanceImportPreviewData'
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
     AttendanceImportResult:
       type: object
       properties:
         imported:
           type: integer
+        processedRows:
+          type: integer
+        failedRows:
+          type: integer
+        elapsedMs:
+          type: integer
+        engine:
+          type: string
+          nullable: true
+        recordUpsertStrategy:
+          type: string
+          nullable: true
         items:
           type: array
           items:
@@ -652,9 +944,15 @@ components:
             properties:
               id:
                 type: string
+              userId:
+                type: string
+                nullable: true
               workDate:
                 type: string
                 format: date
+              engine:
+                type: string
+                nullable: true
         skipped:
           type: array
           items:
@@ -674,10 +972,54 @@ components:
         batchId:
           type: string
           nullable: true
+        idempotent:
+          type: boolean
+        itemsTruncated:
+          type: boolean
         csvWarnings:
           type: array
           items:
             type: string
+        groupWarnings:
+          type: array
+          items:
+            type: string
+        meta:
+          type: object
+    AttendanceImportPrepareData:
+      type: object
+      properties:
+        commitToken:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        ttlSeconds:
+          type: integer
+    AttendanceImportUploadData:
+      type: object
+      properties:
+        fileId:
+          type: string
+        rowCount:
+          type: integer
+        bytes:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        maxBytes:
+          type: integer
+    AttendanceImportAsyncJobData:
+      type: object
+      properties:
+        job:
+          $ref: '#/components/schemas/AttendanceImportJob'
+        idempotent:
+          type: boolean
     AttendanceIntegration:
       type: object
       properties:
@@ -739,22 +1081,50 @@ components:
           type: string
         orgId:
           type: string
+        org_id:
+          type: string
+          deprecated: true
         name:
           type: string
         timezone:
           type: string
         workStartTime:
           type: string
+        work_start_time:
+          type: string
+          deprecated: true
         workEndTime:
           type: string
+        work_end_time:
+          type: string
+          deprecated: true
+        isOvernight:
+          type: boolean
+        is_overnight:
+          type: boolean
+          deprecated: true
         lateGraceMinutes:
           type: integer
+        late_grace_minutes:
+          type: integer
+          deprecated: true
         earlyGraceMinutes:
           type: integer
+        early_grace_minutes:
+          type: integer
+          deprecated: true
         roundingMinutes:
           type: integer
+        rounding_minutes:
+          type: integer
+          deprecated: true
         workingDays:
           type: array
+          items:
+            type: integer
+        working_days:
+          type: array
+          deprecated: true
           items:
             type: integer
     AttendanceShiftAssignment:
@@ -764,19 +1134,40 @@ components:
           type: string
         orgId:
           type: string
+        org_id:
+          type: string
+          deprecated: true
         userId:
           type: string
+        user_id:
+          type: string
+          deprecated: true
         shiftId:
           type: string
+        shift_id:
+          type: string
+          deprecated: true
         startDate:
           type: string
           format: date
+        start_date:
+          type: string
+          format: date
+          deprecated: true
         endDate:
           type: string
           format: date
           nullable: true
+        end_date:
+          type: string
+          format: date
+          nullable: true
+          deprecated: true
         isActive:
           type: boolean
+        is_active:
+          type: boolean
+          deprecated: true
     AttendanceHoliday:
       type: object
       properties:
@@ -792,6 +1183,12 @@ components:
           nullable: true
         isWorkingDay:
           type: boolean
+        type:
+          type: string
+          enum: [holiday, working_day_override]
+        holidayType:
+          type: string
+          enum: [holiday, working_day_override]
     AttendanceSettings:
       type: object
       properties:
@@ -892,6 +1289,475 @@ components:
         updated_at:
           type: string
           format: date-time
+    MultitableBase:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        color:
+          type: string
+          nullable: true
+        ownerId:
+          type: string
+          nullable: true
+        workspaceId:
+          type: string
+          nullable: true
+    MultitableSheet:
+      type: object
+      properties:
+        id:
+          type: string
+        baseId:
+          type: string
+          nullable: true
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+    MultitableView:
+      type: object
+      properties:
+        id:
+          type: string
+        sheetId:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        filterInfo:
+          type: object
+          additionalProperties: true
+        sortInfo:
+          type: object
+          additionalProperties: true
+        groupInfo:
+          type: object
+          additionalProperties: true
+        hiddenFieldIds:
+          type: array
+          items:
+            type: string
+        config:
+          type: object
+          additionalProperties: true
+    MultitableField:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+          enum:
+            - string
+            - number
+            - boolean
+            - date
+            - formula
+            - select
+            - link
+            - lookup
+            - rollup
+            - attachment
+        property:
+          type: object
+          additionalProperties: true
+        options:
+          type: array
+          items:
+            type: object
+            properties:
+              value:
+                type: string
+              color:
+                type: string
+                nullable: true
+            required:
+              - value
+        order:
+          type: integer
+    MultitableRecord:
+      type: object
+      properties:
+        id:
+          type: string
+        version:
+          type: integer
+        data:
+          type: object
+          additionalProperties: true
+    MultitableCommentsScope:
+      type: object
+      properties:
+        targetType:
+          type: string
+        targetId:
+          type: string
+        targetFieldId:
+          type: string
+          nullable: true
+        containerType:
+          type: string
+        containerId:
+          type: string
+      required:
+        - targetType
+        - targetId
+        - containerType
+        - containerId
+    MultitableLinkedRecordSummary:
+      type: object
+      properties:
+        id:
+          type: string
+        display:
+          type: string
+      required:
+        - id
+        - display
+    MultitableAttachment:
+      type: object
+      properties:
+        id:
+          type: string
+        filename:
+          type: string
+        mimeType:
+          type: string
+        size:
+          type: integer
+        url:
+          type: string
+        thumbnailUrl:
+          type: string
+          nullable: true
+        uploadedAt:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - filename
+        - mimeType
+        - size
+        - url
+    MultitableRecordVersion:
+      type: object
+      properties:
+        recordId:
+          type: string
+        version:
+          type: integer
+      required:
+        - recordId
+        - version
+    MultitableComputedRecord:
+      type: object
+      properties:
+        recordId:
+          type: string
+        data:
+          type: object
+          additionalProperties: true
+      required:
+        - recordId
+        - data
+    MultitableRelatedRecord:
+      type: object
+      properties:
+        sheetId:
+          type: string
+        recordId:
+          type: string
+        data:
+          type: object
+          additionalProperties: true
+      required:
+        - sheetId
+        - recordId
+        - data
+    MultitableLinkFieldRef:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+      required:
+        - id
+        - name
+        - type
+    MultitableLinkSummaryMap:
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          $ref: '#/components/schemas/MultitableLinkedRecordSummary'
+    MultitableViewLinkSummaries:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/MultitableLinkSummaryMap'
+    MultitableAttachmentSummaryMap:
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          $ref: '#/components/schemas/MultitableAttachment'
+    MultitableViewAttachmentSummaries:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
+    MultitablePage:
+      type: object
+      properties:
+        offset:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+        hasMore:
+          type: boolean
+      required:
+        - offset
+        - limit
+        - total
+        - hasMore
+    MultitableViewMeta:
+      type: object
+      properties:
+        warnings:
+          type: array
+          items:
+            type: string
+        computedFilterSort:
+          type: boolean
+        ignoredSortFieldIds:
+          type: array
+          items:
+            type: string
+        ignoredFilterFieldIds:
+          type: array
+          items:
+            type: string
+    MultitableCapabilities:
+      type: object
+      properties:
+        canRead:
+          type: boolean
+        canCreateRecord:
+          type: boolean
+        canEditRecord:
+          type: boolean
+        canDeleteRecord:
+          type: boolean
+        canManageFields:
+          type: boolean
+        canManageViews:
+          type: boolean
+        canComment:
+          type: boolean
+        canManageAutomation:
+          type: boolean
+      required:
+        - canRead
+        - canCreateRecord
+        - canEditRecord
+        - canDeleteRecord
+        - canManageFields
+        - canManageViews
+        - canComment
+        - canManageAutomation
+    MultitableContext:
+      type: object
+      properties:
+        base:
+          allOf:
+            - $ref: '#/components/schemas/MultitableBase'
+          nullable: true
+        sheet:
+          allOf:
+            - $ref: '#/components/schemas/MultitableSheet'
+          nullable: true
+        sheets:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableSheet'
+        views:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableView'
+        capabilities:
+          $ref: '#/components/schemas/MultitableCapabilities'
+    MultitableViewData:
+      type: object
+      properties:
+        id:
+          type: string
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableField'
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableRecord'
+        linkSummaries:
+          $ref: '#/components/schemas/MultitableViewLinkSummaries'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableViewAttachmentSummaries'
+        view:
+          allOf:
+            - $ref: '#/components/schemas/MultitableView'
+          nullable: true
+        meta:
+          $ref: '#/components/schemas/MultitableViewMeta'
+        page:
+          $ref: '#/components/schemas/MultitablePage'
+      required:
+        - id
+        - fields
+        - rows
+    MultitableRecordContext:
+      type: object
+      properties:
+        sheet:
+          $ref: '#/components/schemas/MultitableSheet'
+        view:
+          allOf:
+            - $ref: '#/components/schemas/MultitableView'
+          nullable: true
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableField'
+        record:
+          $ref: '#/components/schemas/MultitableRecord'
+        capabilities:
+          $ref: '#/components/schemas/MultitableCapabilities'
+        commentsScope:
+          $ref: '#/components/schemas/MultitableCommentsScope'
+        linkSummaries:
+          $ref: '#/components/schemas/MultitableLinkSummaryMap'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
+      required:
+        - sheet
+        - fields
+        - record
+        - capabilities
+        - commentsScope
+        - linkSummaries
+    MultitableFormContext:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [form]
+        readOnly:
+          type: boolean
+        submitPath:
+          type: string
+        sheet:
+          $ref: '#/components/schemas/MultitableSheet'
+        view:
+          allOf:
+            - $ref: '#/components/schemas/MultitableView'
+          nullable: true
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableField'
+        capabilities:
+          $ref: '#/components/schemas/MultitableCapabilities'
+        record:
+          allOf:
+            - $ref: '#/components/schemas/MultitableRecord'
+          nullable: true
+        commentsScope:
+          allOf:
+            - $ref: '#/components/schemas/MultitableCommentsScope'
+          nullable: true
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
+      required:
+        - mode
+        - readOnly
+        - submitPath
+        - sheet
+        - fields
+        - capabilities
+    MultitablePersonFieldPrepareResult:
+      type: object
+      properties:
+        targetSheet:
+          $ref: '#/components/schemas/MultitableSheet'
+        fieldProperty:
+          type: object
+          additionalProperties: true
+      required:
+        - targetSheet
+        - fieldProperty
+    MultitableRecordMutationResult:
+      type: object
+      properties:
+        record:
+          $ref: '#/components/schemas/MultitableRecord'
+        commentsScope:
+          $ref: '#/components/schemas/MultitableCommentsScope'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
+      required:
+        - record
+        - commentsScope
+    MultitableFormSubmitResult:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [create, update]
+        record:
+          $ref: '#/components/schemas/MultitableRecord'
+        commentsScope:
+          $ref: '#/components/schemas/MultitableCommentsScope'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
+      required:
+        - mode
+        - record
+        - commentsScope
+    MultitablePatchResult:
+      type: object
+      properties:
+        updated:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableRecordVersion'
+        records:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableComputedRecord'
+        linkSummaries:
+          $ref: '#/components/schemas/MultitableViewLinkSummaries'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableViewAttachmentSummaries'
+        relatedRecords:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableRelatedRecord'
+      required:
+        - updated
   responses:
     Unauthorized:
       description: Unauthorized - Missing or invalid JWT token
@@ -981,6 +1847,26 @@ components:
                 error:
                   code: "INVALID_FORMAT"
                   message: "Request body must be valid JSON"
+    Conflict:
+      description: Conflict - Request conflicts with current resource state
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          examples:
+            optimistic_lock_conflict:
+              summary: Version Conflict
+              value:
+                ok: false
+                error:
+                  code: "CONFLICT"
+                  message: "Resource state changed. Refresh and try again."
+            duplicate_code_conflict:
+              summary: Duplicate Code
+              value:
+                ok: false
+                error:
+                  code: "DUPLICATE_CODE"
+                  message: "Code already exists."
     NotFound:
       description: Not found - Resource does not exist
       content:

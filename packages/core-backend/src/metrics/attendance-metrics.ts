@@ -43,6 +43,25 @@ export const attendanceImportUploadRowsTotal = new client.Counter({
   help: 'Total data rows uploaded via attendance import upload channel (csvFileId)',
 })
 
+export const attendanceImportProcessedRowsTotal = new client.Counter({
+  name: 'attendance_import_processed_rows_total',
+  help: 'Total processed rows reported by attendance import operations',
+  labelNames: ['operation', 'engine'] as const,
+})
+
+export const attendanceImportFailedRowsTotal = new client.Counter({
+  name: 'attendance_import_failed_rows_total',
+  help: 'Total failed rows reported by attendance import operations',
+  labelNames: ['operation', 'engine'] as const,
+})
+
+export const attendanceImportElapsedSeconds = new client.Histogram({
+  name: 'attendance_import_elapsed_seconds',
+  help: 'Attendance import elapsed time reported by API payload telemetry',
+  labelNames: ['operation', 'engine'] as const,
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300, 600, 1200],
+})
+
 registry.registerMetric(attendanceApiErrorsTotal)
 registry.registerMetric(attendanceRateLimitedTotal)
 registry.registerMetric(attendanceOperationRequestsTotal)
@@ -50,3 +69,6 @@ registry.registerMetric(attendanceOperationFailuresTotal)
 registry.registerMetric(attendanceOperationLatencySeconds)
 registry.registerMetric(attendanceImportUploadBytesTotal)
 registry.registerMetric(attendanceImportUploadRowsTotal)
+registry.registerMetric(attendanceImportProcessedRowsTotal)
+registry.registerMetric(attendanceImportFailedRowsTotal)
+registry.registerMetric(attendanceImportElapsedSeconds)

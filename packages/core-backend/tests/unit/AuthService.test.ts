@@ -10,7 +10,7 @@ const poolMocks = vi.hoisted(() => {
   return {
     query,
     poolManager: {
-      get: () => ({ query })
+      get: () => ({ query, getInternalPool: () => null })
     }
   }
 })
@@ -37,13 +37,14 @@ describe('AuthService.verifyToken', () => {
     jwtMocks.verify.mockReset()
     jwtMocks.sign.mockReset()
     poolMocks.query.mockReset()
+    poolMocks.query.mockResolvedValue({ rows: [] })
     rbacMocks.isAdmin.mockReset()
     rbacMocks.listUserPermissions.mockReset()
   })
 
   it('sanitizes user and uses RBAC role/permissions', async () => {
     jwtMocks.verify.mockReturnValue({ userId: 'u1', email: 'admin@x', role: 'user', iat: 0, exp: 0 })
-    poolMocks.query.mockResolvedValue({
+    poolMocks.query.mockResolvedValueOnce({
       rows: [{
         id: 'u1',
         email: 'admin@x',
@@ -69,7 +70,7 @@ describe('AuthService.verifyToken', () => {
 
   it('falls back to stored role/permissions when RBAC lookup fails', async () => {
     jwtMocks.verify.mockReturnValue({ userId: 'u2', email: 'user@x', role: 'user', iat: 0, exp: 0 })
-    poolMocks.query.mockResolvedValue({
+    poolMocks.query.mockResolvedValueOnce({
       rows: [{
         id: 'u2',
         email: 'user@x',
@@ -95,7 +96,7 @@ describe('AuthService.verifyToken', () => {
 
   it('accepts legacy id claim when userId is missing', async () => {
     jwtMocks.verify.mockReturnValue({ id: 'u3', email: 'legacy@x', role: 'user', iat: 0, exp: 0 })
-    poolMocks.query.mockResolvedValue({
+    poolMocks.query.mockResolvedValueOnce({
       rows: [{
         id: 'u3',
         email: 'legacy@x',
@@ -137,13 +138,14 @@ describe('AuthService.refreshToken', () => {
     jwtMocks.verify.mockReset()
     jwtMocks.sign.mockReset()
     poolMocks.query.mockReset()
+    poolMocks.query.mockResolvedValue({ rows: [] })
     rbacMocks.isAdmin.mockReset()
     rbacMocks.listUserPermissions.mockReset()
   })
 
   it('refreshes token when legacy id claim is present', async () => {
     jwtMocks.verify.mockReturnValue({ id: 'u4', email: 'refresh@x', role: 'admin', iat: 0, exp: 0 })
-    poolMocks.query.mockResolvedValue({
+    poolMocks.query.mockResolvedValueOnce({
       rows: [{
         id: 'u4',
         email: 'refresh@x',

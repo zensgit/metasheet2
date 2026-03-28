@@ -1,3 +1,6 @@
+import { assertImportTelemetry } from './attendance-import-telemetry-utils.mjs'
+import { resolveSmokeWorkDate } from './attendance-smoke-workdate.mjs'
+
 const apiBase = (process.env.API_BASE || '').replace(/\/+$/, '')
 let token = process.env.AUTH_TOKEN || ''
 const orgId = process.env.ORG_ID || 'default'
@@ -9,15 +12,19 @@ const requireImportExport = process.env.REQUIRE_IMPORT_EXPORT === 'true'
 const requireImportUpload = process.env.REQUIRE_IMPORT_UPLOAD === 'true'
 const requireImportAsync = process.env.REQUIRE_IMPORT_ASYNC === 'true'
 const requireImportTelemetry = process.env.REQUIRE_IMPORT_TELEMETRY === 'true'
+const requireImportUpsertStrategy = process.env.REQUIRE_IMPORT_UPSERT_STRATEGY === 'true'
+const requireImportUploadAsync = process.env.REQUIRE_IMPORT_UPLOAD_ASYNC == null
+  ? requireImportUpload
+  : process.env.REQUIRE_IMPORT_UPLOAD_ASYNC === 'true'
 const requireBatchResolve = process.env.REQUIRE_BATCH_RESOLVE === 'true'
 const requirePreviewAsync = process.env.REQUIRE_PREVIEW_ASYNC === 'true'
 const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
 const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
 const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 120000))
-const groupLookupRetryAttempts = Math.max(1, Number(process.env.GROUP_LOOKUP_RETRY_ATTEMPTS || 8))
-const groupLookupRetryDelayMs = Math.max(100, Number(process.env.GROUP_LOOKUP_RETRY_DELAY_MS || 750))
-const groupLookupMaxPages = Math.max(1, Number(process.env.GROUP_LOOKUP_MAX_PAGES || 20))
-const importEngines = new Set(['standard', 'bulk'])
+const groupRetryAttempts = Math.max(1, Number(process.env.GROUP_RETRY_ATTEMPTS || 8))
+const groupRetryDelayMs = Math.max(100, Number(process.env.GROUP_RETRY_DELAY_MS || 1000))
+const groupPageSize = Math.max(1, Number(process.env.GROUP_PAGE_SIZE || 200))
+const groupPageMax = Math.max(1, Number(process.env.GROUP_PAGE_MAX || 20))
 
 function normalizeProductMode(value) {
   if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
@@ -141,10 +148,6 @@ function assertOk({ res, raw, body }, label) {
   }
 }
 
-function toDateOnly(date) {
-  return date.toISOString().slice(0, 10)
-}
-
 function makeGroupName() {
   // Keep a stable group name so daily gates don't keep creating new groups.
   // The backend upserts on (org_id, name).
@@ -154,6 +157,16 @@ function makeGroupName() {
 function makeIdempotencyKey() {
   const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   return `attendance-smoke-${suffix}`
+}
+
+function toDateOnly(date) {
+  return date.toISOString().slice(0, 10)
+}
+
+function isoForWorkDate(workDate, hour, minute = 0) {
+  const hh = String(hour).padStart(2, '0')
+  const mm = String(minute).padStart(2, '0')
+  return `${workDate}T${hh}:${mm}:00.000Z`
 }
 
 function makeUuidV4() {
@@ -176,50 +189,64 @@ function makeCsv(workDate, userId, groupName) {
   ].join('\n')
 }
 
-function isoMinutesAgo(minutes) {
-  const ms = Math.max(0, Number(minutes) || 0) * 60 * 1000
-  return new Date(Date.now() - ms).toISOString()
-}
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function coerceNonNegativeNumber(value) {
-  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value)
-    if (Number.isFinite(parsed) && parsed >= 0) return parsed
+function isRetriableStatus(status) {
+  return status === 408 || status === 429 || (status >= 500 && status <= 504)
+}
+
+async function findGroupByNameWithRetry(groupName) {
+  async function findGroupByNameAcrossPages() {
+    for (let page = 1; page <= groupPageMax; page += 1) {
+      const groups = await apiFetch(`/attendance/groups?pageSize=${groupPageSize}&page=${page}`, { method: 'GET' })
+      assertOk(groups, 'GET /attendance/groups')
+      const groupItems = groups.body?.data?.items || []
+      const created = groupItems.find((g) => g && g.name === groupName)
+      if (created?.id) return created
+      if (!Array.isArray(groupItems) || groupItems.length < groupPageSize) break
+    }
+    return null
+  }
+
+  for (let attempt = 1; attempt <= groupRetryAttempts; attempt += 1) {
+    const created = await findGroupByNameAcrossPages()
+    if (created?.id) {
+      if (attempt > 1) log(`group resolved after retry: attempt=${attempt}`)
+      return created
+    }
+    if (attempt < groupRetryAttempts) {
+      await sleep(groupRetryDelayMs)
+    }
   }
   return null
 }
 
-function assertImportTelemetry(payload, label, options = {}) {
-  const minProcessedRows = Number.isFinite(options.minProcessedRows) ? Number(options.minProcessedRows) : null
-  const engine = typeof payload?.engine === 'string' ? payload.engine.trim().toLowerCase() : ''
-  if (!importEngines.has(engine)) {
-    throw new Error(`${label}: telemetry.engine missing or invalid`)
+async function verifyGroupMembershipWithRetry(groupId, userId) {
+  async function hasGroupMemberAcrossPages() {
+    for (let page = 1; page <= groupPageMax; page += 1) {
+      const members = await apiFetch(`/attendance/groups/${groupId}/members?pageSize=${groupPageSize}&page=${page}`, { method: 'GET' })
+      assertOk(members, 'GET /attendance/groups/:id/members')
+      const memberItems = members.body?.data?.items || []
+      const hasMember = memberItems.some((m) => m && (m.userId === userId || m.user_id === userId))
+      if (hasMember) return true
+      if (!Array.isArray(memberItems) || memberItems.length < groupPageSize) break
+    }
+    return false
   }
-  const processedRows = coerceNonNegativeNumber(payload?.processedRows ?? payload?.rowCount ?? payload?.imported)
-  if (processedRows === null) {
-    throw new Error(`${label}: telemetry.processedRows missing or invalid`)
-  }
-  if (minProcessedRows !== null && processedRows < minProcessedRows) {
-    throw new Error(`${label}: telemetry.processedRows below minimum (${processedRows} < ${minProcessedRows})`)
-  }
-  const failedRows = coerceNonNegativeNumber(payload?.failedRows ?? payload?.skippedCount ?? 0)
-  if (failedRows === null) {
-    throw new Error(`${label}: telemetry.failedRows missing or invalid`)
-  }
-  const elapsedMs = coerceNonNegativeNumber(payload?.elapsedMs ?? payload?.jobElapsedMs)
-  if (elapsedMs === null) {
-    throw new Error(`${label}: telemetry.elapsedMs missing or invalid`)
-  }
-  return { engine, processedRows, failedRows, elapsedMs }
-}
 
-function isRetriableStatus(status) {
-  return status === 408 || status === 429 || (status >= 500 && status <= 504)
+  for (let attempt = 1; attempt <= groupRetryAttempts; attempt += 1) {
+    const hasMember = await hasGroupMemberAcrossPages()
+    if (hasMember) {
+      if (attempt > 1) log(`group membership resolved after retry: attempt=${attempt}`)
+      return true
+    }
+    if (attempt < groupRetryAttempts) {
+      await sleep(groupRetryDelayMs)
+    }
+  }
+  return false
 }
 
 async function fetchWithRetry(url, init = {}, options = {}) {
@@ -290,58 +317,6 @@ async function pollImportJob(jobId, { timeoutMs = 180000, intervalMs = 1000 } = 
 
     await sleep(intervalMs)
   }
-}
-
-async function findGroupByName(groupName) {
-  let lastCount = 0
-  for (let attempt = 1; attempt <= groupLookupRetryAttempts; attempt += 1) {
-    let scanned = 0
-    for (let page = 1; page <= groupLookupMaxPages; page += 1) {
-      const groups = await apiFetch(`/attendance/groups?page=${page}&pageSize=200`, { method: 'GET' })
-      assertOk(groups, `GET /attendance/groups?page=${page}`)
-      const items = Array.isArray(groups.body?.data?.items) ? groups.body.data.items : []
-      scanned += items.length
-      const created = items.find((g) => g && g.name === groupName)
-      if (created?.id) {
-        if (attempt > 1 || page > 1) {
-          log(`group lookup recovered: attempt=${attempt}/${groupLookupRetryAttempts} page=${page}/${groupLookupMaxPages}`)
-        }
-        return created
-      }
-      if (items.length < 200) break
-    }
-    lastCount = scanned
-    if (attempt < groupLookupRetryAttempts) {
-      await sleep(groupLookupRetryDelayMs)
-    }
-  }
-  return { id: null, lastCount }
-}
-
-async function ensureGroupMember(groupId, userId) {
-  let lastCount = 0
-  for (let attempt = 1; attempt <= groupLookupRetryAttempts; attempt += 1) {
-    let scanned = 0
-    for (let page = 1; page <= groupLookupMaxPages; page += 1) {
-      const members = await apiFetch(`/attendance/groups/${groupId}/members?page=${page}&pageSize=200`, { method: 'GET' })
-      assertOk(members, `GET /attendance/groups/:id/members?page=${page}`)
-      const items = Array.isArray(members.body?.data?.items) ? members.body.data.items : []
-      scanned += items.length
-      const hasMember = items.some((m) => m && (m.userId === userId || m.user_id === userId))
-      if (hasMember) {
-        if (attempt > 1 || page > 1) {
-          log(`membership lookup recovered: attempt=${attempt}/${groupLookupRetryAttempts} page=${page}/${groupLookupMaxPages}`)
-        }
-        return true
-      }
-      if (items.length < 200) break
-    }
-    lastCount = scanned
-    if (attempt < groupLookupRetryAttempts) {
-      await sleep(groupLookupRetryDelayMs)
-    }
-  }
-  return { ok: false, lastCount }
 }
 
 async function run() {
@@ -473,10 +448,11 @@ async function run() {
   log('template ok')
 
   // 5) preview
-  const workDate = toDateOnly(new Date())
+  const workDate = resolveSmokeWorkDate()
   const groupName = makeGroupName()
   const idempotencyKey = makeIdempotencyKey()
   const csvText = makeCsv(workDate, userId, groupName)
+  log(`workDate=${workDate}`)
 
   let csvFileId = ''
   if (requireImportUpload) {
@@ -560,7 +536,7 @@ async function run() {
     }
     if (requireImportTelemetry) {
       const telemetry = assertImportTelemetry(previewAsyncDone, 'GET /attendance/import/jobs/:id (preview-async)', { minProcessedRows: 1 })
-      log(`preview async telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs}`)
+      log(`preview async telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs} recordUpsertStrategy=${telemetry.recordUpsertStrategy || 'n/a'}`)
     }
 
     const previewAsyncRetryPayload = { ...previewAsyncPayload }
@@ -636,8 +612,11 @@ async function run() {
   if (!batchId) die('commit did not return batchId')
   log(`commit ok: batchId=${batchId}`)
   if (requireImportTelemetry) {
-    const telemetry = assertImportTelemetry(commit.body?.data, 'POST /attendance/import/commit', { minProcessedRows: 1 })
-    log(`import commit telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs}`)
+    const telemetry = assertImportTelemetry(commit.body?.data, 'POST /attendance/import/commit', {
+      minProcessedRows: 1,
+      requireUpsertStrategy: requireImportUpsertStrategy,
+    })
+    log(`import commit telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs} recordUpsertStrategy=${telemetry.recordUpsertStrategy || 'n/a'}`)
   }
 
   // 6.1) idempotency retry should return the same batch without requiring a fresh commit token.
@@ -657,8 +636,11 @@ async function run() {
     if (retryBatchId !== batchId) die(`idempotency retry returned different batchId: ${retryBatchId}`)
     if (commitRetry.body?.data?.idempotent !== true) die('idempotency retry missing idempotent=true')
     if (requireImportTelemetry) {
-      const telemetry = assertImportTelemetry(commitRetry.body?.data, 'POST /attendance/import/commit (idempotency retry)', { minProcessedRows: 1 })
-      log(`import idempotency telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs}`)
+      const telemetry = assertImportTelemetry(commitRetry.body?.data, 'POST /attendance/import/commit (idempotency retry)', {
+        minProcessedRows: 1,
+        requireUpsertStrategy: requireImportUpsertStrategy,
+      })
+      log(`import idempotency telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs} recordUpsertStrategy=${telemetry.recordUpsertStrategy || 'n/a'}`)
     }
     log('idempotency ok')
   }
@@ -691,6 +673,27 @@ async function run() {
     const workDateAsync = toDateOnly(new Date(Date.now() - 2 * 24 * 60 * 60 * 1000))
     const idempotencyKeyAsync = `${idempotencyKey}-async`
     const csvTextAsync = makeCsv(workDateAsync, userId, groupName)
+    let csvFileIdAsync = ''
+
+    if (requireImportUploadAsync) {
+      const query = new URLSearchParams()
+      if (orgId) query.set('orgId', orgId)
+      query.set('filename', `attendance-smoke-async-${workDateAsync}.csv`)
+      const uploadAsyncRes = await apiFetchRaw(`/attendance/import/upload?${query.toString()}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/csv',
+        },
+        body: csvTextAsync,
+      })
+      assertOk(uploadAsyncRes, 'POST /attendance/import/upload (async)')
+      if (uploadAsyncRes.res.status !== 201) {
+        log(`WARN: import async upload returned HTTP ${uploadAsyncRes.res.status} (expected 201)`)
+      }
+      csvFileIdAsync = String(uploadAsyncRes.body?.data?.fileId || uploadAsyncRes.body?.data?.id || '')
+      if (!csvFileIdAsync) die('import async upload did not return fileId')
+      log(`import async upload ok: fileId=${csvFileIdAsync}`)
+    }
 
     const asyncPayload = {
       ...payloadExample,
@@ -698,7 +701,7 @@ async function run() {
       userId,
       timezone: payloadExample.timezone || defaultTimezone,
       mappingProfileId: 'dingtalk_csv_daily_summary',
-      csvText: csvTextAsync,
+      ...(requireImportUploadAsync ? { csvFileId: csvFileIdAsync } : { csvText: csvTextAsync }),
       idempotencyKey: idempotencyKeyAsync,
       groupSync: {
         autoCreate: true,
@@ -728,8 +731,11 @@ async function run() {
       die(`async job batchId mismatch: expected=${asyncBatchId} got=${String(jobDone.batchId || '')}`)
     }
     if (requireImportTelemetry) {
-      const telemetry = assertImportTelemetry(jobDone, 'GET /attendance/import/jobs/:id (commit-async)', { minProcessedRows: 1 })
-      log(`import async telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs}`)
+      const telemetry = assertImportTelemetry(jobDone, 'GET /attendance/import/jobs/:id (commit-async)', {
+        minProcessedRows: 1,
+        requireUpsertStrategy: requireImportUpsertStrategy,
+      })
+      log(`import async telemetry ok: engine=${telemetry.engine} processedRows=${telemetry.processedRows} failedRows=${telemetry.failedRows} elapsedMs=${telemetry.elapsedMs} recordUpsertStrategy=${telemetry.recordUpsertStrategy || 'n/a'}`)
     }
 
     const asyncItemsRes = await apiFetch(`/attendance/import/batches/${asyncBatchId}/items?pageSize=50`, { method: 'GET' })
@@ -765,25 +771,19 @@ async function run() {
   log(`batch items ok: rows=${batchItems.length}`)
 
   // 8) group exists + membership
-  const created = await findGroupByName(groupName)
-  if (!created?.id) {
-    const observed = Number.isFinite(created?.lastCount) ? `, observed_groups=${created.lastCount}` : ''
-    die(`created group not found after retries (${groupLookupRetryAttempts} attempts${observed})`)
-  }
+  const created = await findGroupByNameWithRetry(groupName)
+  if (!created?.id) die('created group not found')
 
-  const memberCheck = await ensureGroupMember(created.id, userId)
-  if (memberCheck !== true) {
-    const observed = Number.isFinite(memberCheck?.lastCount) ? `, observed_members=${memberCheck.lastCount}` : ''
-    die(`importing user is not a member of created group after retries (${groupLookupRetryAttempts} attempts${observed})`)
-  }
+  const hasMember = await verifyGroupMembershipWithRetry(created.id, userId)
+  if (!hasMember) die('importing user is not a member of created group')
   log('group + membership ok')
 
   // 9) request create + approve
   const requestPayload = {
     workDate,
     requestType: 'time_correction',
-    requestedInAt: isoMinutesAgo(60),
-    requestedOutAt: isoMinutesAgo(0),
+    requestedInAt: isoForWorkDate(workDate, 9, 0),
+    requestedOutAt: isoForWorkDate(workDate, 18, 0),
     reason: 'smoke test',
     orgId,
   }

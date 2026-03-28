@@ -60,8 +60,7 @@ PRODUCT_MODE="$(get_env_value PRODUCT_MODE)"
 REQUIRE_TOKEN="$(get_env_value ATTENDANCE_IMPORT_REQUIRE_TOKEN)"
 UPLOAD_DIR="$(get_env_value ATTENDANCE_IMPORT_UPLOAD_DIR)"
 CSV_MAX_ROWS="$(get_env_value ATTENDANCE_IMPORT_CSV_MAX_ROWS)"
-PREFLIGHT_MAX_CSV_ROWS="${ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS:-20000}"
-REQUIRE_ATTENDANCE_MODE="${ATTENDANCE_PREFLIGHT_REQUIRE_PRODUCT_MODE_ATTENDANCE:-0}"
+PREFLIGHT_MAX_CSV_ROWS="${ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS:-100000}"
 
 [[ -n "$JWT_SECRET" ]] || die "JWT_SECRET is missing in ${ENV_FILE}"
 [[ "$JWT_SECRET" != "change-me" ]] || die "JWT_SECRET is still 'change-me' in ${ENV_FILE}"
@@ -86,7 +85,7 @@ if (( PREFLIGHT_MAX_CSV_ROWS < 1000 )); then
 fi
 
 if [[ -z "${CSV_MAX_ROWS}" ]]; then
-  die "ATTENDANCE_IMPORT_CSV_MAX_ROWS is missing in ${ENV_FILE}. Set a production-safe cap (recommended: 20000)."
+  die "ATTENDANCE_IMPORT_CSV_MAX_ROWS is missing in ${ENV_FILE}. Set a production-safe cap (recommended: 100000)."
 fi
 if [[ ! "${CSV_MAX_ROWS}" =~ ^[0-9]+$ ]]; then
   die "ATTENDANCE_IMPORT_CSV_MAX_ROWS must be an integer (got: '${CSV_MAX_ROWS}')."
@@ -96,10 +95,6 @@ if (( CSV_MAX_ROWS < 1000 )); then
 fi
 if (( CSV_MAX_ROWS > PREFLIGHT_MAX_CSV_ROWS )); then
   die "ATTENDANCE_IMPORT_CSV_MAX_ROWS=${CSV_MAX_ROWS} exceeds safe preflight bound ${PREFLIGHT_MAX_CSV_ROWS}. Lower ATTENDANCE_IMPORT_CSV_MAX_ROWS or explicitly override ATTENDANCE_PREFLIGHT_MAX_CSV_ROWS after capacity validation."
-fi
-
-if [[ "${REQUIRE_ATTENDANCE_MODE}" != "0" && "${REQUIRE_ATTENDANCE_MODE}" != "1" ]]; then
-  die "ATTENDANCE_PREFLIGHT_REQUIRE_PRODUCT_MODE_ATTENDANCE must be 0 or 1 (got: '${REQUIRE_ATTENDANCE_MODE}')."
 fi
 
 # CSV upload channel requires a persistent upload directory and a larger nginx body size for the upload route.
@@ -178,14 +173,9 @@ elif [[ "$NODE_ENV" != "production" ]]; then
 fi
 
 if [[ -z "$PRODUCT_MODE" ]]; then
-  if [[ "${REQUIRE_ATTENDANCE_MODE}" == "1" ]]; then
-    die "PRODUCT_MODE is not set. This deployment requires attendance-only shell. Set PRODUCT_MODE=attendance in ${ENV_FILE}."
-  fi
   warn "PRODUCT_MODE is not set. If you sell Attendance as a standalone product, set PRODUCT_MODE=attendance."
 elif [[ "$PRODUCT_MODE" != "attendance" && "$PRODUCT_MODE" != "platform" && "$PRODUCT_MODE" != "attendance-focused" ]]; then
   warn "PRODUCT_MODE is '${PRODUCT_MODE}' (expected: platform|attendance)"
-elif [[ "${REQUIRE_ATTENDANCE_MODE}" == "1" && "$PRODUCT_MODE" != "attendance" && "$PRODUCT_MODE" != "attendance-focused" ]]; then
-  die "PRODUCT_MODE='${PRODUCT_MODE}' is not allowed for attendance-only deployment. Set PRODUCT_MODE=attendance in ${ENV_FILE}."
 fi
 
 info "Preflight OK"

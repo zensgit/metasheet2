@@ -14,37 +14,86 @@ describe('featureFlags', () => {
     vi.unstubAllEnvs()
   })
 
-  it('bootstraps a dev token before the first auth/me when no token exists', async () => {
+  it('skips auth bootstrap when feature loading is requested for a public route', async () => {
+    localStorage.setItem('metasheet_features', JSON.stringify({
+      attendance: true,
+      attendanceAdmin: false,
+      attendanceImport: false,
+      workflow: false,
+      mode: 'attendance',
+    }))
+
+    const fetchMock = vi.fn()
+
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { useFeatureFlags } = await import('../src/stores/featureFlags')
+    const flags = useFeatureFlags()
+    const features = await flags.loadProductFeatures(true, { skipSessionProbe: true })
+
+    expect(features.attendance).toBe(true)
+    expect(features.mode).toBe('attendance')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('refreshes with a session probe after an anonymous bootstrap', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
+
+      if (url.endsWith('/api/plugins')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            list: [
+              { name: 'plugin-attendance', status: 'active' },
+            ],
+          }),
+        }
+      }
 
       if (url.endsWith('/api/auth/me')) {
         return {
           ok: true,
           status: 200,
           json: async () => ({
-            success: true,
             data: {
-              user: { role: 'admin' },
-              features: {
-                workflow: true,
-                attendance: false,
-                attendanceAdmin: true,
-                attendanceImport: false,
-                mode: 'plm-workbench',
+              user: {
+                role: 'admin',
+                features: {
+                  attendance: true,
+                  attendance_admin: true,
+                  attendance_import: true,
+                  mode: 'attendance',
+                },
               },
             },
           }),
         }
       }
 
-      if (url.endsWith('/api/auth/dev-token')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ token: 'dev-bootstrap-token' }),
-        }
-      }
+      throw new Error(`Unexpected fetch URL: ${url}`)
+    })
+
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { useFeatureFlags } = await import('../src/stores/featureFlags')
+    const flags = useFeatureFlags()
+
+    const anonymous = await flags.loadProductFeatures(true, { skipSessionProbe: true })
+    expect(anonymous.attendance).toBe(false)
+    expect(anonymous.attendanceAdmin).toBe(false)
+
+    const authenticated = await flags.loadProductFeatures()
+    expect(authenticated.attendanceAdmin).toBe(true)
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]))
+    expect(urls.filter((url) => url.endsWith('/api/plugins'))).toHaveLength(1)
+    expect(urls.filter((url) => url.endsWith('/api/auth/me'))).toHaveLength(1)
+  })
+
+  it('drops session-aware flags on public bootstrap after logout', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
 
       if (url.endsWith('/api/plugins')) {
         return {
@@ -52,121 +101,28 @@ describe('featureFlags', () => {
           status: 200,
           json: async () => ({
             list: [
-              { name: 'plugin-attendance', status: 'inactive' },
-              { name: 'workflow-toolkit', status: 'active' },
+              { name: 'plugin-attendance', status: 'active' },
             ],
           }),
         }
       }
-
-      throw new Error(`Unexpected fetch URL: ${url}`)
-    })
-
-    vi.stubGlobal('fetch', fetchMock)
-
-    const { useFeatureFlags } = await import('../src/stores/featureFlags')
-    const flags = useFeatureFlags()
-    const features = await flags.loadProductFeatures(true)
-
-    expect(features).toMatchObject({
-      workflow: true,
-      attendanceAdmin: true,
-      mode: 'plm-workbench',
-    })
-    expect(localStorage.getItem('auth_token')).toBe('dev-bootstrap-token')
-    expect(localStorage.getItem('jwt')).toBe('dev-bootstrap-token')
-    expect(localStorage.getItem('devToken')).toBe('dev-bootstrap-token')
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-  })
-
-  it('retries auth/me after a 401 when the existing token is stale', async () => {
-    localStorage.setItem('auth_token', 'stale-token')
-
-    let meRequests = 0
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input)
-
-      if (url.endsWith('/api/auth/me')) {
-        meRequests += 1
-        if (meRequests === 1) {
-          return {
-            ok: false,
-            status: 401,
-            json: async () => ({ error: 'Invalid token' }),
-          }
-        }
-
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({
-            success: true,
-            data: {
-              user: { role: 'admin' },
-              features: { workflow: true, mode: 'platform' },
-            },
-          }),
-        }
-      }
-
-      if (url.endsWith('/api/auth/dev-token')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ token: 'refreshed-dev-token' }),
-        }
-      }
-
-      if (url.endsWith('/api/plugins')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ list: [] }),
-        }
-      }
-
-      throw new Error(`Unexpected fetch URL: ${url}`)
-    })
-
-    vi.stubGlobal('fetch', fetchMock)
-
-    const { useFeatureFlags } = await import('../src/stores/featureFlags')
-    const flags = useFeatureFlags()
-    const features = await flags.loadProductFeatures(true)
-
-    expect(features.workflow).toBe(true)
-    expect(localStorage.getItem('auth_token')).toBe('refreshed-dev-token')
-    expect(meRequests).toBe(2)
-    expect(fetchMock).toHaveBeenCalledTimes(4)
-  })
-
-  it('falls back to plugin inference when auth/me does not include feature flags', async () => {
-    localStorage.setItem('auth_token', 'existing-token')
-
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input)
 
       if (url.endsWith('/api/auth/me')) {
         return {
           ok: true,
           status: 200,
           json: async () => ({
-            success: true,
             data: {
-              user: { role: 'user' },
+              user: {
+                role: 'admin',
+                features: {
+                  attendance: true,
+                  attendance_admin: true,
+                  attendance_import: true,
+                  mode: 'attendance',
+                },
+              },
             },
-          }),
-        }
-      }
-
-      if (url.endsWith('/api/plugins')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({
-            list: [
-              { name: 'workflow-toolkit', status: 'active' },
-            ],
           }),
         }
       }
@@ -178,10 +134,18 @@ describe('featureFlags', () => {
 
     const { useFeatureFlags } = await import('../src/stores/featureFlags')
     const flags = useFeatureFlags()
-    const features = await flags.loadProductFeatures(true)
 
-    expect(features.workflow).toBe(true)
-    expect(features.attendance).toBe(false)
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    localStorage.setItem('auth_token', 'session-token')
+    const authenticated = await flags.loadProductFeatures(true)
+    expect(authenticated.attendanceAdmin).toBe(true)
+
+    localStorage.clear()
+    const anonymous = await flags.loadProductFeatures(false, { skipSessionProbe: true })
+    expect(anonymous.attendance).toBe(false)
+    expect(anonymous.attendanceAdmin).toBe(false)
+
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]))
+    expect(urls.filter((url) => url.endsWith('/api/plugins'))).toHaveLength(1)
+    expect(urls.filter((url) => url.endsWith('/api/auth/me'))).toHaveLength(1)
   })
 })

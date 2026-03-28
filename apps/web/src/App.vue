@@ -31,6 +31,10 @@
             >
               {{ item.label }}
             </router-link>
+            <router-link v-if="canManageUsers" to="/admin/users" class="nav-link">{{ navLabels.users }}</router-link>
+            <router-link v-if="canManageUsers" to="/admin/roles" class="nav-link">{{ navLabels.roles }}</router-link>
+            <router-link v-if="canManageUsers" to="/admin/permissions" class="nav-link">{{ navLabels.permissions }}</router-link>
+            <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
             <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
             <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
@@ -41,13 +45,19 @@
       <div class="nav-actions">
         <label class="nav-locale">
           <span class="nav-locale__label">{{ navLabels.language }}</span>
-          <select class="nav-locale__select" :value="locale" @change="onLocaleChange">
+          <select
+            class="nav-locale__select"
+            data-testid="locale-switcher"
+            :value="locale"
+            @change="onLocaleChange"
+          >
             <option value="en">English</option>
             <option value="zh-CN">中文</option>
           </select>
         </label>
-        <template v-if="attendanceFocused">
+        <template v-if="isLoggedIn">
           <span v-if="accountEmail" class="nav-user">{{ accountEmail }}</span>
+          <router-link to="/settings" class="nav-link">{{ navLabels.mySessions }}</router-link>
           <button class="nav-link nav-link--button" type="button" @click="logout">{{ navLabels.signOut }}</button>
         </template>
       </div>
@@ -66,20 +76,32 @@ import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
 import { useFeatureFlags } from './stores/featureFlags'
+import { getApiBase } from './utils/api'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
 const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures } = useFeatureFlags()
-const { clearToken, getToken } = useAuth()
+const { clearToken, getAccessSnapshot, getToken } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 
 const showNav = computed(() => {
   return route.meta?.hideNavbar !== true
 })
 
+const isPublicRoute = computed(() => {
+  return route.path === '/login' || route.meta?.requiresAuth === false || route.meta?.requiresGuest === true
+})
 const attendanceFocused = computed(() => isAttendanceFocused())
 const plmWorkbenchFocused = computed(() => isPlmWorkbenchFocused())
 const isAdmin = computed(() => hasFeature('attendanceAdmin'))
+const canManageUsers = computed(() => {
+  void route.fullPath
+  return getAccessSnapshot().isAdmin
+})
+const isLoggedIn = computed(() => {
+  void route.fullPath
+  return Boolean(getToken())
+})
 const navLabels = computed(() => {
   if (isZh.value) {
     return {
@@ -92,10 +114,15 @@ const navLabels = computed(() => {
       form: '表单',
       workflows: '流程',
       approvals: '审批中心',
+      users: '用户',
+      roles: '角色',
+      permissions: '权限',
+      adminAudit: '管理审计',
       plugins: '插件',
       plm: 'PLM',
       audit: '审计',
       plmWorkbench: 'PLM 工作台',
+      mySessions: '我的会话',
       signOut: '退出登录',
       language: '语言',
     }
@@ -110,10 +137,15 @@ const navLabels = computed(() => {
     form: 'Form',
     workflows: 'Workflows',
     approvals: 'Approvals',
+    users: 'Users',
+    roles: 'Roles',
+    permissions: 'Permissions',
+    adminAudit: 'Admin Audit',
     plugins: 'Plugins',
     plm: 'PLM',
     audit: 'Audit',
     plmWorkbench: 'PLM Workbench',
+    mySessions: 'My Sessions',
     signOut: 'Sign out',
     language: 'Language',
   }
@@ -126,33 +158,34 @@ const brandText = computed(() => {
 })
 
 const accountEmail = computed(() => {
-  if (typeof localStorage === 'undefined') return ''
-  const token = getToken()
-  if (!token) return ''
-  const chunks = token.split('.')
-  if (chunks.length < 2) return ''
-  try {
-    const normalized = chunks[1]
-      .replace(/-/g, '+')
-      .replace(/_/g, '/')
-      .padEnd(Math.ceil(chunks[1].length / 4) * 4, '=')
-    const json = atob(normalized)
-    const payload = JSON.parse(json) as { email?: unknown }
-    return typeof payload.email === 'string' ? payload.email : ''
-  } catch {
-    return ''
-  }
+  void route.fullPath
+  return getAccessSnapshot().email
 })
 
-function logout(): void {
-  clearToken()
-  if (typeof localStorage !== 'undefined') {
-    localStorage.removeItem('metasheet_features')
-    localStorage.removeItem('metasheet_product_mode')
-    localStorage.removeItem('user_permissions')
-    localStorage.removeItem('user_roles')
+async function logout(): Promise<void> {
+  const token = getToken()
+  if (token) {
+    try {
+      await fetch(`${getApiBase()}/api/auth/logout`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+    } catch {
+      // Ignore logout network failures and still clear local session.
+    }
   }
-  window.location.assign('/')
+  clearToken()
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem('metasheet_features')
+      localStorage.removeItem('metasheet_product_mode')
+    }
+  } catch {
+    // Ignore feature cache cleanup failures.
+  }
+  window.location.assign('/login')
 }
 
 function onLocaleChange(event: Event): void {
@@ -162,8 +195,10 @@ function onLocaleChange(event: Event): void {
 }
 
 onMounted(async () => {
-  await loadProductFeatures().catch(() => null)
-  if (attendanceFocused.value || plmWorkbenchFocused.value) {
+  await loadProductFeatures(false, {
+    skipSessionProbe: isPublicRoute.value,
+  }).catch(() => null)
+  if (isPublicRoute.value || attendanceFocused.value || plmWorkbenchFocused.value) {
     return
   }
   await fetchPlugins()

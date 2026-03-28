@@ -59,8 +59,16 @@ scripts/ops/attendance-onprem-package-verify.sh \
 
 ```text
 metasheet/
+  plugins/
+    plugin-attendance/
   apps/
+    web/
+      package.json
+      dist/
   packages/
+    core-backend/
+      package.json
+      dist/
   scripts/ops/
     attendance-onprem-package-install.sh
     attendance-onprem-package-upgrade.sh
@@ -82,10 +90,10 @@ metasheet/
   pnpm-workspace.yaml
 ```
 
-建议同时包含（降低现场依赖）：
+说明：
 
-- `apps/web/dist`
-- `packages/core-backend/dist`
+- `apps/web/dist` 与 `packages/core-backend/dist` 现在是交付包必选项（非可选）。
+- `plugins/` 下只允许包含 `plugin-attendance`，确保交付包是“考勤专用”。
 
 ## 2. 首次安装（照抄）
 
@@ -137,6 +145,7 @@ scripts/ops/attendance-onprem-package-upgrade.sh
 默认行为：
 
 - 不执行 `git pull`
+- 执行 `pnpm install --frozen-lockfile`
 - 执行 migration
 - 重启服务
 - 执行健康检查
@@ -168,3 +177,35 @@ BUILD_WEB=1 BUILD_BACKEND=1 INSTALL_DEPS=1 scripts/ops/attendance-onprem-package
 5. UAT 签收模板：`docs/deployment/attendance-uat-signoff-template-20260306.md`
 6. Windows Server + WSL2 部署：`docs/deployment/attendance-windows-wsl-onprem-20260306.md`
 7. Windows Server + WSL2 参数集中命令版：`docs/deployment/attendance-windows-wsl-customer-profiled-commands-20260306.md`
+8. 新服务器 UAT 执行 Runbook：`docs/deployment/attendance-onprem-new-server-uat-runbook-20260307.md`
+
+## Update (2026-03-07): Latest Published On-Prem Package (Windows/WSL Ready)
+
+Latest release:
+
+- Tag: `v2.5.1-onprem-20260307-current`
+- Release delivery channel: customer delivery repository / internal artifact source (no public GitHub link in package docs)
+- Package files:
+  - `metasheet-attendance-onprem-v2.5.0-20260307-current.zip`
+  - `metasheet-attendance-onprem-v2.5.0-20260307-current.tgz`
+  - `SHA256SUMS`
+
+Build evidence:
+
+- GitHub Actions run: `#22798975422` (workflow: `attendance-onprem-package-build.yml`)
+- Local artifact archive path:
+  - `output/playwright/ga/22798975422/`
+
+Integrity verification:
+
+```bash
+cd output/playwright/ga/22798975422
+shasum -a 256 -c SHA256SUMS
+```
+
+Package structural verification:
+
+```bash
+scripts/ops/attendance-onprem-package-verify.sh output/playwright/ga/22798975422/metasheet-attendance-onprem-v2.5.0-20260307-current.zip
+scripts/ops/attendance-onprem-package-verify.sh output/playwright/ga/22798975422/metasheet-attendance-onprem-v2.5.0-20260307-current.tgz
+```

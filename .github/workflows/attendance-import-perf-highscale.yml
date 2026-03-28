@@ -1,0 +1,450 @@
+name: Attendance Import Perf High Scale
+
+# Mark drill runs explicitly so dashboards or humans can skip them.
+run-name: Attendance Import Perf High Scale${{ github.event_name == 'workflow_dispatch' && inputs.drill == 'true' && ' [DRILL]' || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      drill:
+        description: 'Optional: mark run as [DRILL] and skip calling production APIs (true/false)'
+        required: false
+        default: 'false'
+      drill_fail:
+        description: 'Optional: intentionally fail the drill job for FAIL-path validation (true/false)'
+        required: false
+        default: 'false'
+      issue_title:
+        description: 'Optional: override issue title for workflow_dispatch drills (leave empty for production title)'
+        required: false
+        default: ''
+      api_base:
+        description: 'API base (must end with /api)'
+        required: false
+        default: 'http://142.171.239.56:8081/api'
+      rows:
+        description: 'Rows to generate for benchmark'
+        required: false
+        default: '100000'
+      mode:
+        description: 'preview or commit'
+        required: false
+        default: 'commit'
+      preview_mode:
+        description: 'Preview execution mode (sync|async|auto)'
+        required: false
+        default: 'auto'
+      commit_async:
+        description: 'Use /commit-async path (true/false)'
+        required: false
+        default: 'true'
+      export_csv:
+        description: 'Verify export CSV latency (true/false)'
+        required: false
+        default: 'true'
+      upload_csv:
+        description: 'Upload CSV via /attendance/import/upload (true/false)'
+        required: false
+        default: 'true'
+      payload_source:
+        description: 'Import payload source (auto|csv|rows)'
+        required: false
+        default: 'auto'
+      csv_rows_limit_hint:
+        description: 'Declared remote CSV row cap for high-scale runs'
+        required: false
+        default: '100000'
+      max_preview_ms:
+        description: 'Fail if preview latency exceeds this value (optional)'
+        required: false
+        default: ''
+      max_commit_ms:
+        description: 'Fail if commit latency exceeds this value (optional)'
+        required: false
+        default: ''
+      max_export_ms:
+        description: 'Fail if export latency exceeds this value (optional)'
+        required: false
+        default: ''
+      import_job_poll_timeout_ms:
+        description: 'Poll timeout (ms) for import async jobs'
+        required: false
+        default: '3600000'
+      import_job_poll_timeout_large_ms:
+        description: 'Large poll timeout (ms) for import async jobs'
+        required: false
+        default: '5400000'
+  schedule:
+    # Weekly at 06:00 UTC (high-scale benchmark lane).
+    - cron: '0 6 * * 0'
+
+concurrency:
+  group: attendance-import-perf-highscale-${{ github.event_name == 'schedule' && 'schedule' || github.event_name == 'workflow_dispatch' && 'manual' || 'other' }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drill:
+    if: github.event_name == 'workflow_dispatch' && inputs.drill == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DRILL_FAIL: ${{ inputs.drill_fail || 'false' }}
+    steps:
+      - name: Drill no-op (skip high-scale benchmark)
+        run: |
+          set -euo pipefail
+          mkdir -p output/playwright/attendance-import-perf-highscale/drill
+          cat > output/playwright/attendance-import-perf-highscale/drill/perf-summary.json <<'EOF'
+          {
+            "startedAt": "1970-01-01T00:00:00.000Z",
+            "scenario": "highscale-drill",
+            "mode": "commit",
+            "apiBase": "<DRILL>",
+            "orgId": "default",
+            "rows": 100000,
+            "commitAsync": true,
+            "uploadCsv": true,
+            "payloadSource": "auto",
+            "previewMs": 11111,
+            "commitMs": 22222,
+            "exportMs": 3333,
+            "rollbackMs": 0,
+            "regressions": [
+              "DRILL: synthetic highscale regression entry"
+            ]
+          }
+          EOF
+
+          if [[ "${DRILL_FAIL:-false}" == "true" ]]; then
+            echo "DRILL_FAIL=true: intentional failure after creating drill artifacts" >&2
+            exit 97
+          fi
+
+      - name: Upload drill artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-import-perf-highscale-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 21
+          path: |
+            output/playwright/attendance-import-perf-highscale/**
+
+  perf:
+    if: github.event_name != 'workflow_dispatch' || inputs.drill != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      classification: ${{ steps.classify-benchmark.outputs.classification }}
+    env:
+      API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
+      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
+      LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL || vars.ATTENDANCE_ADMIN_EMAIL || '' }}
+      LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD || vars.ATTENDANCE_ADMIN_PASSWORD || '' }}
+      AUTH_RESOLVE_ALLOW_INSECURE_HTTP: ${{ vars.ATTENDANCE_ALLOW_INSECURE_HTTP || 'true' }}
+      PERF_PROFILE: high-scale
+      ROWS: ${{ inputs.rows || vars.ATTENDANCE_PERF_HIGHSCALE_ROWS || '100000' }}
+      MODE: ${{ inputs.mode || 'commit' }}
+      PREVIEW_MODE: ${{ inputs.preview_mode || vars.ATTENDANCE_PERF_HIGHSCALE_PREVIEW_MODE || 'auto' }}
+      PREVIEW_ASYNC_ROW_THRESHOLD: ${{ vars.ATTENDANCE_PERF_PREVIEW_ASYNC_ROW_THRESHOLD || '50000' }}
+      ROLLBACK: 'false'
+      COMMIT_ASYNC: ${{ inputs.commit_async || 'true' }}
+      EXPORT_CSV: ${{ inputs.export_csv || vars.ATTENDANCE_PERF_HIGHSCALE_EXPORT_CSV || 'true' }}
+      UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_HIGHSCALE_UPLOAD_CSV || 'true' }}
+      PAYLOAD_SOURCE: ${{ inputs.payload_source || vars.ATTENDANCE_PERF_HIGHSCALE_PAYLOAD_SOURCE || 'auto' }}
+      CSV_ROWS_LIMIT_HINT: ${{ inputs.csv_rows_limit_hint || vars.ATTENDANCE_PERF_HIGHSCALE_CSV_ROWS_LIMIT_HINT || '100000' }}
+      REMOTE_CSV_ROWS_LIMIT: ${{ vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '100000' }}
+      PERF_WORK_DATE_SPAN_DAYS: ${{ vars.ATTENDANCE_PERF_WORK_DATE_SPAN_DAYS_HIGH || '180' }}
+      MAX_PREVIEW_MS: ${{ inputs.max_preview_ms || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS_HIGH || '300000' }}
+      MAX_COMMIT_MS: ${{ inputs.max_commit_ms || vars.ATTENDANCE_PERF_MAX_COMMIT_MS_HIGH || '480000' }}
+      MAX_EXPORT_MS: ${{ inputs.max_export_ms || vars.ATTENDANCE_PERF_MAX_EXPORT_MS_HIGH || '120000' }}
+      IMPORT_JOB_POLL_TIMEOUT_MS: ${{ inputs.import_job_poll_timeout_ms || vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_HIGH_MS || '3600000' }}
+      IMPORT_JOB_POLL_TIMEOUT_LARGE_MS: ${{ inputs.import_job_poll_timeout_large_ms || vars.ATTENDANCE_IMPORT_JOB_POLL_TIMEOUT_LARGE_HIGH_MS || '5400000' }}
+      COMMIT_RETRIES: ${{ vars.ATTENDANCE_PERF_COMMIT_RETRIES_HIGH || vars.ATTENDANCE_PERF_COMMIT_RETRIES || '4' }}
+      COMMIT_RETRIES_LARGE: ${{ vars.ATTENDANCE_PERF_COMMIT_RETRIES_LARGE_HIGH || vars.ATTENDANCE_PERF_COMMIT_RETRIES_LARGE || '6' }}
+      COMMIT_RETRIES_RETRY: ${{ vars.ATTENDANCE_PERF_COMMIT_RETRIES_HIGH_RETRY || vars.ATTENDANCE_PERF_COMMIT_RETRIES_RETRY || '7' }}
+      COMMIT_RETRIES_LARGE_RETRY: ${{ vars.ATTENDANCE_PERF_COMMIT_RETRIES_LARGE_HIGH_RETRY || vars.ATTENDANCE_PERF_COMMIT_RETRIES_LARGE_RETRY || '9' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Resolve valid auth token
+        id: resolve-auth-token
+        run: |
+          set -euo pipefail
+          mkdir -p output/playwright/attendance-import-perf-highscale
+          meta_file="output/playwright/attendance-import-perf-highscale/auth-resolve-meta.txt"
+
+          if ! resolved_token="$(
+            API_BASE="${API_BASE}" \
+            AUTH_TOKEN="${AUTH_TOKEN}" \
+            LOGIN_EMAIL="${LOGIN_EMAIL}" \
+            LOGIN_PASSWORD="${LOGIN_PASSWORD}" \
+            AUTH_RESOLVE_ALLOW_INSECURE_HTTP="${AUTH_RESOLVE_ALLOW_INSECURE_HTTP}" \
+            AUTH_RESOLVE_META_FILE="${meta_file}" \
+            ./scripts/ops/attendance-resolve-auth.sh
+          )"; then
+            API_BASE="${API_BASE}" \
+            ./scripts/ops/attendance-write-auth-error.sh \
+              "${meta_file}" \
+              "output/playwright/attendance-import-perf-highscale/auth-error.txt"
+            echo "::error::No valid attendance admin token; see auth-error.txt artifact."
+            exit 1
+          fi
+
+          echo "::add-mask::${resolved_token}"
+          echo "AUTH_TOKEN_EFFECTIVE=${resolved_token}" >> "$GITHUB_ENV"
+
+      - name: Log resolved high-scale config
+        run: |
+          set -euo pipefail
+          echo "event=${{ github.event_name }}"
+          echo "api_base=${API_BASE}"
+          echo "profile=${PERF_PROFILE}"
+          echo "rows=${ROWS}"
+          echo "mode=${MODE}"
+          echo "preview_mode=${PREVIEW_MODE}"
+          echo "commit_async=${COMMIT_ASYNC}"
+          echo "upload_csv=${UPLOAD_CSV}"
+          echo "payload_source=${PAYLOAD_SOURCE}"
+          echo "csv_rows_limit_hint=${CSV_ROWS_LIMIT_HINT}"
+          echo "remote_csv_rows_limit=${REMOTE_CSV_ROWS_LIMIT}"
+          echo "export_csv=${EXPORT_CSV}"
+          echo "poll_timeout_ms=${IMPORT_JOB_POLL_TIMEOUT_MS}"
+          echo "poll_timeout_large_ms=${IMPORT_JOB_POLL_TIMEOUT_LARGE_MS}"
+
+      - name: Run high-scale benchmark
+        id: benchmark
+        env:
+          AUTH_TOKEN: ${{ env.AUTH_TOKEN_EFFECTIVE }}
+        run: |
+          set -euo pipefail
+          mkdir -p output/playwright/attendance-import-perf-highscale
+          log_dir="output/playwright/attendance-import-perf-highscale"
+          attempt1_log="${log_dir}/perf-attempt1.log"
+          attempt2_log="${log_dir}/perf-attempt2.log"
+          final_log="${log_dir}/perf.log"
+          transient_pattern='HTTP 429|HTTP 5[0-9]{2}|fetch failed|ECONNRESET|ETIMEDOUT|Bad Gateway|timed out'
+
+          run_once() {
+            local log_file="$1"
+            shift
+            set +e
+            "$@" 2>&1 | tee "$log_file"
+            local rc="${PIPESTATUS[0]}"
+            set -e
+            return "$rc"
+          }
+
+          if run_once "$attempt1_log" node ./scripts/ops/attendance-import-perf.mjs; then
+            rc_first=0
+          else
+            rc_first="$?"
+          fi
+          if [[ "$rc_first" -eq 0 ]]; then
+            cp "$attempt1_log" "$final_log"
+            exit 0
+          fi
+
+          last_failure_line="$(grep -E '^\[attendance-import-perf\] Failed:' "$attempt1_log" | tail -n 1 || true)"
+          if [[ -z "$last_failure_line" ]]; then
+            last_failure_line="$(tail -n 40 "$attempt1_log" | tr '\n' ' ')"
+          fi
+          if ! printf '%s' "$last_failure_line" | grep -Eiq "$transient_pattern"; then
+            cp "$attempt1_log" "$final_log"
+            exit "$rc_first"
+          fi
+
+          echo "Transient high-scale perf failure detected; retrying once with expanded commit retries."
+          sleep 20
+          if run_once "$attempt2_log" env \
+            COMMIT_RETRIES="${COMMIT_RETRIES_RETRY}" \
+            COMMIT_RETRIES_LARGE="${COMMIT_RETRIES_LARGE_RETRY}" \
+            node ./scripts/ops/attendance-import-perf.mjs; then
+            rc_second=0
+          else
+            rc_second="$?"
+          fi
+          if [[ "$rc_second" -eq 0 ]]; then
+            cat "$attempt1_log" "$attempt2_log" > "$final_log"
+            exit 0
+          fi
+          cat "$attempt1_log" "$attempt2_log" > "$final_log"
+          exit "$rc_second"
+
+      - name: Classify benchmark failure
+        id: classify-benchmark
+        if: failure()
+        run: |
+          set -euo pipefail
+          log_dir="output/playwright/attendance-import-perf-highscale"
+          final_log="${log_dir}/perf.log"
+          mismatch_file="${log_dir}/perf-capacity-mismatch.json"
+          if PERF_LOG="${final_log}" \
+            OUTPUT_FILE="${mismatch_file}" \
+            ROWS="${ROWS}" \
+            CSV_ROWS_LIMIT_HINT="${CSV_ROWS_LIMIT_HINT}" \
+            REMOTE_CSV_ROWS_LIMIT="${REMOTE_CSV_ROWS_LIMIT}" \
+            UPLOAD_CSV="${UPLOAD_CSV}" \
+            PAYLOAD_SOURCE="${PAYLOAD_SOURCE}" \
+            node ./scripts/ops/attendance-classify-perf-capacity-mismatch.mjs >/dev/null; then
+            last_failure_line="$(jq -r '.failureLine // empty' "${mismatch_file}")"
+            rows_value="$(jq -r '.requestedRows // empty' "${mismatch_file}")"
+            hint_value="$(jq -r '.csvRowsLimitHint // empty' "${mismatch_file}")"
+            remote_value="$(jq -r '.remoteCsvRowsLimit // empty' "${mismatch_file}")"
+            remote_value_source="$(jq -r '.remoteCsvRowsLimitSource // empty' "${mismatch_file}")"
+            payload_source_value="$(jq -r '.payloadSourceRequested // empty' "${mismatch_file}")"
+            echo "classification=capacity_mismatch" >> "$GITHUB_OUTPUT"
+            {
+              echo "High-scale perf benchmark classified as known capacity mismatch."
+              echo
+              echo "- requested rows: \`${rows_value}\`"
+              echo "- payload source requested: \`${payload_source_value}\`"
+              echo "- csv rows limit hint: \`${hint_value}\`"
+              echo "- remote csv rows limit: \`${remote_value}\` (${remote_value_source:-unknown})"
+              echo "- failure: \`${last_failure_line}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload high-scale artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attendance-import-perf-highscale-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 21
+          path: |
+            output/playwright/attendance-import-perf-highscale/**
+
+  issue:
+    name: Perf Highscale Issue Alert (P2)
+    needs: [drill, perf]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DRILL: ${{ github.event.inputs.drill || 'false' }}
+      DRILL_FAIL: ${{ github.event.inputs.drill_fail || 'false' }}
+      ISSUE_TITLE_OVERRIDE: ${{ github.event.inputs.issue_title || '' }}
+      DRILL_RESULT: ${{ needs.drill.result }}
+      PERF_RESULT: ${{ needs.perf.result }}
+      PERF_CLASSIFICATION: ${{ needs.perf.outputs.classification || '' }}
+    steps:
+      - name: Open/update issue on failure (P2, no paging)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const drill = String(process.env.DRILL || '').trim() === 'true'
+            const drillFail = String(process.env.DRILL_FAIL || '').trim() === 'true'
+            const drillResult = String(process.env.DRILL_RESULT || '').trim()
+            const perfResult = String(process.env.PERF_RESULT || '').trim()
+            const perfClassification = String(process.env.PERF_CLASSIFICATION || '').trim()
+            const titleOverride = String(process.env.ISSUE_TITLE_OVERRIDE || '').trim()
+
+            const defaultTitle = '[Attendance P2] Perf highscale alert'
+            const title = titleOverride || defaultTitle
+            const allowIssueOps = !drill || Boolean(titleOverride)
+            if (!allowIssueOps) {
+              core.info('Drill run: skipping issue operations (no override title).')
+              return
+            }
+
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+
+            const isBad = (value) => value && value !== 'success' && value !== 'skipped'
+            const failed = drill ? isBad(drillResult) : (isBad(perfResult) || perfClassification === 'capacity_mismatch')
+            const statusLine = `jobs: perf=${perfResult || 'unknown'} drill=${drillResult || 'unknown'}${drill && drillFail ? ' (drill_fail=true)' : ''}`
+            const classificationLine = perfClassification ? `classification: ${perfClassification}` : null
+
+            const body = [
+              'Automated perf high-scale tracking issue (P2, no paging).',
+              '',
+              `Run: ${runUrl}`,
+              statusLine,
+              classificationLine,
+              '',
+              'Download:',
+              '```bash',
+              `gh run download ${context.runId} -D \"output/playwright/ga/${context.runId}\"`,
+              '```',
+            ].join('\n')
+
+            const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
+            const search = await github.rest.search.issuesAndPullRequests({
+              q,
+              sort: 'updated',
+              order: 'desc',
+              per_page: 20,
+            })
+            const items = Array.isArray(search.data.items) ? search.data.items : []
+            const match = items.find((item) => item && !item.pull_request && item.title === title) || null
+
+            if (failed) {
+              if (match) {
+                if (match.state !== 'open') {
+                  await github.rest.issues.update({
+                    owner,
+                    repo,
+                    issue_number: match.number,
+                    state: 'open',
+                    body,
+                  })
+                  core.info(`Reopened issue #${match.number}`)
+                } else {
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: match.number,
+                    body,
+                  })
+                  core.info(`Commented on issue #${match.number}`)
+                }
+                return
+              }
+
+              const created = await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body,
+              })
+              core.info(`Created issue #${created.data.number}`)
+              return
+            }
+
+            if (!match) {
+              core.info('No perf highscale issue found; nothing to close.')
+              return
+            }
+            if (match.state !== 'open') {
+              core.info(`Perf highscale issue exists but is already closed (#${match.number}).`)
+              return
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: match.number,
+              body: [
+                'Perf high-scale recovery detected. Closing issue.',
+                '',
+                `Run: ${runUrl}`,
+                statusLine,
+              ].join('\n'),
+            })
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number: match.number,
+              state: 'closed',
+            })
+            core.info(`Closed issue #${match.number}`)

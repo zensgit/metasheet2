@@ -10,6 +10,8 @@ import { poolManager } from '../integration/db/connection-pool'
 import { Logger } from '../core/logger'
 import { secretManager } from '../security/SecretManager'
 import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import { isUserSessionRevoked } from './session-revocation'
+import { createUserSession, isUserSessionActive } from './session-registry'
 
 export interface User {
   id: string
@@ -17,6 +19,7 @@ export interface User {
   name: string
   role: string
   permissions: string[]
+  is_active?: boolean
   created_at: Date
   updated_at: Date
   // Index signature for compatibility with Express.Request.user
@@ -32,6 +35,7 @@ export interface TokenPayload {
   userId: string
   email: string
   role: string
+  sid?: string
   iat: number
   exp: number
 }
@@ -124,8 +128,21 @@ export class AuthService {
       }
 
       // 验证用户是否仍然活跃
-      if (user.role === 'disabled') {
+      if (user.role === 'disabled' || user.is_active === false) {
         return null
+      }
+
+      if (await isUserSessionRevoked(user.id, payload.iat)) {
+        this.logger.warn(`Token verification failed: session revoked for user ${user.id}`)
+        return null
+      }
+
+      if (typeof payload.sid === 'string' && payload.sid.trim().length > 0) {
+        const active = await isUserSessionActive(user.id, payload.sid.trim())
+        if (!active) {
+          this.logger.warn(`Token verification failed: session ${payload.sid} inactive for user ${user.id}`)
+          return null
+        }
       }
 
       return this.sanitizeUser(user)
@@ -138,11 +155,12 @@ export class AuthService {
   /**
    * 创建JWT token
    */
-  createToken(user: User): string {
+  createToken(user: User, options: { sid?: string } = {}): string {
     const payload: Omit<TokenPayload, 'iat' | 'exp'> = {
       userId: user.id,
       email: user.email,
-      role: user.role
+      role: user.role,
+      ...(typeof options.sid === 'string' && options.sid.trim().length > 0 ? { sid: options.sid.trim() } : {}),
     }
 
     return jwt.sign(payload, this.config.jwtSecret, {
@@ -167,7 +185,11 @@ export class AuthService {
   /**
    * 用户登录
    */
-  async login(email: string, password: string): Promise<{ user: User; token: string } | null> {
+  async login(
+    email: string,
+    password: string,
+    options: { ipAddress?: string | null; userAgent?: string | null } = {},
+  ): Promise<{ user: User; token: string } | null> {
     try {
       const user = await this.getUserByEmail(email)
       if (!user) {
@@ -181,12 +203,21 @@ export class AuthService {
       }
 
       // 检查用户状态
-      if (user.role === 'disabled') {
+      if (user.role === 'disabled' || user.is_active === false) {
         return null
       }
 
-      // 生成token
-      const token = this.createToken(user)
+      const sessionId = crypto.randomUUID()
+      const token = this.createToken(user, { sid: sessionId })
+      const payload = this.readTokenPayload(token)
+      if (payload?.exp) {
+        await createUserSession(user.id, {
+          sessionId,
+          expiresAt: new Date(payload.exp * 1000).toISOString(),
+          ipAddress: options.ipAddress ?? null,
+          userAgent: options.userAgent ?? null,
+        })
+      }
 
       // 更新最后登录时间
       await this.updateLastLogin(user.id)
@@ -246,7 +277,7 @@ export class AuthService {
       try {
         const pool = poolManager.get()
         const result = await pool.query(
-          'SELECT id, email, name, role, permissions, password_hash, created_at, updated_at FROM users WHERE id = $1',
+          'SELECT id, email, name, role, permissions, password_hash, is_active, created_at, updated_at FROM users WHERE id = $1',
           [userId]
         )
 
@@ -259,6 +290,7 @@ export class AuthService {
             name: row.name,
             role: resolved.role,
             permissions: resolved.permissions,
+            is_active: row.is_active,
             password_hash: row.password_hash,
             created_at: row.created_at,
             updated_at: row.updated_at
@@ -276,6 +308,7 @@ export class AuthService {
           name: 'Development User',
           role: 'admin',
           permissions: ['*:*'],
+          is_active: true,
           password_hash: await bcrypt.hash('dev123', this.config.saltRounds),
           created_at: new Date(),
           updated_at: new Date()
@@ -297,7 +330,7 @@ export class AuthService {
       try {
         const pool = poolManager.get()
         const result = await pool.query(
-          'SELECT id, email, name, role, permissions, password_hash, created_at, updated_at FROM users WHERE email = $1',
+          'SELECT id, email, name, role, permissions, password_hash, is_active, created_at, updated_at FROM users WHERE email = $1',
           [email]
         )
 
@@ -310,6 +343,7 @@ export class AuthService {
             name: row.name,
             role: resolved.role,
             permissions: resolved.permissions,
+            is_active: row.is_active,
             password_hash: row.password_hash,
             created_at: row.created_at,
             updated_at: row.updated_at
@@ -441,14 +475,49 @@ export class AuthService {
 
       // 获取用户最新信息
       const user = await this.getUserById(userId)
-      if (!user || user.role === 'disabled') {
+      if (!user || user.role === 'disabled' || user.is_active === false) {
         return null
       }
 
-      // 生成新token
-      return this.createToken(user)
+      if (await isUserSessionRevoked(user.id, payload.iat)) {
+        this.logger.warn(`Token refresh failed: session revoked for user ${user.id}`)
+        return null
+      }
+
+      const sessionId = typeof payload.sid === 'string' && payload.sid.trim().length > 0
+        ? payload.sid.trim()
+        : crypto.randomUUID()
+      if (typeof payload.sid === 'string' && payload.sid.trim().length > 0) {
+        const active = await isUserSessionActive(user.id, sessionId)
+        if (!active) {
+          this.logger.warn(`Token refresh failed: session ${sessionId} inactive for user ${user.id}`)
+          return null
+        }
+      }
+
+      const refreshedToken = this.createToken(user, { sid: sessionId })
+      const refreshedPayload = this.readTokenPayload(refreshedToken)
+      if (refreshedPayload?.exp) {
+        await createUserSession(user.id, {
+          sessionId,
+          expiresAt: new Date(refreshedPayload.exp * 1000).toISOString(),
+        })
+      }
+
+      return refreshedToken
     } catch (error) {
       this.logger.warn('Token refresh failed', error instanceof Error ? error : undefined)
+      return null
+    }
+  }
+
+  readTokenPayload(token: string, options: { ignoreExpiration?: boolean } = {}): (TokenPayload & { id?: string; sub?: string }) | null {
+    try {
+      return jwt.verify(token, this.config.jwtSecret, {
+        ignoreExpiration: options.ignoreExpiration === true,
+      }) as TokenPayload & { id?: string; sub?: string }
+    } catch (error) {
+      this.logger.warn('Token payload read failed', error instanceof Error ? error : undefined)
       return null
     }
   }

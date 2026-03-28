@@ -8,18 +8,12 @@ on:
       - 'packages/core-backend/**'
       - 'plugins/**'
       - 'apps/web/src/**'
+      - 'scripts/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
-      - '.github/workflows/plugin-tests.yml'
+      - '.github/workflows/*.yml'
   pull_request:
     branches: [main, develop]
-    paths:
-      - 'packages/core-backend/**'
-      - 'plugins/**'
-      - 'apps/web/src/**'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - '.github/workflows/plugin-tests.yml'
 
 jobs:
   test:
@@ -76,8 +70,14 @@ jobs:
           path: install.log
 
       - name: Run linting
+        if: matrix.node-version == '20.x'
         run: |
-          pnpm lint || true # Non-blocking for now
+          pnpm lint
+
+      - name: Run type checking
+        if: matrix.node-version == '20.x'
+        run: |
+          pnpm type-check
 
       - name: Run core-backend tests
         run: |

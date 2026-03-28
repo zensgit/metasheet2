@@ -13,7 +13,7 @@ function info() {
   echo "[attendance-run-gate-contract-case] $*" >&2
 }
 
-[[ -n "$CASE_ID" ]] || die "usage: $0 <strict|dashboard> [output_root]"
+[[ -n "$CASE_ID" ]] || die "usage: $0 <strict|dashboard|openapi> [output_root]"
 
 info "running zh copy contract guard"
 node ./scripts/ops/attendance-verify-zh-copy-contract.mjs
@@ -109,12 +109,58 @@ if [[ "$CASE_ID" == "strict" ]]; then
   exit 0
 fi
 
+if [[ "$CASE_ID" == "openapi" ]]; then
+  openapi_dir="${case_dir}/openapi"
+  mkdir -p "$openapi_dir"
+
+  info "running openapi build"
+  if ! pnpm exec tsx packages/openapi/tools/build.ts >"${openapi_dir}/build.log" 2>&1; then
+    cat "${openapi_dir}/build.log" >&2
+    die "openapi build failed"
+  fi
+
+  if ! git diff --quiet -- \
+    packages/openapi/dist/openapi.json \
+    packages/openapi/dist/openapi.yaml \
+    packages/openapi/dist/combined.openapi.yml; then
+    git diff -- \
+      packages/openapi/dist/openapi.json \
+      packages/openapi/dist/openapi.yaml \
+      packages/openapi/dist/combined.openapi.yml >"${openapi_dir}/dist-drift.patch"
+    die "openapi dist drift detected; rebuild artifacts and commit generated outputs"
+  fi
+
+  node ./scripts/ops/attendance-validate-openapi-import-contract.mjs \
+    packages/openapi/dist/openapi.json \
+    packages/openapi/src/paths/attendance.yml >"${openapi_dir}/validate.log"
+
+  invalid_openapi="${openapi_dir}/openapi.invalid.json"
+  jq 'del(.paths["/api/attendance/import/commit-async"])' \
+    packages/openapi/dist/openapi.json >"${invalid_openapi}"
+  expect_fail "openapi import path contract" \
+    node ./scripts/ops/attendance-validate-openapi-import-contract.mjs \
+      "${invalid_openapi}" \
+      packages/openapi/src/paths/attendance.yml
+
+  invalid_openapi_job="${openapi_dir}/openapi.invalid.job-telemetry.json"
+  jq 'del(.components.schemas.AttendanceImportJob.properties.processedRows)' \
+    packages/openapi/dist/openapi.json >"${invalid_openapi_job}"
+  expect_fail "openapi AttendanceImportJob telemetry contract" \
+    node ./scripts/ops/attendance-validate-openapi-import-contract.mjs \
+      "${invalid_openapi_job}" \
+      packages/openapi/src/paths/attendance.yml
+
+  info "OK: openapi contract case passed"
+  exit 0
+fi
+
 if [[ "$CASE_ID" == "dashboard" ]]; then
   dashboard_valid="${case_dir}/dashboard.valid.json"
   dashboard_invalid_locale_legacy="${case_dir}/dashboard.invalid.locale-legacy.json"
   dashboard_invalid_strict="${case_dir}/dashboard.invalid.strict.json"
   dashboard_invalid_perf="${case_dir}/dashboard.invalid.perf.json"
   dashboard_invalid_longrun="${case_dir}/dashboard.invalid.longrun.json"
+  dashboard_invalid_highscale="${case_dir}/dashboard.invalid.highscale.json"
   dashboard_invalid_upsert="${case_dir}/dashboard.invalid.upsert.json"
   dashboard_invalid_locale="${case_dir}/dashboard.invalid.locale.json"
   dashboard_invalid_cleanup="${case_dir}/dashboard.invalid.cleanup.json"
@@ -142,6 +188,12 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
         "conclusion": "success"
       }
     },
+    "highscale": {
+      "completed": {
+        "id": 200006,
+        "conclusion": "success"
+      }
+    },
     "cleanup": {
       "completed": {
         "id": 200005,
@@ -156,7 +208,7 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
     }
   },
   "gateFlat": {
-    "schemaVersion": 3,
+    "schemaVersion": 4,
     "strict": {
       "summaryPresent": true,
       "summaryValid": true
@@ -187,6 +239,20 @@ if [[ "$CASE_ID" == "dashboard" ]]; then
       "recordUpsertStrategy": "values",
       "expectedRecordUpsertStrategy": "values",
       "previewMs": "33000",
+      "regressionsCount": "0"
+    },
+    "highscale": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 200006,
+      "summarySchemaVersion": 2,
+      "scenario": "rows100k-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "recordUpsertStrategy": "staging",
+      "expectedRecordUpsertStrategy": "staging",
+      "previewMs": "9000",
       "regressionsCount": "0"
     },
     "cleanup": {
@@ -698,6 +764,120 @@ EOF
 }
 EOF
 
+  cat >"$dashboard_invalid_highscale" <<'EOF'
+{
+  "p0Status": "pass",
+  "overallStatus": "pass",
+  "gates": {
+    "strict": {
+      "completed": {
+        "id": 550001,
+        "conclusion": "success"
+      }
+    },
+    "perf": {
+      "completed": {
+        "id": 550002,
+        "conclusion": "success"
+      }
+    },
+    "longrun": {
+      "completed": {
+        "id": 550003,
+        "conclusion": "success"
+      }
+    },
+    "highscale": {
+      "completed": {
+        "id": 550006,
+        "conclusion": "success"
+      }
+    },
+    "cleanup": {
+      "completed": {
+        "id": 550005,
+        "conclusion": "success"
+      }
+    },
+    "localeZh": {
+      "completed": {
+        "id": 550004,
+        "conclusion": "success"
+      }
+    }
+  },
+  "gateFlat": {
+    "schemaVersion": 4,
+    "strict": {
+      "summaryPresent": true,
+      "summaryValid": true
+    },
+    "perf": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 550002,
+      "summarySchemaVersion": 2,
+      "scenario": "100000-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "true",
+      "previewMs": "1200",
+      "regressionsCount": "0"
+    },
+    "longrun": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 550003,
+      "summarySchemaVersion": 2,
+      "scenario": "rows500k-preview",
+      "rows": 500000,
+      "mode": "preview",
+      "uploadCsv": "true",
+      "previewMs": "33000",
+      "regressionsCount": "0"
+    },
+    "highscale": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 550006,
+      "summarySchemaVersion": 2,
+      "scenario": "rows100k-commit",
+      "rows": 100000,
+      "mode": "commit",
+      "uploadCsv": "maybe",
+      "previewMs": "9100",
+      "regressionsCount": "0"
+    },
+    "cleanup": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 550005,
+      "staleCount": "0"
+    },
+    "localeZh": {
+      "status": "PASS",
+      "reasonCode": null,
+      "runId": 550004,
+      "summarySchemaVersion": 3,
+      "authSource": "refresh",
+      "locale": "zh-CN",
+      "lunarLabelCount": "42",
+      "holidayBadgeCount": "1",
+      "holidayCheckEnabled": "true",
+      "toggleCheckSkipped": "false",
+      "zhOverviewTab": "true",
+      "zhAdminTab": "true",
+      "zhWorkflowTab": "true",
+      "zhShellTabsChecked": "true"
+    }
+  },
+  "escalationIssue": {
+    "mode": "none_or_closed",
+    "p0Status": "pass"
+  }
+}
+EOF
+
   cat >"$dashboard_invalid_locale" <<'EOF'
 {
   "p0Status": "pass",
@@ -907,6 +1087,8 @@ EOF
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_perf"
   expect_fail "dashboard longrun gateFlat contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_longrun"
+  expect_fail "dashboard highscale gateFlat contract" \
+    ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_highscale"
   expect_fail "dashboard upsert contract" \
     ./scripts/ops/attendance-validate-daily-dashboard-json.sh "$dashboard_invalid_upsert"
   expect_fail "dashboard locale zh schema v3 contract" \

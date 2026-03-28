@@ -22,6 +22,18 @@ function info() {
   echo "[attendance-storage] $*" >&2
 }
 
+function resolve_compose_cmd() {
+  if docker compose version >/dev/null 2>&1; then
+    echo "docker compose"
+    return 0
+  fi
+  if command -v docker-compose >/dev/null 2>&1; then
+    echo "docker-compose"
+    return 0
+  fi
+  return 1
+}
+
 function get_env_value() {
   local key="$1"
   if [[ ! -f "$ENV_FILE" ]]; then
@@ -76,6 +88,11 @@ info "Compose:   ${COMPOSE_FILE}"
 info "Env file:  ${ENV_FILE}"
 info "Upload dir (container): ${UPLOAD_DIR}"
 info "Thresholds: max_fs_used_pct=${MAX_FS_USED_PCT} max_upload_dir_gb=${MAX_UPLOAD_DIR_GB} max_oldest_file_days=${MAX_OLDEST_FILE_DAYS}"
+
+COMPOSE_CMD="$(resolve_compose_cmd || true)"
+if [[ -z "$COMPOSE_CMD" ]]; then
+  warn "Neither 'docker compose' nor 'docker-compose' is available"
+fi
 
 volume_line="$(
   grep -E "^[[:space:]]*-[[:space:]]*[^#]*:[[:space:]]*${UPLOAD_DIR}([[:space:]]|$|:)" "$COMPOSE_FILE" \
@@ -171,11 +188,20 @@ function run_cmd() {
     #
     # Also, hide noisy docker compose warnings on stderr (e.g. "version is obsolete") by only
     # emitting stderr when the exec fails.
+    [[ -n "$COMPOSE_CMD" ]] || die "docker compose backend exec requested, but no compose command is available"
     local tmp_err out rc
     tmp_err="$(mktemp 2>/dev/null || echo "/tmp/attendance-storage-err-$$")"
     out=""
     set +e
-    out="$(docker compose -f "$COMPOSE_FILE" exec -T backend sh -lc "$cmd" < /dev/null 2>"$tmp_err")"
+    if [[ "$COMPOSE_CMD" == "docker compose" ]]; then
+      out="$(docker compose -f "$COMPOSE_FILE" exec -T backend sh -lc "$cmd" < /dev/null 2>"$tmp_err")"
+    elif [[ "$COMPOSE_CMD" == "docker-compose" ]]; then
+      out="$(docker-compose -f "$COMPOSE_FILE" exec -T backend sh -lc "$cmd" < /dev/null 2>"$tmp_err")"
+    else
+      echo "[attendance-storage] ERROR: unsupported compose command: ${COMPOSE_CMD}" >&2
+      rm -f "$tmp_err" || true
+      return 125
+    fi
     rc=$?
     set -e
     if [[ "$rc" != "0" ]]; then

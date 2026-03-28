@@ -1,4 +1,4 @@
-import type { PoolConfig, QueryResult, QueryResultRow } from 'pg';
+import type { PoolClient, PoolConfig, QueryResult, QueryResultRow } from 'pg';
 import { Pool } from 'pg'
 import { Logger } from '../../core/logger'
 import { secretManager } from '../../security/SecretManager'
@@ -152,10 +152,10 @@ class ConnectionPool {
     }
   }
 
-  async transaction<T>(handler: (client: { query: TransactionQuery }) => Promise<T>): Promise<T> {
-    const client = await this.pool.connect()
+  async transaction<T>(handler: (client: { query: TransactionQuery; __rawClient: PoolClient }) => Promise<T>): Promise<T> {
+    const rawClient = await this.pool.connect()
     try {
-      await client.query('BEGIN')
+      await rawClient.query('BEGIN')
       const query: TransactionQuery = async <R extends QueryResultRow = QueryResultRow>(
         sqlOrConfig: string | QueryConfig,
         params?: unknown[],
@@ -163,22 +163,22 @@ class ConnectionPool {
       ): Promise<QueryResult<R>> => {
         if (typeof sqlOrConfig === 'string') {
           const queryConfig = this.buildQueryConfig(sqlOrConfig, params, options)
-          return client.query<R>(queryConfig)
+          return rawClient.query<R>(queryConfig)
         }
-        return client.query<R>(sqlOrConfig)
+        return rawClient.query<R>(sqlOrConfig)
       }
-      const result = await handler({ query })
-      await client.query('COMMIT')
+      const result = await handler({ query, __rawClient: rawClient })
+      await rawClient.query('COMMIT')
       return result
     } catch (e) {
       try {
-        await client.query('ROLLBACK')
+        await rawClient.query('ROLLBACK')
       } catch (rollbackErr) {
         this.logger.error('ROLLBACK failed', rollbackErr instanceof Error ? rollbackErr : undefined)
       }
       throw e
     } finally {
-      client.release()
+      rawClient.release()
     }
   }
 
@@ -202,6 +202,17 @@ class PoolManager {
       this.logger.warn('DATABASE_URL not set; database pool will use driver defaults and may fail to connect')
     }
 
+    const sslDisabledByEnv = ['false', '0', 'off', 'no'].includes((process.env.DB_SSL || '').trim().toLowerCase())
+    const ssl =
+      process.env.NODE_ENV === 'production' && !sslDisabledByEnv
+        ? {
+            rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false',
+            ca: process.env.DB_SSL_CA,
+            cert: process.env.DB_SSL_CERT,
+            key: process.env.DB_SSL_KEY,
+          }
+        : false
+
     this.main = this.createPool(
       'main',
       {
@@ -217,12 +228,7 @@ class PoolManager {
         // Note: acquireTimeoutMillis is not a valid pg Pool option, removing to fix compilation
 
         // SSL配置
-        ssl: process.env.NODE_ENV === 'production' ? {
-          rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false',
-          ca: process.env.DB_SSL_CA,
-          cert: process.env.DB_SSL_CERT,
-          key: process.env.DB_SSL_KEY,
-        } : false,
+        ssl,
 
         // 查询配置
         query_timeout: parseInt(process.env.DB_QUERY_TIMEOUT || '30000', 10), // 查询超时

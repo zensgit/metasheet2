@@ -1,0 +1,114 @@
+name: Multitable Pilot Feedback
+description: Collect structured feedback from an internal multitable pilot run.
+title: '[Multitable Pilot] '
+labels:
+  - multitable
+  - pilot-feedback
+body:
+  - type: input
+    id: team
+    attributes:
+      label: Team / workspace
+      placeholder: Supply Ops
+    validations:
+      required: true
+
+  - type: input
+    id: owner
+    attributes:
+      label: Pilot owner
+      placeholder: @owner
+    validations:
+      required: true
+
+  - type: input
+    id: scenario
+    attributes:
+      label: Business scenario
+      placeholder: Intake tracking, vendor review, project planning
+    validations:
+      required: true
+
+  - type: textarea
+    id: readiness
+    attributes:
+      label: Readiness artifacts
+      description: Paste the readiness.md path, readiness.json path, and any smoke/profile artifact links.
+      placeholder: |
+        readiness.md:
+        readiness.json:
+        smoke report:
+        profile report:
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: capabilities
+    attributes:
+      label: Core scenario status
+      description: Check the capabilities that passed in the pilot.
+      options:
+        - label: CSV import
+        - label: Person assignment
+        - label: Attachment upload
+        - label: Grid editing
+        - label: Form submit
+        - label: Link selection
+        - label: Search
+        - label: Comment add / resolve
+        - label: Conflict recovery
+
+  - type: textarea
+    id: usability
+    attributes:
+      label: Usability feedback
+      description: What worked well, where users hesitated, and what felt unclear.
+    validations:
+      required: true
+
+  - type: textarea
+    id: performance
+    attributes:
+      label: Performance feedback
+      description: Include approximate table size and any perceived lag or long waits.
+      placeholder: |
+        Largest table used:
+        Perceived grid open speed:
+        Perceived search speed:
+        Browser lag / jank:
+    validations:
+      required: true
+
+  - type: textarea
+    id: bugs
+    attributes:
+      label: Bugs and repro
+      description: Use Title / Severity / Steps / Expected / Actual / Artifact path / Blocking.
+      placeholder: |
+        1. Title:
+        2. Severity:
+        3. Steps:
+        4. Expected:
+        5. Actual:
+        6. Artifact path:
+        7. Blocking:
+    validations:
+      required: false
+
+  - type: dropdown
+    id: rollout
+    attributes:
+      label: Ready to continue pilot
+      options:
+        - Yes
+        - No
+    validations:
+      required: true
+
+  - type: textarea
+    id: blockers
+    attributes:
+      label: Top blockers / next fix batch
+      description: If pilot should pause, list the blocking issues and suggested next fix batch.
+    validations:
+      required: false

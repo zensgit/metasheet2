@@ -954,6 +954,7 @@ export interface AttendanceLeaveTypesTable {
   org_id: string
   code: string
   name: string
+  paid: boolean
   requires_approval: boolean
   requires_attachment: boolean
   default_minutes_per_day: number

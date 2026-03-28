@@ -59,12 +59,32 @@ jobs:
             "DEPLOY_PATH=\"${DEPLOY_PATH}\""
             "PRUNE=\"${PRUNE}\""
             "SKIP_HOST_SYNC=\"${SKIP_HOST_SYNC}\""
-            "cd \"${DEPLOY_PATH}\""
+            'if [[ "${DEPLOY_PATH}" == /* ]]; then'
+              '  DEPLOY_REPO_PATH="${DEPLOY_PATH}"'
+            'elif [[ "${DEPLOY_PATH}" == ~/* ]]; then'
+              '  DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH#~/}"'
+            "else"
+              '  DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH}"'
+            "fi"
+            'if [[ ! -d "$DEPLOY_REPO_PATH" ]]; then'
+              '  echo "[host-sync][error] DEPLOY_PATH missing: ${DEPLOY_PATH} (resolved: ${DEPLOY_REPO_PATH})"'
+              '  echo "[host-sync][error] pwd=$(pwd)"'
+              '  echo "[host-sync][error] home=${HOME}"'
+              '  ls -la "${HOME}" || true'
+              '  exit 1'
+            "fi"
+            'cd "$DEPLOY_REPO_PATH"'
+            'echo "[host-sync] repo_path=${DEPLOY_REPO_PATH}"'
             "echo \"=== HOST SYNC START ===\""
             "host_sync_rc=0"
             "host_sync_attempts=3"
             'if [[ "${SKIP_HOST_SYNC}" == "true" ]]; then'
               '  echo "[host-sync] skipped (skip_host_sync=true)"'
+              '  host_sync_rc=0'
+            'elif ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then'
+              '  echo "[host-sync][warn] DEPLOY_PATH is not a git repo: ${DEPLOY_PATH} (resolved: ${DEPLOY_REPO_PATH}); continuing with existing files"'
+              '  pwd'
+              '  ls -la || true'
               '  host_sync_rc=0'
             "else"
               "  set +e"

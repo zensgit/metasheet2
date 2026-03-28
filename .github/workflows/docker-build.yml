@@ -69,6 +69,8 @@ jobs:
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
+          DEPLOY_IMAGE_OWNER: zensgit
+          DEPLOY_IMAGE_TAG: ${{ github.sha }}
           DRILL_FAIL_STAGE: ${{ github.event.inputs.drill_fail_stage || 'none' }}
         run: |
           set -euo pipefail
@@ -78,6 +80,8 @@ jobs:
           ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}"
+          DEPLOY_IMAGE_OWNER="${DEPLOY_IMAGE_OWNER:-zensgit}"
+          DEPLOY_IMAGE_TAG="${DEPLOY_IMAGE_TAG:-${GITHUB_SHA}}"
           DRILL_FAIL_STAGE="${DRILL_FAIL_STAGE:-none}"
           mkdir -p output/deploy
           deploy_log="output/deploy/deploy.log"
@@ -85,13 +89,68 @@ jobs:
             "set -euo pipefail"
             "DEPLOY_PATH=\"${DEPLOY_PATH:-metasheet2}\""
             "DEPLOY_COMPOSE_FILE=\"${DEPLOY_COMPOSE_FILE:-docker-compose.app.yml}\""
+            "DEPLOY_IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER:-zensgit}\""
+            "DEPLOY_IMAGE_TAG=\"${DEPLOY_IMAGE_TAG:-${GITHUB_SHA}}\""
             "DRILL_FAIL_STAGE=\"${DRILL_FAIL_STAGE:-none}\""
-            "cd \"${DEPLOY_PATH}\""
+            'if [[ "${DEPLOY_PATH}" == /* ]]; then'
+            '  DEPLOY_REPO_PATH="${DEPLOY_PATH}"'
+            'elif [[ "${DEPLOY_PATH}" == ~/* ]]; then'
+            '  DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH#~/}"'
+            'else'
+            '  DEPLOY_REPO_PATH="${HOME}/${DEPLOY_PATH}"'
+            'fi'
+            'if [[ ! -d "$DEPLOY_REPO_PATH" ]]; then'
+            '  echo "[deploy][error] DEPLOY_PATH missing: ${DEPLOY_PATH} (resolved: ${DEPLOY_REPO_PATH})" >&2'
+            '  echo "[deploy][error] pwd=$(pwd)" >&2'
+            '  echo "[deploy][error] home=${HOME}" >&2'
+            '  ls -la "${HOME}" >&2 || true'
+            '  exit 1'
+            'fi'
+            'cd "$DEPLOY_REPO_PATH"'
+            'echo "[deploy] repo_path=${DEPLOY_REPO_PATH}"'
             "# Keep host-mounted config (e.g. docker/nginx.conf) in sync with main."
-            "git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo \"[deploy][error] DEPLOY_PATH is not a git repo: ${DEPLOY_PATH}\" >&2; exit 1; }"
-            "git fetch origin main"
-            "git checkout main"
-            "git pull --ff-only origin main"
+            'if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then'
+            '  echo "[deploy] git sync=enabled"'
+            '  git fetch origin main'
+            '  git checkout main'
+            '  git merge --ff-only origin/main'
+            'else'
+            '  echo "[deploy][warn] DEPLOY_PATH is not a git repo: ${DEPLOY_PATH} (resolved: ${DEPLOY_REPO_PATH}); continuing with existing files"'
+            '  echo "[deploy][warn] pwd=$(pwd)"'
+            '  ls -la || true'
+            'fi'
+            'if docker compose version >/dev/null 2>&1; then'
+            '  COMPOSE_CMD="docker compose"'
+            'elif command -v docker-compose >/dev/null 2>&1; then'
+            '  COMPOSE_CMD="docker-compose"'
+            'else'
+            '  echo "[deploy][error] neither '\''docker compose'\'' nor '\''docker-compose'\'' is available" >&2'
+            '  exit 125'
+            'fi'
+            'echo "[deploy] compose_cmd=${COMPOSE_CMD}"'
+            'echo "[deploy] image_owner=${DEPLOY_IMAGE_OWNER}"'
+            'echo "[deploy] image_tag=${DEPLOY_IMAGE_TAG}"'
+            'ENV_FILE_PATH="docker/app.env"'
+            'if [[ -f "${ENV_FILE_PATH}" ]]; then'
+            '  database_url_line="$(grep -E "^DATABASE_URL=" "${ENV_FILE_PATH}" | tail -n 1 || true)"'
+            '  database_url="${database_url_line#DATABASE_URL=}"'
+            '  database_url="${database_url%\"}"'
+            '  database_url="${database_url#\"}"'
+            '  if [[ "${database_url}" == *"@postgres:"* || "${database_url}" == *"@127.0.0.1:"* || "${database_url}" == *"@localhost:"* ]]; then'
+            '    if grep -Eq "^DB_SSL=" "${ENV_FILE_PATH}"; then'
+            '      sed -i "s/^DB_SSL=.*/DB_SSL=false/" "${ENV_FILE_PATH}"'
+            '    else'
+            '      printf "\\nDB_SSL=false\\n" >> "${ENV_FILE_PATH}"'
+            '    fi'
+            '    echo "[deploy] local-postgres detected; forcing DB_SSL=false in ${ENV_FILE_PATH}"'
+            '  fi'
+            'fi'
+            'for CONTAINER_NAME in metasheet-postgres metasheet-redis metasheet-backend metasheet-web; do'
+            '  if docker ps -a --format "{{.Names}}" | grep -Fxq "${CONTAINER_NAME}"; then'
+            '    echo "[deploy][warn] removing existing container ${CONTAINER_NAME} before recreate"'
+            '    docker rm -f "${CONTAINER_NAME}"'
+            '  fi'
+            'done'
             "# Preflight: validate production env/compose/nginx before (re)deploying containers."
             "echo \"=== ATTENDANCE PREFLIGHT START ===\""
             "preflight_rc=0"
@@ -103,14 +162,15 @@ jobs:
             'if [[ "$preflight_rc" != "0" ]]; then exit "$preflight_rc"; fi'
             "echo \"=== DEPLOY START ===\""
             'if [[ "${DRILL_FAIL_STAGE:-none}" == "deploy" ]]; then echo "[deploy][drill] intentional failure at deploy stage"; exit 91; fi'
-            "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" pull backend web"
-            "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" up -d --no-deps --force-recreate backend web"
+            'eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" up -d postgres redis"'
+            'eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" pull backend web"'
+            'eval "IMAGE_OWNER=\"${DEPLOY_IMAGE_OWNER}\" IMAGE_TAG=\"${DEPLOY_IMAGE_TAG}\" ${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" up -d --no-deps --force-recreate backend web"'
             "echo \"=== DEPLOY END ===\""
             "# Ensure DB schema is up to date before smoke checks."
             "echo \"=== MIGRATE START ===\""
             'if [[ "${DRILL_FAIL_STAGE:-none}" == "migrate" ]]; then echo "[deploy][drill] intentional failure at migrate stage"; exit 92; fi'
             "# Important: redirect stdin so docker compose exec can't consume the rest of this bash -s script."
-            "docker compose -f \"${DEPLOY_COMPOSE_FILE}\" exec -T backend node packages/core-backend/dist/src/db/migrate.js < /dev/null"
+            'eval "${COMPOSE_CMD} -f \"${DEPLOY_COMPOSE_FILE}\" exec -T backend node packages/core-backend/dist/src/db/migrate.js < /dev/null"'
             "echo \"=== MIGRATE END ===\""
             "# Post-deploy smoke checks"
             "echo \"=== SMOKE START ===\""

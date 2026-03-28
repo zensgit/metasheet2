@@ -1,90 +1,51 @@
 #!/usr/bin/env bash
-set -u
+set -uo pipefail
 
-AUTH_RESOLVE_META_FILE_INPUT="${AUTH_RESOLVE_META_FILE:-${1:-}}"
-AUTH_ERROR_FILE_INPUT="${AUTH_ERROR_FILE:-${2:-auth-error.txt}}"
-API_BASE_VALUE="${API_BASE:-${3:-}}"
+META_FILE="${1:-}"
+OUTPUT_FILE="${2:-}"
+API_BASE="${API_BASE:-}"
 
-auth_source="none"
-auth_me_last_http="unknown"
-auth_refresh_last_http="unknown"
-auth_login_last_http="unknown"
-auth_login_email_present="false"
-auth_login_password_present="false"
-
-function warn() {
-  echo "[attendance-write-auth-error] WARN: $*" >&2
+function read_meta_value() {
+  local key="$1"
+  local default_value="$2"
+  if [[ -n "$META_FILE" && -f "$META_FILE" ]]; then
+    awk -F= -v target="$key" '$1 == target { print $2 }' "$META_FILE" | tail -n1
+  else
+    printf '%s\n' "$default_value"
+  fi
 }
 
-function load_meta() {
-  local meta_path="$1"
-  if [[ ! -f "$meta_path" ]]; then
-    warn "auth resolve meta not found: ${meta_path}"
+function main() {
+  if [[ -z "$OUTPUT_FILE" ]]; then
+    echo "[attendance-write-auth-error] WARN: OUTPUT_FILE argument is empty" >&2
     return 0
   fi
 
-  while IFS='=' read -r key value; do
-    [[ -n "${key:-}" ]] || continue
-    case "$key" in
-      AUTH_SOURCE)
-        auth_source="${value:-none}"
-        ;;
-      AUTH_ME_LAST_HTTP)
-        auth_me_last_http="${value:-unknown}"
-        ;;
-      AUTH_REFRESH_LAST_HTTP)
-        auth_refresh_last_http="${value:-unknown}"
-        ;;
-      AUTH_LOGIN_LAST_HTTP)
-        auth_login_last_http="${value:-unknown}"
-        ;;
-      AUTH_LOGIN_EMAIL_PRESENT)
-        auth_login_email_present="${value:-false}"
-        ;;
-      AUTH_LOGIN_PASSWORD_PRESENT)
-        auth_login_password_present="${value:-false}"
-        ;;
-    esac
-  done < "$meta_path"
-}
+  local auth_me_last_http refresh_last_http login_last_http login_email_present login_password_present
+  auth_me_last_http="$(read_meta_value "AUTH_ME_LAST_HTTP" "unknown")"
+  refresh_last_http="$(read_meta_value "AUTH_REFRESH_LAST_HTTP" "unknown")"
+  login_last_http="$(read_meta_value "AUTH_LOGIN_LAST_HTTP" "unknown")"
+  login_email_present="$(read_meta_value "AUTH_LOGIN_EMAIL_PRESENT" "false")"
+  login_password_present="$(read_meta_value "AUTH_LOGIN_PASSWORD_PRESENT" "false")"
 
-function write_auth_error() {
-  local auth_error_file="$1"
-  local auth_error_dir
-  auth_error_dir="$(dirname "$auth_error_file")"
-
-  if ! mkdir -p "$auth_error_dir" 2>/dev/null; then
-    warn "failed to create output directory: ${auth_error_dir}"
-  fi
-
-  if ! cat > "$auth_error_file" <<EOF
+  mkdir -p "$(dirname "$OUTPUT_FILE")" || true
+  cat > "$OUTPUT_FILE" <<EOF
 No valid attendance admin token.
-Tried: ATTENDANCE_ADMIN_JWT validation via /api/auth/me, then /api/auth/refresh-token.
-Fallback: ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD login.
-Remediation:
-- Rotate ATTENDANCE_ADMIN_JWT, or
-- Configure ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD secrets.
-API_BASE=${API_BASE_VALUE}
-AUTH_SOURCE=${auth_source}
-AUTH_ME_LAST_HTTP=${auth_me_last_http}
-AUTH_REFRESH_LAST_HTTP=${auth_refresh_last_http}
-AUTH_LOGIN_LAST_HTTP=${auth_login_last_http}
-AUTH_LOGIN_EMAIL_PRESENT=${auth_login_email_present}
-AUTH_LOGIN_PASSWORD_PRESENT=${auth_login_password_present}
-AUTH_RESOLVE_META_FILE=${AUTH_RESOLVE_META_FILE_INPUT:-}
+Tried (in order):
+1) ATTENDANCE_ADMIN_JWT / vars token via /api/auth/me (retry-aware)
+2) /api/auth/refresh-token with JWT token
+3) ATTENDANCE_ADMIN_EMAIL + ATTENDANCE_ADMIN_PASSWORD login (secrets or vars)
+Diagnostic:
+- auth_me_last_http=${auth_me_last_http}
+- refresh_last_http=${refresh_last_http}
+- login_last_http=${login_last_http}
+- login_email_present=${login_email_present}
+- login_password_present=${login_password_present}
+API_BASE=${API_BASE}
 EOF
-  then
-    warn "failed to write auth error file: ${auth_error_file}"
-  fi
+
+  return 0
 }
 
-if [[ -n "${AUTH_RESOLVE_META_FILE_INPUT}" ]]; then
-  load_meta "${AUTH_RESOLVE_META_FILE_INPUT}"
-else
-  warn "AUTH_RESOLVE_META_FILE is empty; using default diagnostics"
-fi
-
-write_auth_error "${AUTH_ERROR_FILE_INPUT}"
-
-# Best-effort helper: caller decides whether to fail the workflow.
+main "$@" || true
 exit 0

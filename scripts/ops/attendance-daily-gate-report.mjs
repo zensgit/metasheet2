@@ -15,6 +15,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import { fileURLToPath } from 'url'
 
 const token = String(process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '').trim()
 const repo = String(process.env.GITHUB_REPOSITORY || 'zensgit/metasheet2').trim()
@@ -28,6 +29,7 @@ const cleanupWorkflow = String(process.env.CLEANUP_WORKFLOW || 'attendance-remot
 const strictWorkflow = String(process.env.STRICT_WORKFLOW || 'attendance-strict-gates-prod.yml').trim()
 const perfWorkflow = String(process.env.PERF_WORKFLOW || 'attendance-import-perf-baseline.yml').trim()
 const longrunWorkflow = String(process.env.LONGRUN_WORKFLOW || 'attendance-import-perf-longrun.yml').trim()
+const highscaleWorkflow = String(process.env.HIGHSCALE_WORKFLOW || 'attendance-import-perf-highscale.yml').trim()
 const localeZhWorkflow = String(process.env.LOCALE_ZH_WORKFLOW || 'attendance-locale-zh-smoke-prod.yml').trim()
 const contractWorkflow = String(process.env.CONTRACT_WORKFLOW || 'attendance-gate-contract-matrix.yml').trim()
 const protectionWorkflow = String(process.env.PROTECTION_WORKFLOW || 'attendance-branch-policy-drift-prod.yml').trim()
@@ -325,6 +327,12 @@ function parsePerfSummaryJson(text) {
 
   const previewMs = typeof value?.previewMs === 'number' ? value.previewMs : null
   const commitMs = typeof value?.commitMs === 'number' ? value.commitMs : null
+  const commitGateMs = typeof value?.commitGateMs === 'number'
+    ? value.commitGateMs
+    : (typeof value?.perfMetrics?.commitGateMs === 'number' ? value.perfMetrics.commitGateMs : null)
+  const commitGateSource = typeof value?.commitGateSource === 'string'
+    ? value.commitGateSource.trim()
+    : (typeof value?.perfMetrics?.commitGateSource === 'string' ? value.perfMetrics.commitGateSource.trim() : null)
   const exportMs = typeof value?.exportMs === 'number' ? value.exportMs : null
   const rollbackMs = typeof value?.rollbackMs === 'number' ? value.rollbackMs : null
   const rows = typeof value?.rows === 'number' ? value.rows : null
@@ -375,6 +383,8 @@ function parsePerfSummaryJson(text) {
     uploadCsv: uploadCsv === null ? null : uploadCsv ? 'true' : 'false',
     previewMs: previewMs === null ? null : String(previewMs),
     commitMs: commitMs === null ? null : String(commitMs),
+    commitGateMs: commitGateMs === null ? null : String(commitGateMs),
+    commitGateSource: commitGateSource || null,
     exportMs: exportMs === null ? null : String(exportMs),
     rollbackMs: rollbackMs === null ? null : String(rollbackMs),
     regressionsCount: String(regressionsRaw.length),
@@ -642,6 +652,38 @@ function toRunList(value) {
   return Array.isArray(value) ? value : []
 }
 
+function pickLatestCompletedRun(list, { excludeConclusions = [] } = {}) {
+  const completed = toRunList(list).filter((run) => run?.status === 'completed')
+  if (completed.length === 0) return null
+  const excluded = new Set(
+    (Array.isArray(excludeConclusions) ? excludeConclusions : [])
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean),
+  )
+  if (excluded.size === 0) return completed[0]
+  const preferred = completed.find((run) => !excluded.has(String(run?.conclusion || '').trim().toLowerCase()))
+  return preferred || completed[0]
+}
+
+function resolveGateSignalBranch({ gateName, reportBranch, remoteSignalBranchValue }) {
+  const name = String(gateName || '').trim()
+  const branchValue = String(reportBranch || '').trim()
+  const remoteBranch = String(remoteSignalBranchValue || '').trim()
+  const remoteGate = name === 'Remote Preflight'
+    || name === 'Host Metrics'
+    || name === 'Storage Health'
+    || name === 'Upload Cleanup'
+  if (!remoteGate) return branchValue
+  if (!remoteBranch || remoteBranch === branchValue) return branchValue
+  return remoteBranch
+}
+
+function resolveQueryBranchDisplayValue({ gate, reportBranchValue }) {
+  const query = String(gate?.queryBranch || '').trim()
+  if (query) return query
+  return String(reportBranchValue || '').trim()
+}
+
 function filterDrillRuns(list) {
   const normalized = toRunList(list)
   return includeDrillRuns ? normalized : normalized.filter((run) => !isDrillRun(run))
@@ -667,14 +709,14 @@ async function resolveRemoteSignalRuns({
     fallbackError: null,
   }
 
-  const remoteGate = gateName === 'Remote Preflight'
-    || gateName === 'Host Metrics'
-    || gateName === 'Storage Health'
-    || gateName === 'Upload Cleanup'
+  const targetSignalBranch = resolveGateSignalBranch({
+    gateName,
+    reportBranch: branchValue,
+    remoteSignalBranchValue: remoteSignalFallbackBranch,
+  })
   const canFallback = enableRemoteSignalFallback
-    && remoteGate
-    && remoteSignalFallbackBranch
-    && remoteSignalFallbackBranch !== branchValue
+    && targetSignalBranch
+    && targetSignalBranch !== branchValue
   if (!canFallback) {
     return result
   }
@@ -688,7 +730,7 @@ async function resolveRemoteSignalRuns({
     ownerValue,
     repoValue,
     workflowFile,
-    branchValue: remoteSignalFallbackBranch,
+    branchValue: targetSignalBranch,
   })
   result.fallbackError = fallbackRuns.error || null
   if (fallbackRuns.error) {
@@ -698,10 +740,10 @@ async function resolveRemoteSignalRuns({
   const fallbackList = toRunList(fallbackRuns.list)
   const fallbackHasCompleted = hasCompletedRun(fallbackList)
   if (fallbackHasCompleted || !primaryHasCompleted || result.error) {
-    info(`${gateName}: using fallback branch '${remoteSignalFallbackBranch}'`)
+    info(`${gateName}: using fallback branch '${targetSignalBranch}'`)
     result.list = fallbackList
     result.error = fallbackRuns.error || null
-    result.sourceBranch = remoteSignalFallbackBranch
+    result.sourceBranch = targetSignalBranch
     result.fallbackUsed = true
   }
 
@@ -736,6 +778,10 @@ function formatRun(run) {
     updatedAt: run.updated_at || null,
     url: run.html_url || null,
   }
+}
+
+function isPerfGateName(name) {
+  return name === 'Perf Baseline' || name === 'Perf Long Run' || name === 'Perf High Scale'
 }
 
 function evaluateGate({ name, severity, latestAny, latestCompleted, now, lookbackHoursValue, fetchError, sourceBranch = branch }) {
@@ -813,6 +859,7 @@ function renderMarkdown({
   branchValue,
   lookbackHoursValue,
   cleanupLookbackHoursValue,
+  highscaleLookbackHoursValue,
   preflightGate,
   protectionGate,
   metricsGate,
@@ -821,6 +868,7 @@ function renderMarkdown({
   strictGate,
   perfGate,
   longrunGate,
+  highscaleGate,
   localeZhGate,
   contractGate,
   openTrackingIssues,
@@ -838,6 +886,7 @@ function renderMarkdown({
     'Strict Gates': strictWorkflow,
     'Perf Baseline': perfWorkflow,
     'Perf Long Run': longrunWorkflow,
+    'Perf High Scale': highscaleWorkflow,
     'Locale zh Smoke': localeZhWorkflow,
     'Gate Contract Matrix': contractWorkflow,
   }
@@ -848,7 +897,7 @@ function renderMarkdown({
   lines.push(`Generated at (UTC): \`${generatedAt}\``)
   lines.push(`Repository: \`${repoValue}\``)
   lines.push(`Branch: \`${branchValue}\``)
-  lines.push(`Lookback: \`${lookbackHoursValue}h\` (Upload Cleanup uses \`${cleanupLookbackHoursValue}h\`)`)
+  lines.push(`Lookback: \`${lookbackHoursValue}h\` (Upload Cleanup uses \`${cleanupLookbackHoursValue}h\`; Perf High Scale uses \`${highscaleLookbackHoursValue}h\`)`)
   lines.push(`P0 Status: **${p0Status.toUpperCase()}**`)
   lines.push(`Overall: **${overallStatus.toUpperCase()}**`)
   lines.push('')
@@ -908,7 +957,7 @@ function renderMarkdown({
           extra.push(`reasons=${head.join(' ')}`)
         }
       }
-      if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
+      if (isPerfGateName(gate.name)) {
         if (meta.schemaVersion) extra.push(`schema=${meta.schemaVersion}`)
         if (meta.engine) extra.push(`engine=${meta.engine}`)
         if (meta.processedRows) extra.push(`processed=${meta.processedRows}`)
@@ -917,6 +966,8 @@ function renderMarkdown({
         if (meta.rows) extra.push(`rows=${meta.rows}`)
         if (meta.mode) extra.push(`mode=${meta.mode}`)
         if (meta.uploadCsv) extra.push(`upload=${meta.uploadCsv}`)
+        if (meta.commitGateMs) extra.push(`commit_gate_ms=${meta.commitGateMs}`)
+        if (meta.commitGateSource) extra.push(`commit_gate_source=${meta.commitGateSource}`)
         if (meta.regressionsCount) extra.push(`regressions=${meta.regressionsCount}`)
       }
       if (gate.name === 'Locale zh Smoke') {
@@ -936,7 +987,7 @@ function renderMarkdown({
     return `\`${value}\``
   }
 
-  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, localeZhGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, highscaleGate, localeZhGate, contractGate]) {
     const completed = gate.completed
     const runId = completed.id ? `#${completed.id}` : '-'
     const conclusion = completed.conclusion || '-'
@@ -950,7 +1001,7 @@ function renderMarkdown({
   lines.push('')
   lines.push('## Artifact Download Commands')
   lines.push('')
-  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, localeZhGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, highscaleGate, localeZhGate, contractGate]) {
     const runIdValue = gate?.completed?.id
     if (!runIdValue) continue
     lines.push(`- ${gate.name} (#${runIdValue}): \`gh run download ${runIdValue} -D "output/playwright/ga/${runIdValue}"\``)
@@ -978,6 +1029,7 @@ function renderMarkdown({
       [strictGate.name]: strictGate,
       [perfGate.name]: perfGate,
       [longrunGate.name]: longrunGate,
+      [highscaleGate.name]: highscaleGate,
       [localeZhGate.name]: localeZhGate,
       [contractGate.name]: contractGate,
     }
@@ -1012,7 +1064,7 @@ function renderMarkdown({
       if (finding.gate === 'Upload Cleanup') {
         if (meta?.staleCount) metaBits.push(`stale_count=${meta.staleCount}`)
       }
-      if (finding.gate === 'Perf Baseline' || finding.gate === 'Perf Long Run') {
+      if (isPerfGateName(finding.gate)) {
         if (meta?.schemaVersion) metaBits.push(`schema=${meta.schemaVersion}`)
         if (meta?.engine) metaBits.push(`engine=${meta.engine}`)
         if (meta?.processedRows) metaBits.push(`processed_rows=${meta.processedRows}`)
@@ -1023,6 +1075,8 @@ function renderMarkdown({
         if (meta?.uploadCsv) metaBits.push(`upload_csv=${meta.uploadCsv}`)
         if (meta?.previewMs) metaBits.push(`preview_ms=${meta.previewMs}`)
         if (meta?.commitMs) metaBits.push(`commit_ms=${meta.commitMs}`)
+        if (meta?.commitGateMs) metaBits.push(`commit_gate_ms=${meta.commitGateMs}`)
+        if (meta?.commitGateSource) metaBits.push(`commit_gate_source=${meta.commitGateSource}`)
         if (meta?.exportMs) metaBits.push(`export_ms=${meta.exportMs}`)
         if (meta?.rollbackMs) metaBits.push(`rollback_ms=${meta.rollbackMs}`)
         if (meta?.regressionsCount) metaBits.push(`regressions=${meta.regressionsCount}`)
@@ -1197,6 +1251,20 @@ function renderMarkdown({
       lines.push('- Perf Long Run: run succeeded but `perf-summary.json` is missing from artifacts. Check scenario artifact upload paths and rerun longrun.')
     }
 
+    if (findings.some((f) => f && f.gate === 'Perf High Scale' && f.code === 'RUN_FAILED')) {
+      if (highscaleGate?.meta?.regressionsCount && highscaleGate.meta.regressionsCount !== '0') {
+        lines.push(`- Perf High Scale: regressions detected (count=${highscaleGate.meta.regressionsCount}). See perf artifacts for details.`)
+        if (highscaleGate.meta.regressionsSample) {
+          lines.push(`- Perf High Scale: sample regressions: ${highscaleGate.meta.regressionsSample}`)
+        }
+      } else {
+        lines.push('- Perf High Scale: inspect perf artifacts (`perf.log`, `perf-summary.json`) for the first error and threshold evaluation.')
+      }
+    }
+    if (findings.some((f) => f && f.gate === 'Perf High Scale' && f.code === 'PERF_SUMMARY_MISSING')) {
+      lines.push('- Perf High Scale: run succeeded but `perf-summary.json` is missing from artifacts. Check artifact upload paths and rerun highscale benchmark.')
+    }
+
     if (findings.some((f) => f && f.gate === 'Gate Contract Matrix' && f.code === 'RUN_FAILED')) {
       lines.push('- Gate Contract Matrix: contract regression detected. Open matrix artifacts and fix strict/dashboard contract scripts or schema drift before merging.')
     }
@@ -1267,11 +1335,15 @@ function renderMarkdown({
           lines.push(`- Strict Gates: \`provisioning\` failure reason detected: \`${provReason}\`.`)
         }
         if (provReason === 'AUTH_FAILED') {
-          lines.push('- Strict Gates: `provisioning` auth failed. Refresh the admin token and rerun (permission grants require admin).')
+          lines.push('- Strict Gates: `provisioning` auth failed. Refresh the admin token and rerun (access provisioning requires admin).')
         } else if (provReason === 'RATE_LIMITED') {
           lines.push('- Strict Gates: `provisioning` was rate-limited. Wait briefly and rerun.')
         } else if (provReason === 'ENDPOINT_MISSING') {
-          lines.push('- Strict Gates: `provisioning` endpoint missing. Ensure backend routes include `/api/permissions/grant`, then redeploy.')
+          lines.push('- Strict Gates: `provisioning` endpoint missing. Ensure backend routes include `/api/admin/users/:userId/roles/assign` or the legacy `/api/permissions/grant`, then redeploy.')
+        } else if (provReason === 'ROLE_NOT_FOUND') {
+          lines.push('- Strict Gates: `provisioning` attendance roles are missing. Run attendance role/RBAC migrations, confirm `attendance_employee|attendance_approver|attendance_admin` exist, then rerun.')
+        } else if (provReason === 'SERVER_ERROR') {
+          lines.push('- Strict Gates: `provisioning` returned a backend 5xx. Inspect backend logs for `/api/admin/users/:userId/roles/assign` or `/api/permissions/grant`, then rerun.')
         } else if (provReason === 'DNS_FAILED') {
           lines.push('- Strict Gates: `provisioning` failed due to DNS resolution. Check deploy DNS/network and rerun.')
         } else if (provReason === 'CONNECTION_REFUSED') {
@@ -1380,19 +1452,19 @@ function renderMarkdown({
   lines.push('## Suggested Actions')
   lines.push('')
   lines.push('1. Re-run remote preflight or strict gate manually when any `P0` finding exists.')
-  lines.push('2. Re-run branch protection / host metrics / storage health / perf baseline / perf long run / locale zh smoke / contract matrix manually when any `P1` finding exists.')
+  lines.push('2. Re-run branch protection / host metrics / storage health / perf baseline / perf long run / perf high scale / locale zh smoke / contract matrix manually when any `P1/P2` finding exists.')
   lines.push('3. Record evidence paths in production acceptance docs after gate recovery.')
   lines.push('')
   lines.push('Quick re-run commands:')
   lines.push('')
-  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, localeZhGate, contractGate]) {
+  for (const gate of [preflightGate, protectionGate, metricsGate, storageGate, cleanupGate, strictGate, perfGate, longrunGate, highscaleGate, localeZhGate, contractGate]) {
     const wf = workflowByGate[gate.name]
     if (!wf) continue
     lines.push(`- \`${gate.name}\`: \`gh workflow run ${wf}\``)
   }
 
   lines.push('')
-  lines.push('## Open Tracking Issues (P1)')
+  lines.push('## Open Tracking Issues (P1/P2)')
   lines.push('')
   if (openTrackingIssuesError) {
     lines.push(`- Unable to list open issues: \`${openTrackingIssuesError}\``)
@@ -1446,6 +1518,7 @@ async function run() {
   const strictRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: strictWorkflow, branchValue: branch })
   const perfRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: perfWorkflow, branchValue: branch })
   const longrunRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: longrunWorkflow, branchValue: branch })
+  const highscaleRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: highscaleWorkflow, branchValue: branch })
   const localeZhRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: localeZhWorkflow, branchValue: branch })
   const contractRuns = await tryGetWorkflowRuns({ ownerValue: owner, repoValue: repoName, workflowFile: contractWorkflow, branchValue: branch })
 
@@ -1522,6 +1595,11 @@ async function run() {
   if (!includeDrillRuns && longrunListRaw.length !== longrunList.length) {
     info(`longrun: filtered drill/debug runs (${longrunListRaw.length - longrunList.length})`)
   }
+  const highscaleListRaw = Array.isArray(highscaleRuns?.list) ? highscaleRuns.list : []
+  const highscaleList = includeDrillRuns ? highscaleListRaw : highscaleListRaw.filter((run) => !isDrillRun(run))
+  if (!includeDrillRuns && highscaleListRaw.length !== highscaleList.length) {
+    info(`highscale: filtered drill/debug runs (${highscaleListRaw.length - highscaleList.length})`)
+  }
   const localeZhListRaw = Array.isArray(localeZhRuns?.list) ? localeZhRuns.list : []
   const localeZhList = includeDrillRuns ? localeZhListRaw : localeZhListRaw.filter((run) => !isDrillRun(run))
   if (!includeDrillRuns && localeZhListRaw.length !== localeZhList.length) {
@@ -1534,25 +1612,50 @@ async function run() {
   }
 
   const preflightLatestAny = preflightList[0] ?? null
-  const preflightLatestCompleted = preflightList.find((run) => run?.status === 'completed') ?? null
+  const completedRunExcludeConclusions = ['cancelled', 'neutral', 'skipped']
+  const preflightLatestCompleted = pickLatestCompletedRun(preflightList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const protectionLatestAny = protectionList[0] ?? null
-  const protectionLatestCompleted = protectionList.find((run) => run?.status === 'completed') ?? null
+  const protectionLatestCompleted = pickLatestCompletedRun(protectionList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const metricsLatestAny = metricsList[0] ?? null
-  const metricsLatestCompleted = metricsList.find((run) => run?.status === 'completed') ?? null
+  const metricsLatestCompleted = pickLatestCompletedRun(metricsList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const storageLatestAny = storageList[0] ?? null
-  const storageLatestCompleted = storageList.find((run) => run?.status === 'completed') ?? null
+  const storageLatestCompleted = pickLatestCompletedRun(storageList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const cleanupLatestAny = cleanupList[0] ?? null
-  const cleanupLatestCompleted = cleanupList.find((run) => run?.status === 'completed') ?? null
+  const cleanupLatestCompleted = pickLatestCompletedRun(cleanupList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const strictLatestAny = strictList[0] ?? null
-  const strictLatestCompleted = strictList.find((run) => run?.status === 'completed') ?? null
+  const strictLatestCompleted = pickLatestCompletedRun(strictList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const perfLatestAny = perfList[0] ?? null
-  const perfLatestCompleted = perfList.find((run) => run?.status === 'completed') ?? null
+  const perfLatestCompleted = pickLatestCompletedRun(perfList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const longrunLatestAny = longrunList[0] ?? null
-  const longrunLatestCompleted = longrunList.find((run) => run?.status === 'completed') ?? null
+  const longrunLatestCompleted = pickLatestCompletedRun(longrunList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
+  const highscaleLatestAny = highscaleList[0] ?? null
+  const highscaleLatestCompleted = pickLatestCompletedRun(highscaleList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const localeZhLatestAny = localeZhList[0] ?? null
-  const localeZhLatestCompleted = localeZhList.find((run) => run?.status === 'completed') ?? null
+  const localeZhLatestCompleted = pickLatestCompletedRun(localeZhList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
   const contractLatestAny = contractList[0] ?? null
-  const contractLatestCompleted = contractList.find((run) => run?.status === 'completed') ?? null
+  const contractLatestCompleted = pickLatestCompletedRun(contractList, {
+    excludeConclusions: completedRunExcludeConclusions,
+  })
 
   const preflightGate = evaluateGate({
     name: 'Remote Preflight',
@@ -1631,6 +1734,16 @@ async function run() {
     now,
     lookbackHoursValue: lookbackHours,
     fetchError: longrunRuns.error,
+  })
+  const highscaleLookbackHours = Math.max(lookbackHours, 240)
+  const highscaleGate = evaluateGate({
+    name: 'Perf High Scale',
+    severity: 'P2',
+    latestAny: highscaleLatestAny,
+    latestCompleted: highscaleLatestCompleted,
+    now,
+    lookbackHoursValue: highscaleLookbackHours,
+    fetchError: highscaleRuns.error,
   })
 
   const localeZhGate = evaluateGate({
@@ -1819,6 +1932,33 @@ async function run() {
         })
       }
     }
+    if (highscaleGate.completed?.id) {
+      const runId = highscaleGate.completed.id
+      const meta = await tryEnrichGateFromStepSummary({
+        ownerValue: owner,
+        repoValue: repoName,
+        runId,
+        artifactNamePrefixes: [
+          `attendance-import-perf-highscale-${runId}-`,
+        ],
+        metaOutDir: path.join(metaRoot, 'highscale'),
+        innerSuffix: 'perf-summary.json',
+        parse: parsePerfSummaryJson,
+        allowAnyArtifactFallback: true,
+      })
+      if (meta) {
+        highscaleGate.meta = meta
+      } else if (highscaleGate.completed?.conclusion === 'success') {
+        highscaleGate.ok = false
+        highscaleGate.findings.push({
+          severity: 'P2',
+          code: 'PERF_SUMMARY_MISSING',
+          gate: 'Perf High Scale',
+          message: 'Perf High Scale: latest completed run succeeded but perf-summary.json is missing from artifacts',
+          runUrl: highscaleGate.completed.url,
+        })
+      }
+    }
     if (localeZhGate.completed?.id) {
       const runId = localeZhGate.completed.id
       const meta = await tryEnrichGateFromStepSummary({
@@ -1868,6 +2008,7 @@ async function run() {
     ...strictGate.findings,
     ...perfGate.findings,
     ...longrunGate.findings,
+    ...highscaleGate.findings,
     ...localeZhGate.findings,
     ...contractGate.findings,
   ]
@@ -1877,7 +2018,10 @@ async function run() {
   const openIssues = await tryListOpenIssues({ ownerValue: owner, repoValue: repoName })
   const openIssuesListRaw = Array.isArray(openIssues?.list) ? openIssues.list : []
   const openTrackingIssues = openIssuesListRaw
-    .filter((issue) => issue && !issue.pull_request && String(issue.title || '').startsWith('[Attendance P1]'))
+    .filter((issue) => issue && !issue.pull_request && (
+      String(issue.title || '').startsWith('[Attendance P1]')
+      || String(issue.title || '').startsWith('[Attendance P2]')
+    ))
     .slice(0, 10)
   const openTrackingIssuesError = openIssues.error
 
@@ -1905,7 +2049,7 @@ async function run() {
     }
 
     const summaryBits = []
-    const isPerfGate = gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run'
+    const isPerfGate = isPerfGateName(gate.name)
     const regressionsCountValue = String(meta?.regressionsCount ?? '').trim()
     const hasPerfRegressions = regressionsCountValue !== '' && regressionsCountValue !== '0'
     const includePerfMeta = !isPerfGate || Boolean(gate?.ok) || Boolean(meta?.reason) || hasPerfRegressions
@@ -1935,7 +2079,7 @@ async function run() {
         if (pairs.length > 0) {
           summaryBits.push(`reasons=${pairs.slice(0, 3).map(([k, v]) => `${k}=${v}`).join(' ')}`)
         }
-      } else if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
+      } else if (isPerfGateName(gate.name)) {
         if (includePerfMeta) {
           if (meta.schemaVersion) summaryBits.push(`schema=${meta.schemaVersion}`)
           if (meta.engine) summaryBits.push(`engine=${meta.engine}`)
@@ -1947,6 +2091,8 @@ async function run() {
           if (meta.rows) summaryBits.push(`rows=${meta.rows}`)
           if (meta.mode) summaryBits.push(`mode=${meta.mode}`)
           if (meta.uploadCsv) summaryBits.push(`upload_csv=${meta.uploadCsv}`)
+          if (meta.commitGateMs) summaryBits.push(`commit_gate_ms=${meta.commitGateMs}`)
+          if (meta.commitGateSource) summaryBits.push(`commit_gate_source=${meta.commitGateSource}`)
           if (meta.regressionsCount) summaryBits.push(`regressions=${meta.regressionsCount}`)
         }
       } else if (gate.name === 'Locale zh Smoke') {
@@ -2030,7 +2176,7 @@ async function run() {
         flat.zhShellTabsChecked = meta.zhShellTabsChecked ?? null
         flat.summaryValid = meta.summaryValid ?? null
         flat.summaryInvalidReasons = meta.summaryInvalidReasons ?? null
-      } else if (gate.name === 'Perf Baseline' || gate.name === 'Perf Long Run') {
+      } else if (isPerfGateName(gate.name)) {
         if (includePerfMeta) {
           flat.summarySchemaVersion = meta.schemaVersion ?? null
           flat.engine = meta.engine ?? null
@@ -2046,6 +2192,8 @@ async function run() {
           flat.uploadCsv = meta.uploadCsv ?? null
           flat.previewMs = meta.previewMs ?? null
           flat.commitMs = meta.commitMs ?? null
+          flat.commitGateMs = meta.commitGateMs ?? null
+          flat.commitGateSource = meta.commitGateSource ?? null
           flat.exportMs = meta.exportMs ?? null
           flat.rollbackMs = meta.rollbackMs ?? null
           flat.regressionsCount = meta.regressionsCount ?? null
@@ -2062,7 +2210,7 @@ async function run() {
   }
 
   const gateFlat = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     preflight: toGateFlat(preflightGate),
     protection: toGateFlat(protectionGate),
     metrics: toGateFlat(metricsGate),
@@ -2071,6 +2219,7 @@ async function run() {
     strict: toGateFlat(strictGate),
     perf: toGateFlat(perfGate),
     longrun: toGateFlat(longrunGate),
+    highscale: toGateFlat(highscaleGate),
     localeZh: toGateFlat(localeZhGate),
     contract: toGateFlat(contractGate),
   }
@@ -2093,6 +2242,7 @@ async function run() {
       strict: strictGate,
       perf: perfGate,
       longrun: longrunGate,
+      highscale: highscaleGate,
       localeZh: localeZhGate,
       contract: contractGate,
     },
@@ -2105,6 +2255,7 @@ async function run() {
     branchValue: branch,
     lookbackHoursValue: lookbackHours,
     cleanupLookbackHoursValue: cleanupLookbackHours,
+    highscaleLookbackHoursValue: highscaleLookbackHours,
     preflightGate,
     protectionGate,
     metricsGate,
@@ -2113,6 +2264,7 @@ async function run() {
     strictGate,
     perfGate,
     longrunGate,
+    highscaleGate,
     localeZhGate,
     contractGate,
     openTrackingIssues,
@@ -2143,7 +2295,22 @@ async function run() {
   console.log(`REPORT_JSON=${jsonPath}`)
 }
 
-run().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error)
-  die(message)
-})
+const moduleFilePath = fileURLToPath(import.meta.url)
+const entryFilePath = process.argv[1] ? path.resolve(process.argv[1]) : ''
+if (entryFilePath === moduleFilePath) {
+  run().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error)
+    die(message)
+  })
+}
+
+export {
+  parsePerfSummaryJson,
+  parseLocaleZhSummaryJson,
+  parsePreflightStepSummary,
+  parseStorageStepSummary,
+  parseBranchProtectionStepSummary,
+  pickLatestCompletedRun,
+  resolveGateSignalBranch,
+  resolveQueryBranchDisplayValue,
+}

@@ -24,8 +24,13 @@ export interface MobileCapabilityPolicy {
 interface ProductFeatureState {
   loaded: boolean
   loading: boolean
+  sessionAwareLoaded: boolean
   error: string | null
   features: ProductFeatures
+}
+
+interface LoadProductFeatureOptions {
+  skipSessionProbe?: boolean
 }
 
 const DEFAULT_FEATURES: ProductFeatures = {
@@ -39,6 +44,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
 const state = reactive<ProductFeatureState>({
   loaded: false,
   loading: false,
+  sessionAwareLoaded: false,
   error: null,
   features: { ...DEFAULT_FEATURES },
 })
@@ -234,8 +240,12 @@ function resolveFeatures(
   }
 }
 
-async function loadProductFeatures(force = false): Promise<ProductFeatures> {
-  if (state.loaded && !force) return state.features
+async function loadProductFeatures(
+  force = false,
+  options: LoadProductFeatureOptions = {},
+): Promise<ProductFeatures> {
+  const requiresSessionProbe = !options.skipSessionProbe
+  if (state.loaded && !force && (!requiresSessionProbe || state.sessionAwareLoaded)) return state.features
   if (state.loading && loadPromise) return loadPromise
 
   state.loading = true
@@ -245,25 +255,21 @@ async function loadProductFeatures(force = false): Promise<ProductFeatures> {
     let mePayload: any = null
     let pluginPayload: any = null
     let backendFeatures: Partial<ProductFeatures> = {}
-    const { ensureToken, getToken, refreshDevToken } = useAuth()
+    const { ensureToken, getToken, bootstrapSession } = useAuth()
 
     try {
-      if (!getToken()) {
+      const currentToken = getToken()
+
+      if (!currentToken && requiresSessionProbe) {
         await ensureToken()
       }
 
-      let meRes = await apiFetch('/api/auth/me').catch(() => null)
-
-      if (meRes?.status === 401) {
-        const token = await refreshDevToken()
-        if (token) {
-          meRes = await apiFetch('/api/auth/me').catch(() => null)
+      if (requiresSessionProbe && getToken()) {
+        const session = await bootstrapSession()
+        if (session.ok && session.payload) {
+          mePayload = session.payload
+          backendFeatures = extractFeaturesFromPayload(mePayload)
         }
-      }
-
-      if (meRes?.ok) {
-        mePayload = await meRes.json()
-        backendFeatures = extractFeaturesFromPayload(mePayload)
       }
 
       if (needsPluginInference(backendFeatures)) {
@@ -282,6 +288,7 @@ async function loadProductFeatures(force = false): Promise<ProductFeatures> {
 
     state.features = resolveFeatures(backendFeatures, overrideFeatures, pluginInference, adminRole)
     state.loaded = true
+    state.sessionAwareLoaded = state.sessionAwareLoaded || requiresSessionProbe
     state.loading = false
 
     return state.features

@@ -17,6 +17,11 @@ paths:
                 occurredAt:
                   type: string
                   format: date-time
+                  description: Preferred punch timestamp in ISO 8601 format.
+                occurred_at:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for occurredAt.
                 timezone:
                   type: string
                 source:
@@ -49,6 +54,50 @@ paths:
     x-plugin: plugin-attendance
     get:
       summary: List attendance records
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: userId
+          schema: { type: string }
+        - in: query
+          name: orgId
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date }
+        - in: query
+          name: to
+          schema: { type: string, format: date }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceRecord' }
+                      total: { type: integer }
+                      page: { type: integer }
+                      pageSize: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/calendar:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance records for calendar views (compatibility alias)
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: query
@@ -181,27 +230,60 @@ paths:
                 workDate:
                   type: string
                   format: date
+                  description: Work date in YYYY-MM-DD format.
+                date:
+                  type: string
+                  format: date
+                  description: Compatibility alias for workDate.
                 requestType:
                   type: string
                   enum: [missed_check_in, missed_check_out, time_correction, leave, overtime]
+                  description: Request type.
+                type:
+                  type: string
+                  enum: [missed_check_in, missed_check_out, time_correction, leave, overtime]
+                  description: Compatibility alias for requestType.
                 requestedInAt:
                   type: string
                   format: date-time
+                  description: Required for missed_check_in. Optional for time_correction, leave, and overtime.
+                requested_in_at:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for requestedInAt.
+                clockIn:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for requestedInAt.
                 requestedOutAt:
                   type: string
                   format: date-time
+                  description: Required for missed_check_out. Optional for time_correction, leave, and overtime.
+                requested_out_at:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for requestedOutAt.
+                clockOut:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for requestedOutAt.
                 reason:
                   type: string
                 leaveTypeId:
                   type: string
+                  description: Required for leave requests unless leaveTypeCode is provided.
                 leaveTypeCode:
                   type: string
+                  description: Required for leave requests unless leaveTypeId is provided.
                 overtimeRuleId:
                   type: string
+                  description: Required for overtime requests unless overtimeRuleName is provided.
                 overtimeRuleName:
                   type: string
+                  description: Required for overtime requests unless overtimeRuleId is provided.
                 minutes:
                   type: integer
+                  description: Required for overtime unless derived from requestedInAt/requestedOutAt.
                 attachmentUrl:
                   type: string
                 approvalFlowId:
@@ -209,6 +291,38 @@ paths:
                 orgId:
                   type: string
               required: [workDate, requestType]
+            examples:
+              missedCheckIn:
+                summary: Missed check-in using canonical fields
+                value:
+                  workDate: '2026-03-20'
+                  requestType: missed_check_in
+                  requestedInAt: '2026-03-20T09:05:00+08:00'
+                  reason: Forgot to check in after a network reconnect.
+              missedCheckOutLegacy:
+                summary: Missed check-out using legacy alias fields
+                value:
+                  date: '2026-03-20'
+                  type: missed_check_out
+                  clockOut: '2026-03-20T18:10:00+08:00'
+                  reason: Left the office before the kiosk synced.
+              leaveByCode:
+                summary: Leave request using leaveTypeCode
+                value:
+                  workDate: '2026-03-21'
+                  requestType: leave
+                  leaveTypeCode: annual_leave
+                  minutes: 480
+                  reason: Family event
+              overtimeByRuleName:
+                summary: Overtime request using overtimeRuleName
+                value:
+                  workDate: '2026-03-22'
+                  requestType: overtime
+                  requestedInAt: '2026-03-22T18:30:00+08:00'
+                  requestedOutAt: '2026-03-22T21:00:00+08:00'
+                  overtimeRuleName: Weekday OT
+                  reason: End-of-month release support
       responses:
         '201':
           description: Created
@@ -420,12 +534,25 @@ paths:
                 name: { type: string }
                 timezone: { type: string }
                 workStartTime: { type: string }
+                work_start_time: { type: string, deprecated: true }
+                start_time: { type: string, deprecated: true }
                 workEndTime: { type: string }
+                work_end_time: { type: string, deprecated: true }
+                end_time: { type: string, deprecated: true }
+                isOvernight: { type: boolean }
+                is_overnight: { type: boolean, deprecated: true }
                 lateGraceMinutes: { type: integer }
+                late_grace_minutes: { type: integer, deprecated: true }
                 earlyGraceMinutes: { type: integer }
+                early_grace_minutes: { type: integer, deprecated: true }
                 roundingMinutes: { type: integer }
+                rounding_minutes: { type: integer, deprecated: true }
                 workingDays:
                   type: array
+                  items: { type: integer }
+                working_days:
+                  type: array
+                  deprecated: true
                   items: { type: integer }
                 orgId: { type: string }
       responses:
@@ -489,12 +616,25 @@ paths:
                 name: { type: string }
                 timezone: { type: string }
                 workStartTime: { type: string }
+                work_start_time: { type: string, deprecated: true }
+                start_time: { type: string, deprecated: true }
                 workEndTime: { type: string }
+                work_end_time: { type: string, deprecated: true }
+                end_time: { type: string, deprecated: true }
+                isOvernight: { type: boolean }
+                is_overnight: { type: boolean, deprecated: true }
                 lateGraceMinutes: { type: integer }
+                late_grace_minutes: { type: integer, deprecated: true }
                 earlyGraceMinutes: { type: integer }
+                early_grace_minutes: { type: integer, deprecated: true }
                 roundingMinutes: { type: integer }
+                rounding_minutes: { type: integer, deprecated: true }
                 workingDays:
                   type: array
+                  items: { type: integer }
+                working_days:
+                  type: array
+                  deprecated: true
                   items: { type: integer }
                 orgId: { type: string }
               required: [name]
@@ -513,6 +653,27 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/attendance/shifts/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get attendance shift
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceShift' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
     put:
       summary: Update attendance shift
       security: [ { bearerAuth: [] } ]
@@ -588,6 +749,10 @@ paths:
           name: userId
           schema: { type: string }
         - in: query
+          name: user_id
+          schema: { type: string }
+          description: Legacy snake_case alias for userId.
+        - in: query
           name: page
           schema: { type: integer, default: 1 }
         - in: query
@@ -633,7 +798,42 @@ paths:
                 endDate: { type: string, format: date, nullable: true }
                 isActive: { type: boolean }
                 orgId: { type: string }
+                user_id:
+                  type: string
+                  description: Legacy snake_case alias for userId.
+                shift_id:
+                  type: string
+                  description: Legacy snake_case alias for shiftId.
+                start_date:
+                  type: string
+                  format: date
+                  description: Legacy snake_case alias for startDate.
+                end_date:
+                  type: string
+                  format: date
+                  nullable: true
+                  description: Legacy snake_case alias for endDate.
+                is_active:
+                  type: boolean
+                  description: Legacy snake_case alias for isActive.
               required: [userId, shiftId, startDate]
+            examples:
+              camelCase:
+                summary: Create assignment with canonical camelCase fields
+                value:
+                  userId: attendance-user-001
+                  shiftId: 11111111-1111-4111-8111-111111111111
+                  startDate: '2026-03-20'
+                  endDate: null
+                  isActive: true
+              snakeCase:
+                summary: Create assignment with legacy snake_case aliases
+                value:
+                  user_id: attendance-user-001
+                  shift_id: 11111111-1111-4111-8111-111111111111
+                  start_date: '2026-03-20'
+                  end_date: null
+                  is_active: true
       responses:
         '201':
           description: Created
@@ -674,6 +874,11 @@ paths:
                 endDate: { type: string, format: date, nullable: true }
                 isActive: { type: boolean }
                 orgId: { type: string }
+                user_id: { type: string }
+                shift_id: { type: string }
+                start_date: { type: string, format: date }
+                end_date: { type: string, format: date, nullable: true }
+                is_active: { type: boolean }
       responses:
         '200':
           description: OK
@@ -873,7 +1078,7 @@ paths:
   /api/attendance/export:
     x-plugin: plugin-attendance
     get:
-      summary: Export attendance records as CSV
+      summary: Export attendance records as CSV or JSON
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: query
@@ -891,13 +1096,48 @@ paths:
         - in: query
           name: limit
           schema: { type: integer, default: 1000, maximum: 5000 }
+        - in: query
+          name: format
+          schema:
+            type: string
+            enum: [csv, json]
+            default: csv
       responses:
         '200':
-          description: CSV export
+          description: Export result
           content:
             text/csv:
               schema:
                 type: string
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            user_id: { type: string }
+                            org_id: { type: string }
+                            work_date: { type: string, format: date }
+                            timezone: { type: string }
+                            first_in_at: { type: string }
+                            last_out_at: { type: string }
+                            work_minutes: { type: integer }
+                            late_minutes: { type: integer }
+                            early_leave_minutes: { type: integer }
+                            status: { type: string }
+                            is_workday: { type: boolean }
+                      total: { type: integer }
+                      from: { type: string, format: date }
+                      to: { type: string, format: date }
+                      format: { type: string, enum: [json] }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/attendance/reports/requests:
@@ -935,6 +1175,268 @@ paths:
                         items: { $ref: '#/components/schemas/AttendanceRequestReportItem' }
                       from: { type: string, format: date }
                       to: { type: string, format: date }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/groups:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance groups
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: orgId
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceGroup' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      summary: Create attendance group
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                code: { type: string }
+                timezone: { type: string }
+                ruleSetId: { type: string }
+                description: { type: string }
+                orgId: { type: string }
+              required: [name, timezone]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceGroup' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/attendance/groups/{id}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get attendance group by id
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceGroup' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Update attendance group
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                code: { type: string }
+                timezone: { type: string }
+                ruleSetId: { type: string }
+                description: { type: string }
+                orgId: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceGroup' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      summary: Delete attendance group
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/attendance/groups/{id}/members:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance group members
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceGroupMember' }
+                      total: { type: integer }
+                      page: { type: integer }
+                      pageSize: { type: integer }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      summary: Add attendance group members
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string }
+                userIds:
+                  type: array
+                  items: { type: string }
+                user_id:
+                  type: string
+                  description: Legacy snake_case alias for userId.
+                user_ids:
+                  type: array
+                  items: { type: string }
+                  description: Legacy snake_case alias for userIds.
+            examples:
+              singleMemberCamel:
+                summary: Add one member with camelCase fields
+                value:
+                  userId: admin-001
+              batchMembersSnake:
+                summary: Add multiple members with legacy snake_case aliases
+                value:
+                  user_ids:
+                    - admin-001
+                    - attendance-user-002
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendanceGroupMember' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/groups/{id}/members/{userId}:
+    x-plugin: plugin-attendance
+    delete:
+      summary: Remove an attendance group member
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: path
+          name: userId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/attendance/leave-types:
@@ -987,12 +1489,16 @@ paths:
               properties:
                 code: { type: string }
                 name: { type: string }
+                paid: { type: boolean }
                 requiresApproval: { type: boolean }
                 requiresAttachment: { type: boolean }
                 defaultMinutesPerDay: { type: integer }
+                daily_minutes:
+                  type: integer
+                  description: Compatibility alias for defaultMinutesPerDay.
                 isActive: { type: boolean }
                 orgId: { type: string }
-              required: [code, name]
+              required: [name]
       responses:
         '201':
           description: Created
@@ -1008,6 +1514,27 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/attendance/leave-types/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get leave type by id
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceLeaveType' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     put:
       summary: Update leave type
       security: [ { bearerAuth: [] } ]
@@ -1025,9 +1552,13 @@ paths:
               properties:
                 code: { type: string }
                 name: { type: string }
+                paid: { type: boolean }
                 requiresApproval: { type: boolean }
                 requiresAttachment: { type: boolean }
                 defaultMinutesPerDay: { type: integer }
+                daily_minutes:
+                  type: integer
+                  description: Compatibility alias for defaultMinutesPerDay.
                 isActive: { type: boolean }
                 orgId: { type: string }
       responses:
@@ -1065,6 +1596,145 @@ paths:
                       id: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/rule-templates:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get rule templates
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      system:
+                        type: array
+                        items: { type: object }
+                      library:
+                        type: array
+                        items: { type: object }
+                      versions:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string }
+                            version: { type: integer }
+                            createdAt: { type: string, nullable: true }
+                            createdBy: { type: string, nullable: true }
+                            sourceVersionId: { type: string, nullable: true }
+                            itemCount: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      summary: Save rule template library
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                templates:
+                  type: array
+                  items: { type: object }
+              required: [templates]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      templates:
+                        type: array
+                        items: { type: object }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/rule-templates/restore:
+    x-plugin: plugin-attendance
+    post:
+      summary: Restore rule template library from a version
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                versionId: { type: string }
+                version: { type: integer }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      templates:
+                        type: array
+                        items: { type: object }
+                      restoredFrom: { type: string, nullable: true }
+                      version: { type: integer }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/rule-templates/versions/{versionId}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get rule template version contents
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: versionId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      version: { type: integer }
+                      createdAt: { type: string, nullable: true }
+                      createdBy: { type: string, nullable: true }
+                      sourceVersionId: { type: string, nullable: true }
+                      itemCount: { type: integer }
+                      templates:
+                        type: array
+                        items: { type: object }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /api/attendance/overtime-rules:
     x-plugin: plugin-attendance
     get:
@@ -1136,6 +1806,27 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/attendance/overtime-rules/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get overtime rule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceOvertimeRule' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
     put:
       summary: Update overtime rule
       security: [ { bearerAuth: [] } ]
@@ -1251,7 +1942,36 @@ paths:
                   items: { $ref: '#/components/schemas/AttendanceApprovalStep' }
                 isActive: { type: boolean }
                 orgId: { type: string }
+                request_type:
+                  type: string
+                  description: Legacy snake_case alias for requestType.
+                is_active:
+                  type: boolean
+                  description: Legacy snake_case alias for isActive.
               required: [name, requestType]
+            examples:
+              missedCheckIn:
+                summary: Approval flow for missed check-in requests
+                value:
+                  name: 补卡审批
+                  requestType: missed_check_in
+                  steps:
+                    - name: 直属主管
+                      approverUserIds: [manager-user-001]
+                    - name: 人事复核
+                      approverRoleIds: [attendance-admin]
+                  isActive: true
+              missedCheckInSnake:
+                summary: Same payload using legacy snake_case aliases
+                value:
+                  name: 补卡审批
+                  request_type: missed_check_in
+                  steps:
+                    - name: 直属主管
+                      approver_user_ids: [manager-user-001]
+                    - name: 人事复核
+                      approver_role_ids: [attendance-admin]
+                  is_active: true
       responses:
         '201':
           description: Created
@@ -1379,7 +2099,35 @@ paths:
                   items: { type: string }
                 isActive: { type: boolean }
                 orgId: { type: string }
+                shift_sequence:
+                  type: array
+                  items: { type: string }
+                  description: Legacy snake_case alias for shiftSequence.
+                is_active:
+                  type: boolean
+                  description: Legacy snake_case alias for isActive.
               required: [name, shiftSequence]
+            examples:
+              standardCycle:
+                summary: Rotation rule with ordered shift ids
+                value:
+                  name: 四班两倒
+                  timezone: Asia/Shanghai
+                  shiftSequence:
+                    - 11111111-1111-4111-8111-111111111111
+                    - 22222222-2222-4222-8222-222222222222
+                    - 33333333-3333-4333-8333-333333333333
+                  isActive: true
+              standardCycleSnake:
+                summary: Same payload using legacy snake_case aliases
+                value:
+                  name: 四班两倒
+                  timezone: Asia/Shanghai
+                  shift_sequence:
+                    - 11111111-1111-4111-8111-111111111111
+                    - 22222222-2222-4222-8222-222222222222
+                    - 33333333-3333-4333-8333-333333333333
+                  is_active: true
       responses:
         '201':
           description: Created
@@ -1503,7 +2251,42 @@ paths:
                 endDate: { type: string, format: date, nullable: true }
                 isActive: { type: boolean }
                 orgId: { type: string }
+                user_id:
+                  type: string
+                  description: Legacy snake_case alias for userId.
+                rotation_rule_id:
+                  type: string
+                  description: Legacy snake_case alias for rotationRuleId.
+                start_date:
+                  type: string
+                  format: date
+                  description: Legacy snake_case alias for startDate.
+                end_date:
+                  type: string
+                  format: date
+                  nullable: true
+                  description: Legacy snake_case alias for endDate.
+                is_active:
+                  type: boolean
+                  description: Legacy snake_case alias for isActive.
               required: [userId, rotationRuleId, startDate]
+            examples:
+              activeAssignment:
+                summary: Assign one user to a rotation rule
+                value:
+                  userId: attendance-user-001
+                  rotationRuleId: 44444444-4444-4444-8444-444444444444
+                  startDate: '2026-03-20'
+                  endDate: null
+                  isActive: true
+              activeAssignmentSnake:
+                summary: Same payload using legacy snake_case aliases
+                value:
+                  user_id: attendance-user-001
+                  rotation_rule_id: 44444444-4444-4444-8444-444444444444
+                  start_date: '2026-03-20'
+                  end_date: null
+                  is_active: true
       responses:
         '201':
           description: Created
@@ -1636,7 +2419,49 @@ paths:
                 config: { type: object }
                 isDefault: { type: boolean }
                 orgId: { type: string }
+                is_default:
+                  type: boolean
+                  description: Legacy snake_case alias for isDefault.
               required: [name]
+            examples:
+              orgDefault:
+                summary: Org-wide default rule set
+                value:
+                  name: 默认规则集
+                  description: 标准工作日与节假日配置
+                  version: 1
+                  scope: org
+                  isDefault: true
+                  config:
+                    source: manual
+                    rule:
+                      timezone: Asia/Shanghai
+                      workStartTime: '09:00'
+                      workEndTime: '18:00'
+                      workingDays: [1, 2, 3, 4, 5]
+                    policies:
+                      rules:
+                        - name: holiday-no-work
+                          when:
+                            isHoliday: true
+                          then:
+                            setWorkMinutes: 0
+                            setStatus: off
+              orgDefaultSnake:
+                summary: Same payload using legacy snake_case aliases
+                value:
+                  name: 默认规则集
+                  description: 标准工作日与节假日配置
+                  version: 1
+                  scope: org
+                  is_default: true
+                  config:
+                    source: manual
+                    rule:
+                      timezone: Asia/Shanghai
+                      workStartTime: '09:00'
+                      workEndTime: '18:00'
+                      workingDays: [1, 2, 3, 4, 5]
       responses:
         '201':
           description: Created
@@ -1772,6 +2597,11 @@ paths:
     get:
       summary: Get attendance import template
       security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: profileId
+          schema: { type: string }
+          description: Optional import mapping profile ID used to shape the template payload.
       responses:
         '200':
           description: OK
@@ -1782,6 +2612,80 @@ paths:
                 properties:
                   ok: { type: boolean }
                   data: { $ref: '#/components/schemas/AttendanceImportTemplate' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/import/template.csv:
+    x-plugin: plugin-attendance
+    get:
+      summary: Download attendance import CSV template
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: profileId
+          schema: { type: string }
+          description: Optional import mapping profile ID used to shape the CSV template.
+      responses:
+        '200':
+          description: OK
+          content:
+            text/csv:
+              schema:
+                type: string
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/import/upload:
+    x-plugin: plugin-attendance
+    post:
+      summary: Upload attendance import CSV and receive csvFileId
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: orgId
+          schema: { type: string }
+        - in: query
+          name: filename
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceImportUploadData' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/import/prepare:
+    x-plugin: plugin-attendance
+    post:
+      summary: Prepare attendance import commit token
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceImportPrepareData' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
@@ -1794,29 +2698,7 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              properties:
-                source: { type: string }
-                orgId: { type: string }
-                userId: { type: string }
-                timezone: { type: string }
-                ruleSetId: { type: string }
-                mappingProfileId: { type: string }
-                commitToken: { type: string }
-                engine: { type: object }
-                mapping: { type: object }
-                columns: { type: array, items: { type: object } }
-                data: { type: object }
-                csvText: { type: string }
-                csvOptions: { type: object }
-                rows: { type: array, items: { type: object } }
-                entries: { type: array, items: { type: object } }
-                userMap: { type: object }
-                userMapKeyField: { type: string }
-                userMapSourceFields: { type: array, items: { type: string } }
-                statusMap: { type: object }
-                mode: { type: string }
+            schema: { $ref: '#/components/schemas/AttendanceImportRequest' }
       responses:
         '200':
           description: OK
@@ -1826,20 +2708,110 @@ paths:
                 type: object
                 properties:
                   ok: { type: boolean }
-                  data:
-                    type: object
-                    properties:
-                      items:
-                        type: array
-                        items: { $ref: '#/components/schemas/AttendanceImportPreviewItem' }
-                      total: { type: integer }
-                      mappingUsed: { type: array, items: { type: object } }
-                      csvWarnings:
-                        type: array
-                        items: { type: string }
+                  data: { $ref: '#/components/schemas/AttendanceImportPreviewData' }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/import/preview-async:
+    x-plugin: plugin-attendance
+    post:
+      summary: Enqueue attendance import preview async job
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceImportRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceImportAsyncJobData' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/attendance/import/commit:
+    x-plugin: plugin-attendance
+    post:
+      summary: Commit attendance import
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceImportRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceImportResult' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/import/commit-async:
+    x-plugin: plugin-attendance
+    post:
+      summary: Enqueue attendance import commit async job
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendanceImportRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceImportAsyncJobData' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/attendance/import/jobs/{id}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get attendance import job
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceImportJob' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
 
   /api/attendance/import:
     x-plugin: plugin-attendance
@@ -1850,29 +2822,7 @@ paths:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              properties:
-                source: { type: string }
-                orgId: { type: string }
-                userId: { type: string }
-                timezone: { type: string }
-                ruleSetId: { type: string }
-                mappingProfileId: { type: string }
-                commitToken: { type: string }
-                engine: { type: object }
-                mapping: { type: object }
-                columns: { type: array, items: { type: object } }
-                data: { type: object }
-                csvText: { type: string }
-                csvOptions: { type: object }
-                rows: { type: array, items: { type: object } }
-                entries: { type: array, items: { type: object } }
-                userMap: { type: object }
-                userMapKeyField: { type: string }
-                userMapSourceFields: { type: array, items: { type: string } }
-                statusMap: { type: object }
-                mode: { type: string }
+            schema: { $ref: '#/components/schemas/AttendanceImportRequest' }
       responses:
         '200':
           description: OK
@@ -2161,6 +3111,27 @@ paths:
 
   /api/attendance/payroll-templates/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get payroll template by id
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendancePayrollTemplate' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     put:
       summary: Update payroll template
       security: [ { bearerAuth: [] } ]

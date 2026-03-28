@@ -28,6 +28,30 @@ function warn() {
   echo "[attendance-run-workflow-dispatch] WARN: $*" >&2
 }
 
+function extract_unexpected_workflow_inputs() {
+  local raw="${1:-}"
+  if [[ -z "$raw" ]]; then
+    return 0
+  fi
+  python3 - "$raw" <<'PY'
+import json
+import re
+import sys
+
+text = sys.argv[1]
+match = re.search(r'Unexpected inputs provided:\s*(\[[^\]]*\])', text)
+if not match:
+    raise SystemExit(0)
+try:
+    values = json.loads(match.group(1))
+except Exception:
+    raise SystemExit(0)
+for value in values:
+    if isinstance(value, str) and value:
+        print(value)
+PY
+}
+
 command -v gh >/dev/null 2>&1 || die "gh is required"
 command -v jq >/dev/null 2>&1 || die "jq is required"
 
@@ -36,7 +60,7 @@ command -v jq >/dev/null 2>&1 || die "jq is required"
 [[ "$POLL_SECONDS" =~ ^[0-9]+$ ]] || die "POLL_SECONDS must be integer"
 [[ "$LOOKBACK_LIMIT" =~ ^[0-9]+$ ]] || die "LOOKBACK_LIMIT must be integer"
 
-dispatch_args=()
+declare -a dispatch_args=()
 for token in "$@"; do
   if [[ "$token" != *=* ]]; then
     die "invalid dispatch token '$token' (expected key=value)"
@@ -58,7 +82,7 @@ if (( ${#dispatch_args[@]} > 0 )); then
   info "dispatch_args=${dispatch_args[*]}"
 fi
 
-workflow_run_args=()
+declare -a workflow_run_args=()
 if [[ -n "$REF" ]]; then
   workflow_run_args+=("--ref" "$REF")
   if [[ "$BRANCH" == "main" ]]; then
@@ -66,7 +90,45 @@ if [[ -n "$REF" ]]; then
   fi
 fi
 
-gh workflow run "$WORKFLOW" "${workflow_run_args[@]}" "${dispatch_args[@]}"
+dispatch_output=''
+dispatch_rc=0
+declare -a dispatch_attempt_args=("${dispatch_args[@]}")
+dispatch_output="$(gh workflow run "$WORKFLOW" "${workflow_run_args[@]}" "${dispatch_attempt_args[@]}" 2>&1)" || dispatch_rc=$?
+if [[ "$dispatch_rc" -ne 0 ]]; then
+  unsupported_inputs="$(extract_unexpected_workflow_inputs "$dispatch_output" || true)"
+  if [[ -n "$unsupported_inputs" ]]; then
+    declare -a filtered_dispatch_args=()
+    dropped=0
+    index=0
+    while (( index < ${#dispatch_attempt_args[@]} )); do
+      token="${dispatch_attempt_args[$index]}"
+      if [[ "$token" == "-f" ]] && (( index + 1 < ${#dispatch_attempt_args[@]} )); then
+        kv="${dispatch_attempt_args[$((index + 1))]}"
+        key="${kv%%=*}"
+        if printf '%s\n' "$unsupported_inputs" | grep -Fxq "$key"; then
+          dropped=1
+        else
+          filtered_dispatch_args+=("-f" "$kv")
+        fi
+        index=$((index + 2))
+        continue
+      fi
+      filtered_dispatch_args+=("$token")
+      index=$((index + 1))
+    done
+    if (( dropped == 1 )); then
+      warn "workflow rejected unsupported inputs; retry without: $(printf '%s' "$unsupported_inputs" | paste -sd ',' -)"
+      dispatch_attempt_args=("${filtered_dispatch_args[@]}")
+      dispatch_output=''
+      dispatch_rc=0
+      dispatch_output="$(gh workflow run "$WORKFLOW" "${workflow_run_args[@]}" "${dispatch_attempt_args[@]}" 2>&1)" || dispatch_rc=$?
+    fi
+  fi
+fi
+if [[ "$dispatch_rc" -ne 0 ]]; then
+  printf '%s\n' "$dispatch_output" >&2
+  die "failed to dispatch workflow ${WORKFLOW}"
+fi
 
 run_id=""
 run_url=""

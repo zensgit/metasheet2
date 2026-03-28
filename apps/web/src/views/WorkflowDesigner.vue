@@ -1,193 +1,64 @@
 <template>
   <div class="workflow-designer">
     <!-- Header -->
-    <div class="designer-header">
-      <div class="header-left">
-        <el-button :icon="ArrowLeft" @click="goBack">返回</el-button>
-        <el-divider direction="vertical" />
-        <span class="workflow-name">{{ workflowName || '新建工作流' }}</span>
-        <el-tag v-if="isDirty" type="warning" size="small">未保存</el-tag>
-      </div>
-      <div class="header-center">
-        <el-button-group>
-          <el-button :icon="ZoomOut" @click="zoom(-0.1)" />
-          <el-button>{{ Math.round(zoomLevel * 100) }}%</el-button>
-          <el-button :icon="ZoomIn" @click="zoom(0.1)" />
-          <el-button :icon="FullScreen" @click="fitViewport" />
-        </el-button-group>
-      </div>
-      <div class="header-right">
-        <el-button @click="openTemplatePicker">
-          <el-icon><Document /></el-icon>
-          模板
-        </el-button>
-        <el-button @click="showProperties = !showProperties">
-          <el-icon><Setting /></el-icon>
-          属性面板
-        </el-button>
-        <el-button @click="validateWorkflow">
-          <el-icon><CircleCheck /></el-icon>
-          验证
-        </el-button>
-        <el-button type="primary" @click="saveWorkflow" :loading="saving">
-          <el-icon><Upload /></el-icon>
-          保存
-        </el-button>
-        <el-button type="success" @click="deployWorkflow" :loading="deploying">
-          <el-icon><Promotion /></el-icon>
-          部署
-        </el-button>
-      </div>
-    </div>
+    <WorkflowDesignerToolbar
+      :workflow-name="workflowName"
+      :is-dirty="isDirty"
+      :zoom-level="zoomLevel"
+      :saving="saving"
+      :deploying="deploying"
+      @go-back="goBack"
+      @zoom="zoom"
+      @fit-viewport="fitViewport"
+      @open-template-picker="openTemplatePicker"
+      @toggle-properties="showProperties = !showProperties"
+      @validate-workflow="validateWorkflow"
+      @save-workflow="saveWorkflow"
+      @deploy-workflow="deployWorkflow"
+    />
 
     <!-- Main Content -->
     <div class="designer-content">
       <!-- Tool Palette -->
-      <div class="tool-palette">
-        <div class="palette-section">
-          <div class="section-title">事件</div>
-          <div
-            v-for="item in eventElements"
-            :key="item.type"
-            class="palette-item"
-            draggable="true"
-            @dragstart="onDragStart($event, item)"
-          >
-            <div class="item-icon" :style="{ backgroundColor: item.color }">
-              <component :is="item.icon" />
-            </div>
-            <span class="item-label">{{ item.label }}</span>
-          </div>
-        </div>
-        <div class="palette-section">
-          <div class="section-title">任务</div>
-          <div
-            v-for="item in taskElements"
-            :key="item.type"
-            class="palette-item"
-            draggable="true"
-            @dragstart="onDragStart($event, item)"
-          >
-            <div class="item-icon" :style="{ backgroundColor: item.color }">
-              <component :is="item.icon" />
-            </div>
-            <span class="item-label">{{ item.label }}</span>
-          </div>
-        </div>
-        <div class="palette-section">
-          <div class="section-title">网关</div>
-          <div
-            v-for="item in gatewayElements"
-            :key="item.type"
-            class="palette-item"
-            draggable="true"
-            @dragstart="onDragStart($event, item)"
-          >
-            <div class="item-icon" :style="{ backgroundColor: item.color }">
-              <component :is="item.icon" />
-            </div>
-            <span class="item-label">{{ item.label }}</span>
-          </div>
-        </div>
-      </div>
+      <WorkflowPalette
+        :event-elements="eventElements"
+        :task-elements="taskElements"
+        :gateway-elements="gatewayElements"
+        @drag-start="onDragStart"
+      />
 
-      <!-- BPMN Canvas -->
-      <div class="canvas-container" ref="canvasContainer">
-        <div ref="bpmnCanvas" class="bpmn-canvas"></div>
-        <!-- Drop Zone Overlay -->
-        <div
-          v-if="isDragging"
-          class="drop-zone"
-          @dragover.prevent
-          @drop="onDrop"
-        >
-          拖放元素到此处
-        </div>
-      </div>
+      <WorkflowCanvasShell ref="canvasShellRef" :is-dragging="isDragging" @drop="onDrop" />
 
       <!-- Properties Panel -->
       <transition name="slide-right">
-        <div v-if="showProperties" class="properties-panel">
-          <div class="panel-header">
-            <span>{{ selectedElement ? '元素属性' : '工作流属性' }}</span>
-            <el-button :icon="Close" text @click="showProperties = false" />
-          </div>
-          <div class="panel-content">
-            <!-- Workflow Properties -->
-            <template v-if="!selectedElement">
-              <el-form label-position="top" size="small">
-                <el-form-item label="工作流名称">
-                  <el-input v-model="workflowName" placeholder="输入工作流名称" />
-                </el-form-item>
-                <el-form-item label="工作流描述">
-                  <el-input
-                    v-model="workflowDescription"
-                    type="textarea"
-                    :rows="3"
-                    placeholder="输入工作流描述"
-                  />
-                </el-form-item>
-                <el-form-item label="版本">
-                  <el-input v-model="workflowVersion" disabled />
-                </el-form-item>
-              </el-form>
-            </template>
-            <!-- Element Properties -->
-            <template v-else>
-              <el-form label-position="top" size="small">
-                <el-form-item label="元素ID">
-                  <el-input :model-value="selectedElement.id" disabled />
-                </el-form-item>
-                <el-form-item label="元素名称">
-                  <el-input
-                    v-model="elementName"
-                    placeholder="输入元素名称"
-                    @change="updateElementName"
-                  />
-                </el-form-item>
-                <el-form-item label="元素类型">
-                  <el-tag>{{ getElementTypeLabel(selectedElement.type) }}</el-tag>
-                </el-form-item>
-                <!-- Task-specific properties -->
-                <template v-if="isTaskElement">
-                  <el-form-item label="执行人">
-                    <el-input v-model="taskAssignee" placeholder="输入执行人" />
-                  </el-form-item>
-                  <el-form-item label="候选人">
-                    <el-input v-model="taskCandidates" placeholder="多人用逗号分隔" />
-                  </el-form-item>
-                  <el-form-item label="到期时间">
-                    <el-input v-model="taskDueDate" placeholder="如: PT1H (1小时)" />
-                  </el-form-item>
-                </template>
-                <!-- Gateway-specific properties -->
-                <template v-if="isGatewayElement">
-                  <el-form-item label="默认流">
-                    <el-select v-model="gatewayDefault" placeholder="选择默认出口">
-                      <el-option
-                        v-for="flow in outgoingFlows"
-                        :key="flow.id"
-                        :label="flow.name || flow.id"
-                        :value="flow.id"
-                      />
-                    </el-select>
-                  </el-form-item>
-                </template>
-                <!-- Sequence Flow properties -->
-                <template v-if="isSequenceFlow">
-                  <el-form-item label="条件表达式">
-                    <el-input
-                      v-model="flowCondition"
-                      type="textarea"
-                      :rows="2"
-                      placeholder="${amount > 1000}"
-                    />
-                  </el-form-item>
-                </template>
-              </el-form>
-            </template>
-          </div>
-        </div>
+        <WorkflowPropertyPanel
+          v-if="showProperties"
+          :workflow-name="workflowName"
+          :workflow-description="workflowDescription"
+          :workflow-version="workflowVersion"
+          :selected-element="selectedElement"
+          :element-name="elementName"
+          :element-type-label="selectedElement ? getElementTypeLabel(selectedElement.type) : ''"
+          :task-assignee="taskAssignee"
+          :task-candidates="taskCandidates"
+          :task-due-date="taskDueDate"
+          :gateway-default="gatewayDefault"
+          :flow-condition="flowCondition"
+          :is-task-element="!!isTaskElement"
+          :is-gateway-element="!!isGatewayElement"
+          :is-sequence-flow="!!isSequenceFlow"
+          :outgoing-flows="outgoingFlows"
+          @close="showProperties = false"
+          @update:workflow-name="workflowName = $event"
+          @update:workflow-description="workflowDescription = $event"
+          @update:element-name="elementName = $event"
+          @commit-element-name="updateElementName"
+          @update:task-assignee="taskAssignee = $event"
+          @update:task-candidates="taskCandidates = $event"
+          @update:task-due-date="taskDueDate = $event"
+          @update:gateway-default="gatewayDefault = $event"
+          @update:flow-condition="flowCondition = $event"
+        />
       </transition>
     </div>
 
@@ -223,130 +94,26 @@
       </div>
     </el-dialog>
 
-    <el-dialog v-model="showTemplates" title="工作流模板" width="960px">
-      <div class="template-dialog">
-        <section class="template-dialog__catalog">
-          <div v-if="recentTemplateItems.length" class="template-dialog__recent">
-            <div class="template-dialog__detail-block">
-              <h4>最近使用</h4>
-              <div class="template-dialog__tag-list template-dialog__tag-list--buttons">
-                <button
-                  v-for="template in recentTemplateItems"
-                  :key="template.id"
-                  class="template-dialog__recent-chip"
-                  type="button"
-                  @click="selectRecentTemplate(template.id)"
-                >
-                  <span>{{ template.name }}</span>
-                  <small>{{ template.source }}</small>
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div class="template-dialog__toolbar">
-            <el-input v-model="templateSearch" placeholder="搜索模板" @keydown.enter="refreshTemplateCatalog(0)" />
-            <el-select v-model="templateSource" placeholder="来源" @change="refreshTemplateCatalog(0)">
-              <el-option label="全部来源" value="all" />
-              <el-option label="Builtin" value="builtin" />
-              <el-option label="Database" value="database" />
-            </el-select>
-          </div>
-
-          <p v-if="templateError" class="template-dialog__error">{{ templateError }}</p>
-          <div v-if="templateLoading" class="template-dialog__empty">加载模板中...</div>
-          <div v-else-if="!templateItems.length" class="template-dialog__empty">当前没有可用模板。</div>
-          <div v-else class="template-dialog__list">
-            <button
-              v-for="template in templateItems"
-              :key="template.id"
-              class="template-dialog__item"
-              :class="{ 'is-active': template.id === selectedTemplateId }"
-              type="button"
-              @click="selectTemplate(template.id)"
-            >
-              <div class="template-dialog__item-top">
-                <strong>{{ template.name }}</strong>
-                <span class="template-dialog__badge" :data-source="template.source">{{ template.source }}</span>
-              </div>
-              <p>{{ template.description || 'No description' }}</p>
-              <div class="template-dialog__meta">
-                <span>{{ template.category }}</span>
-                <span>Usage {{ template.usageCount }}</span>
-              </div>
-            </button>
-          </div>
-
-          <div class="template-dialog__pager">
-            <span>{{ templateRangeLabel }}</span>
-            <div class="template-dialog__pager-actions">
-              <el-button size="small" :disabled="templateLoading || templatePagination.offset === 0" @click="refreshTemplateCatalog(Math.max(0, templatePagination.offset - templatePagination.limit))">
-                上一页
-              </el-button>
-              <el-button size="small" :disabled="templateLoading || templatePagination.offset + templatePagination.returned >= templatePagination.total" @click="refreshTemplateCatalog(templatePagination.offset + templatePagination.limit)">
-                下一页
-              </el-button>
-            </div>
-          </div>
-        </section>
-
-        <section class="template-dialog__detail">
-          <template v-if="selectedTemplate">
-            <header class="template-dialog__detail-header">
-              <div>
-                <h3>{{ selectedTemplate.name }}</h3>
-                <p>{{ selectedTemplate.description || 'No description' }}</p>
-              </div>
-              <span class="template-dialog__badge" :data-source="selectedTemplate.source">{{ selectedTemplate.source }}</span>
-            </header>
-
-            <div class="template-dialog__meta-grid">
-              <div>
-                <span class="template-dialog__meta-label">Category</span>
-                <strong>{{ selectedTemplate.category }}</strong>
-              </div>
-              <div>
-                <span class="template-dialog__meta-label">Required Vars</span>
-                <strong>{{ selectedTemplate.requiredVariables.length }}</strong>
-              </div>
-              <div>
-                <span class="template-dialog__meta-label">Optional Vars</span>
-                <strong>{{ selectedTemplate.optionalVariables.length }}</strong>
-              </div>
-            </div>
-
-            <div v-if="selectedTemplate.requiredVariables.length" class="template-dialog__detail-block">
-              <h4>Required Variables</h4>
-              <div class="template-dialog__tag-list">
-                <span v-for="item in selectedTemplate.requiredVariables" :key="item" class="template-dialog__tag">{{ item }}</span>
-              </div>
-            </div>
-
-            <div v-if="selectedTemplate.optionalVariables.length" class="template-dialog__detail-block">
-              <h4>Optional Variables</h4>
-              <div class="template-dialog__tag-list">
-                <span v-for="item in selectedTemplate.optionalVariables" :key="item" class="template-dialog__tag">{{ item }}</span>
-              </div>
-            </div>
-
-            <div v-if="selectedTemplate.tags.length" class="template-dialog__detail-block">
-              <h4>Tags</h4>
-              <div class="template-dialog__tag-list">
-                <span v-for="item in selectedTemplate.tags" :key="item" class="template-dialog__tag">{{ item }}</span>
-              </div>
-            </div>
-          </template>
-          <div v-else class="template-dialog__empty">选择左侧模板查看详情。</div>
-        </section>
-      </div>
-
-      <template #footer>
-        <el-button @click="showTemplates = false">取消</el-button>
-        <el-button type="primary" :disabled="!selectedTemplateId" :loading="applyingTemplate" @click="applyTemplate(selectedTemplateId || undefined)">
-          使用模板
-        </el-button>
-      </template>
-    </el-dialog>
+    <WorkflowTemplateDialog
+      v-model="showTemplates"
+      :template-loading="templateLoading"
+      :applying-template="applyingTemplate"
+      :template-error="templateError"
+      :template-search="templateSearch"
+      :template-source="templateSource"
+      :template-items="templateItems"
+      :template-pagination="templatePagination"
+      :template-range-label="templateRangeLabel"
+      :recent-template-items="recentTemplateItems"
+      :selected-template-id="selectedTemplateId"
+      :selected-template="selectedTemplate"
+      @update:template-search="templateSearch = $event"
+      @update:template-source="templateSource = $event"
+      @refresh-catalog="refreshTemplateCatalog"
+      @select-template="selectTemplate"
+      @select-recent-template="selectRecentTemplate"
+      @apply-selected="applyTemplate(selectedTemplateId || undefined)"
+    />
   </div>
 </template>
 
@@ -355,30 +122,13 @@ import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick, markRaw } f
 import { useRouter, useRoute } from 'vue-router'
 import {
   ElAlert,
-  ElButton,
-  ElButtonGroup,
   ElDialog,
   ElDivider,
-  ElForm,
-  ElFormItem,
   ElIcon,
-  ElInput,
   ElMessage,
   ElMessageBox,
-  ElOption,
-  ElSelect,
-  ElTag,
 } from 'element-plus'
 import {
-  ArrowLeft,
-  ZoomIn,
-  ZoomOut,
-  FullScreen,
-  Setting,
-  Close,
-  Upload,
-  Promotion,
-  CircleCheck,
   CircleCheckFilled,
   VideoPlay,
   VideoPause,
@@ -430,6 +180,11 @@ import {
   type RecentWorkflowTemplateItem,
 } from './workflowDesignerRecentTemplates'
 import { validateWorkflowElements } from './workflowDesignerValidation'
+import WorkflowTemplateDialog from '../components/workflow/WorkflowTemplateDialog.vue'
+import WorkflowPropertyPanel from '../components/workflow/WorkflowPropertyPanel.vue'
+import WorkflowDesignerToolbar from '../components/workflow/WorkflowDesignerToolbar.vue'
+import WorkflowPalette from '../components/workflow/WorkflowPalette.vue'
+import WorkflowCanvasShell from '../components/workflow/WorkflowCanvasShell.vue'
 
 // Types
 interface PaletteItem {
@@ -458,9 +213,15 @@ interface BpmnElement {
 const router = useRouter()
 const route = useRoute()
 
+type WorkflowCanvasShellExposed = {
+  containerEl: HTMLElement | null
+  canvasEl: HTMLElement | null
+}
+
 // State
-const bpmnCanvas = ref<HTMLElement | null>(null)
-const canvasContainer = ref<HTMLElement | null>(null)
+const canvasShellRef = ref<WorkflowCanvasShellExposed | null>(null)
+const bpmnCanvas = computed(() => canvasShellRef.value?.canvasEl ?? null)
+const canvasContainer = computed(() => canvasShellRef.value?.containerEl ?? null)
 const minimapContainer = ref<HTMLElement | null>(null)
 let modeler: WorkflowModelerInstance | null = null
 

@@ -22,14 +22,26 @@ on:
         description: 'Upload CSV via /attendance/import/upload (true/false)'
         required: false
         default: 'true'
-      max_csv_rows:
-        description: 'Server-side CSV max rows cap used to gate longrun scenarios'
+      payload_source:
+        description: 'Import payload source (auto|csv|rows)'
         required: false
-        default: '20000'
+        default: 'auto'
+      preview_mode:
+        description: 'Preview execution mode (sync|async|auto)'
+        required: false
+        default: 'auto'
+      preview_async_row_threshold:
+        description: 'Rows threshold for PREVIEW_MODE=auto async routing'
+        required: false
+        default: '50000'
+      max_csv_rows:
+        description: 'Optional: override remote CSV row cap for long-run payload auto-selection (leave empty to inherit deployed cap)'
+        required: false
+        default: ''
       include_rows500k_preview:
         description: 'Run rows500k-preview scenario (true/false)'
         required: false
-        default: 'true'
+        default: 'false'
       include_rows500k_commit:
         description: 'Run rows500k-commit scenario (true/false)'
         required: false
@@ -63,9 +75,7 @@ on:
     - cron: '10 5 * * *'
 
 concurrency:
-  # Serialize baseline/longrun perf workflows per branch to reduce transient 502s
-  # caused by concurrent heavy import load against the same production API.
-  group: attendance-import-perf-shared-${{ github.ref_name }}
+  group: attendance-import-perf-longrun-${{ github.ref_name }}
   cancel-in-progress: true
 
 permissions:
@@ -144,21 +154,22 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - id: rows10k-preview
+          - id: rows10k-commit
             rows: '10000'
-            mode: 'preview'
+            mode: 'commit'
             commit_async: 'true'
-            commit_retries: '6'
-            export_csv: 'false'
+            export_csv: 'true'
             rollback: 'false'
             expected_upsert_strategy: ''
             max_preview_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_PREVIEW_MS || vars.ATTENDANCE_PERF_MAX_PREVIEW_MS || '100000' }}
-            max_commit_ms: ''
-            max_export_ms: ''
+            max_commit_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_COMMIT_MS || vars.ATTENDANCE_PERF_MAX_COMMIT_MS_STANDARD || '420000' }}
+            max_export_ms: ${{ vars.ATTENDANCE_PERF_LONGRUN_10K_MAX_EXPORT_MS || vars.ATTENDANCE_PERF_MAX_EXPORT_MS || '25000' }}
             max_rollback_ms: ''
             import_job_poll_interval_ms: '2000'
             import_job_poll_timeout_ms: '1800000'
             import_job_poll_timeout_large_ms: '2700000'
+            import_job_poll_recovery_grace_ms: '600000'
+            import_job_recovery_attempts: '4'
           - id: rows100k-commit
             rows: '100000'
             mode: 'commit'
@@ -173,6 +184,7 @@ jobs:
             import_job_poll_interval_ms: '5000'
             import_job_poll_timeout_ms: '2700000'
             import_job_poll_timeout_large_ms: '3600000'
+            import_job_poll_recovery_grace_ms: '900000'
             import_job_recovery_attempts: '4'
           - id: rows50k-preview
             rows: '50000'
@@ -221,56 +233,60 @@ jobs:
             import_job_poll_interval_ms: '10000'
             import_job_poll_timeout_ms: '3600000'
             import_job_poll_timeout_large_ms: '5400000'
+            import_job_poll_recovery_grace_ms: '1200000'
             import_job_recovery_attempts: '3'
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
-      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
-      LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL }}
-      LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD }}
+      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
+      LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL || vars.ATTENDANCE_ADMIN_EMAIL || '' }}
+      LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD || vars.ATTENDANCE_ADMIN_PASSWORD || '' }}
+      AUTH_RESOLVE_ALLOW_INSECURE_HTTP: ${{ vars.ATTENDANCE_ALLOW_INSECURE_HTTP || 'true' }}
       COMMIT_ASYNC: 'true'
       UPLOAD_CSV: ${{ inputs.upload_csv || vars.ATTENDANCE_PERF_UPLOAD_CSV || 'true' }}
-      MAX_CSV_ROWS: ${{ inputs.max_csv_rows || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '20000' }}
-      INCLUDE_ROWS500K_PREVIEW: ${{ inputs.include_rows500k_preview || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_PREVIEW || 'true' }}
+      PAYLOAD_SOURCE: ${{ inputs.payload_source || vars.ATTENDANCE_PERF_PAYLOAD_SOURCE || 'auto' }}
+      PREVIEW_MODE: ${{ inputs.preview_mode || vars.ATTENDANCE_PERF_LONGRUN_PREVIEW_MODE || 'auto' }}
+      PREVIEW_ASYNC_ROW_THRESHOLD: ${{ inputs.preview_async_row_threshold || vars.ATTENDANCE_PERF_PREVIEW_ASYNC_ROW_THRESHOLD || '50000' }}
+      CSV_ROWS_LIMIT_HINT: ${{ inputs.max_csv_rows || vars.ATTENDANCE_IMPORT_CSV_MAX_ROWS || '20000' }}
+      PERF_WORK_DATE_SPAN_DAYS_STANDARD: ${{ vars.ATTENDANCE_PERF_LONGRUN_WORK_DATE_SPAN_DAYS || vars.ATTENDANCE_PERF_WORK_DATE_SPAN_DAYS || '366' }}
+      PERF_WORK_DATE_SPAN_DAYS_HIGH: ${{ vars.ATTENDANCE_PERF_LONGRUN_WORK_DATE_SPAN_DAYS_HIGH || vars.ATTENDANCE_PERF_WORK_DATE_SPAN_DAYS_HIGH || '180' }}
+      INCLUDE_ROWS500K_PREVIEW: ${{ inputs.include_rows500k_preview || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_PREVIEW || 'false' }}
       INCLUDE_ROWS500K_COMMIT: ${{ inputs.include_rows500k_commit || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_500K_COMMIT || 'false' }}
       INCLUDE_ROWS100K_COMMIT: ${{ inputs.include_rows100k_commit || vars.ATTENDANCE_PERF_LONGRUN_INCLUDE_100K_COMMIT || 'false' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve attendance auth token
-        run: |
-          set -euo pipefail
-          output_root="output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}"
-          mkdir -p "$output_root"
-          auth_meta_file="${output_root}/auth-resolve-meta.txt"
-          auth_token_file="${RUNNER_TEMP}/attendance-auth-token.txt"
-
-          if AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_RESOLVE_META_FILE="$auth_meta_file" ./scripts/ops/attendance-resolve-auth.sh > "$auth_token_file"; then
-            resolved_token="$(tr -d '\r\n' < "$auth_token_file")"
-            if [[ -z "$resolved_token" ]]; then
-              AUTH_RESOLVE_META_FILE="$auth_meta_file" \
-                AUTH_ERROR_FILE="${output_root}/auth-error.txt" \
-                API_BASE="$API_BASE" \
-                ./scripts/ops/attendance-write-auth-error.sh
-              echo "::error::Resolved attendance auth token is empty."
-              exit 1
-            fi
-            echo "::add-mask::${resolved_token}"
-            echo "AUTH_TOKEN_EFFECTIVE=${resolved_token}" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          AUTH_RESOLVE_META_FILE="$auth_meta_file" \
-            AUTH_ERROR_FILE="${output_root}/auth-error.txt" \
-            API_BASE="$API_BASE" \
-            ./scripts/ops/attendance-write-auth-error.sh
-          echo "::error::No valid attendance admin token. Rotate ATTENDANCE_ADMIN_JWT or configure ATTENDANCE_ADMIN_EMAIL/ATTENDANCE_ADMIN_PASSWORD."
-          exit 1
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Resolve valid auth token
+        id: resolve-auth-token
+        run: |
+          set -euo pipefail
+          mkdir -p "output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}"
+          meta_file="output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}/auth-resolve-meta.txt"
+
+          if ! resolved_token="$(
+            API_BASE="${API_BASE}" \
+            AUTH_TOKEN="${AUTH_TOKEN}" \
+            LOGIN_EMAIL="${LOGIN_EMAIL}" \
+            LOGIN_PASSWORD="${LOGIN_PASSWORD}" \
+            AUTH_RESOLVE_ALLOW_INSECURE_HTTP="${AUTH_RESOLVE_ALLOW_INSECURE_HTTP}" \
+            AUTH_RESOLVE_META_FILE="${meta_file}" \
+            ./scripts/ops/attendance-resolve-auth.sh
+          )"; then
+            API_BASE="${API_BASE}" \
+            ./scripts/ops/attendance-write-auth-error.sh \
+              "${meta_file}" \
+              "output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}/auth-error.txt"
+            echo "::error::No valid attendance admin token for scenario ${{ matrix.id }}; see auth-error.txt artifact."
+            exit 1
+          fi
+
+          echo "::add-mask::${resolved_token}"
+          echo "AUTH_TOKEN_EFFECTIVE=${resolved_token}" >> "$GITHUB_ENV"
 
       - name: Evaluate scenario gate
         id: scenario_gate
@@ -279,12 +295,17 @@ jobs:
           MATRIX_ROWS: ${{ matrix.rows }}
         run: |
           set -euo pipefail
-          if [[ ! "${MAX_CSV_ROWS}" =~ ^[0-9]+$ ]]; then
-            echo "MAX_CSV_ROWS must be an integer (got: '${MAX_CSV_ROWS}')" >&2
+          if [[ ! "${CSV_ROWS_LIMIT_HINT}" =~ ^[0-9]+$ ]]; then
+            echo "CSV_ROWS_LIMIT_HINT must be an integer (got: '${CSV_ROWS_LIMIT_HINT}')" >&2
             exit 1
           fi
           if [[ ! "${MATRIX_ROWS}" =~ ^[0-9]+$ ]]; then
             echo "MATRIX_ROWS must be an integer (got: '${MATRIX_ROWS}')" >&2
+            exit 1
+          fi
+          payload_source="$(printf '%s' "${PAYLOAD_SOURCE}" | tr '[:upper:]' '[:lower:]')"
+          if [[ "${payload_source}" != 'auto' && "${payload_source}" != 'csv' && "${payload_source}" != 'rows' ]]; then
+            echo "PAYLOAD_SOURCE must be one of auto|csv|rows (got: '${PAYLOAD_SOURCE}')" >&2
             exit 1
           fi
 
@@ -303,9 +324,11 @@ jobs:
             run_allowed='false'
             reasons+=("INCLUDE_ROWS500K_COMMIT=${INCLUDE_ROWS500K_COMMIT}")
           fi
-          if (( MATRIX_ROWS > MAX_CSV_ROWS )); then
+          # When forcing CSV payload, keep the legacy row cap guard.
+          # In auto/rows mode, large scenarios are allowed and perf script will fallback to rows payload.
+          if [[ "${payload_source}" == 'csv' ]] && (( MATRIX_ROWS > CSV_ROWS_LIMIT_HINT )); then
             run_allowed='false'
-            reasons+=("rows=${MATRIX_ROWS} exceeds MAX_CSV_ROWS=${MAX_CSV_ROWS}")
+            reasons+=("rows=${MATRIX_ROWS} exceeds CSV_ROWS_LIMIT_HINT=${CSV_ROWS_LIMIT_HINT} while PAYLOAD_SOURCE=csv")
           fi
 
           reason='enabled'
@@ -334,8 +357,13 @@ jobs:
           IMPORT_JOB_POLL_INTERVAL_MS: ${{ matrix.import_job_poll_interval_ms }}
           IMPORT_JOB_POLL_TIMEOUT_MS: ${{ matrix.import_job_poll_timeout_ms }}
           IMPORT_JOB_POLL_TIMEOUT_LARGE_MS: ${{ matrix.import_job_poll_timeout_large_ms }}
+          IMPORT_JOB_POLL_RECOVERY_GRACE_MS: ${{ matrix.import_job_poll_recovery_grace_ms }}
           IMPORT_JOB_RECOVERY_ATTEMPTS: ${{ matrix.import_job_recovery_attempts }}
-          COMMIT_RETRIES: ${{ matrix.commit_retries || '' }}
+          PAYLOAD_SOURCE: ${{ env.PAYLOAD_SOURCE }}
+          PREVIEW_MODE: ${{ env.PREVIEW_MODE }}
+          PREVIEW_ASYNC_ROW_THRESHOLD: ${{ env.PREVIEW_ASYNC_ROW_THRESHOLD }}
+          CSV_ROWS_LIMIT_HINT: ${{ env.CSV_ROWS_LIMIT_HINT }}
+          PERF_WORK_DATE_SPAN_DAYS: ${{ (matrix.rows == '100000' || matrix.rows == '500000') && env.PERF_WORK_DATE_SPAN_DAYS_HIGH || env.PERF_WORK_DATE_SPAN_DAYS_STANDARD }}
           OUTPUT_DIR: output/playwright/attendance-import-perf-longrun/current/${{ matrix.id }}
         run: |
           set -euo pipefail
@@ -521,25 +549,14 @@ jobs:
               '```',
             ].join('\\n')
 
-            let items = []
-            if (titleOverride) {
-              const listed = await github.paginate(github.rest.issues.listForRepo, {
-                owner,
-                repo,
-                state: 'all',
-                per_page: 100,
-              })
-              items = Array.isArray(listed) ? listed : []
-            } else {
-              const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
-              const search = await github.rest.search.issuesAndPullRequests({
-                q,
-                sort: 'updated',
-                order: 'desc',
-                per_page: 20,
-              })
-              items = Array.isArray(search.data.items) ? search.data.items : []
-            }
+            const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
+            const search = await github.rest.search.issuesAndPullRequests({
+              q,
+              sort: 'updated',
+              order: 'desc',
+              per_page: 20,
+            })
+            const items = Array.isArray(search.data.items) ? search.data.items : []
             const match = items.find((item) => item && !item.pull_request && item.title === title) || null
 
             if (failed) {

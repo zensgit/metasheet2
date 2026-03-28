@@ -83,10 +83,27 @@ components:
       properties:
         id:
           type: string
+        targetType:
+          type: string
+          nullable: true
+        targetId:
+          type: string
+          nullable: true
+        targetFieldId:
+          type: string
+          nullable: true
+        containerType:
+          type: string
+          nullable: true
+        containerId:
+          type: string
+          nullable: true
         spreadsheetId:
           type: string
+          nullable: true
         rowId:
           type: string
+          nullable: true
         fieldId:
           type: string
           nullable: true
@@ -372,6 +389,8 @@ components:
           type: string
         name:
           type: string
+        paid:
+          type: boolean
         requiresApproval:
           type: boolean
         requiresAttachment:
@@ -408,8 +427,18 @@ components:
           type: array
           items:
             type: string
+        approver_user_ids:
+          type: array
+          deprecated: true
+          items:
+            type: string
         approverRoleIds:
           type: array
+          items:
+            type: string
+        approver_role_ids:
+          type: array
+          deprecated: true
           items:
             type: string
     AttendanceApprovalFlow:
@@ -453,19 +482,40 @@ components:
           type: string
         orgId:
           type: string
+        org_id:
+          type: string
+          deprecated: true
         userId:
           type: string
+        user_id:
+          type: string
+          deprecated: true
         rotationRuleId:
           type: string
+        rotation_rule_id:
+          type: string
+          deprecated: true
         startDate:
           type: string
           format: date
+        start_date:
+          type: string
+          format: date
+          deprecated: true
         endDate:
           type: string
           format: date
           nullable: true
+        end_date:
+          type: string
+          format: date
+          nullable: true
+          deprecated: true
         isActive:
           type: boolean
+        is_active:
+          type: boolean
+          deprecated: true
     AttendanceRotationAssignmentItem:
       type: object
       properties:
@@ -562,6 +612,48 @@ components:
           type: object
         isDefault:
           type: boolean
+    AttendanceGroup:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        name:
+          type: string
+        code:
+          type: string
+        timezone:
+          type: string
+        ruleSetId:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+    AttendanceGroupMember:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        groupId:
+          type: string
+        userId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
     AttendancePayrollTemplate:
       type: object
       properties:
@@ -615,8 +707,39 @@ components:
           type: string
         mapping:
           type: object
+        mappingProfiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttendanceImportMappingProfile'
         payloadExample:
           type: object
+    AttendanceImportMappingProfile:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        source:
+          type: string
+          nullable: true
+        mapping:
+          type: object
+          nullable: true
+        requiredFields:
+          type: array
+          items:
+            type: string
+        userMapKeyField:
+          type: string
+          nullable: true
+        userMapSourceFields:
+          type: array
+          items:
+            type: string
     AttendanceImportPreviewItem:
       type: object
       properties:
@@ -659,11 +782,188 @@ components:
           type: array
           items:
             type: string
+    AttendanceImportPreviewStats:
+      type: object
+      properties:
+        invalid:
+          type: integer
+        duplicates:
+          type: integer
+    AttendanceImportPreviewData:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttendanceImportPreviewItem'
+        total:
+          type: integer
+        rowCount:
+          type: integer
+        truncated:
+          type: boolean
+        previewLimit:
+          type: integer
+        mappingUsed:
+          type: array
+          items:
+            type: object
+        csvWarnings:
+          type: array
+          items:
+            type: string
+        groupWarnings:
+          type: array
+          items:
+            type: string
+        asyncSimplified:
+          type: boolean
+        stats:
+          $ref: '#/components/schemas/AttendanceImportPreviewStats'
+    AttendanceImportRequest:
+      type: object
+      properties:
+        source:
+          type: string
+        orgId:
+          type: string
+        userId:
+          type: string
+        timezone:
+          type: string
+        ruleSetId:
+          type: string
+        mappingProfileId:
+          type: string
+        commitToken:
+          type: string
+        idempotencyKey:
+          type: string
+        engine:
+          type: object
+        mapping:
+          type: object
+        columns:
+          type: array
+          items:
+            type: object
+        data:
+          type: object
+        csvText:
+          type: string
+        csvFileId:
+          type: string
+        csvOptions:
+          type: object
+        rows:
+          type: array
+          items:
+            type: object
+        entries:
+          type: array
+          items:
+            type: object
+        userMap:
+          type: object
+        userMapKeyField:
+          type: string
+        userMapSourceFields:
+          type: array
+          items:
+            type: string
+        statusMap:
+          type: object
+        mode:
+          type: string
+    AttendanceImportJob:
+      type: object
+      properties:
+        id:
+          type: string
+        orgId:
+          type: string
+        batchId:
+          type: string
+          nullable: true
+        createdBy:
+          type: string
+          nullable: true
+        idempotencyKey:
+          type: string
+          nullable: true
+        kind:
+          type: string
+        status:
+          type: string
+        engine:
+          type: string
+          nullable: true
+        chunkConfig:
+          type: object
+          nullable: true
+        recordUpsertStrategy:
+          type: string
+          nullable: true
+        progress:
+          type: integer
+        total:
+          type: integer
+        progressPercent:
+          type: integer
+        processedRows:
+          type: integer
+        failedRows:
+          type: integer
+        skippedCount:
+          type: integer
+        skippedRows:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        elapsedMs:
+          type: integer
+        throughputRowsPerSec:
+          type: number
+          format: float
+        error:
+          type: string
+          nullable: true
+        preview:
+          $ref: '#/components/schemas/AttendanceImportPreviewData'
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
     AttendanceImportResult:
       type: object
       properties:
         imported:
           type: integer
+        processedRows:
+          type: integer
+        failedRows:
+          type: integer
+        elapsedMs:
+          type: integer
+        engine:
+          type: string
+          nullable: true
+        recordUpsertStrategy:
+          type: string
+          nullable: true
         items:
           type: array
           items:
@@ -671,9 +971,15 @@ components:
             properties:
               id:
                 type: string
+              userId:
+                type: string
+                nullable: true
               workDate:
                 type: string
                 format: date
+              engine:
+                type: string
+                nullable: true
         skipped:
           type: array
           items:
@@ -693,10 +999,54 @@ components:
         batchId:
           type: string
           nullable: true
+        idempotent:
+          type: boolean
+        itemsTruncated:
+          type: boolean
         csvWarnings:
           type: array
           items:
             type: string
+        groupWarnings:
+          type: array
+          items:
+            type: string
+        meta:
+          type: object
+    AttendanceImportPrepareData:
+      type: object
+      properties:
+        commitToken:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        ttlSeconds:
+          type: integer
+    AttendanceImportUploadData:
+      type: object
+      properties:
+        fileId:
+          type: string
+        rowCount:
+          type: integer
+        bytes:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        maxBytes:
+          type: integer
+    AttendanceImportAsyncJobData:
+      type: object
+      properties:
+        job:
+          $ref: '#/components/schemas/AttendanceImportJob'
+        idempotent:
+          type: boolean
     AttendanceIntegration:
       type: object
       properties:
@@ -758,22 +1108,50 @@ components:
           type: string
         orgId:
           type: string
+        org_id:
+          type: string
+          deprecated: true
         name:
           type: string
         timezone:
           type: string
         workStartTime:
           type: string
+        work_start_time:
+          type: string
+          deprecated: true
         workEndTime:
           type: string
+        work_end_time:
+          type: string
+          deprecated: true
+        isOvernight:
+          type: boolean
+        is_overnight:
+          type: boolean
+          deprecated: true
         lateGraceMinutes:
           type: integer
+        late_grace_minutes:
+          type: integer
+          deprecated: true
         earlyGraceMinutes:
           type: integer
+        early_grace_minutes:
+          type: integer
+          deprecated: true
         roundingMinutes:
           type: integer
+        rounding_minutes:
+          type: integer
+          deprecated: true
         workingDays:
           type: array
+          items:
+            type: integer
+        working_days:
+          type: array
+          deprecated: true
           items:
             type: integer
     AttendanceShiftAssignment:
@@ -783,19 +1161,40 @@ components:
           type: string
         orgId:
           type: string
+        org_id:
+          type: string
+          deprecated: true
         userId:
           type: string
+        user_id:
+          type: string
+          deprecated: true
         shiftId:
           type: string
+        shift_id:
+          type: string
+          deprecated: true
         startDate:
           type: string
           format: date
+        start_date:
+          type: string
+          format: date
+          deprecated: true
         endDate:
           type: string
           format: date
           nullable: true
+        end_date:
+          type: string
+          format: date
+          nullable: true
+          deprecated: true
         isActive:
           type: boolean
+        is_active:
+          type: boolean
+          deprecated: true
     AttendanceHoliday:
       type: object
       properties:
@@ -811,6 +1210,16 @@ components:
           nullable: true
         isWorkingDay:
           type: boolean
+        type:
+          type: string
+          enum:
+            - holiday
+            - working_day_override
+        holidayType:
+          type: string
+          enum:
+            - holiday
+            - working_day_override
     AttendanceSettings:
       type: object
       properties:
@@ -911,6 +1320,478 @@ components:
         updated_at:
           type: string
           format: date-time
+    MultitableBase:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        icon:
+          type: string
+          nullable: true
+        color:
+          type: string
+          nullable: true
+        ownerId:
+          type: string
+          nullable: true
+        workspaceId:
+          type: string
+          nullable: true
+    MultitableSheet:
+      type: object
+      properties:
+        id:
+          type: string
+        baseId:
+          type: string
+          nullable: true
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+    MultitableView:
+      type: object
+      properties:
+        id:
+          type: string
+        sheetId:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        filterInfo:
+          type: object
+          additionalProperties: true
+        sortInfo:
+          type: object
+          additionalProperties: true
+        groupInfo:
+          type: object
+          additionalProperties: true
+        hiddenFieldIds:
+          type: array
+          items:
+            type: string
+        config:
+          type: object
+          additionalProperties: true
+    MultitableField:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+          enum:
+            - string
+            - number
+            - boolean
+            - date
+            - formula
+            - select
+            - link
+            - lookup
+            - rollup
+            - attachment
+        property:
+          type: object
+          additionalProperties: true
+        options:
+          type: array
+          items:
+            type: object
+            properties:
+              value:
+                type: string
+              color:
+                type: string
+                nullable: true
+            required:
+              - value
+        order:
+          type: integer
+    MultitableRecord:
+      type: object
+      properties:
+        id:
+          type: string
+        version:
+          type: integer
+        data:
+          type: object
+          additionalProperties: true
+    MultitableCommentsScope:
+      type: object
+      properties:
+        targetType:
+          type: string
+        targetId:
+          type: string
+        targetFieldId:
+          type: string
+          nullable: true
+        containerType:
+          type: string
+        containerId:
+          type: string
+      required:
+        - targetType
+        - targetId
+        - containerType
+        - containerId
+    MultitableLinkedRecordSummary:
+      type: object
+      properties:
+        id:
+          type: string
+        display:
+          type: string
+      required:
+        - id
+        - display
+    MultitableAttachment:
+      type: object
+      properties:
+        id:
+          type: string
+        filename:
+          type: string
+        mimeType:
+          type: string
+        size:
+          type: integer
+        url:
+          type: string
+        thumbnailUrl:
+          type: string
+          nullable: true
+        uploadedAt:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - filename
+        - mimeType
+        - size
+        - url
+    MultitableRecordVersion:
+      type: object
+      properties:
+        recordId:
+          type: string
+        version:
+          type: integer
+      required:
+        - recordId
+        - version
+    MultitableComputedRecord:
+      type: object
+      properties:
+        recordId:
+          type: string
+        data:
+          type: object
+          additionalProperties: true
+      required:
+        - recordId
+        - data
+    MultitableRelatedRecord:
+      type: object
+      properties:
+        sheetId:
+          type: string
+        recordId:
+          type: string
+        data:
+          type: object
+          additionalProperties: true
+      required:
+        - sheetId
+        - recordId
+        - data
+    MultitableLinkFieldRef:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+      required:
+        - id
+        - name
+        - type
+    MultitableLinkSummaryMap:
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          $ref: '#/components/schemas/MultitableLinkedRecordSummary'
+    MultitableViewLinkSummaries:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/MultitableLinkSummaryMap'
+    MultitableAttachmentSummaryMap:
+      type: object
+      additionalProperties:
+        type: array
+        items:
+          $ref: '#/components/schemas/MultitableAttachment'
+    MultitableViewAttachmentSummaries:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
+    MultitablePage:
+      type: object
+      properties:
+        offset:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+        hasMore:
+          type: boolean
+      required:
+        - offset
+        - limit
+        - total
+        - hasMore
+    MultitableViewMeta:
+      type: object
+      properties:
+        warnings:
+          type: array
+          items:
+            type: string
+        computedFilterSort:
+          type: boolean
+        ignoredSortFieldIds:
+          type: array
+          items:
+            type: string
+        ignoredFilterFieldIds:
+          type: array
+          items:
+            type: string
+    MultitableCapabilities:
+      type: object
+      properties:
+        canRead:
+          type: boolean
+        canCreateRecord:
+          type: boolean
+        canEditRecord:
+          type: boolean
+        canDeleteRecord:
+          type: boolean
+        canManageFields:
+          type: boolean
+        canManageViews:
+          type: boolean
+        canComment:
+          type: boolean
+        canManageAutomation:
+          type: boolean
+      required:
+        - canRead
+        - canCreateRecord
+        - canEditRecord
+        - canDeleteRecord
+        - canManageFields
+        - canManageViews
+        - canComment
+        - canManageAutomation
+    MultitableContext:
+      type: object
+      properties:
+        base:
+          allOf:
+            - $ref: '#/components/schemas/MultitableBase'
+          nullable: true
+        sheet:
+          allOf:
+            - $ref: '#/components/schemas/MultitableSheet'
+          nullable: true
+        sheets:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableSheet'
+        views:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableView'
+        capabilities:
+          $ref: '#/components/schemas/MultitableCapabilities'
+    MultitableViewData:
+      type: object
+      properties:
+        id:
+          type: string
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableField'
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableRecord'
+        linkSummaries:
+          $ref: '#/components/schemas/MultitableViewLinkSummaries'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableViewAttachmentSummaries'
+        view:
+          allOf:
+            - $ref: '#/components/schemas/MultitableView'
+          nullable: true
+        meta:
+          $ref: '#/components/schemas/MultitableViewMeta'
+        page:
+          $ref: '#/components/schemas/MultitablePage'
+      required:
+        - id
+        - fields
+        - rows
+    MultitableRecordContext:
+      type: object
+      properties:
+        sheet:
+          $ref: '#/components/schemas/MultitableSheet'
+        view:
+          allOf:
+            - $ref: '#/components/schemas/MultitableView'
+          nullable: true
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableField'
+        record:
+          $ref: '#/components/schemas/MultitableRecord'
+        capabilities:
+          $ref: '#/components/schemas/MultitableCapabilities'
+        commentsScope:
+          $ref: '#/components/schemas/MultitableCommentsScope'
+        linkSummaries:
+          $ref: '#/components/schemas/MultitableLinkSummaryMap'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
+      required:
+        - sheet
+        - fields
+        - record
+        - capabilities
+        - commentsScope
+        - linkSummaries
+    MultitableFormContext:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum:
+            - form
+        readOnly:
+          type: boolean
+        submitPath:
+          type: string
+        sheet:
+          $ref: '#/components/schemas/MultitableSheet'
+        view:
+          allOf:
+            - $ref: '#/components/schemas/MultitableView'
+          nullable: true
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableField'
+        capabilities:
+          $ref: '#/components/schemas/MultitableCapabilities'
+        record:
+          allOf:
+            - $ref: '#/components/schemas/MultitableRecord'
+          nullable: true
+        commentsScope:
+          allOf:
+            - $ref: '#/components/schemas/MultitableCommentsScope'
+          nullable: true
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
+      required:
+        - mode
+        - readOnly
+        - submitPath
+        - sheet
+        - fields
+        - capabilities
+    MultitablePersonFieldPrepareResult:
+      type: object
+      properties:
+        targetSheet:
+          $ref: '#/components/schemas/MultitableSheet'
+        fieldProperty:
+          type: object
+          additionalProperties: true
+      required:
+        - targetSheet
+        - fieldProperty
+    MultitableRecordMutationResult:
+      type: object
+      properties:
+        record:
+          $ref: '#/components/schemas/MultitableRecord'
+        commentsScope:
+          $ref: '#/components/schemas/MultitableCommentsScope'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
+      required:
+        - record
+        - commentsScope
+    MultitableFormSubmitResult:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum:
+            - create
+            - update
+        record:
+          $ref: '#/components/schemas/MultitableRecord'
+        commentsScope:
+          $ref: '#/components/schemas/MultitableCommentsScope'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
+      required:
+        - mode
+        - record
+        - commentsScope
+    MultitablePatchResult:
+      type: object
+      properties:
+        updated:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableRecordVersion'
+        records:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableComputedRecord'
+        linkSummaries:
+          $ref: '#/components/schemas/MultitableViewLinkSummaries'
+        attachmentSummaries:
+          $ref: '#/components/schemas/MultitableViewAttachmentSummaries'
+        relatedRecords:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableRelatedRecord'
+      required:
+        - updated
   responses:
     Unauthorized:
       description: Unauthorized - Missing or invalid JWT token
@@ -1003,6 +1884,27 @@ components:
                 error:
                   code: INVALID_FORMAT
                   message: Request body must be valid JSON
+    Conflict:
+      description: Conflict - Request conflicts with current resource state
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            optimistic_lock_conflict:
+              summary: Version Conflict
+              value:
+                ok: false
+                error:
+                  code: CONFLICT
+                  message: Resource state changed. Refresh and try again.
+            duplicate_code_conflict:
+              summary: Duplicate Code
+              value:
+                ok: false
+                error:
+                  code: DUPLICATE_CODE
+                  message: Code already exists.
     NotFound:
       description: Not found - Resource does not exist
       content:
@@ -1757,6 +2659,11 @@ paths:
                 occurredAt:
                   type: string
                   format: date-time
+                  description: Preferred punch timestamp in ISO 8601 format.
+                occurred_at:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for occurredAt.
                 timezone:
                   type: string
                 source:
@@ -1796,6 +2703,68 @@ paths:
     x-plugin: plugin-attendance
     get:
       summary: List attendance records
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: userId
+          schema:
+            type: string
+        - in: query
+          name: orgId
+          schema:
+            type: string
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendanceRecord'
+                      total:
+                        type: integer
+                      page:
+                        type: integer
+                      pageSize:
+                        type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/calendar:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance records for calendar views (compatibility alias)
       security:
         - bearerAuth: []
       parameters:
@@ -1979,6 +2948,11 @@ paths:
                 workDate:
                   type: string
                   format: date
+                  description: Work date in YYYY-MM-DD format.
+                date:
+                  type: string
+                  format: date
+                  description: Compatibility alias for workDate.
                 requestType:
                   type: string
                   enum:
@@ -1987,24 +2961,69 @@ paths:
                     - time_correction
                     - leave
                     - overtime
+                  description: Request type.
+                type:
+                  type: string
+                  enum:
+                    - missed_check_in
+                    - missed_check_out
+                    - time_correction
+                    - leave
+                    - overtime
+                  description: Compatibility alias for requestType.
                 requestedInAt:
                   type: string
                   format: date-time
+                  description: >-
+                    Required for missed_check_in. Optional for time_correction,
+                    leave, and overtime.
+                requested_in_at:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for requestedInAt.
+                clockIn:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for requestedInAt.
                 requestedOutAt:
                   type: string
                   format: date-time
+                  description: >-
+                    Required for missed_check_out. Optional for time_correction,
+                    leave, and overtime.
+                requested_out_at:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for requestedOutAt.
+                clockOut:
+                  type: string
+                  format: date-time
+                  description: Compatibility alias for requestedOutAt.
                 reason:
                   type: string
                 leaveTypeId:
                   type: string
+                  description: >-
+                    Required for leave requests unless leaveTypeCode is
+                    provided.
                 leaveTypeCode:
                   type: string
+                  description: Required for leave requests unless leaveTypeId is provided.
                 overtimeRuleId:
                   type: string
+                  description: >-
+                    Required for overtime requests unless overtimeRuleName is
+                    provided.
                 overtimeRuleName:
                   type: string
+                  description: >-
+                    Required for overtime requests unless overtimeRuleId is
+                    provided.
                 minutes:
                   type: integer
+                  description: >-
+                    Required for overtime unless derived from
+                    requestedInAt/requestedOutAt.
                 attachmentUrl:
                   type: string
                 approvalFlowId:
@@ -2014,6 +3033,38 @@ paths:
               required:
                 - workDate
                 - requestType
+            examples:
+              missedCheckIn:
+                summary: Missed check-in using canonical fields
+                value:
+                  workDate: '2026-03-20'
+                  requestType: missed_check_in
+                  requestedInAt: '2026-03-20T09:05:00+08:00'
+                  reason: Forgot to check in after a network reconnect.
+              missedCheckOutLegacy:
+                summary: Missed check-out using legacy alias fields
+                value:
+                  date: '2026-03-20'
+                  type: missed_check_out
+                  clockOut: '2026-03-20T18:10:00+08:00'
+                  reason: Left the office before the kiosk synced.
+              leaveByCode:
+                summary: Leave request using leaveTypeCode
+                value:
+                  workDate: '2026-03-21'
+                  requestType: leave
+                  leaveTypeCode: annual_leave
+                  minutes: 480
+                  reason: Family event
+              overtimeByRuleName:
+                summary: Overtime request using overtimeRuleName
+                value:
+                  workDate: '2026-03-22'
+                  requestType: overtime
+                  requestedInAt: '2026-03-22T18:30:00+08:00'
+                  requestedOutAt: '2026-03-22T21:00:00+08:00'
+                  overtimeRuleName: Weekday OT
+                  reason: End-of-month release support
       responses:
         '201':
           description: Created
@@ -2293,16 +3344,47 @@ paths:
                   type: string
                 workStartTime:
                   type: string
+                work_start_time:
+                  type: string
+                  deprecated: true
+                start_time:
+                  type: string
+                  deprecated: true
                 workEndTime:
                   type: string
+                work_end_time:
+                  type: string
+                  deprecated: true
+                end_time:
+                  type: string
+                  deprecated: true
+                isOvernight:
+                  type: boolean
+                is_overnight:
+                  type: boolean
+                  deprecated: true
                 lateGraceMinutes:
                   type: integer
+                late_grace_minutes:
+                  type: integer
+                  deprecated: true
                 earlyGraceMinutes:
                   type: integer
+                early_grace_minutes:
+                  type: integer
+                  deprecated: true
                 roundingMinutes:
                   type: integer
+                rounding_minutes:
+                  type: integer
+                  deprecated: true
                 workingDays:
                   type: array
+                  items:
+                    type: integer
+                working_days:
+                  type: array
+                  deprecated: true
                   items:
                     type: integer
                 orgId:
@@ -2390,16 +3472,47 @@ paths:
                   type: string
                 workStartTime:
                   type: string
+                work_start_time:
+                  type: string
+                  deprecated: true
+                start_time:
+                  type: string
+                  deprecated: true
                 workEndTime:
                   type: string
+                work_end_time:
+                  type: string
+                  deprecated: true
+                end_time:
+                  type: string
+                  deprecated: true
+                isOvernight:
+                  type: boolean
+                is_overnight:
+                  type: boolean
+                  deprecated: true
                 lateGraceMinutes:
                   type: integer
+                late_grace_minutes:
+                  type: integer
+                  deprecated: true
                 earlyGraceMinutes:
                   type: integer
+                early_grace_minutes:
+                  type: integer
+                  deprecated: true
                 roundingMinutes:
                   type: integer
+                rounding_minutes:
+                  type: integer
+                  deprecated: true
                 workingDays:
                   type: array
+                  items:
+                    type: integer
+                working_days:
+                  type: array
+                  deprecated: true
                   items:
                     type: integer
                 orgId:
@@ -2426,6 +3539,34 @@ paths:
           $ref: '#/components/responses/Forbidden'
   /api/attendance/shifts/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get attendance shift
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceShift'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
     put:
       summary: Update attendance shift
       security:
@@ -2526,6 +3667,11 @@ paths:
           schema:
             type: string
         - in: query
+          name: user_id
+          schema:
+            type: string
+          description: Legacy snake_case alias for userId.
+        - in: query
           name: page
           schema:
             type: integer
@@ -2593,10 +3739,45 @@ paths:
                   type: boolean
                 orgId:
                   type: string
+                user_id:
+                  type: string
+                  description: Legacy snake_case alias for userId.
+                shift_id:
+                  type: string
+                  description: Legacy snake_case alias for shiftId.
+                start_date:
+                  type: string
+                  format: date
+                  description: Legacy snake_case alias for startDate.
+                end_date:
+                  type: string
+                  format: date
+                  nullable: true
+                  description: Legacy snake_case alias for endDate.
+                is_active:
+                  type: boolean
+                  description: Legacy snake_case alias for isActive.
               required:
                 - userId
                 - shiftId
                 - startDate
+            examples:
+              camelCase:
+                summary: Create assignment with canonical camelCase fields
+                value:
+                  userId: attendance-user-001
+                  shiftId: 11111111-1111-4111-8111-111111111111
+                  startDate: '2026-03-20'
+                  endDate: null
+                  isActive: true
+              snakeCase:
+                summary: Create assignment with legacy snake_case aliases
+                value:
+                  user_id: attendance-user-001
+                  shift_id: 11111111-1111-4111-8111-111111111111
+                  start_date: '2026-03-20'
+                  end_date: null
+                  is_active: true
       responses:
         '201':
           description: Created
@@ -2654,6 +3835,19 @@ paths:
                   type: boolean
                 orgId:
                   type: string
+                user_id:
+                  type: string
+                shift_id:
+                  type: string
+                start_date:
+                  type: string
+                  format: date
+                end_date:
+                  type: string
+                  format: date
+                  nullable: true
+                is_active:
+                  type: boolean
       responses:
         '200':
           description: OK
@@ -2920,7 +4114,7 @@ paths:
   /api/attendance/export:
     x-plugin: plugin-attendance
     get:
-      summary: Export attendance records as CSV
+      summary: Export attendance records as CSV or JSON
       security:
         - bearerAuth: []
       parameters:
@@ -2948,13 +4142,72 @@ paths:
             type: integer
             default: 1000
             maximum: 5000
+        - in: query
+          name: format
+          schema:
+            type: string
+            enum:
+              - csv
+              - json
+            default: csv
       responses:
         '200':
-          description: CSV export
+          description: Export result
           content:
             text/csv:
               schema:
                 type: string
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            user_id:
+                              type: string
+                            org_id:
+                              type: string
+                            work_date:
+                              type: string
+                              format: date
+                            timezone:
+                              type: string
+                            first_in_at:
+                              type: string
+                            last_out_at:
+                              type: string
+                            work_minutes:
+                              type: integer
+                            late_minutes:
+                              type: integer
+                            early_leave_minutes:
+                              type: integer
+                            status:
+                              type: string
+                            is_workday:
+                              type: boolean
+                      total:
+                        type: integer
+                      from:
+                        type: string
+                        format: date
+                      to:
+                        type: string
+                        format: date
+                      format:
+                        type: string
+                        enum:
+                          - json
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -3007,6 +4260,350 @@ paths:
                       to:
                         type: string
                         format: date
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/groups:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance groups
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: orgId
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendanceGroup'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      summary: Create attendance group
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                code:
+                  type: string
+                timezone:
+                  type: string
+                ruleSetId:
+                  type: string
+                description:
+                  type: string
+                orgId:
+                  type: string
+              required:
+                - name
+                - timezone
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceGroup'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/attendance/groups/{id}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get attendance group by id
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceGroup'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      summary: Update attendance group
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                code:
+                  type: string
+                timezone:
+                  type: string
+                ruleSetId:
+                  type: string
+                description:
+                  type: string
+                orgId:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceGroup'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      summary: Delete attendance group
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/attendance/groups/{id}/members:
+    x-plugin: plugin-attendance
+    get:
+      summary: List attendance group members
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendanceGroupMember'
+                      total:
+                        type: integer
+                      page:
+                        type: integer
+                      pageSize:
+                        type: integer
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      summary: Add attendance group members
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: string
+                userIds:
+                  type: array
+                  items:
+                    type: string
+                user_id:
+                  type: string
+                  description: Legacy snake_case alias for userId.
+                user_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: Legacy snake_case alias for userIds.
+            examples:
+              singleMemberCamel:
+                summary: Add one member with camelCase fields
+                value:
+                  userId: admin-001
+              batchMembersSnake:
+                summary: Add multiple members with legacy snake_case aliases
+                value:
+                  user_ids:
+                    - admin-001
+                    - attendance-user-002
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AttendanceGroupMember'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/groups/{id}/members/{userId}:
+    x-plugin: plugin-attendance
+    delete:
+      summary: Remove an attendance group member
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: userId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -3078,18 +4675,22 @@ paths:
                   type: string
                 name:
                   type: string
+                paid:
+                  type: boolean
                 requiresApproval:
                   type: boolean
                 requiresAttachment:
                   type: boolean
                 defaultMinutesPerDay:
                   type: integer
+                daily_minutes:
+                  type: integer
+                  description: Compatibility alias for defaultMinutesPerDay.
                 isActive:
                   type: boolean
                 orgId:
                   type: string
               required:
-                - code
                 - name
       responses:
         '201':
@@ -3111,6 +4712,34 @@ paths:
           $ref: '#/components/responses/Forbidden'
   /api/attendance/leave-types/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get leave type by id
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceLeaveType'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
     put:
       summary: Update leave type
       security:
@@ -3132,12 +4761,17 @@ paths:
                   type: string
                 name:
                   type: string
+                paid:
+                  type: boolean
                 requiresApproval:
                   type: boolean
                 requiresAttachment:
                   type: boolean
                 defaultMinutesPerDay:
                   type: integer
+                daily_minutes:
+                  type: integer
+                  description: Compatibility alias for defaultMinutesPerDay.
                 isActive:
                   type: boolean
                 orgId:
@@ -3183,6 +4817,190 @@ paths:
                     properties:
                       id:
                         type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/rule-templates:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get rule templates
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      system:
+                        type: array
+                        items:
+                          type: object
+                      library:
+                        type: array
+                        items:
+                          type: object
+                      versions:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            version:
+                              type: integer
+                            createdAt:
+                              type: string
+                              nullable: true
+                            createdBy:
+                              type: string
+                              nullable: true
+                            sourceVersionId:
+                              type: string
+                              nullable: true
+                            itemCount:
+                              type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    put:
+      summary: Save rule template library
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                templates:
+                  type: array
+                  items:
+                    type: object
+              required:
+                - templates
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      templates:
+                        type: array
+                        items:
+                          type: object
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/rule-templates/restore:
+    x-plugin: plugin-attendance
+    post:
+      summary: Restore rule template library from a version
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                versionId:
+                  type: string
+                version:
+                  type: integer
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      templates:
+                        type: array
+                        items:
+                          type: object
+                      restoredFrom:
+                        type: string
+                        nullable: true
+                      version:
+                        type: integer
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/rule-templates/versions/{versionId}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get rule template version contents
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: versionId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      version:
+                        type: integer
+                      createdAt:
+                        type: string
+                        nullable: true
+                      createdBy:
+                        type: string
+                        nullable: true
+                      sourceVersionId:
+                        type: string
+                        nullable: true
+                      itemCount:
+                        type: integer
+                      templates:
+                        type: array
+                        items:
+                          type: object
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -3286,6 +5104,34 @@ paths:
           $ref: '#/components/responses/Forbidden'
   /api/attendance/overtime-rules/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get overtime rule
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceOvertimeRule'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
     put:
       summary: Update overtime rule
       security:
@@ -3441,9 +5287,42 @@ paths:
                   type: boolean
                 orgId:
                   type: string
+                request_type:
+                  type: string
+                  description: Legacy snake_case alias for requestType.
+                is_active:
+                  type: boolean
+                  description: Legacy snake_case alias for isActive.
               required:
                 - name
                 - requestType
+            examples:
+              missedCheckIn:
+                summary: Approval flow for missed check-in requests
+                value:
+                  name: 补卡审批
+                  requestType: missed_check_in
+                  steps:
+                    - name: 直属主管
+                      approverUserIds:
+                        - manager-user-001
+                    - name: 人事复核
+                      approverRoleIds:
+                        - attendance-admin
+                  isActive: true
+              missedCheckInSnake:
+                summary: Same payload using legacy snake_case aliases
+                value:
+                  name: 补卡审批
+                  request_type: missed_check_in
+                  steps:
+                    - name: 直属主管
+                      approver_user_ids:
+                        - manager-user-001
+                    - name: 人事复核
+                      approver_role_ids:
+                        - attendance-admin
+                  is_active: true
       responses:
         '201':
           description: Created
@@ -3613,9 +5492,38 @@ paths:
                   type: boolean
                 orgId:
                   type: string
+                shift_sequence:
+                  type: array
+                  items:
+                    type: string
+                  description: Legacy snake_case alias for shiftSequence.
+                is_active:
+                  type: boolean
+                  description: Legacy snake_case alias for isActive.
               required:
                 - name
                 - shiftSequence
+            examples:
+              standardCycle:
+                summary: Rotation rule with ordered shift ids
+                value:
+                  name: 四班两倒
+                  timezone: Asia/Shanghai
+                  shiftSequence:
+                    - 11111111-1111-4111-8111-111111111111
+                    - 22222222-2222-4222-8222-222222222222
+                    - 33333333-3333-4333-8333-333333333333
+                  isActive: true
+              standardCycleSnake:
+                summary: Same payload using legacy snake_case aliases
+                value:
+                  name: 四班两倒
+                  timezone: Asia/Shanghai
+                  shift_sequence:
+                    - 11111111-1111-4111-8111-111111111111
+                    - 22222222-2222-4222-8222-222222222222
+                    - 33333333-3333-4333-8333-333333333333
+                  is_active: true
       responses:
         '201':
           description: Created
@@ -3785,10 +5693,45 @@ paths:
                   type: boolean
                 orgId:
                   type: string
+                user_id:
+                  type: string
+                  description: Legacy snake_case alias for userId.
+                rotation_rule_id:
+                  type: string
+                  description: Legacy snake_case alias for rotationRuleId.
+                start_date:
+                  type: string
+                  format: date
+                  description: Legacy snake_case alias for startDate.
+                end_date:
+                  type: string
+                  format: date
+                  nullable: true
+                  description: Legacy snake_case alias for endDate.
+                is_active:
+                  type: boolean
+                  description: Legacy snake_case alias for isActive.
               required:
                 - userId
                 - rotationRuleId
                 - startDate
+            examples:
+              activeAssignment:
+                summary: Assign one user to a rotation rule
+                value:
+                  userId: attendance-user-001
+                  rotationRuleId: 44444444-4444-4444-8444-444444444444
+                  startDate: '2026-03-20'
+                  endDate: null
+                  isActive: true
+              activeAssignmentSnake:
+                summary: Same payload using legacy snake_case aliases
+                value:
+                  user_id: attendance-user-001
+                  rotation_rule_id: 44444444-4444-4444-8444-444444444444
+                  start_date: '2026-03-20'
+                  end_date: null
+                  is_active: true
       responses:
         '201':
           description: Created
@@ -3970,8 +5913,60 @@ paths:
                   type: boolean
                 orgId:
                   type: string
+                is_default:
+                  type: boolean
+                  description: Legacy snake_case alias for isDefault.
               required:
                 - name
+            examples:
+              orgDefault:
+                summary: Org-wide default rule set
+                value:
+                  name: 默认规则集
+                  description: 标准工作日与节假日配置
+                  version: 1
+                  scope: org
+                  isDefault: true
+                  config:
+                    source: manual
+                    rule:
+                      timezone: Asia/Shanghai
+                      workStartTime: '09:00'
+                      workEndTime: '18:00'
+                      workingDays:
+                        - 1
+                        - 2
+                        - 3
+                        - 4
+                        - 5
+                    policies:
+                      rules:
+                        - name: holiday-no-work
+                          when:
+                            isHoliday: true
+                          then:
+                            setWorkMinutes: 0
+                            setStatus: 'off'
+              orgDefaultSnake:
+                summary: Same payload using legacy snake_case aliases
+                value:
+                  name: 默认规则集
+                  description: 标准工作日与节假日配置
+                  version: 1
+                  scope: org
+                  is_default: true
+                  config:
+                    source: manual
+                    rule:
+                      timezone: Asia/Shanghai
+                      workStartTime: '09:00'
+                      workEndTime: '18:00'
+                      workingDays:
+                        - 1
+                        - 2
+                        - 3
+                        - 4
+                        - 5
       responses:
         '201':
           description: Created
@@ -4149,6 +6144,14 @@ paths:
       summary: Get attendance import template
       security:
         - bearerAuth: []
+      parameters:
+        - in: query
+          name: profileId
+          schema:
+            type: string
+          description: >-
+            Optional import mapping profile ID used to shape the template
+            payload.
       responses:
         '200':
           description: OK
@@ -4161,6 +6164,97 @@ paths:
                     type: boolean
                   data:
                     $ref: '#/components/schemas/AttendanceImportTemplate'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/import/template.csv:
+    x-plugin: plugin-attendance
+    get:
+      summary: Download attendance import CSV template
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: profileId
+          schema:
+            type: string
+          description: Optional import mapping profile ID used to shape the CSV template.
+      responses:
+        '200':
+          description: OK
+          content:
+            text/csv:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/import/upload:
+    x-plugin: plugin-attendance
+    post:
+      summary: Upload attendance import CSV and receive csvFileId
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: orgId
+          schema:
+            type: string
+        - in: query
+          name: filename
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceImportUploadData'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/import/prepare:
+    x-plugin: plugin-attendance
+    post:
+      summary: Prepare attendance import commit token
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceImportPrepareData'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -4176,56 +6270,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                source:
-                  type: string
-                orgId:
-                  type: string
-                userId:
-                  type: string
-                timezone:
-                  type: string
-                ruleSetId:
-                  type: string
-                mappingProfileId:
-                  type: string
-                commitToken:
-                  type: string
-                engine:
-                  type: object
-                mapping:
-                  type: object
-                columns:
-                  type: array
-                  items:
-                    type: object
-                data:
-                  type: object
-                csvText:
-                  type: string
-                csvOptions:
-                  type: object
-                rows:
-                  type: array
-                  items:
-                    type: object
-                entries:
-                  type: array
-                  items:
-                    type: object
-                userMap:
-                  type: object
-                userMapKeyField:
-                  type: string
-                userMapSourceFields:
-                  type: array
-                  items:
-                    type: string
-                statusMap:
-                  type: object
-                mode:
-                  type: string
+              $ref: '#/components/schemas/AttendanceImportRequest'
       responses:
         '200':
           description: OK
@@ -4237,28 +6282,141 @@ paths:
                   ok:
                     type: boolean
                   data:
-                    type: object
-                    properties:
-                      items:
-                        type: array
-                        items:
-                          $ref: '#/components/schemas/AttendanceImportPreviewItem'
-                      total:
-                        type: integer
-                      mappingUsed:
-                        type: array
-                        items:
-                          type: object
-                      csvWarnings:
-                        type: array
-                        items:
-                          type: string
+                    $ref: '#/components/schemas/AttendanceImportPreviewData'
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/attendance/import/preview-async:
+    x-plugin: plugin-attendance
+    post:
+      summary: Enqueue attendance import preview async job
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttendanceImportRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceImportAsyncJobData'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/attendance/import/commit:
+    x-plugin: plugin-attendance
+    post:
+      summary: Commit attendance import
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttendanceImportRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceImportResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/import/commit-async:
+    x-plugin: plugin-attendance
+    post:
+      summary: Enqueue attendance import commit async job
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttendanceImportRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceImportAsyncJobData'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/attendance/import/jobs/{id}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get attendance import job
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendanceImportJob'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /api/attendance/import:
     x-plugin: plugin-attendance
     post:
@@ -4270,56 +6428,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                source:
-                  type: string
-                orgId:
-                  type: string
-                userId:
-                  type: string
-                timezone:
-                  type: string
-                ruleSetId:
-                  type: string
-                mappingProfileId:
-                  type: string
-                commitToken:
-                  type: string
-                engine:
-                  type: object
-                mapping:
-                  type: object
-                columns:
-                  type: array
-                  items:
-                    type: object
-                data:
-                  type: object
-                csvText:
-                  type: string
-                csvOptions:
-                  type: object
-                rows:
-                  type: array
-                  items:
-                    type: object
-                entries:
-                  type: array
-                  items:
-                    type: object
-                userMap:
-                  type: object
-                userMapKeyField:
-                  type: string
-                userMapSourceFields:
-                  type: array
-                  items:
-                    type: string
-                statusMap:
-                  type: object
-                mode:
-                  type: string
+              $ref: '#/components/schemas/AttendanceImportRequest'
       responses:
         '200':
           description: OK
@@ -4710,6 +6819,34 @@ paths:
           $ref: '#/components/responses/Forbidden'
   /api/attendance/payroll-templates/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get payroll template by id
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/AttendancePayrollTemplate'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
     put:
       summary: Update payroll template
       security:
@@ -5385,6 +7522,53 @@ paths:
                               - attendance
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /api/auth/users:
+    get:
+      summary: List users for admin consoles
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: q
+          schema:
+            type: string
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/User'
+                      total:
+                        type: integer
+                      page:
+                        type: integer
+                      pageSize:
+                        type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /api/comments:
     get:
       summary: List comments
@@ -5733,6 +7917,1432 @@ paths:
       responses:
         '200':
           description: OK
+  /api/multitable/bases:
+    get:
+      summary: List multitable bases
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      bases:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/MultitableBase'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      summary: Create multitable base
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                name:
+                  type: string
+                icon:
+                  type: string
+                color:
+                  type: string
+                ownerId:
+                  type: string
+                workspaceId:
+                  type: string
+              required:
+                - name
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      base:
+                        $ref: '#/components/schemas/MultitableBase'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/multitable/context:
+    get:
+      summary: Load multitable workbench context
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: baseId
+          schema:
+            type: string
+        - in: query
+          name: sheetId
+          schema:
+            type: string
+          description: >-
+            When `viewId` is omitted, provide `sheetId` to resolve the active
+            sheet.
+        - in: query
+          name: viewId
+          schema:
+            type: string
+          description: Alternative to `sheetId` for resolving the active sheet and view.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/MultitableContext'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/sheets:
+    get:
+      summary: List multitable sheets
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      sheets:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/MultitableSheet'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      summary: Create multitable sheet
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                baseId:
+                  type: string
+                name:
+                  type: string
+                description:
+                  type: string
+                seed:
+                  type: boolean
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      sheet:
+                        allOf:
+                          - $ref: '#/components/schemas/MultitableSheet'
+                          - type: object
+                            properties:
+                              seeded:
+                                type: boolean
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/sheets/{sheetId}:
+    delete:
+      summary: Delete a multitable sheet
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: sheetId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      deleted:
+                        type: string
+                    required:
+                      - deleted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/fields:
+    get:
+      summary: List multitable fields
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: sheetId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      fields:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/MultitableField'
+                    required:
+                      - fields
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      summary: Create a multitable field
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                sheetId:
+                  type: string
+                name:
+                  type: string
+                type:
+                  type: string
+                  enum:
+                    - string
+                    - number
+                    - boolean
+                    - date
+                    - formula
+                    - select
+                    - link
+                    - lookup
+                    - rollup
+                    - attachment
+                property:
+                  type: object
+                  additionalProperties: true
+                order:
+                  type: integer
+              required:
+                - sheetId
+                - name
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      field:
+                        $ref: '#/components/schemas/MultitableField'
+                    required:
+                      - field
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/multitable/fields/{fieldId}:
+    patch:
+      summary: Update a multitable field
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: fieldId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                type:
+                  type: string
+                  enum:
+                    - string
+                    - number
+                    - boolean
+                    - date
+                    - formula
+                    - select
+                    - link
+                    - lookup
+                    - rollup
+                    - attachment
+                property:
+                  type: object
+                  additionalProperties: true
+                order:
+                  type: integer
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      field:
+                        $ref: '#/components/schemas/MultitableField'
+                    required:
+                      - field
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      summary: Delete a multitable field
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: fieldId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      deleted:
+                        type: string
+                    required:
+                      - deleted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/views:
+    get:
+      summary: List multitable views
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: sheetId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      views:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/MultitableView'
+                    required:
+                      - views
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      summary: Create a multitable view
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                sheetId:
+                  type: string
+                name:
+                  type: string
+                type:
+                  type: string
+                filterInfo:
+                  type: object
+                  additionalProperties: true
+                sortInfo:
+                  type: object
+                  additionalProperties: true
+                groupInfo:
+                  type: object
+                  additionalProperties: true
+                hiddenFieldIds:
+                  type: array
+                  items:
+                    type: string
+                config:
+                  type: object
+                  additionalProperties: true
+              required:
+                - sheetId
+                - name
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      view:
+                        $ref: '#/components/schemas/MultitableView'
+                    required:
+                      - view
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/views/{viewId}:
+    patch:
+      summary: Update a multitable view
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: viewId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                type:
+                  type: string
+                filterInfo:
+                  type: object
+                  additionalProperties: true
+                sortInfo:
+                  type: object
+                  additionalProperties: true
+                groupInfo:
+                  type: object
+                  additionalProperties: true
+                hiddenFieldIds:
+                  type: array
+                  items:
+                    type: string
+                config:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      view:
+                        $ref: '#/components/schemas/MultitableView'
+                    required:
+                      - view
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      summary: Delete a multitable view
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: viewId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      deleted:
+                        type: string
+                    required:
+                      - deleted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/view:
+    get:
+      summary: Load multitable grid view data
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: sheetId
+          schema:
+            type: string
+          description: Provide `sheetId` when `viewId` is omitted.
+        - in: query
+          name: viewId
+          schema:
+            type: string
+          description: >-
+            Alternative to `sheetId`; at least one of `sheetId` or `viewId`
+            should be provided.
+        - in: query
+          name: seed
+          schema:
+            type: boolean
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5000
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
+        - in: query
+          name: includeLinkSummaries
+          schema:
+            type: boolean
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Case-insensitive partial match across text/number fields
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/MultitableViewData'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/person-fields/prepare:
+    post:
+      summary: Prepare a multitable person field preset
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sheetId:
+                  type: string
+              required:
+                - sheetId
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/MultitablePersonFieldPrepareResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/attachments:
+    post:
+      summary: Upload a multitable attachment
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                sheetId:
+                  type: string
+                recordId:
+                  type: string
+                  nullable: true
+                fieldId:
+                  type: string
+                  nullable: true
+              required:
+                - file
+                - sheetId
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      attachment:
+                        $ref: '#/components/schemas/MultitableAttachment'
+                    required:
+                      - attachment
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/attachments/{attachmentId}:
+    get:
+      summary: Download or preview a multitable attachment
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: attachmentId
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: thumbnail
+          schema:
+            type: boolean
+          description: >-
+            Best-effort image thumbnail preview; falls back to the original file
+            stream.
+      responses:
+        '200':
+          description: Attachment stream
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            image/*:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      summary: Delete a multitable attachment
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: attachmentId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      deleted:
+                        type: string
+                    required:
+                      - deleted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/form-context:
+    get:
+      summary: Load multitable form workbench context
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: sheetId
+          schema:
+            type: string
+          description: Provide `sheetId` when `viewId` is omitted.
+        - in: query
+          name: viewId
+          schema:
+            type: string
+          description: >-
+            Alternative to `sheetId`; at least one of `sheetId` or `viewId`
+            should be provided.
+        - in: query
+          name: recordId
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/MultitableFormContext'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/records/{recordId}:
+    get:
+      summary: Load multitable record drawer context
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: recordId
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: sheetId
+          schema:
+            type: string
+        - in: query
+          name: viewId
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/MultitableRecordContext'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      summary: Patch a single multitable record
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: recordId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sheetId:
+                  type: string
+                viewId:
+                  type: string
+                expectedVersion:
+                  type: integer
+                data:
+                  type: object
+                  additionalProperties: true
+              anyOf:
+                - required:
+                    - sheetId
+                - required:
+                    - viewId
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/MultitableRecordMutationResult'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ErrorResponse'
+                  - type: object
+                    properties:
+                      error:
+                        type: object
+                        properties:
+                          code:
+                            type: string
+                          message:
+                            type: string
+                          fieldErrors:
+                            type: object
+                            additionalProperties:
+                              type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Version conflict
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ErrorResponse'
+                  - type: object
+                    properties:
+                      error:
+                        type: object
+                        properties:
+                          code:
+                            type: string
+                          message:
+                            type: string
+                          serverVersion:
+                            type: integer
+    delete:
+      summary: Delete a multitable record
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: recordId
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: expectedVersion
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      deleted:
+                        type: string
+                    required:
+                      - deleted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Version conflict
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ErrorResponse'
+                  - type: object
+                    properties:
+                      error:
+                        type: object
+                        properties:
+                          code:
+                            type: string
+                          message:
+                            type: string
+                          serverVersion:
+                            type: integer
+  /api/multitable/views/{viewId}/submit:
+    post:
+      summary: Submit a multitable form view
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: viewId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                recordId:
+                  type: string
+                expectedVersion:
+                  type: integer
+                data:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/MultitableFormSubmitResult'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ErrorResponse'
+                  - type: object
+                    properties:
+                      error:
+                        type: object
+                        properties:
+                          code:
+                            type: string
+                          message:
+                            type: string
+                          fieldErrors:
+                            type: object
+                            additionalProperties:
+                              type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Version conflict
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ErrorResponse'
+                  - type: object
+                    properties:
+                      error:
+                        type: object
+                        properties:
+                          code:
+                            type: string
+                          message:
+                            type: string
+                          serverVersion:
+                            type: integer
+  /api/multitable/fields/{fieldId}/link-options:
+    get:
+      summary: List link field options for a multitable field
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: fieldId
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: recordId
+          schema:
+            type: string
+        - in: query
+          name: search
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      field:
+                        $ref: '#/components/schemas/MultitableLinkFieldRef'
+                      targetSheet:
+                        $ref: '#/components/schemas/MultitableSheet'
+                      selected:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/MultitableLinkedRecordSummary'
+                      records:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/MultitableLinkedRecordSummary'
+                      page:
+                        $ref: '#/components/schemas/MultitablePage'
+                    required:
+                      - field
+                      - targetSheet
+                      - selected
+                      - records
+                      - page
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/records-summary:
+    get:
+      summary: List multitable record summaries
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: sheetId
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: displayFieldId
+          schema:
+            type: string
+        - in: query
+          name: search
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      records:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/MultitableLinkedRecordSummary'
+                      displayMap:
+                        type: object
+                        additionalProperties:
+                          type: string
+                      page:
+                        $ref: '#/components/schemas/MultitablePage'
+                    required:
+                      - records
+                      - displayMap
+                      - page
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/records:
+    post:
+      summary: Create a multitable record
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                viewId:
+                  type: string
+                sheetId:
+                  type: string
+                data:
+                  type: object
+                  additionalProperties: true
+              anyOf:
+                - required:
+                    - sheetId
+                - required:
+                    - viewId
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      record:
+                        $ref: '#/components/schemas/MultitableRecord'
+                    required:
+                      - record
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/multitable/patch:
+    post:
+      summary: Patch multitable cell values
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                viewId:
+                  type: string
+                sheetId:
+                  type: string
+                changes:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      recordId:
+                        type: string
+                      fieldId:
+                        type: string
+                      value:
+                        nullable: true
+                      expectedVersion:
+                        type: integer
+                    required:
+                      - recordId
+                      - fieldId
+                  minItems: 1
+              anyOf:
+                - required:
+                    - sheetId
+                - required:
+                    - viewId
+              required:
+                - changes
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/MultitablePatchResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ErrorResponse'
+                  - type: object
+                    properties:
+                      error:
+                        type: object
+                        properties:
+                          code:
+                            type: string
+                          message:
+                            type: string
+                          serverVersion:
+                            type: integer
   /api/permissions:
     get:
       summary: List all permissions

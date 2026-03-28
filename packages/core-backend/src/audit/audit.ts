@@ -1,6 +1,8 @@
+import { Logger } from '../core/logger'
 import { AuditService } from './AuditService'
 
 export const auditService = new AuditService()
+const logger = new Logger('auditLog')
 
 export interface AuditLogOptions {
   actorId?: string
@@ -17,14 +19,23 @@ export async function auditLog(options: AuditLogOptions): Promise<void> {
     : undefined
   const userId = Number.isFinite(parsedUserId) ? parsedUserId : undefined
 
-  await auditService.logEvent(
-    options.action.toUpperCase(),
-    options.action,
-    {
-      userId,
+  try {
+    await auditService.logEvent(
+      options.action.toUpperCase(),
+      options.action,
+      {
+        userId,
+        resourceType: options.resourceType,
+        resourceId: options.resourceId,
+        actionDetails: options.meta
+      }
+    )
+  } catch (error) {
+    logger.warn('Audit log write failed; continuing without blocking request', {
+      action: options.action,
       resourceType: options.resourceType,
       resourceId: options.resourceId,
-      actionDetails: options.meta
-    }
-  )
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
 }

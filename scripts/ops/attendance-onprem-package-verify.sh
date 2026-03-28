@@ -3,6 +3,7 @@ set -euo pipefail
 
 PACKAGE_FILE="${1:-}"
 VERIFY_SHA="${VERIFY_SHA:-1}"
+VERIFY_NO_GITHUB_LINKS="${VERIFY_NO_GITHUB_LINKS:-1}"
 EXTRACT_ROOT="${EXTRACT_ROOT:-}"
 cleanup_extract_root=0
 list_file=""
@@ -14,6 +15,35 @@ function die() {
 
 function info() {
   echo "[attendance-onprem-package-verify] $*" >&2
+}
+
+function verify_no_github_links() {
+  local root="$1"
+  local patterns='github\.com|githubusercontent\.com|github\.io'
+  local targets=()
+
+  [[ -f "${root}/INSTALL.txt" ]] && targets+=("${root}/INSTALL.txt")
+  [[ -d "${root}/docs/deployment" ]] && targets+=("${root}/docs/deployment")
+
+  if [[ ${#targets[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  if command -v rg >/dev/null 2>&1; then
+    if rg -n --ignore-case "$patterns" "${targets[@]}" >/tmp/attendance_onprem_link_hits.txt 2>/dev/null; then
+      cat /tmp/attendance_onprem_link_hits.txt >&2 || true
+      rm -f /tmp/attendance_onprem_link_hits.txt || true
+      die "Found disallowed GitHub links in on-prem package delivery files"
+    fi
+    rm -f /tmp/attendance_onprem_link_hits.txt || true
+  else
+    if grep -RInE "$patterns" "${targets[@]}" >/tmp/attendance_onprem_link_hits.txt 2>/dev/null; then
+      cat /tmp/attendance_onprem_link_hits.txt >&2 || true
+      rm -f /tmp/attendance_onprem_link_hits.txt || true
+      die "Found disallowed GitHub links in on-prem package delivery files"
+    fi
+    rm -f /tmp/attendance_onprem_link_hits.txt || true
+  fi
 }
 
 function verify_sha() {
@@ -88,9 +118,15 @@ pkg_root="${EXTRACT_ROOT}/${pkg_name}"
 
 required=(
   "apps/web/dist/index.html"
+  "apps/web/package.json"
+  "packages/core-backend/dist/src/index.js"
   "packages/core-backend/dist/src/db/migrate.js"
+  "packages/core-backend/package.json"
+  "plugins/plugin-attendance/plugin.json"
+  "plugins/plugin-attendance/index.cjs"
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"
+  "run-migrate.bat"
   "scripts/ops/attendance-wsl-portproxy-refresh.ps1"
   "scripts/ops/attendance-wsl-portproxy-task.ps1"
   "docker/app.env.example"
@@ -106,6 +142,22 @@ required=(
 for rel in "${required[@]}"; do
   [[ -e "${pkg_root}/${rel}" ]] || die "Required package content missing: ${rel}"
 done
+
+if [[ -d "${pkg_root}/plugins" ]]; then
+  extra_plugins="$(
+    find "${pkg_root}/plugins" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; \
+      | grep -v '^plugin-attendance$' \
+      || true
+  )"
+  if [[ -n "$extra_plugins" ]]; then
+    echo "$extra_plugins" >&2
+    die "Attendance on-prem package must only include plugin-attendance under plugins/"
+  fi
+fi
+
+if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
+  verify_no_github_links "$pkg_root"
+fi
 
 info "Package verify OK"
 info "  package: ${PACKAGE_FILE}"

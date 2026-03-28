@@ -58,12 +58,20 @@ on:
         description: 'Require CSV upload channel (/attendance/import/upload + csvFileId) (true/false)'
         required: false
         default: 'true'
+      require_import_upload_async:
+        description: 'Require async import commit to use CSV upload channel (/attendance/import/upload + csvFileId) (true/false)'
+        required: false
+        default: 'true'
       require_import_async:
         description: 'Require async import commit gate (true/false)'
         required: false
         default: 'true'
       require_import_telemetry:
         description: 'Require import telemetry fields (engine/processedRows/failedRows/elapsedMs) (true/false)'
+        required: false
+        default: 'true'
+      require_import_upsert_strategy:
+        description: 'Require recordUpsertStrategy in import telemetry payloads (true/false)'
         required: false
         default: 'true'
       require_preview_async:
@@ -80,6 +88,10 @@ on:
         default: 'false'
       require_admin_settings_save:
         description: 'Require admin settings save-cycle assertion in desktop full-flow (true/false)'
+        required: false
+        default: 'true'
+      retry_on_rate_limited:
+        description: 'Retry strict gates once when latest gate-summary reason includes RATE_LIMITED (true/false)'
         required: false
         default: 'true'
   schedule:
@@ -133,38 +145,81 @@ jobs:
             reason="$DRILL_API_SMOKE_REASON"
           fi
           mkdir -p output/playwright/attendance-prod-acceptance/drill
-          cat > output/playwright/attendance-prod-acceptance/drill/drill.txt <<'EOF'
-          This is a DRILL run for Attendance Strict Gates (Prod).
-          The workflow intentionally skips calling production APIs.
-          EOF
+          printf '%s\n' \
+            'This is a DRILL run for Attendance Strict Gates (Prod).' \
+            'The workflow intentionally skips calling production APIs.' \
+            > output/playwright/attendance-prod-acceptance/drill/drill.txt
+
+          api_smoke_status='SKIP'
+          provisioning_status='SKIP'
+          playwright_prod_status='SKIP'
+          playwright_desktop_status='SKIP'
+          playwright_mobile_status='SKIP'
+          api_smoke_reason=''
+          provisioning_reason=''
+          playwright_prod_reason=''
+          playwright_desktop_reason=''
+          playwright_mobile_reason=''
+
+          case "$DRILL_FAILED_GATE" in
+            apiSmoke)
+              api_smoke_status='FAIL'
+              api_smoke_reason="$reason"
+              ;;
+            provisioning)
+              provisioning_status='FAIL'
+              provisioning_reason="$reason"
+              ;;
+            playwrightProd)
+              playwright_prod_status='FAIL'
+              playwright_prod_reason="$reason"
+              ;;
+            playwrightDesktop)
+              playwright_desktop_status='FAIL'
+              playwright_desktop_reason="$reason"
+              ;;
+            playwrightMobile)
+              playwright_mobile_status='FAIL'
+              playwright_mobile_reason="$reason"
+              ;;
+          esac
 
           # Provide a minimal gate-summary.json so dashboards can exercise
           # artifact parsing without calling production.
-          cat > output/playwright/attendance-prod-acceptance/drill/gate-summary.json <<EOF
-          {
-            "schemaVersion": 1,
-            "generatedAt": "1970-01-01T00:00:00Z",
-            "apiBase": "<DRILL>",
-            "webUrl": "<DRILL>",
-            "expectProductMode": "attendance",
-            "exitCode": 1,
-            "gates": {
-              "preflight": "SKIP",
-              "apiSmoke": "$([[ "$DRILL_FAILED_GATE" == "apiSmoke" ]] && echo FAIL || echo SKIP)",
-              "provisioning": "$([[ "$DRILL_FAILED_GATE" == "provisioning" ]] && echo FAIL || echo SKIP)",
-              "playwrightProd": "$([[ "$DRILL_FAILED_GATE" == "playwrightProd" ]] && echo FAIL || echo SKIP)",
-              "playwrightDesktop": "$([[ "$DRILL_FAILED_GATE" == "playwrightDesktop" ]] && echo FAIL || echo SKIP)",
-              "playwrightMobile": "$([[ "$DRILL_FAILED_GATE" == "playwrightMobile" ]] && echo FAIL || echo SKIP)"
-            },
-            "gateReasons": {
-              "apiSmoke": $([[ "$DRILL_FAILED_GATE" == "apiSmoke" ]] && echo "\"$reason\"" || echo null),
-              "provisioning": $([[ "$DRILL_FAILED_GATE" == "provisioning" ]] && echo "\"$reason\"" || echo null),
-              "playwrightProd": $([[ "$DRILL_FAILED_GATE" == "playwrightProd" ]] && echo "\"$reason\"" || echo null),
-              "playwrightDesktop": $([[ "$DRILL_FAILED_GATE" == "playwrightDesktop" ]] && echo "\"$reason\"" || echo null),
-              "playwrightMobile": $([[ "$DRILL_FAILED_GATE" == "playwrightMobile" ]] && echo "\"$reason\"" || echo null)
-            }
-          }
-          EOF
+          jq -n \
+            --arg apiSmokeStatus "$api_smoke_status" \
+            --arg provisioningStatus "$provisioning_status" \
+            --arg playwrightProdStatus "$playwright_prod_status" \
+            --arg playwrightDesktopStatus "$playwright_desktop_status" \
+            --arg playwrightMobileStatus "$playwright_mobile_status" \
+            --arg apiSmokeReason "$api_smoke_reason" \
+            --arg provisioningReason "$provisioning_reason" \
+            --arg playwrightProdReason "$playwright_prod_reason" \
+            --arg playwrightDesktopReason "$playwright_desktop_reason" \
+            --arg playwrightMobileReason "$playwright_mobile_reason" \
+            '{
+              schemaVersion: 1,
+              generatedAt: "1970-01-01T00:00:00Z",
+              apiBase: "<DRILL>",
+              webUrl: "<DRILL>",
+              expectProductMode: "attendance",
+              exitCode: 1,
+              gates: {
+                preflight: "SKIP",
+                apiSmoke: $apiSmokeStatus,
+                provisioning: $provisioningStatus,
+                playwrightProd: $playwrightProdStatus,
+                playwrightDesktop: $playwrightDesktopStatus,
+                playwrightMobile: $playwrightMobileStatus
+              },
+              gateReasons: {
+                apiSmoke: (if ($apiSmokeReason | length) > 0 then $apiSmokeReason else null end),
+                provisioning: (if ($provisioningReason | length) > 0 then $provisioningReason else null end),
+                playwrightProd: (if ($playwrightProdReason | length) > 0 then $playwrightProdReason else null end),
+                playwrightDesktop: (if ($playwrightDesktopReason | length) > 0 then $playwrightDesktopReason else null end),
+                playwrightMobile: (if ($playwrightMobileReason | length) > 0 then $playwrightMobileReason else null end)
+              }
+            }' > output/playwright/attendance-prod-acceptance/drill/gate-summary.json
 
           if [[ "$DRILL_INVALID_SUMMARY" == "true" ]]; then
             invalid_tmp="output/playwright/attendance-prod-acceptance/drill/gate-summary.tmp.json"
@@ -204,9 +259,10 @@ jobs:
     timeout-minutes: 45
     env:
       API_BASE: ${{ inputs.api_base || vars.ATTENDANCE_API_BASE || 'http://142.171.239.56:8081/api' }}
-      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT }}
-      LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL }}
-      LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD }}
+      AUTH_TOKEN: ${{ secrets.ATTENDANCE_ADMIN_JWT || vars.ATTENDANCE_ADMIN_JWT || '' }}
+      LOGIN_EMAIL: ${{ secrets.ATTENDANCE_ADMIN_EMAIL || vars.ATTENDANCE_ADMIN_EMAIL || '' }}
+      LOGIN_PASSWORD: ${{ secrets.ATTENDANCE_ADMIN_PASSWORD || vars.ATTENDANCE_ADMIN_PASSWORD || '' }}
+      AUTH_RESOLVE_ALLOW_INSECURE_HTTP: ${{ vars.ATTENDANCE_ALLOW_INSECURE_HTTP || 'true' }}
       PROVISION_USER_ID: ${{ vars.ATTENDANCE_PROVISION_USER_ID }}
       EXPECT_PRODUCT_MODE: ${{ inputs.expect_product_mode || 'attendance' }}
       RUN_PREFLIGHT: 'false'
@@ -214,46 +270,19 @@ jobs:
       REQUIRE_IDEMPOTENCY: ${{ inputs.require_idempotency || 'true' }}
       REQUIRE_IMPORT_EXPORT: ${{ inputs.require_import_export || 'true' }}
       REQUIRE_IMPORT_UPLOAD: ${{ inputs.require_import_upload || 'true' }}
+      REQUIRE_IMPORT_UPLOAD_ASYNC: ${{ inputs.require_import_upload_async || 'true' }}
       REQUIRE_IMPORT_ASYNC: ${{ inputs.require_import_async || 'true' }}
       REQUIRE_IMPORT_TELEMETRY: ${{ inputs.require_import_telemetry || 'true' }}
+      REQUIRE_IMPORT_UPSERT_STRATEGY: ${{ inputs.require_import_upsert_strategy || 'true' }}
       REQUIRE_PREVIEW_ASYNC: ${{ inputs.require_preview_async || 'true' }}
       REQUIRE_BATCH_RESOLVE: ${{ inputs.require_batch_resolve || 'false' }}
       REQUIRE_IMPORT_JOB_RECOVERY: ${{ inputs.require_import_job_recovery || 'false' }}
       REQUIRE_ADMIN_SETTINGS_SAVE: ${{ inputs.require_admin_settings_save || 'true' }}
+      STRICT_RETRY_ON_RATE_LIMITED: ${{ inputs.retry_on_rate_limited || 'true' }}
       HEADLESS: 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Resolve attendance auth token
-        run: |
-          set -euo pipefail
-          output_root="output/playwright/attendance-prod-acceptance"
-          mkdir -p "$output_root"
-          auth_meta_file="${output_root}/auth-resolve-meta.txt"
-          auth_token_file="${RUNNER_TEMP}/attendance-auth-token.txt"
-
-          if AUTH_RESOLVE_ALLOW_INSECURE_HTTP=1 AUTH_RESOLVE_META_FILE="$auth_meta_file" ./scripts/ops/attendance-resolve-auth.sh > "$auth_token_file"; then
-            resolved_token="$(tr -d '\r\n' < "$auth_token_file")"
-            if [[ -z "$resolved_token" ]]; then
-              AUTH_RESOLVE_META_FILE="$auth_meta_file" \
-                AUTH_ERROR_FILE="${output_root}/auth-error.txt" \
-                API_BASE="$API_BASE" \
-                ./scripts/ops/attendance-write-auth-error.sh
-              echo "::error::Resolved attendance auth token is empty."
-              exit 1
-            fi
-            echo "::add-mask::${resolved_token}"
-            echo "AUTH_TOKEN_EFFECTIVE=${resolved_token}" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          AUTH_RESOLVE_META_FILE="$auth_meta_file" \
-            AUTH_ERROR_FILE="${output_root}/auth-error.txt" \
-            API_BASE="$API_BASE" \
-            ./scripts/ops/attendance-write-auth-error.sh
-          echo "::error::No valid attendance admin token. Rotate ATTENDANCE_ADMIN_JWT or configure ATTENDANCE_ADMIN_EMAIL/ATTENDANCE_ADMIN_PASSWORD."
-          exit 1
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -272,13 +301,130 @@ jobs:
       - name: Install Playwright browsers
         run: pnpm exec playwright install chromium --with-deps
 
+      - name: Resolve valid auth token
+        id: resolve-auth-token
+        run: |
+          set -euo pipefail
+          mkdir -p output/playwright/attendance-prod-acceptance
+          meta_file="output/playwright/attendance-prod-acceptance/auth-resolve-meta.txt"
+
+          if ! resolved_token="$(
+            API_BASE="${API_BASE}" \
+            AUTH_TOKEN="${AUTH_TOKEN}" \
+            LOGIN_EMAIL="${LOGIN_EMAIL}" \
+            LOGIN_PASSWORD="${LOGIN_PASSWORD}" \
+            AUTH_RESOLVE_ALLOW_INSECURE_HTTP="${AUTH_RESOLVE_ALLOW_INSECURE_HTTP}" \
+            AUTH_RESOLVE_META_FILE="${meta_file}" \
+            ./scripts/ops/attendance-resolve-auth.sh
+          )"; then
+            API_BASE="${API_BASE}" \
+            ./scripts/ops/attendance-write-auth-error.sh \
+              "${meta_file}" \
+              "output/playwright/attendance-prod-acceptance/auth-error.txt"
+            echo "::error::No valid attendance admin token; see auth-error.txt artifact."
+            exit 1
+          fi
+
+          echo "::add-mask::${resolved_token}"
+          echo "AUTH_TOKEN_EFFECTIVE=${resolved_token}" >> "$GITHUB_ENV"
+
+          auth_source="unknown"
+          if [[ -f "${meta_file}" ]]; then
+            auth_source="$(awk -F= '/^AUTH_SOURCE=/{print $2}' "${meta_file}" | tail -n1)"
+          fi
+          echo "auth_source=${auth_source}" >> "$GITHUB_OUTPUT"
+
       - name: Run strict gates twice (remote)
         id: run_strict
+        continue-on-error: true
         env:
           AUTH_TOKEN: ${{ env.AUTH_TOKEN_EFFECTIVE }}
         run: |
           set -euo pipefail
           ./scripts/ops/attendance-run-strict-gates-twice.sh
+
+      - name: Retry strict gates once on RATE_LIMITED
+        id: run_strict_retry
+        if: always() && steps.run_strict.outcome == 'failure' && env.STRICT_RETRY_ON_RATE_LIMITED == 'true'
+        continue-on-error: true
+        env:
+          AUTH_TOKEN: ${{ env.AUTH_TOKEN_EFFECTIVE }}
+        run: |
+          set -euo pipefail
+          root="output/playwright/attendance-prod-acceptance"
+          latest_summary="$(find "$root" -type f -name 'gate-summary.json' | sort | tail -n 1 || true)"
+          if [[ -z "${latest_summary}" || ! -f "${latest_summary}" ]]; then
+            echo "retry_ran=false" >> "$GITHUB_OUTPUT"
+            echo "No gate-summary.json found from initial strict run; skipping retry."
+            exit 0
+          fi
+
+          should_retry="$(jq -r '
+            [
+              .gateReasons.playwrightProd,
+              .gateReasons.playwrightDesktop,
+              .gateReasons.playwrightMobile
+            ]
+            | map(select(type == "string"))
+            | map(ascii_upcase)
+            | any(. == "RATE_LIMITED" or . == "PLAYWRIGHT_RATE_LIMITED")
+          ' "${latest_summary}" 2>/dev/null || echo false)"
+
+          if [[ "${should_retry}" != "true" ]]; then
+            echo "retry_ran=false" >> "$GITHUB_OUTPUT"
+            echo "Latest strict summary does not include RATE_LIMITED reason; skipping retry."
+            exit 0
+          fi
+
+          echo "retry_ran=true" >> "$GITHUB_OUTPUT"
+          retry_out="${root}/$(date -u +%Y%m%d-%H%M%S)-retry"
+          mkdir -p "${retry_out}"
+
+          API_BASE="${API_BASE}" \
+          AUTH_TOKEN="${AUTH_TOKEN}" \
+          WEB_URL="" \
+          EXPECT_PRODUCT_MODE="${EXPECT_PRODUCT_MODE}" \
+          HEADLESS="${HEADLESS}" \
+          RUN_PREFLIGHT="${RUN_PREFLIGHT}" \
+          PROVISION_USER_ID="${PROVISION_USER_ID}" \
+          REQUIRE_ATTENDANCE_ADMIN_API="${REQUIRE_ATTENDANCE_ADMIN_API}" \
+          REQUIRE_IDEMPOTENCY="${REQUIRE_IDEMPOTENCY}" \
+          REQUIRE_IMPORT_EXPORT="${REQUIRE_IMPORT_EXPORT}" \
+          REQUIRE_IMPORT_UPLOAD="${REQUIRE_IMPORT_UPLOAD}" \
+          REQUIRE_IMPORT_UPLOAD_ASYNC="${REQUIRE_IMPORT_UPLOAD_ASYNC}" \
+          REQUIRE_IMPORT_ASYNC="${REQUIRE_IMPORT_ASYNC}" \
+          REQUIRE_IMPORT_TELEMETRY="${REQUIRE_IMPORT_TELEMETRY}" \
+          REQUIRE_IMPORT_UPSERT_STRATEGY="${REQUIRE_IMPORT_UPSERT_STRATEGY}" \
+          REQUIRE_PREVIEW_ASYNC="${REQUIRE_PREVIEW_ASYNC}" \
+          REQUIRE_BATCH_RESOLVE="${REQUIRE_BATCH_RESOLVE}" \
+          REQUIRE_IMPORT_JOB_RECOVERY="${REQUIRE_IMPORT_JOB_RECOVERY}" \
+          REQUIRE_ADMIN_SETTINGS_SAVE="${REQUIRE_ADMIN_SETTINGS_SAVE}" \
+          OUTPUT_ROOT="${retry_out}" \
+          ./scripts/ops/attendance-run-gates.sh
+
+      - name: Finalize strict outcome
+        id: strict_final
+        if: always()
+        run: |
+          set -euo pipefail
+          root="output/playwright/attendance-prod-acceptance"
+          latest_summary="$(find "$root" -type f -name 'gate-summary.json' | sort | tail -n 1 || true)"
+          if [[ -z "${latest_summary}" || ! -f "${latest_summary}" ]]; then
+            echo "::error::Strict gates failed: gate-summary.json not found in ${root}"
+            exit 1
+          fi
+
+          exit_code="$(jq -r '.exitCode // 1' "${latest_summary}" 2>/dev/null || echo 1)"
+          if [[ "${exit_code}" == "0" ]]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "summary=${latest_summary}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          failed_gates="$(jq -r '.gates // {} | to_entries | map(select(.value == "FAIL") | .key) | join(",")' "${latest_summary}" 2>/dev/null || echo '')"
+          reasons="$(jq -r '.gateReasons // {} | to_entries | map(select(.value != null and (.value|tostring) != "") | "\(.key)=\(.value)") | join(" ")' "${latest_summary}" 2>/dev/null || echo '')"
+          echo "::error::Strict gates failed after optional retry (failed=${failed_gates:-unknown} reasons=${reasons:-none})"
+          exit 1
 
       - name: Validate gate-summary contract (strict)
         if: always()
@@ -439,25 +585,14 @@ jobs:
               '```',
             ].join('\n')
 
-            let items = []
-            if (titleOverride) {
-              const listed = await github.paginate(github.rest.issues.listForRepo, {
-                owner,
-                repo,
-                state: 'all',
-                per_page: 100,
-              })
-              items = Array.isArray(listed) ? listed : []
-            } else {
-              const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
-              const search = await github.rest.search.issuesAndPullRequests({
-                q,
-                sort: 'updated',
-                order: 'desc',
-                per_page: 20,
-              })
-              items = Array.isArray(search.data.items) ? search.data.items : []
-            }
+            const q = `repo:${owner}/${repo} type:issue in:title \"${title}\"`
+            const search = await github.rest.search.issuesAndPullRequests({
+              q,
+              sort: 'updated',
+              order: 'desc',
+              per_page: 20,
+            })
+            const items = Array.isArray(search.data.items) ? search.data.items : []
             const match = items.find((item) => item && !item.pull_request && item.title === title) || null
 
             if (!failed) {

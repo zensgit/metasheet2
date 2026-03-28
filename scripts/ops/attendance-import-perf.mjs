@@ -9,6 +9,7 @@
 
 import fs from 'fs/promises'
 import path from 'path'
+import { assertImportTelemetry, coerceNonNegativeNumber } from './attendance-import-telemetry-utils.mjs'
 
 const apiBase = String(process.env.API_BASE || '').replace(/\/+$/, '')
 let token = String(process.env.AUTH_TOKEN || '')
@@ -19,13 +20,22 @@ const mappingProfileIdOverride = String(process.env.MAPPING_PROFILE_ID || '')
 
 const rows = Math.max(1, Number(process.env.ROWS || 10_000))
 const mode = String(process.env.MODE || 'commit') // preview|commit
+const previewModeRaw = String(process.env.PREVIEW_MODE || 'sync').trim().toLowerCase()
 const scenario = String(process.env.SCENARIO || `${rows}-${mode}`)
+const perfProfile = String(process.env.PERF_PROFILE || process.env.PROFILE || 'standard').trim().toLowerCase()
 const doRollback = process.env.ROLLBACK !== 'false' // default true
 const commitAsync = process.env.COMMIT_ASYNC === 'true' || process.env.ASYNC === 'true'
+const requireImportTelemetry = process.env.REQUIRE_IMPORT_TELEMETRY !== 'false'
+const requireImportUpsertStrategy = process.env.REQUIRE_IMPORT_UPSERT_STRATEGY === 'true'
 
 const outputRoot = String(process.env.OUTPUT_DIR || 'output/playwright/attendance-import-perf')
 const exportCsv = process.env.EXPORT_CSV === 'true'
 const uploadCsv = process.env.UPLOAD_CSV === 'true'
+const payloadSourceRaw = String(process.env.PAYLOAD_SOURCE || 'auto').trim().toLowerCase()
+const csvRowsLimitHintRaw = Number(process.env.CSV_ROWS_LIMIT_HINT || 20_000)
+const csvRowsLimitHint = Number.isFinite(csvRowsLimitHintRaw) && csvRowsLimitHintRaw > 0
+  ? Math.floor(csvRowsLimitHintRaw)
+  : 20_000
 const exportType = String(process.env.EXPORT_TYPE || 'anomalies')
 const maxPreviewMs = parseOptionalPositiveInt('MAX_PREVIEW_MS')
 const maxCommitMs = parseOptionalPositiveInt('MAX_COMMIT_MS')
@@ -43,6 +53,10 @@ const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5)
 const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
 const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 180000))
 const importJobPollIntervalMs = Math.max(500, Number(process.env.IMPORT_JOB_POLL_INTERVAL_MS || 2000))
+const importJobPollApiRetryAttempts = Math.max(
+  1,
+  Number(process.env.IMPORT_JOB_POLL_API_RETRIES || 2),
+)
 const importJobPollTimeoutMs = Math.max(
   60_000,
   Number(process.env.IMPORT_JOB_POLL_TIMEOUT_MS || 30 * 60 * 1000),
@@ -53,8 +67,13 @@ const importJobPollTimeoutLargeMs = Math.max(
 )
 const importJobPollRecoveryGraceMs = Math.max(
   60_000,
-  Number(process.env.IMPORT_JOB_POLL_RECOVERY_GRACE_MS || 10 * 60 * 1000),
+  Number(process.env.IMPORT_JOB_POLL_RECOVERY_GRACE_MS || 3 * 60 * 1000),
 )
+const importJobPollStallTimeoutMs = Math.max(
+  importJobPollIntervalMs * 5,
+  Number(process.env.IMPORT_JOB_POLL_STALL_TIMEOUT_MS || importJobPollRecoveryGraceMs),
+)
+const previewAsyncRowThreshold = Math.max(1, Number(process.env.PREVIEW_ASYNC_ROW_THRESHOLD || 50_000))
 const importJobRecoveryAttemptsRaw = Number(process.env.IMPORT_JOB_RECOVERY_ATTEMPTS || 3)
 const importJobRecoveryAttempts = Number.isFinite(importJobRecoveryAttemptsRaw)
   ? Math.min(8, Math.max(1, Math.floor(importJobRecoveryAttemptsRaw)))
@@ -144,6 +163,12 @@ function isTokenizedImportEndpoint(pathname, method) {
   return /^\/attendance\/import\/(preview|preview-async|commit|commit-async)(?:\/|$)/.test(String(pathname || ''))
 }
 
+function isImportJobPollEndpoint(pathname, method) {
+  const upper = String(method || 'GET').toUpperCase()
+  if (upper !== 'GET') return false
+  return /^\/attendance\/import\/jobs\/[^/]+(?:\/|$)/.test(String(pathname || ''))
+}
+
 function isResponseOk(resp) {
   if (!resp?.res?.ok) return false
   if (resp.body && typeof resp.body === 'object' && (resp.body.success === false || resp.body.ok === false)) return false
@@ -171,6 +196,20 @@ function isAsyncCommitPollTimeoutFailure(error) {
   const message = String(error?.message || error || '').toLowerCase()
   return message.includes('async commit job timed out')
     || message.includes('async commit job poll timed out')
+}
+
+function isRetriableAsyncCommitRecoveryFailure(error) {
+  const message = String(error?.message || error || '').toLowerCase()
+  if (!message) return false
+  return message.includes('http 429')
+    || message.includes('http 500')
+    || message.includes('http 502')
+    || message.includes('http 503')
+    || message.includes('http 504')
+    || message.includes('network error')
+    || message.includes('fetch failed')
+    || message.includes('econnreset')
+    || message.includes('etimedout')
 }
 
 function buildCommitAttemptIdempotencyKey(baseKey, attempt) {
@@ -278,7 +317,11 @@ async function refreshAuthToken() {
 async function apiFetch(pathname, init = {}) {
   const url = `${apiBase}${pathname}`
   const method = String(init.method || 'GET').toUpperCase()
-  const attempts = isTokenizedImportEndpoint(pathname, method) ? 1 : apiRetryAttempts
+  const attempts = isTokenizedImportEndpoint(pathname, method)
+    ? 1
+    : isImportJobPollEndpoint(pathname, method)
+      ? Math.max(1, Math.min(importJobPollApiRetryAttempts, apiRetryAttempts))
+      : apiRetryAttempts
   const res = await fetchWithRetry(url, {
     ...init,
     headers: {
@@ -375,12 +418,6 @@ function resolveEngineByRows(rowCount) {
   return Number(rowCount) >= bulkEngineThreshold ? 'bulk' : 'standard'
 }
 
-function coerceNonNegativeNumber(value) {
-  const numeric = Number(value)
-  if (!Number.isFinite(numeric) || numeric < 0) return null
-  return Math.floor(numeric)
-}
-
 function coerceNonNegativeFloat(value, digits = 2) {
   const numeric = Number(value)
   if (!Number.isFinite(numeric) || numeric < 0) return null
@@ -432,9 +469,74 @@ function makeCsv({ startDate, userId, groupName, userPoolSize, workDateSpanDays 
   return lines.join('\n')
 }
 
+function makeRowsPayload({ startDate, userId, userPoolSize, workDateSpanDays }) {
+  const payloadRows = new Array(rows)
+  for (let i = 0; i < rows; i += 1) {
+    const userIndex = i % userPoolSize
+    const dayIndex = Math.floor(i / userPoolSize)
+    const boundedDayIndex = dayIndex % workDateSpanDays
+    const d = new Date(startDate)
+    d.setUTCDate(d.getUTCDate() - boundedDayIndex)
+    const workDate = toDateOnly(d)
+    const rowUserId = userPoolSize > 1
+      ? `${userId}-perf-${String(userIndex + 1).padStart(4, '0')}`
+      : String(userId)
+    payloadRows[i] = {
+      workDate,
+      userId: rowUserId,
+      fields: {
+        firstInAt: `${workDate}T09:00:00Z`,
+        lastOutAt: `${workDate}T18:00:00Z`,
+        status: 'normal',
+      },
+    }
+  }
+  return payloadRows
+}
+
+function resolvePayloadSource() {
+  if (payloadSourceRaw && payloadSourceRaw !== 'auto' && payloadSourceRaw !== 'csv' && payloadSourceRaw !== 'rows') {
+    die('PAYLOAD_SOURCE must be one of: auto|csv|rows')
+  }
+  if (payloadSourceRaw === 'rows') {
+    return { payloadSource: 'rows', effectiveUploadCsv: false, reason: 'forced_rows' }
+  }
+  if (payloadSourceRaw === 'csv') {
+    return { payloadSource: 'csv', effectiveUploadCsv: uploadCsv, reason: 'forced_csv' }
+  }
+  // Preview payloads cannot exceed the CSV row cap when using upload+csvFileId.
+  // Fall back to rows mode above this cap.
+  if (mode === 'preview' && uploadCsv && rows > csvRowsLimitHint) {
+    return {
+      payloadSource: 'rows',
+      effectiveUploadCsv: false,
+      reason: `preview_rows_exceeds_csv_limit_hint(${csvRowsLimitHint})`,
+    }
+  }
+  if (rows > csvRowsLimitHint) {
+    return {
+      payloadSource: 'rows',
+      effectiveUploadCsv: false,
+      reason: `rows_exceeds_csv_limit_hint(${csvRowsLimitHint})`,
+    }
+  }
+  return { payloadSource: 'csv', effectiveUploadCsv: uploadCsv, reason: 'auto_csv' }
+}
+
+function resolvePreviewMode() {
+  if (previewModeRaw === 'sync' || previewModeRaw === 'async') return previewModeRaw
+  if (previewModeRaw !== 'auto') {
+    die('PREVIEW_MODE must be one of: sync|async|auto')
+  }
+  return rows >= previewAsyncRowThreshold ? 'async' : 'sync'
+}
+
 async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2000 } = {}) {
   const started = Date.now()
   let transientErrors = 0
+  const transientRecoveryErrorThreshold = 3
+  let lastProgressSignal = ''
+  let lastProgressAt = started
   while (true) {
     let job = null
     try {
@@ -443,8 +545,12 @@ async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2
       transientErrors += 1
       const message = (error && error.message) || String(error)
       log(`WARN: transient job poll network error (attempt=${transientErrors}); retrying (${message})`)
-      if (Date.now() - started > timeoutMs) {
+      const elapsed = Date.now() - started
+      if (elapsed > timeoutMs) {
         throw new Error(`async commit job poll timed out after network errors: ${message}`)
+      }
+      if (transientErrors >= transientRecoveryErrorThreshold && elapsed > importJobPollRecoveryGraceMs) {
+        throw new Error(`async commit job poll timed out after transient errors (network): ${message}`)
       }
       await sleep(intervalMs)
       continue
@@ -455,7 +561,11 @@ async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2
       if (transient) {
         transientErrors += 1
         log(`WARN: transient job poll error (attempt=${transientErrors} status=${status}); retrying`)
-        if (Date.now() - started > timeoutMs) {
+        const elapsed = Date.now() - started
+        if (elapsed > timeoutMs) {
+          throw new Error(`async commit job poll timed out after transient errors (last status=${status})`)
+        }
+        if (transientErrors >= transientRecoveryErrorThreshold && elapsed > importJobPollRecoveryGraceMs) {
           throw new Error(`async commit job poll timed out after transient errors (last status=${status})`)
         }
         await sleep(intervalMs)
@@ -469,6 +579,24 @@ async function pollImportJob(jobId, { timeoutMs = 30 * 60 * 1000, intervalMs = 2
     }
     const data = job.body?.data ?? job.body
     const status = String(data?.status || '')
+    const progressSignal = [
+      status || 'unknown',
+      String(data?.progressPercent ?? data?.progress ?? ''),
+      String(data?.processedRows ?? ''),
+      String(data?.failedRows ?? ''),
+      String(data?.elapsedMs ?? ''),
+      String(data?.updatedAt ?? ''),
+      String(data?.step ?? data?.phase ?? ''),
+    ].join('|')
+    const now = Date.now()
+    if (!lastProgressSignal || progressSignal !== lastProgressSignal) {
+      lastProgressSignal = progressSignal
+      lastProgressAt = now
+    } else if ((now - lastProgressAt) > importJobPollStallTimeoutMs && (now - started) > importJobPollRecoveryGraceMs) {
+      throw new Error(
+        `async commit job poll timed out after no progress (stallMs=${now - lastProgressAt} status=${status || 'unknown'})`,
+      )
+    }
     if (status === 'completed') return data
     if (status === 'failed') {
       const msg = data?.error ? String(data.error) : 'job failed'
@@ -535,10 +663,11 @@ async function recoverAsyncCommitJobWithRetry({
       lastError = error
       const message = (error && error.message) || String(error)
       const timedOut = isAsyncCommitPollTimeoutFailure(error)
+      const transientRecoveryError = isRetriableAsyncCommitRecoveryFailure(error)
       log(
         `WARN: commit-async idempotency recovery attempt ${recoveryAttempt}/${importJobRecoveryAttempts} failed (${message})`,
       )
-      if (!timedOut || recoveryAttempt >= importJobRecoveryAttempts) {
+      if ((!timedOut && !transientRecoveryError) || recoveryAttempt >= importJobRecoveryAttempts) {
         throw error
       }
       const delayMs = computeRetryDelayMs({
@@ -560,12 +689,20 @@ async function run() {
 
   log(`API_BASE=${apiBase}`)
   log(`scenario=${scenario}`)
+  log(`profile=${perfProfile}`)
   await refreshAuthToken()
+  const payloadPlan = resolvePayloadSource()
+  const previewMode = resolvePreviewMode()
+  const previewEndpoint = previewMode === 'async'
+    ? '/attendance/import/preview-async'
+    : '/attendance/import/preview'
   const requestedImportEngine = resolveEngineByRows(rows)
   log(`rows=${rows} bulk_engine_threshold=${bulkEngineThreshold} requested_engine=${requestedImportEngine}`)
+  log(`preview_mode_requested=${previewModeRaw} preview_mode_effective=${previewMode} preview_async_row_threshold=${previewAsyncRowThreshold}`)
+  log(`payload_source=${payloadPlan.payloadSource} reason=${payloadPlan.reason} upload_csv_requested=${uploadCsv} upload_csv_effective=${payloadPlan.effectiveUploadCsv} csv_rows_limit_hint=${csvRowsLimitHint}`)
   log(`retry_profile preview=${previewRetryAttempts} commit=${commitRetryAttempts} commit_large=${commitRetryAttemptsLarge}`)
   log(
-    `job_poll interval_ms=${importJobPollIntervalMs} timeout_ms=${importJobPollTimeoutMs} timeout_large_ms=${importJobPollTimeoutLargeMs} recovery_grace_ms=${importJobPollRecoveryGraceMs} recovery_attempts=${importJobRecoveryAttempts}`,
+    `job_poll interval_ms=${importJobPollIntervalMs} api_retries=${importJobPollApiRetryAttempts} timeout_ms=${importJobPollTimeoutMs} timeout_large_ms=${importJobPollTimeoutLargeMs} recovery_grace_ms=${importJobPollRecoveryGraceMs} stall_timeout_ms=${importJobPollStallTimeoutMs} recovery_attempts=${importJobRecoveryAttempts}`,
   )
   if (expectRecordUpsertStrategy) {
     log(`expect_record_upsert_strategy=${expectRecordUpsertStrategy}`)
@@ -603,18 +740,30 @@ async function run() {
   const groupName = `Perf Group ${Date.now().toString(36)}`
   const syntheticShape = resolveSyntheticImportShape(rows)
   log(`synthetic_shape users=${syntheticShape.userPoolSize} work_date_span_days=${syntheticShape.workDateSpanDays}`)
-  const csvText = makeCsv({
-    startDate: new Date(),
-    userId,
-    groupName,
-    userPoolSize: syntheticShape.userPoolSize,
-    workDateSpanDays: syntheticShape.workDateSpanDays,
-  })
+  const startDate = new Date()
+  let csvText = ''
+  let rowsPayload = null
+  if (payloadPlan.payloadSource === 'rows') {
+    rowsPayload = makeRowsPayload({
+      startDate,
+      userId,
+      userPoolSize: syntheticShape.userPoolSize,
+      workDateSpanDays: syntheticShape.workDateSpanDays,
+    })
+  } else {
+    csvText = makeCsv({
+      startDate,
+      userId,
+      groupName,
+      userPoolSize: syntheticShape.userPoolSize,
+      workDateSpanDays: syntheticShape.workDateSpanDays,
+    })
+  }
 
-  const memAfterCsv = process.memoryUsage()
+  const memAfterPayload = process.memoryUsage()
 
   let csvFileId = ''
-  if (uploadCsv) {
+  if (payloadPlan.payloadSource === 'csv' && payloadPlan.effectiveUploadCsv) {
     const query = new URLSearchParams()
     if (orgId) query.set('orgId', orgId)
     query.set('filename', `attendance-perf-${rows}.csv`)
@@ -645,7 +794,9 @@ async function run() {
     userId,
     timezone: payloadExample.timezone || timezone,
     mappingProfileId: resolvedMappingProfileId,
-    ...(uploadCsv ? { csvFileId } : { csvText }),
+    ...(payloadPlan.payloadSource === 'rows'
+      ? { rows: rowsPayload }
+      : (payloadPlan.effectiveUploadCsv ? { csvFileId } : { csvText })),
     idempotencyKey: runId,
     __importEngine: requestedImportEngine,
     batchMeta: {
@@ -654,6 +805,9 @@ async function run() {
       requestedImportEngine,
       syntheticUserPoolSize: syntheticShape.userPoolSize,
       syntheticWorkDateSpanDays: syntheticShape.workDateSpanDays,
+      payloadSource: payloadPlan.payloadSource,
+      uploadCsvRequested: uploadCsv,
+      uploadCsvEffective: payloadPlan.effectiveUploadCsv,
     },
     previewLimit: Number.isFinite(previewLimit) && previewLimit > 0 ? Math.floor(previewLimit) : undefined,
     returnItems,
@@ -665,8 +819,11 @@ async function run() {
 
   // Preview (token can expire/be consumed when upstream returns transient failures).
   let preview = null
+  let previewAsyncJob = null
+  let previewItems = null
   let tPreview0 = nowMs()
   let tPreview1 = tPreview0
+  const previewAsyncIdempotencyKey = `${runId}-preview`
   for (let attempt = 1; attempt <= previewRetryAttempts; attempt += 1) {
     const prepPreview = await apiFetch('/attendance/import/prepare', { method: 'POST', body: '{}' })
     assertOk(prepPreview, `POST /attendance/import/prepare (preview attempt ${attempt})`)
@@ -675,10 +832,29 @@ async function run() {
 
     try {
       tPreview0 = nowMs()
-      preview = await apiFetch('/attendance/import/preview', {
+      preview = await apiFetch(previewEndpoint, {
         method: 'POST',
-        body: JSON.stringify({ ...basePayload, commitToken: commitTokenPreview }),
+        body: JSON.stringify({
+          ...basePayload,
+          idempotencyKey: previewMode === 'async' ? previewAsyncIdempotencyKey : basePayload.idempotencyKey,
+          commitToken: commitTokenPreview,
+        }),
       })
+      if (previewMode === 'async') {
+        assertOk(preview, `POST ${previewEndpoint}`)
+        const previewJobId = preview.body?.data?.job?.id
+        if (!previewJobId) die('preview-async did not return job.id')
+        const previewPollTimeoutMs = rows >= 500_000
+          ? importJobPollTimeoutLargeMs
+          : importJobPollTimeoutMs
+        previewAsyncJob = await pollImportJob(previewJobId, {
+          timeoutMs: previewPollTimeoutMs,
+          intervalMs: importJobPollIntervalMs,
+        })
+        previewItems = previewAsyncJob?.preview?.items
+      } else {
+        previewItems = preview.body?.data?.items
+      }
       tPreview1 = nowMs()
     } catch (error) {
       if (attempt >= previewRetryAttempts) throw error
@@ -708,25 +884,71 @@ async function run() {
     break
   }
   if (!preview) die('preview response missing after retries')
-  assertOk(preview, 'POST /attendance/import/preview')
-  const previewItems = preview.body?.data?.items
+  if (previewMode === 'sync') {
+    assertOk(preview, 'POST /attendance/import/preview')
+  }
   if (!Array.isArray(previewItems) || previewItems.length === 0) die('preview returned 0 items')
+
+  let previewTelemetry = null
+  if (previewMode === 'async') {
+    if (!previewAsyncJob || typeof previewAsyncJob !== 'object') {
+      die('preview-async job result missing')
+    }
+    const previewPayload = previewAsyncJob?.preview
+    const derivedFailedRows = (coerceNonNegativeNumber(previewPayload?.stats?.invalid) ?? 0)
+      + (coerceNonNegativeNumber(previewPayload?.stats?.duplicates) ?? 0)
+    const derived = {
+      engine: previewAsyncJob?.engine || requestedImportEngine,
+      processedRows: previewAsyncJob?.processedRows ?? previewPayload?.rowCount ?? previewPayload?.total ?? previewItems.length,
+      failedRows: previewAsyncJob?.failedRows ?? derivedFailedRows,
+      elapsedMs: previewAsyncJob?.elapsedMs ?? Math.max(0, tPreview1 - tPreview0),
+    }
+    if (requireImportTelemetry) {
+      previewTelemetry = assertImportTelemetry(previewAsyncJob, 'GET /attendance/import/jobs/:id (preview-async)', {
+        minProcessedRows: 1,
+        requireExplicit: true,
+      })
+    } else {
+      previewTelemetry = assertImportTelemetry(derived, 'preview-async telemetry (derived)', {
+        minProcessedRows: 1,
+        requireExplicit: true,
+      })
+    }
+  } else {
+    const previewData = preview.body?.data ?? {}
+    const previewStats = previewData?.stats ?? {}
+    const derivedFailedRows = (coerceNonNegativeNumber(previewStats?.invalid) ?? 0)
+      + (coerceNonNegativeNumber(previewStats?.duplicates) ?? 0)
+    const derived = {
+      engine: requestedImportEngine,
+      processedRows: previewData?.rowCount ?? previewData?.total ?? previewItems.length,
+      failedRows: derivedFailedRows,
+      elapsedMs: Math.max(0, tPreview1 - tPreview0),
+    }
+    previewTelemetry = assertImportTelemetry(derived, 'POST /attendance/import/preview (derived telemetry)', {
+      minProcessedRows: 1,
+      requireExplicit: true,
+    })
+  }
 
   if (mode === 'preview') {
     const summary = {
       schemaVersion: 2,
       startedAt,
       scenario,
+      profile: perfProfile,
       mode,
+      previewMode,
+      previewEndpoint,
       apiBase,
       orgId,
       rows,
-      engine: requestedImportEngine,
+      engine: previewTelemetry.engine,
       requestedImportEngine,
-      resolvedImportEngine: requestedImportEngine,
-      processedRows: null,
-      failedRows: null,
-      elapsedMs: null,
+      resolvedImportEngine: previewTelemetry.engine,
+      processedRows: previewTelemetry.processedRows,
+      failedRows: previewTelemetry.failedRows,
+      elapsedMs: previewTelemetry.elapsedMs,
       progressPercent: null,
       throughputRowsPerSec: null,
       perfMetrics: {
@@ -734,13 +956,16 @@ async function run() {
         commitMs: null,
         exportMs: null,
         rollbackMs: null,
-        processedRows: null,
-        failedRows: null,
-        elapsedMs: null,
+        processedRows: previewTelemetry.processedRows,
+        failedRows: previewTelemetry.failedRows,
+        elapsedMs: previewTelemetry.elapsedMs,
         progressPercent: null,
         throughputRowsPerSec: null,
       },
-      uploadCsv,
+      uploadCsv: payloadPlan.effectiveUploadCsv,
+      uploadCsvRequested: uploadCsv,
+      payloadSource: payloadPlan.payloadSource,
+      payloadSourceReason: payloadPlan.reason,
       previewMs: tPreview1 - tPreview0,
       commitMs: null,
       exportMs: null,
@@ -748,12 +973,12 @@ async function run() {
       rolledBack: false,
       memory: {
         before: memBefore,
-        afterCsv: memAfterCsv,
+        afterPayload: memAfterPayload,
       },
       outputDir: outDir,
     }
     await writeJson(path.join(outDir, 'perf-summary.json'), summary)
-    log(`preview ok: rows=${rows} ms=${summary.previewMs}`)
+    log(`preview ok: rows=${rows} ms=${summary.previewMs} engine=${summary.engine} processed=${summary.processedRows} failed=${summary.failedRows}`)
     log(`Wrote: ${path.join(outDir, 'perf-summary.json')}`)
     return
   }
@@ -887,6 +1112,7 @@ async function run() {
   let chunkItemsSize = null
   let chunkRecordsSize = null
   let recordUpsertStrategy = null
+  const commitTelemetryPayload = commitAsync ? finalAsyncJob : commit.body?.data
   if (commitAsync) {
     const job = commit.body?.data?.job
     jobId = finalAsyncJobId || job?.id
@@ -895,9 +1121,21 @@ async function run() {
     if (!finalJob) die('commit-async job result missing')
     batchId = finalJob?.batchId
     if (typeof finalJob?.engine === 'string' && finalJob.engine) engine = finalJob.engine
-    processedRows = coerceNonNegativeNumber(finalJob?.processedRows)
-    failedRows = coerceNonNegativeNumber(finalJob?.failedRows)
-    jobElapsedMs = coerceNonNegativeNumber(finalJob?.elapsedMs)
+    processedRows = coerceNonNegativeNumber(
+      requireImportTelemetry
+        ? finalJob?.processedRows
+        : (finalJob?.processedRows ?? finalJob?.rowCount ?? finalJob?.imported),
+    )
+    failedRows = coerceNonNegativeNumber(
+      requireImportTelemetry
+        ? finalJob?.failedRows
+        : (finalJob?.failedRows ?? finalJob?.skippedCount),
+    )
+    jobElapsedMs = coerceNonNegativeNumber(
+      requireImportTelemetry
+        ? finalJob?.elapsedMs
+        : (finalJob?.elapsedMs ?? finalJob?.jobElapsedMs),
+    )
     progressPercent = coerceNonNegativeFloat(finalJob?.progressPercent)
     throughputRowsPerSec = coerceNonNegativeFloat(finalJob?.throughputRowsPerSec)
     chunkItemsSize = coerceNonNegativeNumber(finalJob?.summary?.chunkConfig?.itemsChunkSize)
@@ -916,9 +1154,21 @@ async function run() {
   } else {
     batchId = commit.body?.data?.batchId
     if (typeof commit.body?.data?.engine === 'string' && commit.body.data.engine) engine = commit.body.data.engine
-    processedRows = coerceNonNegativeNumber(commit.body?.data?.processedRows ?? commit.body?.data?.rowCount ?? commit.body?.data?.imported)
-    failedRows = coerceNonNegativeNumber(commit.body?.data?.failedRows ?? commit.body?.data?.skippedCount)
-    jobElapsedMs = coerceNonNegativeNumber(commit.body?.data?.elapsedMs ?? commit.body?.data?.jobElapsedMs)
+    processedRows = coerceNonNegativeNumber(
+      requireImportTelemetry
+        ? commit.body?.data?.processedRows
+        : (commit.body?.data?.processedRows ?? commit.body?.data?.rowCount ?? commit.body?.data?.imported),
+    )
+    failedRows = coerceNonNegativeNumber(
+      requireImportTelemetry
+        ? commit.body?.data?.failedRows
+        : (commit.body?.data?.failedRows ?? commit.body?.data?.skippedCount),
+    )
+    jobElapsedMs = coerceNonNegativeNumber(
+      requireImportTelemetry
+        ? commit.body?.data?.elapsedMs
+        : (commit.body?.data?.elapsedMs ?? commit.body?.data?.jobElapsedMs),
+    )
     progressPercent = coerceNonNegativeFloat(commit.body?.data?.progressPercent)
     throughputRowsPerSec = coerceNonNegativeFloat(commit.body?.data?.throughputRowsPerSec)
     chunkItemsSize = coerceNonNegativeNumber(commit.body?.data?.meta?.chunkConfig?.itemsChunkSize)
@@ -951,12 +1201,41 @@ async function run() {
     log(`WARN: batch metadata fetch failed: ${(error && error.message) || String(error)}`)
   }
   const tCommit1 = nowMs()
-  const elapsedMs = jobElapsedMs ?? Math.max(0, tCommit1 - tCommit0)
-  if (processedRows === null) {
-    processedRows = coerceNonNegativeNumber(rows)
+  if (requireImportTelemetry) {
+    const telemetryLabel = commitAsync
+      ? 'GET /attendance/import/jobs/:id (commit-async)'
+      : 'POST /attendance/import/commit'
+    const telemetry = assertImportTelemetry(commitTelemetryPayload, telemetryLabel, {
+      minProcessedRows: 1,
+      requireExplicit: true,
+      requireUpsertStrategy: requireImportUpsertStrategy,
+    })
+    engine = telemetry.engine
+    processedRows = telemetry.processedRows
+    failedRows = telemetry.failedRows
+    jobElapsedMs = telemetry.elapsedMs
+    if (!recordUpsertStrategy && telemetry.recordUpsertStrategy) {
+      recordUpsertStrategy = telemetry.recordUpsertStrategy
+    }
   }
-  if (failedRows === null) {
-    failedRows = 0
+  const elapsedMs = jobElapsedMs ?? Math.max(0, tCommit1 - tCommit0)
+  const commitWallClockMs = Math.max(0, tCommit1 - tCommit0)
+  const commitGateSource = commitAsync && Number.isFinite(elapsedMs)
+    ? 'jobElapsedMs'
+    : 'wallClockMs'
+  const commitGateMs = commitGateSource === 'jobElapsedMs'
+    ? elapsedMs
+    : commitWallClockMs
+  if (!requireImportTelemetry) {
+    if (processedRows === null) {
+      processedRows = coerceNonNegativeNumber(rows)
+    }
+    if (failedRows === null) {
+      failedRows = 0
+    }
+  } else {
+    if (processedRows === null) die('commit telemetry missing processedRows')
+    if (failedRows === null) die('commit telemetry missing failedRows')
   }
   const normalizedRecordUpsertStrategy = normalizeRecordUpsertStrategy(recordUpsertStrategy)
   recordUpsertStrategy = normalizedRecordUpsertStrategy || null
@@ -992,7 +1271,10 @@ async function run() {
     schemaVersion: 2,
     startedAt,
     scenario,
+    profile: perfProfile,
     mode,
+    previewMode,
+    previewEndpoint,
     apiBase,
     orgId,
     rows,
@@ -1013,7 +1295,9 @@ async function run() {
     jobElapsedMs,
     perfMetrics: {
       previewMs: tPreview1 - tPreview0,
-      commitMs: tCommit1 - tCommit0,
+      commitMs: commitWallClockMs,
+      commitGateMs,
+      commitGateSource,
       exportMs,
       rollbackMs,
       processedRows,
@@ -1027,20 +1311,25 @@ async function run() {
         recordsChunkSize: chunkRecordsSize,
       },
     },
-    uploadCsv,
+    uploadCsv: payloadPlan.effectiveUploadCsv,
+    uploadCsvRequested: uploadCsv,
+    payloadSource: payloadPlan.payloadSource,
+    payloadSourceReason: payloadPlan.reason,
     syntheticUserPoolSize: syntheticShape.userPoolSize,
     syntheticWorkDateSpanDays: syntheticShape.workDateSpanDays,
     commitIdempotencyKey,
     jobId,
     previewMs: tPreview1 - tPreview0,
-    commitMs: tCommit1 - tCommit0,
+    commitMs: commitWallClockMs,
+    commitGateMs,
+    commitGateSource,
     exportMs,
     rollbackMs,
     batchId,
     rolledBack,
     memory: {
       before: memBefore,
-      afterCsv: memAfterCsv,
+      afterPayload: memAfterPayload,
     },
     outputDir: outDir,
     thresholds: {
@@ -1058,8 +1347,10 @@ async function run() {
   if (maxPreviewMs !== null && summary.previewMs > maxPreviewMs) {
     summary.regressions.push(`previewMs=${summary.previewMs} exceeds maxPreviewMs=${maxPreviewMs}`)
   }
-  if (maxCommitMs !== null && summary.commitMs > maxCommitMs) {
-    summary.regressions.push(`commitMs=${summary.commitMs} exceeds maxCommitMs=${maxCommitMs}`)
+  if (maxCommitMs !== null && summary.commitGateMs > maxCommitMs) {
+    summary.regressions.push(
+      `commitGateMs=${summary.commitGateMs} (source=${summary.commitGateSource}, wallClockMs=${summary.commitMs}) exceeds maxCommitMs=${maxCommitMs}`
+    )
   }
   if (maxExportMs !== null && summary.exportMs !== null && summary.exportMs > maxExportMs) {
     summary.regressions.push(`exportMs=${summary.exportMs} exceeds maxExportMs=${maxExportMs}`)
@@ -1082,7 +1373,7 @@ async function run() {
 
   await writeJson(path.join(outDir, 'perf-summary.json'), summary)
   log(`preview ok: rows=${rows} ms=${summary.previewMs}`)
-  log(`commit ok: batchId=${batchId} ms=${summary.commitMs}`)
+  log(`commit ok: batchId=${batchId} ms=${summary.commitMs} gateMs=${summary.commitGateMs} source=${summary.commitGateSource}`)
   if (exportMs !== null) log(`export ok: type=${exportType} ms=${exportMs}`)
   if (rolledBack) log(`rollback ok: ms=${rollbackMs}`)
   if (progressPercent !== null || throughputRowsPerSec !== null) {
