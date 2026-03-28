@@ -386,6 +386,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/approvals/pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get pending approvals for current actor */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/approvals/{id}": {
         parameters: {
             query?: never;
@@ -412,13 +449,10 @@ export interface paths {
                     };
                     content?: never;
                 };
-                /** @description Not found */
-                404: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                503: components["responses"]["ServiceUnavailable"];
             };
         };
         put?: never;
@@ -483,6 +517,7 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
                 /** @description Version conflict */
                 409: {
                     headers: {
@@ -492,6 +527,7 @@ export interface paths {
                         "application/json": components["schemas"]["ErrorResponse"];
                     };
                 };
+                503: components["responses"]["ServiceUnavailable"];
             };
         };
         delete?: never;
@@ -555,6 +591,7 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
                 /** @description Version conflict */
                 409: {
                     headers: {
@@ -564,6 +601,7 @@ export interface paths {
                         "application/json": components["schemas"]["ErrorResponse"];
                     };
                 };
+                503: components["responses"]["ServiceUnavailable"];
             };
         };
         delete?: never;
@@ -5348,6 +5386,1011 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/views/team": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List PLM workbench team views */
+        get: {
+            parameters: {
+                query?: {
+                    kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            }[];
+                            metadata?: {
+                                total?: number;
+                                activeTotal?: number;
+                                archivedTotal?: number;
+                                tenantId?: string;
+                                kind?: string;
+                                defaultViewId?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        put?: never;
+        /** Save PLM workbench team view */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        kind: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                        name: string;
+                        state: {
+                            [key: string]: unknown;
+                        };
+                        isDefault?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/views/team/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete PLM workbench team view */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                message?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Rename PLM workbench team view */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/plm-workbench/views/team/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Batch process PLM workbench team views */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        action: "archive" | "restore" | "delete";
+                        ids: string[];
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                /** @enum {string} */
+                                action?: "archive" | "restore" | "delete";
+                                processedIds?: string[];
+                                skippedIds?: string[];
+                                items?: {
+                                    id?: string;
+                                    /** @enum {string} */
+                                    kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                    /** @enum {string} */
+                                    scope?: "team";
+                                    name?: string;
+                                    ownerUserId?: string;
+                                    canManage?: boolean;
+                                    permissions?: {
+                                        [key: string]: boolean;
+                                    };
+                                    isDefault?: boolean;
+                                    isArchived?: boolean;
+                                    state?: {
+                                        [key: string]: unknown;
+                                    };
+                                    /** Format: date-time */
+                                    archivedAt?: string | null;
+                                    /** Format: date-time */
+                                    createdAt?: string | null;
+                                    /** Format: date-time */
+                                    updatedAt?: string | null;
+                                    /** Format: date-time */
+                                    lastDefaultSetAt?: string | null;
+                                }[];
+                            };
+                            metadata?: {
+                                requestedTotal?: number;
+                                processedTotal?: number;
+                                skippedTotal?: number;
+                                processedKinds?: string[];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/views/team/{id}/default": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Set default PLM workbench team view */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        /** Clear default PLM workbench team view */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/filter-presets/team": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List PLM workbench team filter presets */
+        get: {
+            parameters: {
+                query?: {
+                    kind?: "bom" | "where-used";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            }[];
+                            metadata?: {
+                                total?: number;
+                                activeTotal?: number;
+                                archivedTotal?: number;
+                                tenantId?: string;
+                                kind?: string;
+                                defaultPresetId?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        put?: never;
+        /** Save PLM workbench team filter preset */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        kind: "bom" | "where-used";
+                        name: string;
+                        state: {
+                            field?: string;
+                            value?: string;
+                            group?: string;
+                        };
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/filter-presets/team/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete PLM workbench team filter preset */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                message?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Rename PLM workbench team filter preset */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/plm-workbench/filter-presets/team/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Batch process PLM workbench team filter presets */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        action: "archive" | "restore" | "delete";
+                        ids: string[];
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                /** @enum {string} */
+                                action?: "archive" | "restore" | "delete";
+                                processedIds?: string[];
+                                skippedIds?: string[];
+                                items?: {
+                                    id?: string;
+                                    /** @enum {string} */
+                                    kind?: "bom" | "where-used";
+                                    /** @enum {string} */
+                                    scope?: "team";
+                                    name?: string;
+                                    ownerUserId?: string;
+                                    canManage?: boolean;
+                                    permissions?: {
+                                        [key: string]: boolean;
+                                    };
+                                    isDefault?: boolean;
+                                    isArchived?: boolean;
+                                    state?: {
+                                        field?: string;
+                                        value?: string;
+                                        group?: string;
+                                    };
+                                    /** Format: date-time */
+                                    archivedAt?: string | null;
+                                    /** Format: date-time */
+                                    createdAt?: string | null;
+                                    /** Format: date-time */
+                                    updatedAt?: string | null;
+                                    /** Format: date-time */
+                                    lastDefaultSetAt?: string | null;
+                                }[];
+                            };
+                            metadata?: {
+                                requestedTotal?: number;
+                                processedTotal?: number;
+                                skippedTotal?: number;
+                                processedKinds?: string[];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/filter-presets/team/{id}/default": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Set default PLM workbench team filter preset */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        /** Clear default PLM workbench team filter preset */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;

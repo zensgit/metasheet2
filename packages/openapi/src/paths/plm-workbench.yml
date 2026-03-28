@@ -1,0 +1,570 @@
+x-plm-workbench-schemas:
+  teamViewItem: &teamViewItem
+    type: object
+    properties:
+      id: { type: string }
+      kind:
+        type: string
+        enum: [documents, cad, approvals, workbench, audit]
+      scope:
+        type: string
+        enum: [team]
+      name: { type: string }
+      ownerUserId: { type: string }
+      canManage: { type: boolean }
+      permissions:
+        type: object
+        additionalProperties:
+          type: boolean
+      isDefault: { type: boolean }
+      isArchived: { type: boolean }
+      state:
+        type: object
+        additionalProperties: true
+      archivedAt:
+        type: string
+        format: date-time
+        nullable: true
+      createdAt:
+        type: string
+        format: date-time
+        nullable: true
+      updatedAt:
+        type: string
+        format: date-time
+        nullable: true
+      lastDefaultSetAt:
+        type: string
+        format: date-time
+        nullable: true
+  teamPresetItem: &teamPresetItem
+    type: object
+    properties:
+      id: { type: string }
+      kind:
+        type: string
+        enum: [bom, where-used]
+      scope:
+        type: string
+        enum: [team]
+      name: { type: string }
+      ownerUserId: { type: string }
+      canManage: { type: boolean }
+      permissions:
+        type: object
+        additionalProperties:
+          type: boolean
+      isDefault: { type: boolean }
+      isArchived: { type: boolean }
+      state:
+        type: object
+        properties:
+          field: { type: string }
+          value: { type: string }
+          group: { type: string }
+      archivedAt:
+        type: string
+        format: date-time
+        nullable: true
+      createdAt:
+        type: string
+        format: date-time
+        nullable: true
+      updatedAt:
+        type: string
+        format: date-time
+        nullable: true
+      lastDefaultSetAt:
+        type: string
+        format: date-time
+        nullable: true
+  batchResultMeta: &batchResultMeta
+    type: object
+    properties:
+      requestedTotal: { type: integer }
+      processedTotal: { type: integer }
+      skippedTotal: { type: integer }
+      processedKinds:
+        type: array
+        items: { type: string }
+
+paths:
+  /api/plm-workbench/views/team:
+    get:
+      summary: List PLM workbench team views
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: kind
+          schema:
+            type: string
+            enum: [documents, cad, approvals, workbench, audit]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items: *teamViewItem
+                  metadata:
+                    type: object
+                    properties:
+                      total: { type: integer }
+                      activeTotal: { type: integer }
+                      archivedTotal: { type: integer }
+                      tenantId: { type: string }
+                      kind: { type: string }
+                      defaultViewId:
+                        type: string
+                        nullable: true
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      summary: Save PLM workbench team view
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                kind:
+                  type: string
+                  enum: [documents, cad, approvals, workbench, audit]
+                name: { type: string }
+                state:
+                  type: object
+                  additionalProperties: true
+                isDefault: { type: boolean }
+              required: [kind, name, state]
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data: *teamViewItem
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/plm-workbench/views/team/{id}:
+    patch:
+      summary: Rename PLM workbench team view
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+              required: [name]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data: *teamViewItem
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    delete:
+      summary: Delete PLM workbench team view
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      message: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/plm-workbench/views/team/batch:
+    post:
+      summary: Batch process PLM workbench team views
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action:
+                  type: string
+                  enum: [archive, restore, delete]
+                ids:
+                  type: array
+                  items: { type: string }
+              required: [action, ids]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: object
+                    properties:
+                      action:
+                        type: string
+                        enum: [archive, restore, delete]
+                      processedIds:
+                        type: array
+                        items: { type: string }
+                      skippedIds:
+                        type: array
+                        items: { type: string }
+                      items:
+                        type: array
+                        items: *teamViewItem
+                  metadata: *batchResultMeta
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/plm-workbench/views/team/{id}/default:
+    post:
+      summary: Set default PLM workbench team view
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data: *teamViewItem
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    delete:
+      summary: Clear default PLM workbench team view
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data: *teamViewItem
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/plm-workbench/filter-presets/team:
+    get:
+      summary: List PLM workbench team filter presets
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: kind
+          schema:
+            type: string
+            enum: [bom, where-used]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: array
+                    items: *teamPresetItem
+                  metadata:
+                    type: object
+                    properties:
+                      total: { type: integer }
+                      activeTotal: { type: integer }
+                      archivedTotal: { type: integer }
+                      tenantId: { type: string }
+                      kind: { type: string }
+                      defaultPresetId:
+                        type: string
+                        nullable: true
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    post:
+      summary: Save PLM workbench team filter preset
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                kind:
+                  type: string
+                  enum: [bom, where-used]
+                name: { type: string }
+                state:
+                  type: object
+                  properties:
+                    field: { type: string }
+                    value: { type: string }
+                    group: { type: string }
+              required: [kind, name, state]
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data: *teamPresetItem
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/plm-workbench/filter-presets/team/{id}:
+    patch:
+      summary: Rename PLM workbench team filter preset
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+              required: [name]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data: *teamPresetItem
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    delete:
+      summary: Delete PLM workbench team filter preset
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      message: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/plm-workbench/filter-presets/team/batch:
+    post:
+      summary: Batch process PLM workbench team filter presets
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action:
+                  type: string
+                  enum: [archive, restore, delete]
+                ids:
+                  type: array
+                  items: { type: string }
+              required: [action, ids]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: object
+                    properties:
+                      action:
+                        type: string
+                        enum: [archive, restore, delete]
+                      processedIds:
+                        type: array
+                        items: { type: string }
+                      skippedIds:
+                        type: array
+                        items: { type: string }
+                      items:
+                        type: array
+                        items: *teamPresetItem
+                  metadata: *batchResultMeta
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/plm-workbench/filter-presets/team/{id}/default:
+    post:
+      summary: Set default PLM workbench team filter preset
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data: *teamPresetItem
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+    delete:
+      summary: Clear default PLM workbench team filter preset
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data: *teamPresetItem
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
