@@ -11025,39 +11025,6 @@ module.exports = {
     )
 
     context.api.http.addRoute(
-      'GET',
-      '/api/attendance/approval-flows/:id',
-      withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
-        const flowId = normalizeUuidString(req.params.id)
-        if (!flowId) {
-          respondInvalidUuid(res)
-          return
-        }
-
-        try {
-          const rows = await db.query(
-            'SELECT * FROM attendance_approval_flows WHERE id = $1 AND org_id = $2',
-            [flowId, orgId]
-          )
-          if (!rows.length) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Approval flow not found' } })
-            return
-          }
-
-          res.json({ ok: true, data: mapApprovalFlowRow(rows[0]) })
-        } catch (error) {
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-            return
-          }
-          logger.error('Attendance approval flow lookup failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load approval flow' } })
-        }
-      })
-    )
-
-    context.api.http.addRoute(
       'PUT',
       '/api/attendance/approval-flows/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -12147,39 +12114,6 @@ module.exports = {
           }
           logger.error('Attendance rule set creation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create rule set' } })
-        }
-      })
-    )
-
-    context.api.http.addRoute(
-      'GET',
-      '/api/attendance/rule-sets/:id',
-      withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
-        const ruleSetId = normalizeUuidString(req.params.id)
-        if (!ruleSetId) {
-          respondInvalidUuid(res)
-          return
-        }
-
-        try {
-          const rows = await db.query(
-            'SELECT * FROM attendance_rule_sets WHERE id = $1 AND org_id = $2',
-            [ruleSetId, orgId]
-          )
-          if (!rows.length) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rule set not found' } })
-            return
-          }
-
-          res.json({ ok: true, data: mapRuleSetRow(rows[0]) })
-        } catch (error) {
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-            return
-          }
-          logger.error('Attendance rule set lookup failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load rule set' } })
         }
       })
     )
@@ -16230,7 +16164,11 @@ module.exports = {
       '/api/attendance/payroll-cycles/:id',
       withPermission('attendance:admin', async (req, res) => {
         const orgId = getOrgId(req)
-        const payrollCycleId = req.params.id
+        const payrollCycleId = normalizeUuidString(req.params.id)
+        if (!payrollCycleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const rows = await db.query(
@@ -16472,39 +16410,6 @@ module.exports = {
     )
 
     context.api.http.addRoute(
-      'GET',
-      '/api/attendance/payroll-cycles/:id',
-      withPermission('attendance:admin', async (req, res) => {
-        const orgId = getOrgId(req)
-        const cycleId = normalizeUuidString(req.params.id)
-        if (!cycleId) {
-          respondInvalidUuid(res)
-          return
-        }
-
-        try {
-          const rows = await db.query(
-            'SELECT * FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2',
-            [cycleId, orgId]
-          )
-          if (!rows.length) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll cycle not found' } })
-            return
-          }
-
-          res.json({ ok: true, data: mapPayrollCycleRow(rows[0]) })
-        } catch (error) {
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-            return
-          }
-          logger.error('Attendance payroll cycle lookup failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load payroll cycle' } })
-        }
-      })
-    )
-
-    context.api.http.addRoute(
       'PUT',
       '/api/attendance/payroll-cycles/:id',
       withPermission('attendance:admin', async (req, res) => {
@@ -16515,7 +16420,11 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const payrollCycleId = req.params.id
+        const payrollCycleId = normalizeUuidString(req.params.id)
+        if (!payrollCycleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(

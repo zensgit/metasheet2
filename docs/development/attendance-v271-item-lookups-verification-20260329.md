@@ -8,6 +8,8 @@ Branch: `codex/attendance-v271-followup-20260329`
 - approval flow item lookup
 - rule set item lookup
 - payroll cycle item lookup
+- duplicate item `GET` route cleanup for approval flows, rule sets, and payroll cycles
+- payroll cycle `PUT /:id` malformed UUID handling
 - request `work_date` / `workDate` date-only response semantics
 
 ## Commands
@@ -25,6 +27,8 @@ Notes:
 - `4 passed`
 - approval flow, rule set, and payroll cycle item lookups return `200`
 - missing item ids return `404`
+- malformed payroll cycle ids now return `400` on both `GET` and `PUT`
+- duplicate item lookup coverage was collapsed onto the single canonical route per module
 - request item responses keep `work_date` and `workDate` normalized to the same date-only value
 
 ### Backend type check

@@ -1690,7 +1690,9 @@ describe('Attendance Plugin Integration', () => {
       },
     })
     expect(approvalFlowGetRes.status).toBe(200)
-    expect((approvalFlowGetRes.body as { data?: { id?: string } } | undefined)?.data?.id).toBe(approvalFlowId)
+    const approvalFlow = (approvalFlowGetRes.body as { data?: { id?: string; steps?: Array<{ approverUserIds?: string[] }> } } | undefined)?.data
+    expect(approvalFlow?.id).toBe(approvalFlowId)
+    expect(approvalFlow?.steps?.[0]?.approverUserIds?.[0]).toBe(testUserId)
 
     const missingApprovalFlowId = randomUuidV4()
     const missingApprovalFlowGetRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/${missingApprovalFlowId}`, {
@@ -1742,7 +1744,10 @@ describe('Attendance Plugin Integration', () => {
       },
     })
     expect(ruleSetGetRes.status).toBe(200)
-    expect((ruleSetGetRes.body as { data?: { id?: string } } | undefined)?.data?.id).toBe(ruleSetId)
+    const ruleSet = (ruleSetGetRes.body as { data?: { id?: string; name?: string; config?: { source?: string } } } | undefined)?.data
+    expect(ruleSet?.id).toBe(ruleSetId)
+    expect(ruleSet?.name).toBe(`Lookup Rule Set ${runSuffix}`)
+    expect(ruleSet?.config?.source).toBe('manual')
 
     const missingRuleSetId = randomUuidV4()
     const missingRuleSetGetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets/${missingRuleSetId}`, {
@@ -1822,6 +1827,19 @@ describe('Attendance Plugin Integration', () => {
     })
     expect(invalidPayrollCycleRes.status).toBe(400)
     expect((invalidPayrollCycleRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
+
+    const invalidPayrollCycleUpdateRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/not-a-uuid`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Invalid Cycle ${runSuffix}`,
+      }),
+    })
+    expect(invalidPayrollCycleUpdateRes.status).toBe(400)
+    expect((invalidPayrollCycleUpdateRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
   })
 
   it('rejects invalid CSV upload payloads with 400 before creating upload handles', async () => {
@@ -2503,129 +2521,6 @@ describe('Attendance Plugin Integration', () => {
       }),
     })
     expect(invalidHolidayTypeRes.status).toBe(400)
-  })
-
-  it('supports approval flow, rule set, and payroll cycle item lookup routes', async () => {
-    if (!baseUrl) return
-
-    const runSuffix = Date.now().toString(36)
-    const uniqueSeed = Array.from(runSuffix).reduce((total, ch) => total + ch.charCodeAt(0), 0)
-    const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-item-lookup-${runSuffix}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
-    )
-    const token = (tokenRes.body as { token?: string } | undefined)?.token
-    expect(token).toBeTruthy()
-    if (!token) return
-
-    const approvalFlowCreateRes = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        name: `Lookup Flow ${runSuffix}`,
-        requestType: 'leave',
-        steps: [{ level: 1, approverRole: 'manager', approverUserIds: ['manager-user'] }],
-        isActive: true,
-      }),
-    })
-    expect(approvalFlowCreateRes.status).toBe(201)
-    const approvalFlowId = (approvalFlowCreateRes.body as { data?: { id?: string } } | undefined)?.data?.id
-    expect(approvalFlowId).toBeTruthy()
-    if (!approvalFlowId) return
-
-    const approvalFlowGetRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/${approvalFlowId}`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    })
-    expect(approvalFlowGetRes.status).toBe(200)
-    const approvalFlow = (approvalFlowGetRes.body as { data?: { id?: string; steps?: Array<{ approverUserIds?: string[] }> } } | undefined)?.data
-    expect(approvalFlow?.id).toBe(approvalFlowId)
-    expect(approvalFlow?.steps?.[0]?.approverUserIds?.[0]).toBe('manager-user')
-
-    const ruleSetCreateRes = await requestJson(`${baseUrl}/api/attendance/rule-sets`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        name: `Lookup Rule Set ${runSuffix}`,
-        scope: 'org',
-        config: { source: 'lookup-test' },
-      }),
-    })
-    expect(ruleSetCreateRes.status).toBe(201)
-    const ruleSetId = (ruleSetCreateRes.body as { data?: { id?: string } } | undefined)?.data?.id
-    expect(ruleSetId).toBeTruthy()
-    if (!ruleSetId) return
-
-    const ruleSetGetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets/${ruleSetId}`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    })
-    expect(ruleSetGetRes.status).toBe(200)
-    const ruleSet = (ruleSetGetRes.body as { data?: { id?: string; name?: string; config?: { source?: string } } } | undefined)?.data
-    expect(ruleSet?.id).toBe(ruleSetId)
-    expect(ruleSet?.name).toBe(`Lookup Rule Set ${runSuffix}`)
-    expect(ruleSet?.config?.source).toBe('lookup-test')
-
-    const payrollTemplateRes = await requestJson(`${baseUrl}/api/attendance/payroll-templates`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        name: `Lookup Payroll Template ${runSuffix}`,
-        timezone: 'Asia/Shanghai',
-        startDay: 1,
-        endDay: 31,
-        endMonthOffset: 0,
-        autoGenerate: false,
-      }),
-    })
-    expect(payrollTemplateRes.status).toBe(201)
-    const payrollTemplateId = (payrollTemplateRes.body as { data?: { id?: string } } | undefined)?.data?.id
-    expect(payrollTemplateId).toBeTruthy()
-    if (!payrollTemplateId) return
-
-    const payrollAnchorDate = [
-      String(2045 + (uniqueSeed % 10)).padStart(4, '0'),
-      String(((uniqueSeed * 5) % 12) + 1).padStart(2, '0'),
-      '01',
-    ].join('-')
-    const payrollCycleCreateRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        templateId: payrollTemplateId,
-        anchorDate: payrollAnchorDate,
-        status: 'open',
-      }),
-    })
-    expect(payrollCycleCreateRes.status).toBe(201)
-    const payrollCycleId = (payrollCycleCreateRes.body as { data?: { id?: string } } | undefined)?.data?.id
-    expect(payrollCycleId).toBeTruthy()
-    if (!payrollCycleId) return
-
-    const payrollCycleGetRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/${payrollCycleId}`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    })
-    expect(payrollCycleGetRes.status).toBe(200)
-    const payrollCycle = (payrollCycleGetRes.body as { data?: { id?: string; templateId?: string | null; startDate?: string; endDate?: string } } | undefined)?.data
-    expect(payrollCycle?.id).toBe(payrollCycleId)
-    expect(payrollCycle?.templateId).toBe(payrollTemplateId)
-    expect(payrollCycle?.startDate).toMatch(/^\d{4}-\d{2}-\d{2}$/)
-    expect(payrollCycle?.endDate).toMatch(/^\d{4}-\d{2}-\d{2}$/)
   })
 
   it('rejects negative leave type daily_minutes aliases, empty holiday names, and exposes holiday type fields', async () => {

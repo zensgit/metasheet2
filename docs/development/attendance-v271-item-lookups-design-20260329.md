@@ -20,6 +20,8 @@ Current OpenAPI already describes item lookup endpoints for these resources. Thi
 - Ensure approval flows support stable item lookup.
 - Ensure rule sets support stable item lookup.
 - Ensure payroll cycles support stable item lookup.
+- Remove duplicate item `GET` route registrations so lookup semantics stay single-sourced.
+- Keep payroll cycle update id validation aligned with the item lookup contract.
 - Keep request `work_date` / `workDate` normalized to `YYYY-MM-DD`.
 
 ## Non-goals
@@ -59,6 +61,19 @@ Both values must remain the same date-only string. The response shape should not
 
 No OpenAPI shape change is required for this slice because the contract already advertises these item endpoints. Verification should instead prove runtime parity and confirm that rebuilding OpenAPI does not introduce further source changes.
 
+### 4. Route deduplication and update-path parity
+
+The runtime currently contains duplicate item `GET` registrations for:
+
+- `/api/attendance/approval-flows/:id`
+- `/api/attendance/rule-sets/:id`
+- `/api/attendance/payroll-cycles/:id`
+
+This slice keeps a single canonical `GET` registration per resource and extends payroll cycle `PUT /:id` to use the same UUID normalization gate. That keeps `GET` and `PUT` behavior aligned:
+
+- malformed UUID -> `400`
+- valid-but-missing id -> `404`
+
 ## Files
 
 - `plugins/plugin-attendance/index.cjs`
@@ -69,6 +84,8 @@ No OpenAPI shape change is required for this slice because the contract already 
 - Item lookup could silently diverge from update/delete semantics.
   - Mitigation: cover create -> get -> missing lookup in focused integration tests.
 - Payroll cycle item lookup could accept malformed ids differently from neighboring modules.
-  - Mitigation: keep the route behavior narrow and only guarantee `200/404` parity for this slice.
+  - Mitigation: normalize UUIDs on both lookup and update so the module stays on the same `400/404` semantics as neighboring attendance resources.
+- Duplicate item routes could silently diverge in future edits.
+  - Mitigation: remove the duplicate registrations now and collapse coverage onto one focused integration case.
 - Request date formatting could regress again if future mapping changes bypass the request response mapper.
   - Mitigation: assert both `work_date` and `workDate` in the request item test.
