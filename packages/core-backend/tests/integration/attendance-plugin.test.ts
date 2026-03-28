@@ -1114,6 +1114,34 @@ describe('Attendance Plugin Integration', () => {
     expect(shiftLookupBody?.data?.id).toBe(shiftId)
     expect(shiftLookupBody?.data?.name).toBe(`Lookup Shift ${runSuffix}`)
 
+    const rotationRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Lookup Rotation ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        shiftSequence: [shiftId],
+        isActive: true,
+      }),
+    })
+    expect(rotationRuleRes.status).toBe(201)
+    const rotationRuleId = (rotationRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(rotationRuleId).toBeTruthy()
+    if (!rotationRuleId) return
+
+    const rotationLookupRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules/${rotationRuleId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(rotationLookupRes.status).toBe(200)
+    const rotationLookupBody = rotationLookupRes.body as { data?: { id?: string; name?: string } } | undefined
+    expect(rotationLookupBody?.data?.id).toBe(rotationRuleId)
+    expect(rotationLookupBody?.data?.name).toBe(`Lookup Rotation ${runSuffix}`)
+
     const overtimeRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, {
       method: 'POST',
       headers: {
@@ -1149,6 +1177,7 @@ describe('Attendance Plugin Integration', () => {
       'payroll-templates/not-a-uuid',
       'shifts/not-a-uuid',
       'overtime-rules/not-a-uuid',
+      'rotation-rules/not-a-uuid',
     ]
 
     for (const apiPath of invalidEndpoints) {
@@ -1175,6 +1204,13 @@ describe('Attendance Plugin Integration', () => {
       },
     })
     expect(missingOvertimeRes.status).toBe(404)
+
+    const missingRotationRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules/${randomUuidV4()}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(missingRotationRes.status).toBe(404)
   })
 
   it('keeps camelCase and snake_case field aliases on shift and assignment responses', async () => {
@@ -1553,6 +1589,128 @@ describe('Attendance Plugin Integration', () => {
       },
     })
     expect(invalidAssignmentRes.status).toBe(400)
+  })
+
+  it('accepts compatibility payload aliases for approval flow and rule set create routes', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-compat-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const approvalFlowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Compat Approval ${runSuffix}`,
+        type: 'leave',
+        steps: JSON.stringify([
+          {
+            name: '直属主管',
+            approver_user_ids: [testUserId],
+          },
+        ]),
+        is_active: true,
+      }),
+    })
+    expect(approvalFlowRes.status).toBe(201)
+    const createdFlow = (approvalFlowRes.body as { data?: { requestType?: string; steps?: Array<{ approverUserIds?: string[] }> } } | undefined)?.data
+    expect(createdFlow?.requestType).toBe('leave')
+    expect(createdFlow?.steps?.[0]?.approverUserIds).toEqual([testUserId])
+
+    const ruleSetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Compat Rule Set ${runSuffix}`,
+        scope: 'org',
+        version: '2',
+        is_default: false,
+        config: JSON.stringify({
+          source: 'manual',
+          rule: { timezone: 'Asia/Shanghai' },
+        }),
+      }),
+    })
+    expect(ruleSetRes.status).toBe(201)
+    const createdRuleSet = (ruleSetRes.body as { data?: { version?: number; config?: { source?: string; rule?: { timezone?: string } } } } | undefined)?.data
+    expect(createdRuleSet?.version).toBe(2)
+    expect(createdRuleSet?.config?.source).toBe('manual')
+    expect(createdRuleSet?.config?.rule?.timezone).toBe('Asia/Shanghai')
+  })
+
+  it('returns 404 for valid-but-missing approval flow and rule set ids while keeping malformed ids at 400', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-missing-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const missingApprovalFlowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/${randomUuidV4()}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(missingApprovalFlowRes.status).toBe(404)
+    expect((missingApprovalFlowRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('NOT_FOUND')
+
+    const invalidApprovalFlowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/not-a-uuid`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(invalidApprovalFlowRes.status).toBe(400)
+    expect((invalidApprovalFlowRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
+
+    const missingRuleSetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets/${randomUuidV4()}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Missing Rule Set ${runSuffix}`,
+        version: 1,
+        scope: 'org',
+        config: { source: 'manual' },
+      }),
+    })
+    expect(missingRuleSetRes.status).toBe(404)
+    expect((missingRuleSetRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('NOT_FOUND')
+
+    const invalidRuleSetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets/not-a-uuid`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Invalid Rule Set ${runSuffix}`,
+        version: 1,
+        scope: 'org',
+        config: { source: 'manual' },
+      }),
+    })
+    expect(invalidRuleSetRes.status).toBe(400)
+    expect((invalidRuleSetRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
   })
 
   it('rejects invalid CSV upload payloads with 400 before creating upload handles', async () => {

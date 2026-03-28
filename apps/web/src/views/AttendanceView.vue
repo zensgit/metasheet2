@@ -460,9 +460,14 @@
         <div class="attendance__card attendance__card--admin">
           <div class="attendance__admin-header">
             <h3>{{ tr('Admin Console', '管理控制台') }}</h3>
-            <button class="attendance__btn" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
-              {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
-            </button>
+            <div class="attendance__admin-actions">
+              <button class="attendance__btn" type="button" @click="adminFocusedMode = !adminFocusedMode">
+                {{ adminFocusedMode ? tr('Show all sections', '显示全部区块') : tr('Focus current section', '仅显示当前区块') }}
+              </button>
+              <button class="attendance__btn" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
+                {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
+              </button>
+            </div>
           </div>
           <div v-if="statusMessage" class="attendance__status-block attendance__status-block--admin">
             <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
@@ -509,10 +514,14 @@
               @copy-current-link="copyCurrentAdminSectionLink"
               @clear-recents="clearRecentAdminSections"
               @toggle-group="toggleAdminSectionGroup"
-              @select-section="scrollToAdminSection"
+              @select-section="selectAdminSection"
             />
-            <div class="attendance__admin-content">
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.settings)">
+            <div class="attendance__admin-content" :class="{ 'attendance__admin-content--focused': adminFocusedMode }">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
+            >
               <h4>{{ tr('Settings', '设置') }}</h4>
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--checkbox" for="attendance-auto-absence-enabled">
@@ -763,7 +772,11 @@
               </button>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.userAccess)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.userAccess)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.userAccess)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('User Access', '用户权限') }}</h4>
                 <div class="attendance__admin-actions">
@@ -881,7 +894,11 @@
               <p v-else-if="provisionHasLoaded" class="attendance__empty">{{ tr('No permissions loaded.', '未加载到权限。') }}</p>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Batch Provisioning', '批量授权') }}</h4>
                 <div class="attendance__admin-actions">
@@ -989,7 +1006,11 @@
               </p>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.auditLogs)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.auditLogs)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.auditLogs)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Audit Logs', '审计日志') }}</h4>
                 <div class="attendance__admin-actions">
@@ -1157,7 +1178,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidaySync)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidaySync)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidaySync)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Holiday Sync', '节假日同步') }}</h4>
                 <div class="attendance__admin-actions">
@@ -1299,7 +1324,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.defaultRule)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.defaultRule)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.defaultRule)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Default Rule', '默认规则') }}</h4>
                 <button class="attendance__btn" :disabled="ruleLoading" @click="loadRule">
@@ -1388,7 +1417,11 @@
               </button>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.ruleSets)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.ruleSets)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.ruleSets)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rule Sets', '规则集') }}</h4>
                 <button class="attendance__btn" :disabled="ruleSetLoading" @click="loadRuleSets">
@@ -1439,6 +1472,386 @@
                     :placeholder="tr('Optional', '可选')"
                   />
                 </label>
+                <div class="attendance__field attendance__field--full attendance__rule-builder">
+                  <div class="attendance__admin-section-header">
+                    <div>
+                      <h5 class="attendance__subheading">{{ tr('Structured rule builder', '结构化规则构建器') }}</h5>
+                      <p class="attendance__field-hint">
+                        {{ tr('The builder keeps the core JSON config in sync while preserving any advanced fields already stored in the rule draft.', '构建器会同步核心 JSON 配置，并保留规则草稿里已有的高级字段。') }}
+                      </p>
+                    </div>
+                    <div class="attendance__rule-builder-summary">
+                      <span>{{ tr('Source', '来源') }}: <strong>{{ ruleBuilderSource || '--' }}</strong></span>
+                      <span>{{ tr('Timezone', '时区') }}: <strong>{{ ruleBuilderTimezoneLabel || '--' }}</strong></span>
+                      <span>{{ tr('Working days', '工作日') }}: <strong>{{ formatRuleBuilderWorkingDaysLabel(ruleBuilderWorkingDaysText) }}</strong></span>
+                    </div>
+                  </div>
+                  <div class="attendance__admin-grid">
+                    <label class="attendance__field" for="attendance-rule-builder-source">
+                      <span>{{ tr('Source', '来源') }}</span>
+                      <input
+                        id="attendance-rule-builder-source"
+                        v-model="ruleBuilderSource"
+                        type="text"
+                        :placeholder="tr('dingtalk / manual / csv', 'dingtalk / manual / csv')"
+                      />
+                    </label>
+                    <label class="attendance__field" for="attendance-rule-builder-timezone">
+                      <span>{{ tr('Timezone', '时区') }}</span>
+                      <select id="attendance-rule-builder-timezone" v-model="ruleBuilderTimezone">
+                        <option v-for="option in timezoneOptions" :key="`rule-builder-${option.value}`" :value="option.value">
+                          {{ option.label }}
+                        </option>
+                      </select>
+                    </label>
+                    <label class="attendance__field" for="attendance-rule-builder-start">
+                      <span>{{ tr('Work start time', '上班时间') }}</span>
+                      <input id="attendance-rule-builder-start" v-model="ruleBuilderWorkStartTime" type="time" />
+                    </label>
+                    <label class="attendance__field" for="attendance-rule-builder-end">
+                      <span>{{ tr('Work end time', '下班时间') }}</span>
+                      <input id="attendance-rule-builder-end" v-model="ruleBuilderWorkEndTime" type="time" />
+                    </label>
+                    <label class="attendance__field" for="attendance-rule-builder-late-grace">
+                      <span>{{ tr('Late grace minutes', '迟到宽限分钟') }}</span>
+                      <input id="attendance-rule-builder-late-grace" v-model.number="ruleBuilderLateGraceMinutes" type="number" min="0" />
+                    </label>
+                    <label class="attendance__field" for="attendance-rule-builder-early-grace">
+                      <span>{{ tr('Early grace minutes', '早退宽限分钟') }}</span>
+                      <input id="attendance-rule-builder-early-grace" v-model.number="ruleBuilderEarlyGraceMinutes" type="number" min="0" />
+                    </label>
+                  </div>
+                  <div class="attendance__rule-builder-days">
+                    <span class="attendance__field-label">{{ tr('Working days', '工作日') }}</span>
+                    <div class="attendance__rule-builder-day-grid">
+                      <label v-for="day in ruleBuilderDayOptions" :key="day.value" class="attendance__rule-builder-day">
+                        <input v-model="ruleBuilderWorkingDays" type="checkbox" :value="day.value" />
+                        <span>{{ tr(day.labelEn, day.labelZh) }}</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="attendance__admin-actions">
+                    <button class="attendance__btn" type="button" @click="resetRuleBuilderForm">
+                      {{ tr('Reset builder', '重置构建器') }}
+                    </button>
+                    <button class="attendance__btn attendance__btn--primary" type="button" @click="applyRuleBuilderToRuleSetConfig">
+                      {{ tr('Apply builder to JSON', '将构建器应用到 JSON') }}
+                    </button>
+                  </div>
+                  <div class="attendance__rule-builder-preview">
+                    <div class="attendance__admin-section-header">
+                      <div>
+                        <h6 class="attendance__subheading">{{ tr('Draft preview', '草稿预览') }}</h6>
+                        <p class="attendance__field-hint">
+                          {{ tr('Preview the current builder state before saving this rule set.', '在保存规则集前，先预演当前构建器状态。') }}
+                        </p>
+                      </div>
+                      <div class="attendance__admin-actions">
+                        <button
+                          class="attendance__btn attendance__btn--primary"
+                          type="button"
+                          :disabled="ruleSetPreviewLoading || ruleSetSaving"
+                          @click="previewRuleSet"
+                        >
+                          {{ ruleSetPreviewLoading ? tr('Previewing...', '预览中...') : tr('Preview rule set', '预览规则集') }}
+                        </button>
+                        <button
+                          class="attendance__btn"
+                          type="button"
+                          :disabled="ruleSetPreviewLoading || ruleSetSaving"
+                          @click="resetPreviewEvents"
+                        >
+                          {{ tr('Reset events', '重置事件') }}
+                        </button>
+                      </div>
+                    </div>
+                    <div class="attendance__preview-builder">
+                      <div class="attendance__admin-section-header">
+                        <div>
+                          <h6 class="attendance__subheading">{{ tr('Sample event builder', '样本事件构建器') }}</h6>
+                          <p class="attendance__field-hint">
+                            {{ tr('Build preview events row by row. The JSON textarea below remains the advanced mode.', '按行构建预览事件。下方 JSON 文本框仍保留为高级模式。') }}
+                          </p>
+                        </div>
+                        <div class="attendance__admin-actions">
+                          <button class="attendance__btn" type="button" @click="addPreviewEvent">
+                            {{ tr('Add event', '新增事件') }}
+                          </button>
+                        </div>
+                      </div>
+                      <div class="attendance__scenario-lab">
+                        <div class="attendance__field-label">{{ tr('Scenario presets', '场景预设') }}</div>
+                        <div class="attendance__scenario-grid">
+                          <button
+                            v-for="scenario in previewScenarioPresets"
+                            :key="scenario.id"
+                            type="button"
+                            class="attendance__scenario-card"
+                            :class="{ 'attendance__scenario-card--active': activePreviewScenarioId === scenario.id }"
+                            @click="applyPreviewScenario(scenario.id)"
+                          >
+                            <strong>{{ tr(scenario.labelEn, scenario.labelZh) }}</strong>
+                            <span>{{ tr(scenario.descriptionEn, scenario.descriptionZh) }}</span>
+                          </button>
+                        </div>
+                      </div>
+                      <div v-if="previewEventDrafts.length === 0" class="attendance__empty">
+                        {{ tr('No sample events yet. Add one to preview rule results.', '尚无样本事件。添加一条后即可预览规则结果。') }}
+                      </div>
+                      <div v-else class="attendance__table-wrapper">
+                        <table class="attendance__table">
+                          <thead>
+                            <tr>
+                              <th>{{ tr('Type', '类型') }}</th>
+                              <th>{{ tr('Occurred at', '发生时间') }}</th>
+                              <th>{{ tr('Work date', '工作日期') }}</th>
+                              <th>{{ tr('User ID', '用户 ID') }}</th>
+                              <th>{{ tr('Actions', '操作') }}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="(event, index) in previewEventDrafts" :key="event.id">
+                              <td>
+                                <select v-model="event.eventType">
+                                  <option value="check_in">{{ tr('Check in', '上班打卡') }}</option>
+                                  <option value="check_out">{{ tr('Check out', '下班打卡') }}</option>
+                                </select>
+                              </td>
+                              <td>
+                                <input v-model="event.occurredAt" type="datetime-local" />
+                              </td>
+                              <td>
+                                <input v-model="event.workDate" type="date" />
+                              </td>
+                              <td>
+                                <input v-model="event.userId" type="text" :placeholder="tr('user-1', 'user-1')" />
+                              </td>
+                              <td class="attendance__table-actions">
+                                <button class="attendance__btn" type="button" @click="duplicatePreviewEvent(index)">
+                                  {{ tr('Duplicate', '复制') }}
+                                </button>
+                                <button class="attendance__btn attendance__btn--danger" type="button" @click="removePreviewEvent(index)">
+                                  {{ tr('Remove', '移除') }}
+                                </button>
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                    <label class="attendance__field attendance__field--full" for="attendance-rule-preview-events">
+                      <span>{{ tr('Preview events (JSON advanced mode)', '预览事件（JSON 高级模式）') }}</span>
+                      <textarea
+                        id="attendance-rule-preview-events"
+                        v-model="ruleSetPreviewEventsText"
+                        rows="6"
+                        placeholder='[{"eventType":"check_in","occurredAt":"2026-03-21T09:02:00+08:00","workDate":"2026-03-21","userId":"user-1"},{"eventType":"check_out","occurredAt":"2026-03-21T18:08:00+08:00","workDate":"2026-03-21","userId":"user-1"}]'
+                      />
+                      <small class="attendance__field-hint">
+                        {{ tr('Use check_in/check_out events. Keep workDate fixed and adjust occurredAt to simulate lateness or early leave.', '使用 check_in/check_out 事件。可固定 workDate，再通过调整 occurredAt 模拟迟到或早退。') }}
+                      </small>
+                    </label>
+
+                    <div v-if="ruleSetPreviewLoading" class="attendance__preview-state">
+                      {{ tr('Preview is running against the current draft...', '预览正在基于当前草稿运行...') }}
+                    </div>
+                    <div v-else-if="ruleSetPreviewError" class="attendance__empty attendance__empty--error">
+                      {{ ruleSetPreviewError }}
+                    </div>
+                    <template v-else>
+                      <div class="attendance__preview-summary">
+                        <span>{{ tr('Rule source', '规则来源') }}: <strong>{{ ruleBuilderSource || '--' }}</strong></span>
+                        <span>{{ tr('Work window', '工作时间窗') }}: <strong>{{ ruleBuilderWorkStartTime || '--' }} - {{ ruleBuilderWorkEndTime || '--' }}</strong></span>
+                        <span>{{ tr('Grace', '宽限') }}: <strong>{{ ruleBuilderLateGraceMinutes }} / {{ ruleBuilderEarlyGraceMinutes }} min</strong></span>
+                      </div>
+                      <div class="attendance__preview-config-panels">
+                        <div v-if="ruleSetPreviewConfigDiff" class="attendance__template-version-panel attendance__template-version-panel--full">
+                          <div class="attendance__subheading-row">
+                            <div>
+                              <div class="attendance__field-label">{{ tr('Config change summary', '配置变化摘要') }}</div>
+                              <small class="attendance__field-hint">
+                                {{ tr('Highlights how preview resolution normalized the current draft before evaluating events.', '展示预演在评估事件前如何归一化当前草稿。') }}
+                              </small>
+                            </div>
+                            <span class="attendance__field-hint">{{ tr('Compared against the current draft config.', '与当前草稿配置对比。') }}</span>
+                          </div>
+                          <div class="attendance__preview-scorecards">
+                            <div class="attendance__preview-scorecard">
+                              <span>{{ tr('Changed fields', '变更字段') }}</span>
+                              <strong>{{ ruleSetPreviewConfigDiff.changedCount }}</strong>
+                              <small>{{ tr('Value rewritten during resolution', '服务端归一化后改写的值') }}</small>
+                            </div>
+                            <div class="attendance__preview-scorecard">
+                              <span>{{ tr('Added defaults', '新增默认值') }}</span>
+                              <strong>{{ ruleSetPreviewConfigDiff.addedCount }}</strong>
+                              <small>{{ tr('Fields returned only by resolved config', '仅在生效配置中返回的字段') }}</small>
+                            </div>
+                            <div class="attendance__preview-scorecard">
+                              <span>{{ tr('Removed fields', '移除字段') }}</span>
+                              <strong>{{ ruleSetPreviewConfigDiff.removedCount }}</strong>
+                              <small>{{ tr('Draft keys not kept by resolved config', '草稿里有但生效配置未保留的字段') }}</small>
+                            </div>
+                            <div class="attendance__preview-scorecard">
+                              <span>{{ tr('Touched paths', '涉及路径') }}</span>
+                              <strong>{{ ruleSetPreviewConfigDiff.totalChanges }}</strong>
+                              <small>{{ tr('Leaf-level config differences', '叶子级配置差异数') }}</small>
+                            </div>
+                          </div>
+                          <div v-if="ruleSetPreviewConfigDiff.items.length" class="attendance__preview-recommendations">
+                            <div
+                              v-for="item in ruleSetPreviewConfigDiff.items"
+                              :key="item.path"
+                              class="attendance__preview-recommendation"
+                              :class="`attendance__preview-recommendation--${item.severity}`"
+                            >
+                              <div class="attendance__subheading-row">
+                                <strong>{{ item.label }}</strong>
+                                <span class="attendance__severity" :class="`attendance__severity--${item.severity}`">
+                                  {{ formatPreviewSeverity(item.severity) }}
+                                </span>
+                              </div>
+                              <span>{{ item.summary }}</span>
+                              <code class="attendance__inline-code">{{ item.path }}</code>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="attendance__template-version-panel">
+                          <div class="attendance__field-label">{{ tr('Draft config', '草稿配置') }}</div>
+                          <small class="attendance__field-hint">{{ tr('Builder-generated config before preview execution.', '基于当前构建器生成、尚未发送到服务端前的配置。') }}</small>
+                          <pre class="attendance__code attendance__code--builder">{{ formatJson(ruleBuilderPreviewConfig) }}</pre>
+                        </div>
+                        <div v-if="ruleSetPreviewEffectiveConfig" class="attendance__template-version-panel">
+                          <div class="attendance__field-label">{{ tr('Resolved config', '生效配置') }}</div>
+                          <small class="attendance__field-hint">{{ tr('Normalized by the preview API after defaults and server-side resolution.', '由预演接口在补齐默认值和服务端归一化后返回。') }}</small>
+                          <pre class="attendance__code attendance__code--builder">{{ formatJson(ruleSetPreviewEffectiveConfig) }}</pre>
+                        </div>
+                      </div>
+                    </template>
+
+                    <div v-if="ruleSetPreviewResult" class="attendance__preview-result">
+                      <div class="attendance__preview-result-meta">
+                        <span>{{ tr('Events', '事件') }}: {{ ruleSetPreviewResult.totalEvents ?? ruleSetPreviewRows.length }}</span>
+                        <span v-if="ruleSetPreviewResult.ruleSetId">{{ tr('Rule set id', '规则集 ID') }}: <code>{{ ruleSetPreviewResult.ruleSetId }}</code></span>
+                      </div>
+                      <div class="attendance__preview-scorecards">
+                        <div class="attendance__preview-scorecard">
+                          <span>{{ tr('Rows affected', '受影响行') }}</span>
+                          <strong>{{ ruleSetPreviewSummary.flaggedRows }}</strong>
+                          <small>{{ tr('Clean rows', '正常行') }}: {{ ruleSetPreviewSummary.cleanRows }}</small>
+                        </div>
+                        <div class="attendance__preview-scorecard">
+                          <span>{{ tr('Late / early', '迟到 / 早退') }}</span>
+                          <strong>{{ ruleSetPreviewSummary.lateRows }} / {{ ruleSetPreviewSummary.earlyLeaveRows }}</strong>
+                          <small>{{ tr('Minutes', '分钟') }}: {{ ruleSetPreviewSummary.totalLateMinutes }} / {{ ruleSetPreviewSummary.totalEarlyLeaveMinutes }}</small>
+                        </div>
+                        <div class="attendance__preview-scorecard">
+                          <span>{{ tr('Missing punches', '缺卡') }}</span>
+                          <strong>{{ ruleSetPreviewSummary.missingCheckInRows }} / {{ ruleSetPreviewSummary.missingCheckOutRows }}</strong>
+                          <small>{{ tr('In / out', '上班 / 下班') }}</small>
+                        </div>
+                        <div class="attendance__preview-scorecard">
+                          <span>{{ tr('Non-working days', '非工作日') }}</span>
+                          <strong>{{ ruleSetPreviewSummary.nonWorkingDayRows }}</strong>
+                          <small>{{ tr('Abnormal status', '异常状态') }}: {{ ruleSetPreviewSummary.abnormalStatusRows }}</small>
+                        </div>
+                        <div class="attendance__preview-scorecard">
+                          <span>{{ tr('Average work minutes', '平均工时分钟') }}</span>
+                          <strong>{{ ruleSetPreviewSummary.averageWorkMinutes }}</strong>
+                          <small>{{ tr('Preview rows', '预演行数') }}: {{ ruleSetPreviewSummary.totalRows }}</small>
+                        </div>
+                      </div>
+                      <div v-if="ruleSetPreviewRecommendations.length" class="attendance__preview-recommendations">
+                        <div
+                          v-for="item in ruleSetPreviewRecommendations"
+                          :key="item.key"
+                          class="attendance__preview-recommendation"
+                          :class="`attendance__preview-recommendation--${item.severity}`"
+                        >
+                          <div class="attendance__subheading-row">
+                            <strong>{{ formatRuleSetRecommendationTitle(item) }}</strong>
+                            <span class="attendance__severity" :class="`attendance__severity--${item.severity}`">
+                              {{ formatPreviewSeverity(item.severity) }}
+                            </span>
+                          </div>
+                          <span>{{ formatRuleSetRecommendationBody(item) }}</span>
+                        </div>
+                      </div>
+                      <div v-else class="attendance__preview-recommendation attendance__preview-recommendation--info">
+                        <strong>{{ tr('Current draft looks stable', '当前草稿表现稳定') }}</strong>
+                        <span>{{ tr('The selected preview rows are clean under the current builder settings.', '当前构建器设置下，所选预演样本没有暴露规则问题。') }}</span>
+                      </div>
+                      <div v-if="ruleSetPreviewNotes.length" class="attendance__field-hint">
+                        {{ tr('Notes', '说明') }}: {{ ruleSetPreviewNotes.join(' · ') }}
+                      </div>
+                      <div v-if="ruleSetPreviewRows.length" class="attendance__table-wrapper">
+                        <table class="attendance__table">
+                          <thead>
+                            <tr>
+                              <th>{{ tr('Work date', '工作日期') }}</th>
+                              <th>{{ tr('User ID', '用户 ID') }}</th>
+                              <th>{{ tr('First in', '上班卡') }}</th>
+                              <th>{{ tr('Last out', '下班卡') }}</th>
+                              <th>{{ tr('Work minutes', '工时分钟') }}</th>
+                              <th>{{ tr('Late', '迟到') }}</th>
+                              <th>{{ tr('Early leave', '早退') }}</th>
+                              <th>{{ tr('Status', '状态') }}</th>
+                              <th>{{ tr('Actions', '操作') }}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr
+                              v-for="row in ruleSetPreviewRows"
+                              :key="getRuleSetPreviewRowKey(row)"
+                              :class="{ 'attendance__preview-row--selected': selectedRuleSetPreviewRow && getRuleSetPreviewRowKey(selectedRuleSetPreviewRow) === getRuleSetPreviewRowKey(row) }"
+                            >
+                              <td>{{ row.workDate || '--' }}</td>
+                              <td>{{ row.userId || '--' }}</td>
+                              <td>{{ row.firstInAt ? formatDateTime(row.firstInAt) : '--' }}</td>
+                              <td>{{ row.lastOutAt ? formatDateTime(row.lastOutAt) : '--' }}</td>
+                              <td>{{ row.workMinutes }}</td>
+                              <td>{{ row.lateMinutes }}</td>
+                              <td>{{ row.earlyLeaveMinutes }}</td>
+                              <td>{{ formatStatus(row.status) }}</td>
+                              <td class="attendance__table-actions">
+                                <button class="attendance__btn" type="button" @click="selectRuleSetPreviewRow(row)">
+                                  {{ tr('Details', '详情') }}
+                                </button>
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                      <div v-if="selectedRuleSetPreviewRow" class="attendance__template-version-panel">
+                        <div class="attendance__subheading-row">
+                          <h6 class="attendance__subheading">{{ tr('Selected preview row', '选中预演条目') }}</h6>
+                          <span class="attendance__severity" :class="`attendance__severity--${selectedRuleSetPreviewSeverity}`">
+                            {{ formatPreviewSeverity(selectedRuleSetPreviewSeverity) }}
+                          </span>
+                        </div>
+                        <div class="attendance__preview-summary">
+                          <span>{{ tr('User', '用户') }}: <strong>{{ selectedRuleSetPreviewRow.userId || '--' }}</strong></span>
+                          <span>{{ tr('Work date', '工作日期') }}: <strong>{{ selectedRuleSetPreviewRow.workDate || '--' }}</strong></span>
+                          <span>{{ tr('Status', '状态') }}: <strong>{{ formatStatus(selectedRuleSetPreviewRow.status) }}</strong></span>
+                        </div>
+                        <div class="attendance__preview-scorecards">
+                          <div v-for="metric in selectedRuleSetPreviewMetrics" :key="metric.key" class="attendance__preview-scorecard">
+                            <span>{{ metric.label }}</span>
+                            <strong>{{ metric.value }}</strong>
+                          </div>
+                        </div>
+                        <div v-if="selectedRuleSetPreviewHints.length" class="attendance__preview-recommendations">
+                          <div v-for="hint in selectedRuleSetPreviewHints" :key="hint" class="attendance__preview-recommendation attendance__preview-recommendation--info">
+                            <span>{{ hint }}</span>
+                          </div>
+                        </div>
+                        <div v-if="selectedRuleSetPreviewSource" class="attendance__template-version-panel">
+                          <div class="attendance__field-label">{{ tr('Source payload', '源载荷') }}</div>
+                          <pre class="attendance__code attendance__code--builder">{{ formatJson(selectedRuleSetPreviewSource) }}</pre>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
                 <label class="attendance__field attendance__field--full" for="attendance-rule-set-config">
                   <span>{{ tr('Config (JSON)', '配置（JSON）') }}</span>
                   <textarea
@@ -1496,7 +1909,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rule Template Library', '规则模板库') }}</h4>
                 <button
@@ -1566,6 +1983,17 @@
                         <td class="attendance__table-actions">
                           <button
                             class="attendance__btn"
+                            :disabled="ruleTemplateVersionLoading"
+                            @click="openRuleTemplateVersion(version.id)"
+                          >
+                            {{
+                              ruleTemplateVersionLoading && selectedRuleTemplateVersion?.id === version.id
+                                ? tr('Loading...', '加载中...')
+                                : tr('View', '查看')
+                            }}
+                          </button>
+                          <button
+                            class="attendance__btn"
                             :disabled="ruleTemplateRestoring || ruleTemplateSaving"
                             @click="restoreRuleTemplates(version.id)"
                           >
@@ -1576,10 +2004,29 @@
                     </tbody>
                   </table>
                 </div>
+                <div v-if="selectedRuleTemplateVersion" class="attendance__admin-subsection">
+                  <div class="attendance__admin-section-header">
+                    <h5>{{ tr('Selected version', '已选版本') }} #{{ selectedRuleTemplateVersion.version }}</h5>
+                    <button class="attendance__btn" type="button" @click="closeRuleTemplateVersionView">
+                      {{ tr('Close', '关闭') }}
+                    </button>
+                  </div>
+                  <div class="attendance__section-meta">
+                    <span>{{ tr('Created', '创建时间') }}: {{ formatDateTime(selectedRuleTemplateVersion.createdAt ?? null) }}</span>
+                    <span> · {{ tr('Created by', '创建人') }}: {{ selectedRuleTemplateVersion.createdBy || '--' }}</span>
+                    <span> · {{ tr('Items', '条目') }}: {{ selectedRuleTemplateVersion.itemCount ?? '--' }}</span>
+                    <span> · {{ tr('Source version', '来源版本') }}: {{ selectedRuleTemplateVersion.sourceVersionId || '--' }}</span>
+                  </div>
+                  <pre class="attendance__code attendance__code--viewer">{{ formatJson(selectedRuleTemplateVersion.templates ?? selectedRuleTemplateVersion) }}</pre>
+                </div>
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Attendance groups', '考勤组') }}</h4>
                 <button class="attendance__btn" :disabled="attendanceGroupLoading" @click="loadAttendanceGroups">
@@ -1664,7 +2111,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.groupMembers)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.groupMembers)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.groupMembers)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Group members', '分组成员') }}</h4>
                 <button
@@ -1689,18 +2140,34 @@
                     </option>
                   </select>
                 </label>
-                <label class="attendance__field" for="attendance-group-member-user-ids">
-                  <span>{{ tr('User IDs', '用户 ID') }}</span>
+                <AttendanceUserPickerField
+                  v-model="attendanceGroupMemberSelectedUserId"
+                  :tr="tr"
+                  :label="tr('User picker', '用户选择器')"
+                  name="attendanceGroupMemberUserPicker"
+                  :help-text="tr('Pick one user and append it to the bulk list below, or type multiple IDs manually.', '先选一个用户再追加到下方批量列表，也可以直接手动输入多个 ID。')"
+                  :search-placeholder="tr('Search users to append', '搜索要追加的用户')"
+                  input-id="attendance-group-member-user-picker"
+                />
+                <label class="attendance__field attendance__field--full" for="attendance-group-member-user-ids">
+                  <span>{{ tr('User IDs (bulk)', '用户 ID（批量）') }}</span>
                   <input
                     id="attendance-group-member-user-ids"
                     v-model="attendanceGroupMemberUserIds"
                     type="text"
                     :placeholder="tr('userId1, userId2', 'userId1, userId2')"
                   />
-                  <small class="attendance__field-hint">{{ tr('Separate multiple IDs with commas or spaces.', '多个 ID 请用逗号或空格分隔。') }}</small>
+                  <small class="attendance__field-hint">{{ tr('Separate multiple IDs with commas or spaces. The picker above can append one selected user at a time.', '多个 ID 请用逗号或空格分隔。上方选择器可一次追加一个用户。') }}</small>
                 </label>
               </div>
               <div class="attendance__admin-actions">
+                <button
+                  class="attendance__btn"
+                  :disabled="attendanceGroupMemberSaving || !attendanceGroupMemberSelectedUserId"
+                  @click="appendAttendanceGroupMemberSelectedUser"
+                >
+                  {{ tr('Append selected user', '追加所选用户') }}
+                </button>
                 <button
                   class="attendance__btn attendance__btn--primary"
                   :disabled="attendanceGroupMemberSaving"
@@ -1738,12 +2205,99 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.import)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.import)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.import)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Import (DingTalk / Manual)', '导入（钉钉 / 手工）') }}</h4>
-                <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
-                  {{ importLoading ? tr('Loading...', '加载中...') : tr('Load template', '加载模板') }}
-                </button>
+                <div class="attendance__admin-actions">
+                  <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
+                    {{ importLoading ? tr('Loading...', '加载中...') : tr('Load template', '加载模板') }}
+                  </button>
+                  <button class="attendance__btn" :disabled="importLoading || !importTemplateGuide" @click="downloadImportTemplateCsv">
+                    {{ tr('Download CSV template', '下载 CSV 模板') }}
+                  </button>
+                </div>
+              </div>
+              <div v-if="importTemplateGuide" class="attendance__template-guide">
+                <div class="attendance__template-guide-header">
+                  <strong>{{ tr('Template guide', '模板说明') }}</strong>
+                  <span>
+                    {{ tr('Source', '来源') }}: <code>{{ importTemplateGuide.source }}</code>
+                    · {{ tr('Mode', '模式') }}: <code>{{ importTemplateGuide.mode }}</code>
+                  </span>
+                </div>
+                <div class="attendance__template-guide-grid">
+                  <div class="attendance__template-guide-card">
+                    <div class="attendance__template-guide-title">{{ tr('Suggested CSV header', '建议 CSV 表头') }}</div>
+                    <code class="attendance__template-code">{{ importTemplateGuide.sampleHeader || tr('(no header guidance yet)', '（暂无表头指导）') }}</code>
+                  </div>
+                  <div class="attendance__template-guide-card">
+                    <div class="attendance__template-guide-title">{{ tr('Required fields', '必填字段') }}</div>
+                    <div v-if="importTemplateGuide.requiredFields.length" class="attendance__template-chip-list">
+                      <span v-for="field in importTemplateGuide.requiredFields" :key="field" class="attendance__template-chip">
+                        {{ field }}
+                      </span>
+                    </div>
+                    <small v-else class="attendance__field-hint">
+                      {{ tr('No required fields were declared in the template response.', '模板响应中未声明必填字段。') }}
+                    </small>
+                  </div>
+                  <div class="attendance__template-guide-card">
+                    <div class="attendance__template-guide-title">{{ tr('Template columns', '模板列') }}</div>
+                    <div v-if="importTemplateGuide.columns.length" class="attendance__template-chip-list">
+                      <span v-for="column in importTemplateGuide.columns" :key="column" class="attendance__template-chip">
+                        {{ column }}
+                      </span>
+                    </div>
+                    <small v-else class="attendance__field-hint">
+                      {{ tr('The template response did not declare explicit source columns.', '模板响应未声明明确的源列。') }}
+                    </small>
+                  </div>
+                  <div class="attendance__template-guide-card attendance__template-guide-card--full">
+                    <div class="attendance__template-guide-title">{{ tr('Field meanings', '字段说明') }}</div>
+                    <table class="attendance__template-table">
+                      <thead>
+                        <tr>
+                          <th>{{ tr('Field', '字段') }}</th>
+                          <th>{{ tr('Meaning', '含义') }}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="item in importTemplateGuide.fieldGuides" :key="item.field">
+                          <td><code>{{ item.field }}</code></td>
+                          <td>{{ tr(item.meaningEn, item.meaningZh) }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div v-if="selectedImportProfileGuide" class="attendance__template-guide-card attendance__template-guide-card--full">
+                    <div class="attendance__template-guide-title">
+                      {{ tr('Selected mapping profile', '已选映射配置') }}: {{ selectedImportProfileGuide.name }}
+                    </div>
+                    <small v-if="selectedImportProfileGuide.description" class="attendance__field-hint">
+                      {{ selectedImportProfileGuide.description }}
+                    </small>
+                    <table v-if="selectedImportProfileGuide.mappingEntries.length" class="attendance__template-table">
+                      <thead>
+                        <tr>
+                          <th>{{ tr('Target field', '目标字段') }}</th>
+                          <th>{{ tr('Meaning', '含义') }}</th>
+                          <th>{{ tr('Source field', '源字段') }}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="item in selectedImportProfileGuide.mappingEntries" :key="item.targetField">
+                          <td><code>{{ item.targetField }}</code></td>
+                          <td>{{ tr(item.meaningEn, item.meaningZh) }}</td>
+                          <td><code>{{ item.sourceField }}</code></td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-import-rule-set">
@@ -2061,107 +2615,28 @@
                 </table>
               </div>
 
-              <div class="attendance__admin-section-header" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)">
-                <h4>{{ tr('Import batches', '导入批次') }}</h4>
-                <button class="attendance__btn" :disabled="importLoading" @click="loadImportBatches">
-                  {{ importLoading ? tr('Loading...', '加载中...') : tr('Reload batches', '重载批次') }}
-                </button>
-              </div>
-              <div v-if="importBatches.length === 0" class="attendance__empty-state">
-                <div class="attendance__empty">{{ tr('No import batches.', '暂无导入批次。') }}</div>
-                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
-              </div>
-              <div v-else class="attendance__table-wrapper">
-                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
-                <table class="attendance__table">
-                  <thead>
-                    <tr>
-                      <th>{{ tr('Batch', '批次') }}</th>
-                      <th>{{ tr('Status', '状态') }}</th>
-                      <th>{{ tr('Rows', '行数') }}</th>
-                      <th>{{ tr('Engine', '引擎') }}</th>
-                      <th>{{ tr('Chunk', '分块') }}</th>
-                      <th>{{ tr('Source', '来源') }}</th>
-                      <th>{{ tr('Rule set', '规则集') }}</th>
-                      <th>{{ tr('Created', '创建时间') }}</th>
-                      <th>{{ tr('Actions', '操作') }}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="batch in importBatches" :key="batch.id">
-                      <td>{{ batch.id.slice(0, 8) }}</td>
-                      <td>{{ formatStatus(batch.status) }}</td>
-                      <td>{{ batch.rowCount }}</td>
-                      <td>{{ resolveImportBatchEngine(batch) }}</td>
-                      <td>{{ resolveImportBatchChunkLabel(batch) }}</td>
-                      <td>{{ batch.source || '--' }}</td>
-                      <td>{{ resolveRuleSetName(batch.ruleSetId) }}</td>
-                      <td>{{ formatDateTime(batch.createdAt ?? null) }}</td>
-                      <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="loadImportBatchItems(batch.id)">{{ tr('View items', '查看条目') }}</button>
-                        <button
-                          class="attendance__btn attendance__btn--danger"
-                          :disabled="importLoading"
-                          @click="rollbackImportBatch(batch.id)"
-                        >
-                          {{ tr('Rollback', '回滚') }}
-                        </button>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              <div v-if="importBatchItems.length > 0" class="attendance__table-wrapper">
-                <div class="attendance__subheading-row">
-                  <h5 class="attendance__subheading">{{ tr('Batch items', '批次条目') }}</h5>
-                  <div class="attendance__table-actions">
-                    <button class="attendance__btn" :disabled="importLoading" @click="exportImportBatchItemsCsv(false)">
-                      {{ tr('Export items CSV', '导出条目 CSV') }}
-                    </button>
-                    <button class="attendance__btn" :disabled="importLoading" @click="exportImportBatchItemsCsv(true)">
-                      {{ tr('Export anomalies CSV', '导出异常 CSV') }}
-                    </button>
-                  </div>
-                </div>
-                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
-                <table class="attendance__table">
-                  <thead>
-                    <tr>
-                      <th>{{ tr('Work date', '工作日期') }}</th>
-                      <th>{{ tr('User ID', '用户 ID') }}</th>
-                      <th>{{ tr('Record', '记录') }}</th>
-                      <th>{{ tr('Snapshot', '快照') }}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="item in importBatchItems" :key="item.id">
-                      <td>{{ item.workDate }}</td>
-                      <td>{{ item.userId }}</td>
-                      <td>{{ item.recordId || '--' }}</td>
-                      <td>
-                        <button class="attendance__btn" @click="toggleImportBatchSnapshot(item)">
-                          {{ importBatchSnapshot === item.previewSnapshot ? tr('Hide', '隐藏') : tr('View', '查看') }}
-                        </button>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-                <div v-if="importBatchSnapshot" class="attendance__snapshot-panel">
-                  <div class="attendance__field-hint">
-                    {{ tr('Snapshot context', '快照上下文') }}: {{ importBatchSnapshotContextLabel }}
-                  </div>
-                  <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
-                  <pre class="attendance__code">{{ formatJson(importBatchSnapshot.snapshot) }}</pre>
-                </div>
-              </div>
-              <div v-else-if="importBatchSelectedId" class="attendance__empty-state">
-                <div class="attendance__empty">{{ tr('No batch items.', '暂无批次条目。') }}</div>
-                <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
+              <div
+                v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)"
+                class="attendance__admin-section"
+                v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)"
+              >
+                <AttendanceImportBatchesSection
+                  :tr="tr"
+                  :workflow="attendanceImportBatchSectionBindings"
+                  :resolve-rule-set-name="resolveRuleSetName"
+                  :format-status="formatStatus"
+                  :format-date-time="formatDateTime"
+                  :format-json="formatJson"
+                  :storage-key="attendanceImportBatchStorageKey"
+                />
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Payroll Templates', '计薪模板') }}</h4>
                 <button class="attendance__btn" :disabled="payrollTemplateLoading" @click="loadPayrollTemplates">
@@ -2312,7 +2787,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Payroll Cycles', '计薪周期') }}</h4>
                 <button class="attendance__btn" :disabled="payrollCycleLoading" @click="loadPayrollCycles">
@@ -2559,7 +3038,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Leave Types', '请假类型') }}</h4>
                 <button class="attendance__btn" :disabled="leaveTypeLoading" @click="loadLeaveTypes">
@@ -2660,7 +3143,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Overtime Rules', '加班规则') }}</h4>
                 <button class="attendance__btn" :disabled="overtimeRuleLoading" @click="loadOvertimeRules">
@@ -2772,7 +3259,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Approval Flows', '审批流') }}</h4>
                 <button class="attendance__btn" :disabled="approvalFlowLoading" @click="loadApprovalFlows">
@@ -2866,7 +3357,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationRules)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.rotationRules)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationRules)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rotation Rules', '轮班规则') }}</h4>
                 <button class="attendance__btn" :disabled="rotationRuleLoading" @click="loadRotationRules">
@@ -2963,7 +3458,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rotation Assignments', '轮班分配') }}</h4>
                 <button class="attendance__btn" :disabled="rotationAssignmentLoading" @click="loadRotationAssignments">
@@ -3074,7 +3573,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.shifts)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.shifts)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.shifts)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Shifts', '班次') }}</h4>
                 <button class="attendance__btn" :disabled="shiftLoading" @click="loadShifts">
@@ -3198,7 +3701,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.assignments)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.assignments)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.assignments)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Assignments', '排班分配') }}</h4>
                 <button class="attendance__btn" :disabled="assignmentLoading" @click="loadAssignments">
@@ -3305,82 +3812,17 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidays)">
-              <div class="attendance__admin-section-header">
-                <h4>{{ tr('Holidays', '节假日') }}</h4>
-                <button class="attendance__btn" :disabled="holidayLoading" @click="loadHolidays">
-                  {{ holidayLoading ? tr('Loading...', '加载中...') : tr('Reload holidays', '重载节假日') }}
-                </button>
-              </div>
-              <div class="attendance__admin-grid">
-                <label class="attendance__field" for="attendance-holiday-date">
-                  <span>{{ tr('Date', '日期') }}</span>
-                  <input
-                    id="attendance-holiday-date"
-                    name="holidayDate"
-                    v-model="holidayForm.date"
-                    type="date"
-                  />
-                </label>
-                <label class="attendance__field" for="attendance-holiday-name">
-                  <span>{{ tr('Name', '名称') }}</span>
-                  <input
-                    id="attendance-holiday-name"
-                    name="holidayName"
-                    v-model="holidayForm.name"
-                    type="text"
-                    :placeholder="tr('Optional', '可选')"
-                  />
-                </label>
-                <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-working">
-                  <span>{{ tr('Working day override', '工作日覆盖') }}</span>
-                  <input
-                    id="attendance-holiday-working"
-                    name="holidayWorkingDay"
-                    v-model="holidayForm.isWorkingDay"
-                    type="checkbox"
-                  />
-                </label>
-              </div>
-              <div class="attendance__admin-actions">
-                <button class="attendance__btn attendance__btn--primary" :disabled="holidaySaving" @click="saveHoliday">
-                  {{ holidaySaving ? tr('Saving...', '保存中...') : holidayEditingId ? tr('Update holiday', '更新节假日') : tr('Create holiday', '创建节假日') }}
-                </button>
-                <button
-                  v-if="holidayEditingId"
-                  class="attendance__btn"
-                  :disabled="holidaySaving"
-                  @click="resetHolidayForm"
-                >
-                  {{ tr('Cancel edit', '取消编辑') }}
-                </button>
-              </div>
-              <div v-if="holidays.length === 0" class="attendance__empty">{{ tr('No holidays in this range.', '当前范围内暂无节假日。') }}</div>
-              <div v-else class="attendance__table-wrapper">
-                <table class="attendance__table">
-                  <thead>
-                    <tr>
-                      <th>{{ tr('Date', '日期') }}</th>
-                      <th>{{ tr('Name', '名称') }}</th>
-                      <th>{{ tr('Working day', '工作日') }}</th>
-                      <th>{{ tr('Actions', '操作') }}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="holiday in holidays" :key="holiday.id">
-                      <td>{{ holiday.date }}</td>
-                      <td>{{ holiday.name || '--' }}</td>
-                      <td>{{ holiday.isWorkingDay ? tr('Yes', '是') : tr('No', '否') }}</td>
-                      <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editHoliday(holiday)">{{ tr('Edit', '编辑') }}</button>
-                        <button class="attendance__btn attendance__btn--danger" @click="deleteHoliday(holiday.id)">
-                          {{ tr('Delete', '删除') }}
-                        </button>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidays)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidays)"
+            >
+              <AttendanceHolidayDataSection
+                :holiday="holidaySectionBindings"
+                :format-date="formatDate"
+                :show-lunar-calendar="showLunarLabel"
+                :tr="tr"
+              />
             </div>
             </div>
           </div>
@@ -3393,6 +3835,20 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
+import AttendanceImportBatchesSection from './attendance/AttendanceImportBatchesSection.vue'
+import AttendanceHolidayDataSection from './attendance/AttendanceHolidayDataSection.vue'
+import AttendanceUserPickerField from './attendance/AttendanceUserPickerField.vue'
+import { useAttendanceAdminImportBatches } from './attendance/useAttendanceAdminImportBatches'
+import {
+  buildRuleSetPreviewRecommendations,
+  summarizeRuleSetPreviewResult,
+  type AttendanceRuleBuilderState,
+  type AttendanceRuleSetPreviewInput,
+  type AttendanceRuleSetPreviewItem,
+  type AttendanceRuleSetPreviewRecommendation,
+  type AttendanceRuleSetPreviewResult,
+  type AttendanceRuleSetPreviewSummary,
+} from './attendance/useAttendanceAdminRulesAndGroups'
 import {
   ATTENDANCE_ADMIN_SECTION_IDS,
   useAttendanceAdminRail,
@@ -3725,6 +4181,7 @@ interface AttendanceRuleTemplateVersion {
   createdBy?: string | null
   sourceVersionId?: string | null
   itemCount?: number | null
+  templates?: unknown[] | null
 }
 
 interface AttendanceGroup {
@@ -3810,17 +4267,6 @@ interface AttendanceImportItem {
   createdAt?: string
 }
 
-interface AttendanceImportBatchSnapshotContext {
-  userId: string | null
-  workDate: string | null
-  recordId: string | null
-}
-
-interface AttendanceImportBatchSnapshotState {
-  snapshot: Record<string, any>
-  context: AttendanceImportBatchSnapshotContext
-}
-
 interface AttendanceImportMappingProfile {
   id: string
   name: string
@@ -3831,6 +4277,32 @@ interface AttendanceImportMappingProfile {
   userMapKeyField?: string
   userMapSourceFields?: string[]
   payloadExample?: Record<string, any>
+}
+
+interface AttendanceImportFieldGuide {
+  field: string
+  meaningEn: string
+  meaningZh: string
+}
+
+interface AttendanceImportTemplateGuide {
+  source: string
+  mode: 'override' | 'merge'
+  columns: string[]
+  requiredFields: string[]
+  sampleHeader: string
+  fieldGuides: AttendanceImportFieldGuide[]
+}
+
+interface AttendanceImportProfileGuideEntry extends AttendanceImportFieldGuide {
+  targetField: string
+  sourceField: string
+}
+
+interface AttendanceImportProfileGuide {
+  name: string
+  description?: string
+  mappingEntries: AttendanceImportProfileGuideEntry[]
 }
 
 interface AttendanceImportJob {
@@ -4205,14 +4677,6 @@ const importGroupTimezoneLabel = computed(() =>
 const importPreviewTimezoneHint = computed(() =>
   `${tr('Preview timezone', '预览时区')}: ${importTimezoneLabel.value} · ${tr('Group timezone', '分组时区')}: ${importGroupTimezoneLabel.value}`
 )
-const importBatchSnapshotContextLabel = computed(() => {
-  const snapshot = importBatchSnapshot.value
-  if (!snapshot) return '--'
-  const context = snapshot.context && typeof snapshot.context === 'object'
-    ? snapshot.context
-    : null
-  return `userId: ${context?.userId || '--'} · workDate: ${context?.workDate || '--'} · recordId: ${context?.recordId || '--'}`
-})
 const payrollTemplateTimezoneLabel = computed(() => displayTimezone(payrollTemplateForm.timezone))
 const payrollCycleTemplateTimezoneHint = computed(() =>
   `${tr('Cycle template timezone', '周期模板时区')}: ${resolvePayrollTemplateTimezoneLabel(payrollCycleForm.templateId, 'manual')}`
@@ -4242,15 +4706,16 @@ const ruleSets = ref<AttendanceRuleSet[]>([])
 const ruleTemplateSystemText = ref('[]')
 const ruleTemplateLibraryText = ref('[]')
 const ruleTemplateVersions = ref<AttendanceRuleTemplateVersion[]>([])
+const ruleTemplateVersionLoading = ref(false)
+const selectedRuleTemplateVersionId = ref('')
+const selectedRuleTemplateVersion = computed(
+  () => ruleTemplateVersions.value.find(item => item.id === selectedRuleTemplateVersionId.value) ?? null,
+)
 const attendanceGroups = ref<AttendanceGroup[]>([])
 const attendanceGroupMembers = ref<AttendanceGroupMember[]>([])
 const payrollTemplates = ref<AttendancePayrollTemplate[]>([])
 const payrollCycles = ref<AttendancePayrollCycle[]>([])
 const importPreview = ref<AttendanceImportPreviewItem[]>([])
-const importBatches = ref<AttendanceImportBatch[]>([])
-const importBatchItems = ref<AttendanceImportItem[]>([])
-const importBatchSelectedId = ref('')
-const importBatchSnapshot = ref<AttendanceImportBatchSnapshotState | null>(null)
 const importCsvWarnings = ref<string[]>([])
 const importPreviewTask = ref<AttendanceImportPreviewTask | null>(null)
 const importAsyncJob = ref<AttendanceImportJob | null>(null)
@@ -4307,6 +4772,7 @@ const rotationAssignmentEditingId = ref<string | null>(null)
 const ruleSetEditingId = ref<string | null>(null)
 const attendanceGroupEditingId = ref<string | null>(null)
 const attendanceGroupMemberGroupId = ref('')
+const attendanceGroupMemberSelectedUserId = ref('')
 const attendanceGroupMemberUserIds = ref('')
 const payrollTemplateEditingId = ref<string | null>(null)
 const payrollCycleEditingId = ref<string | null>(null)
@@ -4318,6 +4784,8 @@ const selectedImportProfile = computed(() => {
   if (!importProfileId.value) return null
   return importMappingProfiles.value.find(profile => profile.id === importProfileId.value) ?? null
 })
+const importTemplateGuide = computed(() => buildImportTemplateGuide(parseJsonConfig(importForm.payload), selectedImportProfile.value))
+const selectedImportProfileGuide = computed(() => buildImportProfileGuide(selectedImportProfile.value))
 const attendanceGroupOptions = computed(() =>
   attendanceGroups.value.map(group => group.name).filter(name => Boolean(name))
 )
@@ -4340,6 +4808,11 @@ const importGroupRuleSetId = ref('')
 const importGroupTimezone = ref('')
 const importCommitToken = ref('')
 const importCommitTokenExpiresAt = ref('')
+const attendanceImportBatchStorageKey = computed(() =>
+  normalizedOrgId()
+    ? `attendance-import-batch-inbox-views:${normalizedOrgId()}`
+    : 'attendance-import-batch-inbox-views:default'
+)
 
 const importUserMapCount = computed(() => {
   if (!importUserMap.value) return 0
@@ -4349,6 +4822,54 @@ const importUserMapCount = computed(() => {
 
 const orgId = ref('')
 const targetUserId = ref('')
+
+const {
+  exportImportBatchItemsCsv,
+  importBatchImpactLoading,
+  importBatchImpactReport,
+  importBatchItems,
+  importBatchSelectedId,
+  importBatchSnapshot,
+  importBatches,
+  importLoading: importBatchLoading,
+  loadFullImportBatchImpact,
+  loadImportBatchItems,
+  loadImportBatches,
+  rollbackImportBatch,
+  toggleImportBatchSnapshot,
+} = useAttendanceAdminImportBatches({
+  tr,
+  adminForbidden,
+  apiFetch,
+  setStatus: (message, kind = 'info') => setStatus(appendStatusContext(message, importPreviewTimezoneHint.value), kind),
+})
+
+function reloadAttendanceImportBatches() {
+  return loadImportBatches({ orgId: normalizedOrgId() })
+}
+
+function rollbackAttendanceImportBatch(batchId: string, confirmMessage?: string) {
+  return rollbackImportBatch(batchId, {
+    orgId: normalizedOrgId(),
+    confirmMessage,
+  })
+}
+
+const attendanceImportBatchSectionBindings = {
+  importBatchLoading,
+  importBatches,
+  importBatchImpactLoading,
+  importBatchImpactReport,
+  importBatchItems,
+  importBatchSelectedId,
+  importBatchSnapshot,
+  loadFullImportBatchImpact,
+  reloadImportBatches: reloadAttendanceImportBatches,
+  loadImportBatchItems,
+  rollbackImportBatch: rollbackAttendanceImportBatch,
+  exportImportBatchItemsCsv,
+  toggleImportBatchSnapshot,
+}
 
 const { plugins, fetchPlugins, loading: pluginsLoading, error: pluginsError } = usePlugins()
 const attendancePluginNames = new Set(['plugin-attendance', '@metasheet/plugin-attendance'])
@@ -4363,6 +4884,8 @@ const pluginErrorMessage = computed(() => pluginsError.value)
 
 const showAdmin = computed(() => props.mode === 'admin')
 const showOverview = computed(() => props.mode === 'overview')
+const adminFocusedMode = ref(true)
+
 const {
   adminActiveSectionId,
   adminCompactNavOpen,
@@ -4407,6 +4930,24 @@ const {
   isCompactAdminNav,
   adminCompactNavOpen,
 })
+
+function resolvedAdminSectionId(): string {
+  return isKnownAdminSectionId(adminActiveSectionId.value)
+    ? adminActiveSectionId.value
+    : ATTENDANCE_ADMIN_SECTION_IDS.settings
+}
+
+function shouldShowAdminSection(id: string): boolean {
+  return !adminFocusedMode.value || resolvedAdminSectionId() === id
+}
+
+function selectAdminSection(id: string): void {
+  adminFocusedMode.value = true
+  adminActiveSectionId.value = id
+  void nextTick(() => {
+    scrollToAdminSection(id)
+  })
+}
 
 const statusCode = computed(() => statusMeta.value?.code || '')
 const statusHint = computed(() => statusMeta.value?.hint || '')
@@ -4717,9 +5258,30 @@ const importForm = reactive({
   payload: '{}',
 })
 
+const ruleBuilderSource = ref('')
+const ruleBuilderTimezone = ref(defaultTimezone)
+const ruleBuilderWorkStartTime = ref('09:00')
+const ruleBuilderWorkEndTime = ref('18:00')
+const ruleBuilderLateGraceMinutes = ref(10)
+const ruleBuilderEarlyGraceMinutes = ref(10)
+const ruleBuilderWorkingDaysText = ref('1, 2, 3, 4, 5')
+
 function toDateInput(date: Date): string {
   return date.toISOString().slice(0, 10)
 }
+
+function firstDayOfMonth(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), 1)
+}
+
+function lastDayOfMonth(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth() + 1, 0)
+}
+
+const adminHolidayRange = reactive({
+  from: toDateInput(firstDayOfMonth(today)),
+  to: toDateInput(lastDayOfMonth(today)),
+})
 
 function toDateKey(date: Date): string {
   const year = date.getFullYear()
@@ -4738,11 +5300,20 @@ function normalizeDateKey(value: string | null | undefined): string | null {
   return date.toISOString().slice(0, 10)
 }
 
-function formatDateTime(value: string | null): string {
+function formatDateTime(value: string | null | undefined): string {
   if (!value) return '--'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '--'
   return date.toLocaleString(locale.value)
+}
+
+function formatDate(value: string | null | undefined): string {
+  if (!value) return '--'
+  const direct = String(value).trim()
+  if (!direct) return '--'
+  const date = new Date(direct)
+  if (Number.isNaN(date.getTime())) return direct
+  return date.toLocaleDateString(locale.value)
 }
 
 function displayTimezone(value: string | null | undefined): string {
@@ -4983,6 +5554,991 @@ function parseJsonConfig(value: string): Record<string, any> | null {
   } catch {
     return null
   }
+}
+
+function normalizeText(value: unknown): string {
+  if (typeof value === 'string') return value.trim()
+  if (value === null || value === undefined) return ''
+  return String(value).trim()
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map(item => normalizeText(item)).filter(Boolean)
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(/[\n,，\s]+/)
+      .map(item => item.trim())
+      .filter(Boolean)
+  }
+  return []
+}
+
+function parseRuleBuilderWorkingDays(value: string): number[] {
+  return Array.from(new Set(
+    normalizeStringList(value)
+      .map(item => Number.parseInt(item, 10))
+      .filter(item => Number.isInteger(item) && item >= 0 && item <= 6),
+  )).sort((left, right) => left - right)
+}
+
+const ruleBuilderDayOptions = [
+  { value: 0, labelEn: 'Sun', labelZh: '周日' },
+  { value: 1, labelEn: 'Mon', labelZh: '周一' },
+  { value: 2, labelEn: 'Tue', labelZh: '周二' },
+  { value: 3, labelEn: 'Wed', labelZh: '周三' },
+  { value: 4, labelEn: 'Thu', labelZh: '周四' },
+  { value: 5, labelEn: 'Fri', labelZh: '周五' },
+  { value: 6, labelEn: 'Sat', labelZh: '周六' },
+]
+
+const ruleBuilderWorkingDays = computed<number[]>({
+  get: () => parseRuleBuilderWorkingDays(ruleBuilderWorkingDaysText.value),
+  set: (value) => {
+    ruleBuilderWorkingDaysText.value = Array.from(new Set(value)).sort((left, right) => left - right).join(', ')
+  },
+})
+
+const ruleBuilderTimezoneLabel = computed(() => displayTimezone(ruleBuilderTimezone.value))
+
+function formatRuleBuilderWorkingDaysLabel(value: string): string {
+  const days = parseRuleBuilderWorkingDays(value)
+  if (days.length === 0) return tr('Not set', '未设置')
+  return days
+    .map(day => tr(ruleBuilderDayOptions.find(item => item.value === day)?.labelEn ?? String(day), ruleBuilderDayOptions.find(item => item.value === day)?.labelZh ?? String(day)))
+    .join(', ')
+}
+
+function resetRuleBuilderForm() {
+  ruleBuilderSource.value = ''
+  ruleBuilderTimezone.value = defaultTimezone
+  ruleBuilderWorkStartTime.value = '09:00'
+  ruleBuilderWorkEndTime.value = '18:00'
+  ruleBuilderLateGraceMinutes.value = 10
+  ruleBuilderEarlyGraceMinutes.value = 10
+  ruleBuilderWorkingDaysText.value = '1, 2, 3, 4, 5'
+}
+
+function syncRuleBuilderFromRuleSetConfig(configInput: string | Record<string, unknown> | null | undefined = ruleSetForm.config) {
+  const config = typeof configInput === 'string'
+    ? parseJsonConfig(configInput)
+    : (configInput && typeof configInput === 'object' ? configInput as Record<string, unknown> : {})
+  if (!config) return false
+  const rule = config.rule && typeof config.rule === 'object' ? config.rule as Record<string, unknown> : {}
+  ruleBuilderSource.value = normalizeText(config.source ?? rule.source)
+  ruleBuilderTimezone.value = normalizeText(rule.timezone) || defaultTimezone
+  ruleBuilderWorkStartTime.value = normalizeText(rule.workStartTime) || '09:00'
+  ruleBuilderWorkEndTime.value = normalizeText(rule.workEndTime) || '18:00'
+  ruleBuilderLateGraceMinutes.value = Math.max(0, Math.floor(Number(rule.lateGraceMinutes ?? 10) || 10))
+  ruleBuilderEarlyGraceMinutes.value = Math.max(0, Math.floor(Number(rule.earlyGraceMinutes ?? 10) || 10))
+  ruleBuilderWorkingDaysText.value = normalizeStringList(rule.workingDays).join(', ') || '1, 2, 3, 4, 5'
+  return true
+}
+
+function buildRuleBuilderConfigDraft(baseConfig: Record<string, unknown> | null = null): Record<string, unknown> {
+  const nextConfig: Record<string, unknown> = { ...(baseConfig ?? {}) }
+  const rule = nextConfig.rule && typeof nextConfig.rule === 'object' ? { ...(nextConfig.rule as Record<string, unknown>) } : {}
+
+  const source = ruleBuilderSource.value.trim()
+  if (source) nextConfig.source = source
+  else delete nextConfig.source
+
+  const timezone = ruleBuilderTimezone.value.trim()
+  if (timezone) rule.timezone = timezone
+  else delete rule.timezone
+
+  const workStartTime = ruleBuilderWorkStartTime.value.trim()
+  if (workStartTime) rule.workStartTime = workStartTime
+  else delete rule.workStartTime
+
+  const workEndTime = ruleBuilderWorkEndTime.value.trim()
+  if (workEndTime) rule.workEndTime = workEndTime
+  else delete rule.workEndTime
+
+  rule.lateGraceMinutes = Math.max(0, Math.floor(Number(ruleBuilderLateGraceMinutes.value) || 0))
+  rule.earlyGraceMinutes = Math.max(0, Math.floor(Number(ruleBuilderEarlyGraceMinutes.value) || 0))
+
+  const workingDays = parseRuleBuilderWorkingDays(ruleBuilderWorkingDaysText.value)
+  if (workingDays.length > 0) rule.workingDays = workingDays
+  else delete rule.workingDays
+
+  if (Object.keys(rule).length > 0) nextConfig.rule = rule
+  else delete nextConfig.rule
+
+  return nextConfig
+}
+
+function applyRuleBuilderToRuleSetConfig() {
+  const config = parseJsonConfig(ruleSetForm.config)
+  if (!config) {
+    throw new Error(tr('Rule set config must be valid JSON before applying builder changes', '应用构建器变更前，规则集配置必须是合法 JSON'))
+  }
+  const nextConfig = buildRuleBuilderConfigDraft(config)
+  ruleSetForm.config = JSON.stringify(nextConfig, null, 2)
+  syncRuleBuilderFromRuleSetConfig(nextConfig)
+  setStatus(tr('Structured rule builder applied to JSON config.', '结构化规则构建器已同步到 JSON 配置。'))
+  return nextConfig
+}
+
+interface AttendancePreviewEventDraft {
+  id: string
+  eventType: 'check_in' | 'check_out'
+  occurredAt: string
+  workDate: string
+  userId: string
+}
+
+interface AttendancePreviewConfigDiffItem {
+  path: string
+  label: string
+  summary: string
+  severity: 'info' | 'warning'
+}
+
+interface AttendancePreviewConfigDiffSummary {
+  addedCount: number
+  removedCount: number
+  changedCount: number
+  totalChanges: number
+  items: AttendancePreviewConfigDiffItem[]
+}
+
+type AttendancePreviewScenarioPreset = {
+  id: string
+  labelEn: string
+  labelZh: string
+  descriptionEn: string
+  descriptionZh: string
+}
+
+const ruleSetPreviewLoading = ref(false)
+const ruleSetPreviewError = ref('')
+const ruleSetPreviewEventsText = ref('[]')
+const ruleSetPreviewResult = ref<AttendanceRuleSetPreviewResult | null>(null)
+const previewEventDrafts = ref<AttendancePreviewEventDraft[]>([])
+const activePreviewScenarioId = ref('')
+const selectedRuleSetPreviewRowKey = ref('')
+
+const previewScenarioPresets: AttendancePreviewScenarioPreset[] = [
+  {
+    id: 'onTime',
+    labelEn: 'On-time day',
+    labelZh: '准点工作日',
+    descriptionEn: 'Baseline check-in and check-out on a scheduled workday.',
+    descriptionZh: '在工作日生成基准上下班打卡。',
+  },
+  {
+    id: 'lateArrival',
+    labelEn: 'Late arrival',
+    labelZh: '迟到场景',
+    descriptionEn: 'Starts after the configured late grace.',
+    descriptionZh: '在当前迟到宽限后再上班。',
+  },
+  {
+    id: 'earlyLeave',
+    labelEn: 'Early leave',
+    labelZh: '早退场景',
+    descriptionEn: 'Leaves before the configured early-leave grace.',
+    descriptionZh: '在当前早退宽限前提前下班。',
+  },
+  {
+    id: 'missingCheckOut',
+    labelEn: 'Missing check-out',
+    labelZh: '缺少下班卡',
+    descriptionEn: 'Keeps only the check-in event to test missing-punch handling.',
+    descriptionZh: '仅保留上班卡，测试缺卡处理。',
+  },
+  {
+    id: 'restDayOvertime',
+    labelEn: 'Rest-day overtime',
+    labelZh: '休息日加班',
+    descriptionEn: 'Simulates a full-day attendance on a non-working day.',
+    descriptionZh: '在非工作日模拟全天打卡。',
+  },
+]
+
+function normalizeNullableText(value: unknown): string | null {
+  const text = normalizeText(value)
+  return text.length > 0 ? text : null
+}
+
+function normalizeInteger(value: unknown, fallback: number): number {
+  const normalized = Number(value)
+  return Number.isFinite(normalized) && normalized >= 0 ? Math.floor(normalized) : fallback
+}
+
+function asPlainObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function flattenConfigEntries(value: unknown, basePath = ''): Array<{ path: string; value: unknown }> {
+  if (Array.isArray(value) || !isPlainObject(value)) {
+    return basePath ? [{ path: basePath, value }] : []
+  }
+
+  const keys = Object.keys(value).sort()
+  if (keys.length === 0) {
+    return basePath ? [{ path: basePath, value: {} }] : []
+  }
+
+  return keys.flatMap((key) => {
+    const nextPath = basePath ? `${basePath}.${key}` : key
+    const nextValue = value[key]
+    if (Array.isArray(nextValue) || !isPlainObject(nextValue)) {
+      return [{ path: nextPath, value: nextValue }]
+    }
+    return flattenConfigEntries(nextValue, nextPath)
+  })
+}
+
+function formatDiffValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (value === null) return 'null'
+  if (value === undefined) return '--'
+  return JSON.stringify(value)
+}
+
+function formatDiffLabel(path: string): string {
+  const parts = path.split('.').filter(Boolean)
+  return parts[parts.length - 1] ?? path
+}
+
+function buildPreviewConfigDiffSummary(
+  draftConfig: Record<string, unknown>,
+  resolvedConfig: Record<string, unknown> | null,
+): AttendancePreviewConfigDiffSummary | null {
+  if (!resolvedConfig) return null
+
+  const draftEntries = new Map(flattenConfigEntries(draftConfig).map(entry => [entry.path, entry.value]))
+  const resolvedEntries = new Map(flattenConfigEntries(resolvedConfig).map(entry => [entry.path, entry.value]))
+  const allPaths = Array.from(new Set([...draftEntries.keys(), ...resolvedEntries.keys()])).sort()
+
+  const items: AttendancePreviewConfigDiffItem[] = []
+  let addedCount = 0
+  let removedCount = 0
+  let changedCount = 0
+
+  for (const path of allPaths) {
+    const hasDraft = draftEntries.has(path)
+    const hasResolved = resolvedEntries.has(path)
+
+    if (!hasDraft && hasResolved) {
+      addedCount += 1
+      items.push({
+        path,
+        label: tr('Added default', '新增默认值'),
+        summary: tr(
+          `Resolved config added ${formatDiffLabel(path)} = ${formatDiffValue(resolvedEntries.get(path))}.`,
+          `生效配置新增了 ${formatDiffLabel(path)} = ${formatDiffValue(resolvedEntries.get(path))}。`,
+        ),
+        severity: 'info',
+      })
+      continue
+    }
+
+    if (hasDraft && !hasResolved) {
+      removedCount += 1
+      items.push({
+        path,
+        label: tr('Removed during normalization', '归一化后移除'),
+        summary: tr(
+          `Draft value ${formatDiffLabel(path)} = ${formatDiffValue(draftEntries.get(path))} was not kept in resolved config.`,
+          `草稿中的 ${formatDiffLabel(path)} = ${formatDiffValue(draftEntries.get(path))} 未保留在生效配置中。`,
+        ),
+        severity: 'warning',
+      })
+      continue
+    }
+
+    if (JSON.stringify(draftEntries.get(path)) !== JSON.stringify(resolvedEntries.get(path))) {
+      changedCount += 1
+      items.push({
+        path,
+        label: tr('Resolved value changed', '生效值被改写'),
+        summary: tr(
+          `${formatDiffLabel(path)} changed from ${formatDiffValue(draftEntries.get(path))} to ${formatDiffValue(resolvedEntries.get(path))}.`,
+          `${formatDiffLabel(path)} 从 ${formatDiffValue(draftEntries.get(path))} 变为 ${formatDiffValue(resolvedEntries.get(path))}。`,
+        ),
+        severity: 'warning',
+      })
+    }
+  }
+
+  return {
+    addedCount,
+    removedCount,
+    changedCount,
+    totalChanges: items.length,
+    items,
+  }
+}
+
+function normalizeRuleSetPreviewInput(value: unknown): AttendanceRuleSetPreviewInput | null {
+  const item = asPlainObject(value)
+  if (!item) return null
+  const eventType = normalizeText(item.eventType)
+  if (eventType !== 'check_in' && eventType !== 'check_out') return null
+  const occurredAt = normalizeText(item.occurredAt)
+  if (!occurredAt) return null
+  const previewItem: AttendanceRuleSetPreviewInput = {
+    eventType,
+    occurredAt,
+  }
+  const workDate = normalizeNullableText(item.workDate)
+  if (workDate) previewItem.workDate = workDate
+  const userId = normalizeNullableText(item.userId)
+  if (userId) previewItem.userId = userId
+  return previewItem
+}
+
+function parseRuleSetPreviewInputs(value: string): AttendanceRuleSetPreviewInput[] | null {
+  const trimmed = value.trim()
+  if (!trimmed) return []
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (!Array.isArray(parsed)) return null
+    const previewInputs = parsed.map((item) => normalizeRuleSetPreviewInput(item))
+    if (previewInputs.some((item) => item === null)) return null
+    return previewInputs.filter((item): item is AttendanceRuleSetPreviewInput => item !== null)
+  } catch {
+    return null
+  }
+}
+
+function normalizeRuleSetPreviewItem(value: unknown): AttendanceRuleSetPreviewItem | null {
+  const item = asPlainObject(value)
+  if (!item) return null
+  return {
+    userId: normalizeText(item.userId) || 'unknown',
+    workDate: normalizeText(item.workDate),
+    firstInAt: normalizeNullableText(item.firstInAt),
+    lastOutAt: normalizeNullableText(item.lastOutAt),
+    workMinutes: normalizeInteger(item.workMinutes, 0),
+    lateMinutes: normalizeInteger(item.lateMinutes, 0),
+    earlyLeaveMinutes: normalizeInteger(item.earlyLeaveMinutes, 0),
+    status: normalizeText(item.status) || 'unknown',
+    isWorkingDay: typeof item.isWorkingDay === 'boolean' ? item.isWorkingDay : undefined,
+    source: item.source,
+  }
+}
+
+function normalizeRuleSetPreviewResult(value: unknown): AttendanceRuleSetPreviewResult {
+  const item = asPlainObject(value) ?? {}
+  const preview = Array.isArray(item.preview)
+    ? item.preview.map((entry) => normalizeRuleSetPreviewItem(entry)).filter(
+      (entry): entry is AttendanceRuleSetPreviewItem => entry !== null,
+    )
+    : []
+  const config = asPlainObject(item.config) ?? {}
+  const totalEvents = normalizeInteger(item.totalEvents, preview.length)
+  return {
+    ruleSetId: normalizeNullableText(item.ruleSetId),
+    totalEvents,
+    preview,
+    config,
+    notes: normalizeStringList(item.notes),
+  }
+}
+
+function createPreviewEventDraft(overrides: Partial<AttendancePreviewEventDraft> = {}): AttendancePreviewEventDraft {
+  const now = new Date()
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const localIso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`
+  return {
+    id: `${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
+    eventType: 'check_in',
+    occurredAt: localIso,
+    workDate: localIso.slice(0, 10),
+    userId: '',
+    ...overrides,
+  }
+}
+
+function normalizePreviewEventDateTime(value: unknown): string {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (!text) return ''
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(text)) {
+    return text
+  }
+  const parsed = new Date(text.replace(' ', 'T'))
+  if (Number.isNaN(parsed.getTime())) {
+    return text
+  }
+  const pad = (input: number) => String(input).padStart(2, '0')
+  return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}T${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
+}
+
+function normalizePreviewEventDraft(value: unknown): AttendancePreviewEventDraft | null {
+  const item = asPlainObject(value)
+  if (!item) return null
+  const eventType = item.eventType === 'check_out' ? 'check_out' : 'check_in'
+  const occurredAt = normalizePreviewEventDateTime(item.occurredAt)
+  if (!occurredAt) return null
+  return {
+    id: typeof item.id === 'string' && item.id.trim() ? item.id : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    eventType,
+    occurredAt,
+    workDate: typeof item.workDate === 'string' && item.workDate.trim() ? item.workDate.trim() : occurredAt.slice(0, 10),
+    userId: typeof item.userId === 'string' ? item.userId.trim() : '',
+  }
+}
+
+function parsePreviewEventDrafts(value: string): AttendancePreviewEventDraft[] | null {
+  const trimmed = value.trim()
+  if (!trimmed) return []
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (!Array.isArray(parsed)) return null
+    const drafts = parsed.map((item) => normalizePreviewEventDraft(item))
+    if (drafts.some((item) => item === null)) return null
+    return drafts.filter((item): item is AttendancePreviewEventDraft => item !== null)
+  } catch {
+    return null
+  }
+}
+
+function serializePreviewEventDrafts(items: AttendancePreviewEventDraft[]): string {
+  return JSON.stringify(
+    items.map((item) => ({
+      eventType: item.eventType,
+      occurredAt: item.occurredAt,
+      workDate: item.workDate,
+      userId: item.userId,
+    })),
+    null,
+    2,
+  )
+}
+
+function syncPreviewEventTextFromDrafts() {
+  const serialized = serializePreviewEventDrafts(previewEventDrafts.value)
+  if (serialized !== ruleSetPreviewEventsText.value) {
+    ruleSetPreviewEventsText.value = serialized
+  }
+}
+
+function addPreviewEvent() {
+  previewEventDrafts.value = [...previewEventDrafts.value, createPreviewEventDraft()]
+}
+
+function duplicatePreviewEvent(index: number) {
+  const source = previewEventDrafts.value[index]
+  if (!source) return
+  previewEventDrafts.value = [
+    ...previewEventDrafts.value.slice(0, index + 1),
+    createPreviewEventDraft({
+      eventType: source.eventType,
+      occurredAt: source.occurredAt,
+      workDate: source.workDate,
+      userId: source.userId,
+    }),
+    ...previewEventDrafts.value.slice(index + 1),
+  ]
+}
+
+function removePreviewEvent(index: number) {
+  previewEventDrafts.value = previewEventDrafts.value.filter((_, itemIndex) => itemIndex !== index)
+}
+
+function resetPreviewEvents() {
+  previewEventDrafts.value = []
+  activePreviewScenarioId.value = ''
+  syncPreviewEventTextFromDrafts()
+}
+
+function padDatePart(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+function formatDateOnly(date: Date): string {
+  return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`
+}
+
+function parseTimeText(value: string, fallbackHour: number, fallbackMinute = 0): { hour: number; minute: number } {
+  const match = value.trim().match(/^(\d{1,2}):(\d{2})$/)
+  if (!match) {
+    return { hour: fallbackHour, minute: fallbackMinute }
+  }
+  return {
+    hour: Math.min(23, Math.max(0, Number(match[1]))),
+    minute: Math.min(59, Math.max(0, Number(match[2]))),
+  }
+}
+
+function formatDateTimeLocal(date: Date): string {
+  return `${formatDateOnly(date)}T${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}`
+}
+
+function withLocalTime(dateText: string, timeText: string, fallbackHour: number, fallbackMinute = 0): string {
+  const base = /^\d{4}-\d{2}-\d{2}$/.test(dateText) ? dateText : formatDateOnly(new Date())
+  const { hour, minute } = parseTimeText(timeText, fallbackHour, fallbackMinute)
+  const date = new Date(`${base}T00:00`)
+  date.setHours(hour, minute, 0, 0)
+  return formatDateTimeLocal(date)
+}
+
+function shiftDateTimeLocal(value: string, minutes: number): string {
+  const normalized = normalizePreviewEventDateTime(value)
+  const date = new Date(normalized.replace('T', ' ') || value)
+  if (Number.isNaN(date.getTime())) {
+    return normalized
+  }
+  date.setMinutes(date.getMinutes() + minutes)
+  return formatDateTimeLocal(date)
+}
+
+function isWorkingDayForDate(date: Date): boolean {
+  return ruleBuilderWorkingDays.value.includes(date.getDay())
+}
+
+function resolveScenarioDate(kind: 'working' | 'rest'): string {
+  const seed = previewEventDrafts.value[0]?.workDate
+  const fallback = /^\d{4}-\d{2}-\d{2}$/.test(seed ?? '') ? new Date(`${seed}T00:00`) : new Date()
+  for (let offset = 0; offset < 14; offset += 1) {
+    const candidate = new Date(fallback)
+    candidate.setDate(candidate.getDate() + offset)
+    if (kind === 'working' && isWorkingDayForDate(candidate)) {
+      return formatDateOnly(candidate)
+    }
+    if (kind === 'rest' && !isWorkingDayForDate(candidate)) {
+      return formatDateOnly(candidate)
+    }
+  }
+  return formatDateOnly(fallback)
+}
+
+function buildPreviewScenarioDrafts(kind: string): AttendancePreviewEventDraft[] {
+  const userId = previewEventDrafts.value[0]?.userId || 'user-1'
+  const workDate = kind === 'restDayOvertime' ? resolveScenarioDate('rest') : resolveScenarioDate('working')
+  const startAt = withLocalTime(workDate, ruleBuilderWorkStartTime.value, 9, 0)
+  const endAt = withLocalTime(workDate, ruleBuilderWorkEndTime.value, 18, 0)
+  const lateShift = normalizeInteger(ruleBuilderLateGraceMinutes.value, 10) + 5
+  const earlyShift = -1 * (normalizeInteger(ruleBuilderEarlyGraceMinutes.value, 10) + 15)
+
+  switch (kind) {
+    case 'lateArrival':
+      return [
+        createPreviewEventDraft({ eventType: 'check_in', occurredAt: shiftDateTimeLocal(startAt, lateShift), workDate, userId }),
+        createPreviewEventDraft({ eventType: 'check_out', occurredAt: endAt, workDate, userId }),
+      ]
+    case 'earlyLeave':
+      return [
+        createPreviewEventDraft({ eventType: 'check_in', occurredAt: startAt, workDate, userId }),
+        createPreviewEventDraft({ eventType: 'check_out', occurredAt: shiftDateTimeLocal(endAt, earlyShift), workDate, userId }),
+      ]
+    case 'missingCheckOut':
+      return [
+        createPreviewEventDraft({ eventType: 'check_in', occurredAt: startAt, workDate, userId }),
+      ]
+    case 'restDayOvertime':
+      return [
+        createPreviewEventDraft({ eventType: 'check_in', occurredAt: withLocalTime(workDate, '10:00', 10, 0), workDate, userId }),
+        createPreviewEventDraft({ eventType: 'check_out', occurredAt: withLocalTime(workDate, '18:30', 18, 30), workDate, userId }),
+      ]
+    default:
+      return [
+        createPreviewEventDraft({ eventType: 'check_in', occurredAt: startAt, workDate, userId }),
+        createPreviewEventDraft({ eventType: 'check_out', occurredAt: endAt, workDate, userId }),
+      ]
+  }
+}
+
+function applyPreviewScenario(kind: string) {
+  activePreviewScenarioId.value = kind
+  previewEventDrafts.value = buildPreviewScenarioDrafts(kind)
+}
+
+const ruleBuilderPreviewConfig = computed(() => buildRuleBuilderConfigDraft(parseJsonConfig(ruleSetForm.config) ?? {}))
+const ruleSetPreviewRows = computed<AttendanceRuleSetPreviewItem[]>(() => ruleSetPreviewResult.value?.preview ?? [])
+const ruleSetPreviewNotes = computed(() => ruleSetPreviewResult.value?.notes ?? [])
+const ruleBuilderPreviewState = computed<AttendanceRuleBuilderState>(() => ({
+  source: ruleBuilderSource.value,
+  timezone: ruleBuilderTimezone.value,
+  workStartTime: ruleBuilderWorkStartTime.value,
+  workEndTime: ruleBuilderWorkEndTime.value,
+  lateGraceMinutes: normalizeInteger(ruleBuilderLateGraceMinutes.value, 10),
+  earlyGraceMinutes: normalizeInteger(ruleBuilderEarlyGraceMinutes.value, 10),
+  workingDays: ruleBuilderWorkingDaysText.value,
+}))
+const ruleSetPreviewSummary = computed<AttendanceRuleSetPreviewSummary>(() => summarizeRuleSetPreviewResult({
+  ruleSetId: ruleSetPreviewResult.value?.ruleSetId ?? null,
+  totalEvents: ruleSetPreviewResult.value?.totalEvents ?? previewEventDrafts.value.length,
+  preview: ruleSetPreviewRows.value,
+  config: ruleBuilderPreviewConfig.value,
+  notes: ruleSetPreviewNotes.value,
+}))
+const ruleSetPreviewRecommendations = computed<AttendanceRuleSetPreviewRecommendation[]>(() => buildRuleSetPreviewRecommendations({
+  ruleSetId: ruleSetPreviewResult.value?.ruleSetId ?? null,
+  totalEvents: ruleSetPreviewResult.value?.totalEvents ?? previewEventDrafts.value.length,
+  preview: ruleSetPreviewRows.value,
+  config: ruleBuilderPreviewConfig.value,
+  notes: ruleSetPreviewNotes.value,
+}, ruleBuilderPreviewState.value))
+const ruleSetPreviewEffectiveConfig = computed<Record<string, unknown> | null>(() => {
+  const config = asPlainObject(ruleSetPreviewResult.value?.config)
+  return config && Object.keys(config).length > 0 ? config : null
+})
+const ruleSetPreviewConfigDiff = computed(() => buildPreviewConfigDiffSummary(ruleBuilderPreviewConfig.value, ruleSetPreviewEffectiveConfig.value))
+const selectedRuleSetPreviewRow = computed(() => {
+  const rows = ruleSetPreviewRows.value
+  const selected = rows.find((row) => getRuleSetPreviewRowKey(row) === selectedRuleSetPreviewRowKey.value)
+  return selected ?? rows.find((row) => isRuleSetPreviewRowFlagged(row)) ?? rows[0] ?? null
+})
+const selectedRuleSetPreviewSeverity = computed<AttendanceRuleSetPreviewRecommendation['severity']>(() => {
+  const row = selectedRuleSetPreviewRow.value
+  if (!row) return 'info'
+  if (!row.firstInAt || !row.lastOutAt) return 'critical'
+  if (row.isWorkingDay === false) return 'warning'
+  if (normalizeInteger(row.lateMinutes, 0) > 0 || normalizeInteger(row.earlyLeaveMinutes, 0) > 0) return 'warning'
+  if (!isPreviewStatusNormal(row.status)) return 'warning'
+  return 'info'
+})
+const selectedRuleSetPreviewMetrics = computed(() => {
+  const row = selectedRuleSetPreviewRow.value
+  if (!row) return []
+  return [
+    { key: 'workMinutes', label: tr('Work minutes', '工时分钟'), value: row.workMinutes ?? '--' },
+    { key: 'lateMinutes', label: tr('Late', '迟到'), value: row.lateMinutes ?? 0 },
+    { key: 'earlyLeaveMinutes', label: tr('Early leave', '早退'), value: row.earlyLeaveMinutes ?? 0 },
+    { key: 'checkIn', label: tr('Check in', '上班打卡'), value: row.firstInAt ? formatDateTime(row.firstInAt) : '--' },
+    { key: 'checkOut', label: tr('Check out', '下班打卡'), value: row.lastOutAt ? formatDateTime(row.lastOutAt) : '--' },
+  ]
+})
+const selectedRuleSetPreviewHints = computed(() => {
+  const row = selectedRuleSetPreviewRow.value
+  if (!row) return []
+  const hints: string[] = []
+  if (!row.firstInAt || !row.lastOutAt) {
+    hints.push(tr('This row is missing a punch event. Use it to verify missing-punch policy and exception handling.', '该行缺少打卡事件。请用它核对缺卡策略和异常处理。'))
+  }
+  if (normalizeInteger(row.lateMinutes, 0) > 0) {
+    hints.push(tr(`This row still arrives ${row.lateMinutes} minutes late after the current rule.`, `该行在当前规则下仍迟到 ${row.lateMinutes} 分钟。`))
+  }
+  if (normalizeInteger(row.earlyLeaveMinutes, 0) > 0) {
+    hints.push(tr(`This row still leaves ${row.earlyLeaveMinutes} minutes early after the current rule.`, `该行在当前规则下仍早退 ${row.earlyLeaveMinutes} 分钟。`))
+  }
+  if (row.isWorkingDay === false) {
+    hints.push(tr('This row lands on a non-working day. Confirm whether it should be treated as overtime or a temporary working-day override.', '该行落在非工作日。请确认它应被视为加班还是临时调班。'))
+  }
+  if (!isPreviewStatusNormal(row.status)) {
+    hints.push(tr(`Preview returned status "${row.status || 'unknown'}". Review the source payload below.`, `预演返回状态 "${row.status || 'unknown'}"。请结合下方源载荷复核。`))
+  }
+  if (hints.length === 0) {
+    hints.push(tr('This row looks clean under the current draft.', '该行在当前草稿下表现正常。'))
+  }
+  return hints
+})
+const selectedRuleSetPreviewSource = computed<Record<string, unknown> | null>(() => asPlainObject(selectedRuleSetPreviewRow.value?.source))
+
+async function previewRuleSet() {
+  ruleSetPreviewLoading.value = true
+  ruleSetPreviewError.value = ''
+  try {
+    const previewEvents = parseRuleSetPreviewInputs(ruleSetPreviewEventsText.value)
+    if (!previewEvents) {
+      throw new Error(tr('Preview events must be a valid JSON array', '预览事件必须是合法的 JSON 数组'))
+    }
+
+    const payload: Record<string, unknown> = {
+      config: ruleBuilderPreviewConfig.value,
+    }
+    if (ruleSetEditingId.value) {
+      payload.ruleSetId = ruleSetEditingId.value
+    }
+    if (previewEvents.length > 0) {
+      payload.events = previewEvents
+    }
+
+    const response = await apiFetch('/api/attendance/rule-sets/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    const data = await response.json().catch(() => null) as { ok?: boolean; data?: unknown; error?: { message?: string } | null } | null
+    if (!response.ok || !data?.ok) {
+      throw new Error(String(data?.error?.message || tr('Failed to preview rule set', '预览规则集失败')))
+    }
+
+    ruleSetPreviewResult.value = normalizeRuleSetPreviewResult(data.data)
+    setStatus(tr('Rule set preview loaded.', '规则集预览已加载。'))
+  } catch (error: unknown) {
+    ruleSetPreviewResult.value = null
+    ruleSetPreviewError.value = (error as Error)?.message || tr('Failed to preview rule set', '预览规则集失败')
+    setStatus(ruleSetPreviewError.value, 'error')
+  } finally {
+    ruleSetPreviewLoading.value = false
+  }
+}
+
+function getRuleSetPreviewRowKey(row: AttendanceRuleSetPreviewItem): string {
+  return `${row.userId || 'unknown'}:${row.workDate || 'unknown'}`
+}
+
+function isPreviewStatusNormal(status: string | undefined): boolean {
+  const normalized = String(status ?? '').trim().toLowerCase()
+  return normalized.length === 0 || normalized === 'normal' || normalized === 'ok' || normalized === 'adjusted' || normalized === 'off'
+}
+
+function isRuleSetPreviewRowFlagged(row: AttendanceRuleSetPreviewItem): boolean {
+  return (
+    !row.firstInAt
+    || !row.lastOutAt
+    || row.isWorkingDay === false
+    || normalizeInteger(row.lateMinutes, 0) > 0
+    || normalizeInteger(row.earlyLeaveMinutes, 0) > 0
+    || !isPreviewStatusNormal(row.status)
+  )
+}
+
+function selectRuleSetPreviewRow(row: AttendanceRuleSetPreviewItem) {
+  selectedRuleSetPreviewRowKey.value = getRuleSetPreviewRowKey(row)
+}
+
+function formatPreviewSeverity(severity: AttendanceRuleSetPreviewRecommendation['severity']): string {
+  switch (severity) {
+    case 'critical':
+      return tr('Critical', '严重')
+    case 'warning':
+      return tr('Warning', '警告')
+    default:
+      return tr('Info', '提示')
+  }
+}
+
+function formatRuleSetRecommendationTitle(recommendation: AttendanceRuleSetPreviewRecommendation): string {
+  switch (recommendation.key) {
+    case 'raiseLateGrace':
+      return tr('Raise late grace', '提高迟到宽限')
+    case 'raiseEarlyGrace':
+      return tr('Raise early-leave grace', '提高早退宽限')
+    case 'reviewWorkingDays':
+      return tr('Review working-day calendar', '复核工作日历')
+    case 'reviewMissingPunches':
+      return tr('Review missing punches', '复核缺卡')
+    case 'reviewAbnormalStatuses':
+      return tr('Review abnormal statuses', '复核异常状态')
+    default:
+      return tr('Review preview output', '复核预演输出')
+  }
+}
+
+function formatRuleSetRecommendationBody(recommendation: AttendanceRuleSetPreviewRecommendation): string {
+  switch (recommendation.key) {
+    case 'raiseLateGrace':
+      return tr(
+        `${recommendation.affectedRows} row(s) still land late after the current rule. Preview suggests raising total late grace to about ${recommendation.suggestedMinutes} min.`,
+        `${recommendation.affectedRows} 条记录在当前规则下仍然迟到。预演建议把总迟到宽限提高到约 ${recommendation.suggestedMinutes} 分钟。`,
+      )
+    case 'raiseEarlyGrace':
+      return tr(
+        `${recommendation.affectedRows} row(s) still leave early after the current rule. Preview suggests raising total early-leave grace to about ${recommendation.suggestedMinutes} min.`,
+        `${recommendation.affectedRows} 条记录在当前规则下仍然早退。预演建议把总早退宽限提高到约 ${recommendation.suggestedMinutes} 分钟。`,
+      )
+    case 'reviewWorkingDays':
+      return tr(
+        `${recommendation.affectedRows} row(s) landed on non-working days. Confirm weekend/overtime policy or working-day overrides.`,
+        `${recommendation.affectedRows} 条记录落在非工作日。请确认周末加班策略或调班工作日覆盖。`,
+      )
+    case 'reviewMissingPunches':
+      return tr(
+        `${recommendation.affectedRows} row(s) are missing check-in or check-out events.`,
+        `${recommendation.affectedRows} 条记录缺少上班卡或下班卡。`,
+      )
+    case 'reviewAbnormalStatuses':
+      return tr(
+        `${recommendation.affectedRows} row(s) still return non-normal statuses after preview.`,
+        `${recommendation.affectedRows} 条记录在预演后仍返回非正常状态。`,
+      )
+    default:
+      return tr('Review the generated rows before saving this rule set.', '保存规则集前请先复核生成结果。')
+  }
+}
+
+watch(
+  () => ruleSetPreviewEventsText.value,
+  (value) => {
+    const drafts = parsePreviewEventDrafts(value)
+    if (drafts === null) return
+    previewEventDrafts.value = drafts
+  },
+  { immediate: true },
+)
+
+watch(
+  previewEventDrafts,
+  () => {
+    syncPreviewEventTextFromDrafts()
+  },
+  { deep: true },
+)
+
+watch(
+  ruleSetPreviewRows,
+  (rows) => {
+    if (rows.length === 0) {
+      selectedRuleSetPreviewRowKey.value = ''
+      return
+    }
+    const selected = rows.find((row) => getRuleSetPreviewRowKey(row) === selectedRuleSetPreviewRowKey.value)
+    if (selected) return
+    const fallback = rows.find((row) => isRuleSetPreviewRowFlagged(row)) ?? rows[0]
+    selectedRuleSetPreviewRowKey.value = fallback ? getRuleSetPreviewRowKey(fallback) : ''
+  },
+  { immediate: true },
+)
+
+const ATTENDANCE_IMPORT_FIELD_MEANINGS: Record<string, { en: string; zh: string }> = {
+  source: { en: 'Original attendance data source.', zh: '原始考勤数据来源。' },
+  mode: { en: 'Import conflict strategy.', zh: '导入冲突处理策略。' },
+  columns: { en: 'Source columns used to map incoming rows.', zh: '用于映射导入行的源列。' },
+  mapping: { en: 'Field mapping rules from source data to attendance fields.', zh: '源数据到考勤字段的映射规则。' },
+  data: { en: 'Inline row data for preview or import.', zh: '用于预览或导入的内联行数据。' },
+  rows: { en: 'Inline row list for preview or import.', zh: '用于预览或导入的行列表。' },
+  userId: { en: 'User identifier for the imported row.', zh: '导入行对应的用户标识。' },
+  orgId: { en: 'Organization that owns the import.', zh: '导入所属的组织。' },
+  timezone: { en: 'Timezone used to interpret dates and timestamps.', zh: '用于解析日期和时间戳的时区。' },
+  ruleSetId: { en: 'Rule set applied during import evaluation.', zh: '导入评估时使用的规则集。' },
+  mappingProfileId: { en: 'Saved mapping profile selected for this payload.', zh: '此载荷选中的已保存映射配置。' },
+  csvText: { en: 'Raw CSV text to upload or preview.', zh: '用于上传或预览的原始 CSV 文本。' },
+  csvFileId: { en: 'Uploaded CSV file reference returned by the server.', zh: '服务端返回的已上传 CSV 文件引用。' },
+  csvOptions: { en: 'CSV parsing options such as header row and delimiter.', zh: 'CSV 解析选项，例如表头行和分隔符。' },
+  userMap: { en: 'Lookup table used to resolve imported values to users.', zh: '用于把导入值解析为用户的查找表。' },
+  userMapKeyField: { en: 'Key field in the user map, such as employee number.', zh: '用户映射中的键字段，例如工号。' },
+  userMapSourceFields: { en: 'Source fields that can be used to match the user map key.', zh: '用于匹配用户映射键的源字段。' },
+  groupSync: { en: 'Optional group creation and member assignment settings.', zh: '可选的分组创建和成员分配设置。' },
+  commitToken: { en: 'Short-lived token required for preview and commit requests.', zh: '预览和提交请求所需的短期令牌。' },
+}
+
+const ATTENDANCE_IMPORT_FIELD_ORDER = [
+  'source',
+  'mode',
+  'columns',
+  'mapping',
+  'data',
+  'rows',
+  'csvText',
+  'csvFileId',
+  'csvOptions',
+  'userId',
+  'orgId',
+  'timezone',
+  'ruleSetId',
+  'mappingProfileId',
+  'userMap',
+  'userMapKeyField',
+  'userMapSourceFields',
+  'groupSync',
+  'commitToken',
+]
+
+function humanizeImportField(field: string): string {
+  return String(field)
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function describeImportField(field: string): AttendanceImportFieldGuide {
+  const normalized = normalizeText(field)
+  const known = ATTENDANCE_IMPORT_FIELD_MEANINGS[normalized]
+  if (known) {
+    return { field: normalized, meaningEn: known.en, meaningZh: known.zh }
+  }
+  const humanized = humanizeImportField(normalized) || normalized
+  return {
+    field: normalized,
+    meaningEn: `Field "${humanized}".`,
+    meaningZh: `字段“${humanized}”。`,
+  }
+}
+
+function extractImportTemplateColumns(columns: unknown): string[] {
+  if (!Array.isArray(columns)) return []
+  const values: string[] = []
+  for (const column of columns) {
+    if (typeof column === 'string') {
+      const text = column.trim()
+      if (text) values.push(text)
+      continue
+    }
+    if (!column || typeof column !== 'object') continue
+    const record = column as Record<string, unknown>
+    const candidate = record.header ?? record.sourceField ?? record.source ?? record.name ?? record.field
+    const text = normalizeText(candidate)
+    if (text) values.push(text)
+  }
+  return Array.from(new Set(values))
+}
+
+function extractImportRequiredFields(payloadExample: Record<string, any>, profile?: AttendanceImportMappingProfile | null): string[] {
+  return Array.from(new Set([
+    ...(Array.isArray(payloadExample.requiredFields) ? payloadExample.requiredFields : []),
+    ...(Array.isArray(profile?.requiredFields) ? profile.requiredFields : []),
+  ].map(item => normalizeText(item)).filter(Boolean)))
+}
+
+function buildImportTemplateGuide(payloadExample: Record<string, any> | null, profile?: AttendanceImportMappingProfile | null): AttendanceImportTemplateGuide | null {
+  if (!payloadExample || typeof payloadExample !== 'object' || Object.keys(payloadExample).length === 0) return null
+  const columns = extractImportTemplateColumns(payloadExample.columns)
+  const requiredFields = extractImportRequiredFields(payloadExample, profile)
+  const sampleHeader = columns.length > 0 ? columns.join(',') : requiredFields.join(',')
+  const orderedFields = [
+    ...ATTENDANCE_IMPORT_FIELD_ORDER,
+    ...Object.keys(payloadExample).filter(field => !ATTENDANCE_IMPORT_FIELD_ORDER.includes(field)).sort(),
+  ]
+  const fieldGuides = Array.from(new Set(orderedFields))
+    .filter(field => Object.prototype.hasOwnProperty.call(payloadExample, field))
+    .map(field => describeImportField(field))
+
+  return {
+    source: normalizeText(payloadExample.source) || 'attendance',
+    mode: payloadExample.mode === 'merge' ? 'merge' : 'override',
+    columns,
+    requiredFields,
+    sampleHeader,
+    fieldGuides,
+  }
+}
+
+function extractMappingSource(value: unknown): string {
+  if (typeof value === 'string') return value.trim()
+  if (!value || typeof value !== 'object') return normalizeText(value)
+  const node = value as Record<string, unknown>
+  const candidate = node.header ?? node.sourceField ?? node.source ?? node.name ?? node.field ?? node.key ?? node.label ?? node.value
+  if (Array.isArray(candidate)) {
+    return candidate.map(item => normalizeText(item)).filter(Boolean).join(', ')
+  }
+  return normalizeText(candidate) || JSON.stringify(value)
+}
+
+function buildImportProfileGuide(profile: AttendanceImportMappingProfile | null): AttendanceImportProfileGuide | null {
+  if (!profile) return null
+  const mappingEntries = profile.mapping && typeof profile.mapping === 'object' && !Array.isArray(profile.mapping)
+    ? Object.entries(profile.mapping).map(([targetField, sourceValue]) => ({
+      targetField,
+      sourceField: extractMappingSource(sourceValue),
+      ...describeImportField(targetField),
+    }))
+    : []
+
+  return {
+    name: profile.name,
+    description: profile.description,
+    mappingEntries,
+  }
+}
+
+function escapeCsvCell(value: string): string {
+  if (/[",\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`
+  }
+  return value
 }
 
 function parseTemplateLibrary(value: string): any[] | null {
@@ -5404,6 +6960,33 @@ async function loadImportTemplate() {
   } finally {
     importLoading.value = false
   }
+}
+
+function downloadImportTemplateCsv() {
+  const guide = importTemplateGuide.value
+  if (!guide) {
+    setStatus(tr('Load the import template before downloading CSV guidance.', '请先加载导入模板，再下载 CSV 模板。'), 'error')
+    return
+  }
+  const columns = guide.columns.length > 0
+    ? guide.columns
+    : guide.sampleHeader.split(',').map(item => item.trim()).filter(Boolean)
+  if (columns.length === 0) {
+    setStatus(tr('The current template does not expose CSV header guidance yet.', '当前模板尚未提供 CSV 表头指导。'), 'error')
+    return
+  }
+  const csv = `${columns.map(escapeCsvCell).join(',')}\n${columns.map(() => '').join(',')}\n`
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  const source = normalizeText(selectedImportProfile.value?.source ?? guide.source) || 'attendance'
+  link.href = url
+  link.download = `${source}-attendance-template.csv`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+  setStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
 }
 
 function applyImportProfile() {
@@ -6055,7 +7638,7 @@ async function resumeImportAsyncJobPolling() {
       ))
     }
     await loadRecords()
-    await loadImportBatches()
+    await reloadAttendanceImportBatches()
   } catch (error) {
     setStatusFromErrorWithContext(
       error,
@@ -6150,7 +7733,7 @@ async function runImport() {
         }
 
         await loadRecords()
-        await loadImportBatches()
+        await reloadAttendanceImportBatches()
         importCommitToken.value = ''
         importCommitTokenExpiresAt.value = ''
         return
@@ -6215,7 +7798,7 @@ async function runImport() {
       ))
     }
     await loadRecords()
-    await loadImportBatches()
+    await reloadAttendanceImportBatches()
     importCommitToken.value = ''
     importCommitTokenExpiresAt.value = ''
   } catch (error) {
@@ -6230,136 +7813,6 @@ async function runImport() {
   }
 }
 
-function resolveImportBatchEngine(batch: AttendanceImportBatch): string {
-  const engine = typeof batch?.meta?.engine === 'string' ? batch.meta.engine.trim().toLowerCase() : ''
-  if (engine === 'bulk' || engine === 'standard') return engine
-  return '--'
-}
-
-function resolveImportBatchChunkLabel(batch: AttendanceImportBatch): string {
-  const chunk = batch?.meta?.chunkConfig && typeof batch.meta.chunkConfig === 'object'
-    ? batch.meta.chunkConfig as Record<string, unknown>
-    : null
-  const items = Number(chunk?.itemsChunkSize)
-  const records = Number(chunk?.recordsChunkSize)
-  if (!Number.isFinite(items) || !Number.isFinite(records)) return '--'
-  return `${Math.max(0, Math.floor(items))}/${Math.max(0, Math.floor(records))}`
-}
-
-async function loadImportBatches() {
-  importLoading.value = true
-  try {
-    const query = buildQuery({ orgId: normalizedOrgId() })
-    const response = await apiFetch(`/api/attendance/import/batches?${query.toString()}`)
-    if (response.status === 403) {
-      adminForbidden.value = true
-      return
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to load import batches', '加载导入批次失败')))
-    }
-    importBatches.value = data.data?.items ?? []
-  } catch (error: any) {
-    setStatus(appendStatusContext(
-      readErrorMessage(error, tr('Failed to load import batches', '加载导入批次失败')),
-      importPreviewTimezoneHint.value,
-    ), 'error')
-  } finally {
-    importLoading.value = false
-  }
-}
-
-async function loadImportBatchItems(batchId: string) {
-  if (!batchId) return
-  importLoading.value = true
-  try {
-    const response = await apiFetch(`/api/attendance/import/batches/${batchId}/items`)
-    if (response.status === 403) {
-      adminForbidden.value = true
-      return
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to load import batch items', '加载导入批次明细失败')))
-    }
-    importBatchSelectedId.value = batchId
-    importBatchItems.value = data.data?.items ?? []
-    importBatchSnapshot.value = null
-    setStatus(appendStatusContext(
-      tr(`Batch items loaded (${importBatchItems.value.length} rows).`, `批次条目已加载（${importBatchItems.value.length} 行）。`),
-      importPreviewTimezoneHint.value,
-    ))
-  } catch (error: any) {
-    setStatus(appendStatusContext(
-      readErrorMessage(error, tr('Failed to load import batch items', '加载导入批次明细失败')),
-      importPreviewTimezoneHint.value,
-    ), 'error')
-  } finally {
-    importLoading.value = false
-  }
-}
-
-function toggleImportBatchSnapshot(item: AttendanceImportItem) {
-  if (!item.previewSnapshot) {
-    importBatchSnapshot.value = null
-    return
-  }
-  if (importBatchSnapshot.value?.snapshot === item.previewSnapshot) {
-    importBatchSnapshot.value = null
-  } else {
-    importBatchSnapshot.value = {
-      snapshot: item.previewSnapshot,
-      context: {
-        userId: item.userId ?? null,
-        workDate: item.workDate ?? null,
-        recordId: item.recordId ?? null,
-      },
-    }
-  }
-}
-
-async function rollbackImportBatch(batchId: string) {
-  if (!batchId || !window.confirm(tr('Rollback this import batch?', '确认回滚该导入批次吗？'))) return
-  importLoading.value = true
-  try {
-    const response = await apiFetch(`/api/attendance/import/rollback/${batchId}`, { method: 'POST' })
-    if (response.status === 403) {
-      adminForbidden.value = true
-      return
-    }
-    const data = await response.json()
-    if (!response.ok || !data.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to rollback import batch', '回滚导入批次失败')))
-    }
-    await loadImportBatches()
-    if (importBatchSelectedId.value === batchId) {
-      importBatchItems.value = []
-      importBatchSnapshot.value = null
-      importBatchSelectedId.value = ''
-    }
-    setStatus(appendStatusContext(
-      tr('Import batch rolled back.', '导入批次已回滚。'),
-      importPreviewTimezoneHint.value,
-    ))
-  } catch (error: any) {
-    setStatus(appendStatusContext(
-      readErrorMessage(error, tr('Failed to rollback import batch', '回滚导入批次失败')),
-      importPreviewTimezoneHint.value,
-    ), 'error')
-  } finally {
-    importLoading.value = false
-  }
-}
-
-function csvEscape(value: unknown): string {
-  const text = value === null || value === undefined ? '' : String(value)
-  if (/[",\n\r]/.test(text)) {
-    return `"${text.replace(/"/g, '""')}"`
-  }
-  return text
-}
-
 function downloadCsvText(filename: string, csvText: string) {
   const blob = new Blob([csvText], { type: 'text/csv' })
   const url = URL.createObjectURL(blob)
@@ -6371,204 +7824,6 @@ function downloadCsvText(filename: string, csvText: string) {
   link.remove()
   URL.revokeObjectURL(url)
 }
-
-function extractImportSnapshotMetrics(snapshot?: Record<string, any> | null): Record<string, any> {
-  if (!snapshot || typeof snapshot !== 'object') return {}
-  const metrics = (snapshot as any).metrics
-  if (metrics && typeof metrics === 'object' && !Array.isArray(metrics)) return metrics
-  return {}
-}
-
-function extractImportSnapshotWarnings(snapshot?: Record<string, any> | null): string[] {
-  if (!snapshot || typeof snapshot !== 'object') return []
-  const warnings: string[] = []
-  const direct = (snapshot as any).warnings
-  if (Array.isArray(direct)) warnings.push(...direct.map((w) => String(w)))
-  const metrics = extractImportSnapshotMetrics(snapshot)
-  const metricWarnings = (metrics as any).warnings
-  if (Array.isArray(metricWarnings)) warnings.push(...metricWarnings.map((w: any) => String(w)))
-  const policyWarnings = (snapshot as any).policy?.warnings
-  if (Array.isArray(policyWarnings)) warnings.push(...policyWarnings.map((w: any) => String(w)))
-  const engineWarnings = (snapshot as any).engine?.warnings
-  if (Array.isArray(engineWarnings)) warnings.push(...engineWarnings.map((w: any) => String(w)))
-  return Array.from(new Set(warnings))
-}
-
-async function fetchAllImportBatchItems(batchId: string): Promise<AttendanceImportItem[]> {
-  const pageSize = 200
-  let page = 1
-  let total: number | null = null
-  const items: AttendanceImportItem[] = []
-
-  while (total === null || items.length < total) {
-    const params = new URLSearchParams({
-      page: String(page),
-      pageSize: String(pageSize),
-    })
-    const response = await apiFetch(`/api/attendance/import/batches/${batchId}/items?${params.toString()}`)
-    if (response.status === 403) {
-      adminForbidden.value = true
-      throw new Error(tr('Admin permissions required', '需要管理员权限'))
-    }
-    const data = await response.json().catch(() => null)
-    if (!response.ok || !data?.ok) {
-      throw new Error(readErrorMessage(data, tr('Failed to load import items', '加载导入条目失败')))
-    }
-    const pageItems = Array.isArray(data.data?.items) ? data.data.items : []
-    items.push(...pageItems)
-    const nextTotal = Number(data.data?.total)
-    if (Number.isFinite(nextTotal)) total = nextTotal
-    if (pageItems.length === 0) break
-    page += 1
-    if (page > 500) break
-  }
-
-  return items
-}
-
-async function exportImportBatchItemsCsv(onlyAnomalies: boolean) {
-  const batchId = importBatchSelectedId.value
-  if (!batchId) {
-    setStatus(appendStatusContext(
-      tr('Select a batch first.', '请先选择批次。'),
-      importPreviewTimezoneHint.value,
-    ), 'error')
-    return
-  }
-  importLoading.value = true
-
-  try {
-    // Prefer server-side exports when available (works for large batches and includes skipped rows).
-    const exportType = onlyAnomalies ? 'anomalies' : 'all'
-    const serverResponse = await apiFetch(`/api/attendance/import/batches/${batchId}/export.csv?type=${exportType}`, {
-      method: 'GET',
-      headers: {
-        Accept: 'text/csv',
-      },
-    })
-    if (serverResponse.status === 403) {
-      adminForbidden.value = true
-      throw new Error(tr('Admin permissions required', '需要管理员权限'))
-    }
-    if (serverResponse.ok) {
-      const csvText = await serverResponse.text()
-      const stamp = new Date().toISOString().slice(0, 10)
-      const filename = `attendance-import-${batchId.slice(0, 8)}-${exportType}-${stamp}.csv`
-      downloadCsvText(filename, csvText)
-      setStatus(appendStatusContext(
-        tr('CSV exported.', 'CSV 已导出。'),
-        importPreviewTimezoneHint.value,
-      ))
-      return
-    }
-
-    // Backward-compatible fallback for older deployments without the export endpoint.
-    if (serverResponse.status !== 404) {
-      const errorText = await serverResponse.text().catch(() => '')
-      throw new Error(errorText || tr(`Failed to export CSV (HTTP ${serverResponse.status})`, `导出 CSV 失败（HTTP ${serverResponse.status}）`))
-    }
-
-    const allItems = await fetchAllImportBatchItems(batchId)
-    if (allItems.length === 0) {
-      setStatus(appendStatusContext(
-        tr('No batch items found.', '未找到批次明细。'),
-        importPreviewTimezoneHint.value,
-      ), 'error')
-      return
-    }
-    allItems.sort((a, b) => {
-      const dateCmp = String(a.workDate ?? '').localeCompare(String(b.workDate ?? ''))
-      if (dateCmp !== 0) return dateCmp
-      return String(a.userId ?? '').localeCompare(String(b.userId ?? ''))
-    })
-
-    const headers = [
-      'batchId',
-      'itemId',
-      'workDate',
-      'userId',
-      'recordId',
-      'status',
-      'workMinutes',
-      'lateMinutes',
-      'earlyLeaveMinutes',
-      'leaveMinutes',
-      'overtimeMinutes',
-      'warnings',
-    ]
-
-    const rows = allItems.map((item) => {
-      const snapshot = item.previewSnapshot
-      const metrics = extractImportSnapshotMetrics(snapshot)
-      const warnings = extractImportSnapshotWarnings(snapshot)
-
-      const status = String((metrics as any).status ?? '')
-      const workMinutes = Number((metrics as any).workMinutes ?? 0)
-      const lateMinutes = Number((metrics as any).lateMinutes ?? 0)
-      const earlyLeaveMinutes = Number((metrics as any).earlyLeaveMinutes ?? 0)
-      const leaveMinutes = Number((metrics as any).leaveMinutes ?? 0)
-      const overtimeMinutes = Number((metrics as any).overtimeMinutes ?? 0)
-
-      const isAnomaly = Boolean(
-        warnings.length
-        || (item.recordId ?? null) === null
-        || (status && status !== 'normal')
-        || lateMinutes > 0
-        || earlyLeaveMinutes > 0
-        || leaveMinutes > 0
-        || overtimeMinutes > 0,
-      )
-
-      return {
-        item,
-        status,
-        workMinutes,
-        lateMinutes,
-        earlyLeaveMinutes,
-        leaveMinutes,
-        overtimeMinutes,
-        warnings,
-        isAnomaly,
-      }
-    }).filter((row) => (onlyAnomalies ? row.isAnomaly : true))
-
-    const lines: string[] = []
-    lines.push(headers.map(csvEscape).join(','))
-    rows.forEach(({ item, status, workMinutes, lateMinutes, earlyLeaveMinutes, leaveMinutes, overtimeMinutes, warnings }) => {
-      const values = [
-        batchId,
-        item.id,
-        item.workDate || '',
-        item.userId || '',
-        item.recordId || '',
-        status,
-        workMinutes,
-        lateMinutes,
-        earlyLeaveMinutes,
-        leaveMinutes,
-        overtimeMinutes,
-        warnings.join('; '),
-      ]
-      lines.push(values.map(csvEscape).join(','))
-    })
-
-    const stamp = new Date().toISOString().slice(0, 10)
-    const filename = `attendance-import-${batchId.slice(0, 8)}-${onlyAnomalies ? 'anomalies' : 'items'}-${stamp}.csv`
-    downloadCsvText(filename, lines.join('\n'))
-    setStatus(appendStatusContext(
-      tr(`CSV exported (${rows.length}/${allItems.length}).`, `CSV 已导出（${rows.length}/${allItems.length}）。`),
-      importPreviewTimezoneHint.value,
-    ))
-  } catch (error: any) {
-    setStatus(appendStatusContext(
-      readErrorMessage(error, tr('Failed to export CSV', '导出 CSV 失败')),
-      importPreviewTimezoneHint.value,
-    ), 'error')
-  } finally {
-    importLoading.value = false
-  }
-}
-
 function defaultStatusActionForContext(context: AttendanceStatusContext): AttendanceStatusAction | undefined {
   if (context === 'refresh') return 'refresh-overview'
   if (context === 'admin') return 'reload-admin'
@@ -9298,9 +10553,12 @@ function editHoliday(holiday: AttendanceHoliday) {
 async function loadHolidays() {
   holidayLoading.value = true
   try {
+    const range = showAdmin.value
+      ? adminHolidayRange
+      : { from: fromDate.value, to: toDate.value }
     const query = buildQuery({
-      from: fromDate.value,
-      to: toDate.value,
+      from: range.from,
+      to: range.to,
       orgId: normalizedOrgId(),
     })
     const response = await apiFetch(`/api/attendance/holidays?${query.toString()}`)
@@ -9383,6 +10641,13 @@ function resetRuleSetForm() {
   ruleSetForm.scope = 'org'
   ruleSetForm.isDefault = false
   ruleSetForm.config = '{}'
+  ruleSetPreviewError.value = ''
+  ruleSetPreviewResult.value = null
+  ruleSetPreviewEventsText.value = '[]'
+  previewEventDrafts.value = []
+  activePreviewScenarioId.value = ''
+  selectedRuleSetPreviewRowKey.value = ''
+  resetRuleBuilderForm()
 }
 
 function editRuleSet(item: AttendanceRuleSet) {
@@ -9393,6 +10658,10 @@ function editRuleSet(item: AttendanceRuleSet) {
   ruleSetForm.scope = item.scope ?? 'org'
   ruleSetForm.isDefault = item.isDefault ?? false
   ruleSetForm.config = JSON.stringify(item.config ?? {}, null, 2)
+  ruleSetPreviewError.value = ''
+  ruleSetPreviewResult.value = null
+  selectedRuleSetPreviewRowKey.value = ''
+  syncRuleBuilderFromRuleSetConfig(item.config ?? {})
 }
 
 async function loadRuleSets() {
@@ -9633,6 +10902,20 @@ async function addAttendanceGroupMembers() {
   }
 }
 
+function appendAttendanceGroupMemberSelectedUser() {
+  const userId = attendanceGroupMemberSelectedUserId.value.trim()
+  if (!userId) return
+  const ids = attendanceGroupMemberUserIds.value
+    .split(/[\n,，\s]+/)
+    .map(item => item.trim())
+    .filter(Boolean)
+  if (!ids.includes(userId)) {
+    ids.push(userId)
+  }
+  attendanceGroupMemberUserIds.value = ids.join(', ')
+  attendanceGroupMemberSelectedUserId.value = ''
+}
+
 async function removeAttendanceGroupMember(userId: string) {
   const groupId = attendanceGroupMemberGroupId.value
   if (!groupId || !userId) return
@@ -9691,6 +10974,7 @@ async function loadRuleSetTemplate() {
       throw new Error(readErrorMessage(data, tr('Failed to load rule set template', '加载规则集模板失败')))
     }
     ruleSetForm.config = JSON.stringify(data.data ?? {}, null, 2)
+    syncRuleBuilderFromRuleSetConfig(data.data ?? {})
     setStatus(tr('Rule set template loaded.', '规则集模板已加载。'))
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load rule set template', '加载规则集模板失败')), 'error')
@@ -9713,6 +10997,9 @@ async function loadRuleTemplates() {
     const systemTemplates = data.data?.system ?? []
     const libraryTemplates = data.data?.library ?? []
     ruleTemplateVersions.value = Array.isArray(data.data?.versions) ? data.data.versions : []
+    if (!ruleTemplateVersions.value.some(item => item.id === selectedRuleTemplateVersionId.value)) {
+      selectedRuleTemplateVersionId.value = ''
+    }
     ruleTemplateSystemText.value = JSON.stringify(systemTemplates, null, 2)
     ruleTemplateLibraryText.value = JSON.stringify(libraryTemplates, null, 2)
     setStatus(tr('Rule templates loaded.', '规则模板已加载。'))
@@ -9783,6 +11070,42 @@ async function restoreRuleTemplates(versionId: string) {
   } finally {
     ruleTemplateRestoring.value = false
   }
+}
+
+async function openRuleTemplateVersion(versionId: string) {
+  if (!versionId) return
+  const current = ruleTemplateVersions.value.find(item => item.id === versionId) ?? null
+  if (current?.templates) {
+    selectedRuleTemplateVersionId.value = versionId
+    return
+  }
+  ruleTemplateVersionLoading.value = true
+  try {
+    const response = await apiFetch(`/api/attendance/rule-templates/versions/${encodeURIComponent(versionId)}`)
+    if (response.status === 403) {
+      adminForbidden.value = true
+      throw new Error(tr('Admin permissions required', '需要管理员权限'))
+    }
+    const data = await response.json()
+    if (!response.ok || !data.ok || !data.data) {
+      throw new Error(readErrorMessage(data, tr('Failed to load template version', '加载模板版本失败')))
+    }
+    adminForbidden.value = false
+    ruleTemplateVersions.value = ruleTemplateVersions.value.map(item => (
+      item.id === versionId
+        ? { ...item, ...data.data }
+        : item
+    ))
+    selectedRuleTemplateVersionId.value = versionId
+  } catch (error: any) {
+    setStatus(readErrorMessage(error, tr('Failed to load template version', '加载模板版本失败')), 'error')
+  } finally {
+    ruleTemplateVersionLoading.value = false
+  }
+}
+
+function closeRuleTemplateVersionView() {
+  selectedRuleTemplateVersionId.value = ''
 }
 
 function copySystemTemplates() {
@@ -10159,7 +11482,7 @@ async function loadAdminData() {
       loadRuleSets(),
       loadRuleTemplates(),
       loadAttendanceGroups(),
-      loadImportBatches(),
+      reloadAttendanceImportBatches(),
       loadPayrollTemplates(),
       loadPayrollCycles(),
       loadLeaveTypes(),
@@ -10221,6 +11544,29 @@ watch(importMode, () => {
 watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   clearProvisionBatchPreview()
 })
+
+watch(
+  () => ruleSetForm.config,
+  (config) => {
+    syncRuleBuilderFromRuleSetConfig(config)
+  },
+  { immediate: true },
+)
+
+const holidaySectionBindings = {
+  holidays,
+  holidayTotal: computed(() => holidays.value.length),
+  holidayLoading,
+  holidaySaving,
+  holidayEditingId,
+  holidayRange: adminHolidayRange,
+  holidayForm,
+  resetHolidayForm,
+  editHoliday,
+  loadHolidays,
+  saveHoliday,
+  deleteHoliday,
+}
 </script>
 
 <style scoped>
@@ -10757,6 +12103,324 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
 
 .attendance__admin-content {
   min-width: 0;
+}
+
+.attendance__admin-content--focused .attendance__admin-section + .attendance__admin-section {
+  margin-top: 0;
+}
+
+.attendance__template-guide,
+.attendance__rule-builder,
+.attendance__holiday-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.attendance__template-guide {
+  padding: 16px;
+  border: 1px solid #d9e2ec;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #ffffff, #f8fbff);
+}
+
+.attendance__template-guide-header,
+.attendance__template-guide-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.attendance__template-guide-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.attendance__template-guide-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.attendance__template-guide-card--full {
+  grid-column: 1 / -1;
+}
+
+.attendance__template-guide-title {
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.attendance__template-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attendance__template-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+}
+
+.attendance__template-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.attendance__template-table th,
+.attendance__template-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #eef2f7;
+  vertical-align: top;
+  text-align: left;
+}
+
+.attendance__template-code {
+  display: block;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.attendance__rule-builder-summary,
+.attendance__preview-summary,
+.attendance__preview-result-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  color: #4b5563;
+  font-size: 12px;
+}
+
+.attendance__rule-builder-summary strong,
+.attendance__preview-summary strong,
+.attendance__preview-result-meta strong {
+  color: #11243d;
+}
+
+.attendance__rule-builder-days {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attendance__field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #17324d;
+}
+
+.attendance__rule-builder-day-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 8px;
+}
+
+.attendance__rule-builder-day {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #d8e0ea;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.attendance__rule-builder-preview {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #d9e3f1;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.attendance__preview-builder,
+.attendance__preview-config-panels,
+.attendance__scenario-lab,
+.attendance__preview-result,
+.attendance__preview-recommendations {
+  display: grid;
+  gap: 12px;
+}
+
+.attendance__preview-config-panels {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.attendance__preview-state {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #eff6ff;
+  color: #284b7a;
+  font-size: 13px;
+}
+
+.attendance__scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.attendance__scenario-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid #d8e2ef;
+  border-radius: 12px;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attendance__scenario-card strong {
+  color: #17324d;
+}
+
+.attendance__scenario-card span {
+  color: #516074;
+  font-size: 12px;
+}
+
+.attendance__scenario-card--active {
+  border-color: #2563eb;
+  background: #eef5ff;
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.12);
+}
+
+.attendance__preview-scorecards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.attendance__preview-scorecard {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid #dce4ef;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f5f8fc 100%);
+}
+
+.attendance__preview-scorecard span,
+.attendance__preview-scorecard small {
+  color: #516074;
+  font-size: 12px;
+}
+
+.attendance__preview-scorecard strong {
+  color: #11243d;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.attendance__preview-recommendation {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #dbe4ef;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.attendance__preview-recommendation strong {
+  color: #17324d;
+}
+
+.attendance__preview-recommendation span {
+  color: #4b5565;
+  font-size: 13px;
+}
+
+.attendance__preview-recommendation--critical {
+  border-color: #fecaca;
+  background: #fff5f5;
+}
+
+.attendance__preview-recommendation--warning {
+  border-color: #fcd34d;
+  background: #fff9db;
+}
+
+.attendance__preview-recommendation--info {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+
+.attendance__inline-code {
+  display: inline-flex;
+  width: fit-content;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.06);
+  color: #17324d;
+  font-size: 12px;
+}
+
+.attendance__preview-row--selected {
+  background: rgba(239, 246, 255, 0.7);
+}
+
+.attendance__severity {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 70px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.attendance__severity--critical {
+  background: #fee2e2;
+  color: #b42318;
+}
+
+.attendance__severity--warning {
+  background: #fef3c7;
+  color: #9a6700;
+}
+
+.attendance__severity--info {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.attendance__template-version-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #d9e3f1;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+
+.attendance__code--builder {
+  min-height: 180px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.attendance__code--viewer {
+  min-height: 280px;
+  max-height: 520px;
+  overflow: auto;
+}
+
+.attendance__holiday-layout {
+  gap: 16px;
 }
 
 [data-admin-section] {

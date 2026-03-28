@@ -2781,6 +2781,25 @@ function firstDefinedValue(...values) {
   return undefined
 }
 
+function tryParseJsonPayload(value) {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (!trimmed) return value
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return value
+  }
+}
+
+function normalizeNumericPayload(value) {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (!trimmed) return value
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) ? parsed : value
+}
+
 function normalizeGroupMembersPayload(value) {
   const payload = normalizeObjectPayload(value)
   return {
@@ -2827,10 +2846,11 @@ function normalizeApprovalStepPayload(value) {
 
 function normalizeApprovalFlowPayload(value) {
   const payload = normalizeObjectPayload(value)
+  const normalizedSteps = tryParseJsonPayload(payload.steps)
   return {
     ...payload,
-    requestType: firstDefinedValue(payload.requestType, payload.request_type),
-    steps: Array.isArray(payload.steps) ? payload.steps.map(normalizeApprovalStepPayload) : payload.steps,
+    requestType: firstDefinedValue(payload.requestType, payload.request_type, payload.type),
+    steps: Array.isArray(normalizedSteps) ? normalizedSteps.map(normalizeApprovalStepPayload) : normalizedSteps,
     isActive: firstDefinedValue(payload.isActive, payload.is_active),
   }
 }
@@ -2858,8 +2878,11 @@ function normalizeRotationAssignmentPayload(value) {
 
 function normalizeRuleSetPayload(value) {
   const payload = normalizeObjectPayload(value)
+  const normalizedConfig = tryParseJsonPayload(payload.config)
   return {
     ...payload,
+    version: normalizeNumericPayload(payload.version),
+    config: normalizedConfig,
     isDefault: firstDefinedValue(payload.isDefault, payload.is_default),
   }
 }
@@ -11041,6 +11064,39 @@ module.exports = {
           }
           logger.error('Attendance rotation rule update failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update rotation rule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/rotation-rules/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const ruleId = normalizeUuidString(req.params.id)
+        if (!ruleId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_rotation_rules WHERE id = $1 AND org_id = $2',
+            [ruleId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation rule not found' } })
+            return
+          }
+
+          res.json({ ok: true, data: mapRotationRuleRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rotation rule lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load rotation rule' } })
         }
       })
     )

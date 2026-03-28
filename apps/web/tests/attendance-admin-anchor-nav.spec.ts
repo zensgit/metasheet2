@@ -205,6 +205,140 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('.attendance__admin-nav-current')?.textContent).toContain('Data & Payroll · Import batches')
   })
 
+  it('focuses the right pane on the active admin section by default and can reveal all sections on demand', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const settingsSection = container!.querySelector<HTMLElement>('#attendance-admin-settings')
+    const holidaysSection = container!.querySelector<HTMLElement>('#attendance-admin-holidays')
+    expect(settingsSection).toBeTruthy()
+    expect(holidaysSection).toBeTruthy()
+    expect(settingsSection?.style.display).not.toBe('none')
+    expect(holidaysSection?.style.display).toBe('none')
+
+    const holidaysAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-holidays"]')
+    expect(holidaysAnchor).toBeTruthy()
+    holidaysAnchor!.click()
+    await flushUi(2)
+
+    expect(settingsSection?.style.display).toBe('none')
+    expect(holidaysSection?.style.display).not.toBe('none')
+
+    const revealAllButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-header .attendance__btn'))
+      .find(button => button.textContent?.includes('Show all sections'))
+    expect(revealAllButton).toBeTruthy()
+    revealAllButton!.click()
+    await flushUi(2)
+
+    expect(settingsSection?.style.display).not.toBe('none')
+    expect(holidaysSection?.style.display).not.toBe('none')
+  })
+
+  it('restores the live user picker, structured rule builder, and holiday month calendar interactions', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const groupMembersAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-group-members"]')
+    expect(groupMembersAnchor).toBeTruthy()
+    groupMembersAnchor!.click()
+    await flushUi(2)
+
+    expect(container!.querySelector('#attendance-group-member-user-picker')).toBeTruthy()
+    expect(container!.textContent).toContain('Append selected user')
+
+    const ruleSetsAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-rule-sets"]')
+    expect(ruleSetsAnchor).toBeTruthy()
+    ruleSetsAnchor!.click()
+    await flushUi(2)
+
+    const builderSource = container!.querySelector<HTMLInputElement>('#attendance-rule-builder-source')
+    const applyBuilderButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-actions .attendance__btn'))
+      .find(button => button.textContent?.includes('Apply builder to JSON'))
+    const configTextarea = container!.querySelector<HTMLTextAreaElement>('#attendance-rule-set-config')
+    expect(builderSource).toBeTruthy()
+    expect(applyBuilderButton).toBeTruthy()
+    expect(configTextarea).toBeTruthy()
+
+    builderSource!.value = 'dingtalk'
+    builderSource!.dispatchEvent(new Event('input', { bubbles: true }))
+    applyBuilderButton!.click()
+    await flushUi(2)
+
+    expect(container!.textContent).toContain('Structured rule builder')
+    expect(configTextarea!.value).toContain('"source": "dingtalk"')
+    expect(configTextarea!.value).toContain('"workingDays"')
+
+    const holidaysAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-holidays"]')
+    expect(holidaysAnchor).toBeTruthy()
+    holidaysAnchor!.click()
+    await flushUi(2)
+
+    expect(container!.textContent).toContain('Holiday management now follows a month calendar.')
+    const holidayDateInput = container!.querySelector<HTMLInputElement>('#attendance-holiday-date')
+    const before = holidayDateInput?.value
+    const otherDate = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__holiday-cell'))
+      .find(button => !button.classList.contains('attendance__holiday-cell--selected') && !button.disabled)
+    expect(holidayDateInput).toBeTruthy()
+    expect(otherDate).toBeTruthy()
+    otherDate!.click()
+    await flushUi(2)
+    expect(holidayDateInput?.value).not.toBe(before)
+  })
+
+  it('restores import field meanings after loading the live template guide', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url === '/api/attendance/import/template') {
+        return jsonResponse(200, {
+          ok: true,
+            data: {
+              payloadExample: {
+                source: 'attendance',
+                mode: 'override',
+                timezone: 'Asia/Shanghai',
+                columns: ['userId', 'workDate', 'firstInAt'],
+                requiredFields: ['userId', 'workDate'],
+                userId: '<userId>',
+              },
+              mappingProfiles: [],
+            },
+          })
+      }
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [],
+          summary: null,
+        },
+      })
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const importAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-import"]')
+    expect(importAnchor).toBeTruthy()
+    importAnchor!.click()
+    await flushUi(2)
+
+    const importSection = container!.querySelector<HTMLElement>('#attendance-admin-import')
+    expect(importSection).toBeTruthy()
+    const loadTemplateButton = Array.from(importSection!.querySelectorAll<HTMLButtonElement>('.attendance__admin-actions .attendance__btn'))
+      .find(button => button.textContent?.includes('Load template'))
+    expect(loadTemplateButton).toBeTruthy()
+    loadTemplateButton!.click()
+    await flushUi(3)
+
+    expect(importSection!.textContent).toContain('Field meanings')
+    expect(importSection!.textContent).toContain('Original attendance data source.')
+    expect(importSection!.textContent).toContain('Import conflict strategy.')
+    expect(importSection!.textContent).toContain('Template columns')
+    expect(importSection!.querySelector('.attendance__template-guide')).toBeTruthy()
+  })
+
   it('filters anchor items with the quick-find input', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)

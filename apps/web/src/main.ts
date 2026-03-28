@@ -10,7 +10,7 @@ import { useAuth } from './composables/useAuth'
 import { ROUTE_PATHS } from './router/types'
 import { appRoutes } from './router/appRoutes'
 import { useFeatureFlags } from './stores/featureFlags'
-import { normalizePostLoginRedirect, normalizePreLoginRedirect } from './utils/authRedirect'
+import { normalizePostLoginRedirect, normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './utils/authRedirect'
 
 // Create router
 const router = createRouter({
@@ -50,21 +50,24 @@ router.beforeEach(async (to, _from, next) => {
   }
 
   if (requiresAuth) {
-    const redirect = normalizePreLoginRedirect(to.fullPath || '/attendance')
+    const requestedPath = to.fullPath || ROUTE_PATHS.ATTENDANCE
+    const redirect = normalizePreLoginRedirect(requestedPath)
     const ensuredToken = token || await auth.ensureToken()
     if (!ensuredToken) {
-      return next({
-        path: ROUTE_PATHS.LOGIN,
-        query: { redirect },
-      })
+      return next(
+        shouldSkipPreLoginRedirectQuery(requestedPath)
+          ? { path: ROUTE_PATHS.LOGIN }
+          : { path: ROUTE_PATHS.LOGIN, query: { redirect } }
+      )
     }
 
     const session = await auth.bootstrapSession()
     if (!session.ok) {
-      return next({
-        path: ROUTE_PATHS.LOGIN,
-        query: { redirect },
-      })
+      return next(
+        shouldSkipPreLoginRedirectQuery(requestedPath)
+          ? { path: ROUTE_PATHS.LOGIN }
+          : { path: ROUTE_PATHS.LOGIN, query: { redirect } }
+      )
     }
   }
 
