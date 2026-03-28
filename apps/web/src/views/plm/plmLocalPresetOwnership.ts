@@ -3,6 +3,16 @@ type RunPlmLocalPresetOwnershipActionOptions<Result> = {
   shouldClear?: (result: Result) => boolean
 }
 
+export function buildClearedPlmLocalPresetManagementState() {
+  return {
+    nextSelectedPresetKey: '',
+    nextNameDraft: '',
+    nextGroupDraft: '',
+    nextSelectionKeys: [] as string[],
+    nextBatchGroupDraft: '',
+  }
+}
+
 export type PlmLocalPresetTeamPresetActionKind =
   | 'apply'
   | 'save'

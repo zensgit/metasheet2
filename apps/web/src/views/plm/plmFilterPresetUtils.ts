@@ -303,6 +303,8 @@ export function resolveFilterPresetCatalogDraftState(input: {
   routePresetKey?: string
   nameDraft?: string
   groupDraft?: string
+  selectionKeys?: string[]
+  batchGroupDraft?: string
 }) {
   const availablePresetKeys = new Set(
     input.availablePresets
@@ -321,13 +323,21 @@ export function resolveFilterPresetCatalogDraftState(input: {
       ? routePresetKey
       : ''
   )
+  const nextSelectionKeys = Array.from(new Set(
+    (input.selectionKeys || [])
+      .map((key) => key.trim())
+      .filter((key) => key && availablePresetKeys.has(key)),
+  ))
   const shouldPreserveDrafts = Boolean(nextSelectedPresetKey)
+  const shouldPreserveBatchGroup = nextSelectionKeys.length > 0
 
   return {
     nextSelectedPresetKey,
     nextRoutePresetKey,
     nextNameDraft: shouldPreserveDrafts ? input.nameDraft || '' : '',
     nextGroupDraft: shouldPreserveDrafts ? input.groupDraft || '' : '',
+    nextSelectionKeys,
+    nextBatchGroupDraft: shouldPreserveBatchGroup ? input.batchGroupDraft || '' : '',
   }
 }
 

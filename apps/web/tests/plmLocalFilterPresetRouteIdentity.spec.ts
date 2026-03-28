@@ -27,6 +27,8 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
       nextSelectedPresetKey: 'bom:shared',
       nextNameDraft: '共享 BOM',
       nextGroupDraft: '机械',
+      nextSelectionKeys: [],
+      nextBatchGroupDraft: '',
       shouldClear: false,
     })
   })
@@ -37,6 +39,8 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
       selectedPresetKey: 'bom:shared',
       nameDraft: '共享 BOM 草稿',
       groupDraft: '机械草稿',
+      selectionKeys: ['bom:shared'],
+      batchGroupDraft: '批量分组',
       activePreset: {
         key: 'bom:shared',
         label: '共享 BOM',
@@ -52,6 +56,8 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
       nextSelectedPresetKey: '',
       nextNameDraft: '',
       nextGroupDraft: '',
+      nextSelectionKeys: [],
+      nextBatchGroupDraft: '',
       shouldClear: true,
     })
   })
@@ -62,6 +68,8 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
       selectedPresetKey: 'bom:pending',
       nameDraft: '待应用 BOM',
       groupDraft: '待应用分组',
+      selectionKeys: ['bom:shared', 'bom:pending'],
+      batchGroupDraft: '批量分组',
       activePreset: {
         key: 'bom:shared',
         label: '共享 BOM',
@@ -77,6 +85,8 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
       nextSelectedPresetKey: 'bom:pending',
       nextNameDraft: '待应用 BOM',
       nextGroupDraft: '待应用分组',
+      nextSelectionKeys: ['bom:pending'],
+      nextBatchGroupDraft: '批量分组',
       shouldClear: true,
     })
   })
@@ -87,6 +97,8 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
       selectedPresetKey: 'bom:shared',
       nameDraft: '共享 BOM 新版',
       groupDraft: '导入分组',
+      selectionKeys: ['bom:shared'],
+      batchGroupDraft: '批量分组',
       activePreset: {
         key: 'bom:shared',
         label: '共享 BOM',
@@ -103,6 +115,56 @@ describe('plmLocalFilterPresetRouteIdentity', () => {
       nextSelectedPresetKey: 'bom:shared',
       nextNameDraft: '共享 BOM 新版',
       nextGroupDraft: '导入分组',
+      nextSelectionKeys: ['bom:shared'],
+      nextBatchGroupDraft: '批量分组',
+      shouldClear: true,
+    })
+  })
+
+  it('clears the stale route owner, selector, and management state when the route preset no longer exists', () => {
+    expect(resolvePlmLocalFilterPresetRouteIdentity({
+      routePresetKey: 'bom:missing',
+      selectedPresetKey: 'bom:missing',
+      nameDraft: '缺失草稿',
+      groupDraft: '缺失分组',
+      selectionKeys: ['bom:missing'],
+      batchGroupDraft: '批量分组',
+      activePreset: null,
+      currentState: {
+        field: 'path',
+        value: 'root/a',
+      },
+    })).toEqual({
+      nextRoutePresetKey: '',
+      nextSelectedPresetKey: '',
+      nextNameDraft: '',
+      nextGroupDraft: '',
+      nextSelectionKeys: [],
+      nextBatchGroupDraft: '',
+      shouldClear: true,
+    })
+  })
+
+  it('preserves a different pending selector while trimming a missing route owner from batch state', () => {
+    expect(resolvePlmLocalFilterPresetRouteIdentity({
+      routePresetKey: 'bom:missing',
+      selectedPresetKey: 'bom:pending',
+      nameDraft: '待应用草稿',
+      groupDraft: '待应用分组',
+      selectionKeys: ['bom:missing', 'bom:pending'],
+      batchGroupDraft: '批量分组',
+      activePreset: null,
+      currentState: {
+        field: 'path',
+        value: 'root/a',
+      },
+    })).toEqual({
+      nextRoutePresetKey: '',
+      nextSelectedPresetKey: 'bom:pending',
+      nextNameDraft: '待应用草稿',
+      nextGroupDraft: '待应用分组',
+      nextSelectionKeys: ['bom:pending'],
+      nextBatchGroupDraft: '批量分组',
       shouldClear: true,
     })
   })

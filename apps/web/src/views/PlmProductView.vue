@@ -142,6 +142,7 @@ import {
 } from './plm/plmLocalFilterPresetRouteIdentity'
 import { resolvePlmHydratedTeamViewOwnerTakeover } from './plm/plmHydratedTeamViewOwnerTakeover'
 import {
+  buildClearedPlmLocalPresetManagementState,
   runPlmLocalPresetOwnershipAction,
   shouldClearLocalPresetOwnerAfterTeamPresetAction,
   shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore,
@@ -3527,10 +3528,21 @@ function deleteBomFilterPreset() {
   const next = bomFilterPresets.value.filter((preset) => preset.key !== bomFilterPresetKey.value)
   bomFilterPresets.value = next
   persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, next)
-  bomFilterPresetKey.value = ''
-  if (bomFilterPresetQuery.value === deletedKey) {
-    syncBomFilterPresetQuery(undefined)
-  }
+  const nextSelection = resolveFilterPresetCatalogDraftState({
+    availablePresets: next,
+    selectedPresetKey: deletedKey,
+    routePresetKey: bomFilterPresetQuery.value,
+    nameDraft: bomFilterPresetName.value,
+    groupDraft: bomFilterPresetGroup.value,
+    selectionKeys: bomPresetSelection.value,
+    batchGroupDraft: bomPresetBatchGroup.value,
+  })
+  bomFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+  bomFilterPresetName.value = nextSelection.nextNameDraft
+  bomFilterPresetGroup.value = nextSelection.nextGroupDraft
+  bomPresetSelection.value = nextSelection.nextSelectionKeys
+  bomPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
+  syncBomFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
   setDeepLinkMessage('已删除 BOM 过滤预设。')
 }
 
@@ -3595,13 +3607,21 @@ function deleteBomPresetSelection() {
   const next = bomFilterPresets.value.filter((preset) => !selected.has(preset.key))
   bomFilterPresets.value = next
   persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, next)
-  if (!next.some((preset) => preset.key === bomFilterPresetKey.value)) {
-    bomFilterPresetKey.value = ''
-  }
-  if (bomFilterPresetQuery.value && !next.some((preset) => preset.key === bomFilterPresetQuery.value)) {
-    syncBomFilterPresetQuery(undefined)
-  }
-  bomPresetSelection.value = []
+  const nextSelection = resolveFilterPresetCatalogDraftState({
+    availablePresets: next,
+    selectedPresetKey: bomFilterPresetKey.value,
+    routePresetKey: bomFilterPresetQuery.value,
+    nameDraft: bomFilterPresetName.value,
+    groupDraft: bomFilterPresetGroup.value,
+    selectionKeys: bomPresetSelection.value,
+    batchGroupDraft: bomPresetBatchGroup.value,
+  })
+  bomFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+  bomFilterPresetName.value = nextSelection.nextNameDraft
+  bomFilterPresetGroup.value = nextSelection.nextGroupDraft
+  bomPresetSelection.value = nextSelection.nextSelectionKeys
+  bomPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
+  syncBomFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
   setDeepLinkMessage(`已删除 ${selected.size} 条 BOM 过滤预设。`)
 }
 
@@ -3698,10 +3718,21 @@ function deleteWhereUsedFilterPreset() {
   )
   whereUsedFilterPresets.value = next
   persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, next)
-  whereUsedFilterPresetKey.value = ''
-  if (whereUsedFilterPresetQuery.value === deletedKey) {
-    syncWhereUsedFilterPresetQuery(undefined)
-  }
+  const nextSelection = resolveFilterPresetCatalogDraftState({
+    availablePresets: next,
+    selectedPresetKey: deletedKey,
+    routePresetKey: whereUsedFilterPresetQuery.value,
+    nameDraft: whereUsedFilterPresetName.value,
+    groupDraft: whereUsedFilterPresetGroup.value,
+    selectionKeys: whereUsedPresetSelection.value,
+    batchGroupDraft: whereUsedPresetBatchGroup.value,
+  })
+  whereUsedFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+  whereUsedFilterPresetName.value = nextSelection.nextNameDraft
+  whereUsedFilterPresetGroup.value = nextSelection.nextGroupDraft
+  whereUsedPresetSelection.value = nextSelection.nextSelectionKeys
+  whereUsedPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
+  syncWhereUsedFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
   setDeepLinkMessage('已删除 Where-Used 过滤预设。')
 }
 
@@ -3768,16 +3799,21 @@ function deleteWhereUsedPresetSelection() {
   const next = whereUsedFilterPresets.value.filter((preset) => !selected.has(preset.key))
   whereUsedFilterPresets.value = next
   persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, next)
-  if (!next.some((preset) => preset.key === whereUsedFilterPresetKey.value)) {
-    whereUsedFilterPresetKey.value = ''
-  }
-  if (
-    whereUsedFilterPresetQuery.value
-    && !next.some((preset) => preset.key === whereUsedFilterPresetQuery.value)
-  ) {
-    syncWhereUsedFilterPresetQuery(undefined)
-  }
-  whereUsedPresetSelection.value = []
+  const nextSelection = resolveFilterPresetCatalogDraftState({
+    availablePresets: next,
+    selectedPresetKey: whereUsedFilterPresetKey.value,
+    routePresetKey: whereUsedFilterPresetQuery.value,
+    nameDraft: whereUsedFilterPresetName.value,
+    groupDraft: whereUsedFilterPresetGroup.value,
+    selectionKeys: whereUsedPresetSelection.value,
+    batchGroupDraft: whereUsedPresetBatchGroup.value,
+  })
+  whereUsedFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+  whereUsedFilterPresetName.value = nextSelection.nextNameDraft
+  whereUsedFilterPresetGroup.value = nextSelection.nextGroupDraft
+  whereUsedPresetSelection.value = nextSelection.nextSelectionKeys
+  whereUsedPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
+  syncWhereUsedFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
   setDeepLinkMessage(`已删除 ${selected.size} 条 Where-Used 过滤预设。`)
 }
 
@@ -3914,10 +3950,14 @@ function importBomFilterPresetsFromText(raw: string) {
       routePresetKey: bomFilterPresetQuery.value,
       nameDraft: bomFilterPresetName.value,
       groupDraft: bomFilterPresetGroup.value,
+      selectionKeys: bomPresetSelection.value,
+      batchGroupDraft: bomPresetBatchGroup.value,
     })
     bomFilterPresetKey.value = nextSelection.nextSelectedPresetKey
     bomFilterPresetName.value = nextSelection.nextNameDraft
     bomFilterPresetGroup.value = nextSelection.nextGroupDraft
+    bomPresetSelection.value = nextSelection.nextSelectionKeys
+    bomPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
     syncBomFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
     reconcileBomLocalFilterPresetIdentityAfterImport()
     const importedCount = added + updated
@@ -3987,10 +4027,14 @@ function clearBomFilterPresets() {
     routePresetKey: bomFilterPresetQuery.value,
     nameDraft: bomFilterPresetName.value,
     groupDraft: bomFilterPresetGroup.value,
+    selectionKeys: bomPresetSelection.value,
+    batchGroupDraft: bomPresetBatchGroup.value,
   })
   bomFilterPresetKey.value = nextSelection.nextSelectedPresetKey
   bomFilterPresetName.value = nextSelection.nextNameDraft
   bomFilterPresetGroup.value = nextSelection.nextGroupDraft
+  bomPresetSelection.value = nextSelection.nextSelectionKeys
+  bomPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
   syncBomFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
   bomFilterPresetGroupFilter.value = 'all'
   setDeepLinkMessage('已清空 BOM 过滤预设。')
@@ -4050,10 +4094,14 @@ function importWhereUsedFilterPresetsFromText(raw: string) {
       routePresetKey: whereUsedFilterPresetQuery.value,
       nameDraft: whereUsedFilterPresetName.value,
       groupDraft: whereUsedFilterPresetGroup.value,
+      selectionKeys: whereUsedPresetSelection.value,
+      batchGroupDraft: whereUsedPresetBatchGroup.value,
     })
     whereUsedFilterPresetKey.value = nextSelection.nextSelectedPresetKey
     whereUsedFilterPresetName.value = nextSelection.nextNameDraft
     whereUsedFilterPresetGroup.value = nextSelection.nextGroupDraft
+    whereUsedPresetSelection.value = nextSelection.nextSelectionKeys
+    whereUsedPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
     syncWhereUsedFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
     reconcileWhereUsedLocalFilterPresetIdentityAfterImport()
     const importedCount = added + updated
@@ -4123,10 +4171,14 @@ function clearWhereUsedFilterPresets() {
     routePresetKey: whereUsedFilterPresetQuery.value,
     nameDraft: whereUsedFilterPresetName.value,
     groupDraft: whereUsedFilterPresetGroup.value,
+    selectionKeys: whereUsedPresetSelection.value,
+    batchGroupDraft: whereUsedPresetBatchGroup.value,
   })
   whereUsedFilterPresetKey.value = nextSelection.nextSelectedPresetKey
   whereUsedFilterPresetName.value = nextSelection.nextNameDraft
   whereUsedFilterPresetGroup.value = nextSelection.nextGroupDraft
+  whereUsedPresetSelection.value = nextSelection.nextSelectionKeys
+  whereUsedPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
   syncWhereUsedFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
   whereUsedFilterPresetGroupFilter.value = 'all'
   setDeepLinkMessage('已清空 Where-Used 过滤预设。')
@@ -4143,16 +4195,22 @@ function syncWhereUsedFilterPresetQuery(value?: string) {
 }
 
 function clearBomLocalFilterPresetIdentity() {
-  bomFilterPresetKey.value = ''
-  bomFilterPresetName.value = ''
-  bomFilterPresetGroup.value = ''
+  const nextIdentity = buildClearedPlmLocalPresetManagementState()
+  bomFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+  bomFilterPresetName.value = nextIdentity.nextNameDraft
+  bomFilterPresetGroup.value = nextIdentity.nextGroupDraft
+  bomPresetSelection.value = nextIdentity.nextSelectionKeys
+  bomPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
   syncBomFilterPresetQuery(undefined)
 }
 
 function clearWhereUsedLocalFilterPresetIdentity() {
-  whereUsedFilterPresetKey.value = ''
-  whereUsedFilterPresetName.value = ''
-  whereUsedFilterPresetGroup.value = ''
+  const nextIdentity = buildClearedPlmLocalPresetManagementState()
+  whereUsedFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+  whereUsedFilterPresetName.value = nextIdentity.nextNameDraft
+  whereUsedFilterPresetGroup.value = nextIdentity.nextGroupDraft
+  whereUsedPresetSelection.value = nextIdentity.nextSelectionKeys
+  whereUsedPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
   syncWhereUsedFilterPresetQuery(undefined)
 }
 
@@ -4165,12 +4223,16 @@ function reconcileBomLocalFilterPresetIdentityAfterImport() {
       field: bomFilterField.value,
       value: bomFilter.value,
     },
+    selectionKeys: bomPresetSelection.value,
+    batchGroupDraft: bomPresetBatchGroup.value,
     preserveSelectedPresetKeyOnClear: true,
   })
   if (!nextIdentity.shouldClear) {
     return
   }
   bomFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+  bomPresetSelection.value = nextIdentity.nextSelectionKeys
+  bomPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
   syncBomFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
 }
 
@@ -4183,12 +4245,16 @@ function reconcileWhereUsedLocalFilterPresetIdentityAfterImport() {
       field: whereUsedFilterField.value,
       value: whereUsedFilter.value,
     },
+    selectionKeys: whereUsedPresetSelection.value,
+    batchGroupDraft: whereUsedPresetBatchGroup.value,
     preserveSelectedPresetKeyOnClear: true,
   })
   if (!nextIdentity.shouldClear) {
     return
   }
   whereUsedFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+  whereUsedPresetSelection.value = nextIdentity.nextSelectionKeys
+  whereUsedPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
   syncWhereUsedFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
 }
 
@@ -5897,7 +5963,25 @@ async function applyQueryState() {
       if (preset) {
         applyBomLocalFilterPresetIdentity(preset)
       } else {
-        syncBomFilterPresetQuery(undefined)
+        const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+          routePresetKey: bomFilterPresetQuery.value,
+          selectedPresetKey: bomFilterPresetKey.value,
+          nameDraft: bomFilterPresetName.value,
+          groupDraft: bomFilterPresetGroup.value,
+          selectionKeys: bomPresetSelection.value,
+          batchGroupDraft: bomPresetBatchGroup.value,
+          activePreset: null,
+          currentState: {
+            field: bomFilterField.value,
+            value: bomFilter.value,
+          },
+        })
+        bomFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+        bomFilterPresetName.value = nextIdentity.nextNameDraft
+        bomFilterPresetGroup.value = nextIdentity.nextGroupDraft
+        bomPresetSelection.value = nextIdentity.nextSelectionKeys
+        bomPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
+        syncBomFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
       }
     }
     if (whereUsedFilterPresetQuery.value) {
@@ -5905,7 +5989,25 @@ async function applyQueryState() {
       if (preset) {
         applyWhereUsedLocalFilterPresetIdentity(preset)
       } else {
-        syncWhereUsedFilterPresetQuery(undefined)
+        const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+          routePresetKey: whereUsedFilterPresetQuery.value,
+          selectedPresetKey: whereUsedFilterPresetKey.value,
+          nameDraft: whereUsedFilterPresetName.value,
+          groupDraft: whereUsedFilterPresetGroup.value,
+          selectionKeys: whereUsedPresetSelection.value,
+          batchGroupDraft: whereUsedPresetBatchGroup.value,
+          activePreset: null,
+          currentState: {
+            field: whereUsedFilterField.value,
+            value: whereUsedFilter.value,
+          },
+        })
+        whereUsedFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+        whereUsedFilterPresetName.value = nextIdentity.nextNameDraft
+        whereUsedFilterPresetGroup.value = nextIdentity.nextGroupDraft
+        whereUsedPresetSelection.value = nextIdentity.nextSelectionKeys
+        whereUsedPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
+        syncWhereUsedFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
       }
     }
     const compareLeftParam = readQueryParam('compareLeftId')
@@ -7050,6 +7152,8 @@ watch(
       selectedPresetKey,
       nameDraft: bomFilterPresetName.value,
       groupDraft: bomFilterPresetGroup.value,
+      selectionKeys: bomPresetSelection.value,
+      batchGroupDraft: bomPresetBatchGroup.value,
       activePreset: activeBomLocalRoutePreset.value,
       currentState: {
         field: bomFilterField.value,
@@ -7062,6 +7166,8 @@ watch(
     bomFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
     bomFilterPresetName.value = nextIdentity.nextNameDraft
     bomFilterPresetGroup.value = nextIdentity.nextGroupDraft
+    bomPresetSelection.value = nextIdentity.nextSelectionKeys
+    bomPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
     syncBomFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
   },
 )
@@ -7083,6 +7189,8 @@ watch(
       selectedPresetKey,
       nameDraft: whereUsedFilterPresetName.value,
       groupDraft: whereUsedFilterPresetGroup.value,
+      selectionKeys: whereUsedPresetSelection.value,
+      batchGroupDraft: whereUsedPresetBatchGroup.value,
       activePreset: activeWhereUsedLocalRoutePreset.value,
       currentState: {
         field: whereUsedFilterField.value,
@@ -7095,6 +7203,8 @@ watch(
     whereUsedFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
     whereUsedFilterPresetName.value = nextIdentity.nextNameDraft
     whereUsedFilterPresetGroup.value = nextIdentity.nextGroupDraft
+    whereUsedPresetSelection.value = nextIdentity.nextSelectionKeys
+    whereUsedPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
     syncWhereUsedFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
   },
 )

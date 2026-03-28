@@ -141,11 +141,15 @@ describe('plmFilterPresetUtils', () => {
       routePresetKey: ' bom:1 ',
       nameDraft: '旧 BOM 预设',
       groupDraft: '机械',
+      selectionKeys: [' bom:1 ', ' bom:3 '],
+      batchGroupDraft: '批量分组',
     })).toEqual({
       nextSelectedPresetKey: '',
       nextRoutePresetKey: '',
       nextNameDraft: '',
       nextGroupDraft: '',
+      nextSelectionKeys: [],
+      nextBatchGroupDraft: '',
     })
   })
 
@@ -158,11 +162,36 @@ describe('plmFilterPresetUtils', () => {
       routePresetKey: ' bom:1 ',
       nameDraft: '新的 BOM 预设',
       groupDraft: '电机',
+      selectionKeys: [' bom:2 ', ' bom:stale '],
+      batchGroupDraft: '存活分组',
     })).toEqual({
       nextSelectedPresetKey: 'bom:2',
       nextRoutePresetKey: '',
       nextNameDraft: '新的 BOM 预设',
       nextGroupDraft: '电机',
+      nextSelectionKeys: ['bom:2'],
+      nextBatchGroupDraft: '存活分组',
+    })
+  })
+
+  it('clears batch group drafts when no selected presets survive catalog reconciliation', () => {
+    expect(resolveFilterPresetCatalogDraftState({
+      availablePresets: [
+        { key: 'bom:2' },
+      ],
+      selectedPresetKey: ' bom:2 ',
+      routePresetKey: ' bom:2 ',
+      nameDraft: '新的 BOM 预设',
+      groupDraft: '电机',
+      selectionKeys: [' bom:1 '],
+      batchGroupDraft: '待清理分组',
+    })).toEqual({
+      nextSelectedPresetKey: 'bom:2',
+      nextRoutePresetKey: 'bom:2',
+      nextNameDraft: '新的 BOM 预设',
+      nextGroupDraft: '电机',
+      nextSelectionKeys: [],
+      nextBatchGroupDraft: '',
     })
   })
 

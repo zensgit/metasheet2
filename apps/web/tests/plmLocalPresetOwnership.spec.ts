@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  buildClearedPlmLocalPresetManagementState,
   runPlmLocalPresetOwnershipAction,
   shouldClearLocalPresetOwnerAfterTeamPresetAction,
   shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore,
@@ -7,6 +8,16 @@ import {
 } from '../src/views/plm/plmLocalPresetOwnership'
 
 describe('plmLocalPresetOwnership', () => {
+  it('builds a full local preset management cleanup state', () => {
+    expect(buildClearedPlmLocalPresetManagementState()).toEqual({
+      nextSelectedPresetKey: '',
+      nextNameDraft: '',
+      nextGroupDraft: '',
+      nextSelectionKeys: [],
+      nextBatchGroupDraft: '',
+    })
+  })
+
   it('clears the local owner after a successful save-style action', async () => {
     const clearLocalOwner = vi.fn()
 
