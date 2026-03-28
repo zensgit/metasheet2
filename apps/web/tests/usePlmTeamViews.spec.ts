@@ -2597,6 +2597,24 @@ describe('usePlmTeamViews', () => {
     expect(workbenchApply).toHaveBeenCalled()
   })
 
+  it('requires a selected team view before delete', async () => {
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.deleteTeamView()
+
+    expect(deletePlmWorkbenchTeamView).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenCalledWith('请选择工作台团队视角。', true)
+  })
+
   it('separates transfer target availability from transfer submission readiness', async () => {
     vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
       items: [

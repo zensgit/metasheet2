@@ -350,11 +350,14 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function deleteTeamView() {
+    const view = selectedTeamView.value
+    if (!view) {
+      options.setMessage(`请选择${options.label}团队视角。`, true)
+      return
+    }
     if (blockPendingApplyManagementAction()) {
       return
     }
-    const view = selectedTeamView.value
-    if (!view) return
     if (!canManageSelectedTeamView.value) {
       options.setMessage(`仅创建者可删除${options.label}团队视角。`, true)
       return

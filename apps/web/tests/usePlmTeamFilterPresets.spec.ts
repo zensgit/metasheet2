@@ -1631,6 +1631,25 @@ describe('usePlmTeamFilterPresets', () => {
     expect(setMessage).toHaveBeenCalledWith('请先应用BOM团队预设，再执行管理操作。', true)
   })
 
+  it('requires a selected team preset before delete', async () => {
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({
+        field: 'all',
+        value: '',
+      }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.deleteTeamPreset()
+
+    expect(deletePlmTeamFilterPreset).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenCalledWith('请选择BOM团队预设。', true)
+  })
+
   it('allows restoring an archived preset while a local preset owner still owns the current state', async () => {
     const trackedApply = vi.fn()
 

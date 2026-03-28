@@ -698,7 +698,10 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
 
   async function deleteTeamPreset() {
     const preset = selectedTeamPreset.value
-    if (!preset) return
+    if (!preset) {
+      options.setMessage(`请选择${options.label}团队预设。`, true)
+      return
+    }
     if (blockPendingApplyManagementAction()) {
       return
     }
