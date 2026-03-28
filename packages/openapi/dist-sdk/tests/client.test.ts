@@ -489,6 +489,68 @@ describe('createPlmWorkbenchClient', () => {
     })
   })
 
+  it('supports team-scope list helpers without kind filters', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({
+        success: true,
+        data: [{ id: 'view-1', kind: 'documents', name: 'Docs' }],
+        metadata: {
+          total: 1,
+          activeTotal: 1,
+          archivedTotal: 0,
+          tenantId: 'tenant-a',
+          kind: 'all',
+          defaultViewId: 'view-1',
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        success: true,
+        data: [{ id: 'preset-1', kind: 'bom', name: 'BOM preset' }],
+        metadata: {
+          total: 2,
+          activeTotal: 2,
+          archivedTotal: 0,
+          tenantId: 'tenant-a',
+          kind: 'all',
+          defaultPresetId: 'preset-1',
+        },
+      }))
+
+    const client = createPlmWorkbenchClient({
+      baseUrl: 'http://localhost:8910',
+      getToken: () => 'token-all',
+      fetch: fetchMock,
+    })
+
+    await expect(client.listTeamViews()).resolves.toEqual({
+      items: [{ id: 'view-1', kind: 'documents', name: 'Docs' }],
+      metadata: {
+        total: 1,
+        activeTotal: 1,
+        archivedTotal: 0,
+        tenantId: 'tenant-a',
+        kind: 'all',
+        defaultViewId: 'view-1',
+      },
+    })
+    await expect(client.listTeamFilterPresets()).resolves.toEqual({
+      items: [{ id: 'preset-1', kind: 'bom', name: 'BOM preset' }],
+      metadata: {
+        total: 2,
+        activeTotal: 2,
+        archivedTotal: 0,
+        tenantId: 'tenant-a',
+        kind: 'all',
+        defaultPresetId: 'preset-1',
+      },
+    })
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:8910/api/plm-workbench/views/team')
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      'http://localhost:8910/api/plm-workbench/filter-presets/team',
+    )
+  })
+
   it('supports collaborative audit list and summary helpers', async () => {
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({

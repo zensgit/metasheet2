@@ -216,7 +216,7 @@ export interface PlmTeamViewListMetadata {
   activeTotal?: number
   archivedTotal?: number
   tenantId?: string
-  kind?: PlmWorkbenchTeamViewKind
+  kind?: PlmWorkbenchTeamViewKind | 'all'
   defaultViewId?: string | null
 }
 
@@ -225,7 +225,7 @@ export interface PlmTeamFilterPresetListMetadata {
   activeTotal?: number
   archivedTotal?: number
   tenantId?: string
-  kind?: PlmTeamFilterPresetKind
+  kind?: PlmTeamFilterPresetKind | 'all'
   defaultPresetId?: string | null
 }
 
@@ -905,7 +905,7 @@ export function createPlmWorkbenchClient(clientOrOptions: ClientOptions | Reques
 
   return {
     async listTeamViews<T = Record<string, unknown>>(
-      kind: PlmWorkbenchTeamViewKind,
+      kind?: PlmWorkbenchTeamViewKind,
     ): Promise<PlmDirectListResponse<T, PlmTeamViewListMetadata>> {
       const response = await requestDirectEnvelope<T[], PlmTeamViewListMetadata>(
         client,
@@ -1036,7 +1036,7 @@ export function createPlmWorkbenchClient(clientOrOptions: ClientOptions | Reques
     },
 
     async listTeamFilterPresets<T = Record<string, unknown>>(
-      kind: PlmTeamFilterPresetKind,
+      kind?: PlmTeamFilterPresetKind,
     ): Promise<PlmDirectListResponse<T, PlmTeamFilterPresetListMetadata>> {
       const response = await requestDirectEnvelope<T[], PlmTeamFilterPresetListMetadata>(
         client,
