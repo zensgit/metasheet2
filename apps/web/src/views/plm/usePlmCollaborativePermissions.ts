@@ -40,10 +40,13 @@ export function canSharePlmCollaborativeEntry(entry: CollaborativeEntry) {
 
 export function canApplyPlmCollaborativeEntry(entry: CollaborativeEntry) {
   if (!entry) return false
+  if (entry.isArchived) {
+    return false
+  }
   if (typeof entry.permissions?.canApply === 'boolean') {
     return entry.permissions.canApply
   }
-  return !entry.isArchived
+  return true
 }
 
 export function canDuplicatePlmCollaborativeEntry(entry: CollaborativeEntry) {

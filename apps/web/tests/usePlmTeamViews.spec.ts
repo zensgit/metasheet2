@@ -1336,6 +1336,51 @@ describe('usePlmTeamViews', () => {
     expect(setMessage).toHaveBeenLastCalledWith('当前工作台团队视角不可应用。', true)
   })
 
+  it('does not apply an archived team view even when explicit canApply stays true', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-view-archived',
+          kind: 'workbench',
+          scope: 'team',
+          name: '归档工作台视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isArchived: true,
+          permissions: {
+            canApply: true,
+          },
+          state: {
+            query: {
+              documentFilter: 'archived-gear',
+            },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-view-archived'
+
+    expect(model.canApplyTeamView.value).toBe(false)
+
+    model.applyTeamView()
+
+    expect(applyViewState).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenLastCalledWith('请先恢复工作台团队视角，再执行应用。', true)
+  })
+
   it('syncs workbench URL identity after save and set-default actions', async () => {
     const requestedViewId = ref('')
     const syncRequestedViewId = vi.fn((value?: string) => {

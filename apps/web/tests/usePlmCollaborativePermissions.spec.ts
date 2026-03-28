@@ -126,6 +126,15 @@ describe('usePlmCollaborativePermissions', () => {
       },
     })).toBe(false)
 
+    expect(canApplyPlmCollaborativeEntry({
+      canManage: true,
+      isArchived: true,
+      isDefault: false,
+      permissions: {
+        canApply: true,
+      },
+    })).toBe(false)
+
     expect(canSharePlmCollaborativeEntry({
       canManage: true,
       isArchived: false,
