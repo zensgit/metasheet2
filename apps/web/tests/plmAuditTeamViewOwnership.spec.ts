@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   prunePlmAuditTransientOwnershipForRemovedViews,
   resolvePlmAuditCanonicalTeamViewFormDraftState,
+  resolvePlmAuditCompletedTeamViewFormDraftState,
   resolvePlmAuditLogRouteTakeoverFormDraftState,
   resolvePlmAuditRemovedTeamViewIds,
   resolvePlmAuditTakeoverTeamViewFormDraftState,
@@ -339,6 +340,14 @@ describe('plmAuditTeamViewOwnership', () => {
       draftTeamViewName: '新建团队视图',
       draftTeamViewNameOwnerId: '',
       draftOwnerUserId: 'owner-m',
+    })
+  })
+
+  it('clears rename and transfer drafts after successful audit team-view lifecycle mutations', () => {
+    expect(resolvePlmAuditCompletedTeamViewFormDraftState()).toEqual({
+      draftTeamViewName: '',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: '',
     })
   })
 })

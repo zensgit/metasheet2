@@ -920,6 +920,7 @@ import {
 } from './plmAuditTeamViewShareEntry'
 import {
   resolvePlmAuditCanonicalTeamViewFormDraftState,
+  resolvePlmAuditCompletedTeamViewFormDraftState,
   resolvePlmAuditLogRouteTakeoverFormDraftState,
   resolvePlmAuditTakeoverTeamViewFormDraftState,
   prunePlmAuditTransientOwnershipForRemovedViews,
@@ -1449,6 +1450,13 @@ function clearAuditLogRouteTakeoverTeamViewFormDrafts() {
     draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
     draftOwnerUserId: auditTeamViewOwnerUserId.value,
   })
+  auditTeamViewName.value = nextDraftState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
+}
+
+function clearAuditCompletedTeamViewFormDrafts() {
+  const nextDraftState = resolvePlmAuditCompletedTeamViewFormDraftState()
   auditTeamViewName.value = nextDraftState.draftTeamViewName
   auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
   auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
@@ -2371,7 +2379,7 @@ async function duplicateAuditTeamViewEntry(
     applySavedViewAttentionAction({ kind: 'apply' })
     applyRouteState(duplicatedState)
     clearAuditTeamViewShareEntry()
-    setAuditTeamViewNameDraft('', '')
+    clearAuditCompletedTeamViewFormDrafts()
     focusedAuditTeamViewId.value = duplicated.id
     await syncRouteState(duplicatedState)
     setStatus(tr('Audit team view duplicated.', '审计团队视图已复制。'))
@@ -2424,7 +2432,7 @@ async function renameAuditTeamView() {
     replaceAuditTeamView(renamed)
     applyAuditManagedTeamViewAttention()
     applyAuditManagedTeamViewSelection(renamed.id)
-    setAuditTeamViewNameDraft('', '')
+    clearAuditCompletedTeamViewFormDrafts()
     setStatus(tr('Audit team view renamed.', '审计团队视图已重命名。'))
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
