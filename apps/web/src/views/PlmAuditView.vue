@@ -881,6 +881,7 @@ import {
   prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
   resolvePlmAuditCompletedTeamViewBatchCollaborationDraft,
   resolvePlmAuditCompletedTeamViewCollaborationDraft,
+  resolvePlmAuditTeamViewCollaborationFollowupActionFeedback,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
   resolvePlmAuditClearedTeamViewDraftSelection,
@@ -2826,12 +2827,27 @@ async function runAuditTeamViewCollaborationFollowupAction(
       sceneContextAvailable: Boolean(auditSceneContext.value),
     },
   )
-  if (!followup) return
 
   if (actionKind === 'dismiss') {
     clearAuditTeamViewCollaborationFollowup()
     return
   }
+
+  const view = followup ? findAuditTeamViewById(followup.teamViewId) : null
+  const feedback = resolvePlmAuditTeamViewCollaborationFollowupActionFeedback({
+    actionKind,
+    followup,
+    target: view,
+    tr,
+  })
+  if (feedback) {
+    if (followup && !view) {
+      clearAuditTeamViewCollaborationFollowup()
+    }
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!followup) return
 
   if (actionKind === 'view-logs') {
     document.getElementById(followup.logsAnchorId)?.scrollIntoView({
@@ -2870,7 +2886,6 @@ async function runAuditTeamViewCollaborationFollowupAction(
     return
   }
 
-  const view = findAuditTeamViewById(followup.teamViewId)
   if (!view) return
   await setAuditTeamViewDefaultEntry(view, followup.source)
 }

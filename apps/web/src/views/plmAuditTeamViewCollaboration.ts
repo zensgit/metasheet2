@@ -52,6 +52,11 @@ export type PlmAuditTeamViewCollaborationFollowupNotice = {
   }>
 }
 
+export type PlmAuditTeamViewCollaborationFollowupActionFeedback = {
+  kind: 'error'
+  message: string
+}
+
 export type PlmAuditTeamViewCollaborationActionOutcome = {
   statusMessage: string
   followup: PlmAuditTeamViewCollaborationFollowup | null
@@ -636,6 +641,36 @@ export function buildPlmAuditTeamViewCollaborationFollowupNotice(
       },
     ],
   }
+}
+
+export function resolvePlmAuditTeamViewCollaborationFollowupActionFeedback(options: {
+  actionKind: Exclude<PlmAuditTeamViewCollaborationFollowupActionKind, 'dismiss'>
+  followup: PlmAuditTeamViewCollaborationFollowup | null | undefined
+  target: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'name'> | null | undefined
+  tr: (en: string, zh: string) => string
+}): PlmAuditTeamViewCollaborationFollowupActionFeedback | null {
+  const followup = options.followup || null
+  const target = options.target || null
+  const { tr } = options
+
+  if (!followup) {
+    return {
+      kind: 'error',
+      message: tr('Current audit team-view follow-up is unavailable.', '当前审计团队视图后续动作不可用。'),
+    }
+  }
+
+  if (!target) {
+    return {
+      kind: 'error',
+      message: tr(
+        'Audit team view is no longer available. Recreate the collaboration flow before continuing.',
+        '审计团队视图已不存在。请先重新建立协作流程，再继续执行。',
+      ),
+    }
+  }
+
+  return null
 }
 
 export function buildPlmAuditTeamViewCollaborationDraft(
