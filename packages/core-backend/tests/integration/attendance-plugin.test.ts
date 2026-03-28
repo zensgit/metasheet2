@@ -1114,6 +1114,34 @@ describe('Attendance Plugin Integration', () => {
     expect(shiftLookupBody?.data?.id).toBe(shiftId)
     expect(shiftLookupBody?.data?.name).toBe(`Lookup Shift ${runSuffix}`)
 
+    const rotationRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Lookup Rotation ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        shiftSequence: [shiftId],
+        isActive: true,
+      }),
+    })
+    expect(rotationRuleRes.status).toBe(201)
+    const rotationRuleId = (rotationRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(rotationRuleId).toBeTruthy()
+    if (!rotationRuleId) return
+
+    const rotationLookupRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules/${rotationRuleId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(rotationLookupRes.status).toBe(200)
+    const rotationLookupBody = rotationLookupRes.body as { data?: { id?: string; name?: string } } | undefined
+    expect(rotationLookupBody?.data?.id).toBe(rotationRuleId)
+    expect(rotationLookupBody?.data?.name).toBe(`Lookup Rotation ${runSuffix}`)
+
     const overtimeRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, {
       method: 'POST',
       headers: {
@@ -1149,6 +1177,7 @@ describe('Attendance Plugin Integration', () => {
       'payroll-templates/not-a-uuid',
       'shifts/not-a-uuid',
       'overtime-rules/not-a-uuid',
+      'rotation-rules/not-a-uuid',
     ]
 
     for (const apiPath of invalidEndpoints) {
@@ -1175,6 +1204,13 @@ describe('Attendance Plugin Integration', () => {
       },
     })
     expect(missingOvertimeRes.status).toBe(404)
+
+    const missingRotationRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules/${randomUuidV4()}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(missingRotationRes.status).toBe(404)
   })
 
   it('keeps camelCase and snake_case field aliases on shift and assignment responses', async () => {

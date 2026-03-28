@@ -11046,6 +11046,39 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/rotation-rules/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const ruleId = normalizeUuidString(req.params.id)
+        if (!ruleId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_rotation_rules WHERE id = $1 AND org_id = $2',
+            [ruleId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation rule not found' } })
+            return
+          }
+
+          res.json({ ok: true, data: mapRotationRuleRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rotation rule lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load rotation rule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'DELETE',
       '/api/attendance/rotation-rules/:id',
       withPermission('attendance:admin', async (req, res) => {

@@ -460,9 +460,14 @@
         <div class="attendance__card attendance__card--admin">
           <div class="attendance__admin-header">
             <h3>{{ tr('Admin Console', '管理控制台') }}</h3>
-            <button class="attendance__btn" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
-              {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
-            </button>
+            <div class="attendance__admin-actions">
+              <button class="attendance__btn" type="button" @click="adminFocusedMode = !adminFocusedMode">
+                {{ adminFocusedMode ? tr('Show all sections', '显示全部区块') : tr('Focus current section', '仅显示当前区块') }}
+              </button>
+              <button class="attendance__btn" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
+                {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
+              </button>
+            </div>
           </div>
           <div v-if="statusMessage" class="attendance__status-block attendance__status-block--admin">
             <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
@@ -509,10 +514,14 @@
               @copy-current-link="copyCurrentAdminSectionLink"
               @clear-recents="clearRecentAdminSections"
               @toggle-group="toggleAdminSectionGroup"
-              @select-section="scrollToAdminSection"
+              @select-section="selectAdminSection"
             />
-            <div class="attendance__admin-content">
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.settings)">
+            <div class="attendance__admin-content" :class="{ 'attendance__admin-content--focused': adminFocusedMode }">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
+            >
               <h4>{{ tr('Settings', '设置') }}</h4>
               <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--checkbox" for="attendance-auto-absence-enabled">
@@ -763,7 +772,11 @@
               </button>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.userAccess)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.userAccess)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.userAccess)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('User Access', '用户权限') }}</h4>
                 <div class="attendance__admin-actions">
@@ -881,7 +894,11 @@
               <p v-else-if="provisionHasLoaded" class="attendance__empty">{{ tr('No permissions loaded.', '未加载到权限。') }}</p>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Batch Provisioning', '批量授权') }}</h4>
                 <div class="attendance__admin-actions">
@@ -989,7 +1006,11 @@
               </p>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.auditLogs)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.auditLogs)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.auditLogs)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Audit Logs', '审计日志') }}</h4>
                 <div class="attendance__admin-actions">
@@ -1157,7 +1178,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidaySync)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidaySync)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidaySync)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Holiday Sync', '节假日同步') }}</h4>
                 <div class="attendance__admin-actions">
@@ -1299,7 +1324,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.defaultRule)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.defaultRule)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.defaultRule)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Default Rule', '默认规则') }}</h4>
                 <button class="attendance__btn" :disabled="ruleLoading" @click="loadRule">
@@ -1388,7 +1417,11 @@
               </button>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.ruleSets)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.ruleSets)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.ruleSets)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rule Sets', '规则集') }}</h4>
                 <button class="attendance__btn" :disabled="ruleSetLoading" @click="loadRuleSets">
@@ -1439,6 +1472,73 @@
                     :placeholder="tr('Optional', '可选')"
                   />
                 </label>
+                <div class="attendance__field attendance__field--full attendance__rule-builder">
+                  <div class="attendance__admin-section-header">
+                    <div>
+                      <h5 class="attendance__subheading">{{ tr('Structured rule builder', '结构化规则构建器') }}</h5>
+                      <p class="attendance__field-hint">
+                        {{ tr('The builder keeps the core JSON config in sync while preserving any advanced fields already stored in the rule draft.', '构建器会同步核心 JSON 配置，并保留规则草稿里已有的高级字段。') }}
+                      </p>
+                    </div>
+                    <div class="attendance__rule-builder-summary">
+                      <span>{{ tr('Source', '来源') }}: <strong>{{ ruleBuilderSource || '--' }}</strong></span>
+                      <span>{{ tr('Timezone', '时区') }}: <strong>{{ ruleBuilderTimezoneLabel || '--' }}</strong></span>
+                      <span>{{ tr('Working days', '工作日') }}: <strong>{{ formatRuleBuilderWorkingDaysLabel(ruleBuilderWorkingDaysText) }}</strong></span>
+                    </div>
+                  </div>
+                  <div class="attendance__admin-grid">
+                    <label class="attendance__field" for="attendance-rule-builder-source">
+                      <span>{{ tr('Source', '来源') }}</span>
+                      <input
+                        id="attendance-rule-builder-source"
+                        v-model="ruleBuilderSource"
+                        type="text"
+                        :placeholder="tr('dingtalk / manual / csv', 'dingtalk / manual / csv')"
+                      />
+                    </label>
+                    <label class="attendance__field" for="attendance-rule-builder-timezone">
+                      <span>{{ tr('Timezone', '时区') }}</span>
+                      <select id="attendance-rule-builder-timezone" v-model="ruleBuilderTimezone">
+                        <option v-for="option in timezoneOptions" :key="`rule-builder-${option.value}`" :value="option.value">
+                          {{ option.label }}
+                        </option>
+                      </select>
+                    </label>
+                    <label class="attendance__field" for="attendance-rule-builder-start">
+                      <span>{{ tr('Work start time', '上班时间') }}</span>
+                      <input id="attendance-rule-builder-start" v-model="ruleBuilderWorkStartTime" type="time" />
+                    </label>
+                    <label class="attendance__field" for="attendance-rule-builder-end">
+                      <span>{{ tr('Work end time', '下班时间') }}</span>
+                      <input id="attendance-rule-builder-end" v-model="ruleBuilderWorkEndTime" type="time" />
+                    </label>
+                    <label class="attendance__field" for="attendance-rule-builder-late-grace">
+                      <span>{{ tr('Late grace minutes', '迟到宽限分钟') }}</span>
+                      <input id="attendance-rule-builder-late-grace" v-model.number="ruleBuilderLateGraceMinutes" type="number" min="0" />
+                    </label>
+                    <label class="attendance__field" for="attendance-rule-builder-early-grace">
+                      <span>{{ tr('Early grace minutes', '早退宽限分钟') }}</span>
+                      <input id="attendance-rule-builder-early-grace" v-model.number="ruleBuilderEarlyGraceMinutes" type="number" min="0" />
+                    </label>
+                  </div>
+                  <div class="attendance__rule-builder-days">
+                    <span class="attendance__field-label">{{ tr('Working days', '工作日') }}</span>
+                    <div class="attendance__rule-builder-day-grid">
+                      <label v-for="day in ruleBuilderDayOptions" :key="day.value" class="attendance__rule-builder-day">
+                        <input v-model="ruleBuilderWorkingDays" type="checkbox" :value="day.value" />
+                        <span>{{ tr(day.labelEn, day.labelZh) }}</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="attendance__admin-actions">
+                    <button class="attendance__btn" type="button" @click="resetRuleBuilderForm">
+                      {{ tr('Reset builder', '重置构建器') }}
+                    </button>
+                    <button class="attendance__btn attendance__btn--primary" type="button" @click="applyRuleBuilderToRuleSetConfig">
+                      {{ tr('Apply builder to JSON', '将构建器应用到 JSON') }}
+                    </button>
+                  </div>
+                </div>
                 <label class="attendance__field attendance__field--full" for="attendance-rule-set-config">
                   <span>{{ tr('Config (JSON)', '配置（JSON）') }}</span>
                   <textarea
@@ -1496,7 +1596,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rule Template Library', '规则模板库') }}</h4>
                 <button
@@ -1579,7 +1683,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Attendance groups', '考勤组') }}</h4>
                 <button class="attendance__btn" :disabled="attendanceGroupLoading" @click="loadAttendanceGroups">
@@ -1664,7 +1772,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.groupMembers)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.groupMembers)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.groupMembers)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Group members', '分组成员') }}</h4>
                 <button
@@ -1689,18 +1801,34 @@
                     </option>
                   </select>
                 </label>
-                <label class="attendance__field" for="attendance-group-member-user-ids">
-                  <span>{{ tr('User IDs', '用户 ID') }}</span>
+                <AttendanceUserPickerField
+                  v-model="attendanceGroupMemberSelectedUserId"
+                  :tr="tr"
+                  :label="tr('User picker', '用户选择器')"
+                  name="attendanceGroupMemberUserPicker"
+                  :help-text="tr('Pick one user and append it to the bulk list below, or type multiple IDs manually.', '先选一个用户再追加到下方批量列表，也可以直接手动输入多个 ID。')"
+                  :search-placeholder="tr('Search users to append', '搜索要追加的用户')"
+                  input-id="attendance-group-member-user-picker"
+                />
+                <label class="attendance__field attendance__field--full" for="attendance-group-member-user-ids">
+                  <span>{{ tr('User IDs (bulk)', '用户 ID（批量）') }}</span>
                   <input
                     id="attendance-group-member-user-ids"
                     v-model="attendanceGroupMemberUserIds"
                     type="text"
                     :placeholder="tr('userId1, userId2', 'userId1, userId2')"
                   />
-                  <small class="attendance__field-hint">{{ tr('Separate multiple IDs with commas or spaces.', '多个 ID 请用逗号或空格分隔。') }}</small>
+                  <small class="attendance__field-hint">{{ tr('Separate multiple IDs with commas or spaces. The picker above can append one selected user at a time.', '多个 ID 请用逗号或空格分隔。上方选择器可一次追加一个用户。') }}</small>
                 </label>
               </div>
               <div class="attendance__admin-actions">
+                <button
+                  class="attendance__btn"
+                  :disabled="attendanceGroupMemberSaving || !attendanceGroupMemberSelectedUserId"
+                  @click="appendAttendanceGroupMemberSelectedUser"
+                >
+                  {{ tr('Append selected user', '追加所选用户') }}
+                </button>
                 <button
                   class="attendance__btn attendance__btn--primary"
                   :disabled="attendanceGroupMemberSaving"
@@ -1738,12 +1866,99 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.import)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.import)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.import)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Import (DingTalk / Manual)', '导入（钉钉 / 手工）') }}</h4>
-                <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
-                  {{ importLoading ? tr('Loading...', '加载中...') : tr('Load template', '加载模板') }}
-                </button>
+                <div class="attendance__admin-actions">
+                  <button class="attendance__btn" :disabled="importLoading" @click="loadImportTemplate">
+                    {{ importLoading ? tr('Loading...', '加载中...') : tr('Load template', '加载模板') }}
+                  </button>
+                  <button class="attendance__btn" :disabled="importLoading || !importTemplateGuide" @click="downloadImportTemplateCsv">
+                    {{ tr('Download CSV template', '下载 CSV 模板') }}
+                  </button>
+                </div>
+              </div>
+              <div v-if="importTemplateGuide" class="attendance__template-guide">
+                <div class="attendance__template-guide-header">
+                  <strong>{{ tr('Template guide', '模板说明') }}</strong>
+                  <span>
+                    {{ tr('Source', '来源') }}: <code>{{ importTemplateGuide.source }}</code>
+                    · {{ tr('Mode', '模式') }}: <code>{{ importTemplateGuide.mode }}</code>
+                  </span>
+                </div>
+                <div class="attendance__template-guide-grid">
+                  <div class="attendance__template-guide-card">
+                    <div class="attendance__template-guide-title">{{ tr('Suggested CSV header', '建议 CSV 表头') }}</div>
+                    <code class="attendance__template-code">{{ importTemplateGuide.sampleHeader || tr('(no header guidance yet)', '（暂无表头指导）') }}</code>
+                  </div>
+                  <div class="attendance__template-guide-card">
+                    <div class="attendance__template-guide-title">{{ tr('Required fields', '必填字段') }}</div>
+                    <div v-if="importTemplateGuide.requiredFields.length" class="attendance__template-chip-list">
+                      <span v-for="field in importTemplateGuide.requiredFields" :key="field" class="attendance__template-chip">
+                        {{ field }}
+                      </span>
+                    </div>
+                    <small v-else class="attendance__field-hint">
+                      {{ tr('No required fields were declared in the template response.', '模板响应中未声明必填字段。') }}
+                    </small>
+                  </div>
+                  <div class="attendance__template-guide-card">
+                    <div class="attendance__template-guide-title">{{ tr('Template columns', '模板列') }}</div>
+                    <div v-if="importTemplateGuide.columns.length" class="attendance__template-chip-list">
+                      <span v-for="column in importTemplateGuide.columns" :key="column" class="attendance__template-chip">
+                        {{ column }}
+                      </span>
+                    </div>
+                    <small v-else class="attendance__field-hint">
+                      {{ tr('The template response did not declare explicit source columns.', '模板响应未声明明确的源列。') }}
+                    </small>
+                  </div>
+                  <div class="attendance__template-guide-card attendance__template-guide-card--full">
+                    <div class="attendance__template-guide-title">{{ tr('Field meanings', '字段说明') }}</div>
+                    <table class="attendance__template-table">
+                      <thead>
+                        <tr>
+                          <th>{{ tr('Field', '字段') }}</th>
+                          <th>{{ tr('Meaning', '含义') }}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="item in importTemplateGuide.fieldGuides" :key="item.field">
+                          <td><code>{{ item.field }}</code></td>
+                          <td>{{ tr(item.meaningEn, item.meaningZh) }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div v-if="selectedImportProfileGuide" class="attendance__template-guide-card attendance__template-guide-card--full">
+                    <div class="attendance__template-guide-title">
+                      {{ tr('Selected mapping profile', '已选映射配置') }}: {{ selectedImportProfileGuide.name }}
+                    </div>
+                    <small v-if="selectedImportProfileGuide.description" class="attendance__field-hint">
+                      {{ selectedImportProfileGuide.description }}
+                    </small>
+                    <table v-if="selectedImportProfileGuide.mappingEntries.length" class="attendance__template-table">
+                      <thead>
+                        <tr>
+                          <th>{{ tr('Target field', '目标字段') }}</th>
+                          <th>{{ tr('Meaning', '含义') }}</th>
+                          <th>{{ tr('Source field', '源字段') }}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="item in selectedImportProfileGuide.mappingEntries" :key="item.targetField">
+                          <td><code>{{ item.targetField }}</code></td>
+                          <td>{{ tr(item.meaningEn, item.meaningZh) }}</td>
+                          <td><code>{{ item.sourceField }}</code></td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
               <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-import-rule-set">
@@ -2061,7 +2276,12 @@
                 </table>
               </div>
 
-              <div class="attendance__admin-section-header" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)">
+              <div
+                v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)"
+                class="attendance__admin-section"
+                v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)"
+              >
+              <div class="attendance__admin-section-header">
                 <h4>{{ tr('Import batches', '导入批次') }}</h4>
                 <button class="attendance__btn" :disabled="importLoading" @click="loadImportBatches">
                   {{ importLoading ? tr('Loading...', '加载中...') : tr('Reload batches', '重载批次') }}
@@ -2159,9 +2379,14 @@
                 <div class="attendance__empty">{{ tr('No batch items.', '暂无批次条目。') }}</div>
                 <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
               </div>
+              </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Payroll Templates', '计薪模板') }}</h4>
                 <button class="attendance__btn" :disabled="payrollTemplateLoading" @click="loadPayrollTemplates">
@@ -2312,7 +2537,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Payroll Cycles', '计薪周期') }}</h4>
                 <button class="attendance__btn" :disabled="payrollCycleLoading" @click="loadPayrollCycles">
@@ -2559,7 +2788,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Leave Types', '请假类型') }}</h4>
                 <button class="attendance__btn" :disabled="leaveTypeLoading" @click="loadLeaveTypes">
@@ -2660,7 +2893,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Overtime Rules', '加班规则') }}</h4>
                 <button class="attendance__btn" :disabled="overtimeRuleLoading" @click="loadOvertimeRules">
@@ -2772,7 +3009,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Approval Flows', '审批流') }}</h4>
                 <button class="attendance__btn" :disabled="approvalFlowLoading" @click="loadApprovalFlows">
@@ -2866,7 +3107,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationRules)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.rotationRules)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationRules)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rotation Rules', '轮班规则') }}</h4>
                 <button class="attendance__btn" :disabled="rotationRuleLoading" @click="loadRotationRules">
@@ -2963,7 +3208,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Rotation Assignments', '轮班分配') }}</h4>
                 <button class="attendance__btn" :disabled="rotationAssignmentLoading" @click="loadRotationAssignments">
@@ -3074,7 +3323,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.shifts)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.shifts)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.shifts)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Shifts', '班次') }}</h4>
                 <button class="attendance__btn" :disabled="shiftLoading" @click="loadShifts">
@@ -3198,7 +3451,11 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.assignments)">
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.assignments)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.assignments)"
+            >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Assignments', '排班分配') }}</h4>
                 <button class="attendance__btn" :disabled="assignmentLoading" @click="loadAssignments">
@@ -3305,82 +3562,17 @@
               </div>
             </div>
 
-            <div class="attendance__admin-section" v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidays)">
-              <div class="attendance__admin-section-header">
-                <h4>{{ tr('Holidays', '节假日') }}</h4>
-                <button class="attendance__btn" :disabled="holidayLoading" @click="loadHolidays">
-                  {{ holidayLoading ? tr('Loading...', '加载中...') : tr('Reload holidays', '重载节假日') }}
-                </button>
-              </div>
-              <div class="attendance__admin-grid">
-                <label class="attendance__field" for="attendance-holiday-date">
-                  <span>{{ tr('Date', '日期') }}</span>
-                  <input
-                    id="attendance-holiday-date"
-                    name="holidayDate"
-                    v-model="holidayForm.date"
-                    type="date"
-                  />
-                </label>
-                <label class="attendance__field" for="attendance-holiday-name">
-                  <span>{{ tr('Name', '名称') }}</span>
-                  <input
-                    id="attendance-holiday-name"
-                    name="holidayName"
-                    v-model="holidayForm.name"
-                    type="text"
-                    :placeholder="tr('Optional', '可选')"
-                  />
-                </label>
-                <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-working">
-                  <span>{{ tr('Working day override', '工作日覆盖') }}</span>
-                  <input
-                    id="attendance-holiday-working"
-                    name="holidayWorkingDay"
-                    v-model="holidayForm.isWorkingDay"
-                    type="checkbox"
-                  />
-                </label>
-              </div>
-              <div class="attendance__admin-actions">
-                <button class="attendance__btn attendance__btn--primary" :disabled="holidaySaving" @click="saveHoliday">
-                  {{ holidaySaving ? tr('Saving...', '保存中...') : holidayEditingId ? tr('Update holiday', '更新节假日') : tr('Create holiday', '创建节假日') }}
-                </button>
-                <button
-                  v-if="holidayEditingId"
-                  class="attendance__btn"
-                  :disabled="holidaySaving"
-                  @click="resetHolidayForm"
-                >
-                  {{ tr('Cancel edit', '取消编辑') }}
-                </button>
-              </div>
-              <div v-if="holidays.length === 0" class="attendance__empty">{{ tr('No holidays in this range.', '当前范围内暂无节假日。') }}</div>
-              <div v-else class="attendance__table-wrapper">
-                <table class="attendance__table">
-                  <thead>
-                    <tr>
-                      <th>{{ tr('Date', '日期') }}</th>
-                      <th>{{ tr('Name', '名称') }}</th>
-                      <th>{{ tr('Working day', '工作日') }}</th>
-                      <th>{{ tr('Actions', '操作') }}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="holiday in holidays" :key="holiday.id">
-                      <td>{{ holiday.date }}</td>
-                      <td>{{ holiday.name || '--' }}</td>
-                      <td>{{ holiday.isWorkingDay ? tr('Yes', '是') : tr('No', '否') }}</td>
-                      <td class="attendance__table-actions">
-                        <button class="attendance__btn" @click="editHoliday(holiday)">{{ tr('Edit', '编辑') }}</button>
-                        <button class="attendance__btn attendance__btn--danger" @click="deleteHoliday(holiday.id)">
-                          {{ tr('Delete', '删除') }}
-                        </button>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+            <div
+              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidays)"
+              class="attendance__admin-section"
+              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidays)"
+            >
+              <AttendanceHolidayDataSection
+                :holiday="holidaySectionBindings"
+                :format-date="formatDate"
+                :show-lunar-calendar="showLunarLabel"
+                :tr="tr"
+              />
             </div>
             </div>
           </div>
@@ -3393,6 +3585,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
+import AttendanceHolidayDataSection from './attendance/AttendanceHolidayDataSection.vue'
+import AttendanceUserPickerField from './attendance/AttendanceUserPickerField.vue'
 import {
   ATTENDANCE_ADMIN_SECTION_IDS,
   useAttendanceAdminRail,
@@ -3831,6 +4025,32 @@ interface AttendanceImportMappingProfile {
   userMapKeyField?: string
   userMapSourceFields?: string[]
   payloadExample?: Record<string, any>
+}
+
+interface AttendanceImportFieldGuide {
+  field: string
+  meaningEn: string
+  meaningZh: string
+}
+
+interface AttendanceImportTemplateGuide {
+  source: string
+  mode: 'override' | 'merge'
+  columns: string[]
+  requiredFields: string[]
+  sampleHeader: string
+  fieldGuides: AttendanceImportFieldGuide[]
+}
+
+interface AttendanceImportProfileGuideEntry extends AttendanceImportFieldGuide {
+  targetField: string
+  sourceField: string
+}
+
+interface AttendanceImportProfileGuide {
+  name: string
+  description?: string
+  mappingEntries: AttendanceImportProfileGuideEntry[]
 }
 
 interface AttendanceImportJob {
@@ -4307,6 +4527,7 @@ const rotationAssignmentEditingId = ref<string | null>(null)
 const ruleSetEditingId = ref<string | null>(null)
 const attendanceGroupEditingId = ref<string | null>(null)
 const attendanceGroupMemberGroupId = ref('')
+const attendanceGroupMemberSelectedUserId = ref('')
 const attendanceGroupMemberUserIds = ref('')
 const payrollTemplateEditingId = ref<string | null>(null)
 const payrollCycleEditingId = ref<string | null>(null)
@@ -4318,6 +4539,8 @@ const selectedImportProfile = computed(() => {
   if (!importProfileId.value) return null
   return importMappingProfiles.value.find(profile => profile.id === importProfileId.value) ?? null
 })
+const importTemplateGuide = computed(() => buildImportTemplateGuide(parseJsonConfig(importForm.payload), selectedImportProfile.value))
+const selectedImportProfileGuide = computed(() => buildImportProfileGuide(selectedImportProfile.value))
 const attendanceGroupOptions = computed(() =>
   attendanceGroups.value.map(group => group.name).filter(name => Boolean(name))
 )
@@ -4363,6 +4586,8 @@ const pluginErrorMessage = computed(() => pluginsError.value)
 
 const showAdmin = computed(() => props.mode === 'admin')
 const showOverview = computed(() => props.mode === 'overview')
+const adminFocusedMode = ref(true)
+
 const {
   adminActiveSectionId,
   adminCompactNavOpen,
@@ -4407,6 +4632,24 @@ const {
   isCompactAdminNav,
   adminCompactNavOpen,
 })
+
+function resolvedAdminSectionId(): string {
+  return isKnownAdminSectionId(adminActiveSectionId.value)
+    ? adminActiveSectionId.value
+    : ATTENDANCE_ADMIN_SECTION_IDS.settings
+}
+
+function shouldShowAdminSection(id: string): boolean {
+  return !adminFocusedMode.value || resolvedAdminSectionId() === id
+}
+
+function selectAdminSection(id: string): void {
+  adminFocusedMode.value = true
+  adminActiveSectionId.value = id
+  void nextTick(() => {
+    scrollToAdminSection(id)
+  })
+}
 
 const statusCode = computed(() => statusMeta.value?.code || '')
 const statusHint = computed(() => statusMeta.value?.hint || '')
@@ -4717,9 +4960,30 @@ const importForm = reactive({
   payload: '{}',
 })
 
+const ruleBuilderSource = ref('')
+const ruleBuilderTimezone = ref(defaultTimezone)
+const ruleBuilderWorkStartTime = ref('09:00')
+const ruleBuilderWorkEndTime = ref('18:00')
+const ruleBuilderLateGraceMinutes = ref(10)
+const ruleBuilderEarlyGraceMinutes = ref(10)
+const ruleBuilderWorkingDaysText = ref('1, 2, 3, 4, 5')
+
 function toDateInput(date: Date): string {
   return date.toISOString().slice(0, 10)
 }
+
+function firstDayOfMonth(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), 1)
+}
+
+function lastDayOfMonth(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth() + 1, 0)
+}
+
+const adminHolidayRange = reactive({
+  from: toDateInput(firstDayOfMonth(today)),
+  to: toDateInput(lastDayOfMonth(today)),
+})
 
 function toDateKey(date: Date): string {
   const year = date.getFullYear()
@@ -4743,6 +5007,15 @@ function formatDateTime(value: string | null): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '--'
   return date.toLocaleString(locale.value)
+}
+
+function formatDate(value: string | null | undefined): string {
+  if (!value) return '--'
+  const direct = String(value).trim()
+  if (!direct) return '--'
+  const date = new Date(direct)
+  if (Number.isNaN(date.getTime())) return direct
+  return date.toLocaleDateString(locale.value)
 }
 
 function displayTimezone(value: string | null | undefined): string {
@@ -4983,6 +5256,280 @@ function parseJsonConfig(value: string): Record<string, any> | null {
   } catch {
     return null
   }
+}
+
+function normalizeText(value: unknown): string {
+  if (typeof value === 'string') return value.trim()
+  if (value === null || value === undefined) return ''
+  return String(value).trim()
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map(item => normalizeText(item)).filter(Boolean)
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(/[\n,，\s]+/)
+      .map(item => item.trim())
+      .filter(Boolean)
+  }
+  return []
+}
+
+function parseRuleBuilderWorkingDays(value: string): number[] {
+  return Array.from(new Set(
+    normalizeStringList(value)
+      .map(item => Number.parseInt(item, 10))
+      .filter(item => Number.isInteger(item) && item >= 0 && item <= 6),
+  )).sort((left, right) => left - right)
+}
+
+const ruleBuilderDayOptions = [
+  { value: 0, labelEn: 'Sun', labelZh: '周日' },
+  { value: 1, labelEn: 'Mon', labelZh: '周一' },
+  { value: 2, labelEn: 'Tue', labelZh: '周二' },
+  { value: 3, labelEn: 'Wed', labelZh: '周三' },
+  { value: 4, labelEn: 'Thu', labelZh: '周四' },
+  { value: 5, labelEn: 'Fri', labelZh: '周五' },
+  { value: 6, labelEn: 'Sat', labelZh: '周六' },
+]
+
+const ruleBuilderWorkingDays = computed<number[]>({
+  get: () => parseRuleBuilderWorkingDays(ruleBuilderWorkingDaysText.value),
+  set: (value) => {
+    ruleBuilderWorkingDaysText.value = Array.from(new Set(value)).sort((left, right) => left - right).join(', ')
+  },
+})
+
+const ruleBuilderTimezoneLabel = computed(() => displayTimezone(ruleBuilderTimezone.value))
+
+function formatRuleBuilderWorkingDaysLabel(value: string): string {
+  const days = parseRuleBuilderWorkingDays(value)
+  if (days.length === 0) return tr('Not set', '未设置')
+  return days
+    .map(day => tr(ruleBuilderDayOptions.find(item => item.value === day)?.labelEn ?? String(day), ruleBuilderDayOptions.find(item => item.value === day)?.labelZh ?? String(day)))
+    .join(', ')
+}
+
+function resetRuleBuilderForm() {
+  ruleBuilderSource.value = ''
+  ruleBuilderTimezone.value = defaultTimezone
+  ruleBuilderWorkStartTime.value = '09:00'
+  ruleBuilderWorkEndTime.value = '18:00'
+  ruleBuilderLateGraceMinutes.value = 10
+  ruleBuilderEarlyGraceMinutes.value = 10
+  ruleBuilderWorkingDaysText.value = '1, 2, 3, 4, 5'
+}
+
+function syncRuleBuilderFromRuleSetConfig(configInput: string | Record<string, unknown> | null | undefined = ruleSetForm.config) {
+  const config = typeof configInput === 'string'
+    ? parseJsonConfig(configInput)
+    : (configInput && typeof configInput === 'object' ? configInput as Record<string, unknown> : {})
+  if (!config) return false
+  const rule = config.rule && typeof config.rule === 'object' ? config.rule as Record<string, unknown> : {}
+  ruleBuilderSource.value = normalizeText(config.source ?? rule.source)
+  ruleBuilderTimezone.value = normalizeText(rule.timezone) || defaultTimezone
+  ruleBuilderWorkStartTime.value = normalizeText(rule.workStartTime) || '09:00'
+  ruleBuilderWorkEndTime.value = normalizeText(rule.workEndTime) || '18:00'
+  ruleBuilderLateGraceMinutes.value = Math.max(0, Math.floor(Number(rule.lateGraceMinutes ?? 10) || 10))
+  ruleBuilderEarlyGraceMinutes.value = Math.max(0, Math.floor(Number(rule.earlyGraceMinutes ?? 10) || 10))
+  ruleBuilderWorkingDaysText.value = normalizeStringList(rule.workingDays).join(', ') || '1, 2, 3, 4, 5'
+  return true
+}
+
+function buildRuleBuilderConfigDraft(baseConfig: Record<string, unknown> | null = null): Record<string, unknown> {
+  const nextConfig: Record<string, unknown> = { ...(baseConfig ?? {}) }
+  const rule = nextConfig.rule && typeof nextConfig.rule === 'object' ? { ...(nextConfig.rule as Record<string, unknown>) } : {}
+
+  const source = ruleBuilderSource.value.trim()
+  if (source) nextConfig.source = source
+  else delete nextConfig.source
+
+  const timezone = ruleBuilderTimezone.value.trim()
+  if (timezone) rule.timezone = timezone
+  else delete rule.timezone
+
+  const workStartTime = ruleBuilderWorkStartTime.value.trim()
+  if (workStartTime) rule.workStartTime = workStartTime
+  else delete rule.workStartTime
+
+  const workEndTime = ruleBuilderWorkEndTime.value.trim()
+  if (workEndTime) rule.workEndTime = workEndTime
+  else delete rule.workEndTime
+
+  rule.lateGraceMinutes = Math.max(0, Math.floor(Number(ruleBuilderLateGraceMinutes.value) || 0))
+  rule.earlyGraceMinutes = Math.max(0, Math.floor(Number(ruleBuilderEarlyGraceMinutes.value) || 0))
+
+  const workingDays = parseRuleBuilderWorkingDays(ruleBuilderWorkingDaysText.value)
+  if (workingDays.length > 0) rule.workingDays = workingDays
+  else delete rule.workingDays
+
+  if (Object.keys(rule).length > 0) nextConfig.rule = rule
+  else delete nextConfig.rule
+
+  return nextConfig
+}
+
+function applyRuleBuilderToRuleSetConfig() {
+  const config = parseJsonConfig(ruleSetForm.config)
+  if (!config) {
+    throw new Error(tr('Rule set config must be valid JSON before applying builder changes', '应用构建器变更前，规则集配置必须是合法 JSON'))
+  }
+  const nextConfig = buildRuleBuilderConfigDraft(config)
+  ruleSetForm.config = JSON.stringify(nextConfig, null, 2)
+  syncRuleBuilderFromRuleSetConfig(nextConfig)
+  setStatus(tr('Structured rule builder applied to JSON config.', '结构化规则构建器已同步到 JSON 配置。'))
+  return nextConfig
+}
+
+const ATTENDANCE_IMPORT_FIELD_MEANINGS: Record<string, { en: string; zh: string }> = {
+  source: { en: 'Original attendance data source.', zh: '原始考勤数据来源。' },
+  mode: { en: 'Import conflict strategy.', zh: '导入冲突处理策略。' },
+  columns: { en: 'Source columns used to map incoming rows.', zh: '用于映射导入行的源列。' },
+  mapping: { en: 'Field mapping rules from source data to attendance fields.', zh: '源数据到考勤字段的映射规则。' },
+  data: { en: 'Inline row data for preview or import.', zh: '用于预览或导入的内联行数据。' },
+  rows: { en: 'Inline row list for preview or import.', zh: '用于预览或导入的行列表。' },
+  userId: { en: 'User identifier for the imported row.', zh: '导入行对应的用户标识。' },
+  orgId: { en: 'Organization that owns the import.', zh: '导入所属的组织。' },
+  timezone: { en: 'Timezone used to interpret dates and timestamps.', zh: '用于解析日期和时间戳的时区。' },
+  ruleSetId: { en: 'Rule set applied during import evaluation.', zh: '导入评估时使用的规则集。' },
+  mappingProfileId: { en: 'Saved mapping profile selected for this payload.', zh: '此载荷选中的已保存映射配置。' },
+  csvText: { en: 'Raw CSV text to upload or preview.', zh: '用于上传或预览的原始 CSV 文本。' },
+  csvFileId: { en: 'Uploaded CSV file reference returned by the server.', zh: '服务端返回的已上传 CSV 文件引用。' },
+  csvOptions: { en: 'CSV parsing options such as header row and delimiter.', zh: 'CSV 解析选项，例如表头行和分隔符。' },
+  userMap: { en: 'Lookup table used to resolve imported values to users.', zh: '用于把导入值解析为用户的查找表。' },
+  userMapKeyField: { en: 'Key field in the user map, such as employee number.', zh: '用户映射中的键字段，例如工号。' },
+  userMapSourceFields: { en: 'Source fields that can be used to match the user map key.', zh: '用于匹配用户映射键的源字段。' },
+  groupSync: { en: 'Optional group creation and member assignment settings.', zh: '可选的分组创建和成员分配设置。' },
+  commitToken: { en: 'Short-lived token required for preview and commit requests.', zh: '预览和提交请求所需的短期令牌。' },
+}
+
+const ATTENDANCE_IMPORT_FIELD_ORDER = [
+  'source',
+  'mode',
+  'columns',
+  'mapping',
+  'data',
+  'rows',
+  'csvText',
+  'csvFileId',
+  'csvOptions',
+  'userId',
+  'orgId',
+  'timezone',
+  'ruleSetId',
+  'mappingProfileId',
+  'userMap',
+  'userMapKeyField',
+  'userMapSourceFields',
+  'groupSync',
+  'commitToken',
+]
+
+function humanizeImportField(field: string): string {
+  return String(field)
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function describeImportField(field: string): AttendanceImportFieldGuide {
+  const normalized = normalizeText(field)
+  const known = ATTENDANCE_IMPORT_FIELD_MEANINGS[normalized]
+  if (known) {
+    return { field: normalized, meaningEn: known.en, meaningZh: known.zh }
+  }
+  const humanized = humanizeImportField(normalized) || normalized
+  return {
+    field: normalized,
+    meaningEn: `Field "${humanized}".`,
+    meaningZh: `字段“${humanized}”。`,
+  }
+}
+
+function extractImportTemplateColumns(columns: unknown): string[] {
+  if (!Array.isArray(columns)) return []
+  const values: string[] = []
+  for (const column of columns) {
+    if (typeof column === 'string') {
+      const text = column.trim()
+      if (text) values.push(text)
+      continue
+    }
+    if (!column || typeof column !== 'object') continue
+    const record = column as Record<string, unknown>
+    const candidate = record.header ?? record.sourceField ?? record.source ?? record.name ?? record.field
+    const text = normalizeText(candidate)
+    if (text) values.push(text)
+  }
+  return Array.from(new Set(values))
+}
+
+function extractImportRequiredFields(payloadExample: Record<string, any>, profile?: AttendanceImportMappingProfile | null): string[] {
+  return Array.from(new Set([
+    ...(Array.isArray(payloadExample.requiredFields) ? payloadExample.requiredFields : []),
+    ...(Array.isArray(profile?.requiredFields) ? profile.requiredFields : []),
+  ].map(item => normalizeText(item)).filter(Boolean)))
+}
+
+function buildImportTemplateGuide(payloadExample: Record<string, any> | null, profile?: AttendanceImportMappingProfile | null): AttendanceImportTemplateGuide | null {
+  if (!payloadExample || typeof payloadExample !== 'object' || Object.keys(payloadExample).length === 0) return null
+  const columns = extractImportTemplateColumns(payloadExample.columns)
+  const requiredFields = extractImportRequiredFields(payloadExample, profile)
+  const sampleHeader = columns.length > 0 ? columns.join(',') : requiredFields.join(',')
+  const orderedFields = [
+    ...ATTENDANCE_IMPORT_FIELD_ORDER,
+    ...Object.keys(payloadExample).filter(field => !ATTENDANCE_IMPORT_FIELD_ORDER.includes(field)).sort(),
+  ]
+  const fieldGuides = Array.from(new Set(orderedFields))
+    .filter(field => Object.prototype.hasOwnProperty.call(payloadExample, field))
+    .map(field => describeImportField(field))
+
+  return {
+    source: normalizeText(payloadExample.source) || 'attendance',
+    mode: payloadExample.mode === 'merge' ? 'merge' : 'override',
+    columns,
+    requiredFields,
+    sampleHeader,
+    fieldGuides,
+  }
+}
+
+function extractMappingSource(value: unknown): string {
+  if (typeof value === 'string') return value.trim()
+  if (!value || typeof value !== 'object') return normalizeText(value)
+  const node = value as Record<string, unknown>
+  const candidate = node.header ?? node.sourceField ?? node.source ?? node.name ?? node.field ?? node.key ?? node.label ?? node.value
+  if (Array.isArray(candidate)) {
+    return candidate.map(item => normalizeText(item)).filter(Boolean).join(', ')
+  }
+  return normalizeText(candidate) || JSON.stringify(value)
+}
+
+function buildImportProfileGuide(profile: AttendanceImportMappingProfile | null): AttendanceImportProfileGuide | null {
+  if (!profile) return null
+  const mappingEntries = profile.mapping && typeof profile.mapping === 'object' && !Array.isArray(profile.mapping)
+    ? Object.entries(profile.mapping).map(([targetField, sourceValue]) => ({
+      targetField,
+      sourceField: extractMappingSource(sourceValue),
+      ...describeImportField(targetField),
+    }))
+    : []
+
+  return {
+    name: profile.name,
+    description: profile.description,
+    mappingEntries,
+  }
+}
+
+function escapeCsvCell(value: string): string {
+  if (/[",\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`
+  }
+  return value
 }
 
 function parseTemplateLibrary(value: string): any[] | null {
@@ -5404,6 +5951,33 @@ async function loadImportTemplate() {
   } finally {
     importLoading.value = false
   }
+}
+
+function downloadImportTemplateCsv() {
+  const guide = importTemplateGuide.value
+  if (!guide) {
+    setStatus(tr('Load the import template before downloading CSV guidance.', '请先加载导入模板，再下载 CSV 模板。'), 'error')
+    return
+  }
+  const columns = guide.columns.length > 0
+    ? guide.columns
+    : guide.sampleHeader.split(',').map(item => item.trim()).filter(Boolean)
+  if (columns.length === 0) {
+    setStatus(tr('The current template does not expose CSV header guidance yet.', '当前模板尚未提供 CSV 表头指导。'), 'error')
+    return
+  }
+  const csv = `${columns.map(escapeCsvCell).join(',')}\n${columns.map(() => '').join(',')}\n`
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  const source = normalizeText(selectedImportProfile.value?.source ?? guide.source) || 'attendance'
+  link.href = url
+  link.download = `${source}-attendance-template.csv`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+  setStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
 }
 
 function applyImportProfile() {
@@ -9298,9 +9872,12 @@ function editHoliday(holiday: AttendanceHoliday) {
 async function loadHolidays() {
   holidayLoading.value = true
   try {
+    const range = showAdmin.value
+      ? adminHolidayRange
+      : { from: fromDate.value, to: toDate.value }
     const query = buildQuery({
-      from: fromDate.value,
-      to: toDate.value,
+      from: range.from,
+      to: range.to,
       orgId: normalizedOrgId(),
     })
     const response = await apiFetch(`/api/attendance/holidays?${query.toString()}`)
@@ -9383,6 +9960,7 @@ function resetRuleSetForm() {
   ruleSetForm.scope = 'org'
   ruleSetForm.isDefault = false
   ruleSetForm.config = '{}'
+  resetRuleBuilderForm()
 }
 
 function editRuleSet(item: AttendanceRuleSet) {
@@ -9393,6 +9971,7 @@ function editRuleSet(item: AttendanceRuleSet) {
   ruleSetForm.scope = item.scope ?? 'org'
   ruleSetForm.isDefault = item.isDefault ?? false
   ruleSetForm.config = JSON.stringify(item.config ?? {}, null, 2)
+  syncRuleBuilderFromRuleSetConfig(item.config ?? {})
 }
 
 async function loadRuleSets() {
@@ -9633,6 +10212,20 @@ async function addAttendanceGroupMembers() {
   }
 }
 
+function appendAttendanceGroupMemberSelectedUser() {
+  const userId = attendanceGroupMemberSelectedUserId.value.trim()
+  if (!userId) return
+  const ids = attendanceGroupMemberUserIds.value
+    .split(/[\n,，\s]+/)
+    .map(item => item.trim())
+    .filter(Boolean)
+  if (!ids.includes(userId)) {
+    ids.push(userId)
+  }
+  attendanceGroupMemberUserIds.value = ids.join(', ')
+  attendanceGroupMemberSelectedUserId.value = ''
+}
+
 async function removeAttendanceGroupMember(userId: string) {
   const groupId = attendanceGroupMemberGroupId.value
   if (!groupId || !userId) return
@@ -9691,6 +10284,7 @@ async function loadRuleSetTemplate() {
       throw new Error(readErrorMessage(data, tr('Failed to load rule set template', '加载规则集模板失败')))
     }
     ruleSetForm.config = JSON.stringify(data.data ?? {}, null, 2)
+    syncRuleBuilderFromRuleSetConfig(data.data ?? {})
     setStatus(tr('Rule set template loaded.', '规则集模板已加载。'))
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load rule set template', '加载规则集模板失败')), 'error')
@@ -10221,6 +10815,29 @@ watch(importMode, () => {
 watch([provisionBatchUserIdsText, provisionBatchRole], () => {
   clearProvisionBatchPreview()
 })
+
+watch(
+  () => ruleSetForm.config,
+  (config) => {
+    syncRuleBuilderFromRuleSetConfig(config)
+  },
+  { immediate: true },
+)
+
+const holidaySectionBindings = {
+  holidays,
+  holidayTotal: computed(() => holidays.value.length),
+  holidayLoading,
+  holidaySaving,
+  holidayEditingId,
+  holidayRange: adminHolidayRange,
+  holidayForm,
+  resetHolidayForm,
+  editHoliday,
+  loadHolidays,
+  saveHoliday,
+  deleteHoliday,
+}
 </script>
 
 <style scoped>
@@ -10757,6 +11374,127 @@ watch([provisionBatchUserIdsText, provisionBatchRole], () => {
 
 .attendance__admin-content {
   min-width: 0;
+}
+
+.attendance__admin-content--focused .attendance__admin-section + .attendance__admin-section {
+  margin-top: 0;
+}
+
+.attendance__template-guide,
+.attendance__rule-builder,
+.attendance__holiday-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.attendance__template-guide {
+  padding: 16px;
+  border: 1px solid #d9e2ec;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #ffffff, #f8fbff);
+}
+
+.attendance__template-guide-header,
+.attendance__template-guide-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.attendance__template-guide-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.attendance__template-guide-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.attendance__template-guide-card--full {
+  grid-column: 1 / -1;
+}
+
+.attendance__template-guide-title {
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.attendance__template-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attendance__template-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+}
+
+.attendance__template-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.attendance__template-table th,
+.attendance__template-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #eef2f7;
+  vertical-align: top;
+  text-align: left;
+}
+
+.attendance__template-code {
+  display: block;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.attendance__rule-builder-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  color: #4b5563;
+  font-size: 12px;
+}
+
+.attendance__rule-builder-days {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attendance__rule-builder-day-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 8px;
+}
+
+.attendance__rule-builder-day {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #d8e0ea;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.attendance__holiday-layout {
+  gap: 16px;
 }
 
 [data-admin-section] {
