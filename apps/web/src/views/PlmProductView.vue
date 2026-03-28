@@ -134,7 +134,10 @@ import {
   matchPlmTeamFilterPresetStateSnapshot,
   pickPlmTeamFilterPresetRouteOwnerState,
 } from './plm/plmTeamFilterPresetStateMatch'
-import { resolvePlmHydratedTeamPresetOwnerTakeover } from './plm/plmHydratedTeamPresetOwnerTakeover'
+import {
+  resolvePlmHydratedRemovedTeamPresetOwner,
+  resolvePlmHydratedTeamPresetOwnerTakeover,
+} from './plm/plmHydratedTeamPresetOwnerTakeover'
 import { resolvePlmHydratedLocalFilterPresetTakeover } from './plm/plmHydratedLocalFilterPresetTakeover'
 import {
   buildPlmLocalFilterPresetRouteOwnerWatchKey,
@@ -5618,6 +5621,31 @@ function applyHydratedTeamPresetOwnerTakeover(options: {
   options.clearTeamPresetSelection()
 }
 
+function applyHydratedRemovedTeamPresetOwner(options: {
+  removedRouteOwnerId: string
+  teamPresetQuery: { value: string }
+  teamPresetKey: { value: string }
+  teamPresetName: { value: string }
+  teamPresetGroup: { value: string }
+  teamPresetOwnerUserId: { value: string }
+  clearTeamPresetSelection: () => void
+}) {
+  const takeover = resolvePlmHydratedRemovedTeamPresetOwner({
+    removedRouteOwnerId: options.removedRouteOwnerId,
+    localSelectorId: options.teamPresetKey.value,
+    localNameDraft: options.teamPresetName.value,
+    localGroupDraft: options.teamPresetGroup.value,
+    localOwnerUserIdDraft: options.teamPresetOwnerUserId.value,
+  })
+  options.teamPresetQuery.value = ''
+  if (!takeover.shouldClearLocalSelector) return
+  options.teamPresetKey.value = takeover.nextSelectorId
+  options.teamPresetName.value = takeover.nextNameDraft
+  options.teamPresetGroup.value = takeover.nextGroupDraft
+  options.teamPresetOwnerUserId.value = takeover.nextOwnerUserIdDraft
+  options.clearTeamPresetSelection()
+}
+
 async function applyQueryState() {
   if (isApplyingRouteQueryState.value) {
     pendingRouteQueryHydration = true
@@ -5907,6 +5935,16 @@ async function applyQueryState() {
         clearTeamPresetSelection: clearWhereUsedTeamPresetSelection,
       })
       whereUsedTeamPresetQuery.value = whereUsedTeamPresetParam
+    } else if (whereUsedTeamPresetQuery.value) {
+      applyHydratedRemovedTeamPresetOwner({
+        removedRouteOwnerId: whereUsedTeamPresetQuery.value,
+        teamPresetQuery: whereUsedTeamPresetQuery,
+        teamPresetKey: whereUsedTeamPresetKey,
+        teamPresetName: whereUsedTeamPresetName,
+        teamPresetGroup: whereUsedTeamPresetGroup,
+        teamPresetOwnerUserId: whereUsedTeamPresetOwnerUserId,
+        clearTeamPresetSelection: clearWhereUsedTeamPresetSelection,
+      })
     }
     const whereUsedFilterParam = readQueryParam('whereUsedFilter')
     if (whereUsedFilterParam !== undefined) {
@@ -5977,6 +6015,16 @@ async function applyQueryState() {
         clearTeamPresetSelection: clearBomTeamPresetSelection,
       })
       bomTeamPresetQuery.value = bomTeamPresetParam
+    } else if (bomTeamPresetQuery.value) {
+      applyHydratedRemovedTeamPresetOwner({
+        removedRouteOwnerId: bomTeamPresetQuery.value,
+        teamPresetQuery: bomTeamPresetQuery,
+        teamPresetKey: bomTeamPresetKey,
+        teamPresetName: bomTeamPresetName,
+        teamPresetGroup: bomTeamPresetGroup,
+        teamPresetOwnerUserId: bomTeamPresetOwnerUserId,
+        clearTeamPresetSelection: clearBomTeamPresetSelection,
+      })
     }
     const bomFilterParam = readQueryParam('bomFilter')
     if (bomFilterParam !== undefined) {

@@ -40,6 +40,13 @@ export function resolveApprovalInboxErrorRecord(
 
   const record = payload as Record<string, unknown>
   const nestedError = record.error
+  if (typeof nestedError === 'string' && nestedError.trim()) {
+    return {
+      code: null,
+      currentVersion: null,
+      message: nestedError.trim(),
+    }
+  }
   if (nestedError && typeof nestedError === 'object') {
     const nestedRecord = nestedError as Record<string, unknown>
     const nestedMessage = nestedRecord.message

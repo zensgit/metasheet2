@@ -38,6 +38,15 @@ describe('approvalInboxFeedback', () => {
       ),
     ).toBe('Rejection reason is required')
 
+    expect(
+      resolveApprovalInboxErrorMessage(
+        {
+          error: 'Approval instance not found',
+        },
+        '404 Not Found',
+      ),
+    ).toBe('Approval instance not found')
+
     expect(resolveApprovalInboxErrorMessage(null, '500 Internal Server Error')).toBe('500 Internal Server Error')
   })
 
@@ -54,6 +63,16 @@ describe('approvalInboxFeedback', () => {
         }),
       }),
     ).resolves.toBe('Approval history is unavailable for archived approvals')
+
+    await expect(
+      readApprovalInboxError({
+        status: 404,
+        statusText: 'Not Found',
+        json: async () => ({
+          error: 'Approval instance not found',
+        }),
+      }),
+    ).resolves.toBe('Approval instance not found')
 
     await expect(
       readApprovalInboxError({
