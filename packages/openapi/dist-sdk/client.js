@@ -414,5 +414,31 @@ export function createPlmWorkbenchClient(clientOrOptions) {
                 metadata: response.metadata,
             };
         },
+        async listCollaborativeAuditLogs(params = {}) {
+            const response = await requestDirectEnvelope(client, 'GET', withQuery('/api/plm-workbench/audit-logs', {
+                page: params.page,
+                pageSize: params.pageSize,
+                q: params.q,
+                actorId: params.actorId,
+                action: params.action,
+                resourceType: params.resourceType,
+                kind: params.kind,
+                from: params.from,
+                to: params.to,
+            }), 'Failed to load PLM collaborative audit logs');
+            return {
+                items: Array.isArray(response.data?.items) ? response.data.items : [],
+                page: response.data?.page,
+                pageSize: response.data?.pageSize,
+                total: response.data?.total,
+                metadata: response.metadata,
+            };
+        },
+        async getCollaborativeAuditSummary(params = {}) {
+            return requestDirectApi(client, 'GET', withQuery('/api/plm-workbench/audit-logs/summary', {
+                windowMinutes: params.windowMinutes,
+                limit: params.limit,
+            }), 'Failed to load PLM collaborative audit summary');
+        },
     };
 }

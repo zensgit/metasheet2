@@ -5391,6 +5391,168 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/plm-workbench/audit-logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List PLM workbench collaborative audit logs */
+        get: {
+            parameters: {
+                query?: {
+                    page?: number;
+                    pageSize?: number;
+                    q?: string;
+                    actorId?: string;
+                    action?: "archive" | "restore" | "delete" | "set-default" | "clear-default";
+                    resourceType?: "plm-team-preset-batch" | "plm-team-preset-default" | "plm-team-view-batch" | "plm-team-view-default";
+                    kind?: string;
+                    from?: string;
+                    to?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                items?: {
+                                    id?: string;
+                                    actorId?: string;
+                                    actorType?: string;
+                                    action?: string;
+                                    /** @enum {string} */
+                                    resourceType?: "plm-team-preset-batch" | "plm-team-preset-default" | "plm-team-view-batch" | "plm-team-view-default";
+                                    resourceId?: string;
+                                    requestId?: string;
+                                    ip?: string;
+                                    userAgent?: string;
+                                    /** Format: date-time */
+                                    occurredAt?: string;
+                                    meta?: {
+                                        tenantId?: string;
+                                        ownerUserId?: string;
+                                        audit?: string;
+                                        kind?: string;
+                                        viewName?: string;
+                                        requestedIds?: string[];
+                                        processedIds?: string[];
+                                        skippedIds?: string[];
+                                        processedKinds?: string[];
+                                        requestedTotal?: number;
+                                        processedTotal?: number;
+                                        skippedTotal?: number;
+                                    };
+                                }[];
+                                page?: number;
+                                pageSize?: number;
+                                total?: number;
+                            };
+                            metadata?: {
+                                resourceTypes?: ("plm-team-preset-batch" | "plm-team-preset-default" | "plm-team-view-batch" | "plm-team-view-default")[];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                /** @description Internal Server Error */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/audit-logs/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get PLM workbench collaborative audit summary */
+        get: {
+            parameters: {
+                query?: {
+                    windowMinutes?: number;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                windowMinutes?: number;
+                                actions?: {
+                                    total?: number;
+                                    action?: string;
+                                    /** @enum {string} */
+                                    resourceType?: "plm-team-preset-batch" | "plm-team-preset-default" | "plm-team-view-batch" | "plm-team-view-default";
+                                }[];
+                                resourceTypes?: {
+                                    total?: number;
+                                    action?: string;
+                                    /** @enum {string} */
+                                    resourceType?: "plm-team-preset-batch" | "plm-team-preset-default" | "plm-team-view-batch" | "plm-team-view-default";
+                                }[];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                /** @description Internal Server Error */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/plm-workbench/views/team": {
         parameters: {
             query?: never;

@@ -434,4 +434,72 @@ describe('createPlmWorkbenchClient', () => {
       ownerUserId: 'user-2',
     })
   })
+
+  it('supports collaborative audit list and summary helpers', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({
+        success: true,
+        data: {
+          items: [
+            {
+              id: 'log-1',
+              action: 'archive',
+            },
+          ],
+          page: 2,
+          pageSize: 20,
+          total: 35,
+        },
+        metadata: {
+          resourceTypes: ['plm-team-view-batch', 'plm-team-preset-default'],
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        success: true,
+        data: {
+          windowMinutes: 180,
+          actions: [{ action: 'archive', total: 4 }],
+          resourceTypes: [{ resourceType: 'plm-team-view-batch', total: 6 }],
+        },
+      }))
+
+    const client = createPlmWorkbenchClient({
+      baseUrl: 'http://localhost:8910',
+      getToken: () => 'token-audit',
+      fetch: fetchMock,
+    })
+
+    await expect(client.listCollaborativeAuditLogs({
+      page: 2,
+      pageSize: 20,
+      action: 'archive',
+      resourceType: 'plm-team-view-batch',
+      kind: 'documents',
+    })).resolves.toEqual({
+      items: [{ id: 'log-1', action: 'archive' }],
+      page: 2,
+      pageSize: 20,
+      total: 35,
+      metadata: {
+        resourceTypes: ['plm-team-view-batch', 'plm-team-preset-default'],
+      },
+    })
+
+    await expect(client.getCollaborativeAuditSummary({
+      windowMinutes: 180,
+      limit: 6,
+    })).resolves.toEqual({
+      windowMinutes: 180,
+      actions: [{ action: 'archive', total: 4 }],
+      resourceTypes: [{ resourceType: 'plm-team-view-batch', total: 6 }],
+    })
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'http://localhost:8910/api/plm-workbench/audit-logs?page=2&pageSize=20&action=archive&resourceType=plm-team-view-batch&kind=documents',
+    )
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe('GET')
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      'http://localhost:8910/api/plm-workbench/audit-logs/summary?windowMinutes=180&limit=6',
+    )
+  })
 })

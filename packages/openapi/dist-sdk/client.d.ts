@@ -94,6 +94,41 @@ export interface PlmApprovalActionParams {
 export type PlmWorkbenchTeamViewKind = 'documents' | 'cad' | 'approvals' | 'workbench' | 'audit';
 export type PlmTeamFilterPresetKind = 'bom' | 'where-used';
 export type PlmWorkbenchBatchAction = 'archive' | 'restore' | 'delete';
+export type PlmCollaborativeAuditResourceType = 'plm-team-preset-batch' | 'plm-team-preset-default' | 'plm-team-view-batch' | 'plm-team-view-default';
+export interface ListPlmCollaborativeAuditLogsParams {
+    page?: number;
+    pageSize?: number;
+    q?: string;
+    actorId?: string;
+    action?: string;
+    resourceType?: PlmCollaborativeAuditResourceType | '';
+    kind?: string;
+    from?: string;
+    to?: string;
+}
+export interface GetPlmCollaborativeAuditSummaryParams {
+    windowMinutes?: number;
+    limit?: number;
+}
+export interface PlmCollaborativeAuditLogsResponse<T = Record<string, unknown>> {
+    items: T[];
+    page?: number;
+    pageSize?: number;
+    total?: number;
+    metadata?: {
+        resourceTypes?: PlmCollaborativeAuditResourceType[];
+    };
+}
+export interface PlmCollaborativeAuditSummaryRow {
+    action?: string;
+    resourceType?: PlmCollaborativeAuditResourceType;
+    total?: number;
+}
+export interface PlmCollaborativeAuditSummaryResponse {
+    windowMinutes?: number;
+    actions?: PlmCollaborativeAuditSummaryRow[];
+    resourceTypes?: PlmCollaborativeAuditSummaryRow[];
+}
 export interface PlmWorkbenchBatchResult<T = Record<string, unknown>> {
     action?: string;
     processedIds?: string[];
@@ -183,4 +218,6 @@ export declare function createPlmWorkbenchClient(clientOrOptions: ClientOptions 
     archiveTeamFilterPreset<T = Record<string, unknown>>(id: string): Promise<T>;
     restoreTeamFilterPreset<T = Record<string, unknown>>(id: string): Promise<T>;
     batchTeamFilterPresets<T = Record<string, unknown>>(action: PlmWorkbenchBatchAction, ids: string[]): Promise<PlmWorkbenchBatchResult<T>>;
+    listCollaborativeAuditLogs<T = Record<string, unknown>>(params?: ListPlmCollaborativeAuditLogsParams): Promise<PlmCollaborativeAuditLogsResponse<T>>;
+    getCollaborativeAuditSummary(params?: GetPlmCollaborativeAuditSummaryParams): Promise<PlmCollaborativeAuditSummaryResponse>;
 };

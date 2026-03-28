@@ -131,6 +131,51 @@ export type PlmTeamFilterPresetKind = 'bom' | 'where-used'
 
 export type PlmWorkbenchBatchAction = 'archive' | 'restore' | 'delete'
 
+export type PlmCollaborativeAuditResourceType =
+  | 'plm-team-preset-batch'
+  | 'plm-team-preset-default'
+  | 'plm-team-view-batch'
+  | 'plm-team-view-default'
+
+export interface ListPlmCollaborativeAuditLogsParams {
+  page?: number
+  pageSize?: number
+  q?: string
+  actorId?: string
+  action?: string
+  resourceType?: PlmCollaborativeAuditResourceType | ''
+  kind?: string
+  from?: string
+  to?: string
+}
+
+export interface GetPlmCollaborativeAuditSummaryParams {
+  windowMinutes?: number
+  limit?: number
+}
+
+export interface PlmCollaborativeAuditLogsResponse<T = Record<string, unknown>> {
+  items: T[]
+  page?: number
+  pageSize?: number
+  total?: number
+  metadata?: {
+    resourceTypes?: PlmCollaborativeAuditResourceType[]
+  }
+}
+
+export interface PlmCollaborativeAuditSummaryRow {
+  action?: string
+  resourceType?: PlmCollaborativeAuditResourceType
+  total?: number
+}
+
+export interface PlmCollaborativeAuditSummaryResponse {
+  windowMinutes?: number
+  actions?: PlmCollaborativeAuditSummaryRow[]
+  resourceTypes?: PlmCollaborativeAuditSummaryRow[]
+}
+
 export interface PlmWorkbenchBatchResult<T = Record<string, unknown>> {
   action?: string
   processedIds?: string[]
@@ -995,6 +1040,58 @@ export function createPlmWorkbenchClient(clientOrOptions: ClientOptions | Reques
         ...response.data,
         metadata: response.metadata,
       }
+    },
+
+    async listCollaborativeAuditLogs<T = Record<string, unknown>>(
+      params: ListPlmCollaborativeAuditLogsParams = {},
+    ): Promise<PlmCollaborativeAuditLogsResponse<T>> {
+      const response = await requestDirectEnvelope<
+        {
+          items?: T[]
+          page?: number
+          pageSize?: number
+          total?: number
+        },
+        {
+          resourceTypes?: PlmCollaborativeAuditResourceType[]
+        }
+      >(
+        client,
+        'GET',
+        withQuery('/api/plm-workbench/audit-logs', {
+          page: params.page,
+          pageSize: params.pageSize,
+          q: params.q,
+          actorId: params.actorId,
+          action: params.action,
+          resourceType: params.resourceType,
+          kind: params.kind,
+          from: params.from,
+          to: params.to,
+        }),
+        'Failed to load PLM collaborative audit logs',
+      )
+      return {
+        items: Array.isArray(response.data?.items) ? response.data.items : [],
+        page: response.data?.page,
+        pageSize: response.data?.pageSize,
+        total: response.data?.total,
+        metadata: response.metadata,
+      }
+    },
+
+    async getCollaborativeAuditSummary(
+      params: GetPlmCollaborativeAuditSummaryParams = {},
+    ): Promise<PlmCollaborativeAuditSummaryResponse> {
+      return requestDirectApi<PlmCollaborativeAuditSummaryResponse>(
+        client,
+        'GET',
+        withQuery('/api/plm-workbench/audit-logs/summary', {
+          windowMinutes: params.windowMinutes,
+          limit: params.limit,
+        }),
+        'Failed to load PLM collaborative audit summary',
+      )
     },
   }
 }

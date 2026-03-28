@@ -725,20 +725,25 @@ export async function listPlmCollaborativeAuditLogs(params: PlmCollaborativeAudi
     pageSize: params.pageSize ?? 50,
   })
 
-  const payload = await requestJson<{
-    items?: unknown[]
-    page?: number
-    pageSize?: number
-    total?: number
-  }>(`/api/plm-workbench/audit-logs?${search.toString()}`)
+  const payload = await rawPlmWorkbenchClient.listCollaborativeAuditLogs<unknown>({
+    page: Number(search.get('page') || 1),
+    pageSize: Number(search.get('pageSize') || 50),
+    q: search.get('q') || undefined,
+    actorId: search.get('actorId') || undefined,
+    action: search.get('action') || undefined,
+    resourceType: (search.get('resourceType') as PlmCollaborativeAuditResourceType | '') || undefined,
+    kind: search.get('kind') || undefined,
+    from: search.get('from') || undefined,
+    to: search.get('to') || undefined,
+  })
 
   return {
-    items: Array.isArray(payload.data?.items)
-      ? payload.data.items.map(mapPlmCollaborativeAuditLogItem).filter((item) => item.id && item.action)
+    items: Array.isArray(payload.items)
+      ? payload.items.map(mapPlmCollaborativeAuditLogItem).filter((item) => item.id && item.action)
       : [],
-    page: typeof payload.data?.page === 'number' ? payload.data.page : Number(search.get('page') || 1),
-    pageSize: typeof payload.data?.pageSize === 'number' ? payload.data.pageSize : Number(search.get('pageSize') || 50),
-    total: typeof payload.data?.total === 'number' ? payload.data.total : 0,
+    page: typeof payload.page === 'number' ? payload.page : Number(search.get('page') || 1),
+    pageSize: typeof payload.pageSize === 'number' ? payload.pageSize : Number(search.get('pageSize') || 50),
+    total: typeof payload.total === 'number' ? payload.total : 0,
   }
 }
 
@@ -770,27 +775,21 @@ export async function getPlmCollaborativeAuditSummary(params?: {
   windowMinutes?: number
   limit?: number
 }) {
-  const search = new URLSearchParams()
-  if (typeof params?.windowMinutes === 'number') search.set('windowMinutes', String(params.windowMinutes))
-  if (typeof params?.limit === 'number') search.set('limit', String(params.limit))
-
-  const suffix = search.toString()
-  const payload = await requestJson<{
-    windowMinutes?: number
-    actions?: Array<{ action?: string; total?: number }>
-    resourceTypes?: Array<{ resourceType?: string; total?: number }>
-  }>(`/api/plm-workbench/audit-logs/summary${suffix ? `?${suffix}` : ''}`)
+  const payload = await rawPlmWorkbenchClient.getCollaborativeAuditSummary({
+    windowMinutes: params?.windowMinutes,
+    limit: params?.limit,
+  })
 
   return {
-    windowMinutes: typeof payload.data?.windowMinutes === 'number' ? payload.data.windowMinutes : 60,
-    actions: Array.isArray(payload.data?.actions)
-      ? payload.data.actions.map((row) => ({
+    windowMinutes: typeof payload.windowMinutes === 'number' ? payload.windowMinutes : 60,
+    actions: Array.isArray(payload.actions)
+      ? payload.actions.map((row) => ({
         action: typeof row.action === 'string' ? row.action : '',
         total: typeof row.total === 'number' ? row.total : 0,
       }))
       : [],
-    resourceTypes: Array.isArray(payload.data?.resourceTypes)
-      ? payload.data.resourceTypes
+    resourceTypes: Array.isArray(payload.resourceTypes)
+      ? payload.resourceTypes
         .map((row) => ({
           resourceType:
             row.resourceType === 'plm-team-preset-batch'

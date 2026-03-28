@@ -87,8 +87,167 @@ x-plm-workbench-schemas:
       processedKinds:
         type: array
         items: { type: string }
+  collaborativeAuditMeta: &collaborativeAuditMeta
+    type: object
+    properties:
+      tenantId: { type: string }
+      ownerUserId: { type: string }
+      audit: { type: string }
+      kind: { type: string }
+      viewName: { type: string }
+      requestedIds:
+        type: array
+        items: { type: string }
+      processedIds:
+        type: array
+        items: { type: string }
+      skippedIds:
+        type: array
+        items: { type: string }
+      processedKinds:
+        type: array
+        items: { type: string }
+      requestedTotal: { type: integer }
+      processedTotal: { type: integer }
+      skippedTotal: { type: integer }
+  collaborativeAuditLogItem: &collaborativeAuditLogItem
+    type: object
+    properties:
+      id: { type: string }
+      actorId: { type: string }
+      actorType: { type: string }
+      action: { type: string }
+      resourceType:
+        type: string
+        enum: [plm-team-preset-batch, plm-team-preset-default, plm-team-view-batch, plm-team-view-default]
+      resourceId: { type: string }
+      requestId: { type: string }
+      ip: { type: string }
+      userAgent: { type: string }
+      occurredAt:
+        type: string
+        format: date-time
+      meta: *collaborativeAuditMeta
+  collaborativeAuditSummaryRow: &collaborativeAuditSummaryRow
+    type: object
+    properties:
+      total: { type: integer }
+      action: { type: string }
+      resourceType:
+        type: string
+        enum: [plm-team-preset-batch, plm-team-preset-default, plm-team-view-batch, plm-team-view-default]
 
 paths:
+  /api/plm-workbench/audit-logs:
+    get:
+      summary: List PLM workbench collaborative audit logs
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer }
+        - in: query
+          name: pageSize
+          schema: { type: integer }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: actorId
+          schema: { type: string }
+        - in: query
+          name: action
+          schema:
+            type: string
+            enum: [archive, restore, delete, set-default, clear-default]
+        - in: query
+          name: resourceType
+          schema:
+            type: string
+            enum: [plm-team-preset-batch, plm-team-preset-default, plm-team-view-batch, plm-team-view-default]
+        - in: query
+          name: kind
+          schema: { type: string }
+        - in: query
+          name: from
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: *collaborativeAuditLogItem
+                      page: { type: integer }
+                      pageSize: { type: integer }
+                      total: { type: integer }
+                  metadata:
+                    type: object
+                    properties:
+                      resourceTypes:
+                        type: array
+                        items:
+                          type: string
+                          enum: [plm-team-preset-batch, plm-team-preset-default, plm-team-view-batch, plm-team-view-default]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/plm-workbench/audit-logs/summary:
+    get:
+      summary: Get PLM workbench collaborative audit summary
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: windowMinutes
+          schema: { type: integer }
+        - in: query
+          name: limit
+          schema: { type: integer }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  data:
+                    type: object
+                    properties:
+                      windowMinutes: { type: integer }
+                      actions:
+                        type: array
+                        items: *collaborativeAuditSummaryRow
+                      resourceTypes:
+                        type: array
+                        items: *collaborativeAuditSummaryRow
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
   /api/plm-workbench/views/team:
     get:
       summary: List PLM workbench team views
