@@ -143,7 +143,10 @@ import {
   buildPlmLocalFilterPresetRouteOwnerWatchKey,
   resolvePlmLocalFilterPresetRouteIdentity,
 } from './plm/plmLocalFilterPresetRouteIdentity'
-import { resolvePlmHydratedTeamViewOwnerTakeover } from './plm/plmHydratedTeamViewOwnerTakeover'
+import {
+  resolvePlmHydratedRemovedTeamViewOwner,
+  resolvePlmHydratedTeamViewOwnerTakeover,
+} from './plm/plmHydratedTeamViewOwnerTakeover'
 import {
   buildClearedPlmLocalPresetManagementState,
   runPlmLocalPresetOwnershipAction,
@@ -5598,6 +5601,28 @@ function applyHydratedTeamViewOwnerTakeover(options: {
   options.clearTeamViewSelection()
 }
 
+function applyHydratedRemovedTeamViewOwner(options: {
+  removedRouteOwnerId: string
+  teamViewQuery: { value: string }
+  teamViewKey: { value: string }
+  teamViewName: { value: string }
+  teamViewOwnerUserId: { value: string }
+  clearTeamViewSelection: () => void
+}) {
+  const takeover = resolvePlmHydratedRemovedTeamViewOwner({
+    removedRouteOwnerId: options.removedRouteOwnerId,
+    localSelectorId: options.teamViewKey.value,
+    localNameDraft: options.teamViewName.value,
+    localOwnerUserIdDraft: options.teamViewOwnerUserId.value,
+  })
+  options.teamViewQuery.value = ''
+  if (!takeover.shouldClearLocalSelector) return
+  options.teamViewKey.value = takeover.nextSelectorId
+  options.teamViewName.value = takeover.nextNameDraft
+  options.teamViewOwnerUserId.value = takeover.nextOwnerUserIdDraft
+  options.clearTeamViewSelection()
+}
+
 function applyHydratedTeamPresetOwnerTakeover(options: {
   routeOwnerId: string
   teamPresetKey: { value: string }
@@ -5745,6 +5770,15 @@ async function applyQueryState() {
         clearTeamViewSelection: clearWorkbenchTeamViewSelection,
       })
       workbenchTeamViewQuery.value = workbenchTeamViewParam
+    } else if (workbenchTeamViewQuery.value) {
+      applyHydratedRemovedTeamViewOwner({
+        removedRouteOwnerId: workbenchTeamViewQuery.value,
+        teamViewQuery: workbenchTeamViewQuery,
+        teamViewKey: workbenchTeamViewKey,
+        teamViewName: workbenchTeamViewName,
+        teamViewOwnerUserId: workbenchTeamViewOwnerUserId,
+        clearTeamViewSelection: clearWorkbenchTeamViewSelection,
+      })
     }
     const sceneFocus = readWorkbenchSceneFocus(route.query)
     sceneCatalogAutoFocusSceneId.value = sceneFocus || ''
@@ -5758,6 +5792,15 @@ async function applyQueryState() {
         clearTeamViewSelection: clearDocumentTeamViewSelection,
       })
       documentTeamViewQuery.value = documentTeamViewParam
+    } else if (documentTeamViewQuery.value) {
+      applyHydratedRemovedTeamViewOwner({
+        removedRouteOwnerId: documentTeamViewQuery.value,
+        teamViewQuery: documentTeamViewQuery,
+        teamViewKey: documentTeamViewKey,
+        teamViewName: documentTeamViewName,
+        teamViewOwnerUserId: documentTeamViewOwnerUserId,
+        clearTeamViewSelection: clearDocumentTeamViewSelection,
+      })
     }
     const cadTeamViewParam = readQueryParam('cadTeamView')
     if (cadTeamViewParam !== undefined) {
@@ -5769,6 +5812,15 @@ async function applyQueryState() {
         clearTeamViewSelection: clearCadTeamViewSelection,
       })
       cadTeamViewQuery.value = cadTeamViewParam
+    } else if (cadTeamViewQuery.value) {
+      applyHydratedRemovedTeamViewOwner({
+        removedRouteOwnerId: cadTeamViewQuery.value,
+        teamViewQuery: cadTeamViewQuery,
+        teamViewKey: cadTeamViewKey,
+        teamViewName: cadTeamViewName,
+        teamViewOwnerUserId: cadTeamViewOwnerUserId,
+        clearTeamViewSelection: clearCadTeamViewSelection,
+      })
     }
     const approvalsTeamViewParam = readQueryParam('approvalsTeamView')
     if (approvalsTeamViewParam !== undefined) {
@@ -5780,6 +5832,15 @@ async function applyQueryState() {
         clearTeamViewSelection: clearApprovalsTeamViewSelection,
       })
       approvalsTeamViewQuery.value = approvalsTeamViewParam
+    } else if (approvalsTeamViewQuery.value) {
+      applyHydratedRemovedTeamViewOwner({
+        removedRouteOwnerId: approvalsTeamViewQuery.value,
+        teamViewQuery: approvalsTeamViewQuery,
+        teamViewKey: approvalsTeamViewKey,
+        teamViewName: approvalsTeamViewName,
+        teamViewOwnerUserId: approvalsTeamViewOwnerUserId,
+        clearTeamViewSelection: clearApprovalsTeamViewSelection,
+      })
     }
     const documentRoleParam = readQueryParam('documentRole')
     if (documentRoleParam !== undefined) {

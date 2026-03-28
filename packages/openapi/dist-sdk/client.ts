@@ -52,6 +52,12 @@ export interface PlmListResponse<T = Record<string, unknown>> {
   offset?: number
 }
 
+export interface PlmApprovalHistoryResponse<T = Record<string, unknown>> {
+  approvalId: string
+  items: T[]
+  total?: number
+}
+
 export interface ListPlmProductsParams extends PaginationOptions {
   query?: string
   status?: string
@@ -368,8 +374,8 @@ export function createPlmFederationClient(clientOrOptions: ClientOptions | Reque
 
     async getApprovalHistory<T = Record<string, unknown>>(
       approvalId: string,
-    ): Promise<{ items?: T[] }> {
-      return requestPlmQuery<{ items?: T[] }>(
+    ): Promise<PlmApprovalHistoryResponse<T>> {
+      return requestPlmQuery<PlmApprovalHistoryResponse<T>>(
         client,
         {
           operation: 'approval_history',

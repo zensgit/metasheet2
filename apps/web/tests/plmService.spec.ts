@@ -238,4 +238,27 @@ describe('plmService', () => {
       currentVersion: 9,
     })
   })
+
+  it('preserves approval history envelope fields from the federation client', async () => {
+    apiPostMock.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        approvalId: 'ECO-42',
+        items: [{ id: 'record-1' }],
+        total: 1,
+      },
+    })
+
+    const result = await plmService.getApprovalHistory('ECO-42')
+
+    expect(result).toEqual({
+      approvalId: 'ECO-42',
+      items: [{ id: 'record-1' }],
+      total: 1,
+    })
+    expect(apiPostMock).toHaveBeenCalledWith('/api/federation/plm/query', {
+      operation: 'approval_history',
+      approvalId: 'ECO-42',
+    })
+  })
 })

@@ -99,7 +99,7 @@ describe('createPlmFederationClient', () => {
 
   it('sends approval history, where-used, bom compare, and substitutes operations', async () => {
     const fetchMock = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true, data: { approvalId: 'ECO-42', items: [], total: 0 } }))
       .mockResolvedValueOnce(jsonResponse({ ok: true, data: { parents: [] } }))
       .mockResolvedValueOnce(jsonResponse({ ok: true, data: { added: [], removed: [], changed: [] } }))
       .mockResolvedValueOnce(jsonResponse({ ok: true, data: { substitutes: [] } }))
@@ -110,7 +110,11 @@ describe('createPlmFederationClient', () => {
       fetch: fetchMock,
     })
 
-    await client.getApprovalHistory('ECO-42')
+    await expect(client.getApprovalHistory('ECO-42')).resolves.toEqual({
+      approvalId: 'ECO-42',
+      items: [],
+      total: 0,
+    })
     await client.getWhereUsed({ itemId: 'COMP-200', recursive: true, maxLevels: 4 })
     await client.compareBom({
       leftId: 'ITEM-1000',

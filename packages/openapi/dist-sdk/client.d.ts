@@ -33,6 +33,11 @@ export interface PlmListResponse<T = Record<string, unknown>> {
     limit?: number;
     offset?: number;
 }
+export interface PlmApprovalHistoryResponse<T = Record<string, unknown>> {
+    approvalId: string;
+    items: T[];
+    total?: number;
+}
 export interface ListPlmProductsParams extends PaginationOptions {
     query?: string;
     status?: string;
@@ -104,9 +109,7 @@ export declare function createPlmFederationClient(clientOrOptions: ClientOptions
     getBom<T = Record<string, unknown>>(productId: string, params?: GetPlmBomParams): Promise<PlmListResponse<T>>;
     listDocuments<T = Record<string, unknown>>(params: ListPlmDocumentsParams): Promise<PlmListResponse<T>>;
     listApprovals<T = Record<string, unknown>>(params?: ListPlmApprovalsParams): Promise<PlmListResponse<T>>;
-    getApprovalHistory<T = Record<string, unknown>>(approvalId: string): Promise<{
-        items?: T[];
-    }>;
+    getApprovalHistory<T = Record<string, unknown>>(approvalId: string): Promise<PlmApprovalHistoryResponse<T>>;
     approveApproval<T = Record<string, unknown>>(params: PlmApprovalActionParams): Promise<T>;
     rejectApproval<T = Record<string, unknown>>(params: PlmApprovalActionParams): Promise<T>;
     getWhereUsed<T = Record<string, unknown>>(params: GetPlmWhereUsedParams): Promise<T>;

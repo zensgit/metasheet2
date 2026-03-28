@@ -7,6 +7,12 @@ export type PlmListResponse<T = Record<string, unknown>> = {
   offset?: number
 }
 
+export type PlmApprovalHistoryResponse<T = Record<string, unknown>> = {
+  approvalId: string
+  items: T[]
+  total?: number
+}
+
 export interface SearchProductsParams {
   query?: string
   itemType?: string
@@ -173,7 +179,7 @@ class PlmService {
     })
   }
 
-  async getApprovalHistory<T = Record<string, unknown>>(approvalId: string): Promise<{ items?: T[] }> {
+  async getApprovalHistory<T = Record<string, unknown>>(approvalId: string): Promise<PlmApprovalHistoryResponse<T>> {
     return plmClient.getApprovalHistory<T>(approvalId)
   }
 
