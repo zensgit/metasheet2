@@ -2296,6 +2296,57 @@ describe('usePlmTeamViews', () => {
     expect(setMessage).toHaveBeenLastCalledWith('当前工作台团队视角不可分享。', true)
   })
 
+  it('reports share link generation failures before attempting to copy the current workbench team view', async () => {
+    const buildShareUrl = vi.fn(() => '')
+    const copyShareUrl = vi.fn().mockResolvedValue(true)
+
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-share-empty-url',
+          kind: 'workbench',
+          scope: 'team',
+          name: '空链接工作台视角',
+          ownerUserId: 'owner-2',
+          canManage: true,
+          isDefault: false,
+          state: {
+            query: {
+              documentFilter: 'empty-share-doc',
+            },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+      buildShareUrl,
+      copyShareUrl,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-share-empty-url'
+
+    await model.shareTeamView()
+
+    expect(buildShareUrl).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'workbench-share-empty-url',
+        name: '空链接工作台视角',
+      }),
+    )
+    expect(copyShareUrl).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenLastCalledWith('生成工作台团队视角分享链接失败。', true)
+  })
+
   it('blocks granular management handlers when explicit permissions disable the current workbench team view action', async () => {
     vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
       items: [

@@ -537,7 +537,13 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       return
     }
 
-    const ok = await options.copyShareUrl(options.buildShareUrl(view))
+    const url = options.buildShareUrl(view)
+    if (!url) {
+      options.setMessage(`生成${options.label}团队视角分享链接失败。`, true)
+      return
+    }
+
+    const ok = await options.copyShareUrl(url)
     if (!ok) {
       options.setMessage(`复制${options.label}团队视角分享链接失败`, true)
       return

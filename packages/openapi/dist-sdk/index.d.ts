@@ -8662,7 +8662,71 @@ export interface paths {
                 503: components["responses"]["ServiceUnavailable"];
             };
         };
-        delete?: never;
+        /** Clear default PLM workbench team view */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;
@@ -8978,71 +9042,7 @@ export interface paths {
                 503: components["responses"]["ServiceUnavailable"];
             };
         };
-        /** Clear default PLM workbench team view */
-        delete: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @example true */
-                            success?: boolean;
-                            data?: {
-                                id?: string;
-                                /** @enum {string} */
-                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
-                                /** @enum {string} */
-                                scope?: "team";
-                                name?: string;
-                                ownerUserId?: string;
-                                canManage?: boolean;
-                                permissions?: {
-                                    [key: string]: boolean;
-                                };
-                                isDefault?: boolean;
-                                isArchived?: boolean;
-                                state?: {
-                                    [key: string]: unknown;
-                                };
-                                /** Format: date-time */
-                                archivedAt?: string | null;
-                                /** Format: date-time */
-                                createdAt?: string | null;
-                                /** Format: date-time */
-                                updatedAt?: string | null;
-                                /** Format: date-time */
-                                lastDefaultSetAt?: string | null;
-                            };
-                        };
-                    };
-                };
-                401: components["responses"]["Unauthorized"];
-                403: components["responses"]["Forbidden"];
-                404: components["responses"]["NotFound"];
-                /** @description Conflict */
-                409: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["ErrorResponse"];
-                    };
-                };
-                503: components["responses"]["ServiceUnavailable"];
-            };
-        };
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -9485,7 +9485,73 @@ export interface paths {
                 503: components["responses"]["ServiceUnavailable"];
             };
         };
-        delete?: never;
+        /** Clear default PLM workbench team filter preset */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
         options?: never;
         head?: never;
         patch?: never;
@@ -9809,73 +9875,7 @@ export interface paths {
                 503: components["responses"]["ServiceUnavailable"];
             };
         };
-        /** Clear default PLM workbench team filter preset */
-        delete: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path: {
-                    id: string;
-                };
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description OK */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": {
-                            /** @example true */
-                            success?: boolean;
-                            data?: {
-                                id?: string;
-                                /** @enum {string} */
-                                kind?: "bom" | "where-used";
-                                /** @enum {string} */
-                                scope?: "team";
-                                name?: string;
-                                ownerUserId?: string;
-                                canManage?: boolean;
-                                permissions?: {
-                                    [key: string]: boolean;
-                                };
-                                isDefault?: boolean;
-                                isArchived?: boolean;
-                                state?: {
-                                    field?: string;
-                                    value?: string;
-                                    group?: string;
-                                };
-                                /** Format: date-time */
-                                archivedAt?: string | null;
-                                /** Format: date-time */
-                                createdAt?: string | null;
-                                /** Format: date-time */
-                                updatedAt?: string | null;
-                                /** Format: date-time */
-                                lastDefaultSetAt?: string | null;
-                            };
-                        };
-                    };
-                };
-                401: components["responses"]["Unauthorized"];
-                403: components["responses"]["Forbidden"];
-                404: components["responses"]["NotFound"];
-                /** @description Conflict */
-                409: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content: {
-                        "application/json": components["schemas"]["ErrorResponse"];
-                    };
-                };
-                503: components["responses"]["ServiceUnavailable"];
-            };
-        };
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
