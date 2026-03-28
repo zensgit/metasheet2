@@ -16,6 +16,7 @@ import {
   shouldResolvePlmAuditSharedEntryOnQueryChange,
   reducePlmAuditTeamViewShareEntry,
   resolvePlmAuditTeamViewShareEntryActionFeedback,
+  shouldClearPlmAuditTeamViewShareEntryForActionFeedback,
 } from '../src/views/plmAuditTeamViewShareEntry'
 
 function tr(en: string, zh: string) {
@@ -139,6 +140,20 @@ describe('plmAuditTeamViewShareEntry', () => {
       kind: 'error',
       message: 'Current shared audit team view action is unavailable.|当前分享的审计团队视图动作不可用。',
     })
+  })
+
+  it('clears stale shared-entry ownership when action feedback no longer has a target', () => {
+    expect(shouldClearPlmAuditTeamViewShareEntryForActionFeedback({
+      teamViewId: 'audit-view-1',
+    }, null)).toBe(true)
+
+    expect(shouldClearPlmAuditTeamViewShareEntryForActionFeedback({
+      teamViewId: 'audit-view-1',
+    }, {
+      id: 'audit-view-1',
+    })).toBe(false)
+
+    expect(shouldClearPlmAuditTeamViewShareEntryForActionFeedback(null, null)).toBe(false)
   })
 
   it('returns explicit feedback when a shared-entry action is archived or no-op', () => {

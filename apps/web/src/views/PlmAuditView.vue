@@ -909,6 +909,7 @@ import {
   resolvePlmAuditTeamViewShareEntryActionTarget,
   resolvePlmAuditSharedEntryRouteSyncDecision,
   shouldKeepPlmAuditTeamViewShareEntry,
+  shouldClearPlmAuditTeamViewShareEntryForActionFeedback,
   shouldTakeOverPlmAuditSharedEntryOnManagementHandoff,
   shouldTakeOverPlmAuditSharedEntryOnSavedViewTakeover,
   shouldTakeOverPlmAuditSharedEntryOnSourceAction,
@@ -2937,6 +2938,16 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
     auditTeamViewShareEntryTarget.value,
     selectedAuditTeamView.value,
   )
+  const shouldClearStaleShareEntry = shouldClearPlmAuditTeamViewShareEntryForActionFeedback(
+    auditTeamViewShareEntry.value,
+    view,
+  )
+
+  async function clearStaleShareEntryIfNeeded() {
+    if (!shouldClearStaleShareEntry) return
+    clearAuditTeamViewShareEntry()
+    await consumeAuditTeamViewShareEntryQuery()
+  }
 
   if (actionKind === 'save-local') {
     const feedback = resolvePlmAuditTeamViewShareEntryActionFeedback({
@@ -2945,6 +2956,7 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
       tr,
     })
     if (feedback) {
+      await clearStaleShareEntryIfNeeded()
       setStatus(feedback.message, feedback.kind)
       return
     }
@@ -2970,6 +2982,7 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
       tr,
     })
     if (feedback) {
+      await clearStaleShareEntryIfNeeded()
       setStatus(feedback.message, feedback.kind)
       return
     }
@@ -2986,6 +2999,7 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
     tr,
   })
   if (feedback) {
+    await clearStaleShareEntryIfNeeded()
     setStatus(feedback.message, feedback.kind)
     return
   }

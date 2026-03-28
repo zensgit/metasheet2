@@ -226,6 +226,13 @@ export function resolvePlmAuditTeamViewShareEntryActionTarget<T>(
   return entryTarget
 }
 
+export function shouldClearPlmAuditTeamViewShareEntryForActionFeedback<T>(
+  entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
+  target: T | null,
+) {
+  return Boolean(entry && !target)
+}
+
 export function resolvePlmAuditSharedEntryTakeoverSelection(
   _selectedIds: string[],
 ) {
@@ -259,7 +266,6 @@ export function shouldTakeOverPlmAuditSharedEntryOnSavedViewTakeover(
 ) {
   return Boolean(entry)
 }
-
 export function shouldTakeOverPlmAuditSharedEntryOnSceneContextTakeover(
   entry: Pick<PlmAuditTeamViewShareEntry, 'teamViewId'> | null,
 ) {
