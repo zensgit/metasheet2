@@ -809,7 +809,95 @@ describe('usePlmTeamFilterPresets', () => {
     await model.deleteTeamPreset()
 
     expect(deletePlmTeamFilterPreset).not.toHaveBeenCalled()
-    expect(setMessage).toHaveBeenCalledWith('当前Where-Used团队预设不可删除。', true)
+    expect(setMessage).toHaveBeenCalledWith('仅创建者可删除Where-Used团队预设。', true)
+  })
+
+  it('returns owner-specific denial messages for readonly team preset management actions', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-readonly-active',
+          kind: 'bom',
+          scope: 'team',
+          name: '只读激活预设',
+          ownerUserId: 'owner-a',
+          canManage: false,
+          isDefault: false,
+          permissions: {
+            canManage: false,
+            canApply: true,
+            canDelete: false,
+            canArchive: false,
+            canSetDefault: false,
+          },
+          state: { field: 'path', value: 'root/active', group: 'A组' },
+        },
+        {
+          id: 'preset-readonly-default',
+          kind: 'bom',
+          scope: 'team',
+          name: '只读默认预设',
+          ownerUserId: 'owner-a',
+          canManage: false,
+          isDefault: true,
+          permissions: {
+            canManage: false,
+            canApply: true,
+            canClearDefault: false,
+          },
+          state: { field: 'path', value: 'root/default', group: '默认组' },
+        },
+        {
+          id: 'preset-readonly-archived',
+          kind: 'bom',
+          scope: 'team',
+          name: '只读归档预设',
+          ownerUserId: 'owner-a',
+          canManage: false,
+          isDefault: false,
+          isArchived: true,
+          permissions: {
+            canManage: false,
+            canApply: false,
+            canRestore: false,
+          },
+          state: { field: 'path', value: 'root/archived', group: '归档组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/active', group: 'A组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+
+    model.teamPresetKey.value = 'preset-readonly-active'
+    await model.deleteTeamPreset()
+    await model.archiveTeamPreset()
+    await model.setTeamPresetDefault()
+
+    model.teamPresetKey.value = 'preset-readonly-default'
+    await model.clearTeamPresetDefault()
+
+    model.teamPresetKey.value = 'preset-readonly-archived'
+    await model.restoreTeamPreset()
+
+    expect(deletePlmTeamFilterPreset).not.toHaveBeenCalled()
+    expect(archivePlmTeamFilterPreset).not.toHaveBeenCalled()
+    expect(setPlmTeamFilterPresetDefault).not.toHaveBeenCalled()
+    expect(clearPlmTeamFilterPresetDefault).not.toHaveBeenCalled()
+    expect(restorePlmTeamFilterPreset).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenNthCalledWith(1, '仅创建者可删除BOM团队预设。', true)
+    expect(setMessage).toHaveBeenNthCalledWith(2, '仅创建者可归档BOM团队预设。', true)
+    expect(setMessage).toHaveBeenNthCalledWith(3, '仅创建者可设置BOM默认团队预设。', true)
+    expect(setMessage).toHaveBeenNthCalledWith(4, '仅创建者可取消BOM默认团队预设。', true)
+    expect(setMessage).toHaveBeenNthCalledWith(5, '仅创建者可恢复BOM团队预设。', true)
   })
 
   it('honors granular action denials for active team presets', async () => {
