@@ -1420,6 +1420,96 @@ describe('usePlmTeamViews', () => {
     expect(workbenchApply).toHaveLastReturnedWith('workbench-saved')
   })
 
+  it('demotes the previous default view permissions immediately after a default switch', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-default-old',
+          kind: 'workbench',
+          scope: 'team',
+          name: '旧默认视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: true,
+          permissions: {
+            canManage: true,
+            canApply: true,
+            canSetDefault: false,
+            canClearDefault: true,
+          },
+          state: {
+            query: {
+              documentFilter: 'old-default',
+            },
+          },
+        },
+        {
+          id: 'workbench-default-new',
+          kind: 'workbench',
+          scope: 'team',
+          name: '新默认视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canManage: true,
+            canApply: true,
+            canSetDefault: true,
+            canClearDefault: false,
+          },
+          state: {
+            query: {
+              documentFilter: 'new-default',
+            },
+          },
+        },
+      ],
+    })
+    vi.mocked(setPlmWorkbenchTeamViewDefault).mockResolvedValue({
+      id: 'workbench-default-new',
+      kind: 'workbench',
+      scope: 'team',
+      name: '新默认视角',
+      ownerUserId: 'dev-user',
+      canManage: true,
+      isDefault: true,
+      permissions: {
+        canManage: true,
+        canApply: true,
+        canSetDefault: false,
+        canClearDefault: true,
+      },
+      state: {
+        query: {
+          documentFilter: 'new-default',
+        },
+      },
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-default-new'
+    await model.setTeamViewDefault()
+
+    expect(model.teamViews.value.find((view) => view.id === 'workbench-default-old')).toMatchObject({
+      isDefault: false,
+      permissions: {
+        canSetDefault: true,
+        canClearDefault: false,
+      },
+    })
+  })
+
   it('clears stale batch selections before saving a new workbench team view', async () => {
     const requestedViewId = ref('workbench-current')
     const syncRequestedViewId = vi.fn((value?: string) => {

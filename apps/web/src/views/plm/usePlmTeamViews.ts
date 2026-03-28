@@ -85,7 +85,22 @@ function applyDefaultTeamViewUpdate<Kind extends PlmWorkbenchTeamViewKind>(
 ) {
   const next = views.map((entry) => {
     if (entry.id === view.id) return view
-    return entry.isDefault ? { ...entry, isDefault: false } : entry
+    if (!entry.isDefault) return entry
+
+    const canManage = typeof entry.permissions?.canManage === 'boolean'
+      ? entry.permissions.canManage
+      : Boolean(entry.canManage)
+    return {
+      ...entry,
+      isDefault: false,
+      permissions: entry.permissions
+        ? {
+          ...entry.permissions,
+          canSetDefault: canManage && !entry.isArchived,
+          canClearDefault: false,
+        }
+        : entry.permissions,
+    }
   })
   return sortTeamViews(next as PlmWorkbenchTeamView<Kind>[])
 }

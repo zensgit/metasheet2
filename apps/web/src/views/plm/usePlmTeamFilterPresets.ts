@@ -72,7 +72,22 @@ function applyDefaultPresetUpdate(
 ) {
   const next = presets.map((entry) => {
     if (entry.id === preset.id) return preset
-    return entry.isDefault ? { ...entry, isDefault: false } : entry
+    if (!entry.isDefault) return entry
+
+    const canManage = typeof entry.permissions?.canManage === 'boolean'
+      ? entry.permissions.canManage
+      : Boolean(entry.canManage)
+    return {
+      ...entry,
+      isDefault: false,
+      permissions: entry.permissions
+        ? {
+          ...entry.permissions,
+          canSetDefault: canManage && !entry.isArchived,
+          canClearDefault: false,
+        }
+        : entry.permissions,
+    }
   })
   return sortTeamPresets(next)
 }

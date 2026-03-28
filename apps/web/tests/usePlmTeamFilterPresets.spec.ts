@@ -487,6 +487,85 @@ describe('usePlmTeamFilterPresets', () => {
     expect(model.teamPresets.value.some((preset) => preset.id === 'preset-1')).toBe(false)
   })
 
+  it('demotes the previous default preset permissions immediately after a default switch', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-default-old',
+          kind: 'bom',
+          scope: 'team',
+          name: '旧默认预设',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: true,
+          permissions: {
+            canManage: true,
+            canApply: true,
+            canSetDefault: false,
+            canClearDefault: true,
+          },
+          state: { field: 'path', value: 'root/old', group: '机械' },
+        },
+        {
+          id: 'preset-default-new',
+          kind: 'bom',
+          scope: 'team',
+          name: '新默认预设',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          permissions: {
+            canManage: true,
+            canApply: true,
+            canSetDefault: true,
+            canClearDefault: false,
+          },
+          state: { field: 'path', value: 'root/new', group: '共享' },
+        },
+      ],
+    })
+    vi.mocked(setPlmTeamFilterPresetDefault).mockResolvedValue({
+      id: 'preset-default-new',
+      kind: 'bom',
+      scope: 'team',
+      name: '新默认预设',
+      ownerUserId: 'dev-user',
+      canManage: true,
+      isDefault: true,
+      permissions: {
+        canManage: true,
+        canApply: true,
+        canSetDefault: false,
+        canClearDefault: true,
+      },
+      state: { field: 'path', value: 'root/new', group: '共享' },
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({
+        field: 'all',
+        value: '',
+      }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-default-new'
+    await model.setTeamPresetDefault()
+
+    expect(model.teamPresets.value.find((preset) => preset.id === 'preset-default-old')).toMatchObject({
+      isDefault: false,
+      permissions: {
+        canSetDefault: true,
+        canClearDefault: false,
+      },
+    })
+  })
+
   it('returns null when apply or save does not complete a team preset takeover', async () => {
     vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
       items: [
