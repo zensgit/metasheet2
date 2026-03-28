@@ -12,14 +12,34 @@ export function resolvePlmHydratedLocalFilterPresetTakeover(
 ) {
   const routePresetKey = options.routePresetKey.trim()
   const localSelectorKey = options.localSelectorKey.trim()
-  const shouldClearLocalSelector = Boolean(routePresetKey && localSelectorKey && routePresetKey !== localSelectorKey)
+  const localSelectionKeys = Array.from(new Set(
+    options.localSelectionKeys
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  ))
+  const nextSelectionKeys = !routePresetKey
+    ? localSelectionKeys
+    : localSelectorKey && localSelectorKey !== routePresetKey
+      ? []
+      : localSelectionKeys.filter((entry) => entry === routePresetKey)
+  const shouldClearDrafts = Boolean(
+    routePresetKey
+    && localSelectorKey !== routePresetKey,
+  )
+  const shouldClearLocalSelector = Boolean(
+    routePresetKey
+    && (
+      (localSelectorKey && localSelectorKey !== routePresetKey)
+      || nextSelectionKeys.length !== localSelectionKeys.length
+    ),
+  )
 
   return {
     shouldClearLocalSelector,
-    nextSelectorKey: shouldClearLocalSelector ? '' : options.localSelectorKey,
-    nextNameDraft: shouldClearLocalSelector ? '' : options.localNameDraft,
-    nextGroupDraft: shouldClearLocalSelector ? '' : options.localGroupDraft,
-    nextSelectionKeys: shouldClearLocalSelector ? [] : options.localSelectionKeys,
-    nextBatchGroupDraft: shouldClearLocalSelector ? '' : options.localBatchGroupDraft,
+    nextSelectorKey: shouldClearDrafts ? '' : options.localSelectorKey,
+    nextNameDraft: shouldClearDrafts ? '' : options.localNameDraft,
+    nextGroupDraft: shouldClearDrafts ? '' : options.localGroupDraft,
+    nextSelectionKeys,
+    nextBatchGroupDraft: nextSelectionKeys.length ? options.localBatchGroupDraft : '',
   }
 }

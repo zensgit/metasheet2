@@ -558,6 +558,16 @@ describe('plmWorkbenchViewState', () => {
     expect(
       hasExplicitPlmBomTeamPresetAutoApplyQueryState(
         applyPlmDeferredRouteQueryPatch(
+          {},
+          { bomFilterPreset: 'bom-missing' },
+        ),
+        { hasLocalFilterPresetOwner: false },
+      ),
+    ).toBe(false)
+
+    expect(
+      hasExplicitPlmBomTeamPresetAutoApplyQueryState(
+        applyPlmDeferredRouteQueryPatch(
           { bomFilterPreset: 'bom-local-1' },
           { bomFilterPreset: undefined },
         ),
@@ -600,6 +610,16 @@ describe('plmWorkbenchViewState', () => {
         ),
       ),
     ).toBe(true)
+
+    expect(
+      hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState(
+        applyPlmDeferredRouteQueryPatch(
+          {},
+          { whereUsedFilterPreset: 'where-missing' },
+        ),
+        { hasLocalFilterPresetOwner: false },
+      ),
+    ).toBe(false)
 
     expect(
       hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState(

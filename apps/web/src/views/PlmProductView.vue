@@ -4218,6 +4218,8 @@ function reconcileBomLocalFilterPresetIdentityAfterImport() {
   const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
     routePresetKey: bomFilterPresetQuery.value,
     selectedPresetKey: bomFilterPresetKey.value,
+    nameDraft: bomFilterPresetName.value,
+    groupDraft: bomFilterPresetGroup.value,
     activePreset: activeBomLocalRoutePreset.value,
     currentState: {
       field: bomFilterField.value,
@@ -4231,6 +4233,8 @@ function reconcileBomLocalFilterPresetIdentityAfterImport() {
     return
   }
   bomFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+  bomFilterPresetName.value = nextIdentity.nextNameDraft
+  bomFilterPresetGroup.value = nextIdentity.nextGroupDraft
   bomPresetSelection.value = nextIdentity.nextSelectionKeys
   bomPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
   syncBomFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
@@ -4240,6 +4244,8 @@ function reconcileWhereUsedLocalFilterPresetIdentityAfterImport() {
   const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
     routePresetKey: whereUsedFilterPresetQuery.value,
     selectedPresetKey: whereUsedFilterPresetKey.value,
+    nameDraft: whereUsedFilterPresetName.value,
+    groupDraft: whereUsedFilterPresetGroup.value,
     activePreset: activeWhereUsedLocalRoutePreset.value,
     currentState: {
       field: whereUsedFilterField.value,
@@ -4253,6 +4259,8 @@ function reconcileWhereUsedLocalFilterPresetIdentityAfterImport() {
     return
   }
   whereUsedFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+  whereUsedFilterPresetName.value = nextIdentity.nextNameDraft
+  whereUsedFilterPresetGroup.value = nextIdentity.nextGroupDraft
   whereUsedPresetSelection.value = nextIdentity.nextSelectionKeys
   whereUsedPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
   syncWhereUsedFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
@@ -4361,15 +4369,22 @@ const {
   },
   buildShareUrl: (preset) => buildTeamFilterPresetShareUrl('bom', preset, route.path, 'bom'),
   copyShareUrl: copyToClipboard,
-  shouldAutoApplyDefault: () => (
-    !hasExplicitPlmBomTeamPresetAutoApplyQueryState(
-      applyPlmDeferredRouteQueryPatch(
-        route.query as Record<string, unknown>,
-        deferredRouteQueryPatch,
-      ),
+  shouldAutoApplyDefault: () => {
+    const effectiveQuery = applyPlmDeferredRouteQueryPatch(
+      route.query as Record<string, unknown>,
+      deferredRouteQueryPatch,
     )
-    && !bomFilter.value.trim()
-  ),
+    const localPresetKey = typeof effectiveQuery.bomFilterPreset === 'string'
+      ? effectiveQuery.bomFilterPreset.trim()
+      : ''
+    return (
+      !hasExplicitPlmBomTeamPresetAutoApplyQueryState(effectiveQuery, {
+        hasLocalFilterPresetOwner: !localPresetKey
+          || bomFilterPresets.value.some((entry) => entry.key === localPresetKey),
+      })
+      && !bomFilter.value.trim()
+    )
+  },
   hasPendingExternalOwnerDrift: () => hasActiveBomLocalPresetOwner.value && Boolean(bomTeamPresetKey.value.trim()),
 })
 
@@ -4465,15 +4480,22 @@ const {
   },
   buildShareUrl: (preset) => buildTeamFilterPresetShareUrl('where-used', preset, route.path, 'where-used'),
   copyShareUrl: copyToClipboard,
-  shouldAutoApplyDefault: () => (
-    !hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState(
-      applyPlmDeferredRouteQueryPatch(
-        route.query as Record<string, unknown>,
-        deferredRouteQueryPatch,
-      ),
+  shouldAutoApplyDefault: () => {
+    const effectiveQuery = applyPlmDeferredRouteQueryPatch(
+      route.query as Record<string, unknown>,
+      deferredRouteQueryPatch,
     )
-    && !whereUsedFilter.value.trim()
-  ),
+    const localPresetKey = typeof effectiveQuery.whereUsedFilterPreset === 'string'
+      ? effectiveQuery.whereUsedFilterPreset.trim()
+      : ''
+    return (
+      !hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState(effectiveQuery, {
+        hasLocalFilterPresetOwner: !localPresetKey
+          || whereUsedFilterPresets.value.some((entry) => entry.key === localPresetKey),
+      })
+      && !whereUsedFilter.value.trim()
+    )
+  },
   hasPendingExternalOwnerDrift: () => hasActiveWhereUsedLocalPresetOwner.value && Boolean(whereUsedTeamPresetKey.value.trim()),
 })
 

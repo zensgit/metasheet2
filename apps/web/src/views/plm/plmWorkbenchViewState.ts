@@ -326,34 +326,44 @@ function hasExplicitPlmFilterPresetAutoApplyQueryState(
     filterPresetKey: string
     filterKey: string
     filterFieldKey: string
+    hasLocalFilterPresetOwner?: boolean
   },
 ): boolean {
   const next = normalizePlmWorkbenchQuerySnapshot(value)
   const filterValue = next[options.filterKey]
   const filterFieldValue = next[options.filterFieldKey]
+  const hasLocalFilterPresetOwner = options.hasLocalFilterPresetOwner ?? true
   return Boolean(
     next[options.teamPresetKey]
-    || next[options.filterPresetKey]
+    || (hasLocalFilterPresetOwner && next[options.filterPresetKey])
     || filterValue
     || (filterValue && filterFieldValue && filterFieldValue !== 'all')
   )
 }
 
-export function hasExplicitPlmBomTeamPresetAutoApplyQueryState(value: unknown): boolean {
+export function hasExplicitPlmBomTeamPresetAutoApplyQueryState(
+  value: unknown,
+  options?: { hasLocalFilterPresetOwner?: boolean },
+): boolean {
   return hasExplicitPlmFilterPresetAutoApplyQueryState(value, {
     teamPresetKey: 'bomTeamPreset',
     filterPresetKey: 'bomFilterPreset',
     filterKey: 'bomFilter',
     filterFieldKey: 'bomFilterField',
+    hasLocalFilterPresetOwner: options?.hasLocalFilterPresetOwner,
   })
 }
 
-export function hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState(value: unknown): boolean {
+export function hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState(
+  value: unknown,
+  options?: { hasLocalFilterPresetOwner?: boolean },
+): boolean {
   return hasExplicitPlmFilterPresetAutoApplyQueryState(value, {
     teamPresetKey: 'whereUsedTeamPreset',
     filterPresetKey: 'whereUsedFilterPreset',
     filterKey: 'whereUsedFilter',
     filterFieldKey: 'whereUsedFilterField',
+    hasLocalFilterPresetOwner: options?.hasLocalFilterPresetOwner,
   })
 }
 
