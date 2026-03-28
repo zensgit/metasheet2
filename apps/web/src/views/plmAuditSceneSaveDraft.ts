@@ -4,6 +4,13 @@ export type PlmAuditSceneSaveDraft = {
   description: string
 }
 
+export type PlmAuditSceneSaveActionKind = 'saved-view' | 'team-view' | 'team-default'
+
+export type PlmAuditSceneSaveActionFeedback = {
+  kind: 'error'
+  message: string
+}
+
 export type PlmAuditSceneSaveDraftInput = {
   sceneId: string
   sceneName: string
@@ -46,4 +53,22 @@ export function buildPlmAuditSceneSaveDraft(
       '可将这个以场景为中心的审计快速保存为本地视图，或直接提升为团队视图。',
     ),
   }
+}
+
+export function resolvePlmAuditSceneSaveActionFeedback(options: {
+  actionKind: PlmAuditSceneSaveActionKind
+  draft: PlmAuditSceneSaveDraft | null | undefined
+  tr: (en: string, zh: string) => string
+}): PlmAuditSceneSaveActionFeedback | null {
+  const draft = options.draft || null
+  const { tr } = options
+
+  if (!draft) {
+    return {
+      kind: 'error',
+      message: tr('Current audit scene save action is unavailable.', '当前审计场景保存动作不可用。'),
+    }
+  }
+
+  return null
 }

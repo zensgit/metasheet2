@@ -969,7 +969,10 @@ import {
   withPlmAuditSceneQueryContext,
 } from './plmAuditSceneContext'
 import { buildPlmAuditSceneInputToken } from './plmAuditSceneInputToken'
-import { buildPlmAuditSceneSaveDraft } from './plmAuditSceneSaveDraft'
+import {
+  buildPlmAuditSceneSaveDraft,
+  resolvePlmAuditSceneSaveActionFeedback,
+} from './plmAuditSceneSaveDraft'
 import { buildPlmAuditSceneSummaryCard } from './plmAuditSceneSummary'
 import {
   buildPlmAuditSceneToken,
@@ -1506,6 +1509,15 @@ async function returnToWorkbenchScene() {
 
 async function runAuditSceneSaveAction(actionKind: 'saved-view' | 'team-view' | 'team-default') {
   const draft = auditSceneSaveDraft.value
+  const feedback = resolvePlmAuditSceneSaveActionFeedback({
+    actionKind,
+    draft,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
   if (!draft) return
 
   if (actionKind === 'saved-view') {

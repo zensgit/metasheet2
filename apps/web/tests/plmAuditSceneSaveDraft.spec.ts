@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { buildPlmAuditSceneSaveDraft } from '../src/views/plmAuditSceneSaveDraft'
+import {
+  buildPlmAuditSceneSaveDraft,
+  resolvePlmAuditSceneSaveActionFeedback,
+} from '../src/views/plmAuditSceneSaveDraft'
 
 function tr(en: string, _zh: string) {
   return en
@@ -39,5 +42,16 @@ describe('plmAuditSceneSaveDraft', () => {
       sceneOwnerUserId: '',
       recommendationReason: '',
     }, tr)).toBeNull()
+  })
+
+  it('returns explicit feedback when a scene save action loses its draft', () => {
+    expect(resolvePlmAuditSceneSaveActionFeedback({
+      actionKind: 'saved-view',
+      draft: null,
+      tr,
+    })).toEqual({
+      kind: 'error',
+      message: 'Current audit scene save action is unavailable.',
+    })
   })
 })
