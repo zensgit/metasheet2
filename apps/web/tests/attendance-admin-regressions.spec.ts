@@ -146,6 +146,52 @@ describe('Attendance admin regressions', () => {
           },
         })
       }
+      if (url.includes('/api/attendance/rule-sets')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'rule-set-1',
+                name: 'Ops Rules',
+                scope: 'org',
+                version: 3,
+                config: {
+                  source: 'manual',
+                  rule: {
+                    timezone: 'Asia/Shanghai',
+                    workStartTime: '09:00',
+                    workEndTime: '18:00',
+                    workingDays: [1, 2, 3, 4, 5],
+                  },
+                },
+                isDefault: true,
+              },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url.includes('/api/attendance/leave-types')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'leave-type-1',
+                code: 'annual_leave',
+                name: 'Annual Leave',
+                paid: true,
+                requiresApproval: true,
+                requiresAttachment: false,
+                defaultMinutesPerDay: 480,
+                isActive: true,
+              },
+            ],
+            total: 1,
+          },
+        })
+      }
       if (url.includes('/api/attendance/import/batches/batch-1/items')) {
         return jsonResponse(200, {
           ok: true,
@@ -291,6 +337,38 @@ describe('Attendance admin regressions', () => {
     expect(container!.querySelector('.attendance__admin-nav-current')?.textContent).toContain('Organization · Group members')
     expect(container!.textContent).toContain('User picker')
     expect(container!.textContent).toContain('Append selected user')
+  })
+
+  it('keeps edit buttons visible for the active section while focused mode hides inactive sections', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const ruleSetNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-rule-sets"]')
+    const leaveTypeSection = container!.querySelector<HTMLElement>('#attendance-admin-leave-types')
+    expect(ruleSetNav).toBeTruthy()
+    expect(leaveTypeSection).toBeTruthy()
+
+    ruleSetNav!.click()
+    await flushUi(2)
+
+    const ruleSetSection = container!.querySelector<HTMLElement>('#attendance-admin-rule-sets')
+    const visibleEditButton = Array.from(ruleSetSection!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Edit'))
+    expect(ruleSetSection).toBeTruthy()
+    expect(window.getComputedStyle(ruleSetSection!).display).not.toBe('none')
+    expect(visibleEditButton).toBeTruthy()
+    expect(window.getComputedStyle(leaveTypeSection!).display).toBe('none')
+
+    const toggle = container!.querySelector<HTMLButtonElement>('.attendance__admin-header .attendance__admin-actions .attendance__btn')
+    expect(toggle?.textContent).toContain('Show all sections')
+    toggle!.click()
+    await flushUi(2)
+
+    const leaveTypeEditButton = Array.from(leaveTypeSection!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Edit'))
+    expect(window.getComputedStyle(leaveTypeSection!).display).not.toBe('none')
+    expect(leaveTypeEditButton).toBeTruthy()
   })
 
   it('restores the run21 holiday calendar, rule builder, and import template guidance', async () => {

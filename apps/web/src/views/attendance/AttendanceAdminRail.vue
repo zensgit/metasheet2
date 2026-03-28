@@ -460,8 +460,13 @@ const emit = defineEmits<{
     gap: 8px;
   }
 
+  .attendance__admin-nav-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
   .attendance__admin-nav-actions .attendance__btn {
-    width: auto;
+    width: 100%;
   }
 
   .attendance__admin-nav-link {

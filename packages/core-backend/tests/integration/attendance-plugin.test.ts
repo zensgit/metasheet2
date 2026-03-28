@@ -1046,6 +1046,9 @@ describe('Attendance Plugin Integration', () => {
     expect(importTemplateData?.payloadExample?.ruleSetId).toBeUndefined()
     expect(importTemplateData?.payloadExample?.columns).toContain('日期')
     expect(importTemplateData?.payloadExample?.requiredFields).toContain('日期')
+    expect(importTemplateData?.defaultProfileId).toBe('dingtalk_csv_daily_summary')
+    expect(importTemplateData?.csvTemplateUrl).toBe('/api/attendance/import/template.csv?profileId=dingtalk_csv_daily_summary')
+    expect(importTemplateData?.csvTemplateFilename).toBe('attendance-import-template-dingtalk_csv_daily_summary.csv')
 
     const importTemplateCsvRes = await requestJson(`${baseUrl}/api/attendance/import/template.csv`, {
       headers: {
@@ -1064,6 +1067,15 @@ describe('Attendance Plugin Integration', () => {
     expect(importTemplateCsvProfileRes.status).toBe(200)
     expect(importTemplateCsvProfileRes.raw).toContain('workDate,userId,firstInAt,lastOutAt,status')
 
+    const importTemplateCsvAcceptRes = await requestJson(`${baseUrl}/api/attendance/import/template?profileId=manual_rows`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'text/csv',
+      },
+    })
+    expect(importTemplateCsvAcceptRes.status).toBe(200)
+    expect(importTemplateCsvAcceptRes.raw).toContain('workDate,userId,firstInAt,lastOutAt,status')
+
     const importTemplateCsvInvalidProfileRes = await requestJson(`${baseUrl}/api/attendance/import/template.csv?profileId=missing_profile`, {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -1071,6 +1083,90 @@ describe('Attendance Plugin Integration', () => {
     })
     expect(importTemplateCsvInvalidProfileRes.status).toBe(400)
     expect((importTemplateCsvInvalidProfileRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('surfaces CSV header diagnostics during preview and clarifies header-only commit failures', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`attendance-import-diagnostics-${Date.now().toString(36)}`)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const preparePreviewRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(preparePreviewRes.status).toBe(200)
+    const previewCommitToken = (preparePreviewRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(previewCommitToken).toBeTruthy()
+    if (!previewCommitToken) return
+
+    const previewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: 'attendance-test',
+        mappingProfileId: 'dingtalk_csv_daily_summary',
+        userMap: {
+          EMP001: 'attendance-test',
+        },
+        csvText: [
+          '日期,工号,未知列',
+          '2026-03-23,EMP001,备注',
+        ].join('\n'),
+        mode: 'override',
+        commitToken: previewCommitToken,
+      }),
+    })
+    expect(previewRes.status).toBe(200)
+    const previewWarnings = (previewRes.body as { data?: { csvWarnings?: string[] } } | undefined)?.data?.csvWarnings ?? []
+    expect(previewWarnings.some((warning) => warning.includes('Detected CSV columns: 日期, 工号, 未知列'))).toBe(true)
+    expect(previewWarnings.some((warning) => warning.includes('Recognized import columns: 工号→empNo'))).toBe(true)
+    expect(previewWarnings.some((warning) => warning.includes('Template columns missing:'))).toBe(true)
+    expect(previewWarnings.some((warning) => warning.includes('Unmapped CSV columns: 日期, 未知列'))).toBe(true)
+
+    const prepareCommitRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareCommitRes.status).toBe(200)
+    const commitToken = (prepareCommitRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+    if (!commitToken) return
+
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: 'attendance-test',
+        mappingProfileId: 'dingtalk_csv_daily_summary',
+        csvText: '日期,工号,姓名\n',
+        mode: 'override',
+        commitToken,
+      }),
+    })
+    expect(commitRes.status).toBe(400)
+    const commitError = (commitRes.body as { error?: { code?: string; message?: string } } | undefined)?.error
+    expect(commitError?.code).toBe('VALIDATION_ERROR')
+    expect(String(commitError?.message || '')).toContain('CSV contains the header row but no non-empty data rows were parsed')
+    expect(String(commitError?.message || '')).toContain('Detected columns: 日期, 工号, 姓名')
   })
 
   it('supports shift and overtime rule lookup by id and rejects malformed ids with 400', async () => {
@@ -1650,7 +1746,7 @@ describe('Attendance Plugin Integration', () => {
     expect(createdRuleSet?.config?.rule?.timezone).toBe('Asia/Shanghai')
   })
 
-  it('returns 404 for valid-but-missing approval flow and rule set ids while keeping malformed ids at 400', async () => {
+  it('supports approval flow, rule set, and payroll cycle item lookup while keeping missing item semantics stable', async () => {
     if (!baseUrl) return
 
     const runSuffix = Date.now().toString(36)
@@ -1662,7 +1758,48 @@ describe('Attendance Plugin Integration', () => {
     expect(token).toBeTruthy()
     if (!token) return
 
-    const missingApprovalFlowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/${randomUuidV4()}`, {
+    const approvalFlowCreateRes = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Lookup Approval ${runSuffix}`,
+        requestType: 'leave',
+        steps: [
+          {
+            name: '直属主管',
+            approverUserIds: [testUserId],
+          },
+        ],
+      }),
+    })
+    expect(approvalFlowCreateRes.status).toBe(201)
+    const approvalFlowId = (approvalFlowCreateRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(approvalFlowId).toBeTruthy()
+    if (!approvalFlowId) return
+
+    const approvalFlowGetRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/${approvalFlowId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(approvalFlowGetRes.status).toBe(200)
+    const approvalFlow = (approvalFlowGetRes.body as { data?: { id?: string; steps?: Array<{ approverUserIds?: string[] }> } } | undefined)?.data
+    expect(approvalFlow?.id).toBe(approvalFlowId)
+    expect(approvalFlow?.steps?.[0]?.approverUserIds?.[0]).toBe(testUserId)
+
+    const missingApprovalFlowId = randomUuidV4()
+    const missingApprovalFlowGetRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/${missingApprovalFlowId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(missingApprovalFlowGetRes.status).toBe(404)
+    expect((missingApprovalFlowGetRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('NOT_FOUND')
+
+    const missingApprovalFlowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/${missingApprovalFlowId}`, {
       method: 'DELETE',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -1672,7 +1809,6 @@ describe('Attendance Plugin Integration', () => {
     expect((missingApprovalFlowRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('NOT_FOUND')
 
     const invalidApprovalFlowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows/not-a-uuid`, {
-      method: 'DELETE',
       headers: {
         Authorization: `Bearer ${token}`,
       },
@@ -1680,7 +1816,45 @@ describe('Attendance Plugin Integration', () => {
     expect(invalidApprovalFlowRes.status).toBe(400)
     expect((invalidApprovalFlowRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
 
-    const missingRuleSetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets/${randomUuidV4()}`, {
+    const ruleSetCreateRes = await requestJson(`${baseUrl}/api/attendance/rule-sets`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Lookup Rule Set ${runSuffix}`,
+        version: 1,
+        scope: 'org',
+        config: { source: 'manual' },
+      }),
+    })
+    expect(ruleSetCreateRes.status).toBe(201)
+    const ruleSetId = (ruleSetCreateRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(ruleSetId).toBeTruthy()
+    if (!ruleSetId) return
+
+    const ruleSetGetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets/${ruleSetId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(ruleSetGetRes.status).toBe(200)
+    const ruleSet = (ruleSetGetRes.body as { data?: { id?: string; name?: string; config?: { source?: string } } } | undefined)?.data
+    expect(ruleSet?.id).toBe(ruleSetId)
+    expect(ruleSet?.name).toBe(`Lookup Rule Set ${runSuffix}`)
+    expect(ruleSet?.config?.source).toBe('manual')
+
+    const missingRuleSetId = randomUuidV4()
+    const missingRuleSetGetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets/${missingRuleSetId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(missingRuleSetGetRes.status).toBe(404)
+    expect((missingRuleSetGetRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('NOT_FOUND')
+
+    const missingRuleSetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets/${missingRuleSetId}`, {
       method: 'PUT',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -1697,20 +1871,75 @@ describe('Attendance Plugin Integration', () => {
     expect((missingRuleSetRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('NOT_FOUND')
 
     const invalidRuleSetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets/not-a-uuid`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(invalidRuleSetRes.status).toBe(400)
+    expect((invalidRuleSetRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
+
+    const cycleSeed = Number.parseInt(runSuffix, 36)
+    const safeCycleSeed = Number.isFinite(cycleSeed) ? Math.max(0, cycleSeed) : Date.now()
+    const cycleYear = 2031 + (safeCycleSeed % 20)
+    const cycleMonth = String((Math.floor(safeCycleSeed / 7) % 12) + 1).padStart(2, '0')
+    const cycleDay = String((Math.floor(safeCycleSeed / 97) % 20) + 1).padStart(2, '0')
+    const cycleStartDate = `${cycleYear}-${cycleMonth}-${cycleDay}`
+    const cycleEndDay = String(Math.min(28, Number(cycleDay) + 7)).padStart(2, '0')
+    const cycleEndDate = `${cycleYear}-${cycleMonth}-${cycleEndDay}`
+
+    const payrollCycleCreateRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Lookup Cycle ${runSuffix}`,
+        startDate: cycleStartDate,
+        endDate: cycleEndDate,
+      }),
+    })
+    expect(payrollCycleCreateRes.status).toBe(201)
+    const payrollCycleId = (payrollCycleCreateRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(payrollCycleId).toBeTruthy()
+    if (!payrollCycleId) return
+
+    const payrollCycleGetRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/${payrollCycleId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(payrollCycleGetRes.status).toBe(200)
+    expect((payrollCycleGetRes.body as { data?: { id?: string } } | undefined)?.data?.id).toBe(payrollCycleId)
+
+    const missingPayrollCycleRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/${randomUuidV4()}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(missingPayrollCycleRes.status).toBe(404)
+    expect((missingPayrollCycleRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('NOT_FOUND')
+
+    const invalidPayrollCycleRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/not-a-uuid`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(invalidPayrollCycleRes.status).toBe(400)
+    expect((invalidPayrollCycleRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
+
+    const invalidPayrollCycleUpdateRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/not-a-uuid`, {
       method: 'PUT',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        name: `Invalid Rule Set ${runSuffix}`,
-        version: 1,
-        scope: 'org',
-        config: { source: 'manual' },
+        name: `Invalid Cycle ${runSuffix}`,
       }),
     })
-    expect(invalidRuleSetRes.status).toBe(400)
-    expect((invalidRuleSetRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
+    expect(invalidPayrollCycleUpdateRes.status).toBe(400)
+    expect((invalidPayrollCycleUpdateRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
   })
 
   it('rejects invalid CSV upload payloads with 400 before creating upload handles', async () => {
@@ -2226,6 +2455,172 @@ describe('Attendance Plugin Integration', () => {
         body: JSON.stringify(originalSettings),
       }).catch(() => undefined)
     }
+  })
+
+  it('supports request item lookup, update, and delete aliases for self-service follow-up', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-request-item-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const requestedInAt = new Date().toISOString()
+    const requestCreateRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        workDate,
+        requestType: 'missed_check_in',
+        requestedInAt,
+        reason: 'Initial request',
+      }),
+    })
+    expect(requestCreateRes.status).toBe(201)
+    const createdRequest = (requestCreateRes.body as { data?: { request?: { id?: string; work_date?: string; workDate?: string } } } | undefined)?.data?.request
+    expect(createdRequest?.work_date).toBe(workDate)
+    expect(createdRequest?.workDate).toBe(workDate)
+    const requestId = createdRequest?.id
+    expect(requestId).toBeTruthy()
+    if (!requestId) return
+
+    const requestGetRes = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(requestGetRes.status).toBe(200)
+    expect((requestGetRes.body as { data?: { request?: { id?: string; work_date?: string; workDate?: string } } } | undefined)?.data?.request?.id).toBe(requestId)
+    expect((requestGetRes.body as { data?: { request?: { work_date?: string; workDate?: string } } } | undefined)?.data?.request?.work_date).toBe(workDate)
+    expect((requestGetRes.body as { data?: { request?: { work_date?: string; workDate?: string } } } | undefined)?.data?.request?.workDate).toBe(workDate)
+
+    const requestUpdateRes = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        reason: 'Updated request reason',
+        requestedInAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      }),
+    })
+    expect(requestUpdateRes.status).toBe(200)
+    const updatedRequest = (requestUpdateRes.body as { data?: { request?: { reason?: string } } } | undefined)?.data?.request
+    expect(updatedRequest?.reason).toBe('Updated request reason')
+
+    const requestDeleteRes = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(requestDeleteRes.status).toBe(200)
+    expect((requestDeleteRes.body as { data?: { status?: string } } | undefined)?.data?.status).toBe('cancelled')
+
+    const requestGetAfterDeleteRes = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(requestGetAfterDeleteRes.status).toBe(200)
+    expect((requestGetAfterDeleteRes.body as { data?: { request?: { status?: string } } } | undefined)?.data?.request?.status).toBe('cancelled')
+  })
+
+  it('supports holiday item lookup and rejects invalid holiday date/type payloads before write', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const uniqueSeed = Array.from(runSuffix).reduce((total, ch) => total + ch.charCodeAt(0), 0)
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-holiday-item-${runSuffix}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const holidayDate = [
+      String(2040 + (uniqueSeed % 10)).padStart(4, '0'),
+      String(((uniqueSeed * 3) % 12) + 1).padStart(2, '0'),
+      String(((uniqueSeed * 7) % 28) + 1).padStart(2, '0'),
+    ].join('-')
+    const holidayCreateRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        date: holidayDate,
+        name: `Holiday Item ${runSuffix}`,
+        type: 'holiday',
+      }),
+    })
+    expect(holidayCreateRes.status).toBe(201)
+    const holidayId = (holidayCreateRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(holidayId).toBeTruthy()
+    if (!holidayId) return
+
+    const holidayGetRes = await requestJson(`${baseUrl}/api/attendance/holidays/${holidayId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(holidayGetRes.status).toBe(200)
+    expect((holidayGetRes.body as { data?: { id?: string; name?: string; type?: string } } | undefined)?.data?.id).toBe(holidayId)
+    expect((holidayGetRes.body as { data?: { type?: string } } | undefined)?.data?.type).toBe('holiday')
+
+    const holidayUpdateRes = await requestJson(`${baseUrl}/api/attendance/holidays/${holidayId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Holiday Item Updated ${runSuffix}`,
+        type: 'working_day_override',
+      }),
+    })
+    expect(holidayUpdateRes.status).toBe(200)
+    const updatedHoliday = (holidayUpdateRes.body as { data?: { name?: string; type?: string; isWorkingDay?: boolean } } | undefined)?.data
+    expect(updatedHoliday?.name).toBe(`Holiday Item Updated ${runSuffix}`)
+    expect(updatedHoliday?.type).toBe('working_day_override')
+    expect(updatedHoliday?.isWorkingDay).toBe(true)
+
+    const invalidHolidayDateRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        date: 'invalid',
+        name: 'Invalid holiday date',
+      }),
+    })
+    expect(invalidHolidayDateRes.status).toBe(400)
+
+    const invalidHolidayTypeRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        date: '2029-08-18',
+        name: 'Invalid holiday type',
+        type: 'invalid_type',
+      }),
+    })
+    expect(invalidHolidayTypeRes.status).toBe(400)
   })
 
   it('rejects negative leave type daily_minutes aliases, empty holiday names, and exposes holiday type fields', async () => {
@@ -4158,7 +4553,7 @@ describe('Attendance Plugin Integration', () => {
     expect(commitError?.code).toBe('CSV_TOO_LARGE')
   })
 
-  it('supports CSV upload channel (csvFileId) and cleans up after sync commit', async () => {
+  it('supports CSV upload channel via fileId/csvFileId aliases and cleans up after sync commit', async () => {
     if (!baseUrl) return
     if (!importUploadDir) return
 
@@ -4189,7 +4584,7 @@ describe('Attendance Plugin Integration', () => {
       orgId,
       userId: 'attendance-test',
       timezone: 'UTC',
-      csvFileId: String(fileId || ''),
+      fileId: String(fileId || ''),
       mapping: {
         columns: [
           { sourceField: '日期', targetField: 'workDate', dataType: 'date' },
@@ -4270,6 +4665,119 @@ describe('Attendance Plugin Integration', () => {
     await expect(fs.stat(csvPath)).rejects.toBeTruthy()
     await expect(fs.stat(metaPath)).rejects.toBeTruthy()
 
+    if (batchId) {
+      const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      })
+      expect(rollbackRes.status).toBe(200)
+    }
+  })
+
+  it('accepts fileId alias and defaults uploaded CSV imports to the daily summary profile', async () => {
+    if (!baseUrl) return
+    if (!importUploadDir) return
+
+    const runSuffix = Date.now().toString(36)
+    const requesterId = `attendance-fileid-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    if (!token) return
+
+    const orgId = 'default'
+    const workDate = new Date().toISOString().slice(0, 10)
+    const csvHeader = '日期,工号,姓名,考勤组,上班1打卡时间,下班1打卡时间,考勤结果,异常原因'
+    const csvText = `${csvHeader}\n${workDate},EMP${runSuffix.slice(-4)},测试用户,CSV Alias,2026-03-29 09:00,2026-03-29 18:00,正常,\n`
+
+    const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=fileid-alias.csv`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/csv',
+      },
+      body: csvText,
+    })
+    expect(uploadRes.status).toBe(201)
+    const fileId = (uploadRes.body as { data?: { fileId?: string } } | undefined)?.data?.fileId
+    expect(typeof fileId).toBe('string')
+    if (!fileId) return
+
+    const preparePreviewRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(preparePreviewRes.status).toBe(200)
+    const previewCommitToken = (preparePreviewRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(previewCommitToken).toBeTruthy()
+    if (!previewCommitToken) return
+
+    const previewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        orgId,
+        fileId,
+        timezone: 'Asia/Shanghai',
+        commitToken: previewCommitToken,
+      }),
+    })
+    expect(previewRes.status).toBe(200)
+    const previewItems = (previewRes.body as { data?: { items?: Array<{ userId?: string; workDate?: string }> } } | undefined)?.data?.items ?? []
+    expect(previewItems.length).toBeGreaterThan(0)
+    expect(previewItems[0]?.userId).toBe(requesterId)
+    expect(previewItems[0]?.workDate).toBe(workDate)
+
+    const prepareCommitRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareCommitRes.status).toBe(200)
+    const commitToken = (prepareCommitRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+    if (!commitToken) return
+
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        orgId,
+        fileId,
+        timezone: 'Asia/Shanghai',
+        commitToken,
+        returnItems: false,
+      }),
+    })
+    expect(commitRes.status).toBe(200)
+    const commitData = (commitRes.body as { data?: any } | undefined)?.data
+    expect(Number(commitData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(commitData?.failedRows ?? 0)).toBeGreaterThanOrEqual(0)
+
+    const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
+    const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
+    await expect(fs.stat(csvPath)).rejects.toBeTruthy()
+    await expect(fs.stat(metaPath)).rejects.toBeTruthy()
+
+    const batchId = commitData?.batchId
     if (batchId) {
       const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
         method: 'POST',
