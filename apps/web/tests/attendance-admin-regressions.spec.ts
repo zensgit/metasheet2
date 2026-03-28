@@ -73,6 +73,143 @@ describe('Attendance admin regressions', () => {
 
     vi.mocked(apiFetch).mockImplementation(async (input) => {
       const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/rule-sets/preview')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            ruleSetId: 'rule-set-1',
+            totalEvents: 2,
+            config: {
+              source: 'manual',
+              rule: {
+                timezone: 'Asia/Shanghai',
+                workStartTime: '09:00',
+                workEndTime: '18:00',
+                lateGraceMinutes: 10,
+                earlyGraceMinutes: 10,
+                workingDays: [1, 2, 3, 4, 5],
+                overtimeThresholdMinutes: 60,
+              },
+            },
+            notes: ['Preview normalized overtime threshold.'],
+            preview: [
+              {
+                userId: 'user-1',
+                workDate: '2026-03-28',
+                firstInAt: '2026-03-28T09:17:00.000Z',
+                lastOutAt: '2026-03-28T18:02:00.000Z',
+                workMinutes: 465,
+                lateMinutes: 17,
+                earlyLeaveMinutes: 0,
+                status: 'late',
+                isWorkingDay: true,
+                source: {
+                  eventIds: ['evt-1', 'evt-2'],
+                },
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/rule-templates/versions/version-1')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            id: 'version-1',
+            version: 7,
+            createdAt: '2026-03-28T08:00:00.000Z',
+            createdBy: 'ops-admin',
+            sourceVersionId: 'version-6',
+            itemCount: 2,
+            templates: [
+              { name: 'Night Shift', rules: [] },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/rule-templates')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            system: [],
+            library: [],
+            versions: [
+              {
+                id: 'version-1',
+                version: 7,
+                createdAt: '2026-03-28T08:00:00.000Z',
+                createdBy: 'ops-admin',
+                itemCount: 2,
+                sourceVersionId: 'version-6',
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/import/batches/batch-1/items')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            total: 1,
+            items: [
+              {
+                id: 'item-1',
+                userId: 'user-1',
+                workDate: '2026-03-28',
+                recordId: null,
+                createdAt: '2026-03-28T09:00:00.000Z',
+                previewSnapshot: {
+                  metrics: {
+                    status: 'warning',
+                    workMinutes: 470,
+                    lateMinutes: 12,
+                    earlyLeaveMinutes: 0,
+                    leaveMinutes: 0,
+                    overtimeMinutes: 30,
+                    warnings: ['Missing downstream record'],
+                  },
+                  policy: {
+                    matchedRuleSet: 'Default policy',
+                  },
+                  engine: {
+                    adapter: 'bulk',
+                  },
+                },
+              },
+            ],
+          },
+        })
+      }
+      if (url.includes('/api/attendance/import/batches')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'batch-1',
+                status: 'completed',
+                rowCount: 3,
+                source: 'csv',
+                createdBy: 'ops-admin',
+                createdAt: '2026-03-28T08:30:00.000Z',
+                updatedAt: '2026-03-28T09:00:00.000Z',
+                ruleSetId: '',
+                mapping: {
+                  firstInAt: '1_on_duty_user_check_time',
+                  lastOutAt: '1_off_duty_user_check_time',
+                },
+                meta: {
+                  engine: 'bulk',
+                  chunkConfig: {
+                    itemsChunkSize: 200,
+                    recordsChunkSize: 100,
+                  },
+                },
+              },
+            ],
+          },
+        })
+      }
       if (url.includes('/api/attendance/import/template')) {
         return jsonResponse(200, {
           ok: true,
@@ -177,6 +314,19 @@ describe('Attendance admin regressions', () => {
     await flushUi(2)
     expect(container!.textContent).toContain('Structured rule builder')
     expect(container!.textContent).toContain('Apply builder to JSON')
+    expect(container!.textContent).toContain('Draft preview')
+    expect(container!.textContent).toContain('Sample event builder')
+
+    const previewButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Preview rule set'))
+    expect(previewButton).toBeTruthy()
+    previewButton!.click()
+    await flushUi(4)
+
+    expect(container!.textContent).toContain('Rows affected')
+    expect(container!.textContent).toContain('Raise late grace')
+    expect(container!.textContent).toContain('Selected preview row')
+    expect(container!.textContent).toContain('Source payload')
 
     importNav!.click()
     await flushUi(2)
@@ -198,5 +348,46 @@ describe('Attendance admin regressions', () => {
     expect(container!.textContent).toContain('Field meanings')
     expect(container!.textContent).toContain('Selected mapping profile')
     expect(container!.textContent).toContain('Suggested CSV header')
+  })
+
+  it('restores template version details and import batch diagnostics from the split admin sections', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const templateLibraryNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-rule-template-library"]')
+    expect(templateLibraryNav).toBeTruthy()
+    templateLibraryNav!.click()
+    await flushUi(2)
+
+    const viewVersionButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('View'))
+    expect(viewVersionButton).toBeTruthy()
+    viewVersionButton!.click()
+    await flushUi(2)
+
+    expect(container!.textContent).toContain('Selected version')
+    expect(container!.textContent).toContain('ops-admin')
+    expect(container!.textContent).toContain('Night Shift')
+
+    const importBatchesNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-import-batches"]')
+    expect(importBatchesNav).toBeTruthy()
+    importBatchesNav!.click()
+    await flushUi(2)
+
+    const importBatchesSection = container!.querySelector<HTMLElement>('[data-admin-section="attendance-admin-import-batches"]')
+    expect(importBatchesSection).toBeTruthy()
+
+    const viewItemsButton = Array.from(importBatchesSection!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('View items'))
+    expect(viewItemsButton).toBeTruthy()
+    viewItemsButton!.click()
+    await flushUi(6)
+
+    expect(importBatchesSection!.textContent).toContain('Rollback impact estimate')
+    expect(importBatchesSection!.textContent).toContain('Retry guidance')
+    expect(importBatchesSection!.textContent).toContain('Mapping viewer')
+    expect(importBatchesSection!.textContent).toContain('Selected item detail')
+    expect(importBatchesSection!.textContent).toContain('Engine: bulk')
   })
 })
