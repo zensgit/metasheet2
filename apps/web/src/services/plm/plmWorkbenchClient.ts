@@ -244,6 +244,20 @@ function normalizeTeamViewKind(
   return fallback
 }
 
+function readTeamViewKind(value: unknown): PlmWorkbenchTeamViewKind | null {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  if (
+    normalized === 'documents'
+    || normalized === 'cad'
+    || normalized === 'approvals'
+    || normalized === 'workbench'
+    || normalized === 'audit'
+  ) {
+    return normalized
+  }
+  return null
+}
+
 function mapTeamView<Kind extends PlmWorkbenchTeamViewKind>(
   kind: Kind,
   item: unknown,
@@ -329,7 +343,19 @@ const plmWorkbenchRequestClient = {
 
 const rawPlmWorkbenchClient = createPlmWorkbenchClient(plmWorkbenchRequestClient)
 
-export async function listPlmTeamFilterPresets(kind: PlmTeamFilterPresetKind) {
+type PlmTeamFilterPresetListResult = {
+  items: PlmTeamFilterPreset[]
+  metadata?: {
+    total?: number
+    activeTotal?: number
+    archivedTotal?: number
+    tenantId?: string
+    kind?: PlmTeamFilterPresetKind | 'all'
+    defaultPresetId?: string | null
+  }
+}
+
+export async function listPlmTeamFilterPresets(kind?: PlmTeamFilterPresetKind): Promise<PlmTeamFilterPresetListResult> {
   const payload = await rawPlmWorkbenchClient.listTeamFilterPresets<unknown>(kind)
   const items = payload.items.map(mapTeamPreset).filter((item) => item.id && item.name)
   return {
@@ -343,6 +369,7 @@ export async function listPlmTeamFilterPresets(kind: PlmTeamFilterPresetKind) {
         kind:
           payload.metadata.kind === 'bom'
           || payload.metadata.kind === 'where-used'
+          || payload.metadata.kind === 'all'
             ? payload.metadata.kind
             : undefined,
         defaultPresetId:
@@ -470,9 +497,38 @@ export async function batchPlmTeamFilterPresets(
   }
 }
 
-export async function listPlmWorkbenchTeamViews<Kind extends PlmWorkbenchTeamViewKind>(kind: Kind) {
+type PlmWorkbenchTeamViewListMetadata<Kind extends PlmWorkbenchTeamViewKind | 'all' = PlmWorkbenchTeamViewKind | 'all'> = {
+  total?: number
+  activeTotal?: number
+  archivedTotal?: number
+  tenantId?: string
+  kind?: Kind
+  defaultViewId?: string | null
+}
+
+type PlmWorkbenchTeamViewListResult<Kind extends PlmWorkbenchTeamViewKind> = {
+  items: PlmWorkbenchTeamView<Kind>[]
+  metadata?: PlmWorkbenchTeamViewListMetadata<Kind>
+}
+
+type PlmWorkbenchMixedTeamViewListResult = {
+  items: PlmWorkbenchTeamView[]
+  metadata?: PlmWorkbenchTeamViewListMetadata
+}
+
+export async function listPlmWorkbenchTeamViews(): Promise<PlmWorkbenchMixedTeamViewListResult>
+export async function listPlmWorkbenchTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
+  kind: Kind,
+): Promise<PlmWorkbenchTeamViewListResult<Kind>>
+export async function listPlmWorkbenchTeamViews<Kind extends PlmWorkbenchTeamViewKind>(kind?: Kind) {
   const payload = await rawPlmWorkbenchClient.listTeamViews<unknown>(kind)
-  const items = payload.items.map((item) => mapTeamView(kind, item)).filter((item) => item.id && item.name)
+  const items = payload.items.map((item) => {
+    if (kind) return mapTeamView(kind, item)
+
+    const record = item && typeof item === 'object' ? item as Record<string, unknown> : {}
+    const resolvedKind = readTeamViewKind(record.kind)
+    return resolvedKind ? mapTeamView(resolvedKind, item) : null
+  }).filter((item): item is PlmWorkbenchTeamView => Boolean(item?.id && item.name))
   return {
     items,
     metadata: payload.metadata && typeof payload.metadata === 'object'
@@ -487,6 +543,7 @@ export async function listPlmWorkbenchTeamViews<Kind extends PlmWorkbenchTeamVie
           || payload.metadata.kind === 'approvals'
           || payload.metadata.kind === 'workbench'
           || payload.metadata.kind === 'audit'
+          || payload.metadata.kind === 'all'
             ? payload.metadata.kind
             : undefined,
         defaultViewId:

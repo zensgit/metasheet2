@@ -117,6 +117,57 @@ describe('plmWorkbenchClient', () => {
     })
   })
 
+  it('preserves team-scope preset list metadata without a kind filter', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: [
+          {
+            id: 'preset-1',
+            kind: 'bom',
+            name: '关键 BOM',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            state: { field: 'path', value: 'root/a', group: '机械' },
+          },
+          {
+            id: 'preset-2',
+            kind: 'where-used',
+            name: '上游父件',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            state: { field: 'parent', value: 'assy', group: '装配' },
+          },
+        ],
+        metadata: {
+          total: 2,
+          activeTotal: 2,
+          archivedTotal: 0,
+          tenantId: 'tenant-a',
+          kind: 'all',
+          defaultPresetId: 'preset-1',
+        },
+      }),
+    })
+
+    const result = await listPlmTeamFilterPresets()
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/plm-workbench\/filter-presets\/team$/),
+      expect.any(Object),
+    )
+    expect(result.items.map((item) => item.kind)).toEqual(['bom', 'where-used'])
+    expect(result.metadata).toEqual({
+      total: 2,
+      activeTotal: 2,
+      archivedTotal: 0,
+      tenantId: 'tenant-a',
+      kind: 'all',
+      defaultPresetId: 'preset-1',
+    })
+  })
+
   it('saves, toggles default, and deletes team presets', async () => {
     fetchMock
       .mockResolvedValueOnce({
@@ -633,6 +684,97 @@ describe('plmWorkbenchClient', () => {
         method: 'DELETE',
       }),
     )
+  })
+
+  it('preserves mixed team-scope view lists without a kind filter', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: [
+          {
+            id: 'view-docs',
+            kind: 'documents',
+            name: '文档视角',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            state: {
+              role: 'primary',
+              filter: 'gear',
+              sortKey: 'updated',
+              sortDir: 'desc',
+              columns: { mime: true },
+            },
+          },
+          {
+            id: 'view-audit',
+            kind: 'audit',
+            name: '审计视角',
+            ownerUserId: 'auditor',
+            canManage: true,
+            state: {
+              page: '2',
+              q: 'documents',
+              actorId: 'dev-user',
+              kind: 'documents',
+              action: 'ARCHIVE',
+              resourceType: 'PLM-TEAM-VIEW-BATCH',
+              from: '2026-03-11T15:00:00.000Z',
+              to: '2026-03-11T16:00:00.000Z',
+              windowMinutes: '180',
+            },
+          },
+        ],
+        metadata: {
+          total: 2,
+          activeTotal: 2,
+          archivedTotal: 0,
+          tenantId: 'tenant-a',
+          kind: 'all',
+          defaultViewId: 'view-docs',
+        },
+      }),
+    })
+
+    const listed = await listPlmWorkbenchTeamViews()
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/plm-workbench\/views\/team$/),
+      expect.any(Object),
+    )
+    expect(listed.items).toMatchObject([
+      {
+        id: 'view-docs',
+        kind: 'documents',
+        state: {
+          role: 'primary',
+          filter: 'gear',
+          sortKey: 'updated',
+          sortDir: 'desc',
+        },
+      },
+      {
+        id: 'view-audit',
+        kind: 'audit',
+        state: {
+          page: 2,
+          q: 'documents',
+          actorId: 'dev-user',
+          kind: 'documents',
+          action: 'archive',
+          resourceType: 'plm-team-view-batch',
+          windowMinutes: 180,
+        },
+      },
+    ])
+    expect(listed.metadata).toEqual({
+      total: 2,
+      activeTotal: 2,
+      archivedTotal: 0,
+      tenantId: 'tenant-a',
+      kind: 'all',
+      defaultViewId: 'view-docs',
+    })
   })
 
   it('normalizes workbench team view query snapshots', async () => {
