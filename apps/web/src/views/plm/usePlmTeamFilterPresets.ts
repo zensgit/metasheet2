@@ -525,11 +525,11 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     if (blockPendingApplyManagementAction()) {
       return
     }
+    if (preset.isArchived) {
+      options.setMessage(`请先恢复${options.label}团队预设，再执行分享。`, true)
+      return
+    }
     if (!canShareTeamPreset.value) {
-      if (preset.isArchived) {
-        options.setMessage(`请先恢复${options.label}团队预设，再执行分享。`, true)
-        return
-      }
       options.setMessage(
         canManageSelectedTeamPreset.value
           ? `当前${options.label}团队预设不可分享。`

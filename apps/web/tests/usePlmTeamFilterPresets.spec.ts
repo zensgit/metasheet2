@@ -1085,6 +1085,52 @@ describe('usePlmTeamFilterPresets', () => {
     expect(setMessage).toHaveBeenNthCalledWith(2, '当前BOM团队预设不可分享。', true)
   })
 
+  it('blocks sharing archived team presets before explicit share permissions can bypass restore-first gating', async () => {
+    const buildShareUrl = vi.fn(() => 'http://example.test/plm?bomTeamPreset=preset-share-archived')
+    const copyShareUrl = vi.fn().mockResolvedValue(true)
+
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-share-archived',
+          kind: 'bom',
+          scope: 'team',
+          name: '归档共享预设',
+          ownerUserId: 'owner-a',
+          canManage: true,
+          isArchived: true,
+          isDefault: false,
+          permissions: {
+            canManage: true,
+            canApply: true,
+            canShare: true,
+          },
+          state: { field: 'path', value: 'root/archived', group: '归档组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/archived', group: '归档组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+      buildShareUrl,
+      copyShareUrl,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-share-archived'
+
+    await model.shareTeamPreset()
+
+    expect(buildShareUrl).not.toHaveBeenCalled()
+    expect(copyShareUrl).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenLastCalledWith('请先恢复BOM团队预设，再执行分享。', true)
+  })
+
   it('blocks transferring archived team presets before validating the target owner input', async () => {
     vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
       items: [
