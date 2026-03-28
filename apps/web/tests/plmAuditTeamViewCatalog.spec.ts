@@ -312,4 +312,15 @@ describe('plmAuditTeamViewCatalog', () => {
       message: 'Audit team view already set as default.|审计团队视图已设为默认。',
     })
   })
+
+  it('returns explicit feedback when a recommended management target disappears', () => {
+    expect(resolvePlmRecommendedAuditTeamViewActionFeedback({
+      actionKind: 'manage',
+      target: null,
+      tr: (en, zh) => `${en}|${zh}`,
+    })).toEqual({
+      kind: 'error',
+      message: 'Current recommended audit team view is unavailable.|当前推荐审计团队视图不可用。',
+    })
+  })
 })

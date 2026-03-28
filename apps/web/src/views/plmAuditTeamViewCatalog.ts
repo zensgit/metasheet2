@@ -43,7 +43,7 @@ export type PlmAuditTeamViewSummaryHint = {
   description: string
 }
 
-export type PlmRecommendedAuditTeamViewActionKind = 'apply' | 'share' | 'set-default'
+export type PlmRecommendedAuditTeamViewActionKind = 'apply' | 'share' | 'set-default' | 'manage'
 
 export type PlmRecommendedAuditTeamViewActionFeedback = {
   kind: 'info' | 'error'
@@ -80,6 +80,10 @@ export function resolvePlmRecommendedAuditTeamViewActionFeedback(options: {
       kind: 'error',
       message: tr('Current recommended audit team view is unavailable.', '当前推荐审计团队视图不可用。'),
     }
+  }
+
+  if (options.actionKind === 'manage') {
+    return null
   }
 
   if (options.actionKind === 'apply') {

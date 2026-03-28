@@ -2665,6 +2665,15 @@ async function applyRecommendedAuditTeamView(view: PlmRecommendedAuditTeamView) 
 
 async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
   const target = findAuditTeamViewById(view.id)
+  const feedback = resolvePlmRecommendedAuditTeamViewActionFeedback({
+    actionKind: 'manage',
+    target,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
   if (!target) return
 
   const sharedEntryTakeover = shouldTakeOverPlmAuditSharedEntryOnManagementHandoff(
