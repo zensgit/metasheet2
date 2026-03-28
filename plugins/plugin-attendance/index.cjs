@@ -234,6 +234,15 @@ const IMPORT_MAPPING_PROFILES = [
   },
 ]
 
+const IMPORT_REQUIRED_FIELD_ALIASES = {
+  '日期': ['workDate', 'date'],
+  workDate: ['日期', 'date'],
+  '上班1打卡时间': ['1_on_duty_user_check_time', 'firstInAt', 'clockIn1'],
+  '下班1打卡时间': ['1_off_duty_user_check_time', 'lastOutAt', 'clockOut1'],
+  '上班2打卡时间': ['2_on_duty_user_check_time', 'clockIn2'],
+  '下班2打卡时间': ['2_off_duty_user_check_time', 'clockOut2'],
+}
+
 function findImportProfile(profileId) {
   if (!profileId) return null
   return IMPORT_MAPPING_PROFILES.find((profile) => profile.id === profileId) ?? null
@@ -1604,7 +1613,10 @@ function normalizeCsvWorkDate(value) {
     const [yy, mm, dd] = cleaned.split('-')
     return `20${yy}-${mm}-${dd}`
   }
-  if (/^\d{4}\/\d{2}\/\d{2}$/.test(cleaned)) return cleaned.replace(/\//g, '-')
+  if (/^\d{4}[/-]\d{1,2}[/-]\d{1,2}$/.test(cleaned)) {
+    const [yyyy, mm, dd] = cleaned.split(/[/-]/)
+    return `${yyyy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`
+  }
   return null
 }
 
@@ -2064,6 +2076,18 @@ async function validateImportUploadCsvOrThrow({ csvPath, csvOptions }) {
       'CSV header must include a work date column and at least one user or attendance column'
     )
   }
+  const rowScan = await iterateImportRowsFromCsvFileAsync({
+    csvPath,
+    csvOptions,
+    maxRows: Number.MAX_SAFE_INTEGER,
+  })
+  if (rowScan.rowCount <= 0) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'CSV must include at least 1 non-empty data row')
+  }
+  return {
+    rowCount: rowScan.rowCount,
+    warnings: rowScan.warnings,
+  }
 }
 
 function buildRowsFromCsv({ csvText, csvOptions, maxRows }) {
@@ -2208,6 +2232,12 @@ function resolveRequiredFieldValue(row, field) {
   if (!row || !field) return undefined
   if (row.fields && row.fields[field] !== undefined) return row.fields[field]
   if (row[field] !== undefined) return row[field]
+  const aliases = IMPORT_REQUIRED_FIELD_ALIASES[field]
+  if (!Array.isArray(aliases)) return undefined
+  for (const alias of aliases) {
+    if (row.fields && row.fields[alias] !== undefined) return row.fields[alias]
+    if (row[alias] !== undefined) return row[alias]
+  }
   return undefined
 }
 
@@ -12616,18 +12646,8 @@ module.exports = {
 	          await fsp.mkdir(paths.dir, { recursive: true })
 	          const meter = new ImportUploadMeter(ATTENDANCE_IMPORT_UPLOAD_MAX_BYTES)
 	          await pipeline(req, meter, fs.createWriteStream(paths.csvPath))
-
-	          const endedWithNewline = meter.lastByte === 10
-	          const lines = meter.bytes === 0 ? 0 : meter.newlines + (endedWithNewline ? 0 : 1)
-	          const rowCount = Math.max(0, lines - 1) // header row excluded
-
-	          if (rowCount <= 0) {
-	            await deleteImportUpload({ orgId, fileId })
-	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'CSV must include at least 1 data row' } })
-	            return
-	          }
-
-	          await validateImportUploadCsvOrThrow({ csvPath: paths.csvPath })
+	          const validation = await validateImportUploadCsvOrThrow({ csvPath: paths.csvPath })
+	          const rowCount = validation.rowCount
 
 	          const meta = {
 	            fileId,
@@ -16853,10 +16873,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
-      'GET',
-      '/api/attendance/payroll-cycles/:id/summary/export',
-      withPermission('attendance:read', async (req, res) => {
+    const handlePayrollCycleSummaryExport = async (req, res) => {
         const schema = z.object({
           userId: z.string().optional(),
           orgId: z.string().optional(),
@@ -16915,7 +16932,18 @@ module.exports = {
           logger.error('Attendance payroll cycle summary export failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to export payroll summary' } })
         }
-      })
+      }
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/payroll-cycles/:id/summary/export',
+      withPermission('attendance:read', handlePayrollCycleSummaryExport)
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/payroll-cycles/:id/export',
+      withPermission('attendance:read', handlePayrollCycleSummaryExport)
     )
 
     context.api.http.addRoute(

@@ -1940,6 +1940,22 @@ describe('Attendance Plugin Integration', () => {
     })
     expect(invalidPayrollCycleUpdateRes.status).toBe(400)
     expect((invalidPayrollCycleUpdateRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('VALIDATION_ERROR')
+
+    const payrollCycleExportAliasRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/${payrollCycleId}/export`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(payrollCycleExportAliasRes.status).toBe(200)
+    expect(payrollCycleExportAliasRes.raw).toContain('cycle_id,cycle_name,start_date,end_date,metric,value')
+
+    const payrollCycleSummaryExportRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/${payrollCycleId}/summary/export`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(payrollCycleSummaryExportRes.status).toBe(200)
+    expect(payrollCycleSummaryExportRes.raw).toBe(payrollCycleExportAliasRes.raw)
   })
 
   it('rejects invalid CSV upload payloads with 400 before creating upload handles', async () => {
@@ -1967,6 +1983,33 @@ describe('Attendance Plugin Integration', () => {
     expect(body.ok).toBe(false)
     expect(body.error?.code).toBe('VALIDATION_ERROR')
     expect(String(body.error?.message ?? '')).toMatch(/header|data row/i)
+  })
+
+  it('rejects uploaded CSV files that only contain a header row after parser normalization', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=attendance-header-only-csv&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const headerOnlyCsv = 'workDate,userId,1_on_duty_user_check_time,1_off_duty_user_check_time\n,,,\n'
+    const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=default&filename=header-only.csv`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/csv',
+      },
+      body: headerOnlyCsv,
+    })
+
+    expect(uploadRes.status).toBe(400)
+    const body = (uploadRes.body as { ok?: boolean; error?: { code?: string; message?: string } } | undefined) ?? {}
+    expect(body.ok).toBe(false)
+    expect(body.error?.code).toBe('VALIDATION_ERROR')
+    expect(String(body.error?.message ?? '')).toMatch(/non-empty data row/i)
   })
 
   it('keeps /api/health public for probes', async () => {
@@ -4789,6 +4832,111 @@ describe('Attendance Plugin Integration', () => {
       })
       expect(rollbackRes.status).toBe(200)
     }
+  })
+
+  it('accepts uploaded API-column CSV imports with slash dates through required-field aliases', async () => {
+    if (!baseUrl) return
+    if (!importUploadDir) return
+
+    const runSuffix = Date.now().toString(36)
+    const requesterId = `attendance-api-csv-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const orgId = 'default'
+    const csvText = [
+      'workDate,userId,1_on_duty_user_check_time,1_off_duty_user_check_time,attend_result',
+      `2026/3/26,${requesterId},2026-03-26T09:00:00+08:00,2026-03-26T18:00:00+08:00,Normal`,
+      '',
+    ].join('\n')
+
+    const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=api-columns.csv`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/csv',
+      },
+      body: csvText,
+    })
+    expect(uploadRes.status).toBe(201)
+    const fileId = (uploadRes.body as { data?: { fileId?: string; rowCount?: number } } | undefined)?.data?.fileId
+    const rowCount = (uploadRes.body as { data?: { rowCount?: number } } | undefined)?.data?.rowCount
+    expect(rowCount).toBe(1)
+    expect(typeof fileId).toBe('string')
+    if (!fileId) return
+
+    const preparePreviewRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(preparePreviewRes.status).toBe(200)
+    const previewCommitToken = (preparePreviewRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(previewCommitToken).toBeTruthy()
+    if (!previewCommitToken) return
+
+    const previewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        orgId,
+        fileId,
+        timezone: 'Asia/Shanghai',
+        commitToken: previewCommitToken,
+      }),
+    })
+    expect(previewRes.status).toBe(200)
+    const previewItems = (previewRes.body as { data?: { items?: Array<{ userId?: string; workDate?: string; warnings?: string[] }> } } | undefined)?.data?.items ?? []
+    expect(previewItems[0]?.userId).toBe(requesterId)
+    expect(previewItems[0]?.workDate).toBe('2026-03-26')
+    expect(previewItems[0]?.warnings ?? []).not.toContain('Missing required: 日期')
+
+    const prepareCommitRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareCommitRes.status).toBe(200)
+    const commitToken = (prepareCommitRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+    if (!commitToken) return
+
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        orgId,
+        fileId,
+        timezone: 'Asia/Shanghai',
+        commitToken,
+        returnItems: false,
+      }),
+    })
+    expect(commitRes.status).toBe(200)
+    const commitData = (commitRes.body as { data?: { imported?: number; failedRows?: number; skipped?: unknown[] } } | undefined)?.data
+    expect(commitData?.imported).toBe(1)
+    expect(commitData?.failedRows).toBe(0)
+
+    const csvPath = path.join(importUploadDir, orgId, `${fileId}.csv`)
+    const metaPath = path.join(importUploadDir, orgId, `${fileId}.json`)
+    await expect(fs.stat(csvPath)).rejects.toBeTruthy()
+    await expect(fs.stat(metaPath)).rejects.toBeTruthy()
   })
 
   it('routes high-scale csvFileId imports to async endpoints and preserves upload for async lanes', async () => {
