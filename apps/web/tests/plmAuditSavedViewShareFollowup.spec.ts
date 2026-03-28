@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildPlmAuditSavedViewShareFollowupNotice,
+  resolvePlmAuditSavedViewShareFollowupActionFeedback,
   resolvePlmAuditSavedViewLocalSaveFollowupSource,
   resolvePlmAuditSavedViewLocalSaveState,
 } from '../src/views/plmAuditSavedViewShareFollowup'
@@ -223,6 +224,48 @@ describe('plmAuditSavedViewShareFollowup', () => {
           emphasis: 'secondary',
         },
       ],
+    })
+  })
+
+  it('returns explicit feedback when a saved-view share follow-up target disappears', () => {
+    expect(resolvePlmAuditSavedViewShareFollowupActionFeedback({
+      actionKind: 'promote-team',
+      followup: {
+        savedViewId: 'saved-1',
+        source: 'shared-entry',
+      },
+      target: null,
+      tr,
+    })).toEqual({
+      kind: 'error',
+      message:
+        'Saved view is no longer available. Save the shared audit setup locally again before promoting it.|保存视图已不存在。请先重新将分享的审计配置保存到本地，再执行提升。',
+    })
+
+    expect(resolvePlmAuditSavedViewShareFollowupActionFeedback({
+      actionKind: 'promote-default',
+      followup: {
+        savedViewId: 'saved-2',
+        source: 'scene-context',
+      },
+      target: null,
+      tr,
+    })).toEqual({
+      kind: 'error',
+      message:
+        'Saved view is no longer available. Save the scene audit locally again before promoting it.|保存视图已不存在。请先重新将场景审计保存到本地，再执行提升。',
+    })
+  })
+
+  it('returns unavailable feedback when a saved-view share follow-up is already missing', () => {
+    expect(resolvePlmAuditSavedViewShareFollowupActionFeedback({
+      actionKind: 'promote-team',
+      followup: null,
+      target: null,
+      tr,
+    })).toEqual({
+      kind: 'error',
+      message: 'Current saved-view follow-up is unavailable.|当前保存视图后续动作不可用。',
     })
   })
 })

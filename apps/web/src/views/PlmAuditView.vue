@@ -841,6 +841,7 @@ import {
 } from './plmAuditSavedViews'
 import {
   buildPlmAuditSavedViewShareFollowupNotice,
+  resolvePlmAuditSavedViewShareFollowupActionFeedback,
   resolvePlmAuditSavedViewLocalSaveFollowupSource,
   resolvePlmAuditSavedViewLocalSaveState,
   type PlmAuditSavedViewShareFollowup,
@@ -2943,16 +2944,29 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
 }
 
 async function runAuditSavedViewShareFollowupAction(actionKind: PlmAuditSavedViewShareFollowupActionKind) {
-  const followup = auditSavedViewShareFollowup.value
-  if (!followup) return
-
   if (actionKind === 'dismiss') {
     clearAuditSavedViewShareFollowup()
     return
   }
 
-  const view = savedViews.value.find((entry) => entry.id === followup.savedViewId)
-  if (!view) {
+  const followup = auditSavedViewShareFollowup.value
+  const view = followup
+    ? savedViews.value.find((entry) => entry.id === followup.savedViewId) ?? null
+    : null
+  const feedback = resolvePlmAuditSavedViewShareFollowupActionFeedback({
+    actionKind,
+    followup,
+    target: view,
+    tr,
+  })
+  if (feedback) {
+    if (followup && !view) {
+      clearAuditSavedViewShareFollowup()
+    }
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!followup || !view) {
     clearAuditSavedViewShareFollowup()
     return
   }

@@ -55,6 +55,11 @@ export type PlmAuditSavedViewShareFollowupNotice = {
   }>
 }
 
+export type PlmAuditSavedViewShareFollowupActionFeedback = {
+  kind: 'error'
+  message: string
+}
+
 export function buildPlmAuditSavedViewShareFollowupNotice(
   view: Pick<PlmAuditSavedView, 'id' | 'name'>,
   followup: PlmAuditSavedViewShareFollowup | null,
@@ -98,4 +103,39 @@ export function buildPlmAuditSavedViewShareFollowupNotice(
       },
     ],
   }
+}
+
+export function resolvePlmAuditSavedViewShareFollowupActionFeedback(options: {
+  actionKind: Exclude<PlmAuditSavedViewShareFollowupActionKind, 'dismiss'>
+  followup: PlmAuditSavedViewShareFollowup | null | undefined
+  target: Pick<PlmAuditSavedView, 'id' | 'name'> | null | undefined
+  tr: (en: string, zh: string) => string
+}): PlmAuditSavedViewShareFollowupActionFeedback | null {
+  const followup = options.followup || null
+  const target = options.target || null
+  const { tr } = options
+
+  if (!followup) {
+    return {
+      kind: 'error',
+      message: tr('Current saved-view follow-up is unavailable.', '当前保存视图后续动作不可用。'),
+    }
+  }
+
+  if (!target) {
+    return {
+      kind: 'error',
+      message: followup.source === 'shared-entry'
+        ? tr(
+            'Saved view is no longer available. Save the shared audit setup locally again before promoting it.',
+            '保存视图已不存在。请先重新将分享的审计配置保存到本地，再执行提升。',
+          )
+        : tr(
+            'Saved view is no longer available. Save the scene audit locally again before promoting it.',
+            '保存视图已不存在。请先重新将场景审计保存到本地，再执行提升。',
+          ),
+    }
+  }
+
+  return null
 }
