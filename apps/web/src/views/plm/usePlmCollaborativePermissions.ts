@@ -62,6 +62,14 @@ export function canSetDefaultPlmCollaborativeEntry(entry: CollaborativeEntry) {
   return resolveCanManage(entry) && !entry.isArchived && !entry.isDefault
 }
 
+export function canRenamePlmCollaborativeEntry(entry: CollaborativeEntry) {
+  if (!entry) return false
+  if (typeof entry.permissions?.canRename === 'boolean') {
+    return entry.permissions.canRename
+  }
+  return resolveCanManage(entry) && !entry.isArchived
+}
+
 type UsePlmCollaborativePermissionsOptions<TEntry extends CollaborativeEntry> = {
   selectedEntry: ComputedRef<TEntry>
   nameRef: Ref<string>
@@ -118,12 +126,7 @@ export function usePlmCollaborativePermissions<TEntry extends CollaborativeEntry
   })
   const canRename = computed(() => {
     const entry = options.selectedEntry.value
-    if (!entry) return false
-    const canRenameEntry =
-      typeof entry.permissions?.canRename === 'boolean'
-        ? entry.permissions.canRename
-        : canManageSelectedEntry.value && !entry.isArchived
-    return canRenameEntry && Boolean(options.nameRef.value.trim())
+    return canRenamePlmCollaborativeEntry(entry) && Boolean(options.nameRef.value.trim())
   })
   const canTransferTarget = computed(() => {
     const entry = options.selectedEntry.value

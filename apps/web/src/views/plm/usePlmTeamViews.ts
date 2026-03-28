@@ -21,6 +21,7 @@ import type {
 import {
   canApplyPlmCollaborativeEntry,
   canDuplicatePlmCollaborativeEntry,
+  canRenamePlmCollaborativeEntry,
   usePlmCollaborativePermissions,
 } from './usePlmCollaborativePermissions'
 
@@ -195,6 +196,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   const canApplyTeamView = computed(() => canApplyPlmCollaborativeEntry(selectedTeamView.value))
   const canDuplicateTeamView = computed(() => canDuplicatePlmCollaborativeEntry(selectedTeamView.value))
   const defaultTeamViewLabel = computed(() => defaultTeamView.value?.name || '')
+  const canRenameTargetTeamView = computed(() => canRenamePlmCollaborativeEntry(selectedTeamView.value))
 
   watch(teamViewKey, (next, previous) => {
     if (next !== previous) {
@@ -552,8 +554,15 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
-    if (!canManageSelectedTeamView.value) {
-      options.setMessage(`仅创建者可重命名${options.label}团队视角。`, true)
+    if (!canRenameTargetTeamView.value) {
+      options.setMessage(
+        view.isArchived
+          ? `请先恢复${options.label}团队视角，再执行重命名。`
+          : canManageSelectedTeamView.value
+            ? `当前${options.label}团队视角不可重命名。`
+            : `仅创建者可重命名${options.label}团队视角。`,
+        true,
+      )
       return
     }
     if (!teamViewName.value.trim()) {

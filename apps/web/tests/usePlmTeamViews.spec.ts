@@ -2196,6 +2196,55 @@ describe('usePlmTeamViews', () => {
     expect(setMessage).toHaveBeenLastCalledWith('仅创建者可转移工作台团队视角。', true)
   })
 
+  it('blocks readonly workbench view rename before validating the name input', async () => {
+    vi.mocked(listPlmWorkbenchTeamViews).mockResolvedValue({
+      items: [
+        {
+          id: 'workbench-readonly-rename',
+          kind: 'workbench',
+          scope: 'team',
+          name: '只读工作台视角',
+          ownerUserId: 'owner-2',
+          canManage: false,
+          isDefault: false,
+          permissions: {
+            canManage: false,
+            canApply: true,
+            canRename: false,
+          },
+          state: {
+            query: {
+              documentFilter: 'readonly-rename',
+            },
+          },
+        },
+      ],
+    })
+
+    const model = usePlmTeamViews({
+      kind: 'workbench',
+      label: '工作台',
+      getCurrentViewState: () => ({
+        query: {},
+      }),
+      applyViewState,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamViews()
+    model.teamViewKey.value = 'workbench-readonly-rename'
+    await nextTick()
+
+    expect(model.teamViewName.value).toBe('')
+    expect(model.canRenameTeamView.value).toBe(false)
+
+    await model.renameTeamView()
+
+    expect(renamePlmWorkbenchTeamView).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenLastCalledWith('仅创建者可重命名工作台团队视角。', true)
+  })
+
   it('reports share gating precisely when the current workbench team view is manageable but not shareable', async () => {
     const buildShareUrl = vi.fn(() => 'http://example.test/plm?workbenchTeamView=workbench-share-locked')
     const copyShareUrl = vi.fn().mockResolvedValue(true)

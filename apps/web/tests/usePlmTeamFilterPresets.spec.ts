@@ -1215,6 +1215,49 @@ describe('usePlmTeamFilterPresets', () => {
     expect(setMessage).toHaveBeenLastCalledWith('仅创建者可转移BOM团队预设。', true)
   })
 
+  it('blocks readonly team preset rename before validating the name input', async () => {
+    vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
+      items: [
+        {
+          id: 'preset-readonly-rename',
+          kind: 'bom',
+          scope: 'team',
+          name: '只读 BOM 预设',
+          ownerUserId: 'owner-b',
+          canManage: false,
+          isDefault: false,
+          permissions: {
+            canManage: false,
+            canApply: true,
+            canRename: false,
+          },
+          state: { field: 'path', value: 'root/readonly', group: '共享组' },
+        },
+      ],
+    })
+
+    const model = usePlmTeamFilterPresets({
+      kind: 'bom',
+      label: 'BOM',
+      getCurrentPresetState: () => ({ field: 'path', value: 'root/readonly', group: '共享组' }),
+      applyPreset,
+      setMessage,
+      shouldAutoApplyDefault: () => false,
+    })
+
+    await model.refreshTeamPresets()
+    model.teamPresetKey.value = 'preset-readonly-rename'
+    await nextTick()
+
+    expect(model.teamPresetName.value).toBe('')
+    expect(model.canRenameTeamPreset.value).toBe(false)
+
+    await model.renameTeamPreset()
+
+    expect(renamePlmTeamFilterPreset).not.toHaveBeenCalled()
+    expect(setMessage).toHaveBeenLastCalledWith('仅创建者可重命名BOM团队预设。', true)
+  })
+
   it('clears rename, group, and owner drafts when switching the selected team preset', async () => {
     vi.mocked(listPlmTeamFilterPresets).mockResolvedValue({
       items: [

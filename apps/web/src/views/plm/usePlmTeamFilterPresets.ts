@@ -22,6 +22,7 @@ import type {
 import {
   canApplyPlmCollaborativeEntry,
   canDuplicatePlmCollaborativeEntry,
+  canRenamePlmCollaborativeEntry,
   usePlmCollaborativePermissions,
 } from './usePlmCollaborativePermissions'
 
@@ -259,6 +260,7 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
   const canDuplicateTeamPreset = computed(() => (
     canDuplicatePlmCollaborativeEntry(selectedTeamPreset.value)
   ))
+  const canRenameTargetTeamPreset = computed(() => canRenamePlmCollaborativeEntry(selectedTeamPreset.value))
   const showManagementActions = computed(() => (
     !visibleManagementTarget.value || readTeamPresetPermissions(visibleManagementTarget.value).canManage
   ))
@@ -594,15 +596,22 @@ export function usePlmTeamFilterPresets(options: UsePlmTeamFilterPresetsOptions)
     if (blockPendingApplyManagementAction()) {
       return null
     }
+    if (!canRenameTargetTeamPreset.value) {
+      options.setMessage(
+        preset.isArchived
+          ? `请先恢复${options.label}团队预设，再执行重命名。`
+          : canManageSelectedTeamPreset.value
+            ? `当前${options.label}团队预设不可重命名。`
+            : `仅创建者可重命名${options.label}团队预设。`,
+        true,
+      )
+      return null
+    }
     if (!teamPresetName.value.trim()) {
       options.setMessage(`请输入${options.label}团队预设名称。`, true)
       return null
     }
     if (!canRenameTeamPreset.value) {
-      if (preset.isArchived) {
-        options.setMessage(`请先恢复${options.label}团队预设，再执行重命名。`, true)
-        return null
-      }
       options.setMessage(`当前${options.label}团队预设不可重命名。`, true)
       return null
     }
