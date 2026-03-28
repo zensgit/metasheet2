@@ -861,7 +861,7 @@ import {
   buildAuditTeamViewSummaryHint,
   buildRecommendedAuditTeamViews,
   consumeStaleRecommendedAuditTeamViewFocusId,
-  resolveApplicableRecommendedAuditTeamView,
+  resolvePlmRecommendedAuditTeamViewActionFeedback,
   resolveAuditTeamViewRecommendationFilter,
   shouldShowAuditTeamViewRecommendations,
   type PlmRecommendedAuditTeamView,
@@ -2500,10 +2500,6 @@ async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
   setStatus(tr('Audit team view applied.', '审计团队视图已应用。'))
 }
 
-function findApplicableRecommendedAuditTeamView(recommendedViewId: string) {
-  return resolveApplicableRecommendedAuditTeamView(auditTeamViews.value, recommendedViewId)
-}
-
 async function shareAuditTeamViewEntry(
   view: PlmWorkbenchTeamView<'audit'>,
   source?: PlmAuditTeamViewCollaborationSource,
@@ -2629,7 +2625,16 @@ async function setAuditTeamViewDefaultEntry(
 }
 
 async function applyRecommendedAuditTeamView(view: PlmRecommendedAuditTeamView) {
-  const target = findApplicableRecommendedAuditTeamView(view.id)
+  const target = findAuditTeamViewById(view.id)
+  const feedback = resolvePlmRecommendedAuditTeamViewActionFeedback({
+    actionKind: 'apply',
+    target,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
   if (!target) return
   await applyAuditTeamViewEntry(target)
 }
@@ -2692,15 +2697,32 @@ async function focusRecommendedAuditTeamView(view: PlmWorkbenchTeamView<'audit'>
 
 async function runRecommendedAuditTeamViewSecondaryAction(view: PlmRecommendedAuditTeamView) {
   const target = findAuditTeamViewById(view.id)
-  if (!target || target.isArchived) return
 
   if (view.secondaryActionKind === 'set-default') {
-    if (!canSetDefaultPlmCollaborativeEntry(target)) return
+    const feedback = resolvePlmRecommendedAuditTeamViewActionFeedback({
+      actionKind: 'set-default',
+      target,
+      tr,
+    })
+    if (feedback) {
+      setStatus(feedback.message, feedback.kind)
+      return
+    }
+    if (!target) return
     await setAuditTeamViewDefaultEntry(target, 'recommendation')
     return
   }
 
-  if (!canSharePlmCollaborativeEntry(target)) return
+  const feedback = resolvePlmRecommendedAuditTeamViewActionFeedback({
+    actionKind: 'share',
+    target,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!target) return
   await shareAuditTeamViewEntry(target, 'recommendation')
 }
 

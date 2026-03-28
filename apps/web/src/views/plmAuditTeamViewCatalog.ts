@@ -1,6 +1,9 @@
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
 import { canApplyPlmAuditTeamView } from './plmAuditTeamViewManagement'
-import { canSharePlmCollaborativeEntry } from './plm/usePlmCollaborativePermissions'
+import {
+  canSetDefaultPlmCollaborativeEntry,
+  canSharePlmCollaborativeEntry,
+} from './plm/usePlmCollaborativePermissions'
 
 export type PlmRecommendedAuditTeamViewReason = 'default' | 'recent-default' | 'recent-update'
 export type PlmRecommendedAuditTeamViewFilter = '' | PlmRecommendedAuditTeamViewReason
@@ -40,6 +43,13 @@ export type PlmAuditTeamViewSummaryHint = {
   description: string
 }
 
+export type PlmRecommendedAuditTeamViewActionKind = 'apply' | 'share' | 'set-default'
+
+export type PlmRecommendedAuditTeamViewActionFeedback = {
+  kind: 'info' | 'error'
+  message: string
+}
+
 export function consumeStaleRecommendedAuditTeamViewFocusId(
   visibleViews: readonly Pick<PlmRecommendedAuditTeamView, 'id'>[],
   focusedViewId: string,
@@ -55,6 +65,70 @@ export function resolveApplicableRecommendedAuditTeamView(
   const target = views.find((view) => view.id === recommendedViewId) || null
   if (!target || !canApplyPlmAuditTeamView(target)) return null
   return target
+}
+
+export function resolvePlmRecommendedAuditTeamViewActionFeedback(options: {
+  actionKind: PlmRecommendedAuditTeamViewActionKind
+  target: PlmWorkbenchTeamView<'audit'> | null | undefined
+  tr: (en: string, zh: string) => string
+}): PlmRecommendedAuditTeamViewActionFeedback | null {
+  const target = options.target || null
+  const { tr } = options
+
+  if (!target) {
+    return {
+      kind: 'error',
+      message: tr('Current recommended audit team view is unavailable.', '当前推荐审计团队视图不可用。'),
+    }
+  }
+
+  if (options.actionKind === 'apply') {
+    if (!canApplyPlmAuditTeamView(target)) {
+      return {
+        kind: 'error',
+        message: target.isArchived
+          ? tr('Restore the audit team view before applying it.', '请先恢复审计团队视图，再执行应用。')
+          : tr('Current recommended audit team view cannot be applied.', '当前推荐审计团队视图不可应用。'),
+      }
+    }
+    return null
+  }
+
+  if (options.actionKind === 'set-default') {
+    if (target.isDefault) {
+      return {
+        kind: 'info',
+        message: tr('Audit team view already set as default.', '审计团队视图已设为默认。'),
+      }
+    }
+    if (target.isArchived) {
+      return {
+        kind: 'error',
+        message: tr('Restore the audit team view before setting it as default.', '请先恢复审计团队视图，再设为默认。'),
+      }
+    }
+    if (!canSetDefaultPlmCollaborativeEntry(target)) {
+      return {
+        kind: 'error',
+        message: tr('Current recommended audit team view cannot be set as default.', '当前推荐审计团队视图不可设为默认。'),
+      }
+    }
+    return null
+  }
+
+  if (target.isArchived) {
+    return {
+      kind: 'error',
+      message: tr('Restore the audit team view before sharing it.', '请先恢复审计团队视图，再执行分享。'),
+    }
+  }
+  if (!canSharePlmCollaborativeEntry(target)) {
+    return {
+      kind: 'error',
+      message: tr('Current recommended audit team view cannot be shared.', '当前推荐审计团队视图不可分享。'),
+    }
+  }
+  return null
 }
 
 const AUDIT_TEAM_VIEW_RECOMMENDATION_DESCRIPTIONS: Record<string, string> = {

@@ -5,6 +5,7 @@ import {
   buildRecommendedAuditTeamViews,
   consumeStaleRecommendedAuditTeamViewFocusId,
   resolveApplicableRecommendedAuditTeamView,
+  resolvePlmRecommendedAuditTeamViewActionFeedback,
   resolveAuditTeamViewRecommendationFilter,
   shouldShowAuditTeamViewRecommendations,
 } from '../src/views/plmAuditTeamViewCatalog'
@@ -260,5 +261,55 @@ describe('plmAuditTeamViewCatalog', () => {
     expect(resolveApplicableRecommendedAuditTeamView([applicable, readOnly, archived], 'read-only')).toBeNull()
     expect(resolveApplicableRecommendedAuditTeamView([applicable, readOnly, archived], 'archived')).toBeNull()
     expect(resolveApplicableRecommendedAuditTeamView([applicable], 'missing')).toBeNull()
+  })
+
+  it('returns explicit feedback when a recommended apply target is no longer applicable', () => {
+    expect(resolvePlmRecommendedAuditTeamViewActionFeedback({
+      actionKind: 'apply',
+      target: createAuditTeamView({
+        id: 'archived',
+        isArchived: true,
+        permissions: {
+          ...createAuditTeamView().permissions,
+          canApply: false,
+        },
+      }),
+      tr: (en, zh) => `${en}|${zh}`,
+    })).toEqual({
+      kind: 'error',
+      message: 'Restore the audit team view before applying it.|请先恢复审计团队视图，再执行应用。',
+    })
+  })
+
+  it('returns explicit feedback when a recommended secondary target cannot be shared or defaulted', () => {
+    expect(resolvePlmRecommendedAuditTeamViewActionFeedback({
+      actionKind: 'share',
+      target: createAuditTeamView({
+        permissions: {
+          ...createAuditTeamView().permissions,
+          canShare: false,
+        },
+      }),
+      tr: (en, zh) => `${en}|${zh}`,
+    })).toEqual({
+      kind: 'error',
+      message: 'Current recommended audit team view cannot be shared.|当前推荐审计团队视图不可分享。',
+    })
+
+    expect(resolvePlmRecommendedAuditTeamViewActionFeedback({
+      actionKind: 'set-default',
+      target: createAuditTeamView({
+        isDefault: true,
+        permissions: {
+          ...createAuditTeamView().permissions,
+          canSetDefault: false,
+          canClearDefault: true,
+        },
+      }),
+      tr: (en, zh) => `${en}|${zh}`,
+    })).toEqual({
+      kind: 'info',
+      message: 'Audit team view already set as default.|审计团队视图已设为默认。',
+    })
   })
 })
