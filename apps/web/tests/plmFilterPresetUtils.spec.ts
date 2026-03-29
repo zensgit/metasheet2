@@ -85,6 +85,65 @@ describe('plmFilterPresetUtils', () => {
     })
   })
 
+  it('builds local preset share links with panel bootstrap context', () => {
+    const bomUrl = buildFilterPresetShareUrl(
+      'bom',
+      { key: 'bom:1', label: '关键件', field: 'path', value: 'root/a', group: '机械' },
+      'replace',
+      '/plm',
+      'http://example.test',
+      {
+        productId: 'product-42',
+        itemNumber: 'P-1001',
+        itemType: 'Assembly',
+      },
+    )
+    const whereUsedUrl = buildFilterPresetShareUrl(
+      'where-used',
+      { key: 'wu:1', label: '共享父件', field: 'all', value: 'assy-01', group: '' },
+      'merge',
+      '/plm',
+      'http://example.test',
+      {
+        productId: 'product-42',
+        itemNumber: 'P-1001',
+        itemType: 'Assembly',
+        whereUsedItemId: 'item-77',
+      },
+    )
+
+    const bomParams = new URL(bomUrl).searchParams
+    expect(bomParams.get('panel')).toBe('product')
+    expect(bomParams.get('productId')).toBe('product-42')
+    expect(bomParams.get('itemNumber')).toBe('P-1001')
+    expect(bomParams.get('itemType')).toBe('Assembly')
+    expect(bomParams.get('autoload')).toBe('true')
+    expect(bomParams.get('bomPresetShareMode')).toBe('replace')
+    expect(
+      decodeFilterPresetSharePayload(String(bomParams.get('bomPresetShare')), [{ value: 'all' }, { value: 'path' }]),
+    ).toMatchObject({
+      label: '关键件',
+      field: 'path',
+      value: 'root/a',
+    })
+
+    const whereUsedParams = new URL(whereUsedUrl).searchParams
+    expect(whereUsedParams.get('panel')).toBe('where-used')
+    expect(whereUsedParams.get('productId')).toBe('product-42')
+    expect(whereUsedParams.get('itemNumber')).toBe('P-1001')
+    expect(whereUsedParams.get('itemType')).toBe('Assembly')
+    expect(whereUsedParams.get('whereUsedItemId')).toBe('item-77')
+    expect(whereUsedParams.get('autoload')).toBe('true')
+    expect(whereUsedParams.get('whereUsedPresetShareMode')).toBeNull()
+    expect(
+      decodeFilterPresetSharePayload(String(whereUsedParams.get('whereUsedPresetShare')), [{ value: 'all' }, { value: 'path' }]),
+    ).toMatchObject({
+      label: '共享父件',
+      field: 'all',
+      value: 'assy-01',
+    })
+  })
+
   it('builds explicit team preset share links that preserve collaborative identity and cold-start context', () => {
     const bomUrl = buildTeamFilterPresetShareUrl(
       'bom',

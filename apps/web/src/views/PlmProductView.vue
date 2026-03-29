@@ -3551,7 +3551,18 @@ async function shareBomFilterPreset() {
     setDeepLinkMessage('请选择 BOM 过滤预设后分享。', true)
     return
   }
-  const url = buildFilterPresetShareUrl('bom', preset, bomFilterPresetImportMode.value, route.path)
+  const url = buildFilterPresetShareUrl(
+    'bom',
+    preset,
+    bomFilterPresetImportMode.value,
+    route.path,
+    undefined,
+    {
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : '',
+    },
+  )
   if (!url) {
     setDeepLinkMessage('生成 BOM 过滤预设分享链接失败。', true)
     return
@@ -3743,7 +3754,19 @@ async function shareWhereUsedFilterPreset() {
     setDeepLinkMessage('请选择 Where-Used 过滤预设后分享。', true)
     return
   }
-  const url = buildFilterPresetShareUrl('where-used', preset, whereUsedFilterPresetImportMode.value, route.path)
+  const url = buildFilterPresetShareUrl(
+    'where-used',
+    preset,
+    whereUsedFilterPresetImportMode.value,
+    route.path,
+    undefined,
+    {
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : '',
+      whereUsedItemId: whereUsedItemId.value,
+    },
+  )
   if (!url) {
     setDeepLinkMessage('生成 Where-Used 过滤预设分享链接失败。', true)
     return

@@ -244,6 +244,12 @@ export function buildFilterPresetShareUrl(
   mode: FilterPresetShareMode,
   basePath: string,
   origin?: string,
+  routeContext?: {
+    productId?: string | null
+    itemNumber?: string | null
+    itemType?: string | null
+    whereUsedItemId?: string | null
+  },
 ): string {
   const resolvedOrigin = origin ?? (typeof window !== 'undefined' ? window.location.origin : '')
   if (!resolvedOrigin) return ''
@@ -252,11 +258,38 @@ export function buildFilterPresetShareUrl(
   const base = `${resolvedOrigin}${basePath}`
   const params = new URLSearchParams()
   if (kind === 'bom') {
+    params.set('panel', 'product')
     params.set('bomPresetShare', encoded)
     if (mode === 'replace') params.set('bomPresetShareMode', mode)
+    if (routeContext?.productId) {
+      params.set('productId', routeContext.productId)
+    }
+    if (routeContext?.itemNumber) {
+      params.set('itemNumber', routeContext.itemNumber)
+    }
+    if (routeContext?.itemType) {
+      params.set('itemType', routeContext.itemType)
+    }
+    if (routeContext?.productId || routeContext?.itemNumber) {
+      params.set('autoload', 'true')
+    }
   } else {
+    params.set('panel', 'where-used')
     params.set('whereUsedPresetShare', encoded)
     if (mode === 'replace') params.set('whereUsedPresetShareMode', mode)
+    if (routeContext?.productId) {
+      params.set('productId', routeContext.productId)
+    }
+    if (routeContext?.itemNumber) {
+      params.set('itemNumber', routeContext.itemNumber)
+    }
+    if (routeContext?.itemType) {
+      params.set('itemType', routeContext.itemType)
+    }
+    if (routeContext?.whereUsedItemId) {
+      params.set('whereUsedItemId', routeContext.whereUsedItemId)
+      params.set('autoload', 'true')
+    }
   }
   const query = params.toString()
   return query ? `${base}?${query}` : base
