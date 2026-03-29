@@ -158,8 +158,14 @@ export function resolvePlmHydratedPanelDataReset(options: {
     const nextSearchKey = buildSearchKey(options.nextRouteState)
     const previousProductContextKey = buildProductContextKey(options.previousRouteState)
     const nextProductContextKey = buildProductContextKey(options.nextRouteState)
+    const previousBomKey = buildBomKey(options.previousRouteState)
+    const nextBomKey = buildBomKey(options.nextRouteState)
+    const previousDocumentsKey = buildDocumentsKey(options.previousRouteState)
+    const nextDocumentsKey = buildDocumentsKey(options.nextRouteState)
     const previousCadKey = buildCadKey(options.previousRouteState)
     const nextCadKey = buildCadKey(options.nextRouteState)
+    const previousApprovalsKey = buildApprovalsKey(options.previousRouteState)
+    const nextApprovalsKey = buildApprovalsKey(options.nextRouteState)
     const previousWhereUsedKey = buildWhereUsedKey(options.previousRouteState)
     const nextWhereUsedKey = buildWhereUsedKey(options.nextRouteState)
     const previousCompareKey = buildCompareKey(options.previousRouteState)
@@ -170,10 +176,10 @@ export function resolvePlmHydratedPanelDataReset(options: {
     return {
       clearSearch: previousSearchKey !== nextSearchKey,
       clearProduct: previousProductContextKey !== nextProductContextKey,
-      clearBom: previousProductContextKey !== nextProductContextKey,
-      clearDocuments: previousProductContextKey !== nextProductContextKey,
+      clearBom: previousBomKey !== nextBomKey,
+      clearDocuments: previousDocumentsKey !== nextDocumentsKey,
       clearCad: previousCadKey !== nextCadKey,
-      clearApprovals: previousProductContextKey !== nextProductContextKey,
+      clearApprovals: previousApprovalsKey !== nextApprovalsKey,
       clearWhereUsed: previousWhereUsedKey !== nextWhereUsedKey,
       clearCompare: previousCompareKey !== nextCompareKey,
       clearSubstitutes: previousSubstitutesKey !== nextSubstitutesKey,

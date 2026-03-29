@@ -50,6 +50,70 @@ describe('plmHydratedPanelDataReset', () => {
     })
   })
 
+  it('clears non-autoload bom data when route-owned bom options drift under the same product context', () => {
+    expect(resolvePlmHydratedPanelDataReset({
+      previousRouteState: {
+        autoload: false,
+        panel: 'product',
+        productId: 'prod-100',
+        itemNumber: 'P-100',
+        itemType: 'Part',
+        bomDepth: 2,
+      },
+      nextRouteState: {
+        autoload: false,
+        panel: 'product',
+        productId: 'prod-100',
+        itemNumber: 'P-100',
+        itemType: 'Part',
+        bomDepth: 3,
+      },
+    })).toEqual({
+      clearSearch: false,
+      clearProduct: false,
+      clearBom: true,
+      clearDocuments: false,
+      clearCad: false,
+      clearApprovals: false,
+      clearWhereUsed: false,
+      clearCompare: false,
+      clearSubstitutes: false,
+    })
+  })
+
+  it('clears non-autoload documents and approvals data when route-owned panel state drifts under the same product context', () => {
+    expect(resolvePlmHydratedPanelDataReset({
+      previousRouteState: {
+        autoload: false,
+        panel: 'documents,approvals',
+        productId: 'prod-100',
+        itemNumber: 'P-100',
+        itemType: 'Part',
+        documentRole: 'drawing',
+        approvalsStatus: 'pending',
+      },
+      nextRouteState: {
+        autoload: false,
+        panel: 'documents,approvals',
+        productId: 'prod-100',
+        itemNumber: 'P-100',
+        itemType: 'Part',
+        documentRole: 'spec',
+        approvalsStatus: 'rejected',
+      },
+    })).toEqual({
+      clearSearch: false,
+      clearProduct: false,
+      clearBom: false,
+      clearDocuments: true,
+      clearCad: false,
+      clearApprovals: true,
+      clearWhereUsed: false,
+      clearCompare: false,
+      clearSubstitutes: false,
+    })
+  })
+
   it('clears stale non-target panel data for cad-only share links', () => {
     expect(resolvePlmHydratedPanelDataReset({
       previousRouteState: {
