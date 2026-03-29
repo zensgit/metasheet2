@@ -1,5 +1,5 @@
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
-import type { PlmAuditRouteState } from './plmAuditQueryState'
+import { DEFAULT_PLM_AUDIT_ROUTE_STATE, type PlmAuditRouteState } from './plmAuditQueryState'
 import type { PlmAuditSavedViewShareFollowupSource } from './plmAuditSavedViewShareFollowup'
 import {
   resolveAuditTeamViewRecommendationFilter,
@@ -297,7 +297,7 @@ export function shouldKeepPlmAuditTeamViewCollaborationFollowup(
   followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'action' | 'teamViewId'> | null,
   routeState: Pick<
     PlmAuditRouteState,
-    'page' | 'teamViewId' | 'q' | 'actorId' | 'kind' | 'action' | 'resourceType' | 'from' | 'to'
+    'page' | 'teamViewId' | 'q' | 'actorId' | 'kind' | 'action' | 'resourceType' | 'from' | 'to' | 'windowMinutes'
   >,
 ) {
   if (!followup) return false
@@ -307,6 +307,7 @@ export function shouldKeepPlmAuditTeamViewCollaborationFollowup(
       && routeState.kind === 'audit'
       && !routeState.from
       && !routeState.to
+      && routeState.windowMinutes === DEFAULT_PLM_AUDIT_ROUTE_STATE.windowMinutes
     return routeState.action === 'set-default'
       && routeState.resourceType === 'plm-team-view-default'
       && routeState.q === followup.teamViewId

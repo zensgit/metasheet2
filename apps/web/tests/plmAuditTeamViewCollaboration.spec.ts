@@ -1117,6 +1117,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       resourceType: '',
       from: '',
       to: '',
+      windowMinutes: 180,
     })).toBe(true)
 
     expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
@@ -1132,6 +1133,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       resourceType: '',
       from: '',
       to: '',
+      windowMinutes: 180,
     })).toBe(false)
 
     expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
@@ -1147,6 +1149,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       resourceType: 'plm-team-view-default',
       from: '',
       to: '',
+      windowMinutes: 180,
     })).toBe(true)
 
     expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
@@ -1162,6 +1165,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       resourceType: '',
       from: '',
       to: '',
+      windowMinutes: 180,
     })).toBe(false)
 
     expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
@@ -1177,6 +1181,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       resourceType: 'plm-team-view-default',
       from: '',
       to: '',
+      windowMinutes: 180,
     })).toBe(false)
 
     expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
@@ -1192,6 +1197,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       resourceType: 'plm-team-view-default',
       from: '',
       to: '',
+      windowMinutes: 180,
     })).toBe(false)
 
     expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
@@ -1207,6 +1213,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       resourceType: 'plm-team-view-default',
       from: '',
       to: '',
+      windowMinutes: 180,
     })).toBe(false)
 
     expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
@@ -1222,6 +1229,23 @@ describe('plmAuditTeamViewCollaboration', () => {
       resourceType: 'plm-team-view-default',
       from: '2026-03-22',
       to: '',
+      windowMinutes: 180,
+    })).toBe(false)
+
+    expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
+      teamViewId: 'audit-view-9',
+      action: 'set-default',
+    }, {
+      page: 1,
+      teamViewId: '',
+      q: 'audit-view-9',
+      actorId: '',
+      kind: 'audit',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+      from: '',
+      to: '',
+      windowMinutes: 720,
     })).toBe(false)
 
     expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
@@ -1237,6 +1261,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       resourceType: 'plm-team-view-default',
       from: '',
       to: '',
+      windowMinutes: 180,
     })).toBe(false)
   })
 
