@@ -65,6 +65,7 @@ import { kanbanRouter } from './routes/kanban'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
+import { adminDirectoryRouter, initializeAdminDirectorySchedules, shutdownAdminDirectorySchedules } from './routes/admin-directory'
 import workflowRouter from './routes/workflow'
 import workflowDesignerRouter from './routes/workflow-designer'
 import { univerMockRouter } from './routes/univer-mock'
@@ -80,8 +81,6 @@ type PluginRuntimeState = {
   lastAttempt?: string
 }
 
-// Transitional shim while older clients still mix `ok` and `success`.
-// Remove this once response payloads are standardized on a single flag.
 function applyResponseCompatibilityAliases(payload: unknown): unknown {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return payload
@@ -628,6 +627,7 @@ export class MetaSheetServer {
 
     // 路由：IAM 用户/角色/会话/审计管理
     this.app.use(adminUsersRouter())
+    this.app.use(adminDirectoryRouter())
 
     // 路由：管理员端点 (带 SafetyGuard 保护)
     this.app.use('/api/admin', initAdminRoutes({
@@ -964,6 +964,15 @@ export class MetaSheetServer {
       })())
     }
 
+    shutdownTasks.push((async () => {
+      try {
+        await shutdownAdminDirectorySchedules()
+        this.logger.info('Directory sync scheduler stopped')
+      } catch (err) {
+        this.logger.warn(`Directory sync scheduler stop failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
     // 4. Destroy API Gateway resources
     // shutdownTasks.push((async () => {
     //   try {
@@ -1097,6 +1106,7 @@ export class MetaSheetServer {
     // Background tasks (after server starts listening)
     if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       this.stopOperationAuditRetention = startOperationAuditRetention({ logger: this.logger })
+      await initializeAdminDirectorySchedules()
     }
 
     // Register signal handlers only for real runtime, not test runners.
