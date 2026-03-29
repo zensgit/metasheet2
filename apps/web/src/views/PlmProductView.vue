@@ -4356,7 +4356,18 @@ const {
     bomTeamPresetQuery.value = value || ''
     scheduleQuerySync({ bomTeamPreset: value || undefined })
   },
-  buildShareUrl: (preset) => buildTeamFilterPresetShareUrl('bom', preset, route.path, 'bom'),
+  buildShareUrl: (preset) => buildTeamFilterPresetShareUrl(
+    'bom',
+    preset,
+    route.path,
+    'bom',
+    undefined,
+    {
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : '',
+    },
+  ),
   copyShareUrl: copyToClipboard,
   shouldAutoApplyDefault: () => {
     const effectiveQuery = applyPlmDeferredRouteQueryPatch(
@@ -4468,7 +4479,19 @@ const {
     whereUsedTeamPresetQuery.value = value || ''
     scheduleQuerySync({ whereUsedTeamPreset: value || undefined })
   },
-  buildShareUrl: (preset) => buildTeamFilterPresetShareUrl('where-used', preset, route.path, 'where-used'),
+  buildShareUrl: (preset) => buildTeamFilterPresetShareUrl(
+    'where-used',
+    preset,
+    route.path,
+    'where-used',
+    undefined,
+    {
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : '',
+      whereUsedItemId: whereUsedItemId.value,
+    },
+  ),
   copyShareUrl: copyToClipboard,
   shouldAutoApplyDefault: () => {
     const effectiveQuery = applyPlmDeferredRouteQueryPatch(

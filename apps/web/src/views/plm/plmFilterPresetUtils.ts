@@ -268,6 +268,12 @@ export function buildTeamFilterPresetShareUrl(
   basePath: string,
   panel?: string,
   origin?: string,
+  routeContext?: {
+    productId?: string | null
+    itemNumber?: string | null
+    itemType?: string | null
+    whereUsedItemId?: string | null
+  },
 ): string {
   const resolvedOrigin = origin ?? (typeof window !== 'undefined' ? window.location.origin : '')
   if (!resolvedOrigin) return ''
@@ -285,11 +291,36 @@ export function buildTeamFilterPresetShareUrl(
     if (preset.state.field && preset.state.field !== 'all') {
       params.set('bomFilterField', preset.state.field)
     }
+    if (routeContext?.productId) {
+      params.set('productId', routeContext.productId)
+    }
+    if (routeContext?.itemNumber) {
+      params.set('itemNumber', routeContext.itemNumber)
+    }
+    if (routeContext?.itemType) {
+      params.set('itemType', routeContext.itemType)
+    }
+    if (routeContext?.productId || routeContext?.itemNumber) {
+      params.set('autoload', 'true')
+    }
   } else {
     params.set('whereUsedTeamPreset', preset.id)
     params.set('whereUsedFilter', preset.state.value)
     if (preset.state.field && preset.state.field !== 'all') {
       params.set('whereUsedFilterField', preset.state.field)
+    }
+    if (routeContext?.productId) {
+      params.set('productId', routeContext.productId)
+    }
+    if (routeContext?.itemNumber) {
+      params.set('itemNumber', routeContext.itemNumber)
+    }
+    if (routeContext?.itemType) {
+      params.set('itemType', routeContext.itemType)
+    }
+    if (routeContext?.whereUsedItemId) {
+      params.set('whereUsedItemId', routeContext.whereUsedItemId)
+      params.set('autoload', 'true')
     }
   }
 

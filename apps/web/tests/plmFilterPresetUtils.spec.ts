@@ -85,7 +85,7 @@ describe('plmFilterPresetUtils', () => {
     })
   })
 
-  it('builds explicit team preset share links that preserve collaborative identity', () => {
+  it('builds explicit team preset share links that preserve collaborative identity and cold-start context', () => {
     const bomUrl = buildTeamFilterPresetShareUrl(
       'bom',
       {
@@ -101,6 +101,11 @@ describe('plmFilterPresetUtils', () => {
       '/plm',
       'bom',
       'http://example.test',
+      {
+        productId: 'product-42',
+        itemNumber: 'P-1001',
+        itemType: 'Assembly',
+      },
     )
     const whereUsedUrl = buildTeamFilterPresetShareUrl(
       'where-used',
@@ -117,6 +122,12 @@ describe('plmFilterPresetUtils', () => {
       '/plm',
       'where-used',
       'http://example.test',
+      {
+        productId: 'product-42',
+        itemNumber: 'P-1001',
+        itemType: 'Assembly',
+        whereUsedItemId: 'item-77',
+      },
     )
 
     const bomParams = new URL(bomUrl).searchParams
@@ -124,12 +135,21 @@ describe('plmFilterPresetUtils', () => {
     expect(bomParams.get('bomTeamPreset')).toBe('bom-team-1')
     expect(bomParams.get('bomFilter')).toBe('root/a')
     expect(bomParams.get('bomFilterField')).toBe('path')
+    expect(bomParams.get('productId')).toBe('product-42')
+    expect(bomParams.get('itemNumber')).toBe('P-1001')
+    expect(bomParams.get('itemType')).toBe('Assembly')
+    expect(bomParams.get('autoload')).toBe('true')
 
     const whereUsedParams = new URL(whereUsedUrl).searchParams
     expect(whereUsedParams.get('panel')).toBe('where-used')
     expect(whereUsedParams.get('whereUsedTeamPreset')).toBe('wu-team-1')
     expect(whereUsedParams.get('whereUsedFilter')).toBe('assy-01')
     expect(whereUsedParams.get('whereUsedFilterField')).toBeNull()
+    expect(whereUsedParams.get('productId')).toBe('product-42')
+    expect(whereUsedParams.get('itemNumber')).toBe('P-1001')
+    expect(whereUsedParams.get('itemType')).toBe('Assembly')
+    expect(whereUsedParams.get('whereUsedItemId')).toBe('item-77')
+    expect(whereUsedParams.get('autoload')).toBe('true')
   })
 
   it('clears stale local preset drafts when the selected preset disappears from the catalog', () => {
