@@ -28,11 +28,60 @@ const sessionMocks = vi.hoisted(() => ({
 }))
 
 const sessionRegistryMocks = vi.hoisted(() => ({
+  createUserSession: vi.fn(),
   listUserSessions: vi.fn(),
   getUserSession: vi.fn(),
+  refreshUserSessionExpiry: vi.fn(),
   revokeUserSession: vi.fn(),
   touchUserSession: vi.fn(),
   revokeOtherUserSessions: vi.fn(),
+}))
+
+const dingTalkAuthMocks = vi.hoisted(() => ({
+  isConfigured: vi.fn(),
+  buildAuthorizeUrl: vi.fn(),
+  verifyState: vi.fn(),
+  exchangeCode: vi.fn(),
+  getProvisioningConfig: vi.fn(),
+}))
+
+const MockDingTalkAuthExchangeError = vi.hoisted(() => class extends Error {
+  stage: 'token' | 'user-info'
+  status: number
+  details?: Record<string, unknown>
+
+  constructor(
+    stage: 'token' | 'user-info',
+    status: number,
+    message: string,
+    details?: Record<string, unknown>,
+  ) {
+    super(message)
+    this.stage = stage
+    this.status = status
+    this.details = details
+  }
+})
+
+const externalIdentityMocks = vi.hoisted(() => ({
+  buildDingTalkExternalKey: vi.fn(),
+  findDingTalkExternalIdentity: vi.fn(),
+  listUserExternalIdentities: vi.fn(),
+  upsertExternalIdentity: vi.fn(),
+  deleteUserExternalIdentity: vi.fn(),
+  touchExternalIdentityLogin: vi.fn(),
+}))
+
+const externalAuthGrantMocks = vi.hoisted(() => ({
+  isUserExternalAuthEnabled: vi.fn(),
+}))
+
+const auditMocks = vi.hoisted(() => ({
+  auditLog: vi.fn(),
+}))
+
+const directorySyncMocks = vi.hoisted(() => ({
+  captureUnboundLoginForReview: vi.fn(),
 }))
 
 vi.mock('../../src/auth/AuthService', () => ({
@@ -45,6 +94,8 @@ vi.mock('../../src/auth/invite-tokens', () => ({
 
 vi.mock('../../src/db/pg', () => ({
   query: pgMocks.query,
+  transaction: vi.fn(async (handler: (client: { query: typeof pgMocks.query }) => Promise<unknown>) => handler({ query: pgMocks.query })),
+  pool: {},
 }))
 
 vi.mock('bcryptjs', () => bcryptMocks)
@@ -54,14 +105,43 @@ vi.mock('../../src/auth/session-revocation', () => ({
 }))
 
 vi.mock('../../src/auth/session-registry', () => ({
+  createUserSession: sessionRegistryMocks.createUserSession,
   listUserSessions: sessionRegistryMocks.listUserSessions,
   getUserSession: sessionRegistryMocks.getUserSession,
+  refreshUserSessionExpiry: sessionRegistryMocks.refreshUserSessionExpiry,
   revokeUserSession: sessionRegistryMocks.revokeUserSession,
   touchUserSession: sessionRegistryMocks.touchUserSession,
   revokeOtherUserSessions: sessionRegistryMocks.revokeOtherUserSessions,
 }))
 
-import { authRouter } from '../../src/routes/auth'
+vi.mock('../../src/auth/dingtalk-auth', () => ({
+  dingTalkAuthService: dingTalkAuthMocks,
+  DingTalkAuthExchangeError: MockDingTalkAuthExchangeError,
+  isDingTalkAuthExchangeError: (error: unknown) => error instanceof MockDingTalkAuthExchangeError,
+}))
+
+vi.mock('../../src/auth/external-identities', () => ({
+  buildDingTalkExternalKey: externalIdentityMocks.buildDingTalkExternalKey,
+  findDingTalkExternalIdentity: externalIdentityMocks.findDingTalkExternalIdentity,
+  listUserExternalIdentities: externalIdentityMocks.listUserExternalIdentities,
+  upsertExternalIdentity: externalIdentityMocks.upsertExternalIdentity,
+  deleteUserExternalIdentity: externalIdentityMocks.deleteUserExternalIdentity,
+  touchExternalIdentityLogin: externalIdentityMocks.touchExternalIdentityLogin,
+}))
+
+vi.mock('../../src/auth/external-auth-grants', () => ({
+  isUserExternalAuthEnabled: externalAuthGrantMocks.isUserExternalAuthEnabled,
+}))
+
+vi.mock('../../src/audit/audit', () => ({
+  auditLog: auditMocks.auditLog,
+}))
+
+vi.mock('../../src/directory/directory-sync', () => ({
+  directorySyncService: directorySyncMocks,
+}))
+
+import { authRouter, resetAuthRouteRateLimitsForTests } from '../../src/routes/auth'
 
 function createMockResponse() {
   return {
@@ -92,11 +172,13 @@ async function invokeRoute(
     query?: Record<string, unknown>
     params?: Record<string, string>
     body?: Record<string, unknown>
+    ip?: string
   } = {},
 ) {
   const layer = authRouter.stack.find((entry) => entry.route?.path === path && entry.route?.methods?.[method])
   if (!layer?.route?.stack) throw new Error(`Route ${method.toUpperCase()} ${path} not found`)
 
+  const requestIp = options.ip ?? '127.0.0.1'
   const req = {
     method: method.toUpperCase(),
     url: path,
@@ -105,13 +187,15 @@ async function invokeRoute(
     params: options.params ?? {},
     body: options.body ?? {},
     user: undefined,
-    ip: '127.0.0.1',
-    socket: { remoteAddress: '127.0.0.1' },
+    ip: requestIp,
+    socket: { remoteAddress: requestIp },
   } as unknown as Request
 
   const res = createMockResponse()
 
   for (const routeLayer of layer.route.stack) {
+    if (res.headersSent) break
+
     await new Promise<void>((resolve, reject) => {
       try {
         const maybePromise = routeLayer.handle(req, res, (error?: unknown) => {
@@ -120,13 +204,15 @@ async function invokeRoute(
         })
         if (maybePromise && typeof maybePromise.then === 'function') {
           Promise.resolve(maybePromise).then(() => resolve()).catch(reject)
-        } else if (routeLayer.handle.length < 3) {
+        } else if (routeLayer.handle.length < 3 || res.headersSent) {
           resolve()
         }
       } catch (error) {
         reject(error)
       }
     })
+
+    if (res.headersSent) break
   }
 
   return res
@@ -134,6 +220,7 @@ async function invokeRoute(
 
 describe('auth login routes', () => {
   beforeEach(() => {
+    resetAuthRouteRateLimitsForTests()
     authServiceMocks.login.mockReset()
     authServiceMocks.register.mockReset()
     authServiceMocks.refreshToken.mockReset()
@@ -145,11 +232,27 @@ describe('auth login routes', () => {
     bcryptMocks.hash.mockReset()
     bcryptMocks.compare.mockReset()
     sessionMocks.revokeUserSessions.mockReset()
+    sessionRegistryMocks.createUserSession.mockReset()
     sessionRegistryMocks.listUserSessions.mockReset()
     sessionRegistryMocks.getUserSession.mockReset()
+    sessionRegistryMocks.refreshUserSessionExpiry.mockReset()
     sessionRegistryMocks.revokeUserSession.mockReset()
     sessionRegistryMocks.touchUserSession.mockReset()
     sessionRegistryMocks.revokeOtherUserSessions.mockReset()
+    dingTalkAuthMocks.isConfigured.mockReset()
+    dingTalkAuthMocks.buildAuthorizeUrl.mockReset()
+    dingTalkAuthMocks.verifyState.mockReset()
+    dingTalkAuthMocks.exchangeCode.mockReset()
+    dingTalkAuthMocks.getProvisioningConfig.mockReset()
+    externalIdentityMocks.buildDingTalkExternalKey.mockReset()
+    externalIdentityMocks.findDingTalkExternalIdentity.mockReset()
+    externalIdentityMocks.listUserExternalIdentities.mockReset()
+    externalIdentityMocks.upsertExternalIdentity.mockReset()
+    externalIdentityMocks.deleteUserExternalIdentity.mockReset()
+    externalIdentityMocks.touchExternalIdentityLogin.mockReset()
+    externalAuthGrantMocks.isUserExternalAuthEnabled.mockReset().mockResolvedValue(true)
+    auditMocks.auditLog.mockReset()
+    directorySyncMocks.captureUnboundLoginForReview.mockReset().mockResolvedValue(null)
   })
 
   it('returns feature payload on successful login', async () => {
@@ -165,6 +268,9 @@ describe('auth login routes', () => {
       },
       token: 'jwt-login-token',
     })
+    authServiceMocks.createToken.mockReturnValue('jwt-session-token')
+    authServiceMocks.readTokenPayload.mockReturnValue({ exp: Math.floor(Date.now() / 1000) + 3600 })
+    sessionRegistryMocks.createUserSession.mockResolvedValue({ id: 'session-1' })
 
     const response = await invokeRoute('post', '/login', {
       body: {
@@ -174,10 +280,11 @@ describe('auth login routes', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect((response.body as Record<string, any>).data.token).toBe('jwt-login-token')
+    expect((response.body as Record<string, any>).data.token).toBe('jwt-session-token')
     expect((response.body as Record<string, any>).data.features).toMatchObject({
       attendance: true,
       workflow: expect.any(Boolean),
+      platformAdmin: true,
       attendanceAdmin: true,
     })
   })
@@ -202,6 +309,7 @@ describe('auth login routes', () => {
     expect(response.statusCode).toBe(200)
     expect(authServiceMocks.verifyToken).toHaveBeenCalledWith('live-token')
     expect((response.body as Record<string, any>).data.features.attendance).toBe(true)
+    expect((response.body as Record<string, any>).data.features.platformAdmin).toBe(false)
   })
 
   it('lists current user sessions and exposes currentSessionId', async () => {
@@ -251,6 +359,635 @@ describe('auth login routes', () => {
 
     expect(response.statusCode).toBe(401)
     expect((response.body as Record<string, any>).error).toBe('No token provided')
+  })
+
+  it('returns DingTalk login URL when configured', async () => {
+    dingTalkAuthMocks.isConfigured.mockReturnValue(true)
+    dingTalkAuthMocks.buildAuthorizeUrl.mockReturnValue({
+      url: 'https://login.dingtalk.com/oauth2/auth?state=abc',
+      state: 'abc',
+      redirect: '/settings',
+    })
+
+    const response = await invokeRoute('get', '/dingtalk/login-url', {
+      query: { redirect: '/settings' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      provider: 'dingtalk',
+      url: 'https://login.dingtalk.com/oauth2/auth?state=abc',
+      loginUrl: 'https://login.dingtalk.com/oauth2/auth?state=abc',
+      state: 'abc',
+      redirect: '/settings',
+    })
+  })
+
+  it('rate limits DingTalk login-url requests per IP', async () => {
+    dingTalkAuthMocks.isConfigured.mockReturnValue(true)
+    dingTalkAuthMocks.buildAuthorizeUrl.mockReturnValue({
+      url: 'https://login.dingtalk.com/oauth2/auth?state=abc',
+      state: 'abc',
+      redirect: '/settings',
+    })
+
+    let response = await invokeRoute('get', '/dingtalk/login-url', {
+      query: { redirect: '/settings' },
+      ip: '10.0.0.8',
+    })
+
+    expect(response.statusCode).toBe(200)
+
+    for (let attempt = 0; attempt < 20; attempt++) {
+      response = await invokeRoute('get', '/dingtalk/login-url', {
+        query: { redirect: '/settings' },
+        ip: '10.0.0.8',
+      })
+    }
+
+    expect(response.statusCode).toBe(429)
+    expect((response.body as Record<string, any>).error).toContain('Too many DingTalk login attempts')
+  })
+
+  it('returns DingTalk bind URL for the current user', async () => {
+    dingTalkAuthMocks.isConfigured.mockReturnValue(true)
+    dingTalkAuthMocks.buildAuthorizeUrl.mockReturnValue({
+      url: 'https://login.dingtalk.com/oauth2/auth?state=bind',
+      state: 'bind',
+      redirect: '/settings',
+    })
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'bound@example.com',
+      name: 'Bound User',
+      role: 'user',
+      permissions: ['attendance:read'],
+      created_at: new Date('2026-03-23T00:00:00.000Z'),
+      updated_at: new Date('2026-03-23T00:00:00.000Z'),
+    })
+
+    const response = await invokeRoute('post', '/dingtalk/bind/start', {
+      headers: {
+        authorization: 'Bearer live-token',
+      },
+      body: {
+        redirect: '/settings',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      provider: 'dingtalk',
+      url: 'https://login.dingtalk.com/oauth2/auth?state=bind',
+      bindUrl: 'https://login.dingtalk.com/oauth2/auth?state=bind',
+      state: 'bind',
+      redirect: '/settings',
+    })
+  })
+
+  it('rejects DingTalk bind start when the current MetaSheet account is not authorized', async () => {
+    dingTalkAuthMocks.isConfigured.mockReturnValue(true)
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'bound@example.com',
+      name: 'Bound User',
+      role: 'user',
+      permissions: ['attendance:read'],
+      created_at: new Date('2026-03-23T00:00:00.000Z'),
+      updated_at: new Date('2026-03-23T00:00:00.000Z'),
+    })
+    externalAuthGrantMocks.isUserExternalAuthEnabled.mockResolvedValue(false)
+
+    const response = await invokeRoute('post', '/dingtalk/bind/start', {
+      headers: {
+        authorization: 'Bearer live-token',
+      },
+      body: {
+        redirect: '/settings',
+      },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect((response.body as Record<string, any>).error.code).toBe('DINGTALK_BIND_NOT_AUTHORIZED')
+  })
+
+  it('refreshes token and extends current session expiry when sid is present', async () => {
+    authServiceMocks.refreshToken.mockResolvedValue('refreshed-token')
+    authServiceMocks.readTokenPayload.mockReturnValue({
+      sid: 'session-1',
+      exp: Math.floor(Date.now() / 1000) + 7200,
+    })
+    sessionRegistryMocks.refreshUserSessionExpiry.mockResolvedValue({
+      id: 'session-1',
+      userId: 'user-1',
+      issuedAt: '2026-03-23T00:00:00.000Z',
+      expiresAt: '2026-03-23T02:00:00.000Z',
+      lastSeenAt: '2026-03-23T00:30:00.000Z',
+      revokedAt: null,
+      revokedBy: null,
+      revokeReason: null,
+      ipAddress: '127.0.0.1',
+      userAgent: 'Vitest',
+      createdAt: '2026-03-23T00:00:00.000Z',
+      updatedAt: '2026-03-23T00:30:00.000Z',
+    })
+
+    const response = await invokeRoute('post', '/refresh-token', {
+      body: { token: 'old-token' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.token).toBe('refreshed-token')
+    expect(sessionRegistryMocks.refreshUserSessionExpiry).toHaveBeenCalledWith('session-1', expect.any(String))
+  })
+
+  it('exchanges DingTalk code and logs in a bound user', async () => {
+    dingTalkAuthMocks.isConfigured.mockReturnValue(true)
+    dingTalkAuthMocks.verifyState.mockReturnValue({
+      type: 'dingtalk-auth',
+      mode: 'login',
+      redirect: '/attendance',
+    })
+    dingTalkAuthMocks.exchangeCode.mockResolvedValue({
+      provider: 'dingtalk',
+      userId: 'dt-user-1',
+      unionId: 'union-1',
+      openId: 'open-1',
+      corpId: 'corp-1',
+      name: 'Ding User',
+      nick: 'Ding',
+      email: 'bound@example.com',
+      avatarUrl: null,
+      mobile: null,
+      raw: { userId: 'dt-user-1' },
+    })
+    externalIdentityMocks.findDingTalkExternalIdentity.mockResolvedValue({
+      id: 'binding-1',
+      provider: 'dingtalk',
+      externalKey: 'dingtalk:corp-1:dt-user-1',
+      providerUserId: 'dt-user-1',
+      providerUnionId: 'union-1',
+      providerOpenId: 'open-1',
+      corpId: 'corp-1',
+      userId: 'user-1',
+      profile: {},
+      boundBy: 'user-1',
+      lastLoginAt: null,
+      createdAt: '2026-03-23T00:00:00.000Z',
+      updatedAt: '2026-03-23T00:00:00.000Z',
+    })
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [{
+        id: 'user-1',
+        email: 'bound@example.com',
+        name: 'Bound User',
+        role: 'user',
+        permissions: ['attendance:read'],
+        created_at: new Date('2026-03-23T00:00:00.000Z'),
+        updated_at: new Date('2026-03-23T00:00:00.000Z'),
+      }],
+    })
+    authServiceMocks.createToken
+      .mockReturnValueOnce('lookup-token')
+      .mockReturnValueOnce('session-token')
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'bound@example.com',
+      name: 'Bound User',
+      role: 'user',
+      permissions: ['attendance:read'],
+      created_at: new Date('2026-03-23T00:00:00.000Z'),
+      updated_at: new Date('2026-03-23T00:00:00.000Z'),
+    })
+    authServiceMocks.readTokenPayload.mockReturnValue({ exp: Math.floor(Date.now() / 1000) + 3600 })
+    sessionRegistryMocks.createUserSession.mockResolvedValue({ id: 'session-1' })
+
+    const response = await invokeRoute('post', '/dingtalk/exchange', {
+      body: { code: 'code-1', state: 'state-1' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(externalIdentityMocks.touchExternalIdentityLogin).toHaveBeenCalledWith('binding-1')
+    expect((response.body as Record<string, any>).data.token).toBe('session-token')
+    expect((response.body as Record<string, any>).data.binding.id).toBe('binding-1')
+  })
+
+  it('rate limits DingTalk exchange requests per IP', async () => {
+    dingTalkAuthMocks.isConfigured.mockReturnValue(true)
+    dingTalkAuthMocks.verifyState.mockReturnValue(null)
+
+    let response = await invokeRoute('post', '/dingtalk/exchange', {
+      body: { code: 'code-1', state: 'state-1' },
+      ip: '10.0.0.9',
+    })
+    expect(response.statusCode).toBe(400)
+
+    for (let attempt = 0; attempt < 10; attempt++) {
+      response = await invokeRoute('post', '/dingtalk/exchange', {
+        body: { code: 'code-1', state: 'state-1' },
+        ip: '10.0.0.9',
+      })
+    }
+
+    expect(response.statusCode).toBe(429)
+    expect((response.body as Record<string, any>).error).toContain('Too many DingTalk authorization attempts')
+  })
+
+  it('surfaces structured DingTalk upstream exchange failures', async () => {
+    dingTalkAuthMocks.isConfigured.mockReturnValue(true)
+    dingTalkAuthMocks.verifyState.mockReturnValue({
+      type: 'dingtalk-auth',
+      mode: 'login',
+      redirect: '/settings',
+    })
+    dingTalkAuthMocks.exchangeCode.mockRejectedValue(
+      new MockDingTalkAuthExchangeError(
+        'user-info',
+        403,
+        'Failed to fetch DingTalk user info',
+        {
+          payload: {
+            errcode: 40078,
+            errmsg: 'no permission',
+          },
+        },
+      ),
+    )
+
+    const response = await invokeRoute('post', '/dingtalk/exchange', {
+      body: { code: 'code-1', state: 'state-1' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error).toEqual({
+      code: 'DINGTALK_EXCHANGE_FAILED',
+      message: 'Failed to fetch DingTalk user info',
+      details: {
+        provider: 'dingtalk',
+        stage: 'user-info',
+        upstreamStatus: 403,
+        payload: {
+          errcode: 40078,
+          errmsg: 'no permission',
+        },
+      },
+    })
+  })
+
+  it('rejects DingTalk bind when the current user already has another binding', async () => {
+    dingTalkAuthMocks.isConfigured.mockReturnValue(true)
+    dingTalkAuthMocks.verifyState.mockReturnValue({
+      type: 'dingtalk-auth',
+      mode: 'bind',
+      redirect: '/settings',
+      requestedBy: 'user-1',
+    })
+    dingTalkAuthMocks.exchangeCode.mockResolvedValue({
+      provider: 'dingtalk',
+      userId: 'dt-user-2',
+      unionId: 'union-2',
+      openId: 'open-2',
+      corpId: 'corp-1',
+      name: 'Second Ding User',
+      nick: 'Second',
+      email: 'bound@example.com',
+      avatarUrl: null,
+      mobile: null,
+      raw: { userId: 'dt-user-2' },
+    })
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'bound@example.com',
+      name: 'Bound User',
+      role: 'user',
+      permissions: ['attendance:read'],
+      created_at: new Date('2026-03-23T00:00:00.000Z'),
+      updated_at: new Date('2026-03-23T00:00:00.000Z'),
+    })
+    externalIdentityMocks.findDingTalkExternalIdentity.mockResolvedValue(null)
+    externalIdentityMocks.listUserExternalIdentities.mockResolvedValue([
+      {
+        id: 'binding-existing',
+        provider: 'dingtalk',
+        externalKey: 'dingtalk:corp-1:dt-user-1',
+        providerUserId: 'dt-user-1',
+        providerUnionId: 'union-1',
+        providerOpenId: 'open-1',
+        corpId: 'corp-1',
+        userId: 'user-1',
+        profile: {},
+        boundBy: 'user-1',
+        lastLoginAt: null,
+        createdAt: '2026-03-23T00:00:00.000Z',
+        updatedAt: '2026-03-23T00:00:00.000Z',
+      },
+    ])
+
+    const response = await invokeRoute('post', '/dingtalk/exchange', {
+      headers: {
+        authorization: 'Bearer live-token',
+      },
+      body: { code: 'code-2', state: 'state-2' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect((response.body as Record<string, any>).error.code).toBe('DINGTALK_BIND_EXISTS_FOR_USER')
+  })
+
+  it('lists DingTalk bindings for the current user', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'bound@example.com',
+      name: 'Bound User',
+      role: 'user',
+      permissions: ['attendance:read'],
+      created_at: new Date('2026-03-23T00:00:00.000Z'),
+      updated_at: new Date('2026-03-23T00:00:00.000Z'),
+    })
+    externalIdentityMocks.listUserExternalIdentities.mockResolvedValue([
+      {
+        id: 'binding-1',
+        provider: 'dingtalk',
+        externalKey: 'dingtalk:corp-1:dt-user-1',
+        providerUserId: 'dt-user-1',
+        providerUnionId: 'union-1',
+        providerOpenId: 'open-1',
+        corpId: 'corp-1',
+        userId: 'user-1',
+        profile: {},
+        boundBy: 'user-1',
+        lastLoginAt: null,
+        createdAt: '2026-03-23T00:00:00.000Z',
+        updatedAt: '2026-03-23T00:00:00.000Z',
+      },
+    ])
+
+    const response = await invokeRoute('get', '/dingtalk/bindings', {
+      headers: { authorization: 'Bearer live-token' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(externalIdentityMocks.listUserExternalIdentities).toHaveBeenCalledWith('user-1', 'dingtalk')
+    expect((response.body as Record<string, any>).data.items).toHaveLength(1)
+    expect((response.body as Record<string, any>).data.authEnabled).toBe(true)
+  })
+
+  it('rejects DingTalk login when the bound MetaSheet account is not authorized', async () => {
+    dingTalkAuthMocks.isConfigured.mockReturnValue(true)
+    dingTalkAuthMocks.verifyState.mockReturnValue({
+      type: 'dingtalk-auth',
+      mode: 'login',
+      redirect: '/attendance',
+    })
+    dingTalkAuthMocks.exchangeCode.mockResolvedValue({
+      provider: 'dingtalk',
+      userId: 'dt-user-1',
+      unionId: 'union-1',
+      openId: 'open-1',
+      corpId: 'corp-1',
+      name: 'Ding User',
+      nick: 'Ding',
+      email: 'bound@example.com',
+      avatarUrl: null,
+      mobile: null,
+      raw: { userId: 'dt-user-1' },
+    })
+    externalIdentityMocks.findDingTalkExternalIdentity.mockResolvedValue({
+      id: 'binding-1',
+      provider: 'dingtalk',
+      externalKey: 'dingtalk:corp-1:dt-user-1',
+      providerUserId: 'dt-user-1',
+      providerUnionId: 'union-1',
+      providerOpenId: 'open-1',
+      corpId: 'corp-1',
+      userId: 'user-1',
+      profile: {},
+      boundBy: 'user-1',
+      lastLoginAt: null,
+      createdAt: '2026-03-23T00:00:00.000Z',
+      updatedAt: '2026-03-23T00:00:00.000Z',
+    })
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [{
+        id: 'user-1',
+        email: 'bound@example.com',
+        name: 'Bound User',
+        role: 'user',
+        permissions: ['attendance:read'],
+        created_at: new Date('2026-03-23T00:00:00.000Z'),
+        updated_at: new Date('2026-03-23T00:00:00.000Z'),
+      }],
+    })
+    authServiceMocks.createToken.mockReturnValue('lookup-token')
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'bound@example.com',
+      name: 'Bound User',
+      role: 'user',
+      permissions: ['attendance:read'],
+      created_at: new Date('2026-03-23T00:00:00.000Z'),
+      updated_at: new Date('2026-03-23T00:00:00.000Z'),
+    })
+    externalAuthGrantMocks.isUserExternalAuthEnabled.mockResolvedValue(false)
+
+    const response = await invokeRoute('post', '/dingtalk/exchange', {
+      body: { code: 'code-1', state: 'state-1' },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect((response.body as Record<string, any>).error.code).toBe('DINGTALK_LOGIN_NOT_AUTHORIZED')
+  })
+
+  it('unbinds a DingTalk binding for the current user', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'bound@example.com',
+      name: 'Bound User',
+      role: 'user',
+      permissions: ['attendance:read'],
+      created_at: new Date('2026-03-23T00:00:00.000Z'),
+      updated_at: new Date('2026-03-23T00:00:00.000Z'),
+    })
+    externalIdentityMocks.deleteUserExternalIdentity.mockResolvedValue({
+      id: 'binding-1',
+      provider: 'dingtalk',
+      externalKey: 'dingtalk:corp-1:dt-user-1',
+      providerUserId: 'dt-user-1',
+      providerUnionId: 'union-1',
+      providerOpenId: 'open-1',
+      corpId: 'corp-1',
+      userId: 'user-1',
+      profile: {},
+      boundBy: 'user-1',
+      lastLoginAt: null,
+      createdAt: '2026-03-23T00:00:00.000Z',
+      updatedAt: '2026-03-23T00:00:00.000Z',
+    })
+
+    const response = await invokeRoute('post', '/dingtalk/bindings/:provider/:bindingId/unbind', {
+      headers: {
+        authorization: 'Bearer live-token',
+      },
+      params: {
+        provider: 'dingtalk',
+        bindingId: 'binding-1',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(externalIdentityMocks.deleteUserExternalIdentity).toHaveBeenCalledWith('user-1', 'dingtalk', 'binding-1')
+    expect((response.body as Record<string, any>).data.item.id).toBe('binding-1')
+  })
+
+  it('auto-provisions a DingTalk user when no binding exists and provisioning is enabled', async () => {
+    dingTalkAuthMocks.isConfigured.mockReturnValue(true)
+    dingTalkAuthMocks.verifyState.mockReturnValue({
+      type: 'dingtalk-auth',
+      mode: 'login',
+      redirect: '/attendance',
+    })
+    dingTalkAuthMocks.exchangeCode.mockResolvedValue({
+      provider: 'dingtalk',
+      userId: 'dt-user-2',
+      unionId: 'union-2',
+      openId: 'open-2',
+      corpId: 'corp-1',
+      name: 'Fresh Ding User',
+      nick: 'Fresh',
+      email: '',
+      avatarUrl: null,
+      mobile: null,
+      raw: { userId: 'dt-user-2', corpId: 'corp-1' },
+    })
+    dingTalkAuthMocks.getProvisioningConfig.mockReturnValue({
+      autoProvisionEnabled: true,
+      autoProvisionPresetId: 'attendance-employee',
+      autoProvisionOrgId: 'default',
+      autoProvisionEmailDomain: 'dingtalk.local',
+      allowedCorpIds: ['corp-1'],
+    })
+    externalIdentityMocks.findDingTalkExternalIdentity.mockResolvedValue(null)
+    externalIdentityMocks.buildDingTalkExternalKey.mockReturnValue('dingtalk:corp-1:dt-user-2')
+    externalIdentityMocks.upsertExternalIdentity.mockResolvedValue({
+      id: 'binding-2',
+      provider: 'dingtalk',
+      externalKey: 'dingtalk:corp-1:dt-user-2',
+      providerUserId: 'dt-user-2',
+      providerUnionId: 'union-2',
+      providerOpenId: 'open-2',
+      corpId: 'corp-1',
+      userId: 'new-user-1',
+      profile: {},
+      boundBy: null,
+      lastLoginAt: null,
+      createdAt: '2026-03-23T00:00:00.000Z',
+      updatedAt: '2026-03-23T00:00:00.000Z',
+    })
+    bcryptMocks.hash.mockResolvedValue('hashed-auto-password')
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'new-user-1',
+          email: 'dt-user-2@dingtalk.local',
+          name: 'Fresh Ding User',
+          role: 'user',
+          permissions: ['attendance:read', 'attendance:write'],
+          created_at: new Date('2026-03-23T00:00:00.000Z'),
+          updated_at: new Date('2026-03-23T00:00:00.000Z'),
+        }],
+      })
+    authServiceMocks.createToken
+      .mockReturnValueOnce('lookup-token')
+      .mockReturnValueOnce('session-token')
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'new-user-1',
+      email: 'dt-user-2@dingtalk.local',
+      name: 'Fresh Ding User',
+      role: 'user',
+      permissions: ['attendance:read', 'attendance:write'],
+      created_at: new Date('2026-03-23T00:00:00.000Z'),
+      updated_at: new Date('2026-03-23T00:00:00.000Z'),
+    })
+    authServiceMocks.readTokenPayload.mockReturnValue({ exp: Math.floor(Date.now() / 1000) + 3600 })
+    sessionRegistryMocks.createUserSession.mockResolvedValue({ id: 'session-2' })
+
+    const response = await invokeRoute('post', '/dingtalk/exchange', {
+      body: { code: 'code-2', state: 'state-2' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(bcryptMocks.hash).toHaveBeenCalled()
+    expect(externalIdentityMocks.upsertExternalIdentity).toHaveBeenCalled()
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'dingtalk-auto-provision',
+      resourceType: 'user',
+    }))
+    expect((response.body as Record<string, any>).data.provisioned).toBe(true)
+    expect((response.body as Record<string, any>).data.binding.id).toBe('binding-2')
+    expect((response.body as Record<string, any>).data.token).toBe('session-token')
+  })
+
+  it('captures an unbound DingTalk login for administrator review when auto provisioning is disabled', async () => {
+    dingTalkAuthMocks.isConfigured.mockReturnValue(true)
+    dingTalkAuthMocks.verifyState.mockReturnValue({
+      type: 'dingtalk-auth',
+      mode: 'login',
+      redirect: '/attendance',
+    })
+    dingTalkAuthMocks.exchangeCode.mockResolvedValue({
+      provider: 'dingtalk',
+      userId: 'dt-user-9',
+      unionId: 'union-9',
+      openId: 'open-9',
+      corpId: 'corp-1',
+      name: 'Pending Ding User',
+      nick: 'Pending',
+      email: 'pending@example.com',
+      avatarUrl: null,
+      mobile: '13800000000',
+      raw: { userId: 'dt-user-9', corpId: 'corp-1' },
+    })
+    dingTalkAuthMocks.getProvisioningConfig.mockReturnValue({
+      autoProvisionEnabled: false,
+      autoProvisionPresetId: 'attendance-employee',
+      autoProvisionOrgId: 'default',
+      autoProvisionEmailDomain: 'dingtalk.local',
+      allowedCorpIds: [],
+    })
+    externalIdentityMocks.findDingTalkExternalIdentity.mockResolvedValue(null)
+    directorySyncMocks.captureUnboundLoginForReview.mockResolvedValue({
+      integrationId: 'dir-1',
+      accountId: 'acct-9',
+      created: true,
+      linkStatus: 'pending',
+    })
+
+    const response = await invokeRoute('post', '/dingtalk/exchange', {
+      body: { code: 'code-9', state: 'state-9' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(directorySyncMocks.captureUnboundLoginForReview).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'dt-user-9',
+      corpId: 'corp-1',
+    }))
+    expect((response.body as Record<string, any>).error).toEqual({
+      code: 'DINGTALK_ACCOUNT_REVIEW_REQUIRED',
+      message: 'DingTalk account is pending administrator provisioning',
+      details: {
+        integrationId: 'dir-1',
+        accountId: 'acct-9',
+        queuedForReview: true,
+        created: true,
+        linkStatus: 'pending',
+        corpId: 'corp-1',
+      },
+    })
   })
 
   it('returns 401 when list sessions token is invalid', async () => {
