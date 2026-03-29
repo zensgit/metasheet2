@@ -8,6 +8,7 @@ type ReadonlyItemsRef = Readonly<Ref<AdminSectionNavItem[]> | ComputedRef<AdminS
 type UseAttendanceAdminRailNavigationOptions = {
   showAdmin: ReadonlyBoolRef
   adminForbidden: ReadonlyBoolRef
+  adminFocusCurrentSectionOnly?: ReadonlyBoolRef
   adminNavStorageScope: ReadonlyStringRef
   adminActiveSectionId: Ref<string>
   adminSectionNavItems: ReadonlyItemsRef
@@ -20,6 +21,7 @@ type UseAttendanceAdminRailNavigationOptions = {
 export function useAttendanceAdminRailNavigation({
   showAdmin,
   adminForbidden,
+  adminFocusCurrentSectionOnly,
   adminNavStorageScope,
   adminActiveSectionId,
   adminSectionNavItems,
@@ -150,19 +152,24 @@ export function useAttendanceAdminRailNavigation({
     await nextTick()
     const link = resolveActiveAdminNavLink(id)
     if (!(link instanceof HTMLElement)) return
-    link.scrollIntoView({ behavior: 'auto', block: 'nearest', inline: 'nearest' })
+    link.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' })
   }
 
   function scrollToAdminSection(id: string): void {
     if (typeof document === 'undefined') return
     const target = adminSectionElements.get(id) ?? document.getElementById(id)
     if (!(target instanceof HTMLElement)) return
+    const content = target.closest<HTMLElement>('[data-admin-content="true"]')
     adminActiveSectionId.value = id
     adminHashSyncReady = true
     syncAdminSectionHash(id)
     if (isCompactAdminNav.value) {
       adminCompactNavOpen.value = false
     }
+    if (content instanceof HTMLElement) {
+      content.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+    if (adminFocusCurrentSectionOnly?.value) return
     target.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 

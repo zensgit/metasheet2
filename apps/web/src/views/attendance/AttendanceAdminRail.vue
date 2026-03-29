@@ -1,24 +1,7 @@
 <template>
   <aside class="attendance__admin-nav-panel">
     <div class="attendance__admin-nav-header">
-      <strong>{{ tr('Sections', '区块') }}</strong>
-      <div class="attendance__admin-nav-header-meta">
-        <span>{{ adminSectionNavCountLabel }}</span>
-        <span
-          v-if="adminNavStorageScope !== adminNavDefaultStorageScope"
-          class="attendance__admin-nav-scope-badge"
-          :title="tr('Navigation memory scoped to this org.', '当前导航记忆已关联到此组织。')"
-        >
-          {{ adminNavStorageScope }}
-        </span>
-      </div>
-    </div>
-    <div v-if="adminNavScopeFeedback" class="attendance__admin-nav-scope-note">
-      {{ adminNavScopeFeedback }}
-    </div>
-    <div class="attendance__admin-nav-current" :title="activeAdminSectionContextLabel">
-      <span>{{ tr('Current', '当前') }}</span>
-      <strong>{{ activeAdminSectionContextLabel }}</strong>
+      <strong>{{ tr('Jump to', '跳转区块') }}</strong>
     </div>
     <button
       v-if="isCompactAdminNav"
@@ -31,71 +14,6 @@
       <small>{{ activeAdminSectionContextLabel }}</small>
     </button>
     <template v-if="!isCompactAdminNav || adminCompactNavOpen">
-      <label class="attendance__field attendance__field--compact" for="attendance-admin-nav-filter">
-        <span>{{ tr('Quick find', '快速查找') }}</span>
-        <input
-          id="attendance-admin-nav-filter"
-          :value="adminSectionFilter"
-          type="text"
-          :placeholder="tr('Search sections', '搜索区块')"
-          @input="emit('update:sectionFilter', ($event.target as HTMLInputElement).value)"
-        />
-      </label>
-      <div class="attendance__admin-nav-actions">
-        <button
-          class="attendance__btn attendance__btn--inline"
-          type="button"
-          :disabled="adminSectionFilterActive || allAdminSectionGroupsExpanded"
-          @click="emit('expandAll')"
-        >
-          {{ tr('Expand all', '展开全部') }}
-        </button>
-        <button
-          class="attendance__btn attendance__btn--inline"
-          type="button"
-          :disabled="adminSectionFilterActive || allAdminSectionGroupsCollapsed"
-          @click="emit('collapseAll')"
-        >
-          {{ tr('Collapse all', '收起全部') }}
-        </button>
-        <button
-          class="attendance__btn attendance__btn--inline"
-          type="button"
-          @click="emit('copyCurrentLink')"
-        >
-          {{ tr('Copy current link', '复制当前链接') }}
-        </button>
-      </div>
-      <section v-if="visibleRecentAdminSectionNavItems.length > 0" class="attendance__admin-nav-recents">
-        <div class="attendance__admin-nav-recents-header">
-          <strong>{{ tr('Recent', '最近访问') }}</strong>
-          <div class="attendance__admin-nav-recents-meta">
-            <span>{{ `${visibleRecentAdminSectionNavItems.length}` }}</span>
-            <button
-              class="attendance__btn attendance__btn--inline"
-              type="button"
-              data-admin-recents-clear="true"
-              @click="emit('clearRecents')"
-            >
-              {{ tr('Clear', '清空') }}
-            </button>
-          </div>
-        </div>
-        <div class="attendance__admin-nav-recents-items">
-          <button
-            v-for="item in visibleRecentAdminSectionNavItems"
-            :key="`recent-${item.id}`"
-            class="attendance__admin-nav-link attendance__admin-nav-link--recent"
-            :class="{ 'attendance__admin-nav-link--active': adminActiveSectionId === item.id }"
-            :aria-current="adminActiveSectionId === item.id ? 'true' : undefined"
-            :data-admin-anchor-recent="item.id"
-            type="button"
-            @click="emit('selectSection', item.id)"
-          >
-            {{ item.contextLabel }}
-          </button>
-        </div>
-      </section>
       <nav class="attendance__admin-nav" :aria-label="tr('Attendance admin sections', '考勤管理区块')">
         <section
           v-for="group in visibleAdminSectionNavGroups"
@@ -111,7 +29,6 @@
           >
             <span class="attendance__admin-nav-group-title">{{ group.label }}</span>
             <span class="attendance__admin-nav-group-meta">
-              <span class="attendance__admin-nav-group-count">{{ group.countLabel }}</span>
               <span class="attendance__admin-nav-group-caret" aria-hidden="true">{{ group.expanded ? '▾' : '▸' }}</span>
             </span>
           </button>
@@ -145,23 +62,38 @@ import type {
   TranslateFn,
 } from './useAttendanceAdminRail'
 
-defineProps<{
+withDefaults(defineProps<{
   tr: TranslateFn
-  adminSectionNavCountLabel: string
-  adminNavStorageScope: string
-  adminNavDefaultStorageScope: string
-  adminNavScopeFeedback: string
-  activeAdminSectionContextLabel: string
-  isCompactAdminNav: boolean
-  adminCompactNavOpen: boolean
-  adminSectionFilter: string
-  adminSectionFilterActive: boolean
-  allAdminSectionGroupsExpanded: boolean
-  allAdminSectionGroupsCollapsed: boolean
-  visibleRecentAdminSectionNavItems: AdminSectionNavDisplayItem[]
-  visibleAdminSectionNavGroups: AdminSectionNavGroup[]
-  adminActiveSectionId: string
-}>()
+  adminSectionNavCountLabel?: string
+  adminNavStorageScope?: string
+  adminNavDefaultStorageScope?: string
+  adminNavScopeFeedback?: string
+  activeAdminSectionContextLabel?: string
+  isCompactAdminNav?: boolean
+  adminCompactNavOpen?: boolean
+  adminSectionFilter?: string
+  adminSectionFilterActive?: boolean
+  allAdminSectionGroupsExpanded?: boolean
+  allAdminSectionGroupsCollapsed?: boolean
+  visibleRecentAdminSectionNavItems?: AdminSectionNavDisplayItem[]
+  visibleAdminSectionNavGroups?: AdminSectionNavGroup[]
+  adminActiveSectionId?: string
+}>(), {
+  adminSectionNavCountLabel: '',
+  adminNavStorageScope: '',
+  adminNavDefaultStorageScope: '',
+  adminNavScopeFeedback: '',
+  activeAdminSectionContextLabel: '',
+  isCompactAdminNav: false,
+  adminCompactNavOpen: false,
+  adminSectionFilter: '',
+  adminSectionFilterActive: false,
+  allAdminSectionGroupsExpanded: false,
+  allAdminSectionGroupsCollapsed: false,
+  visibleRecentAdminSectionNavItems: () => [],
+  visibleAdminSectionNavGroups: () => [],
+  adminActiveSectionId: '',
+})
 
 const emit = defineEmits<{
   (event: 'update:compactNavOpen', value: boolean): void
@@ -226,110 +158,9 @@ const emit = defineEmits<{
 
 .attendance__admin-nav-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  gap: 12px;
   font-size: 12px;
   color: #6b7280;
-}
-
-.attendance__admin-nav-header-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.attendance__admin-nav-scope-badge {
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: #e0e7ff;
-  color: #3730a3;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.attendance__admin-nav-scope-note {
-  margin-top: -4px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  background: #eef6ff;
-  color: #1d4ed8;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.attendance__admin-nav-current {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px;
-  border: 1px solid #dbeafe;
-  border-radius: 10px;
-  background: #f8fbff;
-  color: #6b7280;
-  font-size: 12px;
-}
-
-.attendance__admin-nav-current strong {
-  color: #1f2937;
-  font-size: 13px;
-  line-height: 1.4;
-}
-
-.attendance__field--compact {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.attendance__field--compact span {
-  font-size: 12px;
-}
-
-.attendance__admin-nav-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.attendance__admin-nav-recents {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid #dbeafe;
-  border-radius: 12px;
-  background: #f8fbff;
-}
-
-.attendance__admin-nav-recents-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  color: #1e3a8a;
-  font-size: 12px;
-}
-
-.attendance__admin-nav-recents-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.attendance__admin-nav-recents-items {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.attendance__admin-nav-link--recent {
-  background: #ffffff;
 }
 
 .attendance__admin-nav-toggle {
@@ -391,14 +222,9 @@ const emit = defineEmits<{
 .attendance__admin-nav-group-meta {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   color: #6b7280;
   font-size: 11px;
-}
-
-.attendance__admin-nav-group-count {
-  min-width: 28px;
-  text-align: right;
 }
 
 .attendance__admin-nav-group-caret {

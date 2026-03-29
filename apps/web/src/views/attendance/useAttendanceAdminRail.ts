@@ -175,6 +175,25 @@ export function useAttendanceAdminRail({
       ],
     },
     {
+      id: 'scheduling',
+      label: tr('Scheduling', '排班执行'),
+      itemIds: [
+        ATTENDANCE_ADMIN_SECTION_IDS.rotationRules,
+        ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments,
+        ATTENDANCE_ADMIN_SECTION_IDS.shifts,
+        ATTENDANCE_ADMIN_SECTION_IDS.assignments,
+        ATTENDANCE_ADMIN_SECTION_IDS.holidays,
+      ],
+    },
+    {
+      id: 'organization',
+      label: tr('Organization', '组织分组'),
+      itemIds: [
+        ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups,
+        ATTENDANCE_ADMIN_SECTION_IDS.groupMembers,
+      ],
+    },
+    {
       id: 'policies',
       label: tr('Policies', '规则策略'),
       itemIds: [
@@ -188,14 +207,6 @@ export function useAttendanceAdminRail({
       ],
     },
     {
-      id: 'organization',
-      label: tr('Organization', '组织分组'),
-      itemIds: [
-        ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups,
-        ATTENDANCE_ADMIN_SECTION_IDS.groupMembers,
-      ],
-    },
-    {
       id: 'data-payroll',
       label: tr('Data & Payroll', '数据与计薪'),
       itemIds: [
@@ -203,17 +214,6 @@ export function useAttendanceAdminRail({
         ATTENDANCE_ADMIN_SECTION_IDS.importBatches,
         ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates,
         ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles,
-      ],
-    },
-    {
-      id: 'scheduling',
-      label: tr('Scheduling', '排班执行'),
-      itemIds: [
-        ATTENDANCE_ADMIN_SECTION_IDS.rotationRules,
-        ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments,
-        ATTENDANCE_ADMIN_SECTION_IDS.shifts,
-        ATTENDANCE_ADMIN_SECTION_IDS.assignments,
-        ATTENDANCE_ADMIN_SECTION_IDS.holidays,
       ],
     },
   ])
