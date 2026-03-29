@@ -15,6 +15,17 @@ export interface Database {
   // Core tables
   users: UsersTable
   user_orgs: UserOrgsTable
+  user_external_identities: UserExternalIdentitiesTable
+  user_external_auth_grants: UserExternalAuthGrantsTable
+  directory_integrations: DirectoryIntegrationsTable
+  directory_departments: DirectoryDepartmentsTable
+  directory_accounts: DirectoryAccountsTable
+  directory_account_departments: DirectoryAccountDepartmentsTable
+  directory_account_links: DirectoryAccountLinksTable
+  directory_sync_runs: DirectorySyncRunsTable
+  directory_template_centers: DirectoryTemplateCentersTable
+  directory_template_center_versions: DirectoryTemplateCenterVersionsTable
+  directory_sync_alerts: DirectorySyncAlertsTable
   cells: CellsTable
   formulas: FormulasTable
   spreadsheets: SpreadsheetsTable
@@ -610,6 +621,7 @@ export interface MetaViewsTable {
   sheet_id: string
   name: string
   type: string
+  config: JSONColumnType<Record<string, unknown> | null>
   filter_info: JSONColumnType<Record<string, unknown> | null>
   sort_info: JSONColumnType<Record<string, unknown> | null>
   group_info: JSONColumnType<Record<string, unknown> | null>
@@ -676,6 +688,7 @@ export interface UsersTable {
   id: Generated<string>
   email: string
   name: string | null
+  mobile: string | null
   password_hash: string
   role: string
   permissions: JSONColumnType<string[]>
@@ -692,6 +705,164 @@ export interface UserOrgsTable {
   org_id: string
   is_active: boolean
   created_at: CreatedAt
+}
+
+export interface UserExternalIdentitiesTable {
+  id: Generated<string>
+  provider: string
+  external_key: string
+  provider_user_id: string | null
+  provider_union_id: string | null
+  provider_open_id: string | null
+  corp_id: string | null
+  local_user_id: string
+  profile: JSONColumnType<Record<string, unknown>>
+  bound_by: string | null
+  last_login_at: NullableTimestamp
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface UserExternalAuthGrantsTable {
+  id: Generated<string>
+  provider: string
+  local_user_id: string
+  enabled: boolean
+  granted_by: string | null
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface DirectoryIntegrationsTable {
+  id: Generated<string>
+  org_id: string
+  provider: string
+  name: string
+  status: string
+  corp_id: string
+  config: JSONColumnType<Record<string, unknown>>
+  sync_enabled: boolean
+  schedule_cron: string | null
+  default_deprovision_policy: string
+  last_sync_at: NullableTimestamp
+  last_success_at: NullableTimestamp
+  last_cursor: JsonObjectColumn
+  last_error: string | null
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface DirectoryDepartmentsTable {
+  id: Generated<string>
+  integration_id: string
+  provider: string
+  external_department_id: string
+  external_parent_department_id: string | null
+  name: string
+  full_path: string | null
+  order_index: number
+  is_active: boolean
+  raw: JSONColumnType<Record<string, unknown>>
+  last_seen_at: CreatedAt
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface DirectoryAccountsTable {
+  id: Generated<string>
+  integration_id: string
+  provider: string
+  corp_id: string | null
+  external_user_id: string
+  union_id: string | null
+  open_id: string | null
+  external_key: string
+  name: string
+  nick: string | null
+  email: string | null
+  mobile: string | null
+  job_number: string | null
+  title: string | null
+  avatar_url: string | null
+  is_active: boolean
+  deprovision_policy_override: string | null
+  raw: JSONColumnType<Record<string, unknown>>
+  last_seen_at: CreatedAt
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface DirectoryAccountDepartmentsTable {
+  directory_account_id: string
+  directory_department_id: string
+  is_primary: boolean
+  created_at: CreatedAt
+}
+
+export interface DirectoryAccountLinksTable {
+  id: Generated<string>
+  directory_account_id: string
+  local_user_id: string | null
+  link_status: string
+  match_strategy: string | null
+  reviewed_by: string | null
+  review_note: string | null
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface DirectorySyncRunsTable {
+  id: Generated<string>
+  integration_id: string
+  status: string
+  started_at: CreatedAt
+  finished_at: NullableTimestamp
+  cursor_before: JsonObjectColumn
+  cursor_after: JsonObjectColumn
+  stats: JSONColumnType<Record<string, unknown>>
+  error_message: string | null
+  meta: JSONColumnType<Record<string, unknown>>
+  triggered_by: string | null
+  trigger_source: string
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface DirectoryTemplateCentersTable {
+  id: Generated<string>
+  integration_id: string
+  team_templates: JSONColumnType<Record<string, unknown>>
+  import_history: JSONColumnType<Array<Record<string, unknown>>>
+  import_presets: JSONColumnType<Record<string, unknown>>
+  created_by: string | null
+  updated_by: string | null
+  created_at: CreatedAt
+  updated_at: UpdatedAt
+}
+
+export interface DirectoryTemplateCenterVersionsTable {
+  id: Generated<string>
+  center_id: string
+  integration_id: string
+  snapshot: JSONColumnType<Record<string, unknown>>
+  change_reason: string
+  created_by: string | null
+  created_at: CreatedAt
+}
+
+export interface DirectorySyncAlertsTable {
+  id: Generated<string>
+  integration_id: string
+  run_id: string | null
+  level: string
+  code: string
+  message: string
+  details: JSONColumnType<Record<string, unknown>>
+  sent_to_webhook: boolean
+  acknowledged_at: NullableTimestamp
+  acknowledged_by: string | null
+  created_at: CreatedAt
+  updated_at: UpdatedAt
 }
 
 export interface TablesTable {
