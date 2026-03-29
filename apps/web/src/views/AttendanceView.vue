@@ -544,11 +544,19 @@
                   {{ adminFocusedMode ? tr('Current section', '当前区块') : tr('Browse sections', '浏览区块') }}
                 </span>
                 <strong>{{ activeAdminSectionContextLabel }}</strong>
-                <span>
+                <span class="attendance__admin-current-section-description">
                   {{
                     adminFocusedMode
                       ? tr('Choose another item on the left and the right pane will return here immediately.', '点击左侧其他区块后，右侧会立即回到这里。')
                       : tr('All sections are visible. Focus mode brings you back to the active block.', '当前显示全部区块；切回聚焦模式可回到当前区块。')
+                  }}
+                </span>
+                <span class="attendance__admin-current-section-hint">
+                  {{
+                    tr(
+                      'Quick switch: Alt+↑ previous · Alt+↓ next. This mode is remembered per workspace.',
+                      '快速切换：Alt+↑ 上一个 · Alt+↓ 下一个。系统会按当前工作区记住该模式。',
+                    )
                   }}
                 </span>
               </div>
@@ -4957,12 +4965,12 @@ const pluginErrorMessage = computed(() => pluginsError.value)
 
 const showAdmin = computed(() => props.mode === 'admin')
 const showOverview = computed(() => props.mode === 'overview')
-const adminFocusedMode = ref(true)
 
 const {
   adminActiveSectionId,
   adminCompactNavOpen,
   adminNavDefaultStorageScope,
+  adminFocusedMode,
   adminNavScopeFeedback,
   adminNavStorageScope,
   adminSectionFilter,
@@ -4998,6 +5006,8 @@ const {
   showAdmin,
   adminForbidden,
   adminFocusCurrentSectionOnly: adminFocusedMode,
+  previousAdminSectionId: computed(() => previousAdminSectionNavItem.value?.id ?? ''),
+  nextAdminSectionId: computed(() => nextAdminSectionNavItem.value?.id ?? ''),
   adminNavStorageScope,
   adminActiveSectionId,
   adminSectionNavItems,
@@ -12281,8 +12291,14 @@ const holidaySectionBindings = {
   font-size: 15px;
 }
 
-.attendance__admin-current-section-copy span:last-child {
+.attendance__admin-current-section-description {
   color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.attendance__admin-current-section-hint {
+  color: #1d4ed8;
   font-size: 12px;
   line-height: 1.45;
 }
