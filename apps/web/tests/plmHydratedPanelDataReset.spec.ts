@@ -1,0 +1,144 @@
+import { describe, expect, it } from 'vitest'
+import { resolvePlmHydratedPanelDataReset } from '../src/views/plm/plmHydratedPanelDataReset'
+
+describe('plmHydratedPanelDataReset', () => {
+  it('keeps existing data when route hydration does not autoload', () => {
+    expect(resolvePlmHydratedPanelDataReset({
+      previousRouteState: {
+        productId: 'prod-100',
+        cadFileId: 'cad-a',
+      },
+      nextRouteState: {
+        autoload: false,
+        panel: 'cad',
+        cadFileId: 'cad-b',
+      },
+    })).toEqual({
+      clearSearch: false,
+      clearProduct: false,
+      clearBom: false,
+      clearDocuments: false,
+      clearCad: false,
+      clearApprovals: false,
+      clearWhereUsed: false,
+      clearCompare: false,
+      clearSubstitutes: false,
+    })
+  })
+
+  it('clears stale non-target panel data for cad-only share links', () => {
+    expect(resolvePlmHydratedPanelDataReset({
+      previousRouteState: {
+        searchQuery: 'motor',
+        searchItemType: 'Part',
+        searchLimit: 10,
+        productId: 'prod-100',
+        itemNumber: 'P-100',
+        itemType: 'Part',
+        bomDepth: 2,
+        documentRole: 'drawing',
+        approvalsStatus: 'pending',
+        cadFileId: 'cad-a',
+        whereUsedItemId: 'item-a',
+        compareLeftId: 'left-a',
+        compareRightId: 'right-a',
+        bomLineId: 'line-a',
+      },
+      nextRouteState: {
+        autoload: true,
+        panel: 'cad',
+        cadFileId: 'cad-b',
+      },
+    })).toEqual({
+      clearSearch: true,
+      clearProduct: true,
+      clearBom: true,
+      clearDocuments: true,
+      clearCad: true,
+      clearApprovals: true,
+      clearWhereUsed: true,
+      clearCompare: true,
+      clearSubstitutes: true,
+    })
+  })
+
+  it('preserves product-scoped fetch data when a documents share reloads the same product context', () => {
+    expect(resolvePlmHydratedPanelDataReset({
+      previousRouteState: {
+        productId: 'prod-100',
+        itemNumber: 'P-100',
+        itemType: 'Part',
+        bomDepth: 2,
+        documentRole: 'drawing',
+        approvalsStatus: 'pending',
+        cadFileId: 'cad-a',
+      },
+      nextRouteState: {
+        autoload: true,
+        panel: 'documents',
+        productId: 'prod-100',
+        itemNumber: 'P-100',
+        itemType: 'Part',
+        bomDepth: 2,
+        documentRole: 'drawing',
+        approvalsStatus: 'pending',
+      },
+    })).toEqual({
+      clearSearch: true,
+      clearProduct: false,
+      clearBom: false,
+      clearDocuments: false,
+      clearCad: true,
+      clearApprovals: false,
+      clearWhereUsed: true,
+      clearCompare: true,
+      clearSubstitutes: true,
+    })
+  })
+
+  it('preserves cad payloads when the hydrated cad target is unchanged', () => {
+    expect(resolvePlmHydratedPanelDataReset({
+      previousRouteState: {
+        cadFileId: 'cad-a',
+        cadOtherFileId: 'cad-b',
+      },
+      nextRouteState: {
+        autoload: true,
+        panel: 'cad',
+        cadFileId: 'cad-a',
+        cadOtherFileId: 'cad-b',
+      },
+    })).toEqual({
+      clearSearch: true,
+      clearProduct: true,
+      clearBom: true,
+      clearDocuments: true,
+      clearCad: false,
+      clearApprovals: true,
+      clearWhereUsed: true,
+      clearCompare: true,
+      clearSubstitutes: true,
+    })
+  })
+
+  it('clears compare data when compare inputs drift under the same panel scope', () => {
+    expect(resolvePlmHydratedPanelDataReset({
+      previousRouteState: {
+        compareLeftId: 'left-a',
+        compareRightId: 'right-a',
+        compareMode: 'delta',
+        compareLineKey: 'child_config',
+        compareMaxLevels: 5,
+      },
+      nextRouteState: {
+        autoload: true,
+        panel: 'compare',
+        compareLeftId: 'left-a',
+        compareRightId: 'right-b',
+        compareMode: 'delta',
+        compareLineKey: 'child_config',
+        compareMaxLevels: 5,
+      },
+    }).clearCompare).toBe(true)
+  })
+})

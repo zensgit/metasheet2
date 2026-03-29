@@ -138,6 +138,10 @@ import {
   resolvePlmHydratedRemovedTeamPresetOwner,
   resolvePlmHydratedTeamPresetOwnerTakeover,
 } from './plm/plmHydratedTeamPresetOwnerTakeover'
+import {
+  type PlmHydratedPanelDataRouteState,
+  resolvePlmHydratedPanelDataReset,
+} from './plm/plmHydratedPanelDataReset'
 import { resolvePlmHydratedRouteQueryTransition } from './plm/plmHydratedRouteQueryTransition'
 import { resolvePlmHydratedLocalFilterPresetTakeover } from './plm/plmHydratedLocalFilterPresetTakeover'
 import {
@@ -5725,6 +5729,93 @@ function applyHydratedRemovedTeamPresetOwner(options: {
   options.teamPresetSelection.value = takeover.nextSelectionIds
 }
 
+function applyHydratedPanelDataReset(options: {
+  previousRouteState: PlmHydratedPanelDataRouteState
+  nextRouteState: PlmHydratedPanelDataRouteState
+}) {
+  const reset = resolvePlmHydratedPanelDataReset(options)
+  if (reset.clearSearch) {
+    searchResults.value = []
+    searchTotal.value = 0
+    searchError.value = ''
+  }
+  if (reset.clearProduct) {
+    product.value = null
+    productLoading.value = false
+    productError.value = ''
+  }
+  if (reset.clearBom) {
+    bomItems.value = []
+    bomLoading.value = false
+    bomError.value = ''
+    clearBomSelection()
+  }
+  if (reset.clearDocuments) {
+    documents.value = []
+    documentsLoading.value = false
+    documentsError.value = ''
+  }
+  if (reset.clearCad) {
+    cadProperties.value = null
+    cadViewState.value = null
+    cadReview.value = null
+    cadHistory.value = null
+    cadDiff.value = null
+    cadMeshStats.value = null
+    cadPropertiesDraft.value = ''
+    cadViewStateDraft.value = ''
+    cadReviewState.value = ''
+    cadReviewNote.value = ''
+    cadLoading.value = false
+    cadDiffLoading.value = false
+    cadUpdating.value = false
+    cadStatus.value = ''
+    cadError.value = ''
+    cadActionStatus.value = ''
+    cadActionError.value = ''
+  }
+  if (reset.clearApprovals) {
+    approvals.value = []
+    approvalsLoading.value = false
+    approvalsError.value = ''
+    approvalActionStatus.value = ''
+    approvalActionError.value = ''
+    approvalActingId.value = ''
+    approvalActionabilityById.value = {}
+    approvalActionabilityLoadingById.value = {}
+    approvalActionabilityActorKey.value = ''
+    approvalHistoryFor.value = ''
+    approvalHistoryLabel.value = ''
+    approvalHistory.value = []
+    approvalHistoryLoading.value = false
+    approvalHistoryError.value = ''
+  }
+  if (reset.clearWhereUsed) {
+    whereUsed.value = null
+    whereUsedLoading.value = false
+    whereUsedError.value = ''
+    clearWhereUsedSelection()
+  }
+  if (reset.clearCompare) {
+    bomCompare.value = null
+    compareLoading.value = false
+    compareError.value = ''
+    clearCompareSelection()
+  }
+  if (reset.clearSubstitutes) {
+    substitutes.value = null
+    substitutesLoading.value = false
+    substitutesError.value = ''
+    substituteItemId.value = ''
+    substituteRank.value = ''
+    substituteNote.value = ''
+    substitutesActionStatus.value = ''
+    substitutesActionError.value = ''
+    substitutesMutating.value = false
+    substitutesDeletingId.value = null
+  }
+}
+
 async function applyQueryState() {
   if (isApplyingRouteQueryState.value) {
     pendingRouteQueryHydration = true
@@ -5743,6 +5834,34 @@ async function applyQueryState() {
       whereUsedTeamPreset: whereUsedTeamPresetQuery.value,
       bomFilterPreset: bomFilterPresetQuery.value,
       bomTeamPreset: bomTeamPresetQuery.value,
+    }
+    const previousHydratedPanelDataRouteState: PlmHydratedPanelDataRouteState = {
+      searchQuery: searchQuery.value,
+      searchItemType: searchItemType.value,
+      searchLimit: searchLimit.value,
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value,
+      bomDepth: bomDepth.value,
+      bomEffectiveAt: bomEffectiveAt.value,
+      documentRole: documentRole.value,
+      approvalsStatus: approvalsStatus.value,
+      cadFileId: cadFileId.value,
+      cadOtherFileId: cadOtherFileId.value,
+      whereUsedItemId: whereUsedItemId.value,
+      whereUsedRecursive: whereUsedRecursive.value,
+      whereUsedMaxLevels: whereUsedMaxLevels.value,
+      compareLeftId: compareLeftId.value,
+      compareRightId: compareRightId.value,
+      compareMode: compareMode.value,
+      compareLineKey: compareLineKey.value,
+      compareMaxLevels: compareMaxLevels.value,
+      compareIncludeChildFields: compareIncludeChildFields.value,
+      compareIncludeSubstitutes: compareIncludeSubstitutes.value,
+      compareIncludeEffectivity: compareIncludeEffectivity.value,
+      compareEffectiveAt: compareEffectiveAt.value,
+      compareRelationshipProps: compareRelationshipProps.value,
+      bomLineId: bomLineId.value,
     }
     productId.value = ''
     productItemNumber.value = ''
@@ -6363,6 +6482,40 @@ async function applyQueryState() {
     const allowsPanel = (key: string) => allowAllPanels || panelTargets.has(key)
 
     const autoLoad = parseQueryBoolean(readQueryParam('autoload')) ?? false
+    const nextHydratedPanelDataRouteState: PlmHydratedPanelDataRouteState = {
+      autoload: autoLoad,
+      panel: panelParam,
+      searchQuery: searchQuery.value,
+      searchItemType: searchItemType.value,
+      searchLimit: searchLimit.value,
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value,
+      bomDepth: bomDepth.value,
+      bomEffectiveAt: bomEffectiveAt.value,
+      documentRole: documentRole.value,
+      approvalsStatus: approvalsStatus.value,
+      cadFileId: cadFileId.value,
+      cadOtherFileId: cadOtherFileId.value,
+      whereUsedItemId: whereUsedItemId.value,
+      whereUsedRecursive: whereUsedRecursive.value,
+      whereUsedMaxLevels: whereUsedMaxLevels.value,
+      compareLeftId: compareLeftId.value,
+      compareRightId: compareRightId.value,
+      compareMode: compareMode.value,
+      compareLineKey: compareLineKey.value,
+      compareMaxLevels: compareMaxLevels.value,
+      compareIncludeChildFields: compareIncludeChildFields.value,
+      compareIncludeSubstitutes: compareIncludeSubstitutes.value,
+      compareIncludeEffectivity: compareIncludeEffectivity.value,
+      compareEffectiveAt: compareEffectiveAt.value,
+      compareRelationshipProps: compareRelationshipProps.value,
+      bomLineId: bomLineId.value,
+    }
+    applyHydratedPanelDataReset({
+      previousRouteState: previousHydratedPanelDataRouteState,
+      nextRouteState: nextHydratedPanelDataRouteState,
+    })
     if (!autoLoad) {
       return
     }
