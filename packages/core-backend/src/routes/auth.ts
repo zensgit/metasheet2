@@ -6,15 +6,29 @@
 import type { Request, Response, NextFunction } from 'express';
 import { Router } from 'express'
 import { hash } from 'bcryptjs'
+import { randomUUID } from 'crypto'
 import jwt, { type SignOptions } from 'jsonwebtoken'
 import { authService, type User } from '../auth/AuthService'
 import { buildOnboardingPacket, getAccessPreset } from '../auth/access-presets'
+import { dingTalkAuthService, isDingTalkAuthExchangeError, type DingTalkIdentityProfile, type DingTalkAuthState } from '../auth/dingtalk-auth'
+import {
+  buildDingTalkExternalKey,
+  deleteUserExternalIdentity,
+  findDingTalkExternalIdentity,
+  listUserExternalIdentities,
+  type UserExternalIdentity,
+  upsertExternalIdentity,
+  touchExternalIdentityLogin,
+} from '../auth/external-identities'
+import { isUserExternalAuthEnabled } from '../auth/external-auth-grants'
 import { verifyInviteToken } from '../auth/invite-tokens'
-import { getUserSession, listUserSessions, revokeOtherUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
+import { createUserSession, getUserSession, listUserSessions, refreshUserSessionExpiry, revokeOtherUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
 import { revokeUserSessions } from '../auth/session-revocation'
-import { query } from '../db/pg'
+import { auditLog } from '../audit/audit'
+import { query, transaction } from '../db/pg'
 import { FEATURE_FLAGS } from '../config/flags'
 import { Logger } from '../core/logger'
+import { directorySyncService } from '../directory/directory-sync'
 
 const logger = new Logger('AuthRouter')
 
@@ -25,6 +39,7 @@ type ProductMode = 'platform' | 'attendance'
 type ProductFeatures = {
   attendance: boolean
   workflow: boolean
+  platformAdmin: boolean
   attendanceAdmin: boolean
   attendanceImport: boolean
   mode: ProductMode
@@ -61,6 +76,39 @@ type InviteLedgerRecord = {
   updated_at: string | Date
 }
 
+type LocalUserRecord = {
+  id: string
+  email: string
+  name: string | null
+  role: string
+  permissions: string[]
+  created_at: string | Date
+  updated_at: string | Date
+}
+
+type DingTalkExchangeResult = {
+  user: User
+  binding: UserExternalIdentity
+  token?: string
+  redirect: string
+  features: ProductFeatures
+  provisioned: boolean
+  onboarding?: ReturnType<typeof buildOnboardingPacket>
+}
+
+class AuthRouteError extends Error {
+  status: number
+  code: string
+  details?: Record<string, unknown>
+
+  constructor(status: number, code: string, message: string, details?: Record<string, unknown>) {
+    super(message)
+    this.status = status
+    this.code = code
+    this.details = details
+  }
+}
+
 function normalizeProductMode(value: unknown): ProductMode {
   return value === 'attendance' || value === 'attendance-focused' ? 'attendance' : 'platform'
 }
@@ -86,6 +134,7 @@ function deriveProductFeatures(user: User): ProductFeatures {
   return {
     attendance: isAdmin || permissions.some((permission) => permission.startsWith('attendance:')),
     workflow: FEATURE_FLAGS.workflowEnabled,
+    platformAdmin: isAdmin,
     attendanceAdmin: isAdmin || permissions.includes('attendance:admin'),
     attendanceImport: isAdmin || permissions.includes('attendance:write'),
     mode: normalizeProductMode(process.env.PRODUCT_MODE),
@@ -116,6 +165,363 @@ function mapInviteUserPayload(user: InviteUserRecord): { id: string; email: stri
     name: user.name,
     isActive: user.is_active === true,
   }
+}
+
+function sanitizeRedirectPath(value: unknown): string {
+  if (typeof value !== 'string') return '/attendance'
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('/')) return '/attendance'
+  if (trimmed.startsWith('//')) return '/attendance'
+  return trimmed
+}
+
+function getClientUserAgent(req: Request): string | null {
+  return typeof req.headers['user-agent'] === 'string' && req.headers['user-agent'].trim().length > 0
+    ? req.headers['user-agent']
+    : null
+}
+
+function toIso(value: string | Date): string {
+  const date = value instanceof Date ? value : new Date(value)
+  return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString()
+}
+
+async function issueAuthenticatedSession(
+  user: User,
+  req: Request,
+  options: {
+    authProvider?: string
+  } = {},
+): Promise<{ token: string; sessionId: string }> {
+  const sessionId = randomUUID()
+  const token = authService.createToken(user, {
+    sessionId,
+    authProvider: options.authProvider,
+  })
+  const payload = authService.readTokenPayload(token)
+  const exp = typeof payload.exp === 'number' ? payload.exp : Math.floor(Date.now() / 1000) + 86400
+
+  await createUserSession(user.id, {
+    sessionId,
+    expiresAt: new Date(exp * 1000).toISOString(),
+    ipAddress: getClientIP(req),
+    userAgent: getClientUserAgent(req),
+  })
+
+  return { token, sessionId }
+}
+
+async function getAuthenticatedUserFromRequest(req: Request): Promise<User | null> {
+  const token = extractBearerToken(req)
+  if (!token) return null
+  return authService.verifyToken(token)
+}
+
+async function loadCanonicalUser(userId: string): Promise<User | null> {
+  const result = await query<LocalUserRecord>(
+    `SELECT id, email, name, role, permissions, created_at, updated_at
+     FROM users
+     WHERE id = $1`,
+    [userId],
+  )
+  const row = result.rows[0]
+  if (!row) return null
+
+  const candidate: User = {
+    id: row.id,
+    email: row.email,
+    name: row.name || '',
+    role: row.role,
+    permissions: Array.isArray(row.permissions) ? row.permissions : [],
+    created_at: new Date(row.created_at),
+    updated_at: new Date(row.updated_at),
+  }
+
+  return authService.verifyToken(authService.createToken(candidate))
+}
+
+function normalizeDingTalkDisplayName(profile: DingTalkIdentityProfile): string {
+  const candidates = [profile.name, profile.nick, profile.email, profile.userId, profile.unionId]
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+      return sanitizeName(candidate)
+    }
+  }
+  return 'DingTalk User'
+}
+
+function resolveDingTalkProvisioningEmail(profile: DingTalkIdentityProfile, domain: string): string {
+  const direct = [profile.email]
+    .find((value): value is string => typeof value === 'string' && value.trim().length > 0)
+  if (direct) return sanitizeEmail(direct)
+
+  const base = String(profile.userId || profile.unionId || profile.openId || randomUUID())
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 64)
+  const localPart = base.length > 0 ? base : `dingtalk-${randomUUID().slice(0, 8)}`
+  return sanitizeEmail(`${localPart}@${domain}`)
+}
+
+async function autoProvisionDingTalkUser(profile: DingTalkIdentityProfile): Promise<{
+  user: User
+  binding: UserExternalIdentity
+  onboarding: ReturnType<typeof buildOnboardingPacket>
+}> {
+  const provisioning = dingTalkAuthService.getProvisioningConfig()
+  if (!provisioning.autoProvisionEnabled) {
+    const captured = await directorySyncService.captureUnboundLoginForReview(profile)
+    if (captured) {
+      throw new AuthRouteError(
+        409,
+        'DINGTALK_ACCOUNT_REVIEW_REQUIRED',
+        'DingTalk account is pending administrator provisioning',
+        {
+          integrationId: captured.integrationId,
+          accountId: captured.accountId,
+          queuedForReview: true,
+          created: captured.created,
+          linkStatus: captured.linkStatus,
+          corpId: profile.corpId,
+        },
+      )
+    }
+
+    throw new AuthRouteError(409, 'DINGTALK_ACCOUNT_UNBOUND', 'DingTalk account is not bound to a MetaSheet user', {
+      queuedForReview: false,
+      corpId: profile.corpId,
+    })
+  }
+
+  const corpId = typeof profile.corpId === 'string' ? profile.corpId.trim() : ''
+  if (provisioning.allowedCorpIds.length > 0 && (!corpId || !provisioning.allowedCorpIds.includes(corpId))) {
+    throw new AuthRouteError(403, 'DINGTALK_CORP_FORBIDDEN', 'This DingTalk enterprise is not allowed to auto-provision accounts', {
+      corpId: corpId || null,
+    })
+  }
+
+  const externalKey = buildDingTalkExternalKey(profile)
+  if (!externalKey) {
+    throw new AuthRouteError(422, 'DINGTALK_IDENTITY_INCOMPLETE', 'DingTalk profile did not contain a stable identity key')
+  }
+
+  const preset = getAccessPreset(provisioning.autoProvisionPresetId)
+  const email = resolveDingTalkProvisioningEmail(profile, provisioning.autoProvisionEmailDomain)
+  const name = normalizeDingTalkDisplayName(profile)
+
+  const existingUser = await query<{ id: string }>('SELECT id FROM users WHERE email = $1 LIMIT 1', [email])
+  if (existingUser.rows.length > 0) {
+    throw new AuthRouteError(409, 'DINGTALK_EMAIL_ALREADY_EXISTS', 'A MetaSheet account with the same email already exists; bind it manually first', {
+      email,
+    })
+  }
+
+  const userId = randomUUID()
+  const passwordHash = await hash(`Dt-${randomUUID()}-Aa9`, Number(process.env.BCRYPT_SALT_ROUNDS || 10))
+  const role = preset?.role || 'user'
+  const roleId = preset?.roleId || ''
+  const directPermissions = Array.from(new Set(preset?.permissions || []))
+
+  await transaction(async (client) => {
+    await client.query(
+      `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, TRUE, $7, NOW(), NOW())`,
+      [userId, email, name, passwordHash, role, JSON.stringify(directPermissions), role === 'admin'],
+    )
+
+    await client.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active, created_at)
+       VALUES ($1, $2, TRUE, NOW())
+       ON CONFLICT (user_id, org_id) DO NOTHING`,
+      [userId, provisioning.autoProvisionOrgId],
+    )
+
+    if (roleId) {
+      await client.query(
+        `INSERT INTO user_roles (user_id, role_id)
+         VALUES ($1, $2)
+         ON CONFLICT DO NOTHING`,
+        [userId, roleId],
+      )
+    }
+
+    if (directPermissions.length > 0) {
+      const values = directPermissions.map((_, index) => `($1, $${index + 2})`).join(', ')
+      await client.query(
+        `INSERT INTO user_permissions (user_id, permission_code)
+         VALUES ${values}
+         ON CONFLICT DO NOTHING`,
+        [userId, ...directPermissions],
+      )
+    }
+  })
+
+  const binding = await upsertExternalIdentity({
+    provider: 'dingtalk',
+    externalKey,
+    providerUserId: profile.userId,
+    providerUnionId: profile.unionId,
+    providerOpenId: profile.openId,
+    corpId: corpId || null,
+    userId,
+    profile: profile.raw,
+    boundBy: null,
+  })
+  if (!binding) {
+    throw new AuthRouteError(500, 'DINGTALK_BINDING_CREATE_FAILED', 'Failed to persist DingTalk identity binding')
+  }
+
+  await auditLog({
+    actorType: 'system',
+    action: 'dingtalk-auto-provision',
+    resourceType: 'user',
+    resourceId: userId,
+    meta: {
+      provider: 'dingtalk',
+      corpId: corpId || null,
+      externalKey,
+      email,
+      presetId: preset?.id || null,
+      orgId: provisioning.autoProvisionOrgId,
+    },
+  })
+
+  const user = await loadCanonicalUser(userId)
+  if (!user) {
+    throw new AuthRouteError(500, 'DINGTALK_USER_LOAD_FAILED', 'Provisioned user could not be loaded')
+  }
+
+  return {
+    user,
+    binding,
+    onboarding: buildOnboardingPacket({
+      email,
+      temporaryPassword: null,
+      preset,
+      inviteToken: null,
+    }),
+  }
+}
+
+async function ensureUserCanUseDingTalk(userId: string, mode: 'bind' | 'login'): Promise<void> {
+  const allowed = await isUserExternalAuthEnabled(userId, 'dingtalk')
+  if (allowed) return
+
+  if (mode === 'bind') {
+    throw new AuthRouteError(
+      403,
+      'DINGTALK_BIND_NOT_AUTHORIZED',
+      'This MetaSheet account is not authorized to bind DingTalk login',
+    )
+  }
+
+  throw new AuthRouteError(
+    403,
+    'DINGTALK_LOGIN_NOT_AUTHORIZED',
+    'This MetaSheet account is not authorized to use DingTalk login',
+  )
+}
+
+async function completeDingTalkExchange(req: Request, state: DingTalkAuthState, profile: DingTalkIdentityProfile): Promise<DingTalkExchangeResult> {
+  const existing = await findDingTalkExternalIdentity(profile)
+  const redirect = sanitizeRedirectPath(state.redirect)
+
+  if (state.mode === 'bind') {
+    const currentUser = await getAuthenticatedUserFromRequest(req)
+    if (!currentUser) {
+      throw new AuthRouteError(401, 'UNAUTHORIZED', 'Authentication required to bind DingTalk account')
+    }
+    if (state.requestedBy && currentUser.id !== state.requestedBy) {
+      throw new AuthRouteError(403, 'DINGTALK_BIND_MISMATCH', 'DingTalk bind session does not match the authenticated user')
+    }
+    await ensureUserCanUseDingTalk(currentUser.id, 'bind')
+    if (existing && existing.userId !== currentUser.id) {
+      throw new AuthRouteError(409, 'DINGTALK_ALREADY_BOUND', 'This DingTalk account is already bound to another user')
+    }
+
+    const currentBindings = await listUserExternalIdentities(currentUser.id, 'dingtalk')
+    const hasDifferentBinding = currentBindings.some((binding) => binding.id !== existing?.id)
+    if (hasDifferentBinding) {
+      throw new AuthRouteError(409, 'DINGTALK_BIND_EXISTS_FOR_USER', 'Current user already has a different DingTalk binding')
+    }
+
+    const externalKey = existing?.externalKey || buildDingTalkExternalKey(profile)
+    if (!externalKey) {
+      throw new AuthRouteError(422, 'DINGTALK_IDENTITY_INCOMPLETE', 'DingTalk profile did not contain a stable identity key')
+    }
+
+    const binding = await upsertExternalIdentity({
+      provider: 'dingtalk',
+      externalKey,
+      providerUserId: profile.userId,
+      providerUnionId: profile.unionId,
+      providerOpenId: profile.openId,
+      corpId: profile.corpId,
+      userId: currentUser.id,
+      profile: profile.raw,
+      boundBy: currentUser.id,
+    })
+    if (!binding) {
+      throw new AuthRouteError(500, 'DINGTALK_BIND_FAILED', 'Failed to bind DingTalk account')
+    }
+
+    await auditLog({
+      actorId: currentUser.id,
+      actorType: 'user',
+      action: 'dingtalk-bind',
+      resourceType: 'user-external-identity',
+      resourceId: binding.id,
+      meta: {
+        provider: 'dingtalk',
+        corpId: profile.corpId,
+        externalKey,
+      },
+    })
+
+    return {
+      user: currentUser,
+      binding,
+      redirect,
+      features: deriveProductFeatures(currentUser),
+      provisioned: false,
+    }
+  }
+
+  if (existing) {
+    const user = await loadCanonicalUser(existing.userId)
+    if (!user) {
+      throw new AuthRouteError(404, 'DINGTALK_BOUND_USER_NOT_FOUND', 'The DingTalk binding points to a missing user')
+    }
+    await ensureUserCanUseDingTalk(user.id, 'login')
+    await touchExternalIdentityLogin(existing.id)
+    const { token } = await issueAuthenticatedSession(user, req, { authProvider: 'dingtalk' })
+    return {
+      user,
+      binding: existing,
+      token,
+      redirect,
+      features: deriveProductFeatures(user),
+      provisioned: false,
+    }
+  }
+
+  const provisioned = await autoProvisionDingTalkUser(profile)
+  const { token } = await issueAuthenticatedSession(provisioned.user, req, { authProvider: 'dingtalk' })
+  return {
+    user: provisioned.user,
+    binding: provisioned.binding,
+    token,
+    redirect,
+    features: deriveProductFeatures(provisioned.user),
+    provisioned: true,
+    onboarding: provisioned.onboarding,
+  }
+}
+
+function isAuthRouteError(error: unknown): error is AuthRouteError {
+  return error instanceof AuthRouteError
 }
 
 // ============================================
@@ -166,11 +572,17 @@ interface RateLimitEntry {
 
 const rateLimitStore = new Map<string, RateLimitEntry>()
 
+export function resetAuthRouteRateLimitsForTests(): void {
+  rateLimitStore.clear()
+}
+
 // Configuration
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000  // 15 minutes
 const MAX_LOGIN_ATTEMPTS = 5                   // Max failed attempts
 const BLOCK_DURATION_MS = 30 * 60 * 1000      // 30 minutes block
 const MAX_REGISTER_PER_IP = 3                  // Max registrations per IP per window
+const MAX_DINGTALK_LOGIN_URL_PER_IP = 20       // Max DingTalk login-url requests per IP per window
+const MAX_DINGTALK_EXCHANGE_PER_IP = 10        // Max DingTalk code exchange attempts per IP per window
 
 function getClientIP(req: Request): string {
   const forwarded = req.headers['x-forwarded-for']
@@ -245,6 +657,36 @@ const registerRateLimiter = (req: Request, res: Response, next: NextFunction) =>
       success: false,
       error: 'Too many registration attempts. Please try again later.',
       retryAfter: result.retryAfter
+    })
+  }
+  next()
+}
+
+const dingTalkLoginUrlRateLimiter = (req: Request, res: Response, next: NextFunction) => {
+  const ip = getClientIP(req)
+  const key = `dingtalk-login-url:${ip}`
+  const result = checkRateLimit(key, MAX_DINGTALK_LOGIN_URL_PER_IP)
+  if (!result.allowed) {
+    logger.warn(`Rate limit exceeded for DingTalk login-url: ${ip}`)
+    return res.status(429).json({
+      success: false,
+      error: 'Too many DingTalk login attempts. Please try again later.',
+      retryAfter: result.retryAfter,
+    })
+  }
+  next()
+}
+
+const dingTalkExchangeRateLimiter = (req: Request, res: Response, next: NextFunction) => {
+  const ip = getClientIP(req)
+  const key = `dingtalk-exchange:${ip}`
+  const result = checkRateLimit(key, MAX_DINGTALK_EXCHANGE_PER_IP)
+  if (!result.allowed) {
+    logger.warn(`Rate limit exceeded for DingTalk exchange: ${ip}`)
+    return res.status(429).json({
+      success: false,
+      error: 'Too many DingTalk authorization attempts. Please try again later.',
+      retryAfter: result.retryAfter,
     })
   }
   next()
@@ -332,13 +774,14 @@ authRouter.post('/login', loginRateLimiter, async (req: Request, res: Response) 
     // Success - reset rate limit
     resetRateLimit(`login:${ip}:${cleanEmail}`)
     logger.info(`Successful login for ${cleanEmail} from ${ip}`)
+    const session = await issueAuthenticatedSession(result.user, req, { authProvider: 'password' })
 
     // 返回用户信息和token
     res.json({
       success: true,
       data: {
         user: result.user,
-        token: result.token,
+        token: session.token,
         features: deriveProductFeatures(result.user),
       }
     })
@@ -412,14 +855,14 @@ authRouter.post('/register', registerRateLimiter, async (req: Request, res: Resp
     }
 
     // 注册成功，自动生成token
-    const token = authService.createToken(user)
+    const session = await issueAuthenticatedSession(user, req, { authProvider: 'password' })
     logger.info(`Successful registration for ${cleanEmail} from ${ip}`)
 
     res.status(201).json({
       success: true,
       data: {
         user,
-        token
+        token: session.token
       }
     })
   } catch (error) {
@@ -427,6 +870,256 @@ authRouter.post('/register', registerRateLimiter, async (req: Request, res: Resp
     res.status(500).json({
       success: false,
       error: 'Internal server error'
+    })
+  }
+})
+
+authRouter.get('/dingtalk/login-url', dingTalkLoginUrlRateLimiter, async (req: Request, res: Response) => {
+  try {
+    if (!dingTalkAuthService.isConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error: 'DingTalk auth is not configured'
+      })
+    }
+
+    const redirect = sanitizeRedirectPath(req.query.redirect)
+    const payload = dingTalkAuthService.buildAuthorizeUrl({
+      mode: 'login',
+      redirect,
+    })
+
+    return res.json({
+      success: true,
+      data: {
+        provider: 'dingtalk',
+        url: payload.url,
+        loginUrl: payload.url,
+        state: payload.state,
+        redirect: payload.redirect,
+      },
+    })
+  } catch (error) {
+    logger.error('DingTalk login-url error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to prepare DingTalk login URL',
+    })
+  }
+})
+
+authRouter.post('/dingtalk/bind/start', async (req: Request, res: Response) => {
+  try {
+    if (!dingTalkAuthService.isConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error: 'DingTalk auth is not configured'
+      })
+    }
+
+    const user = await getAuthenticatedUserFromRequest(req)
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required'
+      })
+    }
+    await ensureUserCanUseDingTalk(user.id, 'bind')
+
+    const redirect = sanitizeRedirectPath(req.body?.redirect || req.query.redirect)
+    const payload = dingTalkAuthService.buildAuthorizeUrl({
+      mode: 'bind',
+      redirect,
+      requestedBy: user.id,
+    })
+
+    return res.json({
+      success: true,
+      data: {
+        provider: 'dingtalk',
+        url: payload.url,
+        bindUrl: payload.url,
+        state: payload.state,
+        redirect: payload.redirect,
+      },
+    })
+  } catch (error) {
+    if (isAuthRouteError(error)) {
+      return res.status(error.status).json({
+        success: false,
+        error: {
+          code: error.code,
+          message: error.message,
+          ...(error.details ? { details: error.details } : {}),
+        },
+      })
+    }
+    logger.error('DingTalk bind-start error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to prepare DingTalk bind URL',
+    })
+  }
+})
+
+authRouter.post('/dingtalk/exchange', dingTalkExchangeRateLimiter, async (req: Request, res: Response) => {
+  try {
+    if (!dingTalkAuthService.isConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error: 'DingTalk auth is not configured'
+      })
+    }
+
+    const code = typeof req.body?.code === 'string' ? req.body.code.trim() : ''
+    const stateValue = typeof req.body?.state === 'string' ? req.body.state.trim() : ''
+    if (!code || !stateValue) {
+      return res.status(400).json({
+        success: false,
+        error: 'code and state are required'
+      })
+    }
+
+    const state = dingTalkAuthService.verifyState(stateValue)
+    if (!state) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid DingTalk auth state'
+      })
+    }
+
+    const profile = await dingTalkAuthService.exchangeCode(code)
+    const result = await completeDingTalkExchange(req, state, profile)
+
+    return res.json({
+      success: true,
+      data: {
+        provider: 'dingtalk',
+        mode: state.mode,
+        redirect: result.redirect,
+        redirectUrl: result.redirect,
+        user: result.user,
+        token: result.token,
+        binding: result.binding,
+        features: result.features,
+        provisioned: result.provisioned,
+        onboarding: result.onboarding,
+      },
+    })
+  } catch (error) {
+    if (isAuthRouteError(error)) {
+      return res.status(error.status).json({
+        success: false,
+        error: {
+          code: error.code,
+          message: error.message,
+          ...(error.details ? { details: error.details } : {}),
+        },
+      })
+    }
+
+    if (isDingTalkAuthExchangeError(error)) {
+      logger.warn('DingTalk exchange upstream error', error)
+      return res.status(error.status >= 400 && error.status < 500 ? 400 : 502).json({
+        success: false,
+        error: {
+          code: 'DINGTALK_EXCHANGE_FAILED',
+          message: error.message,
+          details: {
+            provider: 'dingtalk',
+            stage: error.stage,
+            upstreamStatus: error.status,
+            ...(error.details ? error.details : {}),
+          },
+        },
+      })
+    }
+
+    logger.error('DingTalk exchange error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to complete DingTalk authentication',
+    })
+  }
+})
+
+authRouter.get('/dingtalk/bindings', async (req: Request, res: Response) => {
+  try {
+    const user = await getAuthenticatedUserFromRequest(req)
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required'
+      })
+    }
+
+    const items = await listUserExternalIdentities(user.id, 'dingtalk')
+    const authEnabled = await isUserExternalAuthEnabled(user.id, 'dingtalk')
+    return res.json({
+      success: true,
+      data: {
+        items,
+        authEnabled,
+      },
+    })
+  } catch (error) {
+    logger.error('DingTalk bindings list error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to load DingTalk bindings',
+    })
+  }
+})
+
+authRouter.post('/dingtalk/bindings/:provider/:bindingId/unbind', async (req: Request, res: Response) => {
+  try {
+    const provider = String(req.params.provider || '').trim()
+    const bindingId = String(req.params.bindingId || '').trim()
+    const user = await getAuthenticatedUserFromRequest(req)
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required'
+      })
+    }
+    if (provider !== 'dingtalk' || !bindingId) {
+      return res.status(400).json({
+        success: false,
+        error: 'provider and bindingId are required'
+      })
+    }
+
+    const removed = await deleteUserExternalIdentity(user.id, 'dingtalk', bindingId)
+    if (!removed) {
+      return res.status(404).json({
+        success: false,
+        error: 'Binding not found'
+      })
+    }
+
+    await auditLog({
+      actorId: user.id,
+      actorType: 'user',
+      action: 'dingtalk-unbind',
+      resourceType: 'user-external-identity',
+      resourceId: bindingId,
+      meta: {
+        provider,
+        externalKey: removed.externalKey,
+      },
+    })
+
+    return res.json({
+      success: true,
+      data: {
+        item: removed,
+      },
+    })
+  } catch (error) {
+    logger.error('DingTalk unbind error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to unbind DingTalk account',
     })
   }
 })
@@ -453,6 +1146,13 @@ authRouter.post('/refresh-token', async (req: Request, res: Response) => {
         success: false,
         error: 'Invalid or expired token'
       })
+    }
+
+    const refreshedPayload = authService.readTokenPayload(newToken)
+    const refreshedSid = typeof refreshedPayload?.sid === 'string' ? refreshedPayload.sid.trim() : ''
+    const refreshedExp = typeof refreshedPayload?.exp === 'number' ? refreshedPayload.exp : 0
+    if (refreshedSid && refreshedExp > 0) {
+      await refreshUserSessionExpiry(refreshedSid, new Date(refreshedExp * 1000).toISOString())
     }
 
     res.json({
@@ -651,11 +1351,13 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
       updatedBy: user.id,
       reason: 'invite-accepted',
     })
+    const session = await issueAuthenticatedSession(result.user, req, { authProvider: 'password' })
 
     res.json({
       success: true,
       data: {
         ...result,
+        token: session.token,
         onboarding,
         features: deriveProductFeatures(result.user),
       }

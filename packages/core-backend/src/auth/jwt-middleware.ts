@@ -11,6 +11,8 @@ const AUTH_WHITELIST = [
   '/api/auth/refresh',
   '/api/auth/refresh-token',
   '/api/auth/dev-token',
+  '/api/auth/dingtalk/login-url',
+  '/api/auth/dingtalk/exchange',
   '/api/plugins',
   '/api/v2/hello',
   '/api/v2/rpc-test',
