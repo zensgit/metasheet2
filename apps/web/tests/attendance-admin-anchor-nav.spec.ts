@@ -248,6 +248,7 @@ describe('Attendance admin anchor navigation', () => {
     expect(currentSectionBar?.textContent).toContain('Current section')
     expect(currentSectionBar?.textContent).toContain('Workspace · Settings')
     expect(currentSectionBar?.textContent).toContain('Quick switch: Alt+↑ previous')
+    expect(currentSectionBar?.querySelector('[data-admin-quick-jump="true"]')).toBeTruthy()
     expect(currentSectionBar?.querySelector('[data-admin-focus-toggle="true"]')?.textContent).toContain('Show all sections')
     expect(currentSectionBar?.querySelector('[data-admin-prev-section]')?.getAttribute('data-admin-prev-section-id')).toBe('')
     expect(currentSectionBar?.querySelector('[data-admin-next-section]')?.getAttribute('data-admin-next-section-id')).toBe('attendance-admin-user-access')
@@ -273,6 +274,23 @@ describe('Attendance admin anchor navigation', () => {
 
     expect(window.location.hash).toBe('#attendance-admin-settings')
     expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Workspace · Settings')
+  })
+
+  it('lets operators jump directly to a deep section from the current-section bar selector', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const jumpSelect = container!.querySelector<HTMLSelectElement>('[data-admin-quick-jump="true"]')
+    expect(jumpSelect).toBeTruthy()
+    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(22)
+
+    jumpSelect!.value = 'attendance-admin-shifts'
+    jumpSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+
+    expect(window.location.hash).toBe('#attendance-admin-shifts')
+    expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Scheduling · Shifts')
   })
 
   it('remembers focus-vs-show-all mode across remounts', async () => {

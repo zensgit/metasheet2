@@ -574,6 +574,29 @@
                   <span class="attendance__admin-current-section-nav-direction">{{ tr('Prev', '上一个') }}</span>
                   <strong>{{ previousAdminSectionNavItem?.label || tr('Start', '起点') }}</strong>
                 </button>
+                <label class="attendance__admin-current-section-jump">
+                  <span>{{ tr('Quick jump', '快速跳转') }}</span>
+                  <select
+                    class="attendance__admin-current-section-select"
+                    :value="resolvedAdminSectionId()"
+                    data-admin-quick-jump="true"
+                    @change="handleAdminQuickJumpChange"
+                  >
+                    <optgroup
+                      v-for="group in adminQuickJumpGroups"
+                      :key="group.label"
+                      :label="group.label"
+                    >
+                      <option
+                        v-for="item in group.items"
+                        :key="item.id"
+                        :value="item.id"
+                      >
+                        {{ item.label }}
+                      </option>
+                    </optgroup>
+                  </select>
+                </label>
                 <button
                   class="attendance__btn attendance__btn--inline"
                   type="button"
@@ -4986,6 +5009,7 @@ const {
   isCompactAdminNav,
   isKnownAdminSectionId,
   nextAdminSectionNavItem,
+  orderedAdminSectionNavItems,
   previousAdminSectionNavItem,
   readLastAdminSection,
   collapseAllAdminSectionGroups,
@@ -5023,6 +5047,20 @@ function resolvedAdminSectionId(): string {
     : ATTENDANCE_ADMIN_SECTION_IDS.settings
 }
 
+const adminQuickJumpGroups = computed(() => {
+  const groups = new Map<string, { label: string; items: typeof orderedAdminSectionNavItems.value }>()
+  for (const item of orderedAdminSectionNavItems.value) {
+    const groupLabel = item.groupLabel ?? tr('Sections', '区块')
+    const existing = groups.get(groupLabel)
+    if (existing) {
+      existing.items.push(item)
+      continue
+    }
+    groups.set(groupLabel, { label: groupLabel, items: [item] })
+  }
+  return Array.from(groups.values())
+})
+
 function shouldShowAdminSection(id: string): boolean {
   return !adminFocusedMode.value || resolvedAdminSectionId() === id
 }
@@ -5033,6 +5071,12 @@ function selectAdminSection(id: string): void {
   void nextTick(() => {
     scrollToAdminSection(id)
   })
+}
+
+function handleAdminQuickJumpChange(event: Event): void {
+  const value = event.target instanceof HTMLSelectElement ? event.target.value : ''
+  if (!isKnownAdminSectionId(value)) return
+  selectAdminSection(value)
 }
 
 const statusCode = computed(() => statusMeta.value?.code || '')
@@ -12319,6 +12363,29 @@ const holidaySectionBindings = {
   flex-shrink: 0;
 }
 
+.attendance__admin-current-section-jump {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 164px;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.attendance__admin-current-section-select {
+  min-width: 164px;
+  padding: 7px 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 500;
+}
+
 .attendance__admin-current-section-nav {
   display: inline-flex;
   flex-direction: column;
@@ -12784,6 +12851,11 @@ const holidaySectionBindings = {
 
   .attendance__admin-current-section-actions {
     width: 100%;
+  }
+
+  .attendance__admin-current-section-jump,
+  .attendance__admin-current-section-select {
+    min-width: 100%;
   }
 
   .attendance__admin-shortcuts-items {
