@@ -169,6 +169,30 @@ export function normalizePlmWorkbenchPanelScope(value: unknown): string | undefi
     .join(',')
 }
 
+export function shouldAutoloadPlmProductContext(options: {
+  panel?: unknown
+  productId?: unknown
+  itemNumber?: unknown
+}): boolean {
+  const hasProductContext = Boolean(
+    normalizeQueryValue(options.productId) || normalizeQueryValue(options.itemNumber),
+  )
+  if (!hasProductContext) return false
+
+  const normalizedPanel = normalizePlmWorkbenchPanelScope(options.panel)
+  if (!normalizedPanel) return true
+
+  const selectedPanels = new Set(
+    normalizedPanel
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  )
+  return selectedPanels.has('product')
+    || selectedPanels.has('documents')
+    || selectedPanels.has('approvals')
+}
+
 export function normalizePlmWorkbenchCollaborativeQuerySnapshot(value: unknown): Record<string, string> {
   const next = stripPlmWorkbenchTeamViewIdentity(normalizePlmWorkbenchQuerySnapshot(value))
   delete next.bomFilterPreset

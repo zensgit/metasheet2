@@ -17,6 +17,7 @@ import {
   normalizePlmWorkbenchLocalRouteQuerySnapshot,
   normalizePlmWorkbenchPanelScope,
   normalizePlmWorkbenchQuerySnapshot,
+  shouldAutoloadPlmProductContext,
 } from '../src/views/plm/plmWorkbenchViewState'
 import { applyPlmDeferredRouteQueryPatch } from '../src/views/plm/plmRouteHydrationPatch'
 
@@ -861,6 +862,34 @@ describe('plmWorkbenchViewState', () => {
     )).toBe(
       'https://example.test/plm?panel=approvals&approvalsTeamView=approval-view-2&itemNumber=P-1001&itemType=Assembly&approvalColumns=product&autoload=true',
     )
+  })
+
+  it('bootstraps product context for item-number-only document and approval autoload routes', () => {
+    expect(shouldAutoloadPlmProductContext({
+      panel: 'documents',
+      itemNumber: 'P-1001',
+    })).toBe(true)
+    expect(shouldAutoloadPlmProductContext({
+      panel: 'approvals',
+      itemNumber: 'P-1001',
+    })).toBe(true)
+  })
+
+  it('does not bootstrap product context for unrelated non-product panels', () => {
+    expect(shouldAutoloadPlmProductContext({
+      panel: 'cad',
+      itemNumber: 'P-1001',
+    })).toBe(false)
+    expect(shouldAutoloadPlmProductContext({
+      panel: 'compare',
+      productId: 'product-42',
+    })).toBe(false)
+  })
+
+  it('treats missing panel scope as an all-panels bootstrap when product identity exists', () => {
+    expect(shouldAutoloadPlmProductContext({
+      itemNumber: 'P-1001',
+    })).toBe(true)
   })
 
   it('builds return paths from the current local workbench state with optional overlays', () => {

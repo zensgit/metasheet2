@@ -123,6 +123,7 @@ import {
   resolvePlmFilterFieldQueryValue,
   normalizePlmWorkbenchLocalRouteQuerySnapshot,
   normalizePlmWorkbenchPanelScope,
+  shouldAutoloadPlmProductContext,
 } from './plm/plmWorkbenchViewState'
 import {
   matchPlmTeamViewStateSnapshot,
@@ -6321,9 +6322,17 @@ async function applyQueryState() {
     }
     const tasks: Array<Promise<void>> = []
     if (allowsPanel('search') && searchQuery.value) tasks.push(searchProducts())
-    if (allowsPanel('product') && productId.value) tasks.push(loadProduct())
-    if (allowsPanel('documents') && productId.value) tasks.push(loadDocuments())
-    if (allowsPanel('approvals') && productId.value) tasks.push(loadApprovals())
+    const shouldBootstrapProductContext = shouldAutoloadPlmProductContext({
+      panel: panelParam,
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+    })
+    if (shouldBootstrapProductContext) {
+      tasks.push(loadProduct())
+    } else {
+      if (allowsPanel('documents') && productId.value) tasks.push(loadDocuments())
+      if (allowsPanel('approvals') && productId.value) tasks.push(loadApprovals())
+    }
     if (allowsPanel('cad') && cadFileId.value) tasks.push(loadCadMetadata())
     if (allowsPanel('where-used') && whereUsedItemId.value) tasks.push(loadWhereUsed())
     if (allowsPanel('compare') && compareLeftId.value && compareRightId.value) tasks.push(loadBomCompare())
