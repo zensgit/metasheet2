@@ -554,12 +554,38 @@
               </div>
               <div class="attendance__admin-current-section-actions">
                 <button
+                  class="attendance__btn attendance__btn--inline attendance__admin-current-section-nav"
+                  :class="{ 'attendance__admin-current-section-nav--disabled': !previousAdminSectionNavItem }"
+                  type="button"
+                  data-admin-prev-section
+                  :data-admin-prev-section-id="previousAdminSectionNavItem?.id || ''"
+                  :disabled="!previousAdminSectionNavItem"
+                  :title="previousAdminSectionNavItem?.contextLabel || ''"
+                  @click="previousAdminSectionNavItem && selectAdminSection(previousAdminSectionNavItem.id)"
+                >
+                  <span class="attendance__admin-current-section-nav-direction">{{ tr('Prev', '上一个') }}</span>
+                  <strong>{{ previousAdminSectionNavItem?.label || tr('Start', '起点') }}</strong>
+                </button>
+                <button
                   class="attendance__btn attendance__btn--inline"
                   type="button"
                   data-admin-focus-toggle="true"
                   @click="adminFocusedMode = !adminFocusedMode"
                 >
                   {{ adminFocusedMode ? tr('Show all sections', '显示全部区块') : tr('Focus current section', '仅显示当前区块') }}
+                </button>
+                <button
+                  class="attendance__btn attendance__btn--inline attendance__admin-current-section-nav"
+                  :class="{ 'attendance__admin-current-section-nav--disabled': !nextAdminSectionNavItem }"
+                  type="button"
+                  data-admin-next-section
+                  :data-admin-next-section-id="nextAdminSectionNavItem?.id || ''"
+                  :disabled="!nextAdminSectionNavItem"
+                  :title="nextAdminSectionNavItem?.contextLabel || ''"
+                  @click="nextAdminSectionNavItem && selectAdminSection(nextAdminSectionNavItem.id)"
+                >
+                  <span class="attendance__admin-current-section-nav-direction">{{ tr('Next', '下一个') }}</span>
+                  <strong>{{ nextAdminSectionNavItem?.label || tr('End', '终点') }}</strong>
                 </button>
               </div>
             </div>
@@ -4951,6 +4977,8 @@ const {
   expandAllAdminSectionGroups,
   isCompactAdminNav,
   isKnownAdminSectionId,
+  nextAdminSectionNavItem,
+  previousAdminSectionNavItem,
   readLastAdminSection,
   collapseAllAdminSectionGroups,
   toggleAdminSectionGroup,
@@ -12270,8 +12298,33 @@ const holidaySectionBindings = {
 .attendance__admin-current-section-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.attendance__admin-current-section-nav {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 112px;
+}
+
+.attendance__admin-current-section-nav strong {
+  font-size: 12px;
+}
+
+.attendance__admin-current-section-nav-direction {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.attendance__admin-current-section-nav--disabled {
+  opacity: 0.62;
 }
 
 .attendance__admin-content--focused .attendance__admin-section + .attendance__admin-section {
