@@ -12,6 +12,7 @@ import {
   buildPlmAuditSourceShareFollowupAttentionState,
   buildPlmAuditTeamViewHandoffAttentionState,
   clearPlmAuditSourceFocusState,
+  resolvePlmAuditSavedViewAttentionRuntimeState,
   reducePlmAuditAttentionFocusState,
   reducePlmAuditSavedViewAttentionState,
 } from '../src/views/plmAuditSavedViewAttention'
@@ -443,6 +444,42 @@ describe('plmAuditSavedViewAttention', () => {
         source: 'shared-entry',
       },
       focusedSavedViewId: '',
+    })
+  })
+
+  it('clears stale saved-view focus when the backing saved view no longer exists at runtime', () => {
+    expect(resolvePlmAuditSavedViewAttentionRuntimeState({
+      shareFollowup: null,
+      focusedSavedViewId: 'saved-2',
+    }, [
+      { id: 'saved-1' },
+      { id: 'saved-3' },
+    ])).toEqual({
+      state: {
+        shareFollowup: null,
+        focusedSavedViewId: '',
+      },
+      changed: true,
+    })
+
+    expect(resolvePlmAuditSavedViewAttentionRuntimeState({
+      shareFollowup: {
+        savedViewId: 'saved-1',
+        source: 'shared-entry',
+      },
+      focusedSavedViewId: 'saved-1',
+    }, [
+      { id: 'saved-1' },
+      { id: 'saved-3' },
+    ])).toEqual({
+      state: {
+        shareFollowup: {
+          savedViewId: 'saved-1',
+          source: 'shared-entry',
+        },
+        focusedSavedViewId: 'saved-1',
+      },
+      changed: false,
     })
   })
 })

@@ -6,6 +6,7 @@ import {
   isPlmAuditSharedLinkEntry,
   prunePlmAuditTeamViewShareEntryForRemovedViews,
   resolvePlmAuditSharedEntryTakeoverSelection,
+  resolvePlmAuditTeamViewShareEntryRuntimeState,
   resolvePlmAuditTeamViewShareEntryActionTarget,
   resolvePlmAuditSharedEntryRouteSyncDecision,
   shouldKeepPlmAuditTeamViewShareEntry,
@@ -154,6 +155,29 @@ describe('plmAuditTeamViewShareEntry', () => {
     })).toBe(false)
 
     expect(shouldClearPlmAuditTeamViewShareEntryForActionFeedback(null, null)).toBe(false)
+  })
+
+  it('clears runtime shared-entry ownership when the target no longer exists in the current catalog', () => {
+    expect(resolvePlmAuditTeamViewShareEntryRuntimeState({
+      teamViewId: 'audit-view-1',
+    }, [
+      { id: 'audit-view-1' },
+      { id: 'audit-view-2' },
+    ])).toEqual({
+      entry: {
+        teamViewId: 'audit-view-1',
+      },
+      changed: false,
+    })
+
+    expect(resolvePlmAuditTeamViewShareEntryRuntimeState({
+      teamViewId: 'audit-view-1',
+    }, [
+      { id: 'audit-view-2' },
+    ])).toEqual({
+      entry: null,
+      changed: true,
+    })
   })
 
   it('returns explicit feedback when a shared-entry action is archived or no-op', () => {

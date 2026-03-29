@@ -826,6 +826,7 @@ import {
   buildPlmAuditSourceLocalSaveAttentionState,
   buildPlmAuditSourceShareFollowupAttentionState,
   buildPlmAuditTeamViewHandoffAttentionState,
+  resolvePlmAuditSavedViewAttentionRuntimeState,
   reducePlmAuditAttentionFocusState,
   reducePlmAuditSavedViewAttentionState,
   type PlmAuditAttentionFocusAction,
@@ -906,6 +907,7 @@ import {
   buildPlmAuditTeamViewShareEntryNotice,
   findPlmAuditTeamViewShareEntryView,
   isPlmAuditSharedLinkEntry,
+  resolvePlmAuditTeamViewShareEntryRuntimeState,
   resolvePlmAuditTeamViewShareEntryActionFeedback,
   resolvePlmAuditSharedEntryTakeoverSelection,
   resolvePlmAuditTeamViewShareEntryActionTarget,
@@ -1238,11 +1240,15 @@ const auditTeamViewCollaborationNotice = computed(() => {
   )
 })
 const auditTeamViewShareEntryNotice = computed(() => {
-  const view = auditTeamViewShareEntryTarget.value
+  const entry = resolveAuditTeamViewShareRuntimeEntry()
+  const view = findPlmAuditTeamViewShareEntryView(
+    auditTeamViews.value,
+    entry,
+  )
   if (!view) return null
   return buildPlmAuditTeamViewShareEntryNotice(
     view,
-    auditTeamViewShareEntry.value,
+    entry,
     {
       canDuplicate: canDuplicatePlmCollaborativeEntry(view),
       canSetDefault: canSetDefaultPlmCollaborativeEntry(view),
@@ -1278,23 +1284,42 @@ function resolveAuditTeamViewCollaborationRuntimeFollowup() {
   }
   return outcome.followup
 }
+
+function resolveAuditTeamViewShareRuntimeEntry() {
+  const outcome = resolvePlmAuditTeamViewShareEntryRuntimeState(
+    auditTeamViewShareEntry.value,
+    auditTeamViews.value,
+  )
+  if (outcome.changed) {
+    auditTeamViewShareEntry.value = outcome.entry
+  }
+  return outcome.entry
+}
 const auditSavedViewShareFollowupNotice = computed(() => {
-  const followup = resolveAuditSavedViewShareRuntimeFollowup()
+  const followup = resolveAuditSavedViewRuntimeAttention().shareFollowup
   if (!followup) return null
   const view = savedViews.value.find((entry) => entry.id === followup.savedViewId)
   if (!view) return null
   return buildPlmAuditSavedViewShareFollowupNotice(view, followup, tr)
 })
 
-function resolveAuditSavedViewShareRuntimeFollowup() {
-  const outcome = resolvePlmAuditSavedViewShareFollowupRuntimeState(
+function resolveAuditSavedViewRuntimeAttention() {
+  const followupOutcome = resolvePlmAuditSavedViewShareFollowupRuntimeState(
     auditSavedViewShareFollowup.value,
     savedViews.value,
   )
-  if (outcome.changed) {
-    auditSavedViewShareFollowup.value = outcome.followup
+  const attentionOutcome = resolvePlmAuditSavedViewAttentionRuntimeState(
+    {
+      shareFollowup: followupOutcome.followup,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    savedViews.value,
+  )
+  if (followupOutcome.changed || attentionOutcome.changed) {
+    auditSavedViewShareFollowup.value = attentionOutcome.state.shareFollowup
+    focusedSavedViewId.value = attentionOutcome.state.focusedSavedViewId
   }
-  return outcome.followup
+  return attentionOutcome.state
 }
 
 watch(fromInput, (value) => {
@@ -1438,6 +1463,11 @@ function applySceneContextTakeoverCleanup(targetTeamViewId = readCanonicalTeamVi
       focusedSavedViewId: focusedSavedViewId.value,
     },
     shareEntry: auditTeamViewShareEntry.value,
+    formDraft: {
+      draftTeamViewName: auditTeamViewName.value,
+      draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+      draftOwnerUserId: auditTeamViewOwnerUserId.value,
+    },
     collaboration: {
       selectedIds: auditTeamViewSelection.value,
       draft: auditTeamViewCollaborationDraft.value,
@@ -1449,6 +1479,9 @@ function applySceneContextTakeoverCleanup(targetTeamViewId = readCanonicalTeamVi
   focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
   auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
   auditTeamViewShareEntry.value = nextState.shareEntry
+  auditTeamViewName.value = nextState.formDraft.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextState.formDraft.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextState.formDraft.draftOwnerUserId
   auditTeamViewSelection.value = nextState.collaboration.selectedIds
   auditTeamViewCollaborationDraft.value = nextState.collaboration.draft
   auditTeamViewCollaborationFollowup.value = nextState.collaboration.followup
@@ -2994,6 +3027,7 @@ async function runAuditTeamViewCollaborationFollowupAction(
 }
 
 async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShareEntryActionKind) {
+  const entry = resolveAuditTeamViewShareRuntimeEntry()
   if (actionKind === 'dismiss') {
     clearAuditTeamViewShareEntry()
     await consumeAuditTeamViewShareEntryQuery()
@@ -3001,11 +3035,11 @@ async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShar
   }
 
   const view = resolvePlmAuditTeamViewShareEntryActionTarget(
-    auditTeamViewShareEntryTarget.value,
+    findPlmAuditTeamViewShareEntryView(auditTeamViews.value, entry),
     selectedAuditTeamView.value,
   )
   const shouldClearStaleShareEntry = shouldClearPlmAuditTeamViewShareEntryForActionFeedback(
-    auditTeamViewShareEntry.value,
+    entry,
     view,
   )
 
@@ -3080,7 +3114,7 @@ async function runAuditSavedViewShareFollowupAction(actionKind: PlmAuditSavedVie
     return
   }
 
-  const followup = resolveAuditSavedViewShareRuntimeFollowup()
+  const followup = resolveAuditSavedViewRuntimeAttention().shareFollowup
   const view = followup
     ? savedViews.value.find((entry) => entry.id === followup.savedViewId) ?? null
     : null
@@ -3411,8 +3445,9 @@ async function saveCurrentAuditView() {
   if (!canSaveCurrentAuditView.value) return
   const currentRouteState = readCurrentRouteState()
   const canonicalRouteState = parsePlmAuditRouteState(route.query)
+  const sharedEntry = resolveAuditTeamViewShareRuntimeEntry()
   const followupSource = resolvePlmAuditSavedViewLocalSaveFollowupSource({
-    sharedEntryTeamViewId: auditTeamViewShareEntry.value?.teamViewId || '',
+    sharedEntryTeamViewId: sharedEntry?.teamViewId || '',
     routeTeamViewId: canonicalRouteState.teamViewId,
     sceneContextActive: auditSceneOwnerContextActive.value || auditSceneQueryContextActive.value,
   })
@@ -3599,9 +3634,16 @@ watch(
 )
 
 watch(
-  [savedViews, () => auditSavedViewShareFollowup.value],
+  [savedViews, () => auditSavedViewShareFollowup.value, () => focusedSavedViewId.value],
   () => {
-    resolveAuditSavedViewShareRuntimeFollowup()
+    resolveAuditSavedViewRuntimeAttention()
+  },
+)
+
+watch(
+  [auditTeamViews, () => auditTeamViewShareEntry.value],
+  () => {
+    resolveAuditTeamViewShareRuntimeEntry()
   },
 )
 

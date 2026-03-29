@@ -1,4 +1,5 @@
 import type { PlmAuditSavedViewShareFollowup } from './plmAuditSavedViewShareFollowup'
+import type { PlmAuditSavedView } from './plmAuditSavedViews'
 
 export type PlmAuditSavedViewAttentionState = {
   shareFollowup: PlmAuditSavedViewShareFollowup | null
@@ -250,5 +251,36 @@ export function reducePlmAuditSavedViewAttentionState(
   return {
     shareFollowup: null,
     focusedSavedViewId: '',
+  }
+}
+
+export function resolvePlmAuditSavedViewAttentionRuntimeState(
+  state: PlmAuditSavedViewAttentionState,
+  savedViews: readonly Pick<PlmAuditSavedView, 'id'>[],
+): {
+  state: PlmAuditSavedViewAttentionState
+  changed: boolean
+} {
+  if (!state.focusedSavedViewId.trim()) {
+    return {
+      state,
+      changed: false,
+    }
+  }
+
+  const focusedViewStillExists = savedViews.some((view) => view.id === state.focusedSavedViewId)
+  if (focusedViewStillExists) {
+    return {
+      state,
+      changed: false,
+    }
+  }
+
+  return {
+    state: {
+      ...state,
+      focusedSavedViewId: '',
+    },
+    changed: true,
   }
 }

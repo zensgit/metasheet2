@@ -12,12 +12,17 @@ import {
   shouldTakeOverPlmAuditSharedEntryOnSceneContextTakeover,
   type PlmAuditTeamViewShareEntry,
 } from './plmAuditTeamViewShareEntry'
+import {
+  resolvePlmAuditTakeoverTeamViewFormDraftState,
+  type PlmAuditTeamViewFormDraftState,
+} from './plmAuditTeamViewOwnership'
 
 export type PlmAuditSceneContextTakeoverState = {
   attentionFocus: PlmAuditAttentionFocusState
   savedViewAttention: PlmAuditSavedViewAttentionState
   shareEntry: PlmAuditTeamViewShareEntry | null
   consumeSharedEntry: boolean
+  formDraft: PlmAuditTeamViewFormDraftState
   collaboration: {
     selectedIds: string[]
     draft: PlmAuditTeamViewCollaborationDraft | null
@@ -29,6 +34,7 @@ export function buildPlmAuditSceneContextTakeoverState(options: {
   attentionFocus: PlmAuditAttentionFocusState
   savedViewAttention: PlmAuditSavedViewAttentionState
   shareEntry: PlmAuditTeamViewShareEntry | null
+  formDraft?: PlmAuditTeamViewFormDraftState
   collaboration: {
     selectedIds: string[]
     draft: PlmAuditTeamViewCollaborationDraft | null
@@ -48,6 +54,11 @@ export function buildPlmAuditSceneContextTakeoverState(options: {
     savedViewAttention: nextAttentionState.savedViewAttention,
     shareEntry: sharedEntryTakenOver ? null : options.shareEntry,
     consumeSharedEntry: sharedEntryTakenOver,
+    formDraft: resolvePlmAuditTakeoverTeamViewFormDraftState(options.formDraft || {
+      draftTeamViewName: '',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: '',
+    }),
     collaboration: resolvePlmAuditSavedViewTakeoverCollaborationState({
       selectedIds: options.collaboration.selectedIds,
       draft: options.collaboration.draft,

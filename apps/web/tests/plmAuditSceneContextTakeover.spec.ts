@@ -19,6 +19,11 @@ describe('plmAuditSceneContextTakeover', () => {
       shareEntry: {
         teamViewId: 'team-view-shared',
       },
+      formDraft: {
+        draftTeamViewName: 'Rename scene-owned view',
+        draftTeamViewNameOwnerId: 'team-view-1',
+        draftOwnerUserId: 'owner-a',
+      },
       collaboration: {
         selectedIds: ['team-view-1'],
         draft: {
@@ -51,6 +56,11 @@ describe('plmAuditSceneContextTakeover', () => {
       },
       shareEntry: null,
       consumeSharedEntry: true,
+      formDraft: {
+        draftTeamViewName: '',
+        draftTeamViewNameOwnerId: '',
+        draftOwnerUserId: '',
+      },
       collaboration: {
         selectedIds: [],
         draft: null,
@@ -71,6 +81,11 @@ describe('plmAuditSceneContextTakeover', () => {
         focusedSavedViewId: '',
       },
       shareEntry: null,
+      formDraft: {
+        draftTeamViewName: 'Create new scene-owned view',
+        draftTeamViewNameOwnerId: '',
+        draftOwnerUserId: 'owner-draft',
+      },
       collaboration: {
         selectedIds: ['team-view-9', 'team-view-10'],
         draft: {
@@ -86,6 +101,11 @@ describe('plmAuditSceneContextTakeover', () => {
       },
     })).toMatchObject({
       consumeSharedEntry: false,
+      formDraft: {
+        draftTeamViewName: 'Create new scene-owned view',
+        draftTeamViewNameOwnerId: '',
+        draftOwnerUserId: 'owner-draft',
+      },
       collaboration: {
         selectedIds: ['team-view-9', 'team-view-10'],
         draft: null,
@@ -108,6 +128,11 @@ describe('plmAuditSceneContextTakeover', () => {
       shareEntry: {
         teamViewId: 'team-view-shared',
       },
+      formDraft: {
+        draftTeamViewName: 'Rename scene target',
+        draftTeamViewNameOwnerId: 'team-view-shared',
+        draftOwnerUserId: 'owner-b',
+      },
       collaboration: {
         selectedIds: [],
         draft: null,
@@ -116,6 +141,11 @@ describe('plmAuditSceneContextTakeover', () => {
     })).toMatchObject({
       shareEntry: null,
       consumeSharedEntry: true,
+      formDraft: {
+        draftTeamViewName: '',
+        draftTeamViewNameOwnerId: '',
+        draftOwnerUserId: '',
+      },
     })
   })
 })

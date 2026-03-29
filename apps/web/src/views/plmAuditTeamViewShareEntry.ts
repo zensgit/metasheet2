@@ -219,6 +219,33 @@ export function findPlmAuditTeamViewShareEntryView<T extends { id: string }>(
   return views.find((view) => view.id === entry.teamViewId) || null
 }
 
+export function resolvePlmAuditTeamViewShareEntryRuntimeState<T extends { id: string }>(
+  entry: PlmAuditTeamViewShareEntry | null,
+  views: readonly T[],
+): {
+  entry: PlmAuditTeamViewShareEntry | null
+  changed: boolean
+} {
+  if (!entry) {
+    return {
+      entry: null,
+      changed: false,
+    }
+  }
+
+  if (findPlmAuditTeamViewShareEntryView(views, entry)) {
+    return {
+      entry,
+      changed: false,
+    }
+  }
+
+  return {
+    entry: null,
+    changed: true,
+  }
+}
+
 export function resolvePlmAuditTeamViewShareEntryActionTarget<T>(
   entryTarget: T | null,
   _selectedTarget: T | null,
