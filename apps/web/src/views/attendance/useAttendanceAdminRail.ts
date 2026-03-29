@@ -239,6 +239,15 @@ export function useAttendanceAdminRail({
       ],
     },
   ])
+  const adminSectionGroupIdByItemId = computed(() => {
+    const groupIds = new Map<string, string>()
+    for (const group of adminSectionNavGroups.value) {
+      for (const itemId of group.itemIds) {
+        groupIds.set(itemId, group.id)
+      }
+    }
+    return groupIds
+  })
   const adminSectionGroupLabelByItemId = computed(() => {
     const groupLabels = new Map<string, string>()
     for (const group of adminSectionNavGroups.value) {
@@ -298,6 +307,15 @@ export function useAttendanceAdminRail({
 
   function collapseAllAdminSectionGroups(): void {
     adminCollapsedGroupIds.value = adminSectionNavGroups.value.map(group => group.id)
+  }
+
+  function focusAdminSectionGroup(sectionId: string): void {
+    if (adminSectionFilterActive.value || !isKnownAdminSectionId(sectionId)) return
+    const groupId = adminSectionGroupIdByItemId.value.get(sectionId)
+    if (!groupId) return
+    adminCollapsedGroupIds.value = adminSectionNavGroups.value
+      .map(group => group.id)
+      .filter(id => id !== groupId)
   }
 
   function buildCurrentAdminSectionLink(): string | null {
@@ -379,9 +397,10 @@ export function useAttendanceAdminRail({
         }
       })
       .filter((group): group is AdminSectionNavGroup => Boolean(group))
-    if (!isCompactAdminNav.value || query) return groups
+    if (query) return groups
     const activeIndex = groups.findIndex(group => group.items.some(item => item.id === adminActiveSectionId.value))
     if (activeIndex <= 0) return groups
+    if (!isCompactAdminNav.value && !adminFocusedMode.value) return groups
     const activeGroup = groups[activeIndex]
     return [activeGroup, ...groups.slice(0, activeIndex), ...groups.slice(activeIndex + 1)]
   })
@@ -515,6 +534,7 @@ export function useAttendanceAdminRail({
     clearRecentAdminSections,
     copyCurrentAdminSectionLink,
     expandAllAdminSectionGroups,
+    focusAdminSectionGroup,
     isCompactAdminNav,
     isKnownAdminSectionId,
     nextAdminSectionNavItem,
