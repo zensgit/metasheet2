@@ -1256,7 +1256,6 @@ const auditTeamViewCollaborationFollowupNotice = computed(() => {
     auditTeamViews.value,
     followup,
   )
-  if (!view) return null
   return buildPlmAuditTeamViewCollaborationFollowupNotice(
     view,
     followup,

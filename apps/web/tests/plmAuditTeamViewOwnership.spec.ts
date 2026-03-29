@@ -73,6 +73,34 @@ describe('plmAuditTeamViewOwnership', () => {
     })
   })
 
+  it('keeps default-log collaboration followups when refresh removes the backing team view', () => {
+    expect(prunePlmAuditTransientOwnershipForRemovedViews({
+      collaborationDraft: null,
+      collaborationFollowup: {
+        teamViewId: 'audit-view-2',
+        source: 'recommendation',
+        action: 'set-default',
+        logsAnchorId: 'logs',
+        sourceAnchorId: 'recommendations',
+        sourceSavedViewId: null,
+      },
+      shareEntry: null,
+    }, [
+      'audit-view-2',
+    ])).toEqual({
+      collaborationDraft: null,
+      collaborationFollowup: {
+        teamViewId: 'audit-view-2',
+        source: 'recommendation',
+        action: 'set-default',
+        logsAnchorId: 'logs',
+        sourceAnchorId: 'recommendations',
+        sourceSavedViewId: null,
+      },
+      shareEntry: null,
+    })
+  })
+
   it('clears stale local selectors and focus when refresh removes their backing team views', () => {
     expect(trimPlmAuditExistingTeamViewUiState({
       selectedTeamViewId: 'audit-view-3',

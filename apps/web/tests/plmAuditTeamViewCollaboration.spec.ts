@@ -1148,6 +1148,55 @@ describe('plmAuditTeamViewCollaboration', () => {
     })
   })
 
+  it('keeps default-log follow-ups actionable without a live team-view record', () => {
+    expect(resolvePlmAuditTeamViewCollaborationFollowupActionFeedback({
+      actionKind: 'view-logs',
+      followup: {
+        teamViewId: 'audit-view-2',
+        source: 'recommendation',
+        action: 'set-default',
+        logsAnchorId: 'plm-audit-log-results',
+        sourceAnchorId: 'plm-audit-team-view-recommendations',
+        sourceSavedViewId: null,
+      },
+      target: null,
+      tr,
+    })).toBeNull()
+
+    expect(buildPlmAuditTeamViewCollaborationFollowupNotice(
+      null,
+      {
+        teamViewId: 'audit-view-2',
+        source: 'recommendation',
+        action: 'set-default',
+        logsAnchorId: 'plm-audit-log-results',
+        sourceAnchorId: 'plm-audit-team-view-recommendations',
+        sourceSavedViewId: null,
+      },
+      {
+        canSetDefault: false,
+      },
+      tr,
+    )).toEqual({
+      sourceLabel: 'Recommended team view|推荐团队视图',
+      title: 'Default audit entry updated.|默认审计入口已更新。',
+      description:
+        'Matching default-change audit logs are ready below. Review them now or dismiss this follow-up.|对应的默认变更审计日志已在下方就绪。你可以立即查看，或关闭这条后续提示。',
+      actions: [
+        {
+          kind: 'view-logs',
+          label: 'Review audit logs|查看审计日志',
+          emphasis: 'primary',
+        },
+        {
+          kind: 'dismiss',
+          label: 'Done|完成',
+          emphasis: 'secondary',
+        },
+      ],
+    })
+  })
+
   it('keeps follow-ups only while the route still matches their audit context', () => {
     expect(shouldKeepPlmAuditTeamViewCollaborationFollowup({
       teamViewId: 'audit-view-6',
@@ -1342,6 +1391,26 @@ describe('plmAuditTeamViewCollaboration', () => {
       action: 'share',
       logsAnchorId: 'plm-audit-log-results',
       sourceAnchorId: 'plm-audit-saved-views',
+      sourceSavedViewId: null,
+    })
+  })
+
+  it('keeps set-default follow-ups on the ownerless default-log route after the backing view leaves the list', () => {
+    expect(prunePlmAuditTeamViewCollaborationFollowupForRemovedViews({
+      teamViewId: 'audit-view-9',
+      source: 'recommendation',
+      action: 'set-default',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-team-view-recommendations',
+      sourceSavedViewId: null,
+    }, [
+      'audit-view-9',
+    ])).toEqual({
+      teamViewId: 'audit-view-9',
+      source: 'recommendation',
+      action: 'set-default',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-team-view-recommendations',
       sourceSavedViewId: null,
     })
   })

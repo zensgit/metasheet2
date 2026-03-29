@@ -367,6 +367,7 @@ export function prunePlmAuditTeamViewCollaborationFollowupForRemovedViews(
   removedViewIds: readonly string[],
 ): PlmAuditTeamViewCollaborationFollowup | null {
   if (!followup || !removedViewIds.includes(followup.teamViewId)) return followup
+  if (followup.action === 'set-default') return followup
   return null
 }
 
@@ -574,16 +575,17 @@ export function buildPlmAuditTeamViewCollaborationHandoff(
 }
 
 export function buildPlmAuditTeamViewCollaborationFollowupNotice(
-  view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'isDefault' | 'isArchived'>,
+  view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'isDefault' | 'isArchived'> | null,
   followup: PlmAuditTeamViewCollaborationFollowup | null,
   options: {
     canSetDefault: boolean
   },
   tr: (en: string, zh: string) => string,
 ): PlmAuditTeamViewCollaborationFollowupNotice | null {
-  if (!followup || followup.teamViewId !== view.id) return null
+  if (!followup) return null
 
   if (followup.action === 'share') {
+    if (!view || followup.teamViewId !== view.id) return null
     const actions: PlmAuditTeamViewCollaborationFollowupNotice['actions'] = []
     if (options.canSetDefault && !view.isArchived && !view.isDefault) {
       actions.push({
@@ -680,6 +682,10 @@ export function resolvePlmAuditTeamViewCollaborationFollowupActionFeedback(optio
       kind: 'error',
       message: tr('Current audit team-view follow-up is unavailable.', '当前审计团队视图后续动作不可用。'),
     }
+  }
+
+  if (options.actionKind === 'view-logs' && followup.action === 'set-default') {
+    return null
   }
 
   if (!target) {
