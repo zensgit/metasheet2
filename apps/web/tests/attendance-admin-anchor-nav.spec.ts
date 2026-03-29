@@ -247,6 +247,30 @@ describe('Attendance admin anchor navigation', () => {
     expect(currentSectionBar?.textContent).toContain('Current section')
     expect(currentSectionBar?.textContent).toContain('Workspace · Settings')
     expect(currentSectionBar?.querySelector('[data-admin-focus-toggle="true"]')?.textContent).toContain('Show all sections')
+    expect(currentSectionBar?.querySelector('[data-admin-prev-section]')?.getAttribute('data-admin-prev-section-id')).toBe('')
+    expect(currentSectionBar?.querySelector('[data-admin-next-section]')?.getAttribute('data-admin-next-section-id')).toBe('attendance-admin-user-access')
+  })
+
+  it('lets operators move to the previous and next section from the current-section bar', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const nextButton = container!.querySelector<HTMLButtonElement>('[data-admin-next-section]')
+    expect(nextButton?.getAttribute('data-admin-next-section-id')).toBe('attendance-admin-user-access')
+    nextButton!.click()
+    await flushUi(2)
+
+    expect(window.location.hash).toBe('#attendance-admin-user-access')
+    expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Workspace · User Access')
+    expect(container!.querySelector('[data-admin-prev-section]')?.getAttribute('data-admin-prev-section-id')).toBe('attendance-admin-settings')
+
+    const previousButton = container!.querySelector<HTMLButtonElement>('[data-admin-prev-section]')
+    previousButton!.click()
+    await flushUi(2)
+
+    expect(window.location.hash).toBe('#attendance-admin-settings')
+    expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Workspace · Settings')
   })
 
   it('restores the live user picker, structured rule builder, and holiday month calendar interactions', async () => {

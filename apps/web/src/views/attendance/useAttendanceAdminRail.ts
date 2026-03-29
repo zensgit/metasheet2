@@ -364,6 +364,22 @@ export function useAttendanceAdminRail({
   })
 
   const visibleAdminSectionNavItems = computed(() => visibleAdminSectionNavGroups.value.flatMap(group => group.items))
+  const orderedAdminSectionNavItems = computed<AdminSectionNavDisplayItem[]>(() => {
+    return adminSectionNavGroups.value.flatMap(group => {
+      return group.itemIds
+        .map(id => adminSectionItemMap.value.get(id))
+        .filter((item): item is AdminSectionNavItem => Boolean(item))
+        .map(item => {
+          const groupLabel = adminSectionGroupLabelByItemId.value.get(item.id) ?? null
+          const contextLabel = formatAdminSectionContextLabel(item)
+          return {
+            ...item,
+            groupLabel,
+            contextLabel,
+          }
+        })
+    })
+  })
   const visibleRecentAdminSectionNavItems = computed<AdminSectionNavDisplayItem[]>(() => {
     const query = adminSectionFilterQuery.value
     return adminRecentSectionIds.value
@@ -383,6 +399,19 @@ export function useAttendanceAdminRail({
   const activeAdminSectionContextLabel = computed(() => {
     const activeItem = adminSectionItemMap.value.get(adminActiveSectionId.value)
     return formatAdminSectionContextLabel(activeItem)
+  })
+  const activeAdminSectionOrderedIndex = computed(() => {
+    return orderedAdminSectionNavItems.value.findIndex(item => item.id === adminActiveSectionId.value)
+  })
+  const previousAdminSectionNavItem = computed<AdminSectionNavDisplayItem | null>(() => {
+    const activeIndex = activeAdminSectionOrderedIndex.value
+    if (activeIndex <= 0) return null
+    return orderedAdminSectionNavItems.value[activeIndex - 1] ?? null
+  })
+  const nextAdminSectionNavItem = computed<AdminSectionNavDisplayItem | null>(() => {
+    const activeIndex = activeAdminSectionOrderedIndex.value
+    if (activeIndex < 0 || activeIndex >= orderedAdminSectionNavItems.value.length - 1) return null
+    return orderedAdminSectionNavItems.value[activeIndex + 1] ?? null
   })
   const allAdminSectionGroupsExpanded = computed(() => adminCollapsedGroupIds.value.length === 0)
   const allAdminSectionGroupsCollapsed = computed(() => {
@@ -459,6 +488,9 @@ export function useAttendanceAdminRail({
     expandAllAdminSectionGroups,
     isCompactAdminNav,
     isKnownAdminSectionId,
+    nextAdminSectionNavItem,
+    orderedAdminSectionNavItems,
+    previousAdminSectionNavItem,
     readLastAdminSection,
     collapseAllAdminSectionGroups,
     toggleAdminSectionGroup,
