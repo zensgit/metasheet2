@@ -200,3 +200,11 @@ export function resolvePlmAuditLifecycleLogActionFormDraftState(_options: {
 }): PlmAuditTeamViewFormDraftState {
   return resolvePlmAuditCompletedTeamViewFormDraftState()
 }
+
+export function resolvePlmAuditTransferActionTeamViewFormDraftState(_options: {
+  draftTeamViewName: string
+  draftTeamViewNameOwnerId: string
+  draftOwnerUserId: string
+}): PlmAuditTeamViewFormDraftState {
+  return resolvePlmAuditCompletedTeamViewFormDraftState()
+}

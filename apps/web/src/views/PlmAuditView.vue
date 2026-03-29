@@ -925,6 +925,7 @@ import {
   resolvePlmAuditDefaultActionTeamViewFormDraftState,
   resolvePlmAuditLifecycleLogActionFormDraftState,
   resolvePlmAuditLogRouteTakeoverFormDraftState,
+  resolvePlmAuditTransferActionTeamViewFormDraftState,
   resolvePlmAuditTakeoverTeamViewFormDraftState,
   prunePlmAuditTransientOwnershipForRemovedViews,
   resolvePlmAuditRemovedTeamViewIds,
@@ -1478,6 +1479,17 @@ function clearAuditDefaultActionTeamViewFormDrafts() {
 
 function clearAuditLifecycleLogActionTeamViewFormDrafts() {
   const nextDraftState = resolvePlmAuditLifecycleLogActionFormDraftState({
+    draftTeamViewName: auditTeamViewName.value,
+    draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+  })
+  auditTeamViewName.value = nextDraftState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
+}
+
+function clearAuditTransferActionTeamViewFormDrafts() {
+  const nextDraftState = resolvePlmAuditTransferActionTeamViewFormDraftState({
     draftTeamViewName: auditTeamViewName.value,
     draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
     draftOwnerUserId: auditTeamViewOwnerUserId.value,
@@ -2530,7 +2542,7 @@ async function transferAuditTeamView() {
     replaceAuditTeamView(saved)
     applyAuditManagedTeamViewAttention()
     applyAuditManagedTeamViewSelection(saved.id)
-    auditTeamViewOwnerUserId.value = ''
+    clearAuditTransferActionTeamViewFormDrafts()
     setStatus(tr('Audit team view owner transferred.', '审计团队视图所有者已转移。'))
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
