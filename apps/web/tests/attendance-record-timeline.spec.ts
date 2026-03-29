@@ -222,7 +222,7 @@ describe('Attendance record timeline', () => {
 
     findButton(container!, 'Details').click()
     await flushUi()
-    findButton(container!, 'Use in request form').click()
+    findButton(container!, 'Use as Time correction').click()
     await flushUi()
 
     const workDateInput = container!.querySelector<HTMLInputElement>('#attendance-request-work-date')
@@ -258,13 +258,15 @@ describe('Attendance record timeline', () => {
 
     findButton(container!, 'Details').click()
     await flushUi()
-    findButton(container!, 'Use in request form').click()
+    findButton(container!, 'Use as Missed check-out').click()
     await flushUi()
 
     const requestTypeSelect = container!.querySelector<HTMLSelectElement>('#attendance-request-type')
     const requestedInInput = container!.querySelector<HTMLInputElement>('#attendance-request-in')
     const requestedOutInput = container!.querySelector<HTMLInputElement>('#attendance-request-out')
 
+    expect(container?.textContent).toContain('Suggested request: Missed check-out')
+    expect(findButton(container!, 'Use as Missed check-out')).toBeTruthy()
     expect(requestTypeSelect?.value).toBe('missed_check_out')
     expect(requestedInInput?.value).toBe(toLocalDateTimeValue('2026-03-28T09:01:00+08:00'))
     expect(requestedOutInput?.value).toBe('')
