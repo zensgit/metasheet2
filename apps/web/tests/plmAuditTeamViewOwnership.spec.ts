@@ -3,6 +3,7 @@ import {
   prunePlmAuditTransientOwnershipForRemovedViews,
   resolvePlmAuditCanonicalTeamViewFormDraftState,
   resolvePlmAuditCompletedTeamViewFormDraftState,
+  resolvePlmAuditDefaultActionTeamViewFormDraftState,
   resolvePlmAuditLogRouteTakeoverFormDraftState,
   resolvePlmAuditRemovedTeamViewIds,
   resolvePlmAuditTakeoverTeamViewFormDraftState,
@@ -345,6 +346,28 @@ describe('plmAuditTeamViewOwnership', () => {
 
   it('clears rename and transfer drafts after successful audit team-view save and lifecycle mutations', () => {
     expect(resolvePlmAuditCompletedTeamViewFormDraftState()).toEqual({
+      draftTeamViewName: '',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: '',
+    })
+  })
+
+  it('clears create-mode drafts after successful default actions instead of preserving log-route drafts', () => {
+    expect(resolvePlmAuditLogRouteTakeoverFormDraftState({
+      draftTeamViewName: '新建中的团队视图',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: 'owner-default',
+    })).toEqual({
+      draftTeamViewName: '新建中的团队视图',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: 'owner-default',
+    })
+
+    expect(resolvePlmAuditDefaultActionTeamViewFormDraftState({
+      draftTeamViewName: '新建中的团队视图',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: 'owner-default',
+    })).toEqual({
       draftTeamViewName: '',
       draftTeamViewNameOwnerId: '',
       draftOwnerUserId: '',

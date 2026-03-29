@@ -184,3 +184,11 @@ export function resolvePlmAuditCompletedTeamViewFormDraftState(): PlmAuditTeamVi
     draftOwnerUserId: '',
   }
 }
+
+export function resolvePlmAuditDefaultActionTeamViewFormDraftState(_options: {
+  draftTeamViewName: string
+  draftTeamViewNameOwnerId: string
+  draftOwnerUserId: string
+}): PlmAuditTeamViewFormDraftState {
+  return resolvePlmAuditCompletedTeamViewFormDraftState()
+}

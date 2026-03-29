@@ -922,6 +922,7 @@ import {
 import {
   resolvePlmAuditCanonicalTeamViewFormDraftState,
   resolvePlmAuditCompletedTeamViewFormDraftState,
+  resolvePlmAuditDefaultActionTeamViewFormDraftState,
   resolvePlmAuditLogRouteTakeoverFormDraftState,
   resolvePlmAuditTakeoverTeamViewFormDraftState,
   prunePlmAuditTransientOwnershipForRemovedViews,
@@ -1458,6 +1459,17 @@ function clearAuditLogRouteTakeoverTeamViewFormDrafts() {
 
 function clearAuditCompletedTeamViewFormDrafts() {
   const nextDraftState = resolvePlmAuditCompletedTeamViewFormDraftState()
+  auditTeamViewName.value = nextDraftState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
+}
+
+function clearAuditDefaultActionTeamViewFormDrafts() {
+  const nextDraftState = resolvePlmAuditDefaultActionTeamViewFormDraftState({
+    draftTeamViewName: auditTeamViewName.value,
+    draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+  })
   auditTeamViewName.value = nextDraftState.draftTeamViewName
   auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
   auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
@@ -2637,6 +2649,7 @@ async function setAuditTeamViewDefaultEntry(
     if (nextDraftState.clearDraft) {
       clearAuditTeamViewCollaborationDraft()
     }
+    clearAuditDefaultActionTeamViewFormDrafts()
     setStatus(outcome.statusMessage)
     auditTeamViewCollaborationFollowup.value = outcome.followup
     await nextTick()
