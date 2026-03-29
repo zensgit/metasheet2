@@ -192,3 +192,11 @@ export function resolvePlmAuditDefaultActionTeamViewFormDraftState(_options: {
 }): PlmAuditTeamViewFormDraftState {
   return resolvePlmAuditCompletedTeamViewFormDraftState()
 }
+
+export function resolvePlmAuditLifecycleLogActionFormDraftState(_options: {
+  draftTeamViewName: string
+  draftTeamViewNameOwnerId: string
+  draftOwnerUserId: string
+}): PlmAuditTeamViewFormDraftState {
+  return resolvePlmAuditCompletedTeamViewFormDraftState()
+}

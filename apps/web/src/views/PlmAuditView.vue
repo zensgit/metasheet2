@@ -923,6 +923,7 @@ import {
   resolvePlmAuditCanonicalTeamViewFormDraftState,
   resolvePlmAuditCompletedTeamViewFormDraftState,
   resolvePlmAuditDefaultActionTeamViewFormDraftState,
+  resolvePlmAuditLifecycleLogActionFormDraftState,
   resolvePlmAuditLogRouteTakeoverFormDraftState,
   resolvePlmAuditTakeoverTeamViewFormDraftState,
   prunePlmAuditTransientOwnershipForRemovedViews,
@@ -1466,6 +1467,17 @@ function clearAuditCompletedTeamViewFormDrafts() {
 
 function clearAuditDefaultActionTeamViewFormDrafts() {
   const nextDraftState = resolvePlmAuditDefaultActionTeamViewFormDraftState({
+    draftTeamViewName: auditTeamViewName.value,
+    draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+  })
+  auditTeamViewName.value = nextDraftState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
+}
+
+function clearAuditLifecycleLogActionTeamViewFormDrafts() {
+  const nextDraftState = resolvePlmAuditLifecycleLogActionFormDraftState({
     draftTeamViewName: auditTeamViewName.value,
     draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
     draftOwnerUserId: auditTeamViewOwnerUserId.value,
@@ -2819,7 +2831,7 @@ async function clearAuditTeamViewDefault() {
     if (nextDraftState.clearDraft) {
       clearAuditTeamViewCollaborationDraft()
     }
-    clearAuditLogRouteTakeoverTeamViewFormDrafts()
+    clearAuditLifecycleLogActionTeamViewFormDrafts()
     focusedAuditTeamViewId.value = saved.id
     await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'clear-default', readCurrentRouteState()))
     setStatus(tr('Audit team view default cleared. Showing matching audit logs.', '审计团队视图默认已取消，已切换到对应审计日志。'))
@@ -3138,7 +3150,7 @@ async function runAuditTeamViewLifecycleAction(
       await deletePlmWorkbenchTeamView(view.id)
       removeAuditTeamViews([view.id])
       clearCurrentAuditTeamViewSelectionIfNeeded([view.id])
-      clearAuditLogRouteTakeoverTeamViewFormDrafts()
+      clearAuditLifecycleLogActionTeamViewFormDrafts()
       applyAuditManagedTeamViewAttention()
       focusedAuditTeamViewId.value = ''
       await syncRouteState(buildPlmAuditTeamViewLogState(view, 'delete', readCurrentRouteState()))
@@ -3168,7 +3180,7 @@ async function runAuditTeamViewLifecycleAction(
       }
       auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => id !== view.id)
       clearCurrentAuditTeamViewSelectionIfNeeded([view.id])
-      clearAuditLogRouteTakeoverTeamViewFormDrafts()
+      clearAuditLifecycleLogActionTeamViewFormDrafts()
       await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'archive', readCurrentRouteState()))
       setStatus(tr('Audit team view archived. Showing matching audit logs.', '审计团队视图已归档，已切换到对应审计日志。'))
       return
@@ -3185,7 +3197,7 @@ async function runAuditTeamViewLifecycleAction(
     if (nextDraftState.clearDraft) {
       clearAuditTeamViewCollaborationDraft()
     }
-    clearAuditLogRouteTakeoverTeamViewFormDrafts()
+    clearAuditLifecycleLogActionTeamViewFormDrafts()
     await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'restore', readCurrentRouteState()))
     setStatus(tr('Audit team view restored. Showing matching audit logs.', '审计团队视图已恢复，已切换到对应审计日志。'))
   } catch (error: unknown) {
@@ -3249,7 +3261,7 @@ async function runAuditTeamViewBatchAction(actionKind: PlmAuditTeamViewLifecycle
     if (nextDraftState.clearDraft) {
       clearAuditTeamViewCollaborationDraft()
     }
-    clearAuditLogRouteTakeoverTeamViewFormDrafts()
+    clearAuditLifecycleLogActionTeamViewFormDrafts()
 
     const processedTotal = result.processedIds.length
     const skippedTotal = result.skippedIds.length

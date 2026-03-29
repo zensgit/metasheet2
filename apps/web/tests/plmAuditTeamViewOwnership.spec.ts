@@ -4,6 +4,7 @@ import {
   resolvePlmAuditCanonicalTeamViewFormDraftState,
   resolvePlmAuditCompletedTeamViewFormDraftState,
   resolvePlmAuditDefaultActionTeamViewFormDraftState,
+  resolvePlmAuditLifecycleLogActionFormDraftState,
   resolvePlmAuditLogRouteTakeoverFormDraftState,
   resolvePlmAuditRemovedTeamViewIds,
   resolvePlmAuditTakeoverTeamViewFormDraftState,
@@ -367,6 +368,28 @@ describe('plmAuditTeamViewOwnership', () => {
       draftTeamViewName: '新建中的团队视图',
       draftTeamViewNameOwnerId: '',
       draftOwnerUserId: 'owner-default',
+    })).toEqual({
+      draftTeamViewName: '',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: '',
+    })
+  })
+
+  it('clears create-mode drafts after explicit lifecycle log actions instead of preserving passive log-route takeovers', () => {
+    expect(resolvePlmAuditLogRouteTakeoverFormDraftState({
+      draftTeamViewName: '新建中的团队视图',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: 'owner-lifecycle',
+    })).toEqual({
+      draftTeamViewName: '新建中的团队视图',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: 'owner-lifecycle',
+    })
+
+    expect(resolvePlmAuditLifecycleLogActionFormDraftState({
+      draftTeamViewName: '新建中的团队视图',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: 'owner-lifecycle',
     })).toEqual({
       draftTeamViewName: '',
       draftTeamViewNameOwnerId: '',
