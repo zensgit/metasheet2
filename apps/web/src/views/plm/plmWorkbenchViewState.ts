@@ -196,6 +196,34 @@ export function shouldAutoloadPlmProductContext(options: {
     || selectedPanels.has('substitutes')
 }
 
+export function shouldAutoloadPlmWorkbenchSnapshot(snapshot: Record<string, string>): boolean {
+  if (normalizeQueryValue(snapshot.searchQuery)) {
+    return true
+  }
+
+  if (shouldAutoloadPlmProductContext({
+    panel: snapshot.panel,
+    productId: snapshot.productId,
+    itemNumber: snapshot.itemNumber,
+  })) {
+    return true
+  }
+
+  if (normalizeQueryValue(snapshot.cadFileId)) {
+    return true
+  }
+
+  if (normalizeQueryValue(snapshot.whereUsedItemId)) {
+    return true
+  }
+
+  if (normalizeQueryValue(snapshot.compareLeftId) && normalizeQueryValue(snapshot.compareRightId)) {
+    return true
+  }
+
+  return Boolean(normalizeQueryValue(snapshot.bomLineId))
+}
+
 export function normalizePlmWorkbenchCollaborativeQuerySnapshot(value: unknown): Record<string, string> {
   const next = stripPlmWorkbenchTeamViewIdentity(normalizePlmWorkbenchQuerySnapshot(value))
   delete next.bomFilterPreset
@@ -511,13 +539,15 @@ export function buildPlmWorkbenchTeamViewShareUrl<Kind extends PlmWorkbenchTeamV
   kind: Kind,
   view: PlmWorkbenchTeamView<Kind>,
   basePath: string,
-  origin = 'http://127.0.0.1:8899',
+  origin?: string,
   routeContext?: {
     productId?: string
     itemNumber?: string
     itemType?: string
   },
 ) {
+  const resolvedOrigin = origin ?? (typeof window !== 'undefined' ? window.location.origin : '')
+  if (!resolvedOrigin) return ''
   const params = new URLSearchParams()
 
   if (kind === 'workbench') {
@@ -528,7 +558,8 @@ export function buildPlmWorkbenchTeamViewShareUrl<Kind extends PlmWorkbenchTeamV
       if (key === 'workbenchTeamView') continue
       appendIfPresent(params, key, value)
     }
-    return `${origin}${basePath}?${params.toString()}`
+    appendIfPresent(params, 'autoload', shouldAutoloadPlmWorkbenchSnapshot(query) ? true : undefined)
+    return `${resolvedOrigin}${basePath}?${params.toString()}`
   }
 
   if (kind === 'documents') {
@@ -548,7 +579,7 @@ export function buildPlmWorkbenchTeamViewShareUrl<Kind extends PlmWorkbenchTeamV
       'autoload',
       routeContext?.productId || routeContext?.itemNumber ? true : undefined,
     )
-    return `${origin}${basePath}?${params.toString()}`
+    return `${resolvedOrigin}${basePath}?${params.toString()}`
   }
 
   if (kind === 'cad') {
@@ -560,7 +591,7 @@ export function buildPlmWorkbenchTeamViewShareUrl<Kind extends PlmWorkbenchTeamV
     appendIfPresent(params, 'cadReviewState', cadView.state.reviewState)
     appendIfPresent(params, 'cadReviewNote', cadView.state.reviewNote)
     appendIfPresent(params, 'autoload', cadView.state.fileId ? true : undefined)
-    return `${origin}${basePath}?${params.toString()}`
+    return `${resolvedOrigin}${basePath}?${params.toString()}`
   }
 
   if (kind === 'audit') {
@@ -572,7 +603,7 @@ export function buildPlmWorkbenchTeamViewShareUrl<Kind extends PlmWorkbenchTeamV
     for (const [key, value] of Object.entries(query)) {
       appendIfPresent(params, key, value)
     }
-    return `${origin}${basePath}?${params.toString()}`
+    return `${resolvedOrigin}${basePath}?${params.toString()}`
   }
 
   const approvalsView = view as PlmWorkbenchTeamView<'approvals'>
@@ -591,5 +622,5 @@ export function buildPlmWorkbenchTeamViewShareUrl<Kind extends PlmWorkbenchTeamV
     'autoload',
     routeContext?.productId || routeContext?.itemNumber ? true : undefined,
   )
-  return `${origin}${basePath}?${params.toString()}`
+  return `${resolvedOrigin}${basePath}?${params.toString()}`
 }

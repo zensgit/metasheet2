@@ -694,6 +694,90 @@ describe('plmWorkbenchViewState', () => {
     )
   })
 
+  it('adds autoload to workbench team view share URLs when the saved snapshot carries product bootstrap context', () => {
+    expect(
+      buildPlmWorkbenchTeamViewShareUrl(
+        'workbench',
+        {
+          id: 'workbench-view-2',
+          kind: 'workbench',
+          scope: 'team',
+          name: '产品联动场景',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          state: {
+            query: {
+              panel: 'documents,approvals',
+              productId: 'product-42',
+              itemNumber: 'P-1001',
+              itemType: 'Assembly',
+              documentFilter: 'spec',
+            },
+          },
+        },
+        '/plm',
+        'https://example.test',
+      ),
+    ).toBe(
+      'https://example.test/plm?workbenchTeamView=workbench-view-2&panel=documents%2Capprovals&productId=product-42&itemNumber=P-1001&itemType=Assembly&documentFilter=spec&autoload=true',
+    )
+  })
+
+  it('adds autoload to workbench team view share URLs when the saved snapshot targets cad directly', () => {
+    expect(
+      buildPlmWorkbenchTeamViewShareUrl(
+        'workbench',
+        {
+          id: 'workbench-view-3',
+          kind: 'workbench',
+          scope: 'team',
+          name: 'CAD 场景',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          state: {
+            query: {
+              panel: 'cad',
+              cadFileId: 'cad-main',
+            },
+          },
+        },
+        '/plm',
+        'https://example.test',
+      ),
+    ).toBe(
+      'https://example.test/plm?workbenchTeamView=workbench-view-3&panel=cad&cadFileId=cad-main&autoload=true',
+    )
+  })
+
+  it('uses the current runtime origin when team-view share urls do not receive an explicit origin', () => {
+    const url = new URL(
+      buildPlmWorkbenchTeamViewShareUrl(
+        'audit',
+        {
+          id: 'audit-view-runtime',
+          kind: 'audit',
+          scope: 'team',
+          name: '审计视角',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          state: {
+            q: 'gear',
+          },
+        },
+        '/plm',
+      ),
+    )
+
+    expect(url.origin).toBe(window.location.origin)
+    expect(url.pathname).toBe('/plm')
+    expect(url.searchParams.get('auditEntry')).toBe('share')
+    expect(url.searchParams.get('auditTeamView')).toBe('audit-view-runtime')
+    expect(url.searchParams.get('auditQ')).toBe('gear')
+  })
+
   it('builds panel team view share URLs with explicit team-view identity', () => {
     const documentsUrl = buildPlmWorkbenchTeamViewShareUrl(
       'documents',
