@@ -398,9 +398,9 @@ export function useAttendanceAdminRail({
       })
       .filter((group): group is AdminSectionNavGroup => Boolean(group))
     if (query) return groups
+    if (!isCompactAdminNav.value && !adminFocusedMode.value) return groups
     const activeIndex = groups.findIndex(group => group.items.some(item => item.id === adminActiveSectionId.value))
     if (activeIndex <= 0) return groups
-    if (!isCompactAdminNav.value && !adminFocusedMode.value) return groups
     const activeGroup = groups[activeIndex]
     return [activeGroup, ...groups.slice(0, activeIndex), ...groups.slice(activeIndex + 1)]
   })

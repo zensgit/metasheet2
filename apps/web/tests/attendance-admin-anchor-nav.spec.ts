@@ -328,8 +328,10 @@ describe('Attendance admin anchor navigation', () => {
       const header = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-nav-group-header'))
         .find(button => button.textContent?.includes(label))
       expect(header).toBeTruthy()
-      header!.click()
-      await flushUi(2)
+      if (header!.getAttribute('aria-expanded') === 'false') {
+        header!.click()
+        await flushUi(2)
+      }
     }
 
     const groupMembersAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-group-members"]')
