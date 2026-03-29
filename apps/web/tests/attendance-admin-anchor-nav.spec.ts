@@ -6,6 +6,7 @@ import { apiFetch } from '../src/utils/api'
 const ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY = 'metasheet_attendance_admin_nav_collapsed_groups'
 const ADMIN_NAV_RECENTS_STORAGE_KEY = 'metasheet_attendance_admin_nav_recent_sections'
 const ADMIN_NAV_LAST_SECTION_STORAGE_KEY = 'metasheet_attendance_admin_nav_last_section'
+const ADMIN_NAV_FOCUS_MODE_STORAGE_KEY = 'metasheet_attendance_admin_nav_focused_mode'
 const ADMIN_NAV_DEFAULT_STORAGE_SCOPE = 'default'
 
 function scopedAdminNavStorageKey(baseKey: string, scope = ADMIN_NAV_DEFAULT_STORAGE_SCOPE): string {
@@ -246,6 +247,7 @@ describe('Attendance admin anchor navigation', () => {
     expect(currentSectionBar).toBeTruthy()
     expect(currentSectionBar?.textContent).toContain('Current section')
     expect(currentSectionBar?.textContent).toContain('Workspace · Settings')
+    expect(currentSectionBar?.textContent).toContain('Quick switch: Alt+↑ previous')
     expect(currentSectionBar?.querySelector('[data-admin-focus-toggle="true"]')?.textContent).toContain('Show all sections')
     expect(currentSectionBar?.querySelector('[data-admin-prev-section]')?.getAttribute('data-admin-prev-section-id')).toBe('')
     expect(currentSectionBar?.querySelector('[data-admin-next-section]')?.getAttribute('data-admin-next-section-id')).toBe('attendance-admin-user-access')
@@ -271,6 +273,32 @@ describe('Attendance admin anchor navigation', () => {
 
     expect(window.location.hash).toBe('#attendance-admin-settings')
     expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Workspace · Settings')
+  })
+
+  it('remembers focus-vs-show-all mode across remounts', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const toggle = container!.querySelector<HTMLButtonElement>('[data-admin-focus-toggle="true"]')
+    expect(toggle).toBeTruthy()
+    toggle!.click()
+    await flushUi(2)
+
+    expect(window.localStorage.getItem(scopedAdminNavStorageKey(ADMIN_NAV_FOCUS_MODE_STORAGE_KEY))).toBe('false')
+    expect(toggle?.textContent).toContain('Focus current section')
+
+    app.unmount()
+    container!.innerHTML = ''
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const nextToggle = container!.querySelector<HTMLButtonElement>('[data-admin-focus-toggle="true"]')
+    expect(nextToggle?.textContent).toContain('Focus current section')
+    expect(container!.querySelector<HTMLElement>('#attendance-admin-settings')?.style.display).not.toBe('none')
+    expect(container!.querySelector<HTMLElement>('#attendance-admin-holidays')?.style.display).not.toBe('none')
   })
 
   it('restores the live user picker, structured rule builder, and holiday month calendar interactions', async () => {

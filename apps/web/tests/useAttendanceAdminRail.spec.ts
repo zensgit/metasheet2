@@ -3,6 +3,7 @@ import { effectScope, nextTick, ref } from 'vue'
 import {
   ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY,
   ADMIN_NAV_DEFAULT_STORAGE_SCOPE,
+  ADMIN_NAV_FOCUS_MODE_STORAGE_KEY,
   ADMIN_NAV_LAST_SECTION_STORAGE_KEY,
   ADMIN_NAV_RECENTS_STORAGE_KEY,
   ATTENDANCE_ADMIN_SECTION_IDS,
@@ -120,6 +121,38 @@ describe('useAttendanceAdminRail', () => {
     expect(rail.visibleRecentAdminSectionNavItems.value).toEqual([])
     expect(window.localStorage.getItem(scopedKey(ADMIN_NAV_RECENTS_STORAGE_KEY))).toBe('[]')
     expect(notifications.some(entry => entry.message.includes('Recent admin shortcuts cleared.'))).toBe(true)
+
+    scope.stop()
+  })
+
+  it('reloads and persists focused mode per org-scoped storage bucket', async () => {
+    window.localStorage.setItem(
+      scopedKey(ADMIN_NAV_FOCUS_MODE_STORAGE_KEY, 'org-b'),
+      JSON.stringify(false),
+    )
+
+    const scopeRef = ref<string | undefined>(undefined)
+    const showAdmin = ref(true)
+    const scope = effectScope()
+    const rail = scope.run(() =>
+      useAttendanceAdminRail({
+        tr: (en: string) => en,
+        resolveStorageScope: () => scopeRef.value,
+        showAdmin,
+        notify: () => undefined,
+      }),
+    )!
+
+    await flushUi()
+    expect(rail.adminFocusedMode.value).toBe(true)
+
+    scopeRef.value = 'org-b'
+    await flushUi()
+    expect(rail.adminFocusedMode.value).toBe(false)
+
+    rail.adminFocusedMode.value = true
+    await flushUi()
+    expect(window.localStorage.getItem(scopedKey(ADMIN_NAV_FOCUS_MODE_STORAGE_KEY, 'org-b'))).toBe('true')
 
     scope.stop()
   })

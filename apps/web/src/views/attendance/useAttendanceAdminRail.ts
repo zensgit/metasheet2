@@ -5,6 +5,7 @@ export type TranslateFn = (en: string, zh: string) => string
 export const ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY = 'metasheet_attendance_admin_nav_collapsed_groups'
 export const ADMIN_NAV_RECENTS_STORAGE_KEY = 'metasheet_attendance_admin_nav_recent_sections'
 export const ADMIN_NAV_LAST_SECTION_STORAGE_KEY = 'metasheet_attendance_admin_nav_last_section'
+export const ADMIN_NAV_FOCUS_MODE_STORAGE_KEY = 'metasheet_attendance_admin_nav_focused_mode'
 export const ADMIN_NAV_DEFAULT_STORAGE_SCOPE = 'default'
 const ADMIN_NAV_RECENT_LIMIT = 5
 
@@ -132,6 +133,27 @@ function persistLastAdminSection(scope: string, id: string): void {
   }
 }
 
+function loadAdminNavFocusedMode(scope: string): boolean {
+  if (typeof window === 'undefined') return true
+  try {
+    const raw = window.localStorage.getItem(resolveAdminNavStorageKey(ADMIN_NAV_FOCUS_MODE_STORAGE_KEY, scope))
+    if (!raw) return true
+    const parsed = JSON.parse(raw)
+    return typeof parsed === 'boolean' ? parsed : true
+  } catch {
+    return true
+  }
+}
+
+function persistAdminNavFocusedMode(scope: string, focused: boolean): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(resolveAdminNavStorageKey(ADMIN_NAV_FOCUS_MODE_STORAGE_KEY, scope), JSON.stringify(focused))
+  } catch {
+    // ignore storage write failures (private mode, quota).
+  }
+}
+
 export function useAttendanceAdminRail({
   tr,
   resolveStorageScope,
@@ -233,6 +255,7 @@ export function useAttendanceAdminRail({
   const adminNavStorageScope = computed(() => resolveStorageScope() ?? ADMIN_NAV_DEFAULT_STORAGE_SCOPE)
   const adminCollapsedGroupIds = ref<string[]>(loadAdminNavCollapsedGroups(adminNavStorageScope.value))
   const adminRecentSectionIds = ref<string[]>(loadAdminNavRecentSections(adminNavStorageScope.value))
+  const adminFocusedMode = ref(loadAdminNavFocusedMode(adminNavStorageScope.value))
   const isCompactAdminNav = ref(false)
   const adminCompactNavOpen = ref(false)
   const adminActiveSectionId = ref<string>(ATTENDANCE_ADMIN_SECTION_IDS.settings)
@@ -457,10 +480,15 @@ export function useAttendanceAdminRail({
     persistAdminNavRecentSections(adminNavStorageScope.value, Array.from(new Set(sectionIds)).slice(0, ADMIN_NAV_RECENT_LIMIT))
   })
 
+  watch(adminFocusedMode, focused => {
+    persistAdminNavFocusedMode(adminNavStorageScope.value, focused)
+  })
+
   watch(adminNavStorageScope, (scope, previousScope) => {
     if (scope === previousScope) return
     adminCollapsedGroupIds.value = loadAdminNavCollapsedGroups(scope)
     adminRecentSectionIds.value = loadAdminNavRecentSections(scope)
+    adminFocusedMode.value = loadAdminNavFocusedMode(scope)
     if (previousScope !== undefined) {
       setAdminNavScopeFeedback(scope)
     }
@@ -474,6 +502,7 @@ export function useAttendanceAdminRail({
     adminActiveSectionId,
     adminCompactNavOpen,
     adminNavDefaultStorageScope: ADMIN_NAV_DEFAULT_STORAGE_SCOPE,
+    adminFocusedMode,
     adminNavScopeFeedback,
     adminNavStorageScope,
     adminSectionFilter,

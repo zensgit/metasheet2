@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, nextTick, ref, type App } from 'vue'
+import { computed, createApp, defineComponent, nextTick, ref, type App } from 'vue'
 import type { AdminSectionNavItem } from '../src/views/attendance/useAttendanceAdminRail'
 import { useAttendanceAdminRailNavigation } from '../src/views/attendance/useAttendanceAdminRailNavigation'
 
@@ -64,12 +64,24 @@ describe('useAttendanceAdminRailNavigation', () => {
         const adminFocusCurrentSectionOnly = ref(options?.focused ?? false)
         const adminNavStorageScope = ref('default')
         const adminActiveSectionId = ref(items[0].id)
+        const previousAdminSectionId = computed(() => {
+          const activeIndex = items.findIndex(item => item.id === adminActiveSectionId.value)
+          if (activeIndex <= 0) return ''
+          return items[activeIndex - 1]?.id ?? ''
+        })
+        const nextAdminSectionId = computed(() => {
+          const activeIndex = items.findIndex(item => item.id === adminActiveSectionId.value)
+          if (activeIndex < 0 || activeIndex >= items.length - 1) return ''
+          return items[activeIndex + 1]?.id ?? ''
+        })
         const isCompactAdminNav = ref(false)
         const adminCompactNavOpen = ref(false)
         const { adminSectionBinding, scrollToAdminSection } = useAttendanceAdminRailNavigation({
           showAdmin,
           adminForbidden,
           adminFocusCurrentSectionOnly,
+          previousAdminSectionId,
+          nextAdminSectionId,
           adminNavStorageScope,
           adminActiveSectionId,
           adminSectionNavItems: ref(items),
@@ -90,6 +102,7 @@ describe('useAttendanceAdminRailNavigation', () => {
         <div>
           <button data-admin-anchor="attendance-admin-settings" type="button">Settings</button>
           <button data-admin-anchor="attendance-admin-approval-flows" type="button">Approval Flows</button>
+          <input data-keyboard-blocker type="text" />
           <div data-active-id>{{ adminActiveSectionId }}</div>
           <section v-bind="adminSectionBinding('attendance-admin-settings')">Settings section</section>
           <section v-bind="adminSectionBinding('attendance-admin-approval-flows')">Approval section</section>
@@ -146,5 +159,37 @@ describe('useAttendanceAdminRailNavigation', () => {
     expect(vm.adminCompactNavOpen).toBe(false)
     expect(vm.adminActiveSectionId).toBe('attendance-admin-approval-flows')
     expect(window.location.hash).toBe('#attendance-admin-approval-flows')
+  })
+
+  it('moves between sections with Alt+ArrowDown and Alt+ArrowUp', async () => {
+    const vm = mountHost()
+    await flushUi()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }))
+    await flushUi()
+
+    expect(vm.adminActiveSectionId).toBe('attendance-admin-approval-flows')
+    expect(window.location.hash).toBe('#attendance-admin-approval-flows')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true }))
+    await flushUi()
+
+    expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
+    expect(window.location.hash).toBe('#attendance-admin-settings')
+  })
+
+  it('ignores keyboard navigation while an input is focused', async () => {
+    const vm = mountHost()
+    await flushUi()
+
+    const input = container!.querySelector<HTMLInputElement>('[data-keyboard-blocker]')
+    expect(input).toBeTruthy()
+    input!.focus()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }))
+    await flushUi()
+
+    expect(vm.adminActiveSectionId).toBe('attendance-admin-settings')
+    expect(window.location.hash).toBe('')
   })
 })
