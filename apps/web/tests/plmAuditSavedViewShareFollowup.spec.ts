@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPlmAuditSavedViewShareFollowupNotice,
   resolvePlmAuditSavedViewShareFollowupActionFeedback,
+  resolvePlmAuditSavedViewShareFollowupRuntimeState,
   resolvePlmAuditSavedViewLocalSaveFollowupSource,
   resolvePlmAuditSavedViewLocalSaveState,
 } from '../src/views/plmAuditSavedViewShareFollowup'
@@ -266,6 +267,31 @@ describe('plmAuditSavedViewShareFollowup', () => {
     })).toEqual({
       kind: 'error',
       message: 'Current saved-view follow-up is unavailable.|当前保存视图后续动作不可用。',
+    })
+  })
+
+  it('clears runtime followups when the saved-view target no longer exists', () => {
+    expect(resolvePlmAuditSavedViewShareFollowupRuntimeState({
+      savedViewId: 'saved-view-1',
+      source: 'shared-entry',
+    }, [
+      { id: 'saved-view-1' },
+    ])).toEqual({
+      followup: {
+        savedViewId: 'saved-view-1',
+        source: 'shared-entry',
+      },
+      changed: false,
+    })
+
+    expect(resolvePlmAuditSavedViewShareFollowupRuntimeState({
+      savedViewId: 'saved-view-2',
+      source: 'scene-context',
+    }, [
+      { id: 'saved-view-1' },
+    ])).toEqual({
+      followup: null,
+      changed: true,
     })
   })
 })

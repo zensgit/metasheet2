@@ -105,6 +105,32 @@ export function buildPlmAuditSavedViewShareFollowupNotice(
   }
 }
 
+export function resolvePlmAuditSavedViewShareFollowupRuntimeState(
+  followup: PlmAuditSavedViewShareFollowup | null,
+  savedViews: readonly Pick<PlmAuditSavedView, 'id'>[],
+): {
+  followup: PlmAuditSavedViewShareFollowup | null
+  changed: boolean
+} {
+  if (!followup) {
+    return {
+      followup: null,
+      changed: false,
+    }
+  }
+  const view = savedViews.find((entry) => entry.id === followup.savedViewId) || null
+  if (view) {
+    return {
+      followup,
+      changed: false,
+    }
+  }
+  return {
+    followup: null,
+    changed: true,
+  }
+}
+
 export function resolvePlmAuditSavedViewShareFollowupActionFeedback(options: {
   actionKind: Exclude<PlmAuditSavedViewShareFollowupActionKind, 'dismiss'>
   followup: PlmAuditSavedViewShareFollowup | null | undefined

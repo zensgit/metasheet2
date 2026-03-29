@@ -844,6 +844,7 @@ import {
   resolvePlmAuditSavedViewShareFollowupActionFeedback,
   resolvePlmAuditSavedViewLocalSaveFollowupSource,
   resolvePlmAuditSavedViewLocalSaveState,
+  resolvePlmAuditSavedViewShareFollowupRuntimeState,
   type PlmAuditSavedViewShareFollowup,
   type PlmAuditSavedViewShareFollowupSource,
   type PlmAuditSavedViewShareFollowupActionKind,
@@ -1279,12 +1280,23 @@ function resolveAuditTeamViewCollaborationRuntimeFollowup() {
   return outcome.followup
 }
 const auditSavedViewShareFollowupNotice = computed(() => {
-  const followup = auditSavedViewShareFollowup.value
+  const followup = resolveAuditSavedViewShareRuntimeFollowup()
   if (!followup) return null
   const view = savedViews.value.find((entry) => entry.id === followup.savedViewId)
   if (!view) return null
   return buildPlmAuditSavedViewShareFollowupNotice(view, followup, tr)
 })
+
+function resolveAuditSavedViewShareRuntimeFollowup() {
+  const outcome = resolvePlmAuditSavedViewShareFollowupRuntimeState(
+    auditSavedViewShareFollowup.value,
+    savedViews.value,
+  )
+  if (outcome.changed) {
+    auditSavedViewShareFollowup.value = outcome.followup
+  }
+  return outcome.followup
+}
 
 watch(fromInput, (value) => {
   from.value = normalizePlmAuditDateTimeTransport(value)
@@ -3069,7 +3081,7 @@ async function runAuditSavedViewShareFollowupAction(actionKind: PlmAuditSavedVie
     return
   }
 
-  const followup = auditSavedViewShareFollowup.value
+  const followup = resolveAuditSavedViewShareRuntimeFollowup()
   const view = followup
     ? savedViews.value.find((entry) => entry.id === followup.savedViewId) ?? null
     : null
@@ -3584,6 +3596,13 @@ watch(
   [() => Boolean(auditSceneContext.value), () => auditTeamViewCollaborationFollowup.value],
   () => {
     resolveAuditTeamViewCollaborationRuntimeFollowup()
+  },
+)
+
+watch(
+  [savedViews, () => auditSavedViewShareFollowup.value],
+  () => {
+    resolveAuditSavedViewShareRuntimeFollowup()
   },
 )
 
