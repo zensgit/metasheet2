@@ -5121,7 +5121,17 @@ const {
     documentTeamViewQuery.value = value || ''
     scheduleQuerySync({ documentTeamView: value || undefined })
   },
-  buildShareUrl: (view) => buildPlmWorkbenchTeamViewShareUrl('documents', view, route.path),
+  buildShareUrl: (view) => buildPlmWorkbenchTeamViewShareUrl(
+    'documents',
+    view,
+    route.path,
+    undefined,
+    {
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : '',
+    },
+  ),
   copyShareUrl: copyToClipboard,
   shouldAutoApplyDefault: () => (
     !hasExplicitPlmDocumentAutoApplyQueryState(
@@ -5364,7 +5374,17 @@ const {
     approvalsTeamViewQuery.value = value || ''
     scheduleQuerySync({ approvalsTeamView: value || undefined })
   },
-  buildShareUrl: (view) => buildPlmWorkbenchTeamViewShareUrl('approvals', view, route.path),
+  buildShareUrl: (view) => buildPlmWorkbenchTeamViewShareUrl(
+    'approvals',
+    view,
+    route.path,
+    undefined,
+    {
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : '',
+    },
+  ),
   copyShareUrl: copyToClipboard,
   shouldAutoApplyDefault: () => (
     !hasExplicitPlmApprovalsAutoApplyQueryState(

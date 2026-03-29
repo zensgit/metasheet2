@@ -799,6 +799,70 @@ describe('plmWorkbenchViewState', () => {
     )
   })
 
+  it('adds product context and autoload to document team-view share urls when a product is selected', () => {
+    expect(buildPlmWorkbenchTeamViewShareUrl(
+      'documents',
+      {
+        id: 'document-view-2',
+        kind: 'documents',
+        scope: 'team',
+        name: '文档视角',
+        ownerUserId: 'dev-user',
+        canManage: true,
+        isDefault: false,
+        state: {
+          role: 'secondary',
+          filter: 'spec',
+          sortKey: 'updated',
+          sortDir: 'desc',
+          columns: {
+            actions: false,
+          },
+        },
+      },
+      '/plm',
+      'https://example.test',
+      {
+        productId: 'product-42',
+      },
+    )).toBe(
+      'https://example.test/plm?panel=documents&documentTeamView=document-view-2&productId=product-42&documentRole=secondary&documentFilter=spec&autoload=true',
+    )
+  })
+
+  it('adds item identity and autoload to approvals team-view share urls when only item-number context is available', () => {
+    expect(buildPlmWorkbenchTeamViewShareUrl(
+      'approvals',
+      {
+        id: 'approval-view-2',
+        kind: 'approvals',
+        scope: 'team',
+        name: '审批视角',
+        ownerUserId: 'dev-user',
+        canManage: true,
+        isDefault: false,
+        state: {
+          status: 'pending',
+          filter: '',
+          sortKey: 'created',
+          sortDir: 'desc',
+          columns: {
+            product: true,
+            actions: false,
+          },
+        },
+      },
+      '/plm',
+      'https://example.test',
+      {
+        itemNumber: 'P-1001',
+        itemType: 'Assembly',
+      },
+    )).toBe(
+      'https://example.test/plm?panel=approvals&approvalsTeamView=approval-view-2&itemNumber=P-1001&itemType=Assembly&approvalColumns=product&autoload=true',
+    )
+  })
+
   it('builds return paths from the current local workbench state with optional overlays', () => {
     expect(buildPlmWorkbenchRoutePath(
       '/plm',

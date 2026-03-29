@@ -485,6 +485,11 @@ export function buildPlmWorkbenchTeamViewShareUrl<Kind extends PlmWorkbenchTeamV
   view: PlmWorkbenchTeamView<Kind>,
   basePath: string,
   origin = 'http://127.0.0.1:8899',
+  routeContext?: {
+    productId?: string
+    itemNumber?: string
+    itemType?: string
+  },
 ) {
   const params = new URLSearchParams()
 
@@ -503,11 +508,19 @@ export function buildPlmWorkbenchTeamViewShareUrl<Kind extends PlmWorkbenchTeamV
     const documentView = view as PlmWorkbenchTeamView<'documents'>
     params.set('panel', 'documents')
     params.set('documentTeamView', view.id)
+    appendIfPresent(params, 'productId', routeContext?.productId)
+    appendIfPresent(params, 'itemNumber', routeContext?.itemNumber)
+    appendIfPresent(params, 'itemType', routeContext?.itemType)
     appendIfPresent(params, 'documentRole', documentView.state.role)
     appendIfPresent(params, 'documentFilter', documentView.state.filter)
     appendIfPresent(params, 'documentSort', documentView.state.sortKey !== 'updated' ? documentView.state.sortKey : '')
     appendIfPresent(params, 'documentSortDir', documentView.state.sortDir !== 'desc' ? documentView.state.sortDir : '')
     appendIfPresent(params, 'documentColumns', serializeEnabledColumns(documentView.state.columns))
+    appendIfPresent(
+      params,
+      'autoload',
+      routeContext?.productId || routeContext?.itemNumber ? true : undefined,
+    )
     return `${origin}${basePath}?${params.toString()}`
   }
 
@@ -538,10 +551,18 @@ export function buildPlmWorkbenchTeamViewShareUrl<Kind extends PlmWorkbenchTeamV
   const approvalsView = view as PlmWorkbenchTeamView<'approvals'>
   params.set('panel', 'approvals')
   params.set('approvalsTeamView', view.id)
+  appendIfPresent(params, 'productId', routeContext?.productId)
+  appendIfPresent(params, 'itemNumber', routeContext?.itemNumber)
+  appendIfPresent(params, 'itemType', routeContext?.itemType)
   appendIfPresent(params, 'approvalsStatus', approvalsView.state.status !== 'pending' ? approvalsView.state.status : '')
   appendIfPresent(params, 'approvalsFilter', approvalsView.state.filter)
   appendIfPresent(params, 'approvalSort', approvalsView.state.sortKey !== 'created' ? approvalsView.state.sortKey : '')
   appendIfPresent(params, 'approvalSortDir', approvalsView.state.sortDir !== 'desc' ? approvalsView.state.sortDir : '')
   appendIfPresent(params, 'approvalColumns', serializeEnabledColumns(approvalsView.state.columns))
+  appendIfPresent(
+    params,
+    'autoload',
+    routeContext?.productId || routeContext?.itemNumber ? true : undefined,
+  )
   return `${origin}${basePath}?${params.toString()}`
 }
