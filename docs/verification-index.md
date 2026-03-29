@@ -19,6 +19,134 @@ Entry points:
 - Migrations + typecheck:
   - Report: `docs/verification-migrations-typecheck-20260106_1217.md`
 
+- SSH recovery package delivery:
+  - Report: `docs/development/remote-ssh-recovery-package-verification-20260328.md`
+  - Design: `docs/development/remote-ssh-recovery-package-design-20260328.md`
+  - Bundle report: `docs/development/remote-ssh-recovery-bundle-verification-20260328.md`
+  - Bundle design: `docs/development/remote-ssh-recovery-bundle-design-20260328.md`
+  - Key recovery report: `docs/development/remote-ssh-key-recovery-verification-20260328.md`
+  - Key recovery design: `docs/development/remote-ssh-key-recovery-design-20260328.md`
+  - Artifact dir: `output/ssh-recovery/packages/mainuser`
+
+- Remote Git baseline bootstrap:
+  - Report: `docs/development/remote-git-baseline-bootstrap-verification-20260328.md`
+  - Design: `docs/development/remote-git-baseline-bootstrap-design-20260328.md`
+  - Remote baseline dir: `/home/mainuser/metasheet2-git-baseline`
+
+- Git slice materialize:
+  - Report: `docs/development/directory-baseline-git-materialize-verification-20260328.md`
+  - Design: `docs/development/directory-baseline-git-materialize-design-20260328.md`
+  - Verify output: `output/git-slice-materializations/verify-directory-migration-baseline`
+  - Materialized output: `output/git-slice-materializations/directory-migration-baseline`
+
+- Git slice promote:
+  - Report: `docs/development/directory-baseline-git-promote-verification-20260328.md`
+  - Design: `docs/development/directory-baseline-git-promote-design-20260328.md`
+  - Verify output: `output/git-slice-promotions/verify-directory-migration-baseline`
+  - Promoted output: `output/git-slice-promotions/directory-migration-baseline`
+
+- Git slice handoff:
+  - Report: `docs/development/directory-baseline-git-handoff-verification-20260329.md`
+  - Design: `docs/development/directory-baseline-git-handoff-design-20260329.md`
+  - Verify output: `output/git-slice-handoffs/verify-directory-migration-baseline`
+  - Handoff output: `output/git-slice-handoffs/directory-migration-baseline`
+
+- Git slice replay:
+  - Report: `docs/development/directory-baseline-git-replay-verification-20260329.md`
+  - Design: `docs/development/directory-baseline-git-replay-design-20260329.md`
+  - Verify output: `output/git-slice-replays/verify-directory-migration-baseline`
+  - Replay output: `output/git-slice-replays/directory-migration-baseline`
+
+- Git slice attest:
+  - Report: `docs/development/directory-baseline-git-attest-verification-20260329.md`
+  - Design: `docs/development/directory-baseline-git-attest-design-20260329.md`
+  - Verify output: `output/git-slice-attestations/verify-directory-migration-baseline`
+  - Attest output: `output/git-slice-attestations/directory-migration-baseline`
+
+- Git slice submit:
+  - Report: `docs/development/directory-baseline-git-submit-verification-20260329.md`
+  - Design: `docs/development/directory-baseline-git-submit-design-20260329.md`
+  - Verify output: `output/git-slice-submissions/verify-directory-migration-baseline`
+  - Submit output: `output/git-slice-submissions/directory-migration-baseline`
+
+- Git slice land:
+  - Report: `docs/development/directory-baseline-git-land-verification-20260329.md`
+  - Design: `docs/development/directory-baseline-git-land-design-20260329.md`
+  - Input: `output/git-slice-submissions/directory-migration-baseline`
+  - Verify output: `output/git-slice-landings/verify-directory-migration-baseline`
+  - Landed output: `output/git-slice-landings/directory-migration-baseline`
+
+- Git slice publish:
+  - Report: `docs/development/directory-baseline-git-publish-verification-20260329.md`
+  - Design: `docs/development/directory-baseline-git-publish-design-20260329.md`
+  - Input: `output/git-slice-landings/directory-migration-baseline`
+  - Verify output: `output/git-slice-publishes/verify-directory-migration-baseline`
+  - Publish output: `output/git-slice-publishes/directory-migration-baseline`
+
+- Git slice deliver:
+  - Report: `docs/development/directory-baseline-git-deliver-verification-20260329.md`
+  - Design: `docs/development/directory-baseline-git-deliver-design-20260329.md`
+  - Input: `output/git-slice-publishes/directory-migration-baseline`
+  - Verify output: `output/git-slice-deliveries/verify-directory-migration-baseline`
+  - Deliver output: `output/git-slice-deliveries/directory-migration-baseline`
+
+- Remote Git slice materialize:
+  - Report: `docs/development/remote-git-slice-materialize-verification-20260328.md`
+  - Design: `docs/development/remote-git-slice-materialize-design-20260328.md`
+  - Verify output: `output/remote-git-slice-materializations/directory-migration-baseline/verify-direct`
+  - Materialized output: `output/remote-git-slice-materializations/directory-migration-baseline/materialized`
+
+- Remote Git slice promote:
+  - Report: `docs/development/remote-git-slice-promote-verification-20260328.md`
+  - Design: `docs/development/remote-git-slice-promote-design-20260328.md`
+  - Verify output: `output/remote-git-slice-promotions/directory-migration-baseline/verify`
+  - Promoted output: `output/remote-git-slice-promotions/directory-migration-baseline/promoted`
+
+- Remote Git slice handoff:
+  - Report: `docs/development/remote-git-slice-handoff-verification-20260329.md`
+  - Design: `docs/development/remote-git-slice-handoff-design-20260329.md`
+  - Verify output: `output/remote-git-slice-handoffs/directory-migration-baseline/verify`
+  - Handoff output: `output/remote-git-slice-handoffs/directory-migration-baseline/handoff`
+
+- Remote Git slice replay:
+  - Report: `docs/development/remote-git-slice-replay-verification-20260329.md`
+  - Design: `docs/development/remote-git-slice-replay-design-20260329.md`
+  - Verify output: `output/remote-git-slice-replays/directory-migration-baseline/verify`
+  - Replay output: `output/remote-git-slice-replays/directory-migration-baseline/replay`
+
+- Remote Git slice attest:
+  - Report: `docs/development/remote-git-slice-attest-verification-20260329.md`
+  - Design: `docs/development/remote-git-slice-attest-design-20260329.md`
+  - Verify output: `output/remote-git-slice-attestations/directory-migration-baseline/verify`
+  - Attest output: `output/remote-git-slice-attestations/directory-migration-baseline/attest`
+
+- Remote Git slice submit:
+  - Report: `docs/development/remote-git-slice-submit-verification-20260329.md`
+  - Design: `docs/development/remote-git-slice-submit-design-20260329.md`
+  - Verify output: `output/remote-git-slice-submissions/directory-migration-baseline/verify`
+  - Submit output: `output/remote-git-slice-submissions/directory-migration-baseline/submit`
+
+- Remote Git slice land:
+  - Report: `docs/development/remote-git-slice-land-verification-20260329.md`
+  - Design: `docs/development/remote-git-slice-land-design-20260329.md`
+  - Input: `output/remote-git-slice-submissions/directory-migration-baseline/submit`
+  - Verify output: `output/remote-git-slice-landings/directory-migration-baseline/verify`
+  - Landed output: `output/remote-git-slice-landings/directory-migration-baseline/landed`
+
+- Remote Git slice publish:
+  - Report: `docs/development/remote-git-slice-publish-verification-20260329.md`
+  - Design: `docs/development/remote-git-slice-publish-design-20260329.md`
+  - Input: `output/remote-git-slice-landings/directory-migration-baseline/landed`
+  - Verify output: `output/remote-git-slice-publishes/directory-migration-baseline/verify`
+  - Publish output: `output/remote-git-slice-publishes/directory-migration-baseline/publish`
+
+- Remote Git slice deliver:
+  - Report: `docs/development/remote-git-slice-deliver-verification-20260329.md`
+  - Design: `docs/development/remote-git-slice-deliver-design-20260329.md`
+  - Input: `output/remote-git-slice-publishes/directory-migration-baseline/publish`
+  - Verify output: `output/remote-git-slice-deliveries/directory-migration-baseline/verify`
+  - Deliver output: `output/remote-git-slice-deliveries/directory-migration-baseline/deliver`
+
 - Smoke verification:
   - Report: `docs/verification-smoke-20260106_2041.md`
   - Artifact: `artifacts/smoke/smoke-report-20260106_2041.json`
