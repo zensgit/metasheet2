@@ -8,6 +8,38 @@ import http from 'http'
 
 type HttpResponse = { status: number; body?: unknown; raw: string }
 
+interface AttendancePunchEventListItem {
+  id: string
+  userId: string
+  user_id: string
+  orgId: string
+  org_id: string
+  workDate: string | null
+  work_date: string | null
+  occurredAt: string
+  occurred_at: string
+  eventType: string
+  event_type: string
+  source: string
+  timezone: string
+  location: Record<string, unknown> | null
+  meta: Record<string, unknown> | null
+  createdAt: string | null
+  created_at: string | null
+}
+
+interface PunchEventListResponse {
+  ok: boolean
+  data: {
+    items: AttendancePunchEventListItem[]
+    total: number
+    page: number
+    pageSize: number
+    from: string
+    to: string
+  }
+}
+
 function requestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
@@ -1061,33 +1093,23 @@ describe('Attendance Plugin Integration', () => {
       },
     })
     expect(listRes.status).toBe(200)
-    const listBody = listRes.body as {
-      ok?: boolean
-      data?: {
-        items?: Array<Record<string, unknown>>
-        total?: number
-        page?: number
-        pageSize?: number
-        from?: string
-        to?: string
-      }
-    } | undefined
-    expect(listBody?.ok).toBe(true)
-    expect(listBody?.data?.total).toBeGreaterThanOrEqual(2)
-    expect(listBody?.data?.page).toBe(1)
-    expect(listBody?.data?.pageSize).toBe(50)
-    expect(listBody?.data?.from).toBe('2026-03-28')
-    expect(listBody?.data?.to).toBe('2026-03-28')
-    const items = listBody?.data?.items ?? []
+    const listBody = listRes.body as PunchEventListResponse
+    expect(listBody.ok).toBe(true)
+    expect(listBody.data.total).toBeGreaterThanOrEqual(2)
+    expect(listBody.data.page).toBe(1)
+    expect(listBody.data.pageSize).toBe(50)
+    expect(listBody.data.from).toBe('2026-03-28')
+    expect(listBody.data.to).toBe('2026-03-28')
+    const items = listBody.data.items
     expect(items.length).toBeGreaterThanOrEqual(2)
-    expect(items[0]?.userId).toBe(primaryUserId)
-    expect(items[0]?.user_id).toBe(primaryUserId)
-    expect(items[0]?.workDate).toBe('2026-03-28')
-    expect(items[0]?.work_date).toBe('2026-03-28')
-    expect(items[0]?.eventType).toBe('check_out')
-    expect(items[0]?.event_type).toBe('check_out')
-    expect(String(items[0]?.occurredAt ?? '')).toContain('2026-03-28')
-    expect(String(items[0]?.occurred_at ?? '')).toContain('2026-03-28')
+    expect(items[0].userId).toBe(primaryUserId)
+    expect(items[0].user_id).toBe(primaryUserId)
+    expect(items[0].workDate).toBe('2026-03-28')
+    expect(items[0].work_date).toBe('2026-03-28')
+    expect(items[0].eventType).toBe('check_out')
+    expect(items[0].event_type).toBe('check_out')
+    expect(items[0].occurredAt).toContain('2026-03-28')
+    expect(items[0].occurred_at).toContain('2026-03-28')
 
     const secondUserId = `attendance-punch-events-other-${runSuffix}`
     const secondTokenRes = await requestJson(

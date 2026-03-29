@@ -2738,7 +2738,7 @@ function mapPayrollCycleRow(row) {
 }
 
 function mapAttendanceEventRow(row) {
-  const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
+  const workDate = normalizeDateOnly(row.work_date) ?? null
   return {
     id: row.id,
     userId: row.user_id,
@@ -9277,7 +9277,6 @@ module.exports = {
 
           res.json({
             ok: true,
-            success: true,
             data: {
               items: rows.map(mapAttendanceEventRow),
               total,

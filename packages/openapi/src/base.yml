@@ -240,9 +240,11 @@ components:
         workDate:
           type: string
           format: date
+          nullable: true
         work_date:
           type: string
           format: date
+          nullable: true
         occurredAt:
           type: string
           format: date-time

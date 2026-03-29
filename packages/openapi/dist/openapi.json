@@ -354,11 +354,13 @@
           },
           "workDate": {
             "type": "string",
-            "format": "date"
+            "format": "date",
+            "nullable": true
           },
           "work_date": {
             "type": "string",
-            "format": "date"
+            "format": "date",
+            "nullable": true
           },
           "occurredAt": {
             "type": "string",
