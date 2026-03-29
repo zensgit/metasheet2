@@ -885,7 +885,7 @@ import {
   resolvePlmAuditTeamViewCollaborationActionFeedback,
   resolvePlmAuditCompletedTeamViewBatchCollaborationDraft,
   resolvePlmAuditCompletedTeamViewCollaborationDraft,
-  resolvePlmAuditTeamViewCollaborationRuntimeFollowup,
+  resolvePlmAuditTeamViewCollaborationRuntimeState,
   resolvePlmAuditTeamViewCollaborationFollowupActionFeedback,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
@@ -1218,20 +1218,21 @@ const canRenameAuditTeamViewTarget = computed(() => canRenamePlmCollaborativeEnt
 ))
 const auditTeamViewCollaborationDraftTarget = computed(() => findPlmAuditTeamViewCollaborationDraftView(
   auditTeamViews.value,
-  auditTeamViewCollaborationDraft.value,
+  resolveAuditTeamViewCollaborationRuntimeState().draft,
 ))
 const auditTeamViewShareEntryTarget = computed(() => findPlmAuditTeamViewShareEntryView(
   auditTeamViews.value,
   auditTeamViewShareEntry.value,
 ))
 const auditTeamViewCollaborationNotice = computed(() => {
+  const collaborationState = resolveAuditTeamViewCollaborationRuntimeState()
   const view = auditTeamViewCollaborationDraftTarget.value
   if (!view) return null
-  if (auditTeamViewCollaborationFollowup.value?.teamViewId === view.id) return null
+  if (collaborationState.followup?.teamViewId === view.id) return null
   if (auditTeamViewShareEntry.value?.teamViewId === view.id) return null
   return buildPlmAuditTeamViewCollaborationNotice(
     view,
-    auditTeamViewCollaborationDraft.value,
+    collaborationState.draft,
     {
       canShare: canSharePlmCollaborativeEntry(view),
       canSetDefault: canSetDefaultPlmCollaborativeEntry(view),
@@ -1273,16 +1274,25 @@ const auditTeamViewCollaborationFollowupNotice = computed(() => {
 })
 
 function resolveAuditTeamViewCollaborationRuntimeFollowup() {
-  const outcome = resolvePlmAuditTeamViewCollaborationRuntimeFollowup(
-    auditTeamViewCollaborationFollowup.value,
+  return resolveAuditTeamViewCollaborationRuntimeState().followup
+}
+
+function resolveAuditTeamViewCollaborationRuntimeState() {
+  const outcome = resolvePlmAuditTeamViewCollaborationRuntimeState(
+    {
+      draft: auditTeamViewCollaborationDraft.value,
+      followup: auditTeamViewCollaborationFollowup.value,
+    },
     {
       sceneContextAvailable: Boolean(auditSceneContext.value),
+      savedViews: savedViews.value,
     },
   )
   if (outcome.changed) {
-    auditTeamViewCollaborationFollowup.value = outcome.followup
+    auditTeamViewCollaborationDraft.value = outcome.state.draft
+    auditTeamViewCollaborationFollowup.value = outcome.state.followup
   }
-  return outcome.followup
+  return outcome.state
 }
 
 function resolveAuditTeamViewShareRuntimeEntry() {
@@ -2916,7 +2926,8 @@ async function clearAuditTeamViewDefault() {
 }
 
 async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewCollaborationActionKind) {
-  const draft = auditTeamViewCollaborationDraft.value
+  const collaborationState = resolveAuditTeamViewCollaborationRuntimeState()
+  const draft = collaborationState.draft
   const source = draft?.source
   const sourceSavedViewId = draft?.sourceSavedViewId
 
@@ -3627,9 +3638,9 @@ watch(auditTeamViews, (views, previousViews) => {
 })
 
 watch(
-  [() => Boolean(auditSceneContext.value), () => auditTeamViewCollaborationFollowup.value],
+  [savedViews, () => Boolean(auditSceneContext.value), () => auditTeamViewCollaborationDraft.value, () => auditTeamViewCollaborationFollowup.value],
   () => {
-    resolveAuditTeamViewCollaborationRuntimeFollowup()
+    resolveAuditTeamViewCollaborationRuntimeState()
   },
 )
 

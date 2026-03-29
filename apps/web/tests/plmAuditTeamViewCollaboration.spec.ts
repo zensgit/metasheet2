@@ -22,10 +22,13 @@ import {
   resolvePlmAuditTeamViewCollaborationActionFeedback,
   resolvePlmAuditTeamViewCollaborationFollowupActionFeedback,
   resolvePlmAuditTeamViewCollaborationRuntimeFollowup,
+  resolvePlmAuditTeamViewCollaborationRuntimeState,
   resolvePlmAuditTeamViewFollowupSelection,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
   resolvePlmAuditTeamViewCollaborationSourceAnchorId,
+  syncPlmAuditTeamViewCollaborationDraftSavedViewSource,
+  syncPlmAuditTeamViewCollaborationFollowupSavedViewSource,
   shouldClearPlmAuditTeamViewCollaborationDraft,
   shouldClearPlmAuditTeamViewCollaborationFollowupForViewEntry,
   shouldKeepPlmAuditTeamViewCollaborationDraft,
@@ -1103,6 +1106,94 @@ describe('plmAuditTeamViewCollaboration', () => {
         sourceSavedViewId: null,
       },
       changed: false,
+    })
+  })
+
+  it('drops missing saved-view provenance from promotion drafts and followups at runtime', () => {
+    expect(syncPlmAuditTeamViewCollaborationDraftSavedViewSource({
+      teamViewId: 'audit-view-11',
+      teamViewName: '提升后的审计视图',
+      teamViewOwnerUserId: '',
+      focusTargetId: 'plm-audit-team-view-controls',
+      source: 'saved-view-promotion',
+      sourceSavedViewId: 'saved-view-11',
+      statusMessage: 'ready',
+    }, [
+      { id: 'saved-view-2' },
+    ])).toEqual({
+      teamViewId: 'audit-view-11',
+      teamViewName: '提升后的审计视图',
+      teamViewOwnerUserId: '',
+      focusTargetId: 'plm-audit-team-view-controls',
+      source: 'saved-view-promotion',
+      sourceSavedViewId: null,
+      statusMessage: 'ready',
+    })
+
+    expect(syncPlmAuditTeamViewCollaborationFollowupSavedViewSource({
+      teamViewId: 'audit-view-12',
+      source: 'saved-view-promotion',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-saved-views',
+      sourceSavedViewId: 'saved-view-12',
+    }, [
+      { id: 'saved-view-2' },
+    ])).toEqual({
+      teamViewId: 'audit-view-12',
+      source: 'saved-view-promotion',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-saved-views',
+      sourceSavedViewId: null,
+    })
+  })
+
+  it('persists collaboration runtime cleanup when saved-view promotion provenance disappears externally', () => {
+    expect(resolvePlmAuditTeamViewCollaborationRuntimeState({
+      draft: {
+        teamViewId: 'audit-view-13',
+        teamViewName: '提升后的审计视图',
+        teamViewOwnerUserId: '',
+        focusTargetId: 'plm-audit-team-view-controls',
+        source: 'saved-view-promotion',
+        sourceSavedViewId: 'saved-view-13',
+        statusMessage: 'ready',
+      },
+      followup: {
+        teamViewId: 'audit-view-13',
+        source: 'saved-view-promotion',
+        action: 'share',
+        logsAnchorId: 'plm-audit-log-results',
+        sourceAnchorId: 'plm-audit-saved-views',
+        sourceSavedViewId: 'saved-view-13',
+      },
+    }, {
+      savedViews: [
+        { id: 'saved-view-2' },
+      ],
+      sceneContextAvailable: true,
+    })).toEqual({
+      state: {
+        draft: {
+          teamViewId: 'audit-view-13',
+          teamViewName: '提升后的审计视图',
+          teamViewOwnerUserId: '',
+          focusTargetId: 'plm-audit-team-view-controls',
+          source: 'saved-view-promotion',
+          sourceSavedViewId: null,
+          statusMessage: 'ready',
+        },
+        followup: {
+          teamViewId: 'audit-view-13',
+          source: 'saved-view-promotion',
+          action: 'share',
+          logsAnchorId: 'plm-audit-log-results',
+          sourceAnchorId: 'plm-audit-saved-views',
+          sourceSavedViewId: null,
+        },
+      },
+      changed: true,
     })
   })
 

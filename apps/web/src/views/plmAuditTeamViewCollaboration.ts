@@ -87,6 +87,11 @@ export type PlmAuditTeamViewCollaborationSourceFocusIntent = {
   recommendationFilter: PlmRecommendedAuditTeamViewFilter
 }
 
+export type PlmAuditTeamViewCollaborationRuntimeState = {
+  draft: PlmAuditTeamViewCollaborationDraft | null
+  followup: PlmAuditTeamViewCollaborationFollowup | null
+}
+
 const PLM_AUDIT_TEAM_VIEW_COLLABORATION_LOGS_ANCHOR_ID = 'plm-audit-log-results'
 const PLM_AUDIT_TEAM_VIEW_CONTROLS_ANCHOR_ID = 'plm-audit-team-view-controls'
 
@@ -154,19 +159,85 @@ export function syncPlmAuditTeamViewCollaborationFollowupSourceAnchor(
   }
 }
 
+export function syncPlmAuditTeamViewCollaborationDraftSavedViewSource(
+  draft: PlmAuditTeamViewCollaborationDraft | null,
+  savedViews: readonly Pick<{ id: string }, 'id'>[],
+): PlmAuditTeamViewCollaborationDraft | null {
+  if (!draft || draft.source !== 'saved-view-promotion' || !draft.sourceSavedViewId) {
+    return draft
+  }
+  const sourceView = savedViews.find((entry) => entry.id === draft.sourceSavedViewId) || null
+  if (sourceView) return draft
+  return {
+    ...draft,
+    sourceSavedViewId: null,
+  }
+}
+
+export function syncPlmAuditTeamViewCollaborationFollowupSavedViewSource(
+  followup: PlmAuditTeamViewCollaborationFollowup | null,
+  savedViews: readonly Pick<{ id: string }, 'id'>[],
+): PlmAuditTeamViewCollaborationFollowup | null {
+  if (!followup || followup.source !== 'saved-view-promotion' || !followup.sourceSavedViewId) {
+    return followup
+  }
+  const sourceView = savedViews.find((entry) => entry.id === followup.sourceSavedViewId) || null
+  if (sourceView) return followup
+  return {
+    ...followup,
+    sourceSavedViewId: null,
+  }
+}
+
 export function resolvePlmAuditTeamViewCollaborationRuntimeFollowup(
   followup: PlmAuditTeamViewCollaborationFollowup | null,
   options?: {
     sceneContextAvailable?: boolean
+    savedViews?: readonly Pick<{ id: string }, 'id'>[]
   },
 ): {
   followup: PlmAuditTeamViewCollaborationFollowup | null
   changed: boolean
 } {
-  const nextFollowup = syncPlmAuditTeamViewCollaborationFollowupSourceAnchor(followup, options)
+  const savedViewNormalizedFollowup = syncPlmAuditTeamViewCollaborationFollowupSavedViewSource(
+    followup,
+    options?.savedViews || [],
+  )
+  const nextFollowup = syncPlmAuditTeamViewCollaborationFollowupSourceAnchor(
+    savedViewNormalizedFollowup,
+    options,
+  )
   return {
     followup: nextFollowup,
     changed: nextFollowup !== followup,
+  }
+}
+
+export function resolvePlmAuditTeamViewCollaborationRuntimeState(
+  state: PlmAuditTeamViewCollaborationRuntimeState,
+  options?: {
+    sceneContextAvailable?: boolean
+    savedViews?: readonly Pick<{ id: string }, 'id'>[]
+  },
+): {
+  state: PlmAuditTeamViewCollaborationRuntimeState
+  changed: boolean
+} {
+  const nextDraft = syncPlmAuditTeamViewCollaborationDraftSavedViewSource(
+    state.draft,
+    options?.savedViews || [],
+  )
+  const followupOutcome = resolvePlmAuditTeamViewCollaborationRuntimeFollowup(
+    state.followup,
+    options,
+  )
+  const nextState = {
+    draft: nextDraft,
+    followup: followupOutcome.followup,
+  }
+  return {
+    state: nextState,
+    changed: nextDraft !== state.draft || followupOutcome.changed,
   }
 }
 
