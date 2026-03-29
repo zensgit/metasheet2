@@ -484,14 +484,16 @@
                         </small>
                       </li>
                     </ul>
-                    <p v-if="recordTimelineItems(record.id).length > 0" class="attendance__field-hint attendance__field-hint--strong">
-                      {{ tr('Suggested request', '建议申请') }}: {{ formatRequestType(suggestedRequestTypeForRecord(record)) }}
-                    </p>
-                    <div v-if="recordTimelineItems(record.id).length > 0" class="attendance__table-actions attendance__table-actions--meta">
-                      <button class="attendance__btn" type="button" @click="prefillRequestFromRecordTimeline(record)">
-                        {{ requestTypeCtaLabel(suggestedRequestTypeForRecord(record)) }}
-                      </button>
-                    </div>
+                    <template v-if="recordTimelineItems(record.id).length > 0">
+                      <p class="attendance__field-hint attendance__field-hint--strong">
+                        {{ tr('Suggested request', '建议申请') }}: {{ formatRequestType(suggestedRequestTypeForRecord(record)) }}
+                      </p>
+                      <div class="attendance__table-actions attendance__table-actions--meta">
+                        <button class="attendance__btn" type="button" @click="prefillRequestFromRecordTimeline(record)">
+                          {{ requestTypeCtaLabel(suggestedRequestTypeForRecord(record)) }}
+                        </button>
+                      </div>
+                    </template>
                   </td>
                 </tr>
               </template>
