@@ -5,6 +5,7 @@ import {
   buildPlmAuditPersistedTeamViewRouteState,
   buildPlmAuditSelectedTeamViewRouteState,
   resolvePlmAuditRequestedTeamViewRouteState,
+  shouldApplyPlmAuditRequestedTeamViewTakeoverCleanup,
 } from '../src/views/plmAuditTeamViewRouteState'
 
 type AuditTeamViewRouteCandidate = {
@@ -227,6 +228,41 @@ describe('plmAuditTeamViewRouteState', () => {
         resourceType: 'plm-team-view-default',
       }), DEFAULT_PLM_AUDIT_ROUTE_STATE),
     })
+  })
+
+  it('keeps refresh-time audit collaboration state when a valid requested team-view route is already canonical', () => {
+    const requestedState = buildPlmAuditSelectedTeamViewRouteState(
+      createView('audit-view-keep'),
+      DEFAULT_PLM_AUDIT_ROUTE_STATE,
+    )
+
+    expect(shouldApplyPlmAuditRequestedTeamViewTakeoverCleanup({
+      requestedSharedEntry: false,
+      requestedState,
+      nextState: requestedState,
+    })).toBe(false)
+  })
+
+  it('still triggers route takeover cleanup for shared-entry and default-auto-apply refreshes', () => {
+    const requestedState = buildPlmAuditSelectedTeamViewRouteState(
+      createView('audit-view-share'),
+      DEFAULT_PLM_AUDIT_ROUTE_STATE,
+    )
+
+    expect(shouldApplyPlmAuditRequestedTeamViewTakeoverCleanup({
+      requestedSharedEntry: true,
+      requestedState,
+      nextState: requestedState,
+    })).toBe(true)
+
+    expect(shouldApplyPlmAuditRequestedTeamViewTakeoverCleanup({
+      requestedSharedEntry: false,
+      requestedState: DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      nextState: buildPlmAuditSelectedTeamViewRouteState(
+        createView('audit-view-default'),
+        DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      ),
+    })).toBe(true)
   })
 
   it('does not auto-apply a default team view that exists but is no longer applicable', () => {

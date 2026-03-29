@@ -767,10 +767,35 @@ describe('plmWorkbenchViewState', () => {
       'https://example.test/plm?panel=documents&documentTeamView=document-view-1&documentRole=primary&documentFilter=gear&documentSort=name&documentSortDir=asc&documentColumns=mime',
     )
     expect(cadUrl).toBe(
-      'https://example.test/plm?panel=cad&cadTeamView=cad-view-1&cadFileId=file-main&cadOtherFileId=file-other&cadReviewState=approved&cadReviewNote=looks-good',
+      'https://example.test/plm?panel=cad&cadTeamView=cad-view-1&cadFileId=file-main&cadOtherFileId=file-other&cadReviewState=approved&cadReviewNote=looks-good&autoload=true',
     )
     expect(approvalsUrl).toBe(
       'https://example.test/plm?panel=approvals&approvalsTeamView=approval-view-1&approvalsStatus=approved&approvalsFilter=eco&approvalSort=title&approvalSortDir=asc&approvalColumns=product',
+    )
+  })
+
+  it('adds autoload to CAD team-view share urls when a primary CAD file is present', () => {
+    expect(buildPlmWorkbenchTeamViewShareUrl(
+      'cad',
+      {
+        id: 'cad-view-2',
+        kind: 'cad',
+        scope: 'team',
+        name: 'CAD 单文件视角',
+        ownerUserId: 'dev-user',
+        canManage: true,
+        isDefault: false,
+        state: {
+          fileId: 'file-main',
+          otherFileId: '',
+          reviewState: '',
+          reviewNote: '',
+        },
+      },
+      '/plm',
+      'https://example.test',
+    )).toBe(
+      'https://example.test/plm?panel=cad&cadTeamView=cad-view-2&cadFileId=file-main&autoload=true',
     )
   })
 

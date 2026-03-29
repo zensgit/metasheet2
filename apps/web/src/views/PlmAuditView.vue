@@ -990,6 +990,7 @@ import {
   buildPlmAuditPersistedTeamViewRouteState,
   buildPlmAuditSelectedTeamViewRouteState,
   resolvePlmAuditRequestedTeamViewRouteState,
+  shouldApplyPlmAuditRequestedTeamViewTakeoverCleanup,
 } from './plmAuditTeamViewRouteState'
 import { copyTextToClipboard } from './plm/plmClipboard'
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
@@ -2264,7 +2265,11 @@ async function refreshAuditTeamViews() {
         auditTeamViewShareEntry.value = {
           teamViewId: resolution.viewId,
         }
-      } else {
+      } else if (shouldApplyPlmAuditRequestedTeamViewTakeoverCleanup({
+        requestedSharedEntry,
+        requestedState,
+        nextState: resolution.nextState,
+      })) {
         applyResolvedTeamViewTakeoverCleanup()
       }
       applyRouteState(resolution.nextState)

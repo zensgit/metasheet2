@@ -519,6 +519,7 @@ export function buildPlmWorkbenchTeamViewShareUrl<Kind extends PlmWorkbenchTeamV
     appendIfPresent(params, 'cadOtherFileId', cadView.state.otherFileId)
     appendIfPresent(params, 'cadReviewState', cadView.state.reviewState)
     appendIfPresent(params, 'cadReviewNote', cadView.state.reviewNote)
+    appendIfPresent(params, 'autoload', cadView.state.fileId ? true : undefined)
     return `${origin}${basePath}?${params.toString()}`
   }
 

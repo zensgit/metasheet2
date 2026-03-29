@@ -3,6 +3,7 @@ import {
   buildPlmAuditRouteStateFromTeamView,
   hasExplicitPlmAuditFilters,
   hasPlmAuditSceneContext,
+  isPlmAuditRouteStateEqual,
   type PlmAuditRouteState,
 } from './plmAuditQueryState'
 import { canApplyPlmAuditTeamView } from './plmAuditTeamViewManagement'
@@ -115,4 +116,15 @@ export function resolvePlmAuditRequestedTeamViewRouteState(
   return {
     kind: 'noop',
   }
+}
+
+export function shouldApplyPlmAuditRequestedTeamViewTakeoverCleanup(options: {
+  requestedSharedEntry: boolean
+  requestedState: PlmAuditRouteState
+  nextState: PlmAuditRouteState
+}) {
+  if (options.requestedSharedEntry && options.requestedState.teamViewId.trim()) {
+    return true
+  }
+  return !isPlmAuditRouteStateEqual(options.nextState, options.requestedState)
 }
