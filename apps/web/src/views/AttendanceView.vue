@@ -5718,20 +5718,36 @@ function recordTimelineInlineMessage(recordId: string): string {
   return ''
 }
 
+function inferRequestTypeFromRecordTimeline(items: AttendancePunchEvent[]): string {
+  let hasCheckIn = false
+  let hasCheckOut = false
+  for (const item of items) {
+    if (item.eventType === 'check_in') hasCheckIn = true
+    else if (item.eventType === 'check_out') hasCheckOut = true
+    if (hasCheckIn && hasCheckOut) break
+  }
+  if (hasCheckIn && !hasCheckOut) return 'missed_check_out'
+  if (hasCheckOut && !hasCheckIn) return 'missed_check_in'
+  return 'time_correction'
+}
+
 function resolveRecordTimelineRequestDraft(record: AttendanceRecord): {
+  requestType: string
   requestedInAt: string
   requestedOutAt: string
 } {
   const items = recordTimelineItems(record.id)
+  const requestType = inferRequestTypeFromRecordTimeline(items)
   const checkIn = items.find(item => item.eventType === 'check_in')
   const checkOut = [...items].reverse().find(item => item.eventType === 'check_out')
   const requestedInAtSource = checkIn?.occurredAt
-    ?? record.first_in_at
+    ?? (requestType === 'missed_check_in' ? null : record.first_in_at)
     ?? null
   const requestedOutAtSource = checkOut?.occurredAt
-    ?? record.last_out_at
+    ?? (requestType === 'missed_check_out' ? null : record.last_out_at)
     ?? null
   return {
+    requestType,
     requestedInAt: requestedInAtSource ? formatDateTimeLocal(new Date(requestedInAtSource)) : '',
     requestedOutAt: requestedOutAtSource ? formatDateTimeLocal(new Date(requestedOutAtSource)) : '',
   }
@@ -5740,7 +5756,7 @@ function resolveRecordTimelineRequestDraft(record: AttendanceRecord): {
 async function prefillRequestFromRecordTimeline(record: AttendanceRecord): Promise<void> {
   const draft = resolveRecordTimelineRequestDraft(record)
   requestForm.workDate = record.work_date
-  requestForm.requestType = 'time_correction'
+  requestForm.requestType = draft.requestType
   requestForm.requestedInAt = draft.requestedInAt
   requestForm.requestedOutAt = draft.requestedOutAt
   setStatus(
