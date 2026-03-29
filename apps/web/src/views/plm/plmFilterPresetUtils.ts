@@ -288,6 +288,8 @@ export function buildFilterPresetShareUrl(
     }
     if (routeContext?.whereUsedItemId) {
       params.set('whereUsedItemId', routeContext.whereUsedItemId)
+    }
+    if (routeContext?.whereUsedItemId || routeContext?.productId || routeContext?.itemNumber) {
       params.set('autoload', 'true')
     }
   }
@@ -353,6 +355,8 @@ export function buildTeamFilterPresetShareUrl(
     }
     if (routeContext?.whereUsedItemId) {
       params.set('whereUsedItemId', routeContext.whereUsedItemId)
+    }
+    if (routeContext?.whereUsedItemId || routeContext?.productId || routeContext?.itemNumber) {
       params.set('autoload', 'true')
     }
   }

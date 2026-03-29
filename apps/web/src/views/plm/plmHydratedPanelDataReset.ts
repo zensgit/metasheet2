@@ -154,7 +154,30 @@ export function resolvePlmHydratedPanelDataReset(options: {
   nextRouteState: PlmHydratedPanelDataRouteState
 }): PlmHydratedPanelDataReset {
   if (!options.nextRouteState.autoload) {
-    return EMPTY_RESET
+    const previousSearchKey = buildSearchKey(options.previousRouteState)
+    const nextSearchKey = buildSearchKey(options.nextRouteState)
+    const previousProductContextKey = buildProductContextKey(options.previousRouteState)
+    const nextProductContextKey = buildProductContextKey(options.nextRouteState)
+    const previousCadKey = buildCadKey(options.previousRouteState)
+    const nextCadKey = buildCadKey(options.nextRouteState)
+    const previousWhereUsedKey = buildWhereUsedKey(options.previousRouteState)
+    const nextWhereUsedKey = buildWhereUsedKey(options.nextRouteState)
+    const previousCompareKey = buildCompareKey(options.previousRouteState)
+    const nextCompareKey = buildCompareKey(options.nextRouteState)
+    const previousSubstitutesKey = buildSubstitutesKey(options.previousRouteState)
+    const nextSubstitutesKey = buildSubstitutesKey(options.nextRouteState)
+
+    return {
+      clearSearch: previousSearchKey !== nextSearchKey,
+      clearProduct: previousProductContextKey !== nextProductContextKey,
+      clearBom: previousProductContextKey !== nextProductContextKey,
+      clearDocuments: previousProductContextKey !== nextProductContextKey,
+      clearCad: previousCadKey !== nextCadKey,
+      clearApprovals: previousProductContextKey !== nextProductContextKey,
+      clearWhereUsed: previousWhereUsedKey !== nextWhereUsedKey,
+      clearCompare: previousCompareKey !== nextCompareKey,
+      clearSubstitutes: previousSubstitutesKey !== nextSubstitutesKey,
+    }
   }
 
   const selectedPanels = buildSelectedPanelSet(options.nextRouteState.panel)

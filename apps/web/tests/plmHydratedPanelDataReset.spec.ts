@@ -2,16 +2,40 @@ import { describe, expect, it } from 'vitest'
 import { resolvePlmHydratedPanelDataReset } from '../src/views/plm/plmHydratedPanelDataReset'
 
 describe('plmHydratedPanelDataReset', () => {
-  it('keeps existing data when route hydration does not autoload', () => {
+  it('clears changed route-owned payloads even when route hydration does not autoload', () => {
     expect(resolvePlmHydratedPanelDataReset({
       previousRouteState: {
-        productId: 'prod-100',
         cadFileId: 'cad-a',
       },
       nextRouteState: {
         autoload: false,
         panel: 'cad',
         cadFileId: 'cad-b',
+      },
+    })).toEqual({
+      clearSearch: false,
+      clearProduct: false,
+      clearBom: false,
+      clearDocuments: false,
+      clearCad: true,
+      clearApprovals: false,
+      clearWhereUsed: false,
+      clearCompare: false,
+      clearSubstitutes: false,
+    })
+  })
+
+  it('preserves existing payloads for non-autoload route hydration when the target is unchanged', () => {
+    expect(resolvePlmHydratedPanelDataReset({
+      previousRouteState: {
+        autoload: false,
+        panel: 'cad',
+        cadFileId: 'cad-a',
+      },
+      nextRouteState: {
+        autoload: false,
+        panel: 'cad',
+        cadFileId: 'cad-a',
       },
     })).toEqual({
       clearSearch: false,

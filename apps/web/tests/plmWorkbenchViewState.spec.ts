@@ -875,7 +875,7 @@ describe('plmWorkbenchViewState', () => {
     })).toBe(true)
   })
 
-  it('does not bootstrap product context for unrelated non-product panels', () => {
+  it('bootstraps product context for product-adjacent panels but keeps cad excluded', () => {
     expect(shouldAutoloadPlmProductContext({
       panel: 'cad',
       itemNumber: 'P-1001',
@@ -883,7 +883,15 @@ describe('plmWorkbenchViewState', () => {
     expect(shouldAutoloadPlmProductContext({
       panel: 'compare',
       productId: 'product-42',
-    })).toBe(false)
+    })).toBe(true)
+    expect(shouldAutoloadPlmProductContext({
+      panel: 'where-used',
+      itemNumber: 'P-1001',
+    })).toBe(true)
+    expect(shouldAutoloadPlmProductContext({
+      panel: 'substitutes',
+      productId: 'product-42',
+    })).toBe(true)
   })
 
   it('treats missing panel scope as an all-panels bootstrap when product identity exists', () => {

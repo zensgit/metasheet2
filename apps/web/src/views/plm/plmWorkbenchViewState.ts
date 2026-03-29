@@ -191,6 +191,9 @@ export function shouldAutoloadPlmProductContext(options: {
   return selectedPanels.has('product')
     || selectedPanels.has('documents')
     || selectedPanels.has('approvals')
+    || selectedPanels.has('where-used')
+    || selectedPanels.has('compare')
+    || selectedPanels.has('substitutes')
 }
 
 export function normalizePlmWorkbenchCollaborativeQuerySnapshot(value: unknown): Record<string, string> {
