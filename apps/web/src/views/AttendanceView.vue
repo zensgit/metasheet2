@@ -5725,14 +5725,10 @@ function resolveRecordTimelineRequestDraft(record: AttendanceRecord): {
   const items = recordTimelineItems(record.id)
   const checkIn = items.find(item => item.eventType === 'check_in')
   const checkOut = [...items].reverse().find(item => item.eventType === 'check_out')
-  const first = items[0] ?? null
-  const last = items.length > 0 ? items[items.length - 1] : null
   const requestedInAtSource = checkIn?.occurredAt
-    ?? (first?.eventType === 'check_in' ? first.occurredAt : null)
     ?? record.first_in_at
     ?? null
   const requestedOutAtSource = checkOut?.occurredAt
-    ?? (last?.eventType === 'check_out' ? last.occurredAt : null)
     ?? record.last_out_at
     ?? null
   return {
