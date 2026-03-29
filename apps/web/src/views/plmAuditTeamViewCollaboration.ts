@@ -154,6 +154,22 @@ export function syncPlmAuditTeamViewCollaborationFollowupSourceAnchor(
   }
 }
 
+export function resolvePlmAuditTeamViewCollaborationRuntimeFollowup(
+  followup: PlmAuditTeamViewCollaborationFollowup | null,
+  options?: {
+    sceneContextAvailable?: boolean
+  },
+): {
+  followup: PlmAuditTeamViewCollaborationFollowup | null
+  changed: boolean
+} {
+  const nextFollowup = syncPlmAuditTeamViewCollaborationFollowupSourceAnchor(followup, options)
+  return {
+    followup: nextFollowup,
+    changed: nextFollowup !== followup,
+  }
+}
+
 function isSceneContextControlsFollowup(followup: PlmAuditTeamViewCollaborationFollowup) {
   return followup.source === 'scene-context'
     && followup.sourceAnchorId === PLM_AUDIT_TEAM_VIEW_CONTROLS_ANCHOR_ID

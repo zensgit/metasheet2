@@ -883,6 +883,7 @@ import {
   resolvePlmAuditTeamViewCollaborationActionFeedback,
   resolvePlmAuditCompletedTeamViewBatchCollaborationDraft,
   resolvePlmAuditCompletedTeamViewCollaborationDraft,
+  resolvePlmAuditTeamViewCollaborationRuntimeFollowup,
   resolvePlmAuditTeamViewCollaborationFollowupActionFeedback,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
@@ -892,7 +893,6 @@ import {
   shouldKeepPlmAuditTeamViewCollaborationDraft,
   shouldKeepPlmAuditTeamViewCollaborationFollowup,
   shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry,
-  syncPlmAuditTeamViewCollaborationFollowupSourceAnchor,
   type PlmAuditTeamViewCollaborationActionKind,
   type PlmAuditTeamViewCollaborationDraft,
   type PlmAuditTeamViewCollaborationFollowup,
@@ -1250,12 +1250,7 @@ const auditTeamViewShareEntryNotice = computed(() => {
   )
 })
 const auditTeamViewCollaborationFollowupNotice = computed(() => {
-  const followup = syncPlmAuditTeamViewCollaborationFollowupSourceAnchor(
-    auditTeamViewCollaborationFollowup.value,
-    {
-      sceneContextAvailable: Boolean(auditSceneContext.value),
-    },
-  )
+  const followup = resolveAuditTeamViewCollaborationRuntimeFollowup()
   const view = findPlmAuditTeamViewCollaborationFollowupView(
     auditTeamViews.value,
     followup,
@@ -1270,6 +1265,19 @@ const auditTeamViewCollaborationFollowupNotice = computed(() => {
     tr,
   )
 })
+
+function resolveAuditTeamViewCollaborationRuntimeFollowup() {
+  const outcome = resolvePlmAuditTeamViewCollaborationRuntimeFollowup(
+    auditTeamViewCollaborationFollowup.value,
+    {
+      sceneContextAvailable: Boolean(auditSceneContext.value),
+    },
+  )
+  if (outcome.changed) {
+    auditTeamViewCollaborationFollowup.value = outcome.followup
+  }
+  return outcome.followup
+}
 const auditSavedViewShareFollowupNotice = computed(() => {
   const followup = auditSavedViewShareFollowup.value
   if (!followup) return null
@@ -2910,12 +2918,7 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
 async function runAuditTeamViewCollaborationFollowupAction(
   actionKind: PlmAuditTeamViewCollaborationFollowupActionKind,
 ) {
-  const followup = syncPlmAuditTeamViewCollaborationFollowupSourceAnchor(
-    auditTeamViewCollaborationFollowup.value,
-    {
-      sceneContextAvailable: Boolean(auditSceneContext.value),
-    },
-  )
+  const followup = resolveAuditTeamViewCollaborationRuntimeFollowup()
 
   if (actionKind === 'dismiss') {
     clearAuditTeamViewCollaborationFollowup()
@@ -3576,6 +3579,13 @@ watch(auditTeamViews, (views, previousViews) => {
   }
   trimAuditTeamViewSelection(previousManagedTeamViewId)
 })
+
+watch(
+  [() => Boolean(auditSceneContext.value), () => auditTeamViewCollaborationFollowup.value],
+  () => {
+    resolveAuditTeamViewCollaborationRuntimeFollowup()
+  },
+)
 
 watch(recommendedAuditTeamViews, (views) => {
   focusedRecommendedAuditTeamViewId.value = consumeStaleRecommendedAuditTeamViewFocusId(

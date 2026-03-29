@@ -21,6 +21,7 @@ import {
   resolvePlmAuditSavedViewTakeoverCollaborationState,
   resolvePlmAuditTeamViewCollaborationActionFeedback,
   resolvePlmAuditTeamViewCollaborationFollowupActionFeedback,
+  resolvePlmAuditTeamViewCollaborationRuntimeFollowup,
   resolvePlmAuditTeamViewFollowupSelection,
   resolvePlmAuditTeamViewCollaborationAttentionMode,
   resolvePlmAuditTeamViewCollaborationActionTarget,
@@ -1058,6 +1059,50 @@ describe('plmAuditTeamViewCollaboration', () => {
       logsAnchorId: 'plm-audit-log-results',
       sourceAnchorId: 'plm-audit-saved-views',
       sourceSavedViewId: 'saved-view-10',
+    })
+  })
+
+  it('marks runtime followups as changed when a scene-context anchor must be persisted to controls', () => {
+    expect(resolvePlmAuditTeamViewCollaborationRuntimeFollowup({
+      teamViewId: 'audit-view-9',
+      source: 'scene-context',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-scene-context',
+      sourceSavedViewId: null,
+    }, {
+      sceneContextAvailable: false,
+    })).toEqual({
+      followup: {
+        teamViewId: 'audit-view-9',
+        source: 'scene-context',
+        action: 'share',
+        logsAnchorId: 'plm-audit-log-results',
+        sourceAnchorId: 'plm-audit-team-view-controls',
+        sourceSavedViewId: null,
+      },
+      changed: true,
+    })
+
+    expect(resolvePlmAuditTeamViewCollaborationRuntimeFollowup({
+      teamViewId: 'audit-view-9',
+      source: 'scene-context',
+      action: 'share',
+      logsAnchorId: 'plm-audit-log-results',
+      sourceAnchorId: 'plm-audit-team-view-controls',
+      sourceSavedViewId: null,
+    }, {
+      sceneContextAvailable: false,
+    })).toEqual({
+      followup: {
+        teamViewId: 'audit-view-9',
+        source: 'scene-context',
+        action: 'share',
+        logsAnchorId: 'plm-audit-log-results',
+        sourceAnchorId: 'plm-audit-team-view-controls',
+        sourceSavedViewId: null,
+      },
+      changed: false,
     })
   })
 
