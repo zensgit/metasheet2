@@ -87,6 +87,175 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '409': { description: Conflict }
         '429': { description: Too many requests }
+  /api/auth/dingtalk/login-url:
+    get:
+      summary: Prepare DingTalk login URL
+      parameters:
+        - in: query
+          name: redirect
+          schema: { type: string }
+          description: In-app redirect path after successful login.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      provider:
+                        type: string
+                        enum: [dingtalk]
+                      url: { type: string }
+                      loginUrl: { type: string }
+                      state: { type: string }
+                      redirect: { type: string }
+        '429': { description: Too many requests }
+        '503': { description: DingTalk auth is not configured }
+  /api/auth/dingtalk/bind/start:
+    post:
+      summary: Prepare DingTalk bind URL for the current user
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                redirect: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      provider:
+                        type: string
+                        enum: [dingtalk]
+                      url: { type: string }
+                      bindUrl: { type: string }
+                      state: { type: string }
+                      redirect: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { description: DingTalk auth is not configured }
+  /api/auth/dingtalk/exchange:
+    post:
+      summary: Exchange a DingTalk authorization code for a MetaSheet session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code: { type: string }
+                state: { type: string }
+              required: [code, state]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      provider:
+                        type: string
+                        enum: [dingtalk]
+                      mode:
+                        type: string
+                        enum: [login, bind]
+                      redirect: { type: string }
+                      redirectUrl: { type: string }
+                      token:
+                        type: string
+                        nullable: true
+                      user:
+                        $ref: '#/components/schemas/User'
+                      binding:
+                        $ref: '#/components/schemas/ExternalIdentityBinding'
+                      features:
+                        $ref: '#/components/schemas/ProductFeatures'
+                      provisioned: { type: boolean }
+                      onboarding:
+                        type: object
+                        nullable: true
+                        additionalProperties: true
+        '400': { description: Invalid request or auth state }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Bind mismatch or corp not allowed }
+        '409': { description: Existing local user or conflicting binding }
+        '422': { description: DingTalk identity is incomplete }
+        '429': { description: Too many requests }
+        '503': { description: DingTalk auth is not configured }
+  /api/auth/dingtalk/bindings:
+    get:
+      summary: List DingTalk bindings for the current user
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/ExternalIdentityBinding'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/auth/dingtalk/bindings/{provider}/{bindingId}/unbind:
+    post:
+      summary: Unbind a DingTalk identity from the current user
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: provider
+          required: true
+          schema:
+            type: string
+            enum: [dingtalk]
+        - in: path
+          name: bindingId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      removed:
+                        $ref: '#/components/schemas/ExternalIdentityBinding'
+        '400': { description: Invalid provider or binding id }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/auth/refresh-token:
     post:
       summary: Refresh JWT token

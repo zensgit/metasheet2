@@ -1,0 +1,1201 @@
+paths:
+  /api/admin/directory/integrations:
+    get:
+      summary: List directory integrations
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: orgId
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/DirectoryIntegration' }
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      summary: Create directory integration
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                orgId: { type: string }
+                name: { type: string }
+                corpId: { type: string }
+                status: { type: string }
+                syncEnabled: { type: boolean }
+                scheduleCron: { type: string }
+                defaultDeprovisionPolicy:
+                  $ref: '#/components/schemas/DirectoryDeprovisionPolicy'
+                appKey: { type: string }
+                appSecret: { type: string }
+                rootDepartmentId: { type: string }
+                tokenUrl: { type: string }
+                departmentsUrl: { type: string }
+                usersUrl: { type: string }
+                userDetailUrl: { type: string }
+                pageSize: { type: integer }
+                captureUnboundLogins: { type: boolean }
+              required: [orgId, name, corpId, appKey, appSecret]
+      responses:
+        '200':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryIntegration'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { description: Internal server error }
+  /api/admin/directory/integrations/{integrationId}:
+    patch:
+      summary: Update directory integration
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                orgId: { type: string }
+                name: { type: string }
+                corpId: { type: string }
+                status: { type: string }
+                syncEnabled: { type: boolean }
+                scheduleCron: { type: string, nullable: true }
+                defaultDeprovisionPolicy:
+                  $ref: '#/components/schemas/DirectoryDeprovisionPolicy'
+                appKey: { type: string }
+                appSecret: { type: string }
+                rootDepartmentId: { type: string }
+                tokenUrl: { type: string }
+                departmentsUrl: { type: string }
+                usersUrl: { type: string }
+                userDetailUrl: { type: string }
+                pageSize: { type: integer }
+                captureUnboundLogins: { type: boolean }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryIntegration'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { description: Internal server error }
+  /api/admin/directory/integrations/{integrationId}/test:
+    post:
+      summary: Test directory integration connectivity
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectorySyncTestResult'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { description: Internal server error }
+  /api/admin/directory/integrations/{integrationId}/sync:
+    post:
+      summary: Run directory sync
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectorySyncRun'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Sync already running }
+        '500': { description: Internal server error }
+  /api/admin/directory/integrations/{integrationId}/runs:
+    get:
+      summary: List directory sync runs
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/DirectorySyncRun' }
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/activity:
+    get:
+      summary: List directory activity history
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 10, maximum: 100 }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: action
+          schema: { type: string }
+        - in: query
+          name: resourceType
+          schema:
+            type: string
+            enum: [directory-integration, directory-account, directory-sync-alert, directory-template-center]
+        - in: query
+          name: accountId
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      total: { type: integer }
+                      page: { type: integer }
+                      pageSize: { type: integer }
+                      pageCount: { type: integer }
+                      hasNextPage: { type: boolean }
+                      hasPreviousPage: { type: boolean }
+                      summary:
+                        $ref: '#/components/schemas/DirectoryActivitySummary'
+                      items:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/DirectoryActivity'
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/activity/export.csv:
+    get:
+      summary: Export directory activity history CSV
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: action
+          schema: { type: string }
+        - in: query
+          name: resourceType
+          schema:
+            type: string
+            enum: [directory-integration, directory-account, directory-sync-alert, directory-template-center]
+        - in: query
+          name: accountId
+          schema: { type: string }
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 5000, maximum: 10000 }
+      responses:
+        '200':
+          description: CSV export
+          headers:
+            X-Export-Total:
+              schema: { type: string }
+            X-Export-Returned:
+              schema: { type: string }
+            X-Export-Truncated:
+              schema: { type: string }
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/schedule-status:
+    get:
+      summary: Get directory schedule status
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryScheduleStatus'
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/template-center:
+    get:
+      summary: Get directory template center
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryTemplateCenter'
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Save directory template center
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                teamTemplates:
+                  type: object
+                  additionalProperties: true
+                importHistory:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: true
+                importPresets:
+                  type: object
+                  additionalProperties: true
+                changeReason:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryTemplateCenter'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/template-center/versions:
+    get:
+      summary: List directory template center versions
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 10 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/DirectoryTemplateCenterVersion' }
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/template-center/versions/{versionId}/restore:
+    post:
+      summary: Restore a directory template center version
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: versionId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryTemplateCenter'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/template-center/report:
+    get:
+      summary: Get directory template governance report
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryTemplateGovernanceReport'
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/template-center/report.csv:
+    get:
+      summary: Export directory template governance report as CSV
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: CSV export
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+            Content-Type:
+              schema: { type: string }
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/alerts:
+    get:
+      summary: List directory sync alerts
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/DirectorySyncAlert' }
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/alerts/{alertId}/ack:
+    post:
+      summary: Acknowledge a directory sync alert
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: alertId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectorySyncAlert'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/departments:
+    get:
+      summary: List directory departments
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/DirectoryDepartment' }
+                      actorId: { type: string }
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/accounts:
+    get:
+      summary: List directory accounts
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 20 }
+        - in: query
+          name: linkStatus
+          schema:
+            type: string
+            enum: [pending, linked, conflict, ignored]
+        - in: query
+          name: isActive
+          schema:
+            type: boolean
+        - in: query
+          name: matchStrategy
+          schema:
+            type: string
+            enum: [external_identity, email_exact, mobile_exact, manual]
+        - in: query
+          name: dingtalkAuthEnabled
+          schema:
+            type: boolean
+        - in: query
+          name: isBound
+          schema:
+            type: boolean
+        - in: query
+          name: departmentId
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      total: { type: integer }
+                      page: { type: integer }
+                      pageSize: { type: integer }
+                      pageCount: { type: integer }
+                      hasNextPage: { type: boolean }
+                      hasPreviousPage: { type: boolean }
+                      summary:
+                        type: object
+                        properties:
+                          linked: { type: integer }
+                          pending: { type: integer }
+                          conflict: { type: integer }
+                          ignored: { type: integer }
+                          active: { type: integer }
+                          inactive: { type: integer }
+                          dingtalkAuthEnabled: { type: integer }
+                          dingtalkAuthDisabled: { type: integer }
+                          bound: { type: integer }
+                          unbound: { type: integer }
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/DirectoryAccount' }
+                  meta: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/accounts/export.csv:
+    get:
+      summary: Export directory accounts as CSV
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: linkStatus
+          schema:
+            type: string
+            enum: [pending, linked, conflict, ignored]
+        - in: query
+          name: isActive
+          schema:
+            type: boolean
+        - in: query
+          name: matchStrategy
+          schema:
+            type: string
+            enum: [external_identity, email_exact, mobile_exact, manual]
+        - in: query
+          name: dingtalkAuthEnabled
+          schema:
+            type: boolean
+        - in: query
+          name: isBound
+          schema:
+            type: boolean
+        - in: query
+          name: departmentId
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 5000
+      responses:
+        '200':
+          description: CSV export
+          headers:
+            Content-Disposition:
+              description: Suggested CSV filename for the exported directory accounts
+              schema:
+                type: string
+            X-Export-Total:
+              description: Total number of matching directory accounts before limit truncation
+              schema:
+                type: integer
+            X-Export-Returned:
+              description: Number of directory accounts returned in the CSV payload
+              schema:
+                type: integer
+            X-Export-Truncated:
+              description: Whether the export was truncated by the requested or default limit
+              schema:
+                type: boolean
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/accounts/{accountId}:
+    get:
+      summary: Get directory account detail
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryAccount'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/accounts/{accountId}/link-existing:
+    post:
+      summary: Link a directory account to an existing MetaSheet user
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string }
+              required: [userId]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryAccount'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/accounts/{accountId}/link-existing:
+    post:
+      summary: Link a directory account to an existing MetaSheet user
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId: { type: string }
+              required: [userId]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryAccount'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/accounts/{accountId}/provision-user:
+    post:
+      summary: Provision a MetaSheet user from a directory account
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string }
+                name: { type: string }
+                password: { type: string }
+                authorizeDingTalk: { type: boolean }
+                isActive: { type: boolean }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryProvisionResult'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: User already exists }
+  /api/admin/directory/integrations/{integrationId}/accounts/{accountId}/provision-user:
+    post:
+      summary: Provision a MetaSheet user from a directory account
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string }
+                name: { type: string }
+                password: { type: string }
+                authorizeDingTalk: { type: boolean }
+                isActive: { type: boolean }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryProvisionResult'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: User already exists }
+  /api/admin/directory/accounts/{accountId}/authorize-dingtalk:
+    post:
+      summary: Enable or disable DingTalk login authorization for a linked account
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryAccount'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/accounts/{accountId}/authorize-dingtalk:
+    post:
+      summary: Enable or disable DingTalk login authorization for a linked account
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryAccount'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/accounts/{accountId}/ignore:
+    post:
+      summary: Ignore a directory account
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryAccount'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/accounts/{accountId}/ignore:
+    post:
+      summary: Ignore a directory account
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryAccount'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/accounts/{accountId}/unlink:
+    post:
+      summary: Remove directory account binding
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryAccount'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Directory account is externally bound }
+  /api/admin/directory/integrations/{integrationId}/accounts/{accountId}/unlink:
+    post:
+      summary: Remove directory account binding
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryAccount'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: Directory account is externally bound }
+  /api/admin/directory/accounts/{accountId}/deprovision-policy:
+    post:
+      summary: Update deprovision policy for a directory account
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                policy:
+                  allOf:
+                    - $ref: '#/components/schemas/DirectoryDeprovisionPolicy'
+                  nullable: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryAccount'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/admin/directory/integrations/{integrationId}/accounts/{accountId}/deprovision-policy:
+    post:
+      summary: Update deprovision policy for a directory account
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: integrationId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: accountId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                policy:
+                  allOf:
+                    - $ref: '#/components/schemas/DirectoryDeprovisionPolicy'
+                  nullable: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    $ref: '#/components/schemas/DirectoryAccount'
+                  meta: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
