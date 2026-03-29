@@ -5,7 +5,10 @@
         <span class="brand-text">{{ brandText }}</span>
       </div>
       <div class="nav-links">
-        <router-link v-if="attendanceFocused" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
+        <template v-if="attendanceFocused">
+          <router-link to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
+          <router-link v-if="canAccessDirectoryAdmin" to="/admin/directory" class="nav-link">{{ navLabels.directory }}</router-link>
+        </template>
 
         <template v-else>
           <router-link to="/grid" class="nav-link">{{ navLabels.grid }}</router-link>
@@ -22,7 +25,8 @@
           >
             {{ item.label }}
           </router-link>
-          <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
+          <router-link v-if="canAccessDirectoryAdmin" to="/admin/directory" class="nav-link">{{ navLabels.directory }}</router-link>
+          <router-link v-if="canAccessAttendanceAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
           <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
         </template>
       </div>
@@ -51,25 +55,30 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
+import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
 import { useFeatureFlags } from './stores/featureFlags'
+import { getApiBase } from './utils/api'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
 const { loadProductFeatures, isAttendanceFocused, hasFeature } = useFeatureFlags()
 const { locale, isZh, setLocale } = useLocale()
+const auth = useAuth()
 
 const showNav = computed(() => {
   return route.meta?.hideNavbar !== true
 })
 
 const attendanceFocused = computed(() => isAttendanceFocused())
-const isAdmin = computed(() => hasFeature('attendanceAdmin'))
+const canAccessAttendanceAdmin = computed(() => hasFeature('attendanceAdmin'))
+const canAccessDirectoryAdmin = computed(() => hasFeature('platformAdmin'))
 const navLabels = computed(() => {
   if (isZh.value) {
     return {
       attendance: '考勤',
+      directory: '目录同步',
       grid: '表格',
       spreadsheets: '电子表格',
       kanban: '看板',
@@ -84,6 +93,7 @@ const navLabels = computed(() => {
   }
   return {
     attendance: 'Attendance',
+    directory: 'Directory',
     grid: 'Grid',
     spreadsheets: 'Spreadsheets',
     kanban: 'Kanban',
@@ -102,34 +112,27 @@ const brandText = computed(() => {
   return 'MetaSheet'
 })
 
-const accountEmail = computed(() => {
-  if (typeof localStorage === 'undefined') return ''
-  const token = localStorage.getItem('auth_token')
-  if (!token) return ''
-  const chunks = token.split('.')
-  if (chunks.length < 2) return ''
-  try {
-    const normalized = chunks[1]
-      .replace(/-/g, '+')
-      .replace(/_/g, '/')
-      .padEnd(Math.ceil(chunks[1].length / 4) * 4, '=')
-    const json = atob(normalized)
-    const payload = JSON.parse(json) as { email?: unknown }
-    return typeof payload.email === 'string' ? payload.email : ''
-  } catch {
-    return ''
-  }
-})
+const accountEmail = computed(() => auth.getAccessSnapshot().user.email)
 
-function logout(): void {
-  if (typeof localStorage !== 'undefined') {
-    localStorage.removeItem('auth_token')
-    localStorage.removeItem('metasheet_features')
-    localStorage.removeItem('metasheet_product_mode')
-    localStorage.removeItem('user_permissions')
-    localStorage.removeItem('user_roles')
+async function logout(): Promise<void> {
+  const redirect = typeof route.fullPath === 'string' && route.fullPath.length > 0
+    ? route.fullPath
+    : '/attendance'
+
+  try {
+    const token = auth.getToken()
+    if (token) {
+      await fetch(`${getApiBase()}/api/auth/logout`, {
+        method: 'POST',
+        headers: auth.buildAuthHeaders(),
+      })
+    }
+  } catch {
+    // Ignore logout transport failures; the client still needs to terminate its local session.
   }
-  window.location.assign('/')
+
+  auth.clearToken()
+  window.location.assign(`/login?redirect=${encodeURIComponent(redirect)}`)
 }
 
 function onLocaleChange(event: Event): void {

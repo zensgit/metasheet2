@@ -37,6 +37,66 @@
         </div>
       </div>
 
+      <section class="session-center__binding-panel">
+        <div class="session-center__binding-header">
+          <div>
+            <p class="session-center__binding-label">钉钉绑定</p>
+            <strong>外部身份映射</strong>
+            <p v-if="dingtalkAuthEnabled === false" class="session-center__binding-hint">
+              当前账号尚未在 MetaSheet 中获授权开通钉钉登录，请联系管理员。
+            </p>
+          </div>
+          <div class="session-center__binding-actions">
+            <button class="session-center__button session-center__button--secondary" type="button" :disabled="bindingLoading" @click="void loadBindings()">
+              {{ bindingLoading ? '刷新中...' : '刷新绑定' }}
+            </button>
+            <button class="session-center__button" type="button" :disabled="Boolean(bindingBusy) || bindingStartLoading || dingtalkAuthEnabled === false" @click="void startDingTalkBind()">
+              {{ bindingStartLoading ? '启动中...' : '绑定钉钉账号' }}
+            </button>
+          </div>
+        </div>
+
+        <p
+          v-if="bindingStatus"
+          class="session-center__binding-status"
+          :class="{ 'session-center__binding-status--error': bindingStatusTone === 'error' }"
+        >
+          {{ bindingStatus }}
+        </p>
+
+        <div v-if="bindingLoading && bindings.length === 0" class="session-center__binding-empty">
+          正在加载钉钉绑定...
+        </div>
+        <div v-else-if="!bindingsLoaded" class="session-center__binding-empty">
+          尚未加载钉钉绑定，点击“刷新绑定”查看当前映射。
+        </div>
+        <div v-else-if="dingtalkAuthEnabled === false" class="session-center__binding-empty">
+          当前账号未获授权开通钉钉登录。
+        </div>
+        <div v-else-if="bindings.length === 0" class="session-center__binding-empty">
+          当前没有已绑定的钉钉身份。
+        </div>
+        <div v-else class="session-center__binding-list">
+          <article v-for="binding in bindings" :key="`${binding.provider}-${binding.bindingId}`" class="session-center__binding-card">
+            <div class="session-center__binding-copy">
+              <strong>{{ binding.displayName }}</strong>
+              <p>{{ binding.providerLabel }} · {{ binding.identityLabel }}</p>
+              <small v-if="binding.corpId">企业 ID: {{ binding.corpId }}</small>
+              <small v-if="binding.boundAt">绑定于 {{ formatDate(binding.boundAt) }}</small>
+              <small v-if="binding.lastLoginAt">最近登录 {{ formatDate(binding.lastLoginAt) }}</small>
+            </div>
+            <button
+              class="session-center__button session-center__button--secondary"
+              type="button"
+              :disabled="bindingBusy === `${binding.provider}:${binding.bindingId}`"
+              @click="void unbindDingTalk(binding)"
+            >
+              {{ bindingBusy === `${binding.provider}:${binding.bindingId}` ? '解除中...' : '解除绑定' }}
+            </button>
+          </article>
+        </div>
+      </section>
+
       <section v-if="currentSession" class="session-center__current">
         <div class="session-center__current-copy">
           <p class="session-center__current-label">当前设备</p>
@@ -145,7 +205,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
@@ -154,17 +214,39 @@ import type { UserSessionRecord } from '../utils/session'
 
 type StatusTone = 'info' | 'error'
 
+type ExternalBindingRecord = {
+  provider: string
+  bindingId: string
+  corpId: string | null
+  externalUserId: string | null
+  externalUserName: string | null
+  displayName: string
+  providerLabel: string
+  identityLabel: string
+  boundAt: string | null
+  lastLoginAt: string | null
+}
+
 const router = useRouter()
+const route = useRoute()
 const auth = useAuth()
 
 const loading = ref(false)
+const bindingLoading = ref(false)
+const bindingStartLoading = ref(false)
 const heartbeatLoading = ref(false)
 const busySessionId = ref<string | null>(null)
+const bindingBusy = ref<string | null>(null)
 const revokingOthers = ref(false)
 const sessions = ref<UserSessionRecord[]>([])
+const bindings = ref<ExternalBindingRecord[]>([])
+const bindingsLoaded = ref(false)
+const dingtalkAuthEnabled = ref<boolean | null>(null)
 const currentSessionId = ref<string | null>(null)
 const status = ref('')
+const bindingStatus = ref('')
 const statusTone = ref<StatusTone>('info')
+const bindingStatusTone = ref<StatusTone>('info')
 let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
 
 const accountEmail = computed(() => auth.getAccessSnapshot().user.email)
@@ -178,6 +260,11 @@ const currentSession = computed(() => sessions.value.find((session) => session.i
 function setStatus(message: string, tone: StatusTone = 'info') {
   status.value = message
   statusTone.value = tone
+}
+
+function setBindingStatus(message: string, tone: StatusTone = 'info') {
+  bindingStatus.value = message
+  bindingStatusTone.value = tone
 }
 
 function clearFeatureCache() {
@@ -253,6 +340,252 @@ async function loadSessions() {
     setStatus(readErrorMessage(error, '加载会话失败，请稍后重试'), 'error')
   } finally {
     loading.value = false
+  }
+}
+
+function normalizeBindingRecord(item: unknown): ExternalBindingRecord | null {
+  if (!item || typeof item !== 'object') return null
+  const record = item as Record<string, unknown>
+  const provider = typeof record.provider === 'string' ? record.provider : 'dingtalk'
+  const bindingId = typeof record.bindingId === 'string'
+    ? record.bindingId
+    : typeof record.binding_id === 'string'
+      ? record.binding_id
+      : typeof record.id === 'string'
+        ? record.id
+      : ''
+  if (!bindingId) return null
+
+  const corpId = typeof record.corpId === 'string'
+    ? record.corpId
+    : typeof record.corp_id === 'string'
+      ? record.corp_id
+      : null
+  const externalUserId = typeof record.externalUserId === 'string'
+    ? record.externalUserId
+    : typeof record.external_user_id === 'string'
+      ? record.external_user_id
+      : typeof record.providerUserId === 'string'
+        ? record.providerUserId
+        : typeof record.provider_user_id === 'string'
+          ? record.provider_user_id
+          : typeof record.providerUnionId === 'string'
+            ? record.providerUnionId
+            : typeof record.provider_union_id === 'string'
+              ? record.provider_union_id
+              : typeof record.providerOpenId === 'string'
+                ? record.providerOpenId
+                : typeof record.provider_open_id === 'string'
+                  ? record.provider_open_id
+      : null
+  const profile = record.profile && typeof record.profile === 'object'
+    ? record.profile as Record<string, unknown>
+    : null
+  const profileNested = profile?.profile && typeof profile.profile === 'object'
+    ? profile.profile as Record<string, unknown>
+    : null
+  const externalUserName = typeof record.externalUserName === 'string'
+    ? record.externalUserName
+    : typeof record.external_user_name === 'string'
+      ? record.external_user_name
+      : typeof record.displayName === 'string'
+        ? record.displayName
+        : typeof profile?.name === 'string'
+          ? profile.name
+          : typeof profile?.nick === 'string'
+            ? profile.nick
+            : typeof profileNested?.name === 'string'
+              ? profileNested.name
+              : typeof profileNested?.nick === 'string'
+                ? profileNested.nick
+                : typeof profile?.email === 'string'
+                  ? profile.email
+                  : typeof profileNested?.email === 'string'
+                    ? profileNested.email
+                    : null
+  const boundAt = typeof record.boundAt === 'string'
+    ? record.boundAt
+    : typeof record.bound_at === 'string'
+      ? record.bound_at
+      : typeof record.createdAt === 'string'
+        ? record.createdAt
+        : typeof record.created_at === 'string'
+          ? record.created_at
+      : null
+  const lastLoginAt = typeof record.lastLoginAt === 'string'
+    ? record.lastLoginAt
+    : typeof record.last_login_at === 'string'
+      ? record.last_login_at
+      : null
+
+  const displayName = typeof record.displayName === 'string' && record.displayName.trim().length > 0
+    ? record.displayName.trim()
+    : externalUserName || externalUserId || bindingId
+
+  return {
+    provider,
+    bindingId,
+    corpId,
+    externalUserId,
+    externalUserName,
+    displayName,
+    providerLabel: provider === 'dingtalk' ? '钉钉' : provider,
+    identityLabel: externalUserName || externalUserId || bindingId,
+    boundAt,
+    lastLoginAt,
+  }
+}
+
+async function loadBindings() {
+  bindingLoading.value = true
+  setBindingStatus('')
+
+  try {
+    const response = await apiFetch('/api/auth/dingtalk/bindings')
+    const payload = await response.json().catch(() => null)
+
+    if (response.status === 401) {
+      await redirectToLogin()
+      return
+    }
+
+    if (!response.ok) {
+      setBindingStatus(readErrorMessage(payload, '加载钉钉绑定失败'), 'error')
+      return
+    }
+
+    const data = payload && typeof payload === 'object' ? (payload as Record<string, unknown>).data : null
+    const record = data && typeof data === 'object' ? data as Record<string, unknown> : {}
+    dingtalkAuthEnabled.value = typeof record.authEnabled === 'boolean' ? record.authEnabled : null
+    const list = Array.isArray(record.items)
+      ? record.items
+      : Array.isArray(record.bindings)
+        ? record.bindings
+        : Array.isArray(payload)
+          ? payload
+          : []
+    bindings.value = list
+      .map(normalizeBindingRecord)
+      .filter((binding): binding is ExternalBindingRecord => binding !== null)
+    bindingsLoaded.value = true
+    if (dingtalkAuthEnabled.value === false) {
+      setBindingStatus('当前账号未获授权开通钉钉登录')
+    } else if (bindings.value.length > 0) {
+      setBindingStatus(`已同步 ${bindings.value.length} 条钉钉绑定`)
+    } else {
+      setBindingStatus('当前没有已绑定的钉钉身份')
+    }
+  } catch (error) {
+    setBindingStatus(readErrorMessage(error, '加载钉钉绑定失败，请稍后重试'), 'error')
+  } finally {
+    bindingLoading.value = false
+  }
+}
+
+async function handleBindCallbackReturn() {
+  if (route.query.dingtalk !== 'bound') return
+
+  await loadBindings()
+  if (dingtalkAuthEnabled.value === false) {
+    setBindingStatus('当前账号未获授权开通钉钉登录', 'error')
+  } else {
+    setBindingStatus(bindings.value.length > 0 ? '钉钉账号已绑定' : '钉钉授权已完成，请刷新绑定确认状态。')
+  }
+  await router.replace({
+    name: 'user-settings',
+  }).catch(() => undefined)
+}
+
+async function startDingTalkBind() {
+  if (bindingStartLoading.value) return
+  if (dingtalkAuthEnabled.value === false) {
+    setBindingStatus('当前账号未获授权开通钉钉登录，请联系管理员。', 'error')
+    return
+  }
+  bindingStartLoading.value = true
+  setBindingStatus('')
+
+  try {
+    auth.setExternalAuthContext({
+      provider: 'dingtalk',
+      mode: 'bind',
+      redirect: '/settings',
+      state: null,
+      createdAt: Date.now(),
+    })
+
+    const response = await apiFetch('/api/auth/dingtalk/bind/start', {
+      method: 'POST',
+      body: JSON.stringify({
+        redirect: '/settings',
+      }),
+    })
+    const payload = await response.json().catch(() => null)
+
+    if (response.status === 401) {
+      await redirectToLogin()
+      return
+    }
+
+    if (!response.ok) {
+      throw new Error(readErrorMessage(payload, '启动钉钉绑定失败'))
+    }
+
+    const data = payload && typeof payload === 'object' ? (payload as Record<string, unknown>).data : null
+    const record = data && typeof data === 'object' ? data as Record<string, unknown> : {}
+    const bindUrl = typeof record.bindUrl === 'string'
+      ? record.bindUrl
+      : typeof record.bindingUrl === 'string'
+        ? record.bindingUrl
+        : typeof record.loginUrl === 'string'
+          ? record.loginUrl
+          : typeof record.url === 'string'
+            ? record.url
+            : ''
+
+    if (bindUrl) {
+      auth.openExternalUrl(bindUrl)
+      return
+    }
+
+    setBindingStatus('绑定流程已发起，请按钉钉提示完成授权。')
+    await loadBindings()
+  } catch (error) {
+    auth.clearExternalAuthContext()
+    setBindingStatus(readErrorMessage(error, '启动钉钉绑定失败，请稍后重试'), 'error')
+  } finally {
+    bindingStartLoading.value = false
+  }
+}
+
+async function unbindDingTalk(binding: ExternalBindingRecord) {
+  if (bindingBusy.value) return
+  const key = `${binding.provider}:${binding.bindingId}`
+  bindingBusy.value = key
+  setBindingStatus('')
+
+  try {
+    const response = await apiFetch(`/api/auth/dingtalk/bindings/${encodeURIComponent(binding.provider)}/${encodeURIComponent(binding.bindingId)}/unbind`, {
+      method: 'POST',
+    })
+    const payload = await response.json().catch(() => null)
+
+    if (response.status === 401) {
+      await redirectToLogin()
+      return
+    }
+
+    if (!response.ok) {
+      setBindingStatus(readErrorMessage(payload, '解除钉钉绑定失败'), 'error')
+      return
+    }
+
+    setBindingStatus('钉钉绑定已解除')
+    await loadBindings()
+  } catch (error) {
+    setBindingStatus(readErrorMessage(error, '解除钉钉绑定失败，请稍后重试'), 'error')
+  } finally {
+    bindingBusy.value = null
   }
 }
 
@@ -399,6 +732,11 @@ async function revokeOtherSessions() {
 
 onMounted(() => {
   void loadSessions()
+  if (route.query.dingtalk === 'bound') {
+    void handleBindCallbackReturn()
+    return
+  }
+  void loadBindings()
 })
 
 onBeforeUnmount(() => {
@@ -477,6 +815,95 @@ onBeforeUnmount(() => {
   margin-bottom: 16px;
 }
 
+.session-center__binding-panel {
+  margin-bottom: 16px;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid #cbd5e1;
+  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+  display: grid;
+  gap: 12px;
+}
+
+.session-center__binding-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.session-center__binding-label {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #0f766e;
+}
+
+.session-center__binding-header strong {
+  font-size: 18px;
+  color: #0f172a;
+}
+
+.session-center__binding-hint {
+  margin: 6px 0 0;
+  color: #92400e;
+  font-size: 13px;
+}
+
+.session-center__binding-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.session-center__binding-status {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #ecfeff;
+  color: #0f766e;
+}
+
+.session-center__binding-status--error {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.session-center__binding-list {
+  display: grid;
+  gap: 12px;
+}
+
+.session-center__binding-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+}
+
+.session-center__binding-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.session-center__binding-copy strong {
+  color: #0f172a;
+  font-size: 16px;
+}
+
+.session-center__binding-copy p,
+.session-center__binding-copy small {
+  margin: 0;
+  color: #64748b;
+}
+
 .session-center__metric {
   padding: 14px;
   border-radius: 14px;
@@ -548,6 +975,19 @@ onBeforeUnmount(() => {
   background: #f8fafc;
   color: #64748b;
   text-align: center;
+}
+
+.session-center__empty--compact {
+  padding: 14px;
+}
+
+.session-center__binding-empty {
+  padding: 14px;
+  border-radius: 14px;
+  background: #f8fafc;
+  color: #64748b;
+  text-align: center;
+  font-size: 14px;
 }
 
 .session-center__list {

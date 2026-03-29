@@ -110,6 +110,31 @@ function setupApiMocks({
             roles: ['admin'],
             permissions: ['admin'],
             isAdmin: true,
+            dingtalkAuthEnabled: false,
+          },
+        }),
+      )
+    }
+
+    if (url === `/api/admin/users/${encodedUserId}/dingtalk-auth`) {
+      return Promise.resolve(
+        createMockResponse({
+          ok: true,
+          data: {
+            user: {
+              id: userId,
+              email: 'admin@example.com',
+              name: 'Admin',
+              role: 'admin',
+              is_active: true,
+              is_admin: true,
+              last_login_at: null,
+              created_at: '2026-03-01T00:00:00.000Z',
+            },
+            roles: ['admin'],
+            permissions: ['admin'],
+            isAdmin: true,
+            dingtalkAuthEnabled: true,
           },
         }),
       )
@@ -393,6 +418,42 @@ describe('UserManagementView', () => {
     const status = container.querySelector('.user-admin__status')
     expect(status).not.toBeNull()
     expect(status?.textContent).toContain('users load blocked')
+    unmount()
+  })
+
+  it('authorizes DingTalk login for the selected user', async () => {
+    setupApiMocks({
+      sessionResponses: [
+        createMockResponse({
+          ok: true,
+          data: { items: [] },
+        }),
+      ],
+    })
+
+    const { container, unmount } = mountUserManagement()
+    await flushPromises()
+    await nextTick()
+
+    const authorizeButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('授权钉钉登录'))
+    expect(authorizeButton).toBeDefined()
+    authorizeButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+
+    await flushPromises()
+    await nextTick()
+
+    expect(vi.mocked(apiModule.apiFetch)).toHaveBeenCalledWith(
+      `/api/admin/users/${encodedUserId}/dingtalk-auth`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ enabled: true }),
+      },
+    )
+
+    const status = container.querySelector('.user-admin__status')
+    expect(status).not.toBeNull()
+    expect(status?.textContent).toContain('已授权该账号绑定并使用钉钉登录')
     unmount()
   })
 })
