@@ -37,6 +37,7 @@ import type { RouteLocationNormalized, RouteRecordRaw } from 'vue-router'
 export const AppRouteNames = {
   // Auth routes
   LOGIN: 'login',
+  DINGTALK_AUTH_CALLBACK: 'dingtalk-auth-callback',
   REGISTER: 'register',
   FORGOT_PASSWORD: 'forgot-password',
   RESET_PASSWORD: 'reset-password',
@@ -81,6 +82,7 @@ export const AppRouteNames = {
   ADMIN_DASHBOARD: 'admin-dashboard',
   ADMIN_SETTINGS: 'admin-settings',
   ADMIN_LOGS: 'admin-logs',
+  ADMIN_DIRECTORY: 'admin-directory',
 
   // Error routes
   NOT_FOUND: 'not-found',
@@ -119,6 +121,7 @@ export interface AppRouteParams {
 
   // Routes without params
   'login': Record<string, never>
+  'dingtalk-auth-callback': Record<string, never>
   'register': Record<string, never>
   'forgot-password': Record<string, never>
   'dashboard': Record<string, never>
@@ -139,6 +142,7 @@ export interface AppRouteParams {
   'admin-dashboard': Record<string, never>
   'admin-settings': Record<string, never>
   'admin-logs': Record<string, never>
+  'admin-directory': Record<string, never>
   'not-found': Record<string, never>
   'forbidden': Record<string, never>
   'server-error': Record<string, never>
@@ -180,6 +184,19 @@ export interface AppRouteQuery {
     redirect?: string
   }
 
+  'dingtalk-auth-callback': {
+    code?: string
+    state?: string
+    redirect?: string
+    mode?: 'login' | 'bind'
+    error?: string
+    error_description?: string
+  }
+
+  'user-settings': {
+    dingtalk?: 'bound'
+  }
+
   // Default (no query params) - index signature for untyped routes
   [key: string]: Record<string, string | string[] | undefined>
 }
@@ -215,7 +232,7 @@ export interface RouteMeta {
   transition?: string
 
   // Product capability guard
-  requiredFeature?: 'attendance' | 'workflow' | 'attendanceAdmin' | 'attendanceImport'
+  requiredFeature?: 'attendance' | 'workflow' | 'platformAdmin' | 'attendanceAdmin' | 'attendanceImport'
 }
 
 /**
@@ -332,6 +349,7 @@ export function createTypedNavigation<Name extends AppRouteNamesType>(
 export const ROUTE_PATHS = {
   // Auth
   LOGIN: '/login',
+  DINGTALK_AUTH_CALLBACK: '/auth/dingtalk/callback',
   REGISTER: '/register',
   FORGOT_PASSWORD: '/forgot-password',
   RESET_PASSWORD: '/reset-password/:token',
@@ -376,6 +394,7 @@ export const ROUTE_PATHS = {
   ADMIN_DASHBOARD: '/admin',
   ADMIN_SETTINGS: '/admin/settings',
   ADMIN_LOGS: '/admin/logs',
+  ADMIN_DIRECTORY: '/admin/directory',
 
   // Error
   NOT_FOUND: '/:pathMatch(.*)*',

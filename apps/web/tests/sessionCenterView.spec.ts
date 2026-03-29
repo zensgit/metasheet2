@@ -5,17 +5,27 @@ import * as apiModule from '../src/utils/api'
 
 const replaceMock = vi.fn(async () => undefined)
 const clearTokenMock = vi.fn()
+const clearExternalAuthContextMock = vi.fn()
+const setExternalAuthContextMock = vi.fn()
+const openExternalUrlMock = vi.fn()
+const mockRoute = {
+  query: {} as Record<string, string | undefined>,
+}
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({
     replace: replaceMock,
   }),
+  useRoute: () => mockRoute,
 }))
 
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getAccessSnapshot: () => ({ user: { email: 'admin@example.com' } }),
     clearToken: clearTokenMock,
+    clearExternalAuthContext: clearExternalAuthContextMock,
+    setExternalAuthContext: setExternalAuthContextMock,
+    openExternalUrl: openExternalUrlMock,
   }),
 }))
 
@@ -56,8 +66,29 @@ function mountSessionCenter() {
 describe('SessionCenterView', () => {
   beforeEach(() => {
     clearTokenMock.mockClear()
+    clearExternalAuthContextMock.mockClear()
+    setExternalAuthContextMock.mockClear()
+    openExternalUrlMock.mockClear()
     replaceMock.mockClear()
     vi.mocked(apiModule.apiFetch).mockReset()
+    vi.mocked(apiModule.apiFetch).mockImplementation(async (input) => {
+      if (input === '/api/auth/sessions') {
+        return createMockResponse({
+          ok: true,
+          data: { currentSessionId: null, items: [] },
+        })
+      }
+
+      if (input === '/api/auth/dingtalk/bindings') {
+        return createMockResponse({
+          ok: true,
+          data: { items: [] },
+        })
+      }
+
+      throw new Error(`Unexpected apiFetch call: ${String(input)}`)
+    })
+    mockRoute.query = {}
   })
 
   afterEach(() => {
@@ -169,6 +200,12 @@ describe('SessionCenterView', () => {
         }),
       )
       .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          data: { items: [] },
+        }),
+      )
+      .mockResolvedValueOnce(
         createMockResponse({ error: 'Session end failed' }, 500, false),
       )
 
@@ -212,6 +249,12 @@ describe('SessionCenterView', () => {
               updatedAt: '2026-03-12T08:00:00.000Z',
             }],
           },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          data: { items: [] },
         }),
       )
       .mockResolvedValueOnce(
@@ -259,6 +302,12 @@ describe('SessionCenterView', () => {
               updatedAt: '2026-03-12T08:00:00.000Z',
             }],
           },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          data: { items: [] },
         }),
       )
       .mockResolvedValueOnce(
@@ -327,6 +376,12 @@ describe('SessionCenterView', () => {
         }),
       )
       .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          data: { items: [] },
+        }),
+      )
+      .mockResolvedValueOnce(
         createMockResponse({ error: 'invalid token' }, 401, false),
       )
 
@@ -372,6 +427,12 @@ describe('SessionCenterView', () => {
               updatedAt: '2026-03-12T08:00:00.000Z',
             }],
           },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          data: { items: [] },
         }),
       )
       .mockResolvedValueOnce(
@@ -439,6 +500,12 @@ describe('SessionCenterView', () => {
       .mockResolvedValueOnce(
         createMockResponse({
           ok: true,
+          data: { items: [] },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
           data: { revokedCount: 1 },
         }),
       )
@@ -477,8 +544,7 @@ describe('SessionCenterView', () => {
     await flushPromises()
     await nextTick()
 
-    expect(vi.mocked(apiModule.apiFetch)).toHaveBeenNthCalledWith(
-      2,
+    expect(vi.mocked(apiModule.apiFetch)).toHaveBeenCalledWith(
       '/api/auth/sessions/others/logout',
       { method: 'POST' },
     )
@@ -507,6 +573,12 @@ describe('SessionCenterView', () => {
               updatedAt: '2026-03-12T08:00:00.000Z',
             }],
           },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          data: { items: [] },
         }),
       )
       .mockResolvedValueOnce(
@@ -612,8 +684,7 @@ describe('SessionCenterView', () => {
     await flushPromises()
     await nextTick()
 
-    expect(vi.mocked(apiModule.apiFetch)).toHaveBeenNthCalledWith(
-      2,
+    expect(vi.mocked(apiModule.apiFetch)).toHaveBeenCalledWith(
       '/api/auth/sessions/sess-2/logout',
       { method: 'POST' },
     )
@@ -663,6 +734,285 @@ describe('SessionCenterView', () => {
     expect(container.querySelectorAll('.session-center__card').length).toBe(1)
     const firstCard = container.querySelector('.session-center__card')
     expect(firstCard?.textContent).toContain('sess-1')
+    unmount()
+  })
+
+  it('renders DingTalk bindings and allows refreshing the binding list', async () => {
+    vi.mocked(apiModule.apiFetch)
+      .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          data: {
+            currentSessionId: 'sess-1',
+            items: [{
+              id: 'sess-1',
+              userId: 'user-1',
+              issuedAt: '2026-03-12T00:00:00.000Z',
+              expiresAt: '2026-03-13T00:00:00.000Z',
+              lastSeenAt: '2026-03-12T08:00:00.000Z',
+              revokedAt: null,
+              revokedBy: null,
+              revokeReason: null,
+              ipAddress: '127.0.0.1',
+              userAgent: 'Vitest',
+              createdAt: '2026-03-12T00:00:00.000Z',
+              updatedAt: '2026-03-12T08:00:00.000Z',
+            }],
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          data: {
+            items: [{
+              provider: 'dingtalk',
+              bindingId: 'bind-1',
+              corpId: 'corp-1',
+              externalUserId: 'ding-user-1',
+              externalUserName: '钉钉用户',
+              displayName: '钉钉用户',
+              boundAt: '2026-03-12T00:00:00.000Z',
+              lastLoginAt: '2026-03-13T00:00:00.000Z',
+            }],
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          data: {
+            items: [{
+              provider: 'dingtalk',
+              bindingId: 'bind-1',
+              corpId: 'corp-1',
+              externalUserId: 'ding-user-1',
+              externalUserName: '钉钉用户',
+              displayName: '钉钉用户',
+              boundAt: '2026-03-12T00:00:00.000Z',
+              lastLoginAt: '2026-03-13T00:00:00.000Z',
+            }],
+          },
+        }),
+      )
+
+    const { container, unmount } = mountSessionCenter()
+    await flushPromises()
+    await nextTick()
+
+    const refreshButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('刷新绑定'))
+    expect(refreshButton).toBeDefined()
+    refreshButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+
+    await flushPromises()
+    await nextTick()
+
+    const bindingCard = container.querySelector('.session-center__binding-card')
+    expect(bindingCard).not.toBeNull()
+    expect(bindingCard?.textContent).toContain('钉钉用户')
+    expect(bindingCard?.textContent).toContain('corp-1')
+    expect(container.textContent).toContain('已同步 1 条钉钉绑定')
+    unmount()
+  })
+
+  it('auto-loads DingTalk bindings returned in backend identity shape', async () => {
+    vi.mocked(apiModule.apiFetch).mockImplementation(async (input) => {
+      if (input === '/api/auth/sessions') {
+        return createMockResponse({
+          ok: true,
+          data: {
+            currentSessionId: 'sess-1',
+            items: [{
+              id: 'sess-1',
+              userId: 'user-1',
+              issuedAt: '2026-03-12T00:00:00.000Z',
+              expiresAt: '2026-03-13T00:00:00.000Z',
+              lastSeenAt: '2026-03-12T08:00:00.000Z',
+              revokedAt: null,
+              revokedBy: null,
+              revokeReason: null,
+              ipAddress: '127.0.0.1',
+              userAgent: 'Vitest',
+              createdAt: '2026-03-12T00:00:00.000Z',
+              updatedAt: '2026-03-12T08:00:00.000Z',
+            }],
+          },
+        })
+      }
+
+      if (input === '/api/auth/dingtalk/bindings') {
+        return createMockResponse({
+          ok: true,
+          data: {
+            items: [{
+              id: 'bind-actual-id',
+              provider: 'dingtalk',
+              corpId: 'corp-actual',
+              providerUserId: null,
+              providerUnionId: 'union-1',
+              providerOpenId: 'open-1',
+              createdAt: '2026-03-12T00:00:00.000Z',
+              lastLoginAt: '2026-03-13T00:00:00.000Z',
+              profile: {
+                nick: '周华',
+                email: 'zhouhua@example.com',
+              },
+            }],
+          },
+        })
+      }
+
+      throw new Error(`Unexpected apiFetch call: ${String(input)}`)
+    })
+
+    const { container, unmount } = mountSessionCenter()
+    await flushPromises()
+    await nextTick()
+
+    const bindingCard = container.querySelector('.session-center__binding-card')
+    expect(bindingCard).not.toBeNull()
+    expect(bindingCard?.textContent).toContain('周华')
+    expect(bindingCard?.textContent).toContain('corp-actual')
+    expect(bindingCard?.textContent).not.toContain('当前没有已绑定的钉钉身份')
+    expect(container.textContent).toContain('已同步 1 条钉钉绑定')
+    unmount()
+  })
+
+  it('shows an authorization hint and disables bind when DingTalk login is not enabled for the account', async () => {
+    vi.mocked(apiModule.apiFetch).mockImplementation(async (input) => {
+      if (input === '/api/auth/sessions') {
+        return createMockResponse({
+          ok: true,
+          data: {
+            currentSessionId: null,
+            items: [],
+          },
+        })
+      }
+
+      if (input === '/api/auth/dingtalk/bindings') {
+        return createMockResponse({
+          ok: true,
+          data: {
+            authEnabled: false,
+            items: [],
+          },
+        })
+      }
+
+      throw new Error(`Unexpected apiFetch call: ${String(input)}`)
+    })
+
+    const { container, unmount } = mountSessionCenter()
+    await flushPromises()
+    await nextTick()
+
+    const bindButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('绑定钉钉账号'))
+    expect(bindButton).toBeDefined()
+    expect(bindButton?.getAttribute('disabled')).not.toBeNull()
+    expect(container.textContent).toContain('当前账号未获授权开通钉钉登录')
+    unmount()
+  })
+
+  it('starts DingTalk bind flow and opens backend bind url', async () => {
+    vi.mocked(apiModule.apiFetch)
+      .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          data: {
+            currentSessionId: null,
+            items: [],
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          data: { items: [] },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockResponse({
+          success: true,
+          data: {
+            bindUrl: 'https://login.dingtalk.com/oauth2/auth?bind=1',
+            state: 'bind-state',
+            redirect: '/settings',
+          },
+        }),
+      )
+
+    const { container, unmount } = mountSessionCenter()
+    await flushPromises()
+    await nextTick()
+
+    const bindButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('绑定钉钉账号'))
+    expect(bindButton).toBeDefined()
+    bindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+
+    await flushPromises()
+    await nextTick()
+
+    expect(setExternalAuthContextMock).toHaveBeenCalledWith({
+      provider: 'dingtalk',
+      mode: 'bind',
+      redirect: '/settings',
+      state: null,
+      createdAt: expect.any(Number),
+    })
+    expect(vi.mocked(apiModule.apiFetch)).toHaveBeenCalledWith(
+      '/api/auth/dingtalk/bind/start',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          redirect: '/settings',
+        }),
+      },
+    )
+    expect(openExternalUrlMock).toHaveBeenCalledWith('https://login.dingtalk.com/oauth2/auth?bind=1')
+    unmount()
+  })
+
+  it('refreshes DingTalk bindings after returning from bind callback', async () => {
+    mockRoute.query = { dingtalk: 'bound' }
+
+    vi.mocked(apiModule.apiFetch)
+      .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          data: {
+            currentSessionId: null,
+            items: [],
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          data: {
+            items: [{
+              provider: 'dingtalk',
+              bindingId: 'bind-1',
+              corpId: 'corp-1',
+              externalUserId: 'ding-user-1',
+              externalUserName: '钉钉用户',
+              displayName: '钉钉用户',
+            }],
+          },
+        }),
+      )
+
+    const { container, unmount } = mountSessionCenter()
+    await flushPromises()
+    await nextTick()
+
+    expect(container.textContent).toContain('钉钉账号已绑定')
+    expect(replaceMock).toHaveBeenCalledWith({
+      name: 'user-settings',
+    })
     unmount()
   })
 
@@ -749,8 +1099,7 @@ describe('SessionCenterView', () => {
     await flushPromises()
     await nextTick()
 
-    expect(vi.mocked(apiModule.apiFetch)).toHaveBeenNthCalledWith(
-      2,
+    expect(vi.mocked(apiModule.apiFetch)).toHaveBeenCalledWith(
       `/api/auth/sessions/${encodeURIComponent(specialSessionId)}/logout`,
       { method: 'POST' },
     )
@@ -779,6 +1128,12 @@ describe('SessionCenterView', () => {
               updatedAt: '2026-03-12T08:00:00.000Z',
             }],
           },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createMockResponse({
+          ok: true,
+          data: { items: [] },
         }),
       )
       .mockResolvedValueOnce(

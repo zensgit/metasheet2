@@ -30,6 +30,10 @@
       <button type="submit" :disabled="loading">
         {{ loading ? '登录中...' : '登录' }}
       </button>
+
+      <button class="dingtalk-button" type="button" :disabled="dingTalkLoading" @click="void startDingTalkLogin()">
+        {{ dingTalkLoading ? '跳转中...' : '钉钉登录' }}
+      </button>
     </form>
   </section>
 </template>
@@ -49,6 +53,14 @@ type LoginData = {
   features?: Record<string, unknown>
 }
 
+type DingTalkLoginUrlData = {
+  loginUrl?: string
+  url?: string
+  authUrl?: string
+  redirectUrl?: string
+  state?: string
+}
+
 const route = useRoute()
 const router = useRouter()
 const auth = useAuth()
@@ -56,7 +68,32 @@ const featureFlags = useFeatureFlags()
 const email = ref('')
 const password = ref('')
 const loading = ref(false)
+const dingTalkLoading = ref(false)
 const error = ref('')
+
+function resolveQueryValue(value: unknown): string {
+  if (Array.isArray(value)) return value.find((item) => typeof item === 'string' && item.trim().length > 0)?.trim() || ''
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function resolveLoginRedirect(): string {
+  const redirect = resolveQueryValue(route.query.redirect)
+  return redirect || '/settings'
+}
+
+function extractLoginUrl(payload: Record<string, unknown>): DingTalkLoginUrlData {
+  const data = payload.data && typeof payload.data === 'object'
+    ? payload.data as Record<string, unknown>
+    : payload
+
+  return {
+    loginUrl: resolveQueryValue(data.loginUrl ?? data.login_url),
+    url: resolveQueryValue(data.url),
+    authUrl: resolveQueryValue(data.authUrl ?? data.auth_url),
+    redirectUrl: resolveQueryValue(data.redirectUrl ?? data.redirect_url),
+    state: resolveQueryValue(data.state),
+  }
+}
 
 async function readJson(response: Response): Promise<Record<string, unknown>> {
   try {
@@ -116,6 +153,49 @@ async function submit(): Promise<void> {
     error.value = readErrorMessage(cause, '网络异常，请稍后再试。')
   } finally {
     loading.value = false
+  }
+}
+
+async function startDingTalkLogin(): Promise<void> {
+  if (dingTalkLoading.value) return
+  dingTalkLoading.value = true
+  error.value = ''
+
+  const redirect = resolveLoginRedirect()
+  try {
+    auth.setExternalAuthContext({
+      provider: 'dingtalk',
+      mode: 'login',
+      redirect,
+      state: null,
+      createdAt: Date.now(),
+    })
+
+    const response = await fetch(`${getApiBase()}/api/auth/dingtalk/login-url?redirect=${encodeURIComponent(redirect)}`)
+    const payload = await readJson(response)
+    if (!response.ok) {
+      throw new Error(readErrorMessage(payload, '钉钉登录暂时不可用。'))
+    }
+
+    const loginUrlData = extractLoginUrl(payload)
+    const loginUrl = loginUrlData.loginUrl || loginUrlData.url || loginUrlData.authUrl || loginUrlData.redirectUrl
+    if (!loginUrl) {
+      throw new Error('钉钉登录链接缺失。')
+    }
+
+    auth.setExternalAuthContext({
+      provider: 'dingtalk',
+      mode: 'login',
+      redirect,
+      state: loginUrlData.state || null,
+      createdAt: Date.now(),
+    })
+    auth.openExternalUrl(loginUrl)
+  } catch (cause) {
+    auth.clearExternalAuthContext()
+    error.value = readErrorMessage(cause, '钉钉登录暂时不可用，请稍后再试。')
+  } finally {
+    dingTalkLoading.value = false
   }
 }
 </script>
@@ -179,6 +259,11 @@ button {
   color: #fff;
   padding: 10px 14px;
   font-size: 14px;
+}
+
+.dingtalk-button {
+  border: 1px solid #0f766e;
+  background: linear-gradient(135deg, #0f766e, #115e59);
 }
 
 button:disabled {

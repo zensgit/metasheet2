@@ -26,12 +26,14 @@ import PluginViewHost from './views/PluginViewHost.vue'
 import AttendanceExperienceView from './views/attendance/AttendanceExperienceView.vue'
 import HomeRedirect from './views/HomeRedirect.vue'
 import LoginView from './views/LoginView.vue'
+import DingTalkAuthCallbackView from './views/DingTalkAuthCallbackView.vue'
 import AcceptInviteView from './views/AcceptInviteView.vue'
 import UserManagementView from './views/UserManagementView.vue'
 import SessionCenterView from './views/SessionCenterView.vue'
 import RoleManagementView from './views/RoleManagementView.vue'
 import PermissionManagementView from './views/PermissionManagementView.vue'
 import AdminAuditView from './views/AdminAuditView.vue'
+import DirectoryManagementView from './views/DirectoryManagementView.vue'
 import WorkflowDesigner from './views/WorkflowDesigner.vue'
 
 const routes: RouteRecordRaw[] = [
@@ -46,6 +48,12 @@ const routes: RouteRecordRaw[] = [
     name: AppRouteNames.LOGIN,
     component: LoginView,
     meta: { title: 'Sign In', hideNavbar: true, requiresGuest: true },
+  },
+  {
+    path: ROUTE_PATHS.DINGTALK_AUTH_CALLBACK,
+    name: AppRouteNames.DINGTALK_AUTH_CALLBACK,
+    component: DingTalkAuthCallbackView,
+    meta: { title: 'DingTalk Callback', hideNavbar: true, requiresAuth: false },
   },
   {
     path: '/accept-invite',
@@ -136,6 +144,12 @@ const routes: RouteRecordRaw[] = [
     name: 'permission-management',
     component: PermissionManagementView,
     meta: { title: 'Permission Management' }
+  },
+  {
+    path: ROUTE_PATHS.ADMIN_DIRECTORY,
+    name: AppRouteNames.ADMIN_DIRECTORY,
+    component: DirectoryManagementView,
+    meta: { title: 'Directory Sync', layout: 'admin', requiredFeature: 'platformAdmin' }
   },
   {
     path: '/admin/audit',
@@ -247,6 +261,7 @@ router.beforeEach(async (to, _from, next) => {
     const requiredFeature =
       required === 'attendance' ||
       required === 'workflow' ||
+      required === 'platformAdmin' ||
       required === 'attendanceAdmin' ||
       required === 'attendanceImport'
         ? required
@@ -257,13 +272,8 @@ router.beforeEach(async (to, _from, next) => {
     }
 
     if (flags.isAttendanceFocused()) {
-      const allowed = new Set<string>([
-        '/attendance',
-        '/p/plugin-attendance/attendance',
-        '/settings',
-      ])
       const path = String(to.path || '')
-      if (!allowed.has(path)) {
+      if (!flags.isPathAllowedInAttendanceFocus(path)) {
         return next('/attendance')
       }
     }
