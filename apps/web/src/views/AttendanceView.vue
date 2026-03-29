@@ -428,20 +428,65 @@
                 <th>{{ tr('Leave', '请假') }}</th>
                 <th>{{ tr('Overtime', '加班') }}</th>
                 <th>{{ tr('Status', '状态') }}</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="record in records" :key="record.id">
-                <td>{{ record.work_date }}</td>
-                <td>{{ formatDateTime(record.first_in_at) }}</td>
-                <td>{{ formatDateTime(record.last_out_at) }}</td>
-                <td>{{ record.work_minutes }}</td>
-                <td>{{ record.late_minutes }}</td>
-                <td>{{ record.early_leave_minutes }}</td>
-                <td>{{ formatMetaMinutes(record.meta, 'leave') }}</td>
-                <td>{{ formatMetaMinutes(record.meta, 'overtime') }}</td>
-                <td>{{ formatStatus(record.status) }}</td>
-              </tr>
+              <template v-for="record in records" :key="record.id">
+                <tr>
+                  <td>{{ record.work_date }}</td>
+                  <td>{{ formatDateTime(record.first_in_at) }}</td>
+                  <td>{{ formatDateTime(record.last_out_at) }}</td>
+                  <td>{{ record.work_minutes }}</td>
+                  <td>{{ record.late_minutes }}</td>
+                  <td>{{ record.early_leave_minutes }}</td>
+                  <td>{{ formatMetaMinutes(record.meta, 'leave') }}</td>
+                  <td>{{ formatMetaMinutes(record.meta, 'overtime') }}</td>
+                  <td>{{ formatStatus(record.status) }}</td>
+                  <td class="attendance__table-actions">
+                    <button
+                      class="attendance__btn"
+                      type="button"
+                      :aria-expanded="expandedRecordId === record.id ? 'true' : 'false'"
+                      :disabled="recordTimelineLoadingId === record.id"
+                      @click="toggleRecordTimeline(record)"
+                    >
+                      {{
+                        recordTimelineLoadingId === record.id
+                          ? tr('Loading...', '加载中...')
+                          : expandedRecordId === record.id
+                            ? tr('Hide', '隐藏')
+                            : tr('Details', '详情')
+                      }}
+                    </button>
+                  </td>
+                </tr>
+                <tr v-if="expandedRecordId === record.id" class="attendance__table-row--meta">
+                  <td :colspan="recordsTableColumnCount">
+                    <div v-if="recordTimelineLoadingId === record.id" class="attendance__empty">
+                      {{ tr('Loading raw punch timeline...', '正在加载原始打卡时间线...') }}
+                    </div>
+                    <div v-else-if="recordTimelineInlineMessage(record.id)" class="attendance__empty">
+                      {{ recordTimelineInlineMessage(record.id) }}
+                    </div>
+                    <ul v-else class="attendance__timeline-list">
+                      <li
+                        v-for="event in recordTimelineItems(record.id)"
+                        :key="`${record.id}-${event.id || event.occurredAt}-${event.eventType}`"
+                        class="attendance__timeline-item"
+                      >
+                        <div class="attendance__timeline-primary">
+                          <strong>{{ formatPunchEventType(event.eventType) }}</strong>
+                          <span>{{ formatDateTime(event.occurredAt) }}</span>
+                        </div>
+                        <small v-if="formatPunchEventMeta(event)" class="attendance__field-hint">
+                          {{ formatPunchEventMeta(event) }}
+                        </small>
+                      </li>
+                    </ul>
+                  </td>
+                </tr>
+              </template>
             </tbody>
           </table>
         </div>
@@ -4071,6 +4116,17 @@ interface AttendanceRecord {
   meta?: Record<string, any>
 }
 
+interface AttendancePunchEvent {
+  id?: string
+  userId: string
+  workDate: string
+  eventType: string
+  occurredAt: string
+  source?: string | null
+  timezone?: string | null
+  location?: string | null
+}
+
 interface AttendanceAnomaly {
   recordId: string
   workDate: string
@@ -4637,6 +4693,11 @@ const punching = ref(false)
 const requestSubmitting = ref(false)
 const summary = ref<AttendanceSummary | null>(null)
 const records = ref<AttendanceRecord[]>([])
+const expandedRecordId = ref('')
+const recordTimelineLoadingId = ref('')
+const recordTimelineById = ref<Record<string, AttendancePunchEvent[]>>({})
+const recordTimelineErrorById = ref<Record<string, string>>({})
+const recordTimelineSupported = ref<boolean | null>(null)
 const requests = ref<AttendanceRequest[]>([])
 const anomalies = ref<AttendanceAnomaly[]>([])
 const anomaliesLoading = ref(false)
@@ -4743,6 +4804,7 @@ const payrollCycleGenerating = ref(false)
 const payrollCycleGenerateResult = ref<{ created: number; skipped: number } | null>(null)
 const importLoading = ref(false)
 const adminForbidden = ref(false)
+const recordsTableColumnCount = 10
 const defaultTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 const timezoneOptions = computed(() =>
   buildTimezoneOptions([defaultTimezone, 'UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York'])
@@ -5564,6 +5626,27 @@ function formatRequestType(value: string): string {
   return map[value] ?? value
 }
 
+function formatPunchEventType(value: string | null | undefined): string {
+  const normalized = String(value || '').trim().toLowerCase()
+  const map: Record<string, string> = isZh.value
+    ? {
+        check_in: '上班打卡',
+        check_out: '下班打卡',
+      }
+    : {
+        check_in: 'Check in',
+        check_out: 'Check out',
+      }
+  return map[normalized] ?? (normalized || '--')
+}
+
+function formatPunchEventMeta(item: AttendancePunchEvent): string {
+  const parts = [item.source, item.timezone, item.location]
+    .map(value => String(value || '').trim())
+    .filter(Boolean)
+  return parts.join(' · ')
+}
+
 function formatLunarDayLabel(date: Date): string | undefined {
   if (!isZh.value || Number.isNaN(date.getTime())) return undefined
   try {
@@ -5583,6 +5666,49 @@ function formatWarningsShort(warnings: string[]): string {
   const head = warnings.slice(0, 2).join(', ')
   if (warnings.length > 2) return `${head} (+${warnings.length - 2})`
   return head
+}
+
+function normalizePunchEvent(item: Record<string, any>): AttendancePunchEvent | null {
+  const occurredAt = String(item?.occurredAt ?? item?.occurred_at ?? '').trim()
+  const workDate = normalizeDateKey(item?.workDate ?? item?.work_date)
+  const eventType = String(item?.eventType ?? item?.event_type ?? '').trim()
+  const userId = String(item?.userId ?? item?.user_id ?? '').trim()
+  if (!occurredAt || !workDate || !eventType || !userId) return null
+  return {
+    id: typeof item?.id === 'string' ? item.id : undefined,
+    userId,
+    workDate,
+    eventType,
+    occurredAt,
+    source: typeof item?.source === 'string' ? item.source : null,
+    timezone: typeof item?.timezone === 'string' ? item.timezone : null,
+    location: typeof item?.location === 'string' ? item.location : null,
+  }
+}
+
+function resetRecordTimelineState(): void {
+  expandedRecordId.value = ''
+  recordTimelineLoadingId.value = ''
+  recordTimelineById.value = {}
+  recordTimelineErrorById.value = {}
+  recordTimelineSupported.value = null
+}
+
+function recordTimelineItems(recordId: string): AttendancePunchEvent[] {
+  return recordTimelineById.value[recordId] ?? []
+}
+
+function recordTimelineInlineMessage(recordId: string): string {
+  if (recordTimelineSupported.value === false) {
+    return tr('Raw punch timeline is unavailable on this server.', '当前服务未启用原始打卡时间线。')
+  }
+  if (recordTimelineErrorById.value[recordId]) {
+    return recordTimelineErrorById.value[recordId]
+  }
+  if (recordTimelineItems(recordId).length === 0) {
+    return tr('No raw punch events for this day.', '当天没有原始打卡事件。')
+  }
+  return ''
 }
 
 async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void> {
@@ -9110,6 +9236,55 @@ async function loadSummary() {
   summary.value = data.data
 }
 
+async function loadRecordTimeline(record: AttendanceRecord): Promise<void> {
+  recordTimelineLoadingId.value = record.id
+  try {
+    const query = buildQuery({
+      from: record.work_date,
+      to: record.work_date,
+      userId: normalizedUserId(),
+    })
+    const response = await apiFetch(`/api/attendance/punch/events?${query.toString()}`)
+    const data = await response.json().catch(() => null)
+    if (response.status === 404 || response.status === 405) {
+      recordTimelineSupported.value = false
+      recordTimelineErrorById.value = {
+        ...recordTimelineErrorById.value,
+        [record.id]: tr('Raw punch timeline is unavailable on this server.', '当前服务未启用原始打卡时间线。'),
+      }
+      return
+    }
+    if (!response.ok || !data?.ok) {
+      throw new Error(readErrorMessage(data, tr('Failed to load raw punch timeline', '加载原始打卡时间线失败')))
+    }
+    const items: AttendancePunchEvent[] = Array.isArray(data?.data?.items)
+      ? data.data.items
+          .map((item: Record<string, any>) => normalizePunchEvent(item))
+          .filter((item: AttendancePunchEvent | null): item is AttendancePunchEvent => Boolean(item))
+          .sort((a: AttendancePunchEvent, b: AttendancePunchEvent) => new Date(a.occurredAt).getTime() - new Date(b.occurredAt).getTime())
+      : []
+    recordTimelineSupported.value = true
+    recordTimelineById.value = {
+      ...recordTimelineById.value,
+      [record.id]: items,
+    }
+    if (recordTimelineErrorById.value[record.id]) {
+      const next = { ...recordTimelineErrorById.value }
+      delete next[record.id]
+      recordTimelineErrorById.value = next
+    }
+  } catch (error: any) {
+    recordTimelineErrorById.value = {
+      ...recordTimelineErrorById.value,
+      [record.id]: readErrorMessage(error, tr('Failed to load raw punch timeline', '加载原始打卡时间线失败')),
+    }
+  } finally {
+    if (recordTimelineLoadingId.value === record.id) {
+      recordTimelineLoadingId.value = ''
+    }
+  }
+}
+
 async function loadRecords() {
   const query = buildQuery({
     from: fromDate.value,
@@ -9124,8 +9299,26 @@ async function loadRecords() {
   if (!response.ok || !data.ok) {
     throw new Error(readErrorMessage(data, tr('Failed to load records', '加载记录失败')))
   }
+  resetRecordTimelineState()
   records.value = data.data.items
   recordsTotal.value = data.data.total
+}
+
+async function toggleRecordTimeline(record: AttendanceRecord): Promise<void> {
+  if (expandedRecordId.value === record.id) {
+    expandedRecordId.value = ''
+    return
+  }
+  expandedRecordId.value = record.id
+  if (recordTimelineSupported.value === false) {
+    recordTimelineErrorById.value = {
+      ...recordTimelineErrorById.value,
+      [record.id]: tr('Raw punch timeline is unavailable on this server.', '当前服务未启用原始打卡时间线。'),
+    }
+    return
+  }
+  if (recordTimelineById.value[record.id]) return
+  await loadRecordTimeline(record)
 }
 
 async function loadRequests() {
@@ -12189,6 +12382,36 @@ const holidaySectionBindings = {
 .attendance__records-actions {
   display: flex;
   gap: 8px;
+}
+
+.attendance__timeline-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+}
+
+.attendance__timeline-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px dashed #d7dbe3;
+}
+
+.attendance__timeline-item:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.attendance__timeline-primary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 
 .attendance__pagination {
