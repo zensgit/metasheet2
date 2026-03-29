@@ -223,6 +223,34 @@ describe('plmAuditTeamViewOwnership', () => {
     })
   })
 
+  it('drops transferred readonly views from batch selection while keeping the current selector', () => {
+    expect(trimPlmAuditExistingTeamViewUiState({
+      selectedTeamViewId: 'audit-view-2',
+      managedTeamViewId: 'audit-view-2',
+      selectedIds: ['audit-view-2', 'audit-view-3'],
+      focusedTeamViewId: 'audit-view-2',
+      focusedRecommendedTeamViewId: '',
+      draftTeamViewName: '',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: '',
+    }, [
+      { id: 'audit-view-2', applicable: true, selectable: false, manageable: false },
+      { id: 'audit-view-3', applicable: true, selectable: true, manageable: true },
+    ], {
+      isApplicableView: (view) => view.applicable,
+      isSelectableView: (view) => view.selectable,
+      isManageableView: (view) => view.manageable,
+    })).toEqual({
+      selectedTeamViewId: 'audit-view-2',
+      selectedIds: ['audit-view-3'],
+      focusedTeamViewId: 'audit-view-2',
+      focusedRecommendedTeamViewId: '',
+      draftTeamViewName: '',
+      draftTeamViewNameOwnerId: '',
+      draftOwnerUserId: '',
+    })
+  })
+
   it('downgrades management-owned name drafts into create-mode drafts when the canonical owner becomes read-only', () => {
     expect(trimPlmAuditExistingTeamViewUiState({
       selectedTeamViewId: '',

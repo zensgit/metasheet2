@@ -2542,6 +2542,7 @@ async function transferAuditTeamView() {
     replaceAuditTeamView(saved)
     applyAuditManagedTeamViewAttention()
     applyAuditManagedTeamViewSelection(saved.id)
+    trimAuditTeamViewSelection(saved.id)
     clearAuditTransferActionTeamViewFormDrafts()
     setStatus(tr('Audit team view owner transferred.', '审计团队视图所有者已转移。'))
   } catch (error: unknown) {
