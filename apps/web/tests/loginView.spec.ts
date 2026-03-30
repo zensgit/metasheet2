@@ -5,6 +5,9 @@ import LoginView from '../src/views/LoginView.vue'
 const replaceMock = vi.fn(async () => undefined)
 const setTokenMock = vi.fn()
 const primeSessionMock = vi.fn()
+const setExternalAuthContextMock = vi.fn()
+const clearExternalAuthContextMock = vi.fn()
+const openExternalUrlMock = vi.fn()
 const loadProductFeaturesMock = vi.fn(async () => ({ attendance: true, workflow: true, attendanceAdmin: true, attendanceImport: true, mode: 'platform' }))
 const resolveHomePathMock = vi.fn(() => '/attendance')
 
@@ -19,6 +22,9 @@ vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     setToken: setTokenMock,
     primeSession: primeSessionMock,
+    setExternalAuthContext: setExternalAuthContextMock,
+    clearExternalAuthContext: clearExternalAuthContextMock,
+    openExternalUrl: openExternalUrlMock,
   }),
 }))
 
@@ -63,6 +69,9 @@ describe('LoginView', () => {
     replaceMock.mockReset()
     setTokenMock.mockReset()
     primeSessionMock.mockReset()
+    setExternalAuthContextMock.mockReset()
+    clearExternalAuthContextMock.mockReset()
+    openExternalUrlMock.mockReset()
     loadProductFeaturesMock.mockReset()
     resolveHomePathMock.mockReset().mockReturnValue('/attendance')
     mockRoute.query.redirect = '/settings'
@@ -137,6 +146,34 @@ describe('LoginView', () => {
     })
     expect(loadProductFeaturesMock).toHaveBeenCalledWith(true)
     expect(replaceMock).toHaveBeenCalledWith('/settings')
+    unmount()
+  })
+
+  it('starts DingTalk login and redirects to backend login url', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => createMockResponse({
+      success: true,
+      data: {
+        loginUrl: 'https://login.dingtalk.com/oauth2/auth?mock=1',
+        state: 'state-123',
+      },
+    })))
+
+    const { container, unmount } = mountLoginView()
+    const button = Array.from(container.querySelectorAll('button')).find((item) => item.textContent?.includes('钉钉登录')) as HTMLButtonElement | undefined
+    expect(button).toBeDefined()
+    button?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+
+    await flushPromises()
+    await nextTick()
+
+    expect(setExternalAuthContextMock).toHaveBeenCalledWith({
+      provider: 'dingtalk',
+      mode: 'login',
+      redirect: '/settings',
+      state: null,
+      createdAt: expect.any(Number),
+    })
+    expect(openExternalUrlMock).toHaveBeenCalledWith('https://login.dingtalk.com/oauth2/auth?mock=1')
     unmount()
   })
 })

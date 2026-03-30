@@ -31,6 +31,11 @@ const inviteMocks = vi.hoisted(() => ({
   isInviteTokenExpired: vi.fn((token: string) => token === 'eyJhbGciOiJIUzI1NiJ9.eyJ0eXBlIjoiaW52aXRlIiwiZXhwIjoxfQ.sig'),
 }))
 
+const externalAuthGrantMocks = vi.hoisted(() => ({
+  isUserExternalAuthEnabled: vi.fn(),
+  upsertUserExternalAuthGrant: vi.fn(),
+}))
+
 vi.mock('../../src/middleware/auth', () => ({
   authenticate: (req: Request, _res: Response, next: (error?: unknown) => void) => {
     req.user = state.authUser as never
@@ -57,6 +62,11 @@ vi.mock('../../src/audit/audit', () => ({
 vi.mock('../../src/auth/invite-tokens', () => ({
   issueInviteToken: inviteMocks.issueInviteToken,
   isInviteTokenExpired: inviteMocks.isInviteTokenExpired,
+}))
+
+vi.mock('../../src/auth/external-auth-grants', () => ({
+  isUserExternalAuthEnabled: externalAuthGrantMocks.isUserExternalAuthEnabled,
+  upsertUserExternalAuthGrant: externalAuthGrantMocks.upsertUserExternalAuthGrant,
 }))
 
 import { adminUsersRouter } from '../../src/routes/admin-users'
@@ -160,6 +170,8 @@ describe('admin-users routes', () => {
     inviteMocks.issueInviteToken.mockClear()
     inviteMocks.isInviteTokenExpired.mockClear()
     inviteMocks.isInviteTokenExpired.mockImplementation((token: string) => token === 'eyJhbGciOiJIUzI1NiJ9.eyJ0eXBlIjoiaW52aXRlIiwiZXhwIjoxfQ.sig')
+    externalAuthGrantMocks.isUserExternalAuthEnabled.mockReset().mockResolvedValue(false)
+    externalAuthGrantMocks.upsertUserExternalAuthGrant.mockReset()
   })
 
   it('lists users with pagination payload', async () => {
@@ -518,6 +530,71 @@ describe('admin-users routes', () => {
     expect(String((response.body as Record<string, any>).data.onboarding.inviteMessage)).toContain('推荐入口：/attendance')
     expect(bcryptMocks.hash).toHaveBeenCalledWith('WelcomePass9A', 10)
     expect(auditMocks.auditLog).toHaveBeenCalled()
+  })
+
+  it('can authorize DingTalk login for a managed user', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+    externalAuthGrantMocks.upsertUserExternalAuthGrant.mockResolvedValue({
+      id: 'grant-1',
+      provider: 'dingtalk',
+      userId: 'user-1',
+      enabled: true,
+      grantedBy: 'admin-1',
+      createdAt: '2026-03-12T00:00:00.000Z',
+      updatedAt: '2026-03-12T00:05:00.000Z',
+    })
+    externalAuthGrantMocks.isUserExternalAuthEnabled.mockResolvedValue(true)
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'attendance_employee' }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/dingtalk-auth', {
+      params: { userId: 'user-1' },
+      body: { enabled: true },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(externalAuthGrantMocks.upsertUserExternalAuthGrant).toHaveBeenCalledWith({
+      provider: 'dingtalk',
+      userId: 'user-1',
+      enabled: true,
+      grantedBy: 'admin-1',
+    })
+    expect((response.body as Record<string, any>).data.dingtalkAuthEnabled).toBe(true)
+    expect(auditMocks.auditLog).toHaveBeenCalledWith(expect.objectContaining({
+      resourceType: 'user-external-auth',
+      resourceId: 'user-1:dingtalk',
+    }))
   })
 
   it('rejects create user requests when password policy fails', async () => {
@@ -1741,7 +1818,7 @@ describe('admin-users routes', () => {
     expect(String(pgMocks.query.mock.calls[0]?.[0] || '')).toContain('created_at >=')
     expect(String(pgMocks.query.mock.calls[0]?.[0] || '')).toContain('created_at <=')
     expect(pgMocks.query.mock.calls[0]?.[1]?.slice(0, 3)).toEqual([
-      ['user', 'user-role', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template'],
+      ['user', 'user-role', 'user-password', 'user-session', 'user-invite', 'user-external-auth', 'role', 'permission', 'permission-template'],
       '2026-03-10T00:00:00.000Z',
       '2026-03-12T23:59:59.999Z',
     ])

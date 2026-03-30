@@ -1,9 +1,21 @@
 type FeatureFlags = {
   attendance?: boolean
   workflow?: boolean
+  platformAdmin?: boolean
   attendanceAdmin?: boolean
   attendanceImport?: boolean
   mode?: 'platform' | 'attendance' | 'attendance-focused' | 'plm-workbench'
+}
+
+export type ExternalAuthProvider = 'dingtalk'
+export type ExternalAuthMode = 'login' | 'bind'
+
+export type ExternalAuthContext = {
+  provider: ExternalAuthProvider
+  mode: ExternalAuthMode
+  redirect: string
+  state: string | null
+  createdAt: number
 }
 
 type PrimedSessionPayload = {
@@ -28,6 +40,7 @@ type AccessSnapshot = {
   features: {
     attendance: boolean
     workflow: boolean
+    platformAdmin: boolean
     attendanceAdmin: boolean
     attendanceImport: boolean
     mode: 'platform' | 'attendance' | string
@@ -44,10 +57,14 @@ type BootstrapSessionResult = {
 const DEFAULT_FEATURES: AccessSnapshot['features'] = {
   attendance: false,
   workflow: false,
+  platformAdmin: false,
   attendanceAdmin: false,
   attendanceImport: false,
   mode: 'platform',
 }
+
+const EXTERNAL_AUTH_CONTEXT_KEY = 'metasheet_external_auth_context'
+const EXTERNAL_AUTH_CONTEXT_TTL_MS = 15 * 60 * 1000
 
 let primedSession: PrimedSessionPayload | null = null
 let primedSessionToken: string | null = null
@@ -90,6 +107,7 @@ function normalizeFeatures(features: unknown): AccessSnapshot['features'] {
   return {
     attendance: raw.attendance === true,
     workflow: raw.workflow === true,
+    platformAdmin: raw.platformAdmin === true,
     attendanceAdmin: raw.attendanceAdmin === true,
     attendanceImport: raw.attendanceImport === true,
     mode: normalizeMode(raw.mode),
@@ -98,6 +116,14 @@ function normalizeFeatures(features: unknown): AccessSnapshot['features'] {
 
 function normalizeString(value: unknown): string {
   return typeof value === 'string' ? value : ''
+}
+
+function normalizeExternalAuthProvider(value: unknown): ExternalAuthProvider | null {
+  return value === 'dingtalk' ? value : null
+}
+
+function normalizeExternalAuthMode(value: unknown): ExternalAuthMode | null {
+  return value === 'login' || value === 'bind' ? value : null
 }
 
 function normalizeUserPayload(payload: unknown): AccessSnapshot['user'] {
@@ -182,6 +208,7 @@ function extractAccessSnapshotFromToken(token: string): AccessSnapshot {
     features: {
       attendance: user.role === 'admin' || user.permissions.some((permission) => permission.startsWith('attendance:')),
       workflow: true,
+      platformAdmin: user.role === 'admin',
       attendanceAdmin: user.role === 'admin' || user.permissions.includes('attendance:admin'),
       attendanceImport: user.role === 'admin' || user.permissions.includes('attendance:write'),
       mode: normalizeMode(payload.mode),
@@ -206,6 +233,50 @@ function getCurrentToken(): string | null {
   return token
 }
 
+function readExternalAuthContext(): ExternalAuthContext | null {
+  const raw = withLocalStorageSafe(() => localStorage.getItem(EXTERNAL_AUTH_CONTEXT_KEY))
+  if (!raw) return null
+
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    const provider = normalizeExternalAuthProvider(parsed.provider)
+    const mode = normalizeExternalAuthMode(parsed.mode)
+    const redirect = normalizeString(parsed.redirect).trim()
+
+    if (!provider || !mode || !redirect) return null
+
+    const context = {
+      provider,
+      mode,
+      redirect,
+      state: typeof parsed.state === 'string' && parsed.state.trim().length > 0 ? parsed.state.trim() : null,
+      createdAt: typeof parsed.createdAt === 'number' && Number.isFinite(parsed.createdAt) ? parsed.createdAt : Date.now(),
+    }
+
+    if (Date.now() - context.createdAt > EXTERNAL_AUTH_CONTEXT_TTL_MS) {
+      clearExternalAuthContext()
+      return null
+    }
+
+    return context
+  } catch {
+    clearExternalAuthContext()
+    return null
+  }
+}
+
+function writeExternalAuthContext(context: ExternalAuthContext): void {
+  withLocalStorageSafe(() => {
+    localStorage.setItem(EXTERNAL_AUTH_CONTEXT_KEY, JSON.stringify(context))
+  })
+}
+
+function clearExternalAuthContext(): void {
+  withLocalStorageSafe(() => {
+    localStorage.removeItem(EXTERNAL_AUTH_CONTEXT_KEY)
+  })
+}
+
 function buildAuthHeadersInternal(token: string | null): Record<string, string> {
   const headers: Record<string, string> = {}
   if (token) headers.Authorization = `Bearer ${token}`
@@ -214,6 +285,20 @@ function buildAuthHeadersInternal(token: string | null): Record<string, string> 
 }
 
 function getApiBase(): string {
+  const resolveWindowOrigin = (): string => {
+    const origin = typeof window !== 'undefined' ? window.location?.origin : ''
+    return typeof origin === 'string' && origin.trim().length > 0 ? origin.trim() : ''
+  }
+
+  const isLoopbackUrl = (value: string): boolean => {
+    try {
+      const url = new URL(value)
+      return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(url.hostname)
+    } catch {
+      return false
+    }
+  }
+
   const envValue = (key: 'VITE_API_URL' | 'VITE_API_BASE') => {
     const fromMeta = (import.meta.env as { [key: string]: unknown })[key]
     if (typeof fromMeta === 'string' && fromMeta.trim().length > 0) return fromMeta
@@ -221,12 +306,22 @@ function getApiBase(): string {
   }
 
   const apiUrl = envValue('VITE_API_URL') || envValue('VITE_API_BASE')
-  if (apiUrl) return apiUrl
+  const browserOrigin = resolveWindowOrigin()
+  if (apiUrl) {
+    if (browserOrigin && isLoopbackUrl(apiUrl) && !isLoopbackUrl(browserOrigin)) {
+      return browserOrigin
+    }
+    return apiUrl
+  }
 
-  const origin = typeof window !== 'undefined' ? window.location?.origin : ''
-  if (typeof origin === 'string' && origin.trim().length > 0) return origin
+  if (browserOrigin) return browserOrigin
 
   return 'http://localhost:8900'
+}
+
+function openExternalUrl(url: string): void {
+  if (typeof window === 'undefined') return
+  window.location.assign(url)
 }
 
 export function useAuth() {
@@ -255,12 +350,15 @@ export function useAuth() {
       localStorage.removeItem('auth_token')
       localStorage.removeItem('jwt')
       localStorage.removeItem('devToken')
+      localStorage.removeItem('metasheet_features')
+      localStorage.removeItem('metasheet_product_mode')
       localStorage.removeItem('user_permissions')
       localStorage.removeItem('user_roles')
     })
 
     primedSession = null
     primedSessionToken = null
+    clearExternalAuthContext()
   }
 
   function buildAuthHeaders(): Record<string, string> {
@@ -393,6 +491,18 @@ export function useAuth() {
     )
   }
 
+  function getExternalAuthContext(): ExternalAuthContext | null {
+    return readExternalAuthContext()
+  }
+
+  function setExternalAuthContext(context: ExternalAuthContext): void {
+    writeExternalAuthContext(context)
+  }
+
+  function clearExternalAuthContextPublic(): void {
+    clearExternalAuthContext()
+  }
+
   return {
     getToken,
     setToken,
@@ -403,5 +513,9 @@ export function useAuth() {
     primeSession,
     getAccessSnapshot,
     hasAdminAccess,
+    getExternalAuthContext,
+    setExternalAuthContext,
+    clearExternalAuthContext: clearExternalAuthContextPublic,
+    openExternalUrl,
   }
 }

@@ -1,4 +1,5 @@
 import { computed, reactive, readonly } from 'vue'
+import { ROUTE_PATHS } from '../router/types'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
@@ -8,6 +9,7 @@ export type ProductMode = 'platform' | 'attendance'
 export interface ProductFeatures {
   attendance: boolean
   workflow: boolean
+  platformAdmin: boolean
   attendanceAdmin: boolean
   attendanceImport: boolean
   mode: ProductMode
@@ -36,6 +38,7 @@ interface LoadProductFeatureOptions {
 const DEFAULT_FEATURES: ProductFeatures = {
   attendance: false,
   workflow: false,
+  platformAdmin: false,
   attendanceAdmin: false,
   attendanceImport: false,
   mode: 'platform',
@@ -132,6 +135,12 @@ function extractFeaturesFromPayload(payload: any): Partial<ProductFeatures> {
   return {
     attendance: typeof featuresNode.attendance === 'boolean' ? featuresNode.attendance : undefined,
     workflow: typeof featuresNode.workflow === 'boolean' ? featuresNode.workflow : undefined,
+    platformAdmin:
+      typeof featuresNode.platformAdmin === 'boolean'
+        ? featuresNode.platformAdmin
+        : typeof featuresNode.platform_admin === 'boolean'
+          ? featuresNode.platform_admin
+          : undefined,
     attendanceAdmin:
       typeof featuresNode.attendanceAdmin === 'boolean'
         ? featuresNode.attendanceAdmin
@@ -218,6 +227,12 @@ function resolveFeatures(
     isAdmin,
   )
 
+  const platformAdmin = boolOrDefault(
+    override.platformAdmin,
+    backend.platformAdmin,
+    isAdmin,
+  )
+
   const attendanceImport = boolOrDefault(
     override.attendanceImport,
     backend.attendanceImport,
@@ -231,6 +246,7 @@ function resolveFeatures(
   return {
     attendance,
     workflow,
+    platformAdmin,
     attendanceAdmin,
     attendanceImport,
     mode,
@@ -322,6 +338,28 @@ function isAttendanceFocused(): boolean {
   return state.features.mode === 'attendance' && state.features.attendance
 }
 
+function canAccessDirectoryAdmin(): boolean {
+  return state.features.platformAdmin
+}
+
+function isPathAllowedInAttendanceFocus(path: string): boolean {
+  const normalized = String(path || '').trim()
+  if (!normalized) return false
+
+  const allowed = new Set<string>([
+    ROUTE_PATHS.ATTENDANCE,
+    '/p/plugin-attendance/attendance',
+    ROUTE_PATHS.USER_SETTINGS,
+  ])
+
+  if (allowed.has(normalized)) return true
+  if (normalized === ROUTE_PATHS.ADMIN_DIRECTORY) {
+    return canAccessDirectoryAdmin()
+  }
+
+  return false
+}
+
 function resolveHomePath(): string {
   if (isAttendanceFocused()) return '/attendance'
   return '/grid'
@@ -335,6 +373,8 @@ export function useFeatureFlags() {
     loadProductFeatures,
     hasFeature,
     isAttendanceFocused,
+    canAccessDirectoryAdmin,
+    isPathAllowedInAttendanceFocus,
     resolveHomePath,
   }
 }

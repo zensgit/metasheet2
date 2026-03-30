@@ -48,6 +48,550 @@ components:
           type: array
           items:
             type: string
+    ProductFeatures:
+      type: object
+      properties:
+        attendance: { type: boolean }
+        workflow: { type: boolean }
+        attendanceAdmin: { type: boolean }
+        attendanceImport: { type: boolean }
+        mode:
+          type: string
+          enum: [platform, attendance, attendance-focused, plm-workbench]
+    ExternalIdentityBinding:
+      type: object
+      properties:
+        id: { type: string }
+        provider: { type: string }
+        externalKey: { type: string }
+        providerUserId:
+          type: string
+          nullable: true
+        providerUnionId:
+          type: string
+          nullable: true
+        providerOpenId:
+          type: string
+          nullable: true
+        corpId:
+          type: string
+          nullable: true
+        userId: { type: string }
+        profile:
+          type: object
+          additionalProperties: true
+        boundBy:
+          type: string
+          nullable: true
+        lastLoginAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    DirectoryDeprovisionPolicyAction:
+      type: string
+      enum: [mark_inactive, disable_dingtalk_auth, disable_local_user]
+    DirectoryDeprovisionPolicy:
+      type: array
+      items:
+        $ref: '#/components/schemas/DirectoryDeprovisionPolicyAction'
+      uniqueItems: true
+    DirectoryLinkStatus:
+      type: string
+      enum: [pending, linked, conflict, ignored]
+    DirectoryMatchStrategy:
+      type: string
+      enum: [external_identity, email_exact, mobile_exact, manual]
+    DirectoryIntegrationConfig:
+      type: object
+      properties:
+        appKey:
+          type: string
+        rootDepartmentId:
+          type: string
+        tokenUrl:
+          type: string
+        departmentsUrl:
+          type: string
+        usersUrl:
+          type: string
+        userDetailUrl:
+          type: string
+        pageSize:
+          type: integer
+        captureUnboundLogins:
+          type: boolean
+        hasAppSecret:
+          type: boolean
+    DirectoryIntegration:
+      type: object
+      properties:
+        id: { type: string }
+        orgId: { type: string }
+        provider:
+          type: string
+          enum: [dingtalk]
+        name: { type: string }
+        status: { type: string }
+        corpId: { type: string }
+        syncEnabled: { type: boolean }
+        scheduleCron:
+          type: string
+          nullable: true
+        defaultDeprovisionPolicy:
+          $ref: '#/components/schemas/DirectoryDeprovisionPolicy'
+        config:
+          $ref: '#/components/schemas/DirectoryIntegrationConfig'
+        lastSyncAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastSuccessAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastCursor:
+          type: string
+          nullable: true
+        lastError:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    DirectoryDepartment:
+      type: object
+      properties:
+        id: { type: string }
+        integrationId: { type: string }
+        externalDepartmentId: { type: string }
+        externalParentDepartmentId:
+          type: string
+          nullable: true
+        name: { type: string }
+        fullPath:
+          type: string
+          nullable: true
+        orderIndex:
+          type: integer
+          nullable: true
+        isActive: { type: boolean }
+        lastSeenAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    DirectoryLinkedUser:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string }
+        name:
+          type: string
+          nullable: true
+        isActive: { type: boolean }
+    DirectoryAccount:
+      type: object
+      properties:
+        id: { type: string }
+        integrationId: { type: string }
+        provider:
+          type: string
+          enum: [dingtalk]
+        corpId: { type: string }
+        externalUserId: { type: string }
+        unionId:
+          type: string
+          nullable: true
+        openId:
+          type: string
+          nullable: true
+        externalKey:
+          type: string
+          nullable: true
+        name:
+          type: string
+          nullable: true
+        nick:
+          type: string
+          nullable: true
+        email:
+          type: string
+          nullable: true
+        mobile:
+          type: string
+          nullable: true
+        jobNumber:
+          type: string
+          nullable: true
+        title:
+          type: string
+          nullable: true
+        avatarUrl:
+          type: string
+          nullable: true
+        isActive: { type: boolean }
+        lastSeenAt:
+          type: string
+          format: date-time
+          nullable: true
+        linkStatus:
+          $ref: '#/components/schemas/DirectoryLinkStatus'
+        matchStrategy:
+          allOf:
+            - $ref: '#/components/schemas/DirectoryMatchStrategy'
+          nullable: true
+        linkedUser:
+          allOf:
+            - $ref: '#/components/schemas/DirectoryLinkedUser'
+          nullable: true
+        reviewNote:
+          type: string
+          nullable: true
+        dingtalkAuthEnabled: { type: boolean }
+        isBound: { type: boolean }
+        departmentNames:
+          type: array
+          items:
+            type: string
+        deprovisionPolicyOverride:
+          allOf:
+            - $ref: '#/components/schemas/DirectoryDeprovisionPolicy'
+          nullable: true
+        effectiveDeprovisionPolicy:
+          $ref: '#/components/schemas/DirectoryDeprovisionPolicy'
+        raw:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    DirectorySyncRunStats:
+      type: object
+      properties:
+        departmentsFetched:
+          type: integer
+        accountsFetched:
+          type: integer
+        accountsInserted:
+          type: integer
+        accountsUpdated:
+          type: integer
+        linksMatched:
+          type: integer
+        linksConflicted:
+          type: integer
+        accountsDeactivated:
+          type: integer
+        departmentsInserted:
+          type: integer
+        departmentsUpdated:
+          type: integer
+        skipped:
+          type: boolean
+          nullable: true
+    DirectorySyncRun:
+      type: object
+      properties:
+        id: { type: string }
+        integrationId: { type: string }
+        status:
+          type: string
+          enum: [running, success, error, skipped]
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        cursorBefore:
+          type: string
+          nullable: true
+        cursorAfter:
+          type: string
+          nullable: true
+        stats:
+          $ref: '#/components/schemas/DirectorySyncRunStats'
+        errorMessage:
+          type: string
+          nullable: true
+        meta:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    DirectoryTemplateCenter:
+      type: object
+      properties:
+        integrationId: { type: string }
+        teamTemplates:
+          type: object
+          additionalProperties: true
+        importHistory:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        importPresets:
+          type: object
+          additionalProperties: true
+        createdBy:
+          type: string
+          nullable: true
+        updatedBy:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+    DirectoryTemplateCenterVersionSummary:
+      type: object
+      properties:
+        outputModes:
+          type: array
+          items:
+            type: string
+        teamTemplateCount:
+          type: integer
+        importPresetCount:
+          type: integer
+        importHistoryCount:
+          type: integer
+    DirectoryTemplateCenterVersion:
+      type: object
+      properties:
+        id: { type: string }
+        centerId: { type: string }
+        integrationId: { type: string }
+        changeReason: { type: string }
+        createdBy:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        snapshotSummary:
+          $ref: '#/components/schemas/DirectoryTemplateCenterVersionSummary'
+    DirectoryTemplateGovernancePreset:
+      type: object
+      properties:
+        outputMode: { type: string }
+        id: { type: string }
+        name: { type: string }
+        tags:
+          type: array
+          items:
+            type: string
+        favorite: { type: boolean }
+        pinned: { type: boolean }
+        useCount: { type: integer }
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+        ignoredFieldCount: { type: integer }
+        usageBucket:
+          type: string
+          enum: [unused, low, high]
+    DirectoryTemplateGovernanceTagSummary:
+      type: object
+      properties:
+        tag: { type: string }
+        count: { type: integer }
+    DirectoryTemplateGovernanceTotals:
+      type: object
+      properties:
+        outputModes: { type: integer }
+        teamTemplates: { type: integer }
+        importPresets: { type: integer }
+        favorites: { type: integer }
+        pinned: { type: integer }
+        highFrequency: { type: integer }
+        lowFrequency: { type: integer }
+        unused: { type: integer }
+        distinctTags: { type: integer }
+    DirectoryTemplateGovernanceReport:
+      type: object
+      properties:
+        integrationId: { type: string }
+        generatedAt:
+          type: string
+          format: date-time
+        totals:
+          $ref: '#/components/schemas/DirectoryTemplateGovernanceTotals'
+        tagSummary:
+          type: array
+          items:
+            $ref: '#/components/schemas/DirectoryTemplateGovernanceTagSummary'
+        presets:
+          type: array
+          items:
+            $ref: '#/components/schemas/DirectoryTemplateGovernancePreset'
+    DirectoryScheduleStatus:
+      type: object
+      properties:
+        integrationId: { type: string }
+        syncEnabled: { type: boolean }
+        scheduleCron:
+          type: string
+          nullable: true
+        nextRunAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastRunStatus:
+          type: string
+          nullable: true
+        lastRunStartedAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastRunFinishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastSuccessAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastError:
+          type: string
+          nullable: true
+        alertCount: { type: integer }
+        unacknowledgedAlertCount: { type: integer }
+        lastAlertAt:
+          type: string
+          format: date-time
+          nullable: true
+    DirectorySyncAlert:
+      type: object
+      properties:
+        id: { type: string }
+        integrationId: { type: string }
+        runId:
+          type: string
+          nullable: true
+        level: { type: string }
+        code: { type: string }
+        message: { type: string }
+        details:
+          type: object
+          additionalProperties: true
+        sentToWebhook: { type: boolean }
+        acknowledgedAt:
+          type: string
+          format: date-time
+          nullable: true
+        acknowledgedBy:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    DirectoryActivitySummary:
+      type: object
+      properties:
+        total: { type: integer }
+        integrationActions: { type: integer }
+        accountActions: { type: integer }
+        syncActions: { type: integer }
+        alertActions: { type: integer }
+        templateActions: { type: integer }
+    DirectoryActivity:
+      type: object
+      properties:
+        id: { type: string }
+        createdAt:
+          type: string
+          format: date-time
+        eventType: { type: string }
+        eventCategory: { type: string }
+        eventSeverity: { type: string }
+        action: { type: string }
+        resourceType:
+          type: string
+          enum: [directory-integration, directory-account, directory-sync-alert, directory-template-center]
+        resourceId:
+          type: string
+          nullable: true
+        actorUserId:
+          type: string
+          nullable: true
+        actorName:
+          type: string
+          nullable: true
+        actorEmail:
+          type: string
+          nullable: true
+        actionDetails:
+          type: object
+          additionalProperties: true
+        errorCode:
+          type: string
+          nullable: true
+        integrationId:
+          type: string
+          nullable: true
+        integrationName:
+          type: string
+          nullable: true
+        accountId:
+          type: string
+          nullable: true
+        accountName:
+          type: string
+          nullable: true
+        accountEmail:
+          type: string
+          nullable: true
+        accountExternalUserId:
+          type: string
+          nullable: true
+    DirectorySyncTestResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        corpId: { type: string }
+        departmentSampleCount: { type: integer }
+    DirectoryProvisionResult:
+      type: object
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        temporaryPassword:
+          type: string
+          nullable: true
+        account:
+          $ref: '#/components/schemas/DirectoryAccount'
     Permission:
       type: object
       properties:

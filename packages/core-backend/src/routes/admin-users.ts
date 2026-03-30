@@ -3,6 +3,7 @@ import { Router } from 'express'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { buildOnboardingPacket, getAccessPreset, listAccessPresets } from '../auth/access-presets'
+import { isUserExternalAuthEnabled, upsertUserExternalAuthGrant } from '../auth/external-auth-grants'
 import { recordInvite } from '../auth/invite-ledger'
 import { isInviteTokenExpired, issueInviteToken } from '../auth/invite-tokens'
 import { validatePassword } from '../auth/password-policy'
@@ -88,14 +89,16 @@ type AuditRangeBoundaryMode = 'start' | 'end'
 type CreateUserRequestBody = {
   email?: string
   name?: string
+  mobile?: string
   password?: string
   role?: string
   roleId?: string
   presetId?: string
   isActive?: boolean
+  allowDingTalkAuth?: boolean
 }
 
-const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-password', 'user-session', 'user-invite', 'role', 'permission', 'permission-template'] as const
+const ADMIN_AUDIT_RESOURCE_TYPES = ['user', 'user-role', 'user-password', 'user-session', 'user-invite', 'user-external-auth', 'role', 'permission', 'permission-template'] as const
 
 function getRequestUserId(req: Request): string {
   const raw = req.user as Record<string, unknown> | undefined
@@ -175,10 +178,11 @@ async function fetchUserAccessSnapshot(userId: string) {
   const profile = await fetchUserProfile(userId)
   if (!profile) return null
 
-  const [roles, permissions, isAdmin] = await Promise.all([
+  const [roles, permissions, isAdmin, dingtalkAuthEnabled] = await Promise.all([
     fetchUserRoleIds(userId),
     listUserPermissions(userId),
     isRbacAdmin(userId),
+    isUserExternalAuthEnabled(userId, 'dingtalk'),
   ])
 
   return {
@@ -186,6 +190,7 @@ async function fetchUserAccessSnapshot(userId: string) {
     roles,
     permissions,
     isAdmin,
+    dingtalkAuthEnabled,
   }
 }
 
@@ -198,7 +203,12 @@ function sanitizeEmail(email: string): string {
 }
 
 function sanitizeName(name: string): string {
-  return name.trim().replace(/[<>'\"&;]/g, '').slice(0, 100)
+  return name.trim().replace(/[<>'"&;]/g, '').slice(0, 100)
+}
+
+function sanitizeMobile(value: string): string {
+  const normalized = value.replace(/\D/g, '')
+  return normalized.slice(0, 30)
 }
 
 function parseAuditRangeBoundary(value: unknown, mode: AuditRangeBoundaryMode): string | null {
@@ -553,6 +563,9 @@ export function adminUsersRouter(): Router {
       const body = (req.body || {}) as CreateUserRequestBody
       const cleanEmail = typeof body.email === 'string' ? sanitizeEmail(body.email) : ''
       const cleanName = typeof body.name === 'string' ? sanitizeName(body.name) : ''
+      const cleanMobile = typeof body.mobile === 'string'
+        ? sanitizeMobile(body.mobile)
+        : ''
       const preset = getAccessPreset(typeof body.presetId === 'string' ? body.presetId.trim() : '')
       const cleanRole = typeof body.role === 'string' && body.role.trim()
         ? body.role.trim().slice(0, 100)
@@ -561,6 +574,7 @@ export function adminUsersRouter(): Router {
         ? body.roleId.trim()
         : preset?.roleId || ''
       const isActive = typeof body.isActive === 'boolean' ? body.isActive : true
+      const allowDingTalkAuth = body.allowDingTalkAuth === true
       const requestedPassword = typeof body.password === 'string' ? body.password.trim() : ''
       const directPermissions = Array.from(new Set(preset?.permissions || []))
 
@@ -575,6 +589,10 @@ export function adminUsersRouter(): Router {
 
       if (cleanName.length < 2 || cleanName.length > 100) {
         return jsonError(res, 400, 'INVALID_NAME', 'Name must be between 2 and 100 characters')
+      }
+
+      if (cleanMobile && cleanMobile.length < 4) {
+        return jsonError(res, 400, 'INVALID_MOBILE', 'Mobile must have at least 4 digits')
       }
 
       const password = requestedPassword || generateTemporaryPassword()
@@ -601,9 +619,9 @@ export function adminUsersRouter(): Router {
       const passwordHash = await bcrypt.hash(password, Number(process.env.BCRYPT_SALT_ROUNDS || 10))
 
       await query(
-        `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, NOW(), NOW())`,
-        [userId, cleanEmail, cleanName, passwordHash, cleanRole, JSON.stringify(directPermissions), isActive, cleanRole === 'admin'],
+        `INSERT INTO users (id, email, mobile, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, NOW(), NOW())`,
+        [userId, cleanEmail, cleanMobile || null, cleanName, passwordHash, cleanRole, JSON.stringify(directPermissions), isActive, cleanRole === 'admin'],
       )
 
       if (roleId) {
@@ -627,6 +645,15 @@ export function adminUsersRouter(): Router {
         invalidateUserPerms(userId)
       }
 
+      if (allowDingTalkAuth) {
+        await upsertUserExternalAuthGrant({
+          provider: 'dingtalk',
+          userId,
+          enabled: true,
+          grantedBy: adminUserId,
+        })
+      }
+
       await auditLog({
         actorId: adminUserId,
         actorType: 'user',
@@ -642,6 +669,7 @@ export function adminUsersRouter(): Router {
           roleId: roleId || null,
           is_active: isActive,
           permissions: directPermissions,
+          dingtalkAuthEnabled: allowDingTalkAuth,
           generatedPassword: requestedPassword.length === 0,
         },
       })
@@ -697,6 +725,53 @@ export function adminUsersRouter(): Router {
       return jsonOk(res, { ...snapshot, actorId: adminUserId })
     } catch (error) {
       return jsonError(res, 500, 'USER_ACCESS_FAILED', readErrorMessage(error, 'Failed to load user access'))
+    }
+  })
+
+  r.post('/api/admin/users/:userId/dingtalk-auth', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const userId = String(req.params.userId || '').trim()
+      const enabled = req.body?.enabled === true
+      if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
+
+      const profile = await fetchUserProfile(userId)
+      if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
+
+      const grant = await upsertUserExternalAuthGrant({
+        provider: 'dingtalk',
+        userId,
+        enabled,
+        grantedBy: adminUserId,
+      })
+      if (!grant) {
+        return jsonError(res, 500, 'USER_DINGTALK_AUTH_FAILED', 'Failed to update DingTalk authorization')
+      }
+
+      await auditLog({
+        actorId: adminUserId,
+        actorType: 'user',
+        action: 'update',
+        resourceType: 'user-external-auth',
+        resourceId: `${userId}:dingtalk`,
+        meta: {
+          adminUserId,
+          userId,
+          provider: 'dingtalk',
+          enabled,
+        },
+      })
+
+      const snapshot = await fetchUserAccessSnapshot(userId)
+      return jsonOk(res, {
+        ...snapshot,
+        actorId: adminUserId,
+        changedExternalAuth: grant,
+      })
+    } catch (error) {
+      return jsonError(res, 500, 'USER_DINGTALK_AUTH_FAILED', readErrorMessage(error, 'Failed to update DingTalk authorization'))
     }
   })
 

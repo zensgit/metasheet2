@@ -64,6 +64,10 @@
           <input v-model="createForm.isActive" type="checkbox" />
           <span>创建后立即启用</span>
         </label>
+        <label class="user-admin__toggle">
+          <input v-model="createForm.allowDingTalkAuth" type="checkbox" />
+          <span>创建后允许绑定钉钉登录</span>
+        </label>
       </div>
       <div class="user-admin__role-actions">
         <button class="user-admin__button" type="button" :disabled="busy" @click="void createUser()">
@@ -211,6 +215,37 @@
           </div>
 
           <div class="user-admin__section">
+            <h3>钉钉登录授权</h3>
+            <p class="user-admin__hint">只有在 MetaSheet 内被明确授权的账号，才允许绑定并使用钉钉登录。</p>
+            <div class="user-admin__chips">
+              <span
+                class="user-admin__badge"
+                :class="{ 'user-admin__badge--admin': access.dingtalkAuthEnabled, 'user-admin__badge--inactive': !access.dingtalkAuthEnabled }"
+              >
+                {{ access.dingtalkAuthEnabled ? '已授权钉钉登录' : '未授权钉钉登录' }}
+              </span>
+            </div>
+            <div class="user-admin__role-actions">
+              <button
+                class="user-admin__button"
+                type="button"
+                :disabled="busy || access.dingtalkAuthEnabled"
+                @click="void updateDingTalkAuthorization(true)"
+              >
+                授权钉钉登录
+              </button>
+              <button
+                class="user-admin__button user-admin__button--secondary"
+                type="button"
+                :disabled="busy || !access.dingtalkAuthEnabled"
+                @click="void updateDingTalkAuthorization(false)"
+              >
+                取消钉钉授权
+              </button>
+            </div>
+          </div>
+
+          <div class="user-admin__section">
             <div class="user-admin__section-head">
               <div>
                 <h3>会话</h3>
@@ -313,6 +348,7 @@ type UserAccess = {
   roles: string[]
   permissions: string[]
   isAdmin: boolean
+  dingtalkAuthEnabled: boolean
 }
 
 type CreateUserForm = {
@@ -323,6 +359,7 @@ type CreateUserForm = {
   role: string
   roleId: string
   isActive: boolean
+  allowDingTalkAuth: boolean
 }
 
 type AccessPreset = {
@@ -400,6 +437,7 @@ const createForm = ref<CreateUserForm>({
   role: 'user',
   roleId: '',
   isActive: true,
+  allowDingTalkAuth: false,
 })
 const selectedPreset = computed(() => accessPresets.value.find((preset) => preset.id === createForm.value.presetId) || null)
 const filteredAccessPresets = computed(() => {
@@ -599,6 +637,7 @@ async function createUser(): Promise<void> {
         role: createForm.value.role || undefined,
         roleId: createForm.value.roleId || undefined,
         isActive: createForm.value.isActive,
+        allowDingTalkAuth: createForm.value.allowDingTalkAuth,
       }),
     })
     const payload = await readJson(response)
@@ -621,6 +660,7 @@ async function createUser(): Promise<void> {
       role: 'user',
       roleId: '',
       isActive: true,
+      allowDingTalkAuth: false,
     }
     presetModeFilter.value = ''
     await Promise.all([loadUsers(), loadInviteRecords(access.value?.user.id)])
@@ -797,6 +837,28 @@ async function revokeSingleSession(sessionId: string): Promise<void> {
     await loadUserSessions(access.value.user.id)
   } catch (error) {
     setStatus(readErrorMessage(error, '踢下线失败'), 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function updateDingTalkAuthorization(enabled: boolean): Promise<void> {
+  if (!access.value) return
+  busy.value = true
+  try {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(access.value.user.id)}/dingtalk-auth`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok || payload.ok !== true) {
+      throw new Error(readErrorMessage(payload, enabled ? '授权钉钉登录失败' : '取消钉钉授权失败'))
+    }
+
+    access.value = payload.data as UserAccess
+    setStatus(enabled ? '已授权该账号绑定并使用钉钉登录' : '已取消该账号的钉钉登录授权')
+  } catch (error) {
+    setStatus(readErrorMessage(error, enabled ? '授权钉钉登录失败' : '取消钉钉授权失败'), 'error')
   } finally {
     busy.value = false
   }

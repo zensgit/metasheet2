@@ -71,6 +71,7 @@ describe('featureFlags', () => {
     expect(features).toMatchObject({
       workflow: true,
       attendanceAdmin: true,
+      platformAdmin: true,
       mode: 'platform',
     })
     expect(localStorage.getItem('auth_token')).toBe('dev-bootstrap-token')
@@ -255,9 +256,54 @@ describe('featureFlags', () => {
     expect(features).toMatchObject({
       workflow: true,
       attendance: true,
+      platformAdmin: true,
       attendanceAdmin: true,
       mode: 'attendance',
     })
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('allows the directory route in attendance mode only for platform admins', async () => {
+    localStorage.setItem('auth_token', 'attendance-admin-token')
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/plugins')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ list: [] }),
+        }
+      }
+
+      throw new Error(`Unexpected fetch URL: ${url}`)
+    })
+
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { useAuth } = await import('../src/composables/useAuth')
+    useAuth().primeSession({
+      success: true,
+      data: {
+        user: { role: 'admin', permissions: ['attendance:admin'] },
+        features: {
+          attendance: true,
+          workflow: false,
+          attendanceAdmin: true,
+          attendanceImport: false,
+          mode: 'attendance',
+        },
+      },
+    })
+
+    const { useFeatureFlags } = await import('../src/stores/featureFlags')
+    const flags = useFeatureFlags()
+    await flags.loadProductFeatures(true)
+
+    expect(flags.hasFeature('platformAdmin')).toBe(true)
+    expect(flags.isPathAllowedInAttendanceFocus('/attendance')).toBe(true)
+    expect(flags.isPathAllowedInAttendanceFocus('/settings')).toBe(true)
+    expect(flags.isPathAllowedInAttendanceFocus('/admin/directory')).toBe(true)
+    expect(flags.isPathAllowedInAttendanceFocus('/admin/users')).toBe(false)
   })
 })
