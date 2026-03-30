@@ -34,3 +34,8 @@ export function readErrorMessage(payload: unknown, fallback: string): string {
 
   return fallback
 }
+
+export function wrapOperationError(operation: string, error: unknown): string {
+  const msg = readErrorMessage(error, 'Unknown error')
+  return `${operation}: ${msg}`
+}

@@ -65,6 +65,7 @@ import { kanbanRouter } from './routes/kanban'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
+import { adminDirectoryRouter } from './routes/admin-directory'
 import workflowRouter from './routes/workflow'
 import workflowDesignerRouter from './routes/workflow-designer'
 import { univerMockRouter } from './routes/univer-mock'
@@ -626,6 +627,7 @@ export class MetaSheetServer {
 
     // 路由：IAM 用户/角色/会话/审计管理
     this.app.use(adminUsersRouter())
+    this.app.use(adminDirectoryRouter())
 
     // 路由：管理员端点 (带 SafetyGuard 保护)
     this.app.use('/api/admin', initAdminRoutes({

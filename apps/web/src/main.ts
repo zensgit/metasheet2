@@ -33,6 +33,8 @@ import RoleManagementView from './views/RoleManagementView.vue'
 import PermissionManagementView from './views/PermissionManagementView.vue'
 import AdminAuditView from './views/AdminAuditView.vue'
 import WorkflowDesigner from './views/WorkflowDesigner.vue'
+import DirectoryManagementView from './views/DirectoryManagementView.vue'
+import DingTalkAuthCallbackView from './views/DingTalkAuthCallbackView.vue'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -142,6 +144,18 @@ const routes: RouteRecordRaw[] = [
     name: 'admin-audit',
     component: AdminAuditView,
     meta: { title: 'Admin Audit' }
+  },
+  {
+    path: '/admin/directory',
+    name: 'directory-management',
+    component: DirectoryManagementView,
+    meta: { title: 'Directory Management' }
+  },
+  {
+    path: '/auth/dingtalk/callback',
+    name: 'dingtalk-callback',
+    component: DingTalkAuthCallbackView,
+    meta: { title: 'DingTalk Auth', hideNavbar: true, requiresAuth: false }
   },
   {
     path: '/admin/plugins',

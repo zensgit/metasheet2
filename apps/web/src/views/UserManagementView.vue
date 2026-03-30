@@ -129,6 +129,68 @@
       </div>
     </section>
 
+    <section class="user-admin__panel user-admin__panel--batch">
+      <div class="user-admin__section-head">
+        <div>
+          <h2>批量操作</h2>
+          <p class="user-admin__hint">对待审核用户（未启用且状态为 pending）进行批量审批或拒绝。</p>
+        </div>
+        <button class="user-admin__button user-admin__button--secondary" type="button" @click="batchExpanded = !batchExpanded">
+          {{ batchExpanded ? '收起' : '展开' }}
+        </button>
+      </div>
+      <template v-if="batchExpanded">
+        <div v-if="pendingUsers.length === 0" class="user-admin__empty">暂无待审核用户</div>
+        <template v-else>
+          <div class="user-admin__batch-select-all">
+            <label class="user-admin__toggle">
+              <input type="checkbox" :checked="allPendingSelected" @change="toggleAllPending" />
+              <span>全选待审核用户（{{ pendingUsers.length }}）</span>
+            </label>
+          </div>
+          <div class="user-admin__batch-list">
+            <label v-for="user in pendingUsers" :key="user.id" class="user-admin__batch-item">
+              <input
+                type="checkbox"
+                :checked="batchSelectedIds.has(user.id)"
+                @change="toggleBatchUser(user.id)"
+              />
+              <span>{{ user.name || user.email }} ({{ user.email }})</span>
+            </label>
+          </div>
+          <div class="user-admin__batch-reason">
+            <input
+              v-model.trim="batchReason"
+              class="user-admin__search"
+              type="text"
+              placeholder="可选：操作原因"
+            />
+          </div>
+          <div class="user-admin__role-actions">
+            <button
+              class="user-admin__button"
+              type="button"
+              :disabled="batchBusy || batchSelectedIds.size === 0"
+              @click="void executeBatchAction('approve')"
+            >
+              {{ batchBusy ? '处理中...' : `批量通过 (${batchSelectedIds.size})` }}
+            </button>
+            <button
+              class="user-admin__button user-admin__button--secondary"
+              type="button"
+              :disabled="batchBusy || batchSelectedIds.size === 0"
+              @click="void executeBatchAction('reject')"
+            >
+              {{ batchBusy ? '处理中...' : `批量拒绝 (${batchSelectedIds.size})` }}
+            </button>
+          </div>
+          <p v-if="batchResult" class="user-admin__status" :class="{ 'user-admin__status--error': batchResultTone === 'error' }">
+            {{ batchResult }}
+          </p>
+        </template>
+      </template>
+    </section>
+
     <div class="user-admin__layout">
       <aside class="user-admin__panel">
         <h2>用户列表</h2>
@@ -401,6 +463,68 @@ const createForm = ref<CreateUserForm>({
   roleId: '',
   isActive: true,
 })
+const batchExpanded = ref(false)
+const batchBusy = ref(false)
+const batchSelectedIds = ref<Set<string>>(new Set())
+const batchReason = ref('')
+const batchResult = ref('')
+const batchResultTone = ref<'info' | 'error'>('info')
+
+const pendingUsers = computed(() => users.value.filter((user) => !user.is_active))
+const allPendingSelected = computed(() => pendingUsers.value.length > 0 && pendingUsers.value.every((user) => batchSelectedIds.value.has(user.id)))
+
+function toggleBatchUser(userId: string): void {
+  const next = new Set(batchSelectedIds.value)
+  if (next.has(userId)) {
+    next.delete(userId)
+  } else {
+    next.add(userId)
+  }
+  batchSelectedIds.value = next
+}
+
+function toggleAllPending(): void {
+  if (allPendingSelected.value) {
+    batchSelectedIds.value = new Set()
+  } else {
+    batchSelectedIds.value = new Set(pendingUsers.value.map((user) => user.id))
+  }
+}
+
+async function executeBatchAction(action: 'approve' | 'reject'): Promise<void> {
+  if (batchSelectedIds.value.size === 0) return
+  batchBusy.value = true
+  batchResult.value = ''
+  try {
+    const response = await apiFetch('/api/admin/users/batch', {
+      method: 'POST',
+      body: JSON.stringify({
+        action,
+        userIds: Array.from(batchSelectedIds.value),
+        reason: batchReason.value || undefined,
+      }),
+    })
+    const payload = await readJson(response)
+    if (!response.ok) {
+      throw new Error(readErrorMessage(payload, '批量操作失败'))
+    }
+    const data = (payload.data ?? payload) as Record<string, unknown>
+    const processed = typeof data.processed === 'number' ? data.processed : 0
+    const failed = typeof data.failed === 'number' ? data.failed : 0
+    const actionLabel = action === 'approve' ? '通过' : '拒绝'
+    batchResult.value = `批量${actionLabel}完成：已处理 ${processed} 个用户，失败 ${failed} 个`
+    batchResultTone.value = failed > 0 ? 'error' : 'info'
+    batchSelectedIds.value = new Set()
+    batchReason.value = ''
+    await loadUsers()
+  } catch (error) {
+    batchResult.value = readErrorMessage(error, '批量操作失败')
+    batchResultTone.value = 'error'
+  } finally {
+    batchBusy.value = false
+  }
+}
+
 const selectedPreset = computed(() => accessPresets.value.find((preset) => preset.id === createForm.value.presetId) || null)
 const filteredAccessPresets = computed(() => {
   return accessPresets.value.filter((preset) => !presetModeFilter.value || preset.productMode === presetModeFilter.value)
@@ -1087,6 +1211,41 @@ onMounted(async () => {
 
 .user-admin__role-card p {
   margin: 0;
+}
+
+.user-admin__panel--batch {
+  gap: 12px;
+}
+
+.user-admin__batch-select-all {
+  padding: 8px 0;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.user-admin__batch-list {
+  display: grid;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.user-admin__batch-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: #374151;
+}
+
+.user-admin__batch-item:hover {
+  background: #f3f4f6;
+}
+
+.user-admin__batch-reason {
+  padding: 4px 0;
 }
 
 @media (max-width: 960px) {

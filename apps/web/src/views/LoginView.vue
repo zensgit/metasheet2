@@ -30,12 +30,28 @@
       <button type="submit" :disabled="loading">
         {{ loading ? '登录中...' : '登录' }}
       </button>
+
+      <div v-if="dingtalkAvailable" class="login-divider">
+        <span>或</span>
+      </div>
+
+      <button
+        v-if="dingtalkAvailable"
+        type="button"
+        class="login-dingtalk"
+        :disabled="dingtalkLoading"
+        @click="launchDingTalk"
+      >
+        {{ dingtalkLoading ? '跳转中...' : '钉钉登录' }}
+      </button>
+
+      <p v-if="dingtalkError" class="error">{{ dingtalkError }}</p>
     </form>
   </section>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getApiBase } from '../utils/api'
 import { useAuth } from '../composables/useAuth'
@@ -57,6 +73,9 @@ const email = ref('')
 const password = ref('')
 const loading = ref(false)
 const error = ref('')
+const dingtalkAvailable = ref(false)
+const dingtalkLoading = ref(false)
+const dingtalkError = ref('')
 
 async function readJson(response: Response): Promise<Record<string, unknown>> {
   try {
@@ -118,6 +137,47 @@ async function submit(): Promise<void> {
     loading.value = false
   }
 }
+
+async function probeDingTalk(): Promise<void> {
+  try {
+    const res = await fetch(`${getApiBase()}/api/auth/dingtalk/launch`)
+    dingtalkAvailable.value = res.ok
+  } catch {
+    dingtalkAvailable.value = false
+  }
+}
+
+async function launchDingTalk(): Promise<void> {
+  dingtalkLoading.value = true
+  dingtalkError.value = ''
+  try {
+    const res = await fetch(`${getApiBase()}/api/auth/dingtalk/launch`)
+    const payload = await res.json() as Record<string, unknown>
+
+    if (!res.ok) {
+      dingtalkError.value = readErrorMessage(payload, '钉钉登录暂不可用')
+      return
+    }
+
+    const data = payload.data && typeof payload.data === 'object' ? payload.data as Record<string, unknown> : {}
+    const url = typeof data.url === 'string' ? data.url : ''
+
+    if (!url) {
+      dingtalkError.value = '无法获取钉钉登录地址'
+      return
+    }
+
+    window.location.href = url
+  } catch (cause) {
+    dingtalkError.value = readErrorMessage(cause, '钉钉登录暂不可用')
+  } finally {
+    dingtalkLoading.value = false
+  }
+}
+
+onMounted(() => {
+  void probeDingTalk()
+})
 </script>
 
 <style scoped>
@@ -182,6 +242,40 @@ button {
 }
 
 button:disabled {
+  opacity: 0.6;
+}
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: #e2e8f0;
+}
+
+.login-dingtalk {
+  border: 1px solid #0082ef;
+  border-radius: 10px;
+  background: #fff;
+  color: #0082ef;
+  padding: 10px 14px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.login-dingtalk:hover {
+  background: #f0f7ff;
+}
+
+.login-dingtalk:disabled {
   opacity: 0.6;
 }
 </style>

@@ -1313,5 +1313,66 @@ export function adminUsersRouter(): Router {
     }
   })
 
+  // POST /api/admin/users/batch - batch approve/reject pending users
+  r.post('/api/admin/users/batch', authenticate, async (req: Request, res: Response) => {
+    const adminUserId = await ensurePlatformAdmin(req, res)
+    if (!adminUserId) return
+
+    try {
+      const { action, userIds, reason } = req.body as {
+        action?: string
+        userIds?: string[]
+        reason?: string
+      }
+
+      if (action !== 'approve' && action !== 'reject') {
+        return jsonError(res, 400, 'INVALID_ACTION', 'action must be "approve" or "reject"')
+      }
+
+      if (!Array.isArray(userIds) || userIds.length === 0 || !userIds.every((id) => typeof id === 'string' && id.trim().length > 0)) {
+        return jsonError(res, 400, 'INVALID_USER_IDS', 'userIds must be a non-empty array of strings')
+      }
+
+      const results: Array<{ userId: string; status: 'ok' | 'error'; error?: string }> = []
+      let processed = 0
+      let failed = 0
+
+      for (const userId of userIds) {
+        try {
+          if (action === 'approve') {
+            await query(
+              `UPDATE users SET is_active = true, updated_at = NOW() WHERE id = $1`,
+              [userId],
+            )
+          } else {
+            await query(
+              `UPDATE users SET is_active = false, updated_at = NOW() WHERE id = $1`,
+              [userId],
+            )
+          }
+
+          await auditLog({
+            actorId: adminUserId,
+            actorType: 'user',
+            action: `admin.users.batch.${action}`,
+            resourceType: 'user',
+            resourceId: userId,
+            meta: { action, reason: reason ?? null, batchSize: userIds.length },
+          })
+
+          results.push({ userId, status: 'ok' })
+          processed++
+        } catch (err) {
+          results.push({ userId, status: 'error', error: readErrorMessage(err, 'Unknown error') })
+          failed++
+        }
+      }
+
+      return jsonOk(res, { processed, failed, results })
+    } catch (error) {
+      return jsonError(res, 500, 'BATCH_ACTION_FAILED', readErrorMessage(error, 'Batch action failed'))
+    }
+  })
+
   return r
 }

@@ -9,6 +9,7 @@ import { hash } from 'bcryptjs'
 import jwt, { type SignOptions } from 'jsonwebtoken'
 import { authService, type User } from '../auth/AuthService'
 import { buildOnboardingPacket, getAccessPreset } from '../auth/access-presets'
+import { buildAuthUrl, exchangeCodeForUser, generateState, isDingTalkConfigured, validateState } from '../auth/dingtalk-oauth'
 import { verifyInviteToken } from '../auth/invite-tokens'
 import { getUserSession, listUserSessions, revokeOtherUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
 import { revokeUserSessions } from '../auth/session-revocation'
@@ -984,6 +985,117 @@ authRouter.post('/sessions/others/logout', async (req: Request, res: Response) =
     res.status(500).json({
       success: false,
       error: 'Internal server error'
+    })
+  }
+})
+
+// ============================================
+// DingTalk OAuth
+// ============================================
+
+/**
+ * GET /dingtalk/launch
+ * Returns the DingTalk authorization URL for the frontend to redirect to.
+ * If DingTalk env is not configured, returns 503 with a diagnostic message.
+ */
+authRouter.get('/dingtalk/launch', (_req: Request, res: Response) => {
+  if (!isDingTalkConfigured()) {
+    return res.status(503).json({
+      success: false,
+      error: 'DingTalk login is not configured on this server',
+    })
+  }
+
+  try {
+    const state = generateState()
+    const url = buildAuthUrl(state)
+    res.json({ success: true, data: { url, state } })
+  } catch (error) {
+    logger.error('DingTalk launch error', error instanceof Error ? error : undefined)
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to build DingTalk auth URL',
+    })
+  }
+})
+
+/**
+ * POST /dingtalk/callback
+ * Exchanges the DingTalk auth code for a local user and JWT token.
+ */
+authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
+  try {
+    const code = typeof req.body?.code === 'string' ? req.body.code.trim() : ''
+    const state = typeof req.body?.state === 'string' ? req.body.state.trim() : ''
+
+    if (!code) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required parameter: code',
+      })
+    }
+
+    const stateCheck = validateState(state)
+    if (!stateCheck.valid) {
+      return res.status(400).json({
+        success: false,
+        error: stateCheck.error,
+      })
+    }
+
+    if (!isDingTalkConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error: 'DingTalk login is not configured on this server',
+      })
+    }
+
+    const result = await exchangeCodeForUser(code)
+
+    // Build a User-compatible object for token creation and feature derivation
+    const user: User = {
+      id: result.localUserId,
+      email: result.localUserEmail,
+      name: result.localUserName,
+      role: result.localUserRole,
+      permissions: [],
+      created_at: new Date(),
+      updated_at: new Date(),
+    }
+
+    // Load actual permissions from DB if available
+    try {
+      const permRows = await query(
+        `SELECT p.key FROM user_permissions up JOIN permissions p ON p.id = up.permission_id WHERE up.user_id = $1`,
+        [user.id],
+      )
+      user.permissions = permRows.rows.map((r) => String((r as Record<string, unknown>).key || ''))
+    } catch {
+      // permissions table may not exist
+    }
+
+    const token = await authService.createToken(user, {})
+
+    logger.info(`DingTalk login for ${result.localUserEmail} (openId: ${result.dingtalkUser.openId}, new: ${result.isNewUser})`)
+
+    res.json({
+      success: true,
+      data: {
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+        },
+        token,
+        features: deriveProductFeatures(user),
+      },
+    })
+  } catch (error) {
+    logger.error('DingTalk callback error', error instanceof Error ? error : undefined)
+    res.status(502).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'DingTalk authentication failed',
     })
   }
 })
