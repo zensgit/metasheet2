@@ -18,6 +18,7 @@ import {
   normalizePlmWorkbenchPanelScope,
   normalizePlmWorkbenchQuerySnapshot,
   shouldAutoloadPlmProductContext,
+  shouldAutoloadPlmWorkbenchSnapshot,
 } from '../src/views/plm/plmWorkbenchViewState'
 import { applyPlmDeferredRouteQueryPatch } from '../src/views/plm/plmRouteHydrationPatch'
 
@@ -751,6 +752,34 @@ describe('plmWorkbenchViewState', () => {
     )
   })
 
+  it('does not leak a stale autoload flag from saved view query into workbench share URLs', () => {
+    expect(
+      buildPlmWorkbenchTeamViewShareUrl(
+        'workbench',
+        {
+          id: 'workbench-view-stale',
+          kind: 'workbench',
+          scope: 'team',
+          name: '过时自动加载场景',
+          ownerUserId: 'dev-user',
+          canManage: true,
+          isDefault: false,
+          state: {
+            query: {
+              bomFilter: 'gear',
+              bomFilterField: 'path',
+              autoload: 'true',
+            },
+          },
+        },
+        '/plm',
+        'https://example.test',
+      ),
+    ).toBe(
+      'https://example.test/plm?workbenchTeamView=workbench-view-stale&bomFilter=gear&bomFilterField=path',
+    )
+  })
+
   it('uses the current runtime origin when team-view share urls do not receive an explicit origin', () => {
     const url = new URL(
       buildPlmWorkbenchTeamViewShareUrl(
@@ -982,6 +1011,37 @@ describe('plmWorkbenchViewState', () => {
     expect(shouldAutoloadPlmProductContext({
       itemNumber: 'P-1001',
     })).toBe(true)
+  })
+
+  it('respects panel scope when deriving autoload for workbench snapshot return paths', () => {
+    // panel=cad with product context should NOT autoload (cad is not product-adjacent)
+    expect(shouldAutoloadPlmWorkbenchSnapshot({
+      panel: 'cad',
+      cadFileId: 'cad-main',
+      productId: 'product-42',
+    })).toBe(true) // cadFileId triggers autoload — product context is irrelevant
+
+    expect(shouldAutoloadPlmWorkbenchSnapshot({
+      panel: 'cad',
+      productId: 'product-42',
+    })).toBe(false) // no cadFileId, cad panel excludes product autoload
+
+    // panel=documents with product context SHOULD autoload
+    expect(shouldAutoloadPlmWorkbenchSnapshot({
+      panel: 'documents',
+      productId: 'product-42',
+    })).toBe(true)
+
+    // no panel with product context should autoload (all-panels default)
+    expect(shouldAutoloadPlmWorkbenchSnapshot({
+      productId: 'product-42',
+    })).toBe(true)
+
+    // panel=cad with only product identity and no cadFileId: no autoload
+    expect(shouldAutoloadPlmWorkbenchSnapshot({
+      panel: 'cad',
+      itemNumber: 'P-1001',
+    })).toBe(false)
   })
 
   it('builds return paths from the current local workbench state with optional overlays', () => {

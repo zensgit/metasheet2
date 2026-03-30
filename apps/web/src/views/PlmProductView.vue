@@ -124,6 +124,7 @@ import {
   normalizePlmWorkbenchLocalRouteQuerySnapshot,
   normalizePlmWorkbenchPanelScope,
   shouldAutoloadPlmProductContext,
+  shouldAutoloadPlmWorkbenchSnapshot,
 } from './plm/plmWorkbenchViewState'
 import {
   matchPlmTeamViewStateSnapshot,
@@ -5605,17 +5606,8 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
   append('substitutesFilter', substitutesFilter.value)
   append('panel', resolvedPanel)
 
-  if (includeAutoload) {
-    const shouldAutoload =
-      Boolean(productId.value || productItemNumber.value) ||
-      Boolean(cadFileId.value) ||
-      Boolean(whereUsedItemId.value) ||
-      Boolean(compareLeftId.value && compareRightId.value) ||
-      Boolean(bomLineId.value) ||
-      Boolean(searchQuery.value)
-    if (shouldAutoload) {
-      params.autoload = true
-    }
+  if (includeAutoload && shouldAutoloadPlmWorkbenchSnapshot(params as Record<string, string>)) {
+    params.autoload = true
   }
 
   return params
