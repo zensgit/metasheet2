@@ -20,6 +20,7 @@ import {
   shouldAutoloadPlmProductContext,
   shouldAutoloadPlmWorkbenchSnapshot,
 } from '../src/views/plm/plmWorkbenchViewState'
+import { PLM_PANEL_KEYS } from '../src/views/plm/plmRouteHydrationContracts'
 import { applyPlmDeferredRouteQueryPatch } from '../src/views/plm/plmRouteHydrationPatch'
 
 describe('plmWorkbenchViewState', () => {
@@ -183,6 +184,21 @@ describe('plmWorkbenchViewState', () => {
     expect(normalizePlmWorkbenchPanelScope(' approvals, documents, approvals ')).toBe('documents,approvals')
     expect(normalizePlmWorkbenchPanelScope('all')).toBeUndefined()
     expect(normalizePlmWorkbenchPanelScope('unknown')).toBeUndefined()
+  })
+
+  it('accepts every authoritative panel key and preserves canonical order from the contracts module', () => {
+    // Every key in PLM_PANEL_KEYS must survive normalizePlmWorkbenchPanelScope
+    const allKeys = PLM_PANEL_KEYS.join(',')
+    expect(normalizePlmWorkbenchPanelScope(allKeys)).toBe(allKeys)
+
+    // Individual keys must each be accepted
+    for (const key of PLM_PANEL_KEYS) {
+      expect(normalizePlmWorkbenchPanelScope(key)).toBe(key)
+    }
+
+    // Reversed order re-canonicalises to PLM_PANEL_KEYS order
+    const reversed = [...PLM_PANEL_KEYS].reverse().join(',')
+    expect(normalizePlmWorkbenchPanelScope(reversed)).toBe(allKeys)
   })
 
   it('builds a reset patch that clears every canonical panel team-view owner', () => {

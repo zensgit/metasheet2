@@ -7,6 +7,7 @@ import {
   buildPlmAuditRouteQuery,
   buildPlmAuditRouteStateFromTeamView,
 } from '../plmAuditQueryState'
+import { hasProductAdjacentPanelSelected, PLM_PANEL_KEYS } from './plmRouteHydrationContracts'
 
 export const PLM_WORKBENCH_QUERY_KEYS = [
   'workbenchTeamView',
@@ -84,17 +85,7 @@ export const PLM_WORKBENCH_TEAM_VIEW_OWNER_QUERY_KEYS = [
 ] as const
 
 const PLM_WORKBENCH_QUERY_KEY_SET = new Set<string>(PLM_WORKBENCH_QUERY_KEYS)
-const PLM_WORKBENCH_PANEL_SCOPE_KEYS = [
-  'search',
-  'product',
-  'documents',
-  'approvals',
-  'cad',
-  'where-used',
-  'compare',
-  'substitutes',
-] as const
-const PLM_WORKBENCH_PANEL_SCOPE_KEY_SET = new Set<string>(PLM_WORKBENCH_PANEL_SCOPE_KEYS)
+const PLM_WORKBENCH_PANEL_SCOPE_KEY_SET = new Set<string>(PLM_PANEL_KEYS)
 
 function normalizeQueryValue(value: unknown): string {
   if (typeof value === 'string') return value.trim()
@@ -164,7 +155,7 @@ export function normalizePlmWorkbenchPanelScope(value: unknown): string | undefi
   )
   if (!selected.size) return undefined
 
-  return PLM_WORKBENCH_PANEL_SCOPE_KEYS
+  return PLM_PANEL_KEYS
     .filter((entry) => selected.has(entry))
     .join(',')
 }
@@ -188,12 +179,7 @@ export function shouldAutoloadPlmProductContext(options: {
       .map((entry) => entry.trim())
       .filter(Boolean),
   )
-  return selectedPanels.has('product')
-    || selectedPanels.has('documents')
-    || selectedPanels.has('approvals')
-    || selectedPanels.has('where-used')
-    || selectedPanels.has('compare')
-    || selectedPanels.has('substitutes')
+  return hasProductAdjacentPanelSelected(selectedPanels)
 }
 
 export function shouldAutoloadPlmWorkbenchSnapshot(snapshot: Record<string, string>): boolean {
@@ -555,7 +541,7 @@ export function buildPlmWorkbenchTeamViewShareUrl<Kind extends PlmWorkbenchTeamV
     params.set('workbenchTeamView', view.id)
     const query = normalizePlmWorkbenchCollaborativeQuerySnapshot(workbenchView.state.query)
     for (const [key, value] of Object.entries(query)) {
-      if (key === 'workbenchTeamView') continue
+      if (key === 'workbenchTeamView' || key === 'autoload') continue
       appendIfPresent(params, key, value)
     }
     appendIfPresent(params, 'autoload', shouldAutoloadPlmWorkbenchSnapshot(query) ? true : undefined)
