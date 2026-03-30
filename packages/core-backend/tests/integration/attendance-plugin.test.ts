@@ -8,6 +8,38 @@ import http from 'http'
 
 type HttpResponse = { status: number; body?: unknown; raw: string }
 
+interface AttendancePunchEventListItem {
+  id: string
+  userId: string
+  user_id: string
+  orgId: string
+  org_id: string
+  workDate: string | null
+  work_date: string | null
+  occurredAt: string
+  occurred_at: string
+  eventType: string
+  event_type: string
+  source: string
+  timezone: string
+  location: Record<string, unknown> | null
+  meta: Record<string, unknown> | null
+  createdAt: string | null
+  created_at: string | null
+}
+
+interface PunchEventListResponse {
+  ok: boolean
+  data: {
+    items: AttendancePunchEventListItem[]
+    total: number
+    page: number
+    pageSize: number
+    from: string
+    to: string
+  }
+}
+
 function requestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
@@ -1024,6 +1056,116 @@ describe('Attendance Plugin Integration', () => {
     if (attendance) {
       expect(attendance.status).toBe('active')
     }
+  })
+
+  it('lists raw punch events with stable timeline fields and cross-user guardrails', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const primaryUserId = `attendance-punch-events-${runSuffix}`
+    const adminTokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(primaryUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
+    expect(adminToken).toBeTruthy()
+    if (!adminToken) return
+
+    const punchPayloads = [
+      { eventType: 'check_in', occurredAt: '2026-03-28T09:01:00+08:00', timezone: 'Asia/Shanghai' },
+      { eventType: 'check_out', occurredAt: '2026-03-28T18:05:00+08:00', timezone: 'Asia/Shanghai' },
+    ]
+
+    for (const payload of punchPayloads) {
+      const punchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      })
+      expect(punchRes.status).toBe(200)
+    }
+
+    const listRes = await requestJson(`${baseUrl}/api/attendance/punch/events?from=2026-03-28&to=2026-03-28`, {
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+      },
+    })
+    expect(listRes.status).toBe(200)
+    const listBody = listRes.body as PunchEventListResponse
+    expect(listBody.ok).toBe(true)
+    expect(listBody.data.total).toBeGreaterThanOrEqual(2)
+    expect(listBody.data.page).toBe(1)
+    expect(listBody.data.pageSize).toBe(50)
+    expect(listBody.data.from).toBe('2026-03-28')
+    expect(listBody.data.to).toBe('2026-03-28')
+    const items = listBody.data.items
+    expect(items.length).toBeGreaterThanOrEqual(2)
+    expect(items[0].userId).toBe(primaryUserId)
+    expect(items[0].user_id).toBe(primaryUserId)
+    expect(items[0].workDate).toBe('2026-03-28')
+    expect(items[0].work_date).toBe('2026-03-28')
+    expect(items[0].eventType).toBe('check_out')
+    expect(items[0].event_type).toBe('check_out')
+    expect(items[0].occurredAt).toContain('2026-03-28')
+    expect(items[0].occurred_at).toContain('2026-03-28')
+
+    const secondUserId = `attendance-punch-events-other-${runSuffix}`
+    const secondTokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(secondUserId)}&roles=user&perms=attendance:read,attendance:write`
+    )
+    const secondToken = (secondTokenRes.body as { token?: string } | undefined)?.token
+    expect(secondToken).toBeTruthy()
+    if (!secondToken) return
+
+    const secondPunchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${secondToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        eventType: 'check_in',
+        occurredAt: '2026-03-28T08:55:00+08:00',
+        timezone: 'Asia/Shanghai',
+      }),
+    })
+    expect(secondPunchRes.status).toBe(200)
+
+    const adminOtherUserRes = await requestJson(
+      `${baseUrl}/api/attendance/punch/events?userId=${encodeURIComponent(secondUserId)}&from=2026-03-28&to=2026-03-28`,
+      {
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+        },
+      }
+    )
+    expect(adminOtherUserRes.status).toBe(200)
+    const adminOtherItems = ((adminOtherUserRes.body as { data?: { items?: Array<Record<string, unknown>> } } | undefined)?.data?.items) ?? []
+    expect(adminOtherItems[0]?.userId).toBe(secondUserId)
+    expect(adminOtherItems[0]?.eventType).toBe('check_in')
+
+    const cappedPageSizeRes = await requestJson(
+      `${baseUrl}/api/attendance/punch/events?from=2026-03-28&to=2026-03-28&pageSize=999`,
+      {
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+        },
+      }
+    )
+    expect(cappedPageSizeRes.status).toBe(200)
+    const cappedBody = cappedPageSizeRes.body as { data?: { pageSize?: number } } | undefined
+    expect(cappedBody?.data?.pageSize).toBe(200)
+
+    const invalidDateRes = await requestJson(`${baseUrl}/api/attendance/punch/events?from=2026/03/28&to=2026-03-28`, {
+      headers: {
+        Authorization: `Bearer ${adminToken}`,
+      },
+    })
+    expect(invalidDateRes.status).toBe(400)
+    const invalidBody = invalidDateRes.body as { error?: { code?: string } } | undefined
+    expect(invalidBody?.error?.code).toBe('VALIDATION_ERROR')
   })
 
   it('serves attendance import templates as JSON and CSV', async () => {

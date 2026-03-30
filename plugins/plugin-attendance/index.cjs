@@ -2737,6 +2737,29 @@ function mapPayrollCycleRow(row) {
   }
 }
 
+function mapAttendanceEventRow(row) {
+  const workDate = normalizeDateOnly(row.work_date) ?? null
+  return {
+    id: row.id,
+    userId: row.user_id,
+    user_id: row.user_id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    org_id: row.org_id ?? DEFAULT_ORG_ID,
+    workDate,
+    work_date: workDate,
+    occurredAt: row.occurred_at,
+    occurred_at: row.occurred_at,
+    eventType: row.event_type,
+    event_type: row.event_type,
+    source: row.source ?? 'manual',
+    timezone: row.timezone ?? 'UTC',
+    location: normalizeMetadata(row.location),
+    meta: normalizeMetadata(row.meta),
+    createdAt: row.created_at ?? null,
+    created_at: row.created_at ?? null,
+  }
+}
+
 function mapImportBatchRow(row) {
   const meta = normalizeMetadata(row.meta)
 	  return {
@@ -9179,6 +9202,97 @@ module.exports = {
           }
           logger.error('Attendance punch failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to punch attendance' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/punch/events',
+      withPermission('attendance:read', async (req, res) => {
+        const schema = z.object({
+          userId: z.string().optional(),
+          from: z.string().optional(),
+          to: z.string().optional(),
+        })
+
+        const parsed = schema.safeParse({
+          userId: typeof req.query.userId === 'string' ? req.query.userId : undefined,
+          from: typeof req.query.from === 'string' ? req.query.from : undefined,
+          to: typeof req.query.to === 'string' ? req.query.to : undefined,
+        })
+
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const targetUserId = parsed.data.userId ?? requesterId
+        if (targetUserId !== requesterId) {
+          const allowed = await canAccessOtherUsers(requesterId)
+          if (!allowed) {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'No access to other users' } })
+            return
+          }
+        }
+
+        const { page, pageSize, offset } = parsePagination(req.query)
+        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+        if (!dateRange.ok) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+          return
+        }
+        const { from, to } = dateRange
+
+        try {
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_events
+             WHERE user_id = $1
+               AND org_id = $2
+               AND work_date BETWEEN $3 AND $4
+               AND event_type = ANY($5)`,
+            [targetUserId, orgId, from, to, ['check_in', 'check_out']]
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+
+          const rows = await db.query(
+            `SELECT *
+             FROM attendance_events
+             WHERE user_id = $1
+               AND org_id = $2
+               AND work_date BETWEEN $3 AND $4
+               AND event_type = ANY($5)
+             ORDER BY occurred_at DESC, created_at DESC
+             LIMIT $6 OFFSET $7`,
+            [targetUserId, orgId, from, to, ['check_in', 'check_out'], pageSize, offset]
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapAttendanceEventRow),
+              total,
+              page,
+              pageSize,
+              from,
+              to,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance punch events query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load punch events' } })
         }
       })
     )
