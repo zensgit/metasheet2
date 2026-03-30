@@ -56,6 +56,11 @@ Entry points:
   - Source of truth: `docs/deployment/dingtalk-onprem-rollout-verification-20260330.md`
   - Notes: deployment-only slice; apply DDL/env on 142.171.239.56, restart services, and verify health + OAuth/directory smoke without changing runtime code.
 
+- Attendance build unblock:
+  - Design: `docs/development/attendance-build-unblock-design-20260330.md`
+  - Verification: `docs/development/attendance-build-unblock-verification-20260330.md`
+  - Notes: restores `apps/web/src/utils/timezones.ts` as the canonical source for AttendanceView timezone labels/options and closes the frontend build blocker.
+
 ## Daily / Pre-PR
 
 - Verification summary (latest):
@@ -830,3 +835,6 @@ Entry points:
 - DB SSL production hotfix:
   - Design: `docs/development/dingtalk-onprem-db-ssl-hotfix-design-20260330.md`
   - Verification: `docs/development/dingtalk-onprem-db-ssl-hotfix-verification-20260330.md`
+- Attendance build unblock:
+  - Design: `docs/development/attendance-build-unblock-design-20260330.md`
+  - Verification: `docs/development/attendance-build-unblock-verification-20260330.md`

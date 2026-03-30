@@ -20,6 +20,15 @@ const formatterCache = new Map<string, Intl.DateTimeFormat>()
 const labelCache = new Map<string, string>()
 let supportedTimezonesCache: string[] | null = null
 
+function isValidTimezone(timeZone: string): boolean {
+  try {
+    getFormatter(timeZone)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function getFormatter(timeZone: string): Intl.DateTimeFormat {
   let formatter = formatterCache.get(timeZone)
   if (!formatter) {
@@ -108,7 +117,7 @@ export function buildTimezoneOptions(
 
   for (const zone of preferredTimezones) {
     const normalized = String(zone || '').trim()
-    if (!normalized || deduped.has(normalized)) continue
+    if (!normalized || deduped.has(normalized) || !isValidTimezone(normalized)) continue
     deduped.add(normalized)
     ordered.push(normalized)
   }
