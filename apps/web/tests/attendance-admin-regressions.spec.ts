@@ -391,6 +391,7 @@ describe('Attendance admin regressions', () => {
     ruleSetNav!.click()
     await flushUi(2)
     expect(container!.textContent).toContain('Structured rule builder')
+    expect(container!.textContent).toContain('engine.templates[].rules[]')
     expect(container!.textContent).toContain('Apply builder to JSON')
     expect(container!.textContent).toContain('Draft preview')
     expect(container!.textContent).toContain('Sample event builder')
@@ -425,7 +426,9 @@ describe('Attendance admin regressions', () => {
     expect(container!.textContent).toContain('Template guide')
     expect(container!.textContent).toContain('Field meanings')
     expect(container!.textContent).toContain('Selected mapping profile')
+    expect(container!.textContent).toContain('Single-user quick start')
     expect(container!.textContent).toContain('Suggested CSV header')
+    expect(container!.textContent).toContain('日期,上班1打卡时间,下班1打卡时间')
   })
 
   it('restores template version details and import batch diagnostics from the split admin sections', async () => {
