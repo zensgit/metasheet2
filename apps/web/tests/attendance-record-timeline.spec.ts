@@ -40,6 +40,12 @@ async function flushUi(cycles = 6): Promise<void> {
   }
 }
 
+function toLocalDateTimeValue(value: string): string {
+  const date = new Date(value)
+  const pad = (input: number) => String(input).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 function findButton(container: HTMLElement, label: string): HTMLButtonElement {
   const button = Array.from(container.querySelectorAll('button')).find(
     candidate => candidate.textContent?.trim() === label,
@@ -135,12 +141,14 @@ function installAttendanceMock(options?: { timelineStatus?: number }): string[] 
 describe('Attendance record timeline', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
+  let originalScrollIntoView: typeof HTMLElement.prototype.scrollIntoView | undefined
 
   beforeEach(() => {
     vi.clearAllMocks()
     window.localStorage.clear()
     window.localStorage.setItem('metasheet_locale', 'en')
     window.history.replaceState({}, '', '/attendance')
+    originalScrollIntoView = HTMLElement.prototype.scrollIntoView
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -148,6 +156,9 @@ describe('Attendance record timeline', () => {
   afterEach(() => {
     if (app) app.unmount()
     if (container) container.remove()
+    if (originalScrollIntoView) {
+      HTMLElement.prototype.scrollIntoView = originalScrollIntoView
+    }
     app = null
     container = null
   })
@@ -198,5 +209,31 @@ describe('Attendance record timeline', () => {
     await flushUi()
 
     expect(timelineCalls).toHaveLength(1)
+  })
+
+  it('prefills the request form from the loaded record timeline', async () => {
+    const scrollIntoView = vi.fn()
+    HTMLElement.prototype.scrollIntoView = scrollIntoView
+    installAttendanceMock()
+    app = createApp(AttendanceView)
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Details').click()
+    await flushUi()
+    findButton(container!, 'Use in request form').click()
+    await flushUi()
+
+    const workDateInput = container!.querySelector<HTMLInputElement>('#attendance-request-work-date')
+    const requestTypeSelect = container!.querySelector<HTMLSelectElement>('#attendance-request-type')
+    const requestedInInput = container!.querySelector<HTMLInputElement>('#attendance-request-in')
+    const requestedOutInput = container!.querySelector<HTMLInputElement>('#attendance-request-out')
+
+    expect(workDateInput?.value).toBe('2026-03-28')
+    expect(requestTypeSelect?.value).toBe('time_correction')
+    expect(requestedInInput?.value).toBe(toLocalDateTimeValue('2026-03-28T09:01:00+08:00'))
+    expect(requestedOutInput?.value).toBe(toLocalDateTimeValue('2026-03-28T18:05:00+08:00'))
+    expect(container?.textContent).toContain('Request form updated from record timeline.')
+    expect(scrollIntoView).toHaveBeenCalled()
   })
 })

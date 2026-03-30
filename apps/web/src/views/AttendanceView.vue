@@ -484,6 +484,11 @@
                         </small>
                       </li>
                     </ul>
+                    <div v-if="recordTimelineItems(record.id).length > 0" class="attendance__table-actions attendance__table-actions--meta">
+                      <button class="attendance__btn" type="button" @click="prefillRequestFromRecordTimeline(record)">
+                        {{ tr('Use in request form', '带入补卡申请') }}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               </template>
@@ -5711,6 +5716,41 @@ function recordTimelineInlineMessage(recordId: string): string {
     return tr('No raw punch events for this day.', '当天没有原始打卡事件。')
   }
   return ''
+}
+
+function resolveRecordTimelineRequestDraft(record: AttendanceRecord): {
+  requestedInAt: string
+  requestedOutAt: string
+} {
+  const items = recordTimelineItems(record.id)
+  const checkIn = items.find(item => item.eventType === 'check_in')
+  const checkOut = [...items].reverse().find(item => item.eventType === 'check_out')
+  const requestedInAtSource = checkIn?.occurredAt
+    ?? record.first_in_at
+    ?? null
+  const requestedOutAtSource = checkOut?.occurredAt
+    ?? record.last_out_at
+    ?? null
+  return {
+    requestedInAt: requestedInAtSource ? formatDateTimeLocal(new Date(requestedInAtSource)) : '',
+    requestedOutAt: requestedOutAtSource ? formatDateTimeLocal(new Date(requestedOutAtSource)) : '',
+  }
+}
+
+async function prefillRequestFromRecordTimeline(record: AttendanceRecord): Promise<void> {
+  const draft = resolveRecordTimelineRequestDraft(record)
+  requestForm.workDate = record.work_date
+  requestForm.requestType = 'time_correction'
+  requestForm.requestedInAt = draft.requestedInAt
+  requestForm.requestedOutAt = draft.requestedOutAt
+  setStatus(
+    appendStatusContext(
+      tr('Request form updated from record timeline.', '已根据记录时间线填充补卡申请。'),
+      requestTimezoneContextHint.value,
+    ),
+  )
+  await nextTick()
+  document.getElementById('attendance-request-work-date')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void> {
@@ -12332,6 +12372,10 @@ const holidaySectionBindings = {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.attendance__table-actions--meta {
+  margin-top: 12px;
 }
 
 .attendance__subheading {
