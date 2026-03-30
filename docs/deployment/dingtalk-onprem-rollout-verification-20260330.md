@@ -324,6 +324,28 @@ GET /api/admin/directory/deprovisions
 
 **结果：PASS**
 
+#### 5. Frontend Route Reachability
+
+```bash
+docker inspect -f '{{.Config.Image}}' metasheet-web
+```
+
+```text
+ghcr.io/zensgit/metasheet2-web:dingtalk-rollout-20260330-d619b560d
+```
+
+```bash
+curl -I 'http://127.0.0.1:8081/auth/dingtalk/callback?code=dummy&state=dummy'
+```
+
+```text
+HTTP/1.1 200 OK
+Server: nginx/1.27.5
+Content-Type: text/html
+```
+
+**结果：PASS**
+
 ### 对第二次执行失败原因的最终归因
 
 第二次执行失败由两层问题叠加导致：
@@ -343,8 +365,10 @@ GET /api/admin/directory/deprovisions
 - `users.dingtalk_open_id` 已落地
 - DingTalk env 已配置
 - 新 backend 镜像已部署
+- 新 web 镜像已部署
 - OAuth launch / callback reachability 已通过
 - admin-directory 三条核心接口已通过
+- 前端 DingTalk callback 路由可达
 
 仍需跟踪但不阻塞本轮通过的事项：
 
