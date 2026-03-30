@@ -484,11 +484,16 @@
                         </small>
                       </li>
                     </ul>
-                    <div v-if="recordTimelineItems(record.id).length > 0" class="attendance__table-actions attendance__table-actions--meta">
-                      <button class="attendance__btn" type="button" @click="prefillRequestFromRecordTimeline(record)">
-                        {{ tr('Use in request form', '带入补卡申请') }}
-                      </button>
-                    </div>
+                    <template v-if="recordTimelineItems(record.id).length > 0">
+                      <p class="attendance__field-hint attendance__field-hint--strong">
+                        {{ tr('Suggested request', '建议申请') }}: {{ formatRequestType(suggestedRequestTypeForRecord(record)) }}
+                      </p>
+                      <div class="attendance__table-actions attendance__table-actions--meta">
+                        <button class="attendance__btn" type="button" @click="prefillRequestFromRecordTimeline(record)">
+                          {{ requestTypeCtaLabel(suggestedRequestTypeForRecord(record)) }}
+                        </button>
+                      </div>
+                    </template>
                   </td>
                 </tr>
               </template>
@@ -5633,6 +5638,14 @@ function formatRequestType(value: string): string {
   return map[value] ?? value
 }
 
+function requestTypeCtaLabel(value: string): string {
+  const normalized = String(value || '').trim()
+  if (!normalized) return tr('Use in request form', '带入补卡申请')
+  return isZh.value
+    ? `带入${formatRequestType(normalized)}`
+    : `Use as ${formatRequestType(normalized)}`
+}
+
 function formatPunchEventType(value: string | null | undefined): string {
   const normalized = String(value || '').trim().toLowerCase()
   const map: Record<string, string> = isZh.value
@@ -5729,6 +5742,10 @@ function inferRequestTypeFromRecordTimeline(items: AttendancePunchEvent[]): stri
   if (hasCheckIn && !hasCheckOut) return 'missed_check_out'
   if (hasCheckOut && !hasCheckIn) return 'missed_check_in'
   return 'time_correction'
+}
+
+function suggestedRequestTypeForRecord(record: AttendanceRecord): string {
+  return inferRequestTypeFromRecordTimeline(recordTimelineItems(record.id))
 }
 
 function resolveRecordTimelineRequestDraft(record: AttendanceRecord): {
@@ -12392,6 +12409,12 @@ const holidaySectionBindings = {
 
 .attendance__table-actions--meta {
   margin-top: 12px;
+}
+
+.attendance__field-hint--strong {
+  display: inline-flex;
+  margin-top: 12px;
+  font-weight: 600;
 }
 
 .attendance__subheading {
