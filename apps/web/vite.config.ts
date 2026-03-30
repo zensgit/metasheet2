@@ -5,12 +5,14 @@ import { resolve } from 'path'
 
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
+  const envDir = process.env.METASHEET_ENV_DIR?.trim() || process.cwd()
+  const env = loadEnv(mode, envDir, '')
   const apiBase = env.VITE_API_URL || env.VITE_API_BASE || 'http://127.0.0.1:7778'
   const portValue = Number(env.VITE_PORT)
   const serverPort = Number.isFinite(portValue) && portValue > 0 ? portValue : 8899
 
   return {
+    envDir,
     plugins: [vue()],
     server: {
       port: serverPort,
