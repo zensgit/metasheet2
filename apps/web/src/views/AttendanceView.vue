@@ -1637,12 +1637,10 @@
                       <p class="attendance__field-hint">
                         {{ tr('The builder keeps the core JSON config in sync while preserving any advanced fields already stored in the rule draft.', '构建器会同步核心 JSON 配置，并保留规则草稿里已有的高级字段。') }}
                       </p>
-                      <p class="attendance__field-hint">
-                        <code>engine.templates[].rules[]</code>
-                        {{ tr(' uses the minimal shape ', ' 使用最小结构 ') }}
-                        <code>{ id, when, then }</code>
-                        {{ tr(' and should always be previewed before saving.', '，保存前建议先执行规则预览。') }}
-                      </p>
+                      <p
+                        class="attendance__field-hint"
+                        v-html="tr('<code>engine.templates[].rules[]</code> uses the minimal shape <code>{ id, when, then }</code> and should always be previewed before saving.', '<code>engine.templates[].rules[]</code> 使用最小结构 <code>{ id, when, then }</code>，保存前建议先执行规则预览。')"
+                      />
                     </div>
                     <div class="attendance__rule-builder-summary">
                       <span>{{ tr('Source', '来源') }}: <strong>{{ ruleBuilderSource || '--' }}</strong></span>

@@ -71,7 +71,7 @@ This confirms current `main` already serves item routes for:
 ### Migration conflict audit
 
 ```bash
-rg -n "add_meta_view_config|meta_view_config" /Users/huazhou/Downloads/Github/metasheet2
+rg -n "add_meta_view_config|meta_view_config" .
 ```
 
 Result: no matches on current repository state
