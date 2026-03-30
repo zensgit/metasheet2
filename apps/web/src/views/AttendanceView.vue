@@ -5006,6 +5006,7 @@ const {
   clearRecentAdminSections,
   copyCurrentAdminSectionLink,
   expandAllAdminSectionGroups,
+  focusAdminSectionGroup,
   isCompactAdminNav,
   isKnownAdminSectionId,
   nextAdminSectionNavItem,
@@ -5068,6 +5069,7 @@ function shouldShowAdminSection(id: string): boolean {
 function selectAdminSection(id: string): void {
   adminFocusedMode.value = true
   adminActiveSectionId.value = id
+  focusAdminSectionGroup(id)
   void nextTick(() => {
     scrollToAdminSection(id)
   })

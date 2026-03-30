@@ -324,6 +324,16 @@ describe('Attendance admin anchor navigation', () => {
     app.mount(container!)
     await flushUi()
 
+    async function ensureGroupVisible(label: string): Promise<void> {
+      const header = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-nav-group-header'))
+        .find(button => button.textContent?.includes(label))
+      expect(header).toBeTruthy()
+      if (header!.getAttribute('aria-expanded') === 'false') {
+        header!.click()
+        await flushUi(2)
+      }
+    }
+
     const groupMembersAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-group-members"]')
     expect(groupMembersAnchor).toBeTruthy()
     groupMembersAnchor!.click()
@@ -332,6 +342,7 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('#attendance-group-member-user-picker')).toBeTruthy()
     expect(container!.textContent).toContain('Append selected user')
 
+    await ensureGroupVisible('Policies')
     const ruleSetsAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-rule-sets"]')
     expect(ruleSetsAnchor).toBeTruthy()
     ruleSetsAnchor!.click()
@@ -354,6 +365,7 @@ describe('Attendance admin anchor navigation', () => {
     expect(configTextarea!.value).toContain('"source": "dingtalk"')
     expect(configTextarea!.value).toContain('"workingDays"')
 
+    await ensureGroupVisible('Scheduling')
     const holidaysAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-holidays"]')
     expect(holidaysAnchor).toBeTruthy()
     holidaysAnchor!.click()
@@ -633,5 +645,25 @@ describe('Attendance admin anchor navigation', () => {
     )
     expect(groupLabels[0]).toBe('Policies')
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-approval-flows"]')).toBeTruthy()
+  })
+
+  it('moves the active group to the top on desktop and collapses non-active groups after section selection', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const shiftsAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-shifts"]')
+    expect(shiftsAnchor).toBeTruthy()
+
+    shiftsAnchor!.click()
+    await flushUi(2)
+
+    const groupLabels = Array.from(container!.querySelectorAll('.attendance__admin-nav-group-title')).map(
+      item => item.textContent?.trim() || '',
+    )
+    expect(groupLabels[0]).toBe('Scheduling')
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-shifts"]')).toBeTruthy()
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-user-access"]')).toBeNull()
+    expect(container!.querySelector('[data-admin-shortcut="attendance-admin-shifts"]')?.textContent).toContain('Scheduling · Shifts')
   })
 })
