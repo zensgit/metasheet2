@@ -307,31 +307,24 @@ describe('Attendance admin regressions', () => {
     container = null
   })
 
-  it('focuses the clicked admin section after toggling show-all', async () => {
+  it('keeps the clicked admin section focused and retires the show-all toggle', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
-
-    const toggle = container!.querySelector<HTMLButtonElement>('[data-admin-focus-toggle="true"]')
-    expect(toggle?.textContent).toContain('Show all sections')
-
-    toggle!.click()
-    await flushUi(2)
-    expect(toggle?.textContent).toContain('Focus current section')
 
     const settings = container!.querySelector<HTMLElement>('#attendance-admin-settings')
     const groupMembers = container!.querySelector<HTMLElement>('#attendance-admin-group-members')
     expect(settings).toBeTruthy()
     expect(groupMembers).toBeTruthy()
     expect(window.getComputedStyle(settings!).display).not.toBe('none')
-    expect(window.getComputedStyle(groupMembers!).display).not.toBe('none')
+    expect(window.getComputedStyle(groupMembers!).display).toBe('none')
 
     const groupMembersNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-group-members"]')
     expect(groupMembersNav).toBeTruthy()
     groupMembersNav!.click()
     await flushUi(2)
 
-    expect(toggle?.textContent).toContain('Show all sections')
+    expect(container!.querySelector('[data-admin-focus-toggle="true"]')).toBeNull()
     expect(window.getComputedStyle(settings!).display).toBe('none')
     expect(window.getComputedStyle(groupMembers!).display).not.toBe('none')
     expect(container!.querySelector('[data-admin-shortcut="attendance-admin-group-members"]')?.textContent).toContain('Organization · Group members')
@@ -358,17 +351,11 @@ describe('Attendance admin regressions', () => {
     expect(ruleSetSection).toBeTruthy()
     expect(window.getComputedStyle(ruleSetSection!).display).not.toBe('none')
     expect(visibleEditButton).toBeTruthy()
+    expect(container!.querySelector('[data-admin-focus-toggle="true"]')).toBeNull()
     expect(window.getComputedStyle(leaveTypeSection!).display).toBe('none')
-
-    const toggle = container!.querySelector<HTMLButtonElement>('[data-admin-focus-toggle="true"]')
-    expect(toggle?.textContent).toContain('Show all sections')
-    toggle!.click()
-    await flushUi(2)
-
-    const leaveTypeEditButton = Array.from(leaveTypeSection!.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('Edit'))
-    expect(window.getComputedStyle(leaveTypeSection!).display).not.toBe('none')
-    expect(leaveTypeEditButton).toBeTruthy()
+    const actionCell = visibleEditButton?.closest('td')
+    expect(actionCell).toBeTruthy()
+    expect(actionCell?.classList.contains('attendance__table-actions')).toBe(true)
   })
 
   it('restores the run21 holiday calendar, rule builder, and import template guidance', async () => {
@@ -450,6 +437,14 @@ describe('Attendance admin regressions', () => {
     expect(container!.textContent).toContain('Selected version')
     expect(container!.textContent).toContain('ops-admin')
     expect(container!.textContent).toContain('Night Shift')
+
+    const dataPayrollHeader = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance__admin-nav-group-header'))
+      .find(button => button.textContent?.includes('Data & Payroll'))
+    expect(dataPayrollHeader).toBeTruthy()
+    if (dataPayrollHeader!.getAttribute('aria-expanded') === 'false') {
+      dataPayrollHeader!.click()
+      await flushUi(2)
+    }
 
     const importBatchesNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-import-batches"]')
     expect(importBatchesNav).toBeTruthy()

@@ -134,15 +134,9 @@ function persistLastAdminSection(scope: string, id: string): void {
 }
 
 function loadAdminNavFocusedMode(scope: string): boolean {
-  if (typeof window === 'undefined') return true
-  try {
-    const raw = window.localStorage.getItem(resolveAdminNavStorageKey(ADMIN_NAV_FOCUS_MODE_STORAGE_KEY, scope))
-    if (!raw) return true
-    const parsed = JSON.parse(raw)
-    return typeof parsed === 'boolean' ? parsed : true
-  } catch {
-    return true
-  }
+  void scope
+  // The all-sections mode is retired. Always normalize back to focused mode.
+  return true
 }
 
 function persistAdminNavFocusedMode(scope: string, focused: boolean): void {
@@ -501,7 +495,7 @@ export function useAttendanceAdminRail({
 
   watch(adminFocusedMode, focused => {
     persistAdminNavFocusedMode(adminNavStorageScope.value, focused)
-  })
+  }, { immediate: true })
 
   watch(adminNavStorageScope, (scope, previousScope) => {
     if (scope === previousScope) return
