@@ -40,6 +40,17 @@ describe('API Utils', () => {
       expect(getApiBase()).toBe('https://api-base.example.com')
     })
 
+    it('ignores loopback VITE API env on non-loopback browser origins', () => {
+      vi.stubEnv('VITE_API_URL', '')
+      vi.stubEnv('VITE_API_BASE', 'http://127.0.0.1:7778')
+      Object.defineProperty(window, 'location', {
+        value: { origin: 'http://192.168.1.222' },
+        writable: true,
+        configurable: true,
+      })
+      expect(getApiBase()).toBe('http://192.168.1.222')
+    })
+
     it('falls back to location.origin', () => {
       vi.unstubAllEnvs()
       Object.defineProperty(window, 'location', {
