@@ -591,26 +591,21 @@
             >
             <div
               class="attendance__admin-current-section"
-              :class="{ 'attendance__admin-current-section--expanded': !adminFocusedMode }"
               data-admin-current-section="true"
             >
               <div class="attendance__admin-current-section-copy">
                 <span class="attendance__admin-current-section-eyebrow">
-                  {{ adminFocusedMode ? tr('Current section', '当前区块') : tr('Browse sections', '浏览区块') }}
+                  {{ tr('Current section', '当前区块') }}
                 </span>
                 <strong>{{ activeAdminSectionContextLabel }}</strong>
                 <span class="attendance__admin-current-section-description">
-                  {{
-                    adminFocusedMode
-                      ? tr('Choose another item on the left and the right pane will return here immediately.', '点击左侧其他区块后，右侧会立即回到这里。')
-                      : tr('All sections are visible. Focus mode brings you back to the active block.', '当前显示全部区块；切回聚焦模式可回到当前区块。')
-                  }}
+                  {{ tr('Choose another item on the left and the right pane will return here immediately.', '点击左侧其他区块后，右侧会立即回到这里。') }}
                 </span>
                 <span class="attendance__admin-current-section-hint">
                   {{
                     tr(
-                      'Quick switch: Alt+↑ previous · Alt+↓ next. This mode is remembered per workspace.',
-                      '快速切换：Alt+↑ 上一个 · Alt+↓ 下一个。系统会按当前工作区记住该模式。',
+                      'Quick switch: Alt+↑ previous · Alt+↓ next.',
+                      '快速切换：Alt+↑ 上一个 · Alt+↓ 下一个。',
                     )
                   }}
                 </span>
@@ -652,14 +647,6 @@
                     </optgroup>
                   </select>
                 </label>
-                <button
-                  class="attendance__btn attendance__btn--inline"
-                  type="button"
-                  data-admin-focus-toggle="true"
-                  @click="adminFocusedMode = !adminFocusedMode"
-                >
-                  {{ adminFocusedMode ? tr('Show all sections', '显示全部区块') : tr('Focus current section', '仅显示当前区块') }}
-                </button>
                 <button
                   class="attendance__btn attendance__btn--inline attendance__admin-current-section-nav"
                   :class="{ 'attendance__admin-current-section-nav--disabled': !nextAdminSectionNavItem }"
@@ -12419,8 +12406,16 @@ const holidaySectionBindings = {
 
 .attendance__table-actions {
   display: flex;
+  align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.attendance__table td.attendance__table-actions {
+  width: 1%;
+  min-width: max-content;
+  height: auto;
+  vertical-align: middle;
 }
 
 .attendance__table-actions .attendance__btn {
@@ -12653,10 +12648,6 @@ const holidaySectionBindings = {
   backdrop-filter: blur(10px);
 }
 
-.attendance__admin-current-section--expanded {
-  border-color: #dbeafe;
-}
-
 .attendance__admin-current-section-copy {
   display: flex;
   flex-direction: column;
@@ -12756,6 +12747,13 @@ const holidaySectionBindings = {
   gap: 12px;
 }
 
+.attendance__rule-builder > .attendance__admin-section-header,
+.attendance__rule-builder-preview > .attendance__admin-section-header,
+.attendance__preview-builder > .attendance__admin-section-header {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
 .attendance__template-guide {
   padding: 16px;
   border: 1px solid #d9e2ec;
@@ -12839,6 +12837,10 @@ const holidaySectionBindings = {
   gap: 10px 16px;
   color: #4b5563;
   font-size: 12px;
+}
+
+.attendance__rule-builder-summary {
+  margin-left: auto;
 }
 
 .attendance__rule-builder-summary strong,
@@ -13203,6 +13205,17 @@ const holidaySectionBindings = {
 
   .attendance__table--records {
     min-width: 100%;
+  }
+
+  .attendance__rule-builder-summary {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .attendance__rule-builder > .attendance__admin-section-header,
+  .attendance__rule-builder-preview > .attendance__admin-section-header,
+  .attendance__preview-builder > .attendance__admin-section-header {
+    flex-direction: column;
   }
 
   .attendance__table-actions .attendance__btn,

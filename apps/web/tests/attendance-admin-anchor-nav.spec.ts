@@ -209,7 +209,9 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('[data-admin-shortcut="attendance-admin-import-batches"]')?.textContent).toContain('Data & Payroll · Import batches')
   })
 
-  it('focuses the right pane on the active admin section by default and can reveal all sections on demand', async () => {
+  it('keeps the right pane focused on the active admin section and ignores legacy show-all preferences', async () => {
+    window.localStorage.setItem(scopedAdminNavStorageKey(ADMIN_NAV_FOCUS_MODE_STORAGE_KEY), JSON.stringify(false))
+
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
@@ -228,14 +230,8 @@ describe('Attendance admin anchor navigation', () => {
 
     expect(settingsSection?.style.display).toBe('none')
     expect(holidaysSection?.style.display).not.toBe('none')
-
-    const revealAllButton = container!.querySelector<HTMLButtonElement>('[data-admin-focus-toggle="true"]')
-    expect(revealAllButton).toBeTruthy()
-    revealAllButton!.click()
-    await flushUi(2)
-
-    expect(settingsSection?.style.display).not.toBe('none')
-    expect(holidaysSection?.style.display).not.toBe('none')
+    expect(container!.querySelector('[data-admin-focus-toggle="true"]')).toBeNull()
+    expect(window.localStorage.getItem(scopedAdminNavStorageKey(ADMIN_NAV_FOCUS_MODE_STORAGE_KEY))).toBe('true')
   })
 
   it('renders a sticky current-section bar in the right pane', async () => {
@@ -249,7 +245,7 @@ describe('Attendance admin anchor navigation', () => {
     expect(currentSectionBar?.textContent).toContain('Workspace · Settings')
     expect(currentSectionBar?.textContent).toContain('Quick switch: Alt+↑ previous')
     expect(currentSectionBar?.querySelector('[data-admin-quick-jump="true"]')).toBeTruthy()
-    expect(currentSectionBar?.querySelector('[data-admin-focus-toggle="true"]')?.textContent).toContain('Show all sections')
+    expect(currentSectionBar?.querySelector('[data-admin-focus-toggle="true"]')).toBeNull()
     expect(currentSectionBar?.querySelector('[data-admin-prev-section]')?.getAttribute('data-admin-prev-section-id')).toBe('')
     expect(currentSectionBar?.querySelector('[data-admin-next-section]')?.getAttribute('data-admin-next-section-id')).toBe('attendance-admin-user-access')
   })
@@ -293,18 +289,15 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Scheduling · Shifts')
   })
 
-  it('remembers focus-vs-show-all mode across remounts', async () => {
+  it('normalizes legacy show-all storage back to focused mode across remounts', async () => {
+    window.localStorage.setItem(scopedAdminNavStorageKey(ADMIN_NAV_FOCUS_MODE_STORAGE_KEY), JSON.stringify(false))
+
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
-    const toggle = container!.querySelector<HTMLButtonElement>('[data-admin-focus-toggle="true"]')
-    expect(toggle).toBeTruthy()
-    toggle!.click()
-    await flushUi(2)
-
-    expect(window.localStorage.getItem(scopedAdminNavStorageKey(ADMIN_NAV_FOCUS_MODE_STORAGE_KEY))).toBe('false')
-    expect(toggle?.textContent).toContain('Focus current section')
+    expect(container!.querySelector('[data-admin-focus-toggle="true"]')).toBeNull()
+    expect(window.localStorage.getItem(scopedAdminNavStorageKey(ADMIN_NAV_FOCUS_MODE_STORAGE_KEY))).toBe('true')
 
     app.unmount()
     container!.innerHTML = ''
@@ -313,10 +306,9 @@ describe('Attendance admin anchor navigation', () => {
     app.mount(container!)
     await flushUi()
 
-    const nextToggle = container!.querySelector<HTMLButtonElement>('[data-admin-focus-toggle="true"]')
-    expect(nextToggle?.textContent).toContain('Focus current section')
+    expect(container!.querySelector('[data-admin-focus-toggle="true"]')).toBeNull()
     expect(container!.querySelector<HTMLElement>('#attendance-admin-settings')?.style.display).not.toBe('none')
-    expect(container!.querySelector<HTMLElement>('#attendance-admin-holidays')?.style.display).not.toBe('none')
+    expect(container!.querySelector<HTMLElement>('#attendance-admin-holidays')?.style.display).toBe('none')
   })
 
   it('restores the live user picker, structured rule builder, and holiday month calendar interactions', async () => {
