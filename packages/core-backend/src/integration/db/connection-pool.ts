@@ -44,6 +44,39 @@ interface PoolStats {
   error?: string
 }
 
+function buildPoolSslConfig(): PoolConfig['ssl'] {
+  const rawValue = process.env.DB_SSL?.trim().toLowerCase()
+  const explicitlyDisabled = rawValue !== undefined && ['0', 'false', 'no', 'off', 'disable', 'disabled'].includes(rawValue)
+  if (explicitlyDisabled) {
+    return false
+  }
+
+  const shouldEnable =
+    rawValue !== undefined
+      ? ['1', 'true', 'yes', 'on', 'require', 'required'].includes(rawValue)
+      : process.env.NODE_ENV === 'production'
+
+  if (!shouldEnable) {
+    return false
+  }
+
+  const sslConfig: Exclude<PoolConfig['ssl'], boolean | undefined> = {
+    rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false',
+  }
+
+  if (process.env.DB_SSL_CA) {
+    sslConfig.ca = process.env.DB_SSL_CA
+  }
+  if (process.env.DB_SSL_CERT) {
+    sslConfig.cert = process.env.DB_SSL_CERT
+  }
+  if (process.env.DB_SSL_KEY) {
+    sslConfig.key = process.env.DB_SSL_KEY
+  }
+
+  return sslConfig
+}
+
 class ConnectionPool {
   private pool: Pool
   private slowMs: number
@@ -217,12 +250,7 @@ class PoolManager {
         // Note: acquireTimeoutMillis is not a valid pg Pool option, removing to fix compilation
 
         // SSL配置
-        ssl: process.env.NODE_ENV === 'production' ? {
-          rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false',
-          ca: process.env.DB_SSL_CA,
-          cert: process.env.DB_SSL_CERT,
-          key: process.env.DB_SSL_KEY,
-        } : false,
+        ssl: buildPoolSslConfig(),
 
         // 查询配置
         query_timeout: parseInt(process.env.DB_QUERY_TIMEOUT || '30000', 10), // 查询超时
