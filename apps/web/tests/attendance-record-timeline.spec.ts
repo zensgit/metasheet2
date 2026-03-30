@@ -66,9 +66,29 @@ const baseRecord = {
   meta: {},
 }
 
-function installAttendanceMock(options?: { timelineStatus?: number }): string[] {
+function installAttendanceMock(options?: { timelineStatus?: number; timelineItems?: Array<Record<string, unknown>> }): string[] {
   const timelineCalls: string[] = []
   const timelineStatus = options?.timelineStatus ?? 200
+  const timelineItems = options?.timelineItems ?? [
+    {
+      id: 'evt-2',
+      userId: 'user-1',
+      workDate: '2026-03-28',
+      eventType: 'check_out',
+      occurredAt: '2026-03-28T18:05:00+08:00',
+      source: 'terminal',
+      timezone: 'Asia/Shanghai',
+    },
+    {
+      id: 'evt-1',
+      userId: 'user-1',
+      workDate: '2026-03-28',
+      eventType: 'check_in',
+      occurredAt: '2026-03-28T09:01:00+08:00',
+      source: 'terminal',
+      timezone: 'Asia/Shanghai',
+    },
+  ]
   vi.mocked(apiFetch).mockImplementation(async (input) => {
     const url = String(input)
     if (url.includes('/api/attendance/summary?')) {
@@ -109,27 +129,8 @@ function installAttendanceMock(options?: { timelineStatus?: number }): string[] 
       return jsonResponse(200, {
         ok: true,
         data: {
-          items: [
-            {
-              id: 'evt-2',
-              userId: 'user-1',
-              workDate: '2026-03-28',
-              eventType: 'check_out',
-              occurredAt: '2026-03-28T18:05:00+08:00',
-              source: 'terminal',
-              timezone: 'Asia/Shanghai',
-            },
-            {
-              id: 'evt-1',
-              userId: 'user-1',
-              workDate: '2026-03-28',
-              eventType: 'check_in',
-              occurredAt: '2026-03-28T09:01:00+08:00',
-              source: 'terminal',
-              timezone: 'Asia/Shanghai',
-            },
-          ],
-          total: 2,
+          items: timelineItems,
+          total: timelineItems.length,
         },
       })
     }
@@ -235,5 +236,37 @@ describe('Attendance record timeline', () => {
     expect(requestedOutInput?.value).toBe(toLocalDateTimeValue('2026-03-28T18:05:00+08:00'))
     expect(container?.textContent).toContain('Request form updated from record timeline.')
     expect(scrollIntoView).toHaveBeenCalled()
+  })
+
+  it('infers missed check-out when the loaded timeline only has a check-in event', async () => {
+    installAttendanceMock({
+      timelineItems: [
+        {
+          id: 'evt-1',
+          userId: 'user-1',
+          workDate: '2026-03-28',
+          eventType: 'check_in',
+          occurredAt: '2026-03-28T09:01:00+08:00',
+          source: 'terminal',
+          timezone: 'Asia/Shanghai',
+        },
+      ],
+    })
+    app = createApp(AttendanceView)
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Details').click()
+    await flushUi()
+    findButton(container!, 'Use in request form').click()
+    await flushUi()
+
+    const requestTypeSelect = container!.querySelector<HTMLSelectElement>('#attendance-request-type')
+    const requestedInInput = container!.querySelector<HTMLInputElement>('#attendance-request-in')
+    const requestedOutInput = container!.querySelector<HTMLInputElement>('#attendance-request-out')
+
+    expect(requestTypeSelect?.value).toBe('missed_check_out')
+    expect(requestedInInput?.value).toBe(toLocalDateTimeValue('2026-03-28T09:01:00+08:00'))
+    expect(requestedOutInput?.value).toBe('')
   })
 })
