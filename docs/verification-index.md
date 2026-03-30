@@ -6,6 +6,56 @@ Entry points:
 - README: `README.md` (Documentation Quick Links)
 - Docs Index: `docs/INDEX.md` (测试和验证)
 
+## 2026-03-30 Baseline / Claude Collaboration
+
+- Repo baseline reconciliation:
+  - Run: `pnpm verify:repo-baseline-reconciliation`
+  - Run: `pnpm print:repo-baseline-reconciliation`
+  - Run: `pnpm plan:repo-baseline-reconciliation`
+  - Design: `docs/development/repo-baseline-reconciliation-design-20260330.md`
+  - Verification: `docs/development/repo-baseline-reconciliation-verification-20260330.md`
+  - Artifacts: `output/repo-baseline-reconciliation/verify/report.json`, `output/repo-baseline-reconciliation/verify/summary.md`
+
+- DingTalk ops hardening Claude execution pack:
+  - Task pack: `docs/development/dingtalk-ops-hardening-claude-task-pack-20260330.md`
+  - Verification template: `docs/development/dingtalk-ops-hardening-claude-verification-template-20260330.md`
+  - Notes: Claude Code executes inside the declared write boundary; Codex independently reruns tests and verifies docs/contracts.
+
+- DingTalk ops hardening repair Claude execution pack:
+  - Task pack: `docs/development/dingtalk-ops-hardening-repair-claude-task-pack-20260330.md`
+  - Verification template: `docs/development/dingtalk-ops-hardening-repair-claude-verification-template-20260330.md`
+  - Source of truth: `docs/development/dingtalk-ops-hardening-verification-20260330.md`
+  - Notes: repair-only slice; no new product scope is allowed until schema, contract, callback, and boundary issues are closed.
+
+- DingTalk ops hardening repair-2 Claude execution pack:
+  - Task pack: `docs/development/dingtalk-ops-hardening-repair2-claude-task-pack-20260330.md`
+  - Verification template: `docs/development/dingtalk-ops-hardening-repair2-claude-verification-template-20260330.md`
+  - Source of truth: `docs/development/dingtalk-ops-hardening-verification-20260330.md`
+  - Notes: micro repair only; runtime code is frozen and OpenAPI/docs must align to the existing implementation.
+
+- DingTalk OAuth backend Claude execution pack:
+  - Task pack: `docs/development/dingtalk-oauth-backend-claude-task-pack-20260330.md`
+  - Verification template: `docs/development/dingtalk-oauth-backend-claude-verification-template-20260330.md`
+  - Notes: implement the real DingTalk OAuth callback closure; no new directory/admin/ops scope is allowed in this slice.
+
+- DingTalk OAuth backend repair-1 Claude execution pack:
+  - Task pack: `docs/development/dingtalk-oauth-backend-repair1-claude-task-pack-20260330.md`
+  - Verification template: `docs/development/dingtalk-oauth-backend-repair1-claude-verification-template-20260330.md`
+  - Source of truth: `docs/development/dingtalk-oauth-backend-verification-20260330.md`
+  - Notes: micro repair only; close OAuth state validation, jwt whitelist boundary, and deploy-time OAuth verification.
+
+- DingTalk OAuth backend repair-2 Claude execution pack:
+  - Task pack: `docs/development/dingtalk-oauth-backend-repair2-claude-task-pack-20260330.md`
+  - Verification template: `docs/development/dingtalk-oauth-backend-repair2-claude-verification-template-20260330.md`
+  - Source of truth: `docs/development/dingtalk-oauth-backend-verification-20260330.md`
+  - Notes: final micro repair only; align auth.yml with the existing runtime state-validation behavior.
+
+- DingTalk on-prem rollout Claude execution pack:
+  - Task pack: `docs/development/dingtalk-onprem-rollout-claude-task-pack-20260330.md`
+  - Verification template: `docs/development/dingtalk-onprem-rollout-claude-verification-template-20260330.md`
+  - Source of truth: `docs/deployment/dingtalk-onprem-rollout-verification-20260330.md`
+  - Notes: deployment-only slice; apply DDL/env on 142.171.239.56, restart services, and verify health + OAuth/directory smoke without changing runtime code.
+
 ## Daily / Pre-PR
 
 - Verification summary (latest):
@@ -772,3 +822,11 @@ Entry points:
 - Local smoke runner now uses `scripts/verify-smoke-core.mjs` with `web.home` tolerant of `MetaSheet` or `#app`.
 - `univer-meta` smoke checks added: `sheets`, `fields`, `views`, `records-summary`.
 - Latest report: `docs/smoke-verify-run-2025-12-23.md`.
+
+## 2026-03-30 DingTalk Rollout
+
+- On-prem rollout final verification:
+  - Report: `docs/deployment/dingtalk-onprem-rollout-verification-20260330.md`
+- DB SSL production hotfix:
+  - Design: `docs/development/dingtalk-onprem-db-ssl-hotfix-design-20260330.md`
+  - Verification: `docs/development/dingtalk-onprem-db-ssl-hotfix-verification-20260330.md`
