@@ -1637,6 +1637,10 @@
                       <p class="attendance__field-hint">
                         {{ tr('The builder keeps the core JSON config in sync while preserving any advanced fields already stored in the rule draft.', '构建器会同步核心 JSON 配置，并保留规则草稿里已有的高级字段。') }}
                       </p>
+                      <p
+                        class="attendance__field-hint"
+                        v-html="tr('<code>engine.templates[].rules[]</code> uses the minimal shape <code>{ id, when, then }</code> and should always be previewed before saving.', '<code>engine.templates[].rules[]</code> 使用最小结构 <code>{ id, when, then }</code>，保存前建议先执行规则预览。')"
+                      />
                     </div>
                     <div class="attendance__rule-builder-summary">
                       <span>{{ tr('Source', '来源') }}: <strong>{{ ruleBuilderSource || '--' }}</strong></span>
@@ -2388,6 +2392,18 @@
                   </span>
                 </div>
                 <div class="attendance__template-guide-grid">
+                  <div class="attendance__template-guide-card">
+                    <div class="attendance__template-guide-title">{{ tr('Single-user quick start', '单用户快速开始') }}</div>
+                    <code class="attendance__template-code">日期,上班1打卡时间,下班1打卡时间</code>
+                    <small class="attendance__field-hint">
+                      {{
+                        tr(
+                          'Use this minimum header when importing punch rows for the current signed-in user. Multi-user files still need an employee key or saved mapping profile.',
+                          '导入当前登录用户的打卡行时，可先用这组最小表头。多用户文件仍需要工号类字段或已保存的映射配置。'
+                        )
+                      }}
+                    </small>
+                  </div>
                   <div class="attendance__template-guide-card">
                     <div class="attendance__template-guide-title">{{ tr('Suggested CSV header', '建议 CSV 表头') }}</div>
                     <code class="attendance__template-code">{{ importTemplateGuide.sampleHeader || tr('(no header guidance yet)', '（暂无表头指导）') }}</code>
@@ -12405,6 +12421,16 @@ const holidaySectionBindings = {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.attendance__table-actions .attendance__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: fit-content;
+  min-height: 36px;
+  white-space: nowrap;
 }
 
 .attendance__table-actions--meta {

@@ -1,5 +1,8 @@
 # Attendance Custom Rule Templates (Examples)
 
+See also:
+- `docs/ATTENDANCE_ENGINE_TEMPLATES_SYNTAX.md` for the minimal `engine.templates[].rules[]` shape and authoring checklist.
+
 This document provides ready-to-use examples for the **用户自定义** rule template. Copy any rule into your custom template and adjust the wording or thresholds as needed.
 
 > Notes
