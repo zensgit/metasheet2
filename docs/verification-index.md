@@ -76,6 +76,11 @@ Entry points:
   - Verification: `docs/development/claude-task-pack-archives-verification-20260331.md`
   - Notes: formalizes the 14 Claude execution packs and verification templates as tracked collaboration assets, separating them from rollout/docs backlog.
 
+- DingTalk rollout docs backlog:
+  - Design: `docs/development/dingtalk-rollout-docs-backlog-design-20260331.md`
+  - Verification: `docs/development/dingtalk-rollout-docs-backlog-verification-20260331.md`
+  - Notes: formalizes the 6 DingTalk OAuth and ops-hardening design/verification/deployment docs as tracked rollout assets, leaving only `scripts/openapi-check.mjs` as tooling backlog.
+
 ## Daily / Pre-PR
 
 - Verification summary (latest):
