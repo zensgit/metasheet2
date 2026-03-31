@@ -998,7 +998,7 @@ authRouter.post('/sessions/others/logout', async (req: Request, res: Response) =
  * Returns the DingTalk authorization URL for the frontend to redirect to.
  * If DingTalk env is not configured, returns 503 with a diagnostic message.
  */
-authRouter.get('/dingtalk/launch', (_req: Request, res: Response) => {
+authRouter.get('/dingtalk/launch', async (_req: Request, res: Response) => {
   if (!isDingTalkConfigured()) {
     return res.status(503).json({
       success: false,
@@ -1007,7 +1007,7 @@ authRouter.get('/dingtalk/launch', (_req: Request, res: Response) => {
   }
 
   try {
-    const state = generateState()
+    const state = await generateState()
     const url = buildAuthUrl(state)
     res.json({ success: true, data: { url, state } })
   } catch (error) {
@@ -1035,7 +1035,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       })
     }
 
-    const stateCheck = validateState(state)
+    const stateCheck = await validateState(state)
     if (!stateCheck.valid) {
       return res.status(400).json({
         success: false,

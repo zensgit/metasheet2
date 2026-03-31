@@ -103,13 +103,13 @@ DingTalkAuthCallbackView
 
 ### 存储介质
 
-进程内 `Map<string, number>` — `state → expiresAt` 时间戳。
+Redis 优先，进程内 `Map<string, number>` 作为 graceful fallback。
 
 ### 流程
 
-1. `GET /dingtalk/launch` → `generateState()` 生成 UUID，写入 Map，返回给前端
+1. `GET /dingtalk/launch` → `generateState()` 生成 UUID，优先写入 Redis，失败时回退写入进程内 Map
 2. DingTalk 回调后前端把 `state` 原样 POST 回 `/dingtalk/callback`
-3. `validateState(state)` 从 Map 查找并一次性消费（delete）
+3. `validateState(state)` 优先从 Redis 读取并一次性消费；Redis 不可用或未命中时，再检查进程内 fallback store
 4. 不存在 → `400 Invalid or unknown state parameter`
 5. 已过期 → `400 State parameter has expired`
 
@@ -117,13 +117,14 @@ DingTalkAuthCallbackView
 
 - TTL：5 分钟（`STATE_TTL_MS = 300_000`）
 - 最大容量：10,000 条，超限时淘汰最早条目
+- Redis key 会保留额外 60 秒诊断窗口，用于区分 `expired` 和 `invalid/unknown`
 - 每次 `generateState()` 时自动清理过期条目
 
 ### 局限
 
-- 进程内存储，服务重启后全部失效（用户需重新点击"钉钉登录"）
-- 多进程部署时各进程独立，state 只在发起请求的进程有效
-- 如需多进程共享，后续可迁移到 Redis，接口不变
+- Redis 已配置时，多进程部署可以共享 state，服务重启后只要 Redis 存活就不丢失 state
+- Redis 未配置或短时不可用时，系统自动回退到进程内存储；单机场景可继续工作
+- fallback 模式下服务重启后 state 仍会失效，多进程部署也只在发起请求的进程有效
 
 ## JWT Middleware
 

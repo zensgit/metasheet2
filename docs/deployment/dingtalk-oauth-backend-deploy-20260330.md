@@ -20,6 +20,24 @@ DINGTALK_REDIRECT_URI=https://<your-domain>/auth/dingtalk/callback
 - `DINGTALK_REDIRECT_URI` 必须与 DingTalk 开放平台应用配置中的回调地址完全一致
 - 三个变量任一缺失时，`/api/auth/dingtalk/launch` 返回 503，前端自动隐藏钉钉登录按钮
 
+## 1.1 OAuth state 存储
+
+推荐同时配置 Redis，使 DingTalk OAuth `state` 在多实例和重启场景下保持可验证：
+
+```bash
+REDIS_URL=redis://<host>:6379
+```
+
+如果没有 `REDIS_URL`，也可以使用现有的拆分变量：
+
+```bash
+REDIS_HOST=<host>
+REDIS_PORT=6379
+REDIS_PASSWORD=<optional>
+```
+
+未配置 Redis 或 Redis 短时不可用时，系统会自动回退到进程内存储。回退模式在单实例部署下可工作，但服务重启后 state 会失效，多实例部署也无法跨进程共享。
+
 ## 2. 数据库（可选）
 
 如果需要通过 `dingtalk_open_id` 关联已有用户，执行：

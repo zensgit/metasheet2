@@ -86,6 +86,11 @@ Entry points:
   - Verification: `docs/development/openapi-check-tooling-verification-20260331.md`
   - Notes: formalizes `scripts/openapi-check.mjs` as the final lightweight OpenAPI smoke validator entrypoint left from this reconciliation round.
 
+- OAuth state Redis:
+  - Design: `docs/development/oauth-state-redis-design-20260331.md`
+  - Verification: `docs/development/oauth-state-redis-verification-20260331.md`
+  - Notes: upgrades DingTalk OAuth `state` from process memory to Redis-first storage, while preserving in-memory fallback for single-instance degradation.
+
 ## Daily / Pre-PR
 
 - Verification summary (latest):

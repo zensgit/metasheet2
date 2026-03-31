@@ -295,3 +295,37 @@ OpenAPI `/api/auth/dingtalk/callback` 契约对齐 runtime state 校验逻辑：
 1. [AttendanceView.vue](/Users/huazhou/Downloads/Github/metasheet2/apps/web/src/views/AttendanceView.vue#L3394) 仍有预存 `../utils/timezones` 构建错误
 2. OAuth `state` 当前是进程内内存存储，多进程和重启场景后续仍建议迁移到共享存储
 3. DingTalk env 未配置时仍会按设计自动降级，`launch` 返回 503，前端隐藏登录按钮
+
+## OAuth State Redis Slice（2026-03-31）
+
+### 目标
+
+把 DingTalk OAuth `state` 从进程内内存迁移到 Redis 优先存储，同时保留单机场景下的 graceful fallback。
+
+### 实际结果
+
+- `packages/core-backend/src/auth/dingtalk-oauth.ts`
+  - `generateState()` / `validateState()` 已切到 async
+  - Redis key 前缀：`metasheet:auth:dingtalk:state:*`
+  - Redis 失败时自动回退到进程内 `Map`
+- `packages/core-backend/src/routes/auth.ts`
+  - `/dingtalk/launch` 与 `/dingtalk/callback` 已对接 async state API
+- `packages/core-backend/tests/unit/dingtalk-oauth-state-store.test.ts`
+  - 新增 Redis state store 定向单测
+
+### 独立复跑
+
+- `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/dingtalk-oauth-state-store.test.ts`
+  - 结果：通过，`3 tests passed`
+- `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/auth-login-routes.test.ts`
+  - 结果：通过，`48 tests passed`
+- `pnpm --filter @metasheet/core-backend build`
+  - 结果：通过
+- `pnpm --filter @metasheet/web build`
+  - 结果：通过
+- `node scripts/openapi-check.mjs`
+  - 结果：通过
+
+### 当前判断
+
+本轮通过。此前“state 为进程内内存”的剩余风险已收敛为“Redis 优先，内存 fallback 只作为降级路径”。多实例部署只要共享 Redis，即可保持 callback 的 CSRF state 一致性。
