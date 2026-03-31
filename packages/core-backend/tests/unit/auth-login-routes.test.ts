@@ -10,6 +10,14 @@ const authServiceMocks = vi.hoisted(() => ({
   readTokenPayload: vi.fn(),
 }))
 
+const dingtalkMocks = vi.hoisted(() => ({
+  isDingTalkConfigured: vi.fn(),
+  buildAuthUrl: vi.fn(),
+  exchangeCodeForUser: vi.fn(),
+  generateState: vi.fn(),
+  validateState: vi.fn(),
+}))
+
 const inviteTokenMocks = vi.hoisted(() => ({
   verifyInviteToken: vi.fn(),
 }))
@@ -41,6 +49,14 @@ vi.mock('../../src/auth/AuthService', () => ({
 
 vi.mock('../../src/auth/invite-tokens', () => ({
   verifyInviteToken: inviteTokenMocks.verifyInviteToken,
+}))
+
+vi.mock('../../src/auth/dingtalk-oauth', () => ({
+  isDingTalkConfigured: dingtalkMocks.isDingTalkConfigured,
+  buildAuthUrl: dingtalkMocks.buildAuthUrl,
+  exchangeCodeForUser: dingtalkMocks.exchangeCodeForUser,
+  generateState: dingtalkMocks.generateState,
+  validateState: dingtalkMocks.validateState,
 }))
 
 vi.mock('../../src/db/pg', () => ({
@@ -150,6 +166,11 @@ describe('auth login routes', () => {
     sessionRegistryMocks.revokeUserSession.mockReset()
     sessionRegistryMocks.touchUserSession.mockReset()
     sessionRegistryMocks.revokeOtherUserSessions.mockReset()
+    dingtalkMocks.isDingTalkConfigured.mockReset()
+    dingtalkMocks.buildAuthUrl.mockReset()
+    dingtalkMocks.exchangeCodeForUser.mockReset()
+    dingtalkMocks.generateState.mockReset()
+    dingtalkMocks.validateState.mockReset()
   })
 
   it('returns feature payload on successful login', async () => {
@@ -1118,5 +1139,132 @@ describe('auth login routes', () => {
     expect(response.statusCode).toBe(400)
     expect((response.body as Record<string, any>).error).toBe('Current session is unavailable')
     expect(sessionRegistryMocks.revokeOtherUserSessions).not.toHaveBeenCalled()
+  })
+
+  // ============================================
+  // DingTalk OAuth
+  // ============================================
+
+  it('GET /dingtalk/launch returns auth URL when configured', async () => {
+    dingtalkMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkMocks.generateState.mockReturnValue('generated-state-uuid')
+    dingtalkMocks.buildAuthUrl.mockReturnValue('https://login.dingtalk.com/oauth2/auth?client_id=test')
+
+    const response = await invokeRoute('get', '/dingtalk/launch')
+
+    expect(response.statusCode).toBe(200)
+    const body = response.body as Record<string, any>
+    expect(body.success).toBe(true)
+    expect(body.data.url).toContain('dingtalk.com')
+    expect(body.data.state).toBe('generated-state-uuid')
+    expect(dingtalkMocks.generateState).toHaveBeenCalled()
+  })
+
+  it('GET /dingtalk/launch returns 503 when not configured', async () => {
+    dingtalkMocks.isDingTalkConfigured.mockReturnValue(false)
+
+    const response = await invokeRoute('get', '/dingtalk/launch')
+
+    expect(response.statusCode).toBe(503)
+    expect((response.body as Record<string, any>).error).toContain('not configured')
+  })
+
+  it('POST /dingtalk/callback returns 400 when code is missing', async () => {
+    dingtalkMocks.isDingTalkConfigured.mockReturnValue(true)
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { state: 'some-state' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error).toContain('code')
+  })
+
+  it('POST /dingtalk/callback returns 400 when state is missing', async () => {
+    dingtalkMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkMocks.validateState.mockReturnValue({ valid: false, error: 'Missing required parameter: state' })
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'auth-code' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error).toContain('state')
+  })
+
+  it('POST /dingtalk/callback returns 400 when state is invalid', async () => {
+    dingtalkMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkMocks.validateState.mockReturnValue({ valid: false, error: 'Invalid or unknown state parameter' })
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'auth-code', state: 'wrong-state' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error).toContain('Invalid or unknown state')
+  })
+
+  it('POST /dingtalk/callback returns 400 when state has expired', async () => {
+    dingtalkMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkMocks.validateState.mockReturnValue({ valid: false, error: 'State parameter has expired' })
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'auth-code', state: 'expired-state' },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error).toContain('expired')
+  })
+
+  it('POST /dingtalk/callback returns 503 when not configured', async () => {
+    dingtalkMocks.isDingTalkConfigured.mockReturnValue(false)
+    dingtalkMocks.validateState.mockReturnValue({ valid: true })
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'auth-code', state: 'valid-state' },
+    })
+
+    expect(response.statusCode).toBe(503)
+    expect((response.body as Record<string, any>).error).toContain('not configured')
+  })
+
+  it('POST /dingtalk/callback returns user and token on success', async () => {
+    dingtalkMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkMocks.validateState.mockReturnValue({ valid: true })
+    dingtalkMocks.exchangeCodeForUser.mockResolvedValue({
+      dingtalkUser: { openId: 'dt-open-1', unionId: 'dt-union-1', nick: 'Test User', email: 'test@example.com' },
+      localUserId: 'user-1',
+      localUserEmail: 'test@example.com',
+      localUserName: 'Test User',
+      localUserRole: 'admin',
+      isNewUser: false,
+    })
+    pgMocks.query.mockResolvedValue({ rows: [{ key: 'attendance:admin' }] })
+    authServiceMocks.createToken.mockResolvedValue('jwt-dingtalk-token')
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'valid-code', state: 'some-state' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    const body = response.body as Record<string, any>
+    expect(body.success).toBe(true)
+    expect(body.data.token).toBe('jwt-dingtalk-token')
+    expect(body.data.user.email).toBe('test@example.com')
+    expect(body.data.features).toBeDefined()
+    expect(body.data.features.attendance).toBe(true)
+  })
+
+  it('POST /dingtalk/callback returns 502 when DingTalk API fails', async () => {
+    dingtalkMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkMocks.validateState.mockReturnValue({ valid: true })
+    dingtalkMocks.exchangeCodeForUser.mockRejectedValue(new Error('Failed to obtain access token from DingTalk'))
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'bad-code', state: 'some-state' },
+    })
+
+    expect(response.statusCode).toBe(502)
+    expect((response.body as Record<string, any>).error).toContain('Failed to obtain access token')
   })
 })

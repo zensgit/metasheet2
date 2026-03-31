@@ -282,3 +282,102 @@ paths:
         '400': { description: Bad request }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '500': { description: Internal server error }
+  /api/auth/dingtalk/launch:
+    get:
+      summary: Get DingTalk OAuth authorization URL
+      description: |
+        Returns the DingTalk authorization URL for the frontend to redirect to.
+        Returns 503 if DingTalk env vars are not configured.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      url:
+                        type: string
+                        description: DingTalk authorization URL
+                      state:
+                        type: string
+                        description: CSRF state token
+        '503':
+          description: DingTalk not configured
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: false }
+                  error: { type: string }
+  /api/auth/dingtalk/callback:
+    post:
+      summary: Exchange DingTalk auth code for login session
+      description: |
+        Exchanges the DingTalk authorization code for a local user and JWT token.
+        Same response shape as POST /api/auth/login.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code:
+                  type: string
+                  description: DingTalk authorization code
+                state:
+                  type: string
+                  description: CSRF state token
+              required: [code, state]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      user:
+                        type: object
+                        properties:
+                          id: { type: string }
+                          email: { type: string }
+                          name: { type: string }
+                          role: { type: string }
+                      token: { type: string }
+                      features:
+                        type: object
+                        properties:
+                          attendance: { type: boolean }
+                          workflow: { type: boolean }
+                          attendanceAdmin: { type: boolean }
+                          attendanceImport: { type: boolean }
+                          mode: { type: string, enum: [platform, attendance] }
+        '400':
+          description: |
+            Request validation failed. Possible errors:
+            - Missing required parameter: code
+            - Missing required parameter: state
+            - Invalid or unknown state parameter
+            - State parameter has expired
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: false }
+                  error: { type: string }
+        '502':
+          description: DingTalk API error
+        '503':
+          description: DingTalk not configured

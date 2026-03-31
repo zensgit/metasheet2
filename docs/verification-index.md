@@ -61,6 +61,11 @@ Entry points:
   - Verification: `docs/development/attendance-build-unblock-verification-20260330.md`
   - Notes: restores `apps/web/src/utils/timezones.ts` as the canonical source for AttendanceView timezone labels/options and closes the frontend build blocker.
 
+- DingTalk runtime contract follow-ups:
+  - Design: `docs/development/dingtalk-runtime-contract-followups-design-20260331.md`
+  - Verification: `docs/development/dingtalk-runtime-contract-followups-verification-20260331.md`
+  - Notes: closes the test/OpenAPI/smoke follow-up set around the already-accepted DingTalk OAuth and directory runtime behavior, without touching runtime code.
+
 ## Daily / Pre-PR
 
 - Verification summary (latest):

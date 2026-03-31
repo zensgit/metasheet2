@@ -139,4 +139,42 @@ describe('LoginView', () => {
     expect(replaceMock).toHaveBeenCalledWith('/settings')
     unmount()
   })
+
+  it('hides DingTalk button when launch probe fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.includes('/dingtalk/launch')) {
+        return createMockResponse({ success: false, error: 'not configured' }, 503, false)
+      }
+      return createMockResponse({})
+    }))
+
+    const { container, unmount } = mountLoginView()
+    await flushPromises()
+    await nextTick()
+
+    const dingtalkBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.includes('钉钉登录'),
+    )
+    expect(dingtalkBtn).toBeUndefined()
+    unmount()
+  })
+
+  it('shows DingTalk button when launch probe succeeds', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.includes('/dingtalk/launch')) {
+        return createMockResponse({ success: true, data: { url: 'https://dingtalk.com/auth', state: 'test' } })
+      }
+      return createMockResponse({})
+    }))
+
+    const { container, unmount } = mountLoginView()
+    await flushPromises()
+    await nextTick()
+
+    const dingtalkBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent?.includes('钉钉登录'),
+    )
+    expect(dingtalkBtn).toBeDefined()
+    unmount()
+  })
 })

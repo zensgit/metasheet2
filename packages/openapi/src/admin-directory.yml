@@ -1,0 +1,457 @@
+# Admin Directory API - DingTalk Ops Hardening
+# 目录同步告警、离职审计与回滚、批量处理接口
+#
+# Canonical shapes match the runtime code in:
+#   packages/core-backend/src/directory/DirectorySyncService.ts
+#   packages/core-backend/src/directory/deprovision-ledger.ts
+#   packages/core-backend/src/routes/admin-directory.ts
+
+paths:
+  /api/admin/directory/sync/status:
+    get:
+      summary: Get directory sync status and alert state
+      description: |
+        返回当前目录同步状态。字段与 DirectorySyncStatusRecord 一致。
+      tags: [Admin Directory]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Sync status with alert state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      lastSyncAt:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      nextSyncAt:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      status:
+                        type: string
+                        enum: [idle, running, failed, completed]
+                      hasAlert:
+                        type: boolean
+                      alertMessage:
+                        type: string
+                        nullable: true
+                      alertAcknowledgedAt:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      alertAcknowledgedBy:
+                        type: string
+                        nullable: true
+        '401':
+          $ref: 'base.yml#/components/responses/Unauthorized'
+        '403':
+          $ref: 'base.yml#/components/responses/Forbidden'
+
+  /api/admin/directory/sync/acknowledge:
+    post:
+      summary: Acknowledge directory sync alert
+      description: |
+        管理员确认已知悉当前告警。返回更新后的完整 sync status。
+      tags: [Admin Directory]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Updated sync status after acknowledgement
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    description: Same shape as GET /sync/status .data
+                    properties:
+                      lastSyncAt:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      nextSyncAt:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      status:
+                        type: string
+                        enum: [idle, running, failed, completed]
+                      hasAlert:
+                        type: boolean
+                      alertMessage:
+                        type: string
+                        nullable: true
+                      alertAcknowledgedAt:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      alertAcknowledgedBy:
+                        type: string
+                        nullable: true
+        '401':
+          $ref: 'base.yml#/components/responses/Unauthorized'
+        '403':
+          $ref: 'base.yml#/components/responses/Forbidden'
+
+  /api/admin/directory/sync/history:
+    get:
+      summary: Get paginated directory sync history
+      description: |
+        返回目录同步执行历史列表。data.items 数组与 SyncHistoryRecord 一致。
+      tags: [Admin Directory]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 200
+      responses:
+        '200':
+          description: Paginated list of sync runs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            status:
+                              type: string
+                              enum: [idle, running, failed, completed]
+                            message:
+                              type: string
+                              nullable: true
+                            syncedCount:
+                              type: integer
+                            failedCount:
+                              type: integer
+                            createdAt:
+                              type: string
+                              format: date-time
+                      page:
+                        type: integer
+                      pageSize:
+                        type: integer
+                      total:
+                        type: integer
+        '401':
+          $ref: 'base.yml#/components/responses/Unauthorized'
+        '403':
+          $ref: 'base.yml#/components/responses/Forbidden'
+
+  /api/admin/directory/deprovisions:
+    get:
+      summary: List deprovision audit records
+      description: |
+        返回离职/停用操作的审计记录列表。data.items 数组与 DeprovisionRecord 一致。
+      tags: [Admin Directory]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 200
+        - in: query
+          name: q
+          description: Search by target_user_id, performed_by, or reason
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Paginated list of deprovision records
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            targetUserId:
+                              type: string
+                            performedBy:
+                              type: string
+                            reason:
+                              type: string
+                              nullable: true
+                            userSnapshot:
+                              type: object
+                            status:
+                              type: string
+                              enum: [executed, rolled-back]
+                            rolledBackBy:
+                              type: string
+                              nullable: true
+                            rolledBackAt:
+                              type: string
+                              format: date-time
+                              nullable: true
+                            createdAt:
+                              type: string
+                              format: date-time
+                            updatedAt:
+                              type: string
+                              format: date-time
+                      page:
+                        type: integer
+                      pageSize:
+                        type: integer
+                      total:
+                        type: integer
+                      query:
+                        type: string
+        '401':
+          $ref: 'base.yml#/components/responses/Unauthorized'
+        '403':
+          $ref: 'base.yml#/components/responses/Forbidden'
+
+  /api/admin/directory/deprovisions/{id}:
+    get:
+      summary: Get deprovision detail
+      description: |
+        返回单条离职/停用操作的完整详情。字段与 DeprovisionRecord 一致。
+      tags: [Admin Directory]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Deprovision detail with snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      targetUserId:
+                        type: string
+                      performedBy:
+                        type: string
+                      reason:
+                        type: string
+                        nullable: true
+                      userSnapshot:
+                        type: object
+                        description: Pre-deprovision state snapshot (JSONB)
+                      status:
+                        type: string
+                        enum: [executed, rolled-back]
+                      rolledBackBy:
+                        type: string
+                        nullable: true
+                      rolledBackAt:
+                        type: string
+                        format: date-time
+                        nullable: true
+                      createdAt:
+                        type: string
+                        format: date-time
+                      updatedAt:
+                        type: string
+                        format: date-time
+        '401':
+          $ref: 'base.yml#/components/responses/Unauthorized'
+        '403':
+          $ref: 'base.yml#/components/responses/Forbidden'
+        '404':
+          $ref: 'base.yml#/components/responses/NotFound'
+
+  /api/admin/directory/deprovisions/{id}/rollback:
+    post:
+      summary: Rollback a deprovision
+      description: |
+        回滚一次离职/停用操作。返回 { record, snapshot }。
+      tags: [Admin Directory]
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Rollback result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      record:
+                        type: object
+                        description: Updated DeprovisionRecord
+                        properties:
+                          id:
+                            type: string
+                          targetUserId:
+                            type: string
+                          performedBy:
+                            type: string
+                          reason:
+                            type: string
+                            nullable: true
+                          userSnapshot:
+                            type: object
+                          status:
+                            type: string
+                            enum: [rolled-back]
+                          rolledBackBy:
+                            type: string
+                          rolledBackAt:
+                            type: string
+                            format: date-time
+                          createdAt:
+                            type: string
+                            format: date-time
+                          updatedAt:
+                            type: string
+                            format: date-time
+                      snapshot:
+                        type: object
+                        description: The userSnapshot for restoration
+        '401':
+          $ref: 'base.yml#/components/responses/Unauthorized'
+        '403':
+          $ref: 'base.yml#/components/responses/Forbidden'
+        '404':
+          $ref: 'base.yml#/components/responses/NotFound'
+
+  /api/admin/users/batch:
+    post:
+      summary: Batch approve or reject pending users
+      description: |
+        批量处理待审核用户。每个用户的处理结果会独立记入审计日志。
+      tags: [Admin Users]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action:
+                  type: string
+                  enum: [approve, reject]
+                userIds:
+                  type: array
+                  items:
+                    type: string
+                  minItems: 1
+                reason:
+                  type: string
+                  nullable: true
+              required: [action, userIds]
+      responses:
+        '200':
+          description: Batch result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      processed:
+                        type: integer
+                      failed:
+                        type: integer
+                      results:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            userId:
+                              type: string
+                            status:
+                              type: string
+                              enum: [ok, error]
+                            error:
+                              type: string
+                              nullable: true
+        '401':
+          $ref: 'base.yml#/components/responses/Unauthorized'
+        '403':
+          $ref: 'base.yml#/components/responses/Forbidden'
+        '422':
+          $ref: 'base.yml#/components/responses/ValidationError'
