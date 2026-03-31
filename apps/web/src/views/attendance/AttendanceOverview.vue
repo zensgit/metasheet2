@@ -1,8 +1,13 @@
 <template>
-  <AttendanceView mode="overview" />
+  <AttendanceView mode="overview" :initial-section-id="initialSectionId" />
 </template>
 
 <script setup lang="ts">
 import AttendanceView from '../AttendanceView.vue'
-</script>
 
+withDefaults(defineProps<{
+  initialSectionId?: string
+}>(), {
+  initialSectionId: '',
+})
+</script>

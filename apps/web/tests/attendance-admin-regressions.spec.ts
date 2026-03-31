@@ -356,6 +356,7 @@ describe('Attendance admin regressions', () => {
     const actionCell = visibleEditButton?.closest('td')
     expect(actionCell).toBeTruthy()
     expect(actionCell?.classList.contains('attendance__table-actions')).toBe(true)
+    expect(window.getComputedStyle(actionCell!).display).toBe('table-cell')
   })
 
   it('restores the run21 holiday calendar, rule builder, and import template guidance', async () => {

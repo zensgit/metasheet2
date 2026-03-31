@@ -73,7 +73,7 @@
       </section>
 
       <section class="attendance__grid" v-if="showOverview">
-        <div class="attendance__card">
+        <div class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requests)">
           <h3>{{ tr('Summary', '汇总') }}</h3>
           <small class="attendance__field-hint">{{ summaryTimezoneContextHint }}</small>
           <div v-if="summary" class="attendance__summary">
@@ -181,7 +181,7 @@
           </div>
         </div>
 
-        <div class="attendance__card">
+        <div class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies)">
           <h3>{{ tr('Adjustment Request', '补卡申请') }}</h3>
           <small class="attendance__field-hint">{{ requestTimezoneContextHint }}</small>
           <div class="attendance__request-form">
@@ -318,7 +318,7 @@
           </div>
         </div>
 
-        <div class="attendance__card">
+        <div class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)">
           <div class="attendance__requests-header">
             <h3>{{ tr('Anomalies', '异常') }}</h3>
             <button class="attendance__btn" :disabled="anomaliesLoading || loading" @click="reloadAnomaliesWithStatus">
@@ -403,7 +403,7 @@
         </div>
       </section>
 
-      <section class="attendance__card" v-if="showOverview">
+      <section class="attendance__card" v-if="showOverview" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.records)">
         <div class="attendance__records-header">
           <h3>{{ tr('Records', '记录') }}</h3>
           <div class="attendance__records-actions">
@@ -2001,8 +2001,11 @@
                     </div>
                   </div>
                 </div>
-                <label class="attendance__field attendance__field--full" for="attendance-rule-set-config">
+                <label class="attendance__field attendance__field--full attendance__rule-set-json-panel" for="attendance-rule-set-config">
                   <span>{{ tr('Config (JSON)', '配置（JSON）') }}</span>
+                  <small class="attendance__field-hint">
+                    {{ tr('Advanced mode: inspect or fine-tune the JSON after using the structured builder.', '高级模式：可在使用结构化构建器后继续检查或微调 JSON。') }}
+                  </small>
                   <textarea
                     id="attendance-rule-set-config"
                     name="ruleSetConfig"
@@ -4024,6 +4027,13 @@ import { buildTimezoneOptions, formatTimezoneLabel } from '../utils/timezones'
 
 type AttendancePageMode = 'overview' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
+const ATTENDANCE_OVERVIEW_SECTION_IDS = {
+  requests: 'attendance-overview-requests',
+  anomalies: 'attendance-overview-anomalies',
+  requestReport: 'attendance-overview-request-report',
+  records: 'attendance-overview-records',
+} as const
+type AttendanceOverviewSectionId = typeof ATTENDANCE_OVERVIEW_SECTION_IDS[keyof typeof ATTENDANCE_OVERVIEW_SECTION_IDS]
 type AttendanceStatusAction =
   | 'refresh-overview'
   | 'reload-admin'
@@ -4056,9 +4066,11 @@ interface AttendanceStatusMeta {
 const props = withDefaults(
   defineProps<{
     mode?: AttendancePageMode
+    initialSectionId?: string
   }>(),
   {
     mode: 'overview',
+    initialSectionId: '',
   }
 )
 
@@ -5063,6 +5075,28 @@ const pluginErrorMessage = computed(() => pluginsError.value)
 
 const showAdmin = computed(() => props.mode === 'admin')
 const showOverview = computed(() => props.mode === 'overview')
+const overviewSectionElements = new Map<string, HTMLElement>()
+
+function isKnownOverviewSectionId(id: string | null | undefined): id is AttendanceOverviewSectionId {
+  if (!id) return false
+  return Object.values(ATTENDANCE_OVERVIEW_SECTION_IDS).includes(id as AttendanceOverviewSectionId)
+}
+
+function setOverviewSectionRef(id: string, element: Element | null): void {
+  if (element instanceof HTMLElement) {
+    overviewSectionElements.set(id, element)
+    return
+  }
+  overviewSectionElements.delete(id)
+}
+
+function overviewSectionBinding(id: AttendanceOverviewSectionId): Record<string, unknown> {
+  return {
+    id,
+    'data-overview-section': id,
+    ref: (element: Element | null) => setOverviewSectionRef(id, element),
+  }
+}
 
 const {
   adminActiveSectionId,
@@ -5148,6 +5182,23 @@ function selectAdminSection(id: string): void {
   void nextTick(() => {
     scrollToAdminSection(id)
   })
+}
+
+async function focusInitialAttendanceSection(): Promise<void> {
+  const targetId = props.initialSectionId.trim()
+  if (!targetId || !attendancePluginActive.value) return
+
+  if (showAdmin.value && !adminForbidden.value && isKnownAdminSectionId(targetId)) {
+    selectAdminSection(targetId)
+    return
+  }
+
+  if (!showOverview.value || !isKnownOverviewSectionId(targetId) || typeof document === 'undefined') return
+  await nextTick()
+  const target = overviewSectionElements.get(targetId) ?? document.getElementById(targetId)
+  if (target instanceof HTMLElement) {
+    target.scrollIntoView({ behavior: 'auto', block: 'start' })
+  }
 }
 
 function handleAdminQuickJumpChange(event: Event): void {
@@ -11921,6 +11972,14 @@ watch(orgId, () => {
   }
 })
 
+watch(
+  () => [props.initialSectionId, showAdmin.value, showOverview.value, adminForbidden.value, attendancePluginActive.value] as const,
+  () => {
+    void focusInitialAttendanceSection()
+  },
+  { immediate: true },
+)
+
 watch(attendanceGroupMemberGroupId, () => {
   if (attendancePluginActive.value) {
     loadAttendanceGroupMembers()
@@ -12412,10 +12471,27 @@ const holidaySectionBindings = {
 }
 
 .attendance__table td.attendance__table-actions {
-  width: 1%;
+  display: table-cell;
+  width: auto;
   min-width: max-content;
   height: auto;
   vertical-align: middle;
+  white-space: nowrap;
+}
+
+.attendance__table td.attendance__table-actions > .attendance__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: fit-content;
+  min-height: 36px;
+  white-space: nowrap;
+  margin-right: 8px;
+  margin-bottom: 8px;
+}
+
+.attendance__table td.attendance__table-actions > .attendance__btn:last-child {
+  margin-right: 0;
 }
 
 .attendance__table-actions .attendance__btn {
@@ -12747,11 +12823,25 @@ const holidaySectionBindings = {
   gap: 12px;
 }
 
+.attendance__rule-builder,
+.attendance__rule-set-json-panel {
+  padding: 16px;
+  border: 1px solid #d9e3f1;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
 .attendance__rule-builder > .attendance__admin-section-header,
 .attendance__rule-builder-preview > .attendance__admin-section-header,
 .attendance__preview-builder > .attendance__admin-section-header {
   align-items: flex-start;
   flex-wrap: wrap;
+}
+
+.attendance__rule-builder > .attendance__admin-section-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
 }
 
 .attendance__template-guide {
@@ -12840,7 +12930,18 @@ const holidaySectionBindings = {
 }
 
 .attendance__rule-builder-summary {
-  margin-left: auto;
+  margin-left: 0;
+  width: 100%;
+}
+
+.attendance__rule-builder-summary span {
+  display: grid;
+  gap: 4px;
+  min-width: 148px;
+  padding: 10px 12px;
+  border: 1px solid #dce6f3;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.96);
 }
 
 .attendance__rule-builder-summary strong,
@@ -13011,6 +13112,11 @@ const holidaySectionBindings = {
 
 .attendance__preview-row--selected {
   background: rgba(239, 246, 255, 0.7);
+}
+
+.attendance__rule-set-json-panel textarea {
+  min-height: 220px;
+  font-family: 'SFMono-Regular', ui-monospace, 'Cascadia Mono', 'Segoe UI Mono', monospace;
 }
 
 .attendance__severity {

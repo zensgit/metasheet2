@@ -27,12 +27,25 @@
 
     <AttendanceOverview
       v-else-if="activeTab === 'overview'"
+      key="attendance-overview"
+    />
+    <AttendanceOverview
+      v-else-if="activeTab === 'reports'"
+      key="attendance-reports"
+      initial-section-id="attendance-overview-request-report"
     />
     <AttendanceAdminCenter
       v-else-if="activeTab === 'admin' && canAccessAdmin"
+      key="attendance-admin"
+    />
+    <AttendanceAdminCenter
+      v-else-if="activeTab === 'import' && canAccessAdmin"
+      key="attendance-import"
+      initial-section-id="attendance-admin-import"
     />
     <AttendanceWorkflowDesigner
       v-else-if="activeTab === 'workflow'"
+      key="attendance-workflow"
       :can-design="canAccessWorkflow"
     />
     <section v-else class="attendance-shell__desktop-hint">
@@ -51,7 +64,7 @@ import AttendanceOverview from './AttendanceOverview.vue'
 import AttendanceAdminCenter from './AttendanceAdminCenter.vue'
 import AttendanceWorkflowDesigner from './AttendanceWorkflowDesigner.vue'
 
-type AttendanceTab = 'overview' | 'admin' | 'workflow'
+type AttendanceTab = 'overview' | 'reports' | 'admin' | 'import' | 'workflow'
 
 const route = useRoute()
 const router = useRouter()
@@ -64,12 +77,14 @@ const isMobile = ref(false)
 
 const canAccessAdmin = computed(() => hasFeature('attendanceAdmin'))
 const canAccessWorkflow = computed(() => hasFeature('workflow'))
-const desktopOnlyTabs: AttendanceTab[] = ['admin', 'workflow']
+const desktopOnlyTabs: AttendanceTab[] = ['admin', 'import', 'workflow']
 const t = computed(() => isZh.value
   ? {
       attendanceSections: '考勤模块',
       overview: '总览',
+      reports: '报表',
       adminCenter: '管理中心',
+      importCenter: '导入',
       workflowDesigner: '流程设计',
       loadingAttendance: '加载考勤模块...',
       desktopRecommended: '建议使用桌面端',
@@ -82,7 +97,9 @@ const t = computed(() => isZh.value
   : {
       attendanceSections: 'Attendance sections',
       overview: 'Overview',
+      reports: 'Reports',
       adminCenter: 'Admin Center',
+      importCenter: 'Import',
       workflowDesigner: 'Workflow Designer',
       loadingAttendance: 'Loading attendance module...',
       desktopRecommended: 'Desktop recommended',
@@ -96,10 +113,12 @@ const t = computed(() => isZh.value
 const availableTabs = computed<Array<{ id: AttendanceTab; label: string }>>(() => {
   const tabs: Array<{ id: AttendanceTab; label: string }> = [
     { id: 'overview', label: t.value.overview },
+    { id: 'reports', label: t.value.reports },
   ]
 
   if (canAccessAdmin.value) {
     tabs.push({ id: 'admin', label: t.value.adminCenter })
+    tabs.push({ id: 'import', label: t.value.importCenter })
   }
 
   if (canAccessWorkflow.value) {
@@ -143,7 +162,7 @@ function updateMobileState(): void {
 }
 
 function normalizeTab(value: unknown): AttendanceTab {
-  if (value === 'admin' || value === 'workflow' || value === 'overview') return value
+  if (value === 'admin' || value === 'workflow' || value === 'overview' || value === 'reports' || value === 'import') return value
   return 'overview'
 }
 
