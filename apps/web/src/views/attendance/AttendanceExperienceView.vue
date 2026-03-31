@@ -25,28 +25,11 @@
       </button>
     </section>
 
-    <AttendanceOverview
-      v-else-if="activeTab === 'overview'"
-      key="attendance-overview"
-    />
-    <AttendanceOverview
-      v-else-if="activeTab === 'reports'"
-      key="attendance-reports"
-      initial-section-id="attendance-overview-request-report"
-    />
-    <AttendanceAdminCenter
-      v-else-if="activeTab === 'admin' && canAccessAdmin"
-      key="attendance-admin"
-    />
-    <AttendanceAdminCenter
-      v-else-if="activeTab === 'import' && canAccessAdmin"
-      key="attendance-import"
-      initial-section-id="attendance-admin-import"
-    />
-    <AttendanceWorkflowDesigner
-      v-else-if="activeTab === 'workflow'"
-      key="attendance-workflow"
-      :can-design="canAccessWorkflow"
+    <component
+      v-else-if="activeView"
+      :is="activeView.component"
+      :key="activeView.key"
+      v-bind="activeView.props"
     />
     <section v-else class="attendance-shell__desktop-hint">
       <h3>{{ t.capabilityUnavailable }}</h3>
@@ -135,6 +118,44 @@ const desktopOnlyMessage = computed(() => {
     return t.value.workflowDesktopHint
   }
   return t.value.adminDesktopHint
+})
+
+const activeView = computed(() => {
+  switch (activeTab.value) {
+    case 'overview':
+      return {
+        component: AttendanceOverview,
+        key: 'attendance-overview',
+        props: {},
+      }
+    case 'reports':
+      return {
+        component: AttendanceOverview,
+        key: 'attendance-reports',
+        props: { initialSectionId: 'attendance-overview-request-report' },
+      }
+    case 'admin':
+      if (!canAccessAdmin.value) return null
+      return {
+        component: AttendanceAdminCenter,
+        key: 'attendance-admin',
+        props: {},
+      }
+    case 'import':
+      if (!canAccessAdmin.value) return null
+      return {
+        component: AttendanceAdminCenter,
+        key: 'attendance-import',
+        props: { initialSectionId: 'attendance-admin-import' },
+      }
+    case 'workflow':
+      if (!canAccessWorkflow.value) return null
+      return {
+        component: AttendanceWorkflowDesigner,
+        key: 'attendance-workflow',
+        props: { canDesign: canAccessWorkflow.value },
+      }
+  }
 })
 
 function updateMobileState(): void {
