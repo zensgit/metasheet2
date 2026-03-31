@@ -838,3 +838,6 @@ Entry points:
 - Attendance build unblock:
   - Design: `docs/development/attendance-build-unblock-design-20260330.md`
   - Verification: `docs/development/attendance-build-unblock-verification-20260330.md`
+- Repo baseline reconciliation:
+  - Design: `docs/development/repo-baseline-reconciliation-design-20260330.md`
+  - Verification: `docs/development/repo-baseline-reconciliation-verification-20260330.md`
