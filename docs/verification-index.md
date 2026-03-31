@@ -91,6 +91,10 @@ Entry points:
   - Verification: `docs/development/oauth-state-redis-verification-20260331.md`
   - Notes: upgrades DingTalk OAuth `state` from process memory to Redis-first storage, while preserving in-memory fallback for single-instance degradation.
 
+- OAuth state Redis on-prem rollout:
+  - Verification: `docs/deployment/oauth-state-redis-onprem-rollout-verification-20260331.md`
+  - Notes: confirms the new backend image is deployed on `142.171.239.56` and proves Redis-backed state survives a backend restart.
+
 ## Daily / Pre-PR
 
 - Verification summary (latest):
