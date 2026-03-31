@@ -81,6 +81,11 @@ Entry points:
   - Verification: `docs/development/dingtalk-rollout-docs-backlog-verification-20260331.md`
   - Notes: formalizes the 6 DingTalk OAuth and ops-hardening design/verification/deployment docs as tracked rollout assets, leaving only `scripts/openapi-check.mjs` as tooling backlog.
 
+- OpenAPI check tooling:
+  - Design: `docs/development/openapi-check-tooling-design-20260331.md`
+  - Verification: `docs/development/openapi-check-tooling-verification-20260331.md`
+  - Notes: formalizes `scripts/openapi-check.mjs` as the final lightweight OpenAPI smoke validator entrypoint left from this reconciliation round.
+
 ## Daily / Pre-PR
 
 - Verification summary (latest):
