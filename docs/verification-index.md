@@ -71,6 +71,11 @@ Entry points:
   - Verification: `docs/development/generated-artifacts-cleanup-verification-20260331.md`
   - Notes: removes `.claude/worktrees/tender-elion`, `output/releases`, and `output/repo-baseline-reconciliation`, collapsing the dirty tree down to real docs/scripts backlog.
 
+- Claude task pack archives:
+  - Design: `docs/development/claude-task-pack-archives-design-20260331.md`
+  - Verification: `docs/development/claude-task-pack-archives-verification-20260331.md`
+  - Notes: formalizes the 14 Claude execution packs and verification templates as tracked collaboration assets, separating them from rollout/docs backlog.
+
 ## Daily / Pre-PR
 
 - Verification summary (latest):
