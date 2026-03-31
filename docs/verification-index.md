@@ -66,6 +66,11 @@ Entry points:
   - Verification: `docs/development/dingtalk-runtime-contract-followups-verification-20260331.md`
   - Notes: closes the test/OpenAPI/smoke follow-up set around the already-accepted DingTalk OAuth and directory runtime behavior, without touching runtime code.
 
+- Generated artifacts cleanup:
+  - Design: `docs/development/generated-artifacts-cleanup-design-20260331.md`
+  - Verification: `docs/development/generated-artifacts-cleanup-verification-20260331.md`
+  - Notes: removes `.claude/worktrees/tender-elion`, `output/releases`, and `output/repo-baseline-reconciliation`, collapsing the dirty tree down to real docs/scripts backlog.
+
 ## Daily / Pre-PR
 
 - Verification summary (latest):
