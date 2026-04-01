@@ -26,7 +26,11 @@ pnpm verify:dingtalk-oauth-alert-notify:webhooksite
 
 ### 2. rollout 读取持久化配置
 
-在未显式传入 `ALERTMANAGER_WEBHOOK_URL` 时，`dingtalk-onprem-alert-notify-rollout.sh` 已从远端持久化文件读取 webhook URL 并完成 rollout。
+在未显式传入 `ALERTMANAGER_WEBHOOK_URL` 时，`dingtalk-onprem-alert-notify-rollout.sh` 已从远端持久化文件读取 webhook URL 并完成 rollout，实际输出：
+
+```text
+[onprem-alert-notify] resolved default receiver source: remote-persisted
+```
 
 ### 3. 外部 webhook 命中
 
@@ -39,22 +43,18 @@ user_agent=Alertmanager/0.27.0
 ip=142.171.239.56
 ```
 
-### 4. 恢复到本地默认 receiver
+### 4. 恢复到无持久化配置
 
 exercise 结束后已恢复为：
 
 ```text
-ALERTMANAGER_WEBHOOK_URL=http://alert-webhook:8080/notify
+configured=false
 ```
 
-对应 `--print-status`：
+并且已确认：
 
-```text
-configured=true
-scheme=http
-host=alert-webhook:8080
-path_length=7
-```
+- `/home/mainuser/metasheet2/docker/observability/alertmanager/alertmanager.onprem.env` 不存在
+- `/home/mainuser/metasheet2/docker/observability/alertmanager/alertmanager.onprem.yml` 中的 `default-webhook` 已回到 `http://alert-webhook:8080/notify`
 
 ## 结论
 

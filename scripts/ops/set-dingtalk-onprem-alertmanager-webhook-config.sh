@@ -9,7 +9,6 @@ REMOTE_APP_DIR="${REMOTE_APP_DIR:-/home/mainuser/metasheet2}"
 REMOTE_CONFIG_FILE="${REMOTE_APP_DIR}/docker/observability/alertmanager/alertmanager.onprem.env"
 MODE="${1:-set}"
 WEBHOOK_URL="${ALERTMANAGER_WEBHOOK_URL:-}"
-DEFAULT_LOCAL_WEBHOOK_URL="http://alert-webhook:8080/notify"
 
 ssh_cmd() {
   ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no "${SSH_USER_HOST}" "$@"
@@ -91,10 +90,6 @@ case "${MODE}" in
     fi
     write_config
     ;;
-  --set-local-default)
-    WEBHOOK_URL="${DEFAULT_LOCAL_WEBHOOK_URL}"
-    write_config
-    ;;
   --clear)
     clear_config
     ;;
@@ -102,7 +97,7 @@ case "${MODE}" in
     print_status
     ;;
   *)
-    echo "usage: $0 [set|--set-local-default|--clear|--print-status]" >&2
+    echo "usage: $0 [set|--clear|--print-status]" >&2
     exit 1
     ;;
 esac

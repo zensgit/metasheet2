@@ -25,13 +25,7 @@ bash scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh --print-stat
 bash scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh --clear
 ```
 
-仅当你希望删除持久化文件、完全回退到 rollout 的纯 fallback 行为时才需要 `--clear`。
-
-## 恢复安全默认值
-
-```bash
-bash scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh --set-local-default
-```
+`--clear` 会删除持久化文件。之后若未显式传 `ALERTMANAGER_WEBHOOK_URL`，notify rollout 会按 fallback 回退到本地默认 receiver。
 
 ## 应用配置
 

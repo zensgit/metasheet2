@@ -29,7 +29,7 @@ Webhook.site 实际收到来自目标主机的 POST：
 
 ```text
 alertname=DingTalkOAuthExternalWebhookExercise
-exercise_id=external-1775011925
+exercise_id=external-1775014044
 user_agent=Alertmanager/0.27.0
 ip=142.171.239.56
 ```
@@ -42,7 +42,8 @@ exercise 结束后再次确认：
 - `metasheet-alert-webhook` healthy
 - `metasheet-prometheus` healthy
 - `metasheet-grafana` healthy
-- `/home/mainuser/metasheet2/docker/observability/alertmanager/alertmanager.onprem.env` 已恢复成本地默认 `http://alert-webhook:8080/notify`
+- `/home/mainuser/metasheet2/docker/observability/alertmanager/alertmanager.onprem.env` 已被清除，`--print-status` 返回 `configured=false`
+- `/home/mainuser/metasheet2/docker/observability/alertmanager/alertmanager.onprem.yml` 中的 `default-webhook` 已回到 `http://alert-webhook:8080/notify`
 
 ## 结论
 
@@ -51,5 +52,6 @@ exercise 结束后再次确认：
 当前已能证明：
 
 1. Alertmanager 到外部 webhook 的真实出站网络可用
-2. 目标主机可在短时覆盖外部 URL 后恢复到本地默认 receiver
-3. 若后续提供长期 Slack / DingTalk / Feishu webhook，可直接复用同一 rollout 路径
+2. 目标主机可在短时使用外部 URL 后恢复到 `configured=false`
+3. 若后续再次执行 notify rollout，默认 receiver 会按 fallback 回到本地 `http://alert-webhook:8080/notify`
+4. 若后续提供长期 Slack / DingTalk / Feishu webhook，可直接复用同一 rollout 路径

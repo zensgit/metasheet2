@@ -12,7 +12,7 @@ ROLLBACK_DONE="false"
 
 cleanup() {
   if [ "${RESTORE_LOCAL_NOTIFY}" = "true" ] && [ "${ROLLBACK_DONE}" != "true" ]; then
-    bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh" --set-local-default >/dev/null 2>&1 || true
+    bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh" --clear >/dev/null 2>&1 || true
     if bash "${ROOT_DIR}/scripts/ops/dingtalk-onprem-alert-notify-rollout.sh" >/dev/null 2>&1; then
       ROLLBACK_DONE="true"
     fi
@@ -112,8 +112,8 @@ for _ in $(seq 1 20); do
     echo "[oauth-alert-notify-webhooksite] PASS"
     echo "${requests_json}"
     if [ "${RESTORE_LOCAL_NOTIFY}" = "true" ]; then
-      echo "[oauth-alert-notify-webhooksite] restoring local default receiver"
-      bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh" --set-local-default >/dev/null
+      echo "[oauth-alert-notify-webhooksite] restoring local default receiver by clearing persisted config"
+      bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh" --clear >/dev/null
       bash "${ROOT_DIR}/scripts/ops/dingtalk-onprem-alert-notify-rollout.sh" >/dev/null
       ROLLBACK_DONE="true"
     fi

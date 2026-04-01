@@ -26,19 +26,19 @@
 
 外部 exercise 只是在此基础上：
 
-1. 临时覆盖 `ALERTMANAGER_WEBHOOK_URL`
+1. 临时写入持久化 `ALERTMANAGER_WEBHOOK_URL`
 2. 发送一条不命中 `local-test-webhook` 路由的 `DingTalkOAuthExternalWebhookExercise`
 3. 在 Webhook.site 上确认实际收到请求
-4. 恢复本地默认 receiver
+4. 清除持久化配置，让主机回到 `configured=false`
 
-### 3. 为什么要恢复本地默认 receiver
+### 3. 为什么要清除持久化配置
 
 因为当前主机没有持久化的外部通知凭据。一次性 request-capture 只用于证明：
 
 - 远端 Alertmanager 能向公网 webhook 发出请求
 - 当前网络、TLS、HTTP 出站链路正常
 
-验证完成后，恢复本地 receiver 可以避免把临时 URL 留在生产配置中。
+验证完成后，清除持久化配置可以避免把临时 URL 留在生产配置中；后续如需本地自证，notify rollout 会按 fallback 再回到本地 receiver。
 
 ## 非目标
 

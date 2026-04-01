@@ -41,9 +41,9 @@ pnpm verify:dingtalk-oauth-alert-notify:webhooksite
 该脚本会：
 
 1. 创建临时 Webhook.site 端点
-2. 临时覆盖 `ALERTMANAGER_WEBHOOK_URL`
+2. 临时写入持久化 `ALERTMANAGER_WEBHOOK_URL`
 3. 验证外部投递成功
-4. 自动恢复本地默认 receiver
+4. 自动清除持久化配置并回到 `configured=false`
 
 若已经拿到正式长期 webhook，则不要每次手工传环境变量，改用持久化配置入口：
 

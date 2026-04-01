@@ -38,8 +38,7 @@ ALERTMANAGER_WEBHOOK_URL=https://example.com/your/webhook
 职责：
 
 - `set`：写入远端持久化 webhook URL
-- `--set-local-default`：把持久化配置恢复为安全本地默认 receiver
-- `--clear`：删除远端持久化配置（仅在需要回退到纯 fallback 行为时使用）
+- `--clear`：删除远端持久化配置；后续 notify rollout 若未显式覆盖，将按 fallback 回到安全本地默认 receiver
 - `--print-status`：输出是否已配置，以及经脱敏后的 host / scheme 信息
 
 ### 3. rollout 读取优先级
@@ -59,7 +58,7 @@ ALERTMANAGER_WEBHOOK_URL=https://example.com/your/webhook
 1. 先通过 `set-dingtalk-onprem-alertmanager-webhook-config.sh` 写入临时外部 URL
 2. 不再通过环境变量传参，直接执行 notify rollout
 3. 确认外部请求命中
-4. 通过 `--set-local-default` 恢复到安全本地默认 receiver
+4. 通过 `--clear` 删除持久化配置，确认主机回到 `configured=false`；后续 rollout 再按 fallback 回到安全本地默认 receiver
 
 ## 非目标
 

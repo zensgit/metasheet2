@@ -14,6 +14,7 @@ build/
 .env.local
 .env.*.local
 docker/app.env
+docker/observability/alertmanager/alertmanager.onprem.env
 docker-compose.override.yml
 
 # IDE
