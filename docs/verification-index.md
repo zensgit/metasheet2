@@ -95,6 +95,13 @@ Entry points:
   - Verification: `docs/deployment/oauth-state-redis-onprem-rollout-verification-20260331.md`
   - Notes: confirms the new backend image is deployed on `142.171.239.56` and proves Redis-backed state survives a backend restart.
 
+- DingTalk login e2e smoke:
+  - Script: `node scripts/dingtalk-login-e2e-smoke.mjs`
+  - Package script: `pnpm verify:dingtalk-login-e2e-smoke`
+  - Design: `docs/development/dingtalk-login-e2e-smoke-design-20260331.md`
+  - Verification: `docs/development/dingtalk-login-e2e-smoke-verification-20260331.md`
+  - Notes: browser-level DingTalk login smoke, including real login-button/redirect/error flows and a simulated success callback handoff.
+
 ## Daily / Pre-PR
 
 - Verification summary (latest):
