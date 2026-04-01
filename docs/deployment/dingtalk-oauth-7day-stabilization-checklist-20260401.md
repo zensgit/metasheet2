@@ -54,12 +54,10 @@ pnpm ops:onprem-alert-drill
 在 7 天窗口内至少安排一次第二操作者独立执行：
 
 ```bash
-bash scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh --print-status
-bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
-pnpm ops:onprem-alert-drill
+pnpm ops:onprem-alert-second-operator-drill
 ```
 
-并由其在 `#metasheet-alerts` 中核对 firing / resolved。
+并由其在 `#metasheet-alerts` 中核对相同 `drillId` 的 firing / resolved。
 
 ## 通过标准
 

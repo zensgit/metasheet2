@@ -34,6 +34,7 @@
     "ops:onprem-grafana-alert-rollout": "bash scripts/ops/dingtalk-onprem-observability-rollout.sh",
     "ops:onprem-alert-notify-rollout": "bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh",
     "ops:onprem-alert-drill": "bash scripts/ops/dingtalk-onprem-alert-drill.sh",
+    "ops:onprem-alert-second-operator-drill": "bash scripts/ops/dingtalk-onprem-second-operator-drill.sh",
     "ops:dingtalk-oauth-stability-check": "bash scripts/ops/dingtalk-oauth-stability-check.sh",
     "verify:attendance-locale-zh": "node scripts/verify-attendance-locale-zh-smoke.mjs",
     "verify:attendance-zh-copy-contract": "node scripts/ops/attendance-verify-zh-copy-contract.mjs",

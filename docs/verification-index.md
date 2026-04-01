@@ -135,6 +135,10 @@ Entry points:
   - 7-day stabilization checklist: `docs/deployment/dingtalk-oauth-7day-stabilization-checklist-20260401.md`
   - 7-day stabilization Day 0: `docs/deployment/dingtalk-oauth-7day-stabilization-day0-20260401.md`
   - Stability check command: `pnpm ops:dingtalk-oauth-stability-check`
+  - Second-operator handoff command: `pnpm ops:onprem-alert-second-operator-drill`
+  - Second-operator handoff design: `docs/development/onprem-second-operator-handoff-design-20260401.md`
+  - Second-operator handoff verification: `docs/development/onprem-second-operator-handoff-verification-20260401.md`
+  - Second-operator handoff runbook: `docs/deployment/onprem-second-operator-handoff-20260401.md`
   - On-prem rollout: `docs/deployment/oauth-state-observability-onprem-rollout-verification-20260401.md`
   - Notes: adds dedicated DingTalk OAuth state metrics, fallback counters, callback rejection logs, Prometheus alert rules, a Grafana overview dashboard, an Alertmanager bridge that translates Slack notifications, and an on-prem firing/resolved drill runbook.
 

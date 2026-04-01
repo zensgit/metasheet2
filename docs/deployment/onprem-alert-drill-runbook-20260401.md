@@ -42,6 +42,16 @@ pnpm ops:onprem-alert-drill
 - `firingObserved=true`
 - `resolvedObserved=true`
 
+### 第二操作者快捷入口
+
+如需让第二操作者按统一顺序完成 status / rollout / 日检 / drill，可直接执行：
+
+```bash
+pnpm ops:onprem-alert-second-operator-drill
+```
+
+该命令会输出最终 `drillId=...`，再到 `#metasheet-alerts` 手动核对 firing / resolved。
+
 ## 4. 在 Slack 频道核对
 
 进入 `#metasheet-alerts`，确认同一 `drillId` 对应两条消息：
@@ -100,5 +110,6 @@ bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
 优先检查：
 
 - `pnpm ops:onprem-alert-drill` 是否真的观察到了 resolved
+- `pnpm ops:onprem-alert-second-operator-drill` 是否输出了 drillId
 - `docker logs metasheet-alert-webhook` 是否有 `/notify` resolved payload
 - Slack 频道是否筛掉了较早消息
