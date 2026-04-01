@@ -804,6 +804,17 @@ export function buildPlmAuditTeamViewCollaborationDraft(
   }
 }
 
+export function resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter(
+  source: PlmAuditTeamViewCollaborationSource | null | undefined,
+  sourceRecommendationFilter?: PlmRecommendedAuditTeamViewFilter,
+): PlmRecommendedAuditTeamViewFilter | undefined {
+  if (source !== 'recommendation') {
+    return undefined
+  }
+
+  return sourceRecommendationFilter ?? ''
+}
+
 export function buildPlmAuditTeamViewCollaborationNotice(
   view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'name' | 'isDefault' | 'isArchived'>,
   draft: PlmAuditTeamViewCollaborationDraft | null,

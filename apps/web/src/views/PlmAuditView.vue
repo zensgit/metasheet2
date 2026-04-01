@@ -877,6 +877,7 @@ import {
   buildPlmAuditTeamViewCollaborationHandoff,
   buildPlmAuditTeamViewCollaborationFollowupNotice,
   buildPlmAuditTeamViewCollaborationNotice,
+  resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter,
   buildPlmAuditTeamViewCollaborationSourceFocusIntent,
   findPlmAuditTeamViewCollaborationDraftView,
   findPlmAuditTeamViewCollaborationFollowupView,
@@ -2642,6 +2643,7 @@ async function shareAuditTeamViewEntry(
   view: PlmWorkbenchTeamView<'audit'>,
   source?: PlmAuditTeamViewCollaborationSource,
   sourceSavedViewId?: string | null,
+  sourceRecommendationFilter?: PlmRecommendedAuditTeamViewFilter,
 ) {
   const ok = await copyTextToClipboard(buildAuditTeamViewShareUrl(view))
   if (!ok) {
@@ -2656,6 +2658,10 @@ async function shareAuditTeamViewEntry(
     {
       sceneContextAvailable: Boolean(auditSceneContext.value),
       sourceSavedViewId,
+      sourceRecommendationFilter: resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter(
+        source,
+        sourceRecommendationFilter,
+      ),
     },
   )
   const previousDraft = auditTeamViewCollaborationDraft.value
@@ -2695,6 +2701,7 @@ async function setAuditTeamViewDefaultEntry(
   view: PlmWorkbenchTeamView<'audit'>,
   source?: PlmAuditTeamViewCollaborationSource,
   sourceSavedViewId?: string | null,
+  sourceRecommendationFilter?: PlmRecommendedAuditTeamViewFilter,
 ) {
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
@@ -2722,6 +2729,10 @@ async function setAuditTeamViewDefaultEntry(
       {
         sceneContextAvailable: Boolean(auditSceneContext.value),
         sourceSavedViewId,
+        sourceRecommendationFilter: resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter(
+          source,
+          sourceRecommendationFilter,
+        ),
       },
     )
     if (sharedEntryTakeover) {
@@ -2857,7 +2868,12 @@ async function runRecommendedAuditTeamViewSecondaryAction(view: PlmRecommendedAu
       return
     }
     if (!target) return
-    await setAuditTeamViewDefaultEntry(target, 'recommendation')
+    await setAuditTeamViewDefaultEntry(
+      target,
+      'recommendation',
+      null,
+      auditTeamViewRecommendationFilter.value,
+    )
     return
   }
 
@@ -2871,7 +2887,12 @@ async function runRecommendedAuditTeamViewSecondaryAction(view: PlmRecommendedAu
     return
   }
   if (!target) return
-  await shareAuditTeamViewEntry(target, 'recommendation')
+  await shareAuditTeamViewEntry(
+    target,
+    'recommendation',
+    null,
+    auditTeamViewRecommendationFilter.value,
+  )
 }
 
 async function clearAuditTeamViewDefault() {
@@ -2930,6 +2951,7 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
   const draft = collaborationState.draft
   const source = draft?.source
   const sourceSavedViewId = draft?.sourceSavedViewId
+  const sourceRecommendationFilter = draft?.sourceRecommendationFilter
 
   if (actionKind === 'dismiss') {
     dismissAuditTeamViewCollaborationDraft()
@@ -2956,7 +2978,12 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
   if (!view) return
 
   if (actionKind === 'share') {
-    const ok = await shareAuditTeamViewEntry(view, source, sourceSavedViewId)
+    const ok = await shareAuditTeamViewEntry(
+      view,
+      source,
+      sourceSavedViewId,
+      sourceRecommendationFilter,
+    )
     if (ok && shouldClearPlmAuditTeamViewCollaborationDraft(
       auditTeamViewCollaborationDraft.value,
       view.id,
@@ -2966,7 +2993,12 @@ async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewC
     return
   }
 
-  const ok = await setAuditTeamViewDefaultEntry(view, source, sourceSavedViewId)
+  const ok = await setAuditTeamViewDefaultEntry(
+    view,
+    source,
+    sourceSavedViewId,
+    sourceRecommendationFilter,
+  )
   if (ok) clearAuditTeamViewCollaborationDraft()
 }
 
@@ -3034,7 +3066,12 @@ async function runAuditTeamViewCollaborationFollowupAction(
   }
 
   if (!view) return
-  await setAuditTeamViewDefaultEntry(view, followup.source)
+  await setAuditTeamViewDefaultEntry(
+    view,
+    followup.source,
+    followup.sourceSavedViewId,
+    followup.sourceRecommendationFilter,
+  )
 }
 
 async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShareEntryActionKind) {

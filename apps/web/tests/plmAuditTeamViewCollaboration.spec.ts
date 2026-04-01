@@ -21,6 +21,7 @@ import {
   resolvePlmAuditSavedViewTakeoverCollaborationState,
   resolvePlmAuditTeamViewCollaborationActionFeedback,
   resolvePlmAuditTeamViewCollaborationFollowupActionFeedback,
+  resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter,
   resolvePlmAuditTeamViewCollaborationRuntimeFollowup,
   resolvePlmAuditTeamViewCollaborationRuntimeState,
   resolvePlmAuditTeamViewFollowupSelection,
@@ -252,6 +253,9 @@ describe('plmAuditTeamViewCollaboration', () => {
       'recommendation',
       'share',
       tr,
+      {
+        sourceRecommendationFilter: 'recent-default',
+      },
     )).toEqual({
       statusMessage:
         'Share link copied for the recommended audit team view.|已复制推荐审计团队视图的分享链接。',
@@ -262,6 +266,7 @@ describe('plmAuditTeamViewCollaboration', () => {
         logsAnchorId: 'plm-audit-log-results',
         sourceAnchorId: 'plm-audit-recommended-team-views',
         sourceSavedViewId: null,
+        sourceRecommendationFilter: 'recent-default',
       },
       scrollTargetId: null,
     })
@@ -780,6 +785,20 @@ describe('plmAuditTeamViewCollaboration', () => {
     expect(resolvePlmAuditTeamViewCollaborationSourceAnchorId('scene-context', {
       sceneContextAvailable: false,
     })).toBe('plm-audit-team-view-controls')
+  })
+
+  it('normalizes recommendation provenance filters for direct source actions', () => {
+    expect(resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter(
+      'recommendation',
+      'recent-default',
+    )).toBe('recent-default')
+    expect(resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter(
+      'recommendation',
+    )).toBe('')
+    expect(resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter(
+      'saved-view-promotion',
+      'recent-default',
+    )).toBeUndefined()
   })
 
   it('builds recommendation source focus intent that restores the card filter and focus', () => {
