@@ -801,6 +801,28 @@ describe('plmAuditTeamViewCollaboration', () => {
     )).toBeUndefined()
   })
 
+  it('reuses the recommendation provenance normalizer for draft and followup builders', () => {
+    expect(buildPlmAuditTeamViewCollaborationDraft({
+      id: 'audit-view-14',
+      name: '推荐团队视图',
+    }, tr, 'recommendation', {
+      sourceRecommendationFilter: 'recent-default',
+    }).sourceRecommendationFilter).toBe('recent-default')
+
+    expect(buildPlmAuditTeamViewCollaborationFollowup(
+      'audit-view-14',
+      'recommendation',
+      'share',
+    ).sourceRecommendationFilter).toBe('')
+
+    expect(buildPlmAuditTeamViewCollaborationDraft({
+      id: 'audit-view-15',
+      name: '场景团队视图',
+    }, tr, 'scene-context', {
+      sourceRecommendationFilter: 'recent-default',
+    }).sourceRecommendationFilter).toBeUndefined()
+  })
+
   it('builds recommendation source focus intent that restores the card filter and focus', () => {
     expect(buildPlmAuditTeamViewCollaborationSourceFocusIntent({
       source: 'recommendation',

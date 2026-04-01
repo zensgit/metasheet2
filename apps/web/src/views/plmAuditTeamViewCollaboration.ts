@@ -19,6 +19,7 @@ export type PlmAuditTeamViewCollaborationDraft = {
   statusMessage: string
   source: PlmAuditTeamViewCollaborationSource
   sourceSavedViewId: string | null
+  sourceRecommendationFilter?: PlmRecommendedAuditTeamViewFilter
 }
 
 export type PlmAuditTeamViewCollaborationNotice = {
@@ -44,6 +45,7 @@ export type PlmAuditTeamViewCollaborationFollowup = {
   logsAnchorId: string
   sourceAnchorId: string
   sourceSavedViewId: string | null
+  sourceRecommendationFilter?: PlmRecommendedAuditTeamViewFilter
 }
 
 export type PlmAuditTeamViewCollaborationFollowupNotice = {
@@ -132,6 +134,7 @@ export function buildPlmAuditTeamViewCollaborationFollowup(
   options?: {
     sceneContextAvailable?: boolean
     sourceSavedViewId?: string | null
+    sourceRecommendationFilter?: PlmRecommendedAuditTeamViewFilter
   },
 ): PlmAuditTeamViewCollaborationFollowup {
   return {
@@ -141,6 +144,10 @@ export function buildPlmAuditTeamViewCollaborationFollowup(
     logsAnchorId: PLM_AUDIT_TEAM_VIEW_COLLABORATION_LOGS_ANCHOR_ID,
     sourceAnchorId: resolvePlmAuditTeamViewCollaborationSourceAnchorId(source, options),
     sourceSavedViewId: source === 'saved-view-promotion' ? options?.sourceSavedViewId || null : null,
+    sourceRecommendationFilter: resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter(
+      source,
+      options?.sourceRecommendationFilter,
+    ),
   }
 }
 
@@ -778,6 +785,7 @@ export function buildPlmAuditTeamViewCollaborationDraft(
   source: PlmAuditTeamViewCollaborationSource = 'recommendation',
   options?: {
     sourceSavedViewId?: string | null
+    sourceRecommendationFilter?: PlmRecommendedAuditTeamViewFilter
   },
 ): PlmAuditTeamViewCollaborationDraft {
   return {
@@ -787,6 +795,10 @@ export function buildPlmAuditTeamViewCollaborationDraft(
     focusTargetId: 'plm-audit-team-view-controls',
     source,
     sourceSavedViewId: source === 'saved-view-promotion' ? options?.sourceSavedViewId || null : null,
+    sourceRecommendationFilter: resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter(
+      source,
+      options?.sourceRecommendationFilter,
+    ),
     statusMessage: source === 'saved-view-promotion'
       ? tr(
           'Saved view promoted and collaboration controls are ready.',
