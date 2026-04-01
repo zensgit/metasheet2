@@ -306,6 +306,23 @@ describe('plmAuditTeamViewRouteState', () => {
     })
   })
 
+  it('does not auto-apply the default team view when only returnToPlmPath scene recovery is present', () => {
+    expect(resolvePlmAuditRequestedTeamViewRouteState(
+      {
+        ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+        returnToPlmPath: '/plm?sceneFocus=scene-1',
+      },
+      [createView('audit-view-1')],
+      createView('audit-default', {
+        kind: 'workbench',
+        action: 'set-default',
+        resourceType: 'plm-team-view-default',
+      }),
+    )).toEqual({
+      kind: 'noop',
+    })
+  })
+
   it('keeps the current state when explicit filters are already active', () => {
     expect(resolvePlmAuditRequestedTeamViewRouteState(
       {

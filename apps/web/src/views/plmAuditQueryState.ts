@@ -93,8 +93,8 @@ export function parsePlmAuditRouteState(query: LocationQuery): PlmAuditRouteStat
       || resourceType === 'plm-team-view-default'
         ? resourceType
         : '',
-    from: normalizePlmAuditDateTimeTransport(query.auditFrom),
-    to: normalizePlmAuditDateTimeTransport(query.auditTo),
+    from: normalizePlmAuditDateTimeTransport(readString(query.auditFrom)),
+    to: normalizePlmAuditDateTimeTransport(readString(query.auditTo)),
     windowMinutes: normalizeWindowMinutes(query.auditWindow),
     teamViewId: readString(query.auditTeamView),
     sceneId: readString(query.auditSceneId),
@@ -183,6 +183,7 @@ export function hasPlmAuditSceneContext(
     | 'sceneOwnerUserId'
     | 'sceneRecommendationReason'
     | 'sceneRecommendationSourceLabel'
+    | 'returnToPlmPath'
   >,
 ) {
   return Boolean(
@@ -190,7 +191,8 @@ export function hasPlmAuditSceneContext(
     || state.sceneName
     || state.sceneOwnerUserId
     || state.sceneRecommendationReason
-    || state.sceneRecommendationSourceLabel,
+    || state.sceneRecommendationSourceLabel
+    || state.returnToPlmPath,
   )
 }
 

@@ -53,6 +53,19 @@ describe('plmAuditQueryState', () => {
     })
   })
 
+  it('normalizes repeated audit datetime query params using the first value', () => {
+    const expectedFrom = normalizePlmAuditDateTimeTransport('2026-03-11T15:00')
+    const expectedTo = normalizePlmAuditDateTimeTransport('2026-03-11T16:00')
+
+    expect(parsePlmAuditRouteState({
+      auditFrom: ['2026-03-11T15:00', '2026-03-11T18:00'],
+      auditTo: ['2026-03-11T16:00', '2026-03-11T19:00'],
+    })).toMatchObject({
+      from: expectedFrom,
+      to: expectedTo,
+    })
+  })
+
   it('accepts default-scene audit action and resource filters', () => {
     expect(parsePlmAuditRouteState({
       auditAction: 'set-default',
@@ -189,6 +202,10 @@ describe('plmAuditQueryState', () => {
       sceneOwnerUserId: 'owner-a',
       sceneRecommendationReason: 'recent-update',
       sceneRecommendationSourceLabel: '近期更新的团队场景',
+    })).toBe(true)
+    expect(hasPlmAuditSceneContext({
+      ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+      returnToPlmPath: '/plm?sceneFocus=scene-1',
     })).toBe(true)
   })
 
