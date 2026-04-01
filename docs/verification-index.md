@@ -113,6 +113,7 @@ Entry points:
   - Design: `docs/development/oauth-state-observability-design-20260401.md`
   - Verification: `docs/development/oauth-state-observability-verification-20260401.md`
   - Deployment notes: `docs/deployment/dingtalk-oauth-backend-deploy-20260330.md`
+  - On-prem rollout: `docs/deployment/oauth-state-observability-onprem-rollout-verification-20260401.md`
   - Notes: adds dedicated DingTalk OAuth state metrics, fallback counters, and callback rejection logs on top of the Redis-backed state store.
 
 ## Daily / Pre-PR
