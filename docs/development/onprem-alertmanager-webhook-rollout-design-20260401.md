@@ -31,7 +31,12 @@
 
 - `docker/observability/alertmanager/alertmanager.onprem.yml.template`
 
-默认接收器走 webhook，URL 由 rollout 脚本渲染。
+默认接收器不再直连外部 webhook，而是统一发往本地 bridge：
+
+- `default-webhook -> http://alert-webhook:8080/notify`
+- `local-test-webhook -> http://alert-webhook:8080/exercise`
+
+这样 Alertmanager 始终只面对通用 webhook 协议，真正的外部平台兼容性由本地 receiver 负责。
 
 ### 2. 扩展 on-prem compose
 
@@ -43,8 +48,9 @@
 其中：
 
 - `alertmanager` 只绑定 `127.0.0.1:9093`
-- `alert-webhook` 作为默认本地通知接收器，方便 on-prem 自证通知链
+- `alert-webhook` 作为默认本地通知接收器和外部桥接器，方便 on-prem 自证通知链
 - `alert-webhook` 的 healthcheck 改用 Python 标准库请求 `/`，避免 `python:3.12-alpine` 上缺失 `wget`
+- `alert-webhook` 通过运行时 env 接收 `ALERTMANAGER_WEBHOOK_URL`，从而把 Alertmanager payload 转换并转发到 Slack / Webhook.site / 其他外部地址
 
 ### 3. Prometheus 接入 Alertmanager
 
@@ -65,6 +71,16 @@
 - 远端同步资产、渲染 config、拉起 Alertmanager / webhook receiver
 - 通过 Alertmanager API 注入一条 synthetic alert，并在 receiver logs 中确认 webhook 收到通知
 
+新增：
+
+- `scripts/ops/dingtalk-onprem-alert-drill.sh`
+
+职责：
+
+- 直接向远端 Alertmanager 注入一条走默认外部通知链的 synthetic alert
+- 等待 firing -> resolved 生命周期闭环
+- 输出 drill id，便于到 Slack 频道中精确核对两条消息
+
 ### 5. 兼容 docker-compose v1.29.2
 
 目标主机上的 `docker-compose` 仍是 `1.29.2`，存在已知的 `ContainerConfig` recreate 问题。为避免再次把健康中的 Grafana / Prometheus 带崩，本轮 rollout 采用：
@@ -77,13 +93,18 @@
 
 ## 取舍
 
-### 为什么默认接本地 webhook receiver
+### 为什么引入本地 bridge，而不是让 Alertmanager 直连 Slack
 
-用户未提供现成外部 webhook 端点时，仍需要把通知链做成“可验证、可重复”的闭环。默认本地 receiver 可确保：
+Alertmanager 的 `webhook_configs` 会发送通用 Alertmanager JSON，而 Slack Incoming Webhook 需要 `{"text": ...}` 之类的 Slack payload。直接把 Slack URL 配到 Alertmanager 会触发 `400 no_text`。本地 bridge 负责把两者解耦：
 
-1. rollout 不依赖第三方平台
-2. 验证结果可在容器日志中直接取证
-3. 后续替换成真实 Slack/Feishu webhook 只需覆盖 `ALERTMANAGER_WEBHOOK_URL`
+1. Alertmanager 始终只发通用 JSON
+2. `alert-webhook` 可以把 payload 转成 Slack 可接收的文本消息
+3. 对 Webhook.site 等通用端点则保留 raw JSON 转发
+4. 本地 exercise 与正式外部通知链可以共存，不互相污染
+
+### 为什么 default route 仍经过本地 bridge
+
+即便已经拿到正式 Slack webhook，也不应让 Alertmanager 直接面对第三方 webhook 协议差异。bridge 让后续新增格式化、签名、重试与路由扩展都发生在本地资产中，而不是散落在告警配置里。
 
 ### 为什么 synthetic alert 直接发到 Alertmanager
 
@@ -93,4 +114,5 @@
 
 - 不在本轮接入外部 Slack / Feishu 凭据
 - 不在本轮开放 Alertmanager 公网访问
-- 不在本轮把 synthetic alert 自动回写为 silence / resolve drill
+- 不在本轮接入第三方机器人签名协议
+- 不在本轮把 resolved drill 做成 Slack API 读回校验；频道落地仍以浏览器可见性复核为准

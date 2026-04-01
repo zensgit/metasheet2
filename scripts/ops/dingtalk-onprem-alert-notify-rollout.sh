@@ -9,9 +9,9 @@ REMOTE_APP_DIR="${REMOTE_APP_DIR:-/home/mainuser/metasheet2}"
 REMOTE_OBS_DIR="${REMOTE_APP_DIR}/docker/observability"
 REMOTE_PROM_RULES_DIR="${REMOTE_APP_DIR}/ops/prometheus"
 REMOTE_ALERTMANAGER_ENV_FILE="${REMOTE_OBS_DIR}/alertmanager/alertmanager.onprem.env"
+REMOTE_ALERT_WEBHOOK_RUNTIME_ENV_FILE="${REMOTE_OBS_DIR}/alertmanager/alert-webhook.runtime.env"
 REMOTE_APP_NETWORK="${REMOTE_APP_NETWORK:-metasheet2_default}"
 DOCKER_COMPOSE_BIN="${DOCKER_COMPOSE_BIN:-docker-compose}"
-DEFAULT_LOCAL_WEBHOOK_URL="http://alert-webhook:8080/notify"
 ALERTMANAGER_WEBHOOK_URL="${ALERTMANAGER_WEBHOOK_URL:-}"
 
 ssh_cmd() {
@@ -29,28 +29,22 @@ copy_asset() {
   scp_cmd "${local_path}" "${SSH_USER_HOST}:${remote_path}"
 }
 
-render_alertmanager_config() {
-  local temp_file
-  temp_file="$(mktemp)"
-  TEMPLATE_FILE_INPUT="${ROOT_DIR}/docker/observability/alertmanager/alertmanager.onprem.yml.template" \
-    DEFAULT_WEBHOOK_URL_INPUT="$1" \
-    OUTPUT_FILE_INPUT="${temp_file}" \
-    python3 - <<'EOF'
-from pathlib import Path
+write_alert_webhook_runtime_env() {
+  local webhook_url="$1"
+  local payload_b64
+  payload_b64="$(ALERTMANAGER_WEBHOOK_URL_INPUT="${webhook_url}" python3 - <<'EOF'
+import base64
 import os
 
-template_path = Path(os.environ["TEMPLATE_FILE_INPUT"])
-output_path = Path(os.environ["OUTPUT_FILE_INPUT"])
-default_webhook_url = os.environ["DEFAULT_WEBHOOK_URL_INPUT"]
-
-content = template_path.read_text()
-content = content.replace("__DEFAULT_WEBHOOK_URL__", default_webhook_url)
-output_path.write_text(content)
+content = "# Managed by scripts/ops/dingtalk-onprem-alert-notify-rollout.sh\n" \
+          f"ALERTMANAGER_WEBHOOK_URL={os.environ['ALERTMANAGER_WEBHOOK_URL_INPUT']}\n"
+print(base64.b64encode(content.encode()).decode())
 EOF
-  printf '%s\n' "${temp_file}"
+)"
+  ssh_cmd "mkdir -p \"$(dirname "${REMOTE_ALERT_WEBHOOK_RUNTIME_ENV_FILE}")\" && tmp_file=\$(mktemp) && printf '%s' '${payload_b64}' | base64 -d > \"\${tmp_file}\" && install -m 600 \"\${tmp_file}\" '${REMOTE_ALERT_WEBHOOK_RUNTIME_ENV_FILE}' && rm -f \"\${tmp_file}\""
 }
 
-resolve_default_webhook_url() {
+resolve_external_webhook_target() {
   if [ -n "${ALERTMANAGER_WEBHOOK_URL}" ]; then
     printf 'env-override\n%s\n' "${ALERTMANAGER_WEBHOOK_URL}"
     return 0
@@ -77,7 +71,7 @@ EOF" || true)"
     return 0
   fi
 
-  printf 'local-default\n%s\n' "${DEFAULT_LOCAL_WEBHOOK_URL}"
+  printf 'local-bridge-only\n\n'
 }
 
 build_alert_payload() {
@@ -115,14 +109,13 @@ copy_asset "${ROOT_DIR}/ops/prometheus/dingtalk-oauth-alerts.yml" "${REMOTE_PROM
 ssh_cmd "chmod 644 \"${REMOTE_OBS_DIR}/alertmanager/webhook-receiver.py\""
 
 echo "[onprem-alert-notify] rendering Alertmanager config"
-RESOLUTION_OUTPUT="$(resolve_default_webhook_url)"
+copy_asset "${ROOT_DIR}/docker/observability/alertmanager/alertmanager.onprem.yml.template" "${REMOTE_OBS_DIR}/alertmanager/alertmanager.onprem.yml"
+ssh_cmd "chmod 644 \"${REMOTE_OBS_DIR}/alertmanager/alertmanager.onprem.yml\""
+RESOLUTION_OUTPUT="$(resolve_external_webhook_target)"
 RESOLVED_ALERTMANAGER_WEBHOOK_SOURCE="$(printf '%s\n' "${RESOLUTION_OUTPUT}" | sed -n '1p')"
 RESOLVED_ALERTMANAGER_WEBHOOK_URL="$(printf '%s\n' "${RESOLUTION_OUTPUT}" | sed -n '2p')"
-echo "[onprem-alert-notify] resolved default receiver source: ${RESOLVED_ALERTMANAGER_WEBHOOK_SOURCE}"
-RENDERED_ALERTMANAGER_CONFIG="$(render_alertmanager_config "${RESOLVED_ALERTMANAGER_WEBHOOK_URL}")"
-trap 'rm -f "${RENDERED_ALERTMANAGER_CONFIG}"' EXIT
-copy_asset "${RENDERED_ALERTMANAGER_CONFIG}" "${REMOTE_OBS_DIR}/alertmanager/alertmanager.onprem.yml"
-ssh_cmd "chmod 644 \"${REMOTE_OBS_DIR}/alertmanager/alertmanager.onprem.yml\""
+echo "[onprem-alert-notify] resolved external forward target source: ${RESOLVED_ALERTMANAGER_WEBHOOK_SOURCE}"
+write_alert_webhook_runtime_env "${RESOLVED_ALERTMANAGER_WEBHOOK_URL}"
 
 echo "[onprem-alert-notify] removing legacy Grafana datasource duplication"
 ssh_cmd "rm -f \"${REMOTE_OBS_DIR}/grafana/provisioning/datasources/datasource.yml\""

@@ -121,16 +121,20 @@ pnpm verify:dingtalk-oauth-alert-notify
 bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
 ```
 
-可选外部 webhook 覆盖：
+默认 rollout 只建立本地 bridge。若要接通正式外部通知目标，先写入长期 webhook：
 
 ```bash
 ALERTMANAGER_WEBHOOK_URL=https://example.com/your/webhook \
+bash scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh
 bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
 ```
+
+bridge 会把 Alertmanager 的通用 webhook payload 转成 Slack `text` 消息，避免 Slack Incoming Webhook 的 `no_text` 错误。
 
 对应部署说明：
 
 - `docs/deployment/onprem-alertmanager-webhook-rollout-20260401.md`
+- `docs/deployment/onprem-alertmanager-webhook-persistence-20260401.md`
 
 若尚未准备长期外部 webhook，但要确认公网 webhook 投递能力，可执行：
 

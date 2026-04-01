@@ -125,8 +125,13 @@ Entry points:
   - Deployment verification: `docs/deployment/onprem-grafana-alert-rollout-verification-20260401.md`
   - Alert notify deployment: `docs/deployment/onprem-alertmanager-webhook-rollout-20260401.md`
   - Alert notify deployment verification: `docs/deployment/onprem-alertmanager-webhook-rollout-verification-20260401.md`
+  - Alert drill runbook: `docs/deployment/onprem-alert-drill-runbook-20260401.md`
+  - Alert drill design: `docs/development/onprem-alert-drill-and-runbook-design-20260401.md`
+  - Alert drill verification: `docs/development/onprem-alert-drill-and-runbook-verification-20260401.md`
+  - Alert drill deployment verification: `docs/deployment/onprem-alert-drill-runbook-verification-20260401.md`
+  - Alert drill command: `pnpm ops:onprem-alert-drill`
   - On-prem rollout: `docs/deployment/oauth-state-observability-onprem-rollout-verification-20260401.md`
-  - Notes: adds dedicated DingTalk OAuth state metrics, fallback counters, callback rejection logs, Prometheus alert rules, a Grafana overview dashboard, and an on-prem rollout path that now includes Alertmanager -> webhook notification verification.
+  - Notes: adds dedicated DingTalk OAuth state metrics, fallback counters, callback rejection logs, Prometheus alert rules, a Grafana overview dashboard, an Alertmanager bridge that translates Slack notifications, and an on-prem firing/resolved drill runbook.
 
 ## Daily / Pre-PR
 

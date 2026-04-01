@@ -7,6 +7,7 @@ TEMPLATE_FILE="${ROOT_DIR}/docker/observability/alertmanager/alertmanager.onprem
 CONFIG_EXAMPLE_FILE="${ROOT_DIR}/docker/observability/alertmanager/config.example.yml"
 ENV_EXAMPLE_FILE="${ROOT_DIR}/docker/observability/alertmanager/alertmanager.onprem.env.example"
 LOCAL_ALERTMANAGER_CONFIG="${ROOT_DIR}/docker/observability/alertmanager/alertmanager.onprem.yml"
+LOCAL_ALERT_WEBHOOK_RUNTIME_ENV="${ROOT_DIR}/docker/observability/alertmanager/alert-webhook.runtime.env"
 ONPREM_COMPOSE_FILE="${ROOT_DIR}/docker/observability/docker-compose.onprem.yml"
 ONPREM_PROM_CONFIG="${ROOT_DIR}/docker/observability/prometheus/prometheus.onprem.yml"
 WEBHOOK_RECEIVER_FILE="${ROOT_DIR}/docker/observability/alertmanager/webhook-receiver.py"
@@ -14,6 +15,9 @@ WEBHOOK_RECEIVER_FILE="${ROOT_DIR}/docker/observability/alertmanager/webhook-rec
 cleanup_local_alertmanager_config() {
   if [ -f "${LOCAL_ALERTMANAGER_CONFIG}" ]; then
     rm -f "${LOCAL_ALERTMANAGER_CONFIG}"
+  fi
+  if [ -f "${LOCAL_ALERT_WEBHOOK_RUNTIME_ENV}" ]; then
+    rm -f "${LOCAL_ALERT_WEBHOOK_RUNTIME_ENV}"
   fi
 }
 
@@ -35,18 +39,23 @@ assert 'default-webhook' in receiver_names
 assert 'local-test-webhook' in receiver_names
 routes = parsed['route'].get('routes', [])
 assert any('DingTalkOAuthAlertNotifyExercise' in ''.join(route.get('matchers', [])) for route in routes)
-assert '__DEFAULT_WEBHOOK_URL__' in file_path.read_text()
+content = file_path.read_text()
+assert 'http://alert-webhook:8080/notify' in content
+assert 'http://alert-webhook:8080/exercise' in content
 print('[oauth-alert-notify] Alertmanager template parsed successfully')
 EOF
 
 echo "[oauth-alert-notify] validating webhook receiver asset"
 test -f "${WEBHOOK_RECEIVER_FILE}"
+grep -q "/notify" "${WEBHOOK_RECEIVER_FILE}"
+grep -q "/exercise" "${WEBHOOK_RECEIVER_FILE}"
 
 echo "[oauth-alert-notify] validating persistent env example"
 grep -q '^ALERTMANAGER_WEBHOOK_URL=' "${ENV_EXAMPLE_FILE}"
 
 echo "[oauth-alert-notify] preparing local rendered config for compose validation"
 cp "${CONFIG_EXAMPLE_FILE}" "${LOCAL_ALERTMANAGER_CONFIG}"
+printf 'ALERTMANAGER_WEBHOOK_URL=\n' > "${LOCAL_ALERT_WEBHOOK_RUNTIME_ENV}"
 
 echo "[oauth-alert-notify] validating on-prem compose wiring"
 docker compose -f "${ONPREM_COMPOSE_FILE}" config >/dev/null

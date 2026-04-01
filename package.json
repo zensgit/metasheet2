@@ -33,6 +33,7 @@
     "ops:set-onprem-alertmanager-webhook-config": "bash scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh",
     "ops:onprem-grafana-alert-rollout": "bash scripts/ops/dingtalk-onprem-observability-rollout.sh",
     "ops:onprem-alert-notify-rollout": "bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh",
+    "ops:onprem-alert-drill": "bash scripts/ops/dingtalk-onprem-alert-drill.sh",
     "verify:attendance-locale-zh": "node scripts/verify-attendance-locale-zh-smoke.mjs",
     "verify:attendance-zh-copy-contract": "node scripts/ops/attendance-verify-zh-copy-contract.mjs",
     "print:git-baseline-report": "node scripts/ops/git-baseline-report.mjs",

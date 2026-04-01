@@ -59,6 +59,8 @@ services:
     container_name: metasheet-alert-webhook
     volumes:
       - ./alertmanager/webhook-receiver.py:/app/webhook-receiver.py:ro
+    env_file:
+      - ./alertmanager/alert-webhook.runtime.env
     command: ["python3", "/app/webhook-receiver.py"]
     networks:
       - metasheet-net

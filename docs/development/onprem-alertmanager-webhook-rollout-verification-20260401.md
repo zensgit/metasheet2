@@ -94,3 +94,20 @@ pnpm ops:onprem-alert-notify-rollout
 2. Prometheus 已真实注册 Alertmanager
 3. 本地 webhook receiver 已真实收到 synthetic alert
 4. 整体通知链已从“可见”推进到“可通知”
+
+## 后续更新
+
+后续在正式 Slack on-prem drill 中又发现一个真实兼容性问题：
+
+- Alertmanager 直连 Slack Incoming Webhook 会返回 `400 no_text`
+
+因此当前正式语义已升级为：
+
+- Alertmanager 统一只发到本地 `alert-webhook` bridge
+- bridge 再负责把 Slack 消息转成 `text` payload 并转发到 `#metasheet-alerts`
+
+对应最新设计 / 验证：
+
+- `docs/development/onprem-alert-drill-and-runbook-design-20260401.md`
+- `docs/development/onprem-alert-drill-and-runbook-verification-20260401.md`
+- `docs/deployment/onprem-alert-drill-runbook-20260401.md`

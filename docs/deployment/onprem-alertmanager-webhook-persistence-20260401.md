@@ -4,7 +4,9 @@
 
 ## 目标
 
-为 `142.171.239.56` 这类 on-prem 主机提供可持久化的 Alertmanager 外部 webhook 配置入口。
+为 `142.171.239.56` 这类 on-prem 主机提供可持久化的外部通知目标配置入口。
+
+注意：该配置不是让 Alertmanager 直接调用第三方 webhook，而是供本地 `metasheet-alert-webhook` bridge 使用。
 
 ## 写入配置
 
@@ -35,4 +37,4 @@ bash scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh --clear
 bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
 ```
 
-此时 rollout 会优先读取远端持久化配置，而不是回退到本地默认 receiver。
+此时 rollout 会优先读取远端持久化配置，并把它注入到 `metasheet-alert-webhook`。Alertmanager 本身仍只向本地 bridge 发通用 webhook。

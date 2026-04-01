@@ -13,11 +13,16 @@
 
 ## 默认行为
 
-若未指定外部 webhook，rollout 默认使用本地容器 receiver：
+Alertmanager 默认总是先把通知发到本地 bridge：
 
 - `metasheet-alert-webhook`
 
-这样可以在不依赖第三方平台的前提下完成通知链自证。
+bridge 的行为是：
+
+- `default-webhook -> /notify`
+- `local-test-webhook -> /exercise`
+
+若未指定外部 webhook，bridge 只记录 payload，不向第三方发送；这样可以在不依赖第三方平台的前提下完成通知链自证。
 
 ## 使用方式
 
@@ -25,10 +30,11 @@
 bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
 ```
 
-或：
+若需要正式对外通知，先写入长期 webhook，再 rollout：
 
 ```bash
 ALERTMANAGER_WEBHOOK_URL=https://example.com/your/webhook \
+bash scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh
 bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
 ```
 
@@ -45,15 +51,7 @@ pnpm verify:dingtalk-oauth-alert-notify:webhooksite
 3. 验证外部投递成功
 4. 自动清除持久化配置并回到 `configured=false`
 
-若已经拿到正式长期 webhook，则不要每次手工传环境变量，改用持久化配置入口：
-
-```bash
-ALERTMANAGER_WEBHOOK_URL=https://example.com/your/webhook \
-bash scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh
-bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
-```
-
-对应部署说明：
+对应持久化说明：
 
 - `docs/deployment/onprem-alertmanager-webhook-persistence-20260401.md`
 
@@ -70,6 +68,15 @@ bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
    - Alertmanager health
    - Prometheus `api/v1/alertmanagers`
    - synthetic alert webhook delivery
+
+## 外部通知兼容性
+
+正式外部 webhook 不是由 Alertmanager 直接调用，而是由 `metasheet-alert-webhook` bridge 负责：
+
+- Slack `hooks.slack.com`：bridge 自动把 Alertmanager JSON 转成 Slack `text` 消息
+- Webhook.site / 通用 webhook：bridge 直接转发 raw Alertmanager JSON
+
+这一步是必需的，因为 Slack Incoming Webhook 不能直接消费 Alertmanager 通用 webhook payload。
 
 ## 实际验证报告
 
