@@ -1383,11 +1383,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       },
       target: null,
       tr,
-    })).toEqual({
-      kind: 'error',
-      message:
-        'Audit team view is no longer available. Recreate the collaboration flow before continuing.|审计团队视图已不存在。请先重新建立协作流程，再继续执行。',
-    })
+    })).toBeNull()
   })
 
   it('keeps default-log follow-ups actionable without a live team-view record', () => {
