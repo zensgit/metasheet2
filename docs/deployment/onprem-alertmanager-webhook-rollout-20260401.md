@@ -45,6 +45,18 @@ pnpm verify:dingtalk-oauth-alert-notify:webhooksite
 3. 验证外部投递成功
 4. 自动恢复本地默认 receiver
 
+若已经拿到正式长期 webhook，则不要每次手工传环境变量，改用持久化配置入口：
+
+```bash
+ALERTMANAGER_WEBHOOK_URL=https://example.com/your/webhook \
+bash scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh
+bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
+```
+
+对应部署说明：
+
+- `docs/deployment/onprem-alertmanager-webhook-persistence-20260401.md`
+
 ## 结果
 
 脚本会：

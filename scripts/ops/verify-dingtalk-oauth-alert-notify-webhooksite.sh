@@ -5,7 +5,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SSH_USER_HOST="${SSH_USER_HOST:-mainuser@142.171.239.56}"
 SSH_KEY="${SSH_KEY:-${HOME}/.ssh/metasheet2_deploy}"
-REMOTE_APP_DIR="${REMOTE_APP_DIR:-/home/mainuser/metasheet2}"
 RESTORE_LOCAL_NOTIFY="${RESTORE_LOCAL_NOTIFY:-true}"
 WEBHOOK_SITE_TOKEN="${WEBHOOK_SITE_TOKEN:-}"
 
@@ -13,7 +12,8 @@ ROLLBACK_DONE="false"
 
 cleanup() {
   if [ "${RESTORE_LOCAL_NOTIFY}" = "true" ] && [ "${ROLLBACK_DONE}" != "true" ]; then
-    if ALERTMANAGER_WEBHOOK_URL="" bash "${ROOT_DIR}/scripts/ops/dingtalk-onprem-alert-notify-rollout.sh" >/dev/null 2>&1; then
+    bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh" --set-local-default >/dev/null 2>&1 || true
+    if bash "${ROOT_DIR}/scripts/ops/dingtalk-onprem-alert-notify-rollout.sh" >/dev/null 2>&1; then
       ROLLBACK_DONE="true"
     fi
   fi
@@ -97,8 +97,10 @@ fi
 WEBHOOK_URL="https://webhook.site/${WEBHOOK_SITE_TOKEN}"
 EXERCISE_ID="external-$(date +%s)"
 
-echo "[oauth-alert-notify-webhooksite] applying external webhook override"
-ALERTMANAGER_WEBHOOK_URL="${WEBHOOK_URL}" bash "${ROOT_DIR}/scripts/ops/dingtalk-onprem-alert-notify-rollout.sh"
+echo "[oauth-alert-notify-webhooksite] writing persistent external webhook config"
+ALERTMANAGER_WEBHOOK_URL="${WEBHOOK_URL}" bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh"
+echo "[oauth-alert-notify-webhooksite] rollout using persisted webhook config"
+bash "${ROOT_DIR}/scripts/ops/dingtalk-onprem-alert-notify-rollout.sh"
 
 echo "[oauth-alert-notify-webhooksite] sending external notification exercise"
 send_external_exercise "${EXERCISE_ID}"
@@ -111,7 +113,8 @@ for _ in $(seq 1 20); do
     echo "${requests_json}"
     if [ "${RESTORE_LOCAL_NOTIFY}" = "true" ]; then
       echo "[oauth-alert-notify-webhooksite] restoring local default receiver"
-      ALERTMANAGER_WEBHOOK_URL="" bash "${ROOT_DIR}/scripts/ops/dingtalk-onprem-alert-notify-rollout.sh" >/dev/null
+      bash "${ROOT_DIR}/scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh" --set-local-default >/dev/null
+      bash "${ROOT_DIR}/scripts/ops/dingtalk-onprem-alert-notify-rollout.sh" >/dev/null
       ROLLBACK_DONE="true"
     fi
     exit 0

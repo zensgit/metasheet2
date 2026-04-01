@@ -42,7 +42,7 @@ exercise 结束后再次确认：
 - `metasheet-alert-webhook` healthy
 - `metasheet-prometheus` healthy
 - `metasheet-grafana` healthy
-- `/home/mainuser/metasheet2/docker/observability/alertmanager/alertmanager.onprem.yml` 已恢复成本地默认 `http://alert-webhook:8080/notify`
+- `/home/mainuser/metasheet2/docker/observability/alertmanager/alertmanager.onprem.env` 已恢复成本地默认 `http://alert-webhook:8080/notify`
 
 ## 结论
 

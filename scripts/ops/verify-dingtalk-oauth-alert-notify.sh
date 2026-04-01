@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEMPLATE_FILE="${ROOT_DIR}/docker/observability/alertmanager/alertmanager.onprem.yml.template"
 CONFIG_EXAMPLE_FILE="${ROOT_DIR}/docker/observability/alertmanager/config.example.yml"
+ENV_EXAMPLE_FILE="${ROOT_DIR}/docker/observability/alertmanager/alertmanager.onprem.env.example"
 LOCAL_ALERTMANAGER_CONFIG="${ROOT_DIR}/docker/observability/alertmanager/alertmanager.onprem.yml"
 ONPREM_COMPOSE_FILE="${ROOT_DIR}/docker/observability/docker-compose.onprem.yml"
 ONPREM_PROM_CONFIG="${ROOT_DIR}/docker/observability/prometheus/prometheus.onprem.yml"
@@ -40,6 +41,9 @@ EOF
 
 echo "[oauth-alert-notify] validating webhook receiver asset"
 test -f "${WEBHOOK_RECEIVER_FILE}"
+
+echo "[oauth-alert-notify] validating persistent env example"
+grep -q '^ALERTMANAGER_WEBHOOK_URL=' "${ENV_EXAMPLE_FILE}"
 
 echo "[oauth-alert-notify] preparing local rendered config for compose validation"
 cp "${CONFIG_EXAMPLE_FILE}" "${LOCAL_ALERTMANAGER_CONFIG}"

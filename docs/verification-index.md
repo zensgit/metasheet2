@@ -929,3 +929,8 @@ Entry points:
   - Design: `docs/development/onprem-external-webhook-exercise-design-20260401.md`
   - Verification: `docs/development/onprem-external-webhook-exercise-verification-20260401.md`
   - Deployment verification: `docs/deployment/onprem-external-webhook-exercise-verification-20260401.md`
+- Webhook persistence:
+  - Design: `docs/development/onprem-alertmanager-webhook-persistence-design-20260401.md`
+  - Verification: `docs/development/onprem-alertmanager-webhook-persistence-verification-20260401.md`
+  - Deployment: `docs/deployment/onprem-alertmanager-webhook-persistence-20260401.md`
+  - Deployment verification: `docs/deployment/onprem-alertmanager-webhook-persistence-verification-20260401.md`

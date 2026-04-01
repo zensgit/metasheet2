@@ -142,6 +142,18 @@ pnpm verify:dingtalk-oauth-alert-notify:webhooksite
 
 - `docs/deployment/onprem-external-webhook-exercise-verification-20260401.md`
 
+若已准备正式 webhook，并希望作为 on-prem 长期配置保留：
+
+```bash
+ALERTMANAGER_WEBHOOK_URL=https://example.com/your/webhook \
+bash scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh
+bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
+```
+
+对应部署说明：
+
+- `docs/deployment/onprem-alertmanager-webhook-persistence-20260401.md`
+
 ### 手动验证
 
 1. 不配置 DingTalk 环境变量时：
