@@ -2,7 +2,7 @@
  * API utilities for frontend-backend communication
  */
 
-import { normalizePreLoginRedirect } from './authRedirect'
+import { normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './authRedirect'
 
 // Vite environment type declaration
 declare global {
@@ -26,6 +26,21 @@ export interface ApiFetchOptions extends RequestInit {
   suppressUnauthorizedRedirect?: boolean
 }
 
+function resolveWindowOrigin(): string {
+  if (typeof window === 'undefined') return ''
+  const origin = window?.location?.origin
+  return typeof origin === 'string' && origin.trim().length > 0 ? origin.trim() : ''
+}
+
+function isLoopbackUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(url.hostname)
+  } catch {
+    return false
+  }
+}
+
 /**
  * Get the API base URL from environment or default to relative path
  */
@@ -39,13 +54,16 @@ export function getApiBase(): string {
   }
 
   const apiUrl = envValue('VITE_API_URL') || envValue('VITE_API_BASE')
-  if (apiUrl) return apiUrl
-
-  if (typeof window !== 'undefined') {
-    const origin = window?.location?.origin
-    if (typeof origin === 'string' && origin.trim().length > 0) {
-      return origin
+  const browserOrigin = resolveWindowOrigin()
+  if (apiUrl) {
+    if (browserOrigin && isLoopbackUrl(apiUrl) && !isLoopbackUrl(browserOrigin)) {
+      return browserOrigin
     }
+    return apiUrl
+  }
+
+  if (browserOrigin) {
+    return browserOrigin
   }
 
   return 'http://localhost:8900'
@@ -95,6 +113,7 @@ function buildLoginRedirectUrl(): string {
   if (typeof window === 'undefined') return '/login'
   const current = `${window.location.pathname || ''}${window.location.search || ''}${window.location.hash || ''}` || '/'
   if (current.startsWith('/login')) return '/login'
+  if (shouldSkipPreLoginRedirectQuery(current)) return '/login'
   const redirect = normalizePreLoginRedirect(current)
   return `/login?redirect=${encodeURIComponent(redirect)}`
 }

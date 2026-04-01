@@ -207,6 +207,56 @@ describe('useAttendanceAdminLeavePolicies', () => {
     expect(setStatus).toHaveBeenCalledWith('Invalid steps JSON', 'error')
   })
 
+  it('saves an approval flow with requestType in the POST body and reloads the list', async () => {
+    const adminForbidden = ref(false)
+    const requestForm = reactive({ leaveTypeId: '', overtimeRuleId: '' })
+    const setStatus = vi.fn()
+    const apiFetch = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(201, { ok: true, data: { id: 'flow-1' } }))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ok: true,
+        data: {
+          items: [
+            {
+              id: 'flow-1',
+              name: 'Manager Approval',
+              requestType: 'missed_check_in',
+              steps: [],
+              isActive: true,
+            },
+          ],
+        },
+      }))
+
+    const policies = useAttendanceAdminLeavePolicies({
+      adminForbidden,
+      requestForm,
+      apiFetch,
+      getOrgId: () => 'org-1',
+      setStatus,
+    })
+
+    policies.approvalFlowForm.name = ' Manager Approval '
+    policies.approvalFlowForm.requestType = 'missed_check_in'
+    policies.approvalFlowForm.steps = '[]'
+
+    await policies.saveApprovalFlow()
+
+    expect(apiFetch).toHaveBeenNthCalledWith(1, '/api/attendance/approval-flows', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'Manager Approval',
+        requestType: 'missed_check_in',
+        steps: [],
+        isActive: true,
+        orgId: 'org-1',
+      }),
+    })
+    expect(apiFetch).toHaveBeenNthCalledWith(2, '/api/attendance/approval-flows?orgId=org-1')
+    expect(policies.approvalFlows.value[0]?.requestType).toBe('missed_check_in')
+    expect(setStatus).toHaveBeenCalledWith('Approval flow created.')
+  })
+
   it('marks admin forbidden and forwards admin errors for leave type 403 responses', async () => {
     const adminForbidden = ref(false)
     const requestForm = reactive({ leaveTypeId: '', overtimeRuleId: '' })

@@ -315,6 +315,39 @@ html, body {
   overflow: auto;
 }
 
+@media (max-width: 768px) {
+  .app-nav {
+    height: auto;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    padding: 12px 16px;
+    gap: 8px 12px;
+  }
+
+  .nav-brand,
+  .nav-links,
+  .nav-actions {
+    width: 100%;
+  }
+
+  .nav-links,
+  .nav-actions {
+    flex-wrap: wrap;
+  }
+
+  .nav-actions {
+    gap: 8px;
+  }
+
+  .nav-user {
+    width: 100%;
+  }
+
+  .nav-link {
+    padding: 8px 12px;
+  }
+}
+
 /* Dark mode support */
 @media (prefers-color-scheme: dark) {
   html, body {

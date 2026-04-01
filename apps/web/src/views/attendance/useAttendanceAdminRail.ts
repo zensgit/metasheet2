@@ -5,6 +5,7 @@ export type TranslateFn = (en: string, zh: string) => string
 export const ADMIN_NAV_COLLAPSE_PREFS_STORAGE_KEY = 'metasheet_attendance_admin_nav_collapsed_groups'
 export const ADMIN_NAV_RECENTS_STORAGE_KEY = 'metasheet_attendance_admin_nav_recent_sections'
 export const ADMIN_NAV_LAST_SECTION_STORAGE_KEY = 'metasheet_attendance_admin_nav_last_section'
+export const ADMIN_NAV_FOCUS_MODE_STORAGE_KEY = 'metasheet_attendance_admin_nav_focused_mode'
 export const ADMIN_NAV_DEFAULT_STORAGE_SCOPE = 'default'
 const ADMIN_NAV_RECENT_LIMIT = 5
 
@@ -132,6 +133,21 @@ function persistLastAdminSection(scope: string, id: string): void {
   }
 }
 
+function loadAdminNavFocusedMode(scope: string): boolean {
+  void scope
+  // The all-sections mode is retired. Always normalize back to focused mode.
+  return true
+}
+
+function persistAdminNavFocusedMode(scope: string, focused: boolean): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(resolveAdminNavStorageKey(ADMIN_NAV_FOCUS_MODE_STORAGE_KEY, scope), JSON.stringify(focused))
+  } catch {
+    // ignore storage write failures (private mode, quota).
+  }
+}
+
 export function useAttendanceAdminRail({
   tr,
   resolveStorageScope,
@@ -175,6 +191,25 @@ export function useAttendanceAdminRail({
       ],
     },
     {
+      id: 'scheduling',
+      label: tr('Scheduling', '排班执行'),
+      itemIds: [
+        ATTENDANCE_ADMIN_SECTION_IDS.rotationRules,
+        ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments,
+        ATTENDANCE_ADMIN_SECTION_IDS.shifts,
+        ATTENDANCE_ADMIN_SECTION_IDS.assignments,
+        ATTENDANCE_ADMIN_SECTION_IDS.holidays,
+      ],
+    },
+    {
+      id: 'organization',
+      label: tr('Organization', '组织分组'),
+      itemIds: [
+        ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups,
+        ATTENDANCE_ADMIN_SECTION_IDS.groupMembers,
+      ],
+    },
+    {
       id: 'policies',
       label: tr('Policies', '规则策略'),
       itemIds: [
@@ -188,14 +223,6 @@ export function useAttendanceAdminRail({
       ],
     },
     {
-      id: 'organization',
-      label: tr('Organization', '组织分组'),
-      itemIds: [
-        ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups,
-        ATTENDANCE_ADMIN_SECTION_IDS.groupMembers,
-      ],
-    },
-    {
       id: 'data-payroll',
       label: tr('Data & Payroll', '数据与计薪'),
       itemIds: [
@@ -205,18 +232,16 @@ export function useAttendanceAdminRail({
         ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles,
       ],
     },
-    {
-      id: 'scheduling',
-      label: tr('Scheduling', '排班执行'),
-      itemIds: [
-        ATTENDANCE_ADMIN_SECTION_IDS.rotationRules,
-        ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments,
-        ATTENDANCE_ADMIN_SECTION_IDS.shifts,
-        ATTENDANCE_ADMIN_SECTION_IDS.assignments,
-        ATTENDANCE_ADMIN_SECTION_IDS.holidays,
-      ],
-    },
   ])
+  const adminSectionGroupIdByItemId = computed(() => {
+    const groupIds = new Map<string, string>()
+    for (const group of adminSectionNavGroups.value) {
+      for (const itemId of group.itemIds) {
+        groupIds.set(itemId, group.id)
+      }
+    }
+    return groupIds
+  })
   const adminSectionGroupLabelByItemId = computed(() => {
     const groupLabels = new Map<string, string>()
     for (const group of adminSectionNavGroups.value) {
@@ -233,6 +258,7 @@ export function useAttendanceAdminRail({
   const adminNavStorageScope = computed(() => resolveStorageScope() ?? ADMIN_NAV_DEFAULT_STORAGE_SCOPE)
   const adminCollapsedGroupIds = ref<string[]>(loadAdminNavCollapsedGroups(adminNavStorageScope.value))
   const adminRecentSectionIds = ref<string[]>(loadAdminNavRecentSections(adminNavStorageScope.value))
+  const adminFocusedMode = ref(loadAdminNavFocusedMode(adminNavStorageScope.value))
   const isCompactAdminNav = ref(false)
   const adminCompactNavOpen = ref(false)
   const adminActiveSectionId = ref<string>(ATTENDANCE_ADMIN_SECTION_IDS.settings)
@@ -275,6 +301,15 @@ export function useAttendanceAdminRail({
 
   function collapseAllAdminSectionGroups(): void {
     adminCollapsedGroupIds.value = adminSectionNavGroups.value.map(group => group.id)
+  }
+
+  function focusAdminSectionGroup(sectionId: string): void {
+    if (adminSectionFilterActive.value || !isKnownAdminSectionId(sectionId)) return
+    const groupId = adminSectionGroupIdByItemId.value.get(sectionId)
+    if (!groupId) return
+    adminCollapsedGroupIds.value = adminSectionNavGroups.value
+      .map(group => group.id)
+      .filter(id => id !== groupId)
   }
 
   function buildCurrentAdminSectionLink(): string | null {
@@ -356,7 +391,8 @@ export function useAttendanceAdminRail({
         }
       })
       .filter((group): group is AdminSectionNavGroup => Boolean(group))
-    if (!isCompactAdminNav.value || query) return groups
+    if (query) return groups
+    if (!isCompactAdminNav.value && !adminFocusedMode.value) return groups
     const activeIndex = groups.findIndex(group => group.items.some(item => item.id === adminActiveSectionId.value))
     if (activeIndex <= 0) return groups
     const activeGroup = groups[activeIndex]
@@ -364,6 +400,22 @@ export function useAttendanceAdminRail({
   })
 
   const visibleAdminSectionNavItems = computed(() => visibleAdminSectionNavGroups.value.flatMap(group => group.items))
+  const orderedAdminSectionNavItems = computed<AdminSectionNavDisplayItem[]>(() => {
+    return adminSectionNavGroups.value.flatMap(group => {
+      return group.itemIds
+        .map(id => adminSectionItemMap.value.get(id))
+        .filter((item): item is AdminSectionNavItem => Boolean(item))
+        .map(item => {
+          const groupLabel = adminSectionGroupLabelByItemId.value.get(item.id) ?? null
+          const contextLabel = formatAdminSectionContextLabel(item)
+          return {
+            ...item,
+            groupLabel,
+            contextLabel,
+          }
+        })
+    })
+  })
   const visibleRecentAdminSectionNavItems = computed<AdminSectionNavDisplayItem[]>(() => {
     const query = adminSectionFilterQuery.value
     return adminRecentSectionIds.value
@@ -383,6 +435,19 @@ export function useAttendanceAdminRail({
   const activeAdminSectionContextLabel = computed(() => {
     const activeItem = adminSectionItemMap.value.get(adminActiveSectionId.value)
     return formatAdminSectionContextLabel(activeItem)
+  })
+  const activeAdminSectionOrderedIndex = computed(() => {
+    return orderedAdminSectionNavItems.value.findIndex(item => item.id === adminActiveSectionId.value)
+  })
+  const previousAdminSectionNavItem = computed<AdminSectionNavDisplayItem | null>(() => {
+    const activeIndex = activeAdminSectionOrderedIndex.value
+    if (activeIndex <= 0) return null
+    return orderedAdminSectionNavItems.value[activeIndex - 1] ?? null
+  })
+  const nextAdminSectionNavItem = computed<AdminSectionNavDisplayItem | null>(() => {
+    const activeIndex = activeAdminSectionOrderedIndex.value
+    if (activeIndex < 0 || activeIndex >= orderedAdminSectionNavItems.value.length - 1) return null
+    return orderedAdminSectionNavItems.value[activeIndex + 1] ?? null
   })
   const allAdminSectionGroupsExpanded = computed(() => adminCollapsedGroupIds.value.length === 0)
   const allAdminSectionGroupsCollapsed = computed(() => {
@@ -428,10 +493,15 @@ export function useAttendanceAdminRail({
     persistAdminNavRecentSections(adminNavStorageScope.value, Array.from(new Set(sectionIds)).slice(0, ADMIN_NAV_RECENT_LIMIT))
   })
 
+  watch(adminFocusedMode, focused => {
+    persistAdminNavFocusedMode(adminNavStorageScope.value, focused)
+  }, { immediate: true })
+
   watch(adminNavStorageScope, (scope, previousScope) => {
     if (scope === previousScope) return
     adminCollapsedGroupIds.value = loadAdminNavCollapsedGroups(scope)
     adminRecentSectionIds.value = loadAdminNavRecentSections(scope)
+    adminFocusedMode.value = loadAdminNavFocusedMode(scope)
     if (previousScope !== undefined) {
       setAdminNavScopeFeedback(scope)
     }
@@ -445,6 +515,7 @@ export function useAttendanceAdminRail({
     adminActiveSectionId,
     adminCompactNavOpen,
     adminNavDefaultStorageScope: ADMIN_NAV_DEFAULT_STORAGE_SCOPE,
+    adminFocusedMode,
     adminNavScopeFeedback,
     adminNavStorageScope,
     adminSectionFilter,
@@ -457,8 +528,12 @@ export function useAttendanceAdminRail({
     clearRecentAdminSections,
     copyCurrentAdminSectionLink,
     expandAllAdminSectionGroups,
+    focusAdminSectionGroup,
     isCompactAdminNav,
     isKnownAdminSectionId,
+    nextAdminSectionNavItem,
+    orderedAdminSectionNavItems,
+    previousAdminSectionNavItem,
     readLastAdminSection,
     collapseAllAdminSectionGroups,
     toggleAdminSectionGroup,

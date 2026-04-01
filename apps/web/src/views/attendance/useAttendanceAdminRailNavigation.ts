@@ -8,6 +8,9 @@ type ReadonlyItemsRef = Readonly<Ref<AdminSectionNavItem[]> | ComputedRef<AdminS
 type UseAttendanceAdminRailNavigationOptions = {
   showAdmin: ReadonlyBoolRef
   adminForbidden: ReadonlyBoolRef
+  adminFocusCurrentSectionOnly?: ReadonlyBoolRef
+  previousAdminSectionId?: ReadonlyStringRef
+  nextAdminSectionId?: ReadonlyStringRef
   adminNavStorageScope: ReadonlyStringRef
   adminActiveSectionId: Ref<string>
   adminSectionNavItems: ReadonlyItemsRef
@@ -20,6 +23,9 @@ type UseAttendanceAdminRailNavigationOptions = {
 export function useAttendanceAdminRailNavigation({
   showAdmin,
   adminForbidden,
+  adminFocusCurrentSectionOnly,
+  previousAdminSectionId,
+  nextAdminSectionId,
   adminNavStorageScope,
   adminActiveSectionId,
   adminSectionNavItems,
@@ -33,6 +39,29 @@ export function useAttendanceAdminRailNavigation({
   let adminHashSyncReady = false
   let adminHashRestoreCompleted = false
   let adminHashRestorePending = false
+
+  function resolveAdminKeyboardTarget(direction: 'previous' | 'next'): string | null {
+    const candidate = direction === 'previous'
+      ? previousAdminSectionId?.value
+      : nextAdminSectionId?.value
+    return isKnownAdminSectionId(candidate) ? candidate : null
+  }
+
+  function isInteractiveAdminKeyboardTarget(target: EventTarget | null): boolean {
+    if (target instanceof HTMLElement) {
+      if (target.isContentEditable) return true
+      const tagName = target.tagName.toLowerCase()
+      if (tagName === 'input' || tagName === 'textarea' || tagName === 'select' || tagName === 'button') {
+        return true
+      }
+      if (target.closest('input, textarea, select, button, [contenteditable="true"]')) return true
+    }
+    const activeElement = typeof document !== 'undefined' ? document.activeElement : null
+    if (!(activeElement instanceof HTMLElement)) return false
+    if (activeElement.isContentEditable) return true
+    const tagName = activeElement.tagName.toLowerCase()
+    return tagName === 'input' || tagName === 'textarea' || tagName === 'select'
+  }
 
   function setAdminSectionRef(id: string, element: Element | null): void {
     if (element instanceof HTMLElement) {
@@ -150,20 +179,41 @@ export function useAttendanceAdminRailNavigation({
     await nextTick()
     const link = resolveActiveAdminNavLink(id)
     if (!(link instanceof HTMLElement)) return
-    link.scrollIntoView({ behavior: 'auto', block: 'nearest', inline: 'nearest' })
+    link.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' })
   }
 
   function scrollToAdminSection(id: string): void {
     if (typeof document === 'undefined') return
     const target = adminSectionElements.get(id) ?? document.getElementById(id)
     if (!(target instanceof HTMLElement)) return
+    const content = target.closest<HTMLElement>('[data-admin-content="true"]')
     adminActiveSectionId.value = id
     adminHashSyncReady = true
     syncAdminSectionHash(id)
     if (isCompactAdminNav.value) {
       adminCompactNavOpen.value = false
     }
+    if (content instanceof HTMLElement) {
+      content.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+    if (adminFocusCurrentSectionOnly?.value) return
     target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  function handleAdminSectionKeyboardNavigation(event: KeyboardEvent): void {
+    if (!showAdmin.value || adminForbidden.value) return
+    if (!event.altKey || event.metaKey || event.ctrlKey) return
+    if (event.defaultPrevented || isInteractiveAdminKeyboardTarget(event.target)) return
+    const direction = event.key === 'ArrowUp'
+      ? 'previous'
+      : event.key === 'ArrowDown'
+        ? 'next'
+        : null
+    if (!direction) return
+    const targetId = resolveAdminKeyboardTarget(direction)
+    if (!targetId) return
+    event.preventDefault()
+    scrollToAdminSection(targetId)
   }
 
   function syncAdminNavViewportState(): void {
@@ -184,6 +234,7 @@ export function useAttendanceAdminRailNavigation({
     syncAdminNavViewportState()
     if (typeof window !== 'undefined') {
       window.addEventListener('resize', syncAdminNavViewportState)
+      window.addEventListener('keydown', handleAdminSectionKeyboardNavigation)
     }
     if (showAdmin.value && !adminForbidden.value) {
       nextTick().then(() => restoreAdminSectionFromHash())
@@ -195,6 +246,7 @@ export function useAttendanceAdminRailNavigation({
     disconnectAdminSectionObserver()
     if (typeof window !== 'undefined') {
       window.removeEventListener('resize', syncAdminNavViewportState)
+      window.removeEventListener('keydown', handleAdminSectionKeyboardNavigation)
     }
   })
 

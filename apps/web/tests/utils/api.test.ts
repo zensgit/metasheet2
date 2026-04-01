@@ -40,6 +40,17 @@ describe('API Utils', () => {
       expect(getApiBase()).toBe('https://api-base.example.com')
     })
 
+    it('ignores loopback VITE API env on non-loopback browser origins', () => {
+      vi.stubEnv('VITE_API_URL', '')
+      vi.stubEnv('VITE_API_BASE', 'http://127.0.0.1:7778')
+      Object.defineProperty(window, 'location', {
+        value: { origin: 'http://192.168.1.222' },
+        writable: true,
+        configurable: true,
+      })
+      expect(getApiBase()).toBe('http://192.168.1.222')
+    })
+
     it('falls back to location.origin', () => {
       vi.unstubAllEnvs()
       Object.defineProperty(window, 'location', {
@@ -130,9 +141,12 @@ describe('API Utils', () => {
       window.localStorage.clear()
       vi.restoreAllMocks()
       vi.stubEnv('VITE_API_URL', 'https://api.example.com')
+      vi.useFakeTimers()
     })
 
     afterEach(() => {
+      vi.runOnlyPendingTimers()
+      vi.useRealTimers()
       vi.unstubAllEnvs()
       vi.restoreAllMocks()
       Object.defineProperty(window, 'location', {
@@ -165,6 +179,30 @@ describe('API Utils', () => {
       expect(window.localStorage.getItem('auth_token')).toBeNull()
       expect(replace).toHaveBeenCalledTimes(1)
       expect(replace.mock.calls[0][0]).toContain('/login?redirect=')
+    })
+
+    it('redirects root-route unauthorized responses to plain /login without a redundant redirect query', async () => {
+      const replace = vi.fn()
+      Object.defineProperty(window, 'location', {
+        value: {
+          pathname: '/',
+          search: '',
+          hash: '',
+          replace,
+          href: 'https://app.example.com/',
+          origin: 'https://app.example.com',
+        },
+        writable: true,
+        configurable: true,
+      })
+
+      window.localStorage.setItem('auth_token', 'expired-token')
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 401 }))
+
+      await apiFetch('/api/attendance/records')
+
+      expect(window.localStorage.getItem('auth_token')).toBeNull()
+      expect(replace).toHaveBeenCalledWith('/login')
     })
 
     it('does not redirect when /api/auth/login returns 401', async () => {

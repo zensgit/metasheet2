@@ -1,5 +1,8 @@
 # Attendance Import: DingTalk CSV
 
+See also:
+- `docs/ATTENDANCE_IMPORT_TEMPLATE_QUICKSTART.md` for the minimum working CSV header and the current operator flow.
+
 ## Overview
 This import path supports DingTalk CSV exports and CSV-derived JSON payloads. The import API now accepts:
 

@@ -232,6 +232,55 @@ components:
         created_at:
           type: string
           format: date-time
+    AttendancePunchEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        user_id:
+          type: string
+        orgId:
+          type: string
+        org_id:
+          type: string
+        workDate:
+          type: string
+          format: date
+          nullable: true
+        work_date:
+          type: string
+          format: date
+          nullable: true
+        occurredAt:
+          type: string
+          format: date-time
+        occurred_at:
+          type: string
+          format: date-time
+        eventType:
+          type: string
+          enum: [check_in, check_out]
+        event_type:
+          type: string
+          enum: [check_in, check_out]
+        source:
+          type: string
+        timezone:
+          type: string
+        location:
+          type: object
+        meta:
+          type: object
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
     AttendanceRecord:
       type: object
       properties:
@@ -693,6 +742,13 @@ components:
       type: object
       properties:
         source:
+          type: string
+        defaultProfileId:
+          type: string
+          nullable: true
+        csvTemplateUrl:
+          type: string
+        csvTemplateFilename:
           type: string
         mapping:
           type: object

@@ -234,6 +234,15 @@ const IMPORT_MAPPING_PROFILES = [
   },
 ]
 
+const IMPORT_REQUIRED_FIELD_ALIASES = {
+  '日期': ['workDate', 'date'],
+  workDate: ['日期', 'date'],
+  '上班1打卡时间': ['1_on_duty_user_check_time', 'firstInAt', 'clockIn1'],
+  '下班1打卡时间': ['1_off_duty_user_check_time', 'lastOutAt', 'clockOut1'],
+  '上班2打卡时间': ['2_on_duty_user_check_time', 'clockIn2'],
+  '下班2打卡时间': ['2_off_duty_user_check_time', 'clockOut2'],
+}
+
 function findImportProfile(profileId) {
   if (!profileId) return null
   return IMPORT_MAPPING_PROFILES.find((profile) => profile.id === profileId) ?? null
@@ -325,10 +334,14 @@ function buildImportTemplatePayloadExample(profile) {
 }
 
 function buildAttendanceImportTemplateData(profile) {
+  const query = profile?.id ? `?profileId=${encodeURIComponent(profile.id)}` : ''
   return {
     source: typeof profile?.source === 'string' && profile.source.trim()
       ? profile.source.trim()
       : 'dingtalk',
+    defaultProfileId: profile?.id ?? null,
+    csvTemplateUrl: `/api/attendance/import/template.csv${query}`,
+    csvTemplateFilename: buildImportTemplateFilename(profile),
     mapping: {
       columns: IMPORT_MAPPING_COLUMNS,
     },
@@ -362,6 +375,44 @@ function buildImportTemplateFilename(profile) {
     .replace(/[^a-z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '')
   return `attendance-import-template-${seed || 'attendance'}.csv`
+}
+
+function normalizeImportPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload ?? {}
+  const next = { ...payload }
+  if (next.csvFileId === undefined) next.csvFileId = next.fileId ?? next.csv_file_id
+  if (next.mappingProfileId === undefined) next.mappingProfileId = next.profileId ?? next.mapping_profile_id
+  if (next.userId === undefined) next.userId = next.user_id
+  if (next.orgId === undefined) next.orgId = next.org_id
+  if (next.commitToken === undefined) next.commitToken = next.commit_token
+  if (next.previewLimit === undefined) next.previewLimit = next.preview_limit
+  if (next.returnItems === undefined) next.returnItems = next.return_items
+  if (next.itemsLimit === undefined) next.itemsLimit = next.items_limit
+  if (next.ruleSetId === undefined) next.ruleSetId = next.rule_set_id
+  if (next.userMap === undefined) next.userMap = next.user_map
+  if (next.userMapKeyField === undefined) next.userMapKeyField = next.user_map_key_field
+  if (next.userMapSourceFields === undefined) next.userMapSourceFields = next.user_map_source_fields
+  if (next.groupSync === undefined) next.groupSync = next.group_sync
+  if (next.batchMeta === undefined) next.batchMeta = next.batch_meta
+  if (next.csvText === undefined) next.csvText = next.csv_text
+  if (next.csvOptions === undefined) next.csvOptions = next.csv_options
+  if (next.idempotencyKey === undefined) next.idempotencyKey = next.idempotency_key
+  return next
+}
+
+function resolveImportProfileForPayload(payload) {
+  const profile = findImportProfile(payload?.mappingProfileId)
+  if (profile) return profile
+  const source = typeof payload?.source === 'string' ? payload.source.trim() : ''
+  const hasCsvInput = (
+    typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()
+  ) || (
+    typeof payload?.csvText === 'string' && payload.csvText.trim()
+  )
+  if (hasCsvInput && (!source || source === 'csv' || source === 'dingtalk_csv')) {
+    return getDefaultImportTemplateProfile()
+  }
+  return null
 }
 
 const IMPORT_COMMIT_TOKEN_TTL_MS = 10 * 60 * 1000
@@ -763,6 +814,31 @@ function normalizeDateOnlyStrict(value) {
   const date = new Date(`${normalized}T00:00:00.000Z`)
   if (Number.isNaN(date.getTime())) return null
   return date.toISOString().slice(0, 10) === normalized ? normalized : null
+}
+
+function normalizeDateOnlyValue(value) {
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null
+    const localMidnight =
+      value.getHours() === 0
+      && value.getMinutes() === 0
+      && value.getSeconds() === 0
+      && value.getMilliseconds() === 0
+    const utcMidnight =
+      value.getUTCHours() === 0
+      && value.getUTCMinutes() === 0
+      && value.getUTCSeconds() === 0
+      && value.getUTCMilliseconds() === 0
+    if (localMidnight && !utcMidnight) {
+      return [
+        String(value.getFullYear()).padStart(4, '0'),
+        String(value.getMonth() + 1).padStart(2, '0'),
+        String(value.getDate()).padStart(2, '0'),
+      ].join('-')
+    }
+    return value.toISOString().slice(0, 10)
+  }
+  return normalizeDateOnlyStrict(value)
 }
 
 function normalizeUuidString(value) {
@@ -1537,7 +1613,10 @@ function normalizeCsvWorkDate(value) {
     const [yy, mm, dd] = cleaned.split('-')
     return `20${yy}-${mm}-${dd}`
   }
-  if (/^\d{4}\/\d{2}\/\d{2}$/.test(cleaned)) return cleaned.replace(/\//g, '-')
+  if (/^\d{4}[/-]\d{1,2}[/-]\d{1,2}$/.test(cleaned)) {
+    const [yyyy, mm, dd] = cleaned.split(/[/-]/)
+    return `${yyyy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`
+  }
   return null
 }
 
@@ -1871,6 +1950,116 @@ async function readImportCsvHeaderFromFile(csvPath, delimiter = ',') {
   return header
 }
 
+function readImportCsvHeaderFromText(csvText, delimiter = ',') {
+  if (typeof csvText !== 'string' || !csvText.trim()) return []
+  let header = []
+  iterateCsvRows(csvText, delimiter, (rawRow) => {
+    const normalized = rawRow.map(normalizeCsvHeaderValue)
+    if (normalized.some((cell) => cell && String(cell).trim().length > 0)) {
+      header = normalized
+      return false
+    }
+    return true
+  })
+  return header
+}
+
+function summarizeImportDiagnosticValues(values, maxItems = 6) {
+  const normalized = Array.isArray(values)
+    ? values
+      .map((value) => String(value ?? '').trim())
+      .filter(Boolean)
+    : []
+  if (!normalized.length) return ''
+  if (normalized.length <= maxItems) return normalized.join(', ')
+  return `${normalized.slice(0, maxItems).join(', ')} (+${normalized.length - maxItems} more)`
+}
+
+function buildImportHeaderDiagnostics({ header, mapping, profile }) {
+  const columns = Array.isArray(header)
+    ? header.map(normalizeCsvHeaderValue).filter(Boolean)
+    : []
+  if (!columns.length) return null
+
+  const normalizedHeaderLookup = new Set(columns.map(normalizeImportHeaderLookupKey).filter(Boolean))
+  const matchedMappings = []
+  const matchedHeaderKeys = new Set()
+  for (const entry of Array.isArray(mapping) ? mapping : []) {
+    if (!entry || typeof entry !== 'object') continue
+    const sourceField = normalizeCsvHeaderValue(entry.sourceField)
+    const targetField = typeof entry.targetField === 'string' ? entry.targetField.trim() : ''
+    if (!sourceField || !targetField) continue
+    const lookupKey = normalizeImportHeaderLookupKey(sourceField)
+    if (!lookupKey || !normalizedHeaderLookup.has(lookupKey)) continue
+    matchedHeaderKeys.add(lookupKey)
+    matchedMappings.push(`${sourceField}→${targetField}`)
+  }
+
+  const templateColumns = resolveImportTemplateColumns(profile)
+  const missingTemplateColumns = templateColumns.filter((column) => {
+    const lookupKey = normalizeImportHeaderLookupKey(column)
+    return lookupKey && !normalizedHeaderLookup.has(lookupKey)
+  })
+  const unmatchedHeaders = columns.filter((column) => {
+    const lookupKey = normalizeImportHeaderLookupKey(column)
+    return lookupKey && !matchedHeaderKeys.has(lookupKey)
+  })
+
+  return {
+    columns,
+    matchedMappings,
+    missingTemplateColumns,
+    unmatchedHeaders,
+  }
+}
+
+async function resolveImportHeaderDiagnostics({ payload, orgId, mapping, profile, readUploadHeader }) {
+  const delimiter = payload?.csvOptions?.delimiter || ','
+  let header = []
+  const csvFileId = typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()
+    ? payload.csvFileId.trim()
+    : (typeof payload?.fileId === 'string' && payload.fileId.trim() ? payload.fileId.trim() : '')
+  if (csvFileId) {
+    if (typeof readUploadHeader === 'function') {
+      header = await readUploadHeader(csvFileId, delimiter)
+    }
+  } else if (typeof payload?.csvText === 'string' && payload.csvText.trim()) {
+    header = readImportCsvHeaderFromText(payload.csvText, delimiter)
+  }
+  return buildImportHeaderDiagnostics({ header, mapping, profile })
+}
+
+function buildImportHeaderWarnings(diagnostics) {
+  if (!diagnostics) return []
+  const warnings = []
+  if (diagnostics.columns.length) {
+    warnings.push(`Detected CSV columns: ${summarizeImportDiagnosticValues(diagnostics.columns)}`)
+  }
+  if (diagnostics.matchedMappings.length) {
+    warnings.push(`Recognized import columns: ${summarizeImportDiagnosticValues(diagnostics.matchedMappings)}`)
+  }
+  if (diagnostics.missingTemplateColumns.length) {
+    warnings.push(`Template columns missing: ${summarizeImportDiagnosticValues(diagnostics.missingTemplateColumns)}`)
+  }
+  if (diagnostics.unmatchedHeaders.length) {
+    warnings.push(`Unmapped CSV columns: ${summarizeImportDiagnosticValues(diagnostics.unmatchedHeaders)}`)
+  }
+  return warnings
+}
+
+function buildImportEmptyRowsMessage({ operation, payload, headerDiagnostics }) {
+  const base = operation === 'preview' ? 'No rows to preview' : 'No rows to import'
+  if (headerDiagnostics?.columns?.length) {
+    return `${base}. CSV contains the header row but no non-empty data rows were parsed. Detected columns: ${summarizeImportDiagnosticValues(headerDiagnostics.columns)}`
+  }
+  const hasCsvSource = typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()
+    || typeof payload?.csvText === 'string' && payload.csvText.trim()
+  if (hasCsvSource) {
+    return `${base}. CSV content did not yield any non-empty rows.`
+  }
+  return `${base}. Provide csvText, csvFileId, rows, entries, or source column data.`
+}
+
 async function validateImportUploadCsvOrThrow({ csvPath, csvOptions }) {
   const delimiter = csvOptions?.delimiter || ','
   const header = await readImportCsvHeaderFromFile(csvPath, delimiter)
@@ -1886,6 +2075,18 @@ async function validateImportUploadCsvOrThrow({ csvPath, csvOptions }) {
       'VALIDATION_ERROR',
       'CSV header must include a work date column and at least one user or attendance column'
     )
+  }
+  const rowScan = await iterateImportRowsFromCsvFileAsync({
+    csvPath,
+    csvOptions,
+    maxRows: Number.MAX_SAFE_INTEGER,
+  })
+  if (rowScan.rowCount <= 0) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'CSV must include at least 1 non-empty data row')
+  }
+  return {
+    rowCount: rowScan.rowCount,
+    warnings: rowScan.warnings,
   }
 }
 
@@ -2031,6 +2232,12 @@ function resolveRequiredFieldValue(row, field) {
   if (!row || !field) return undefined
   if (row.fields && row.fields[field] !== undefined) return row.fields[field]
   if (row[field] !== undefined) return row[field]
+  const aliases = IMPORT_REQUIRED_FIELD_ALIASES[field]
+  if (!Array.isArray(aliases)) return undefined
+  for (const alias of aliases) {
+    if (row.fields && row.fields[alias] !== undefined) return row.fields[alias]
+    if (row[alias] !== undefined) return row[alias]
+  }
   return undefined
 }
 
@@ -2523,10 +2730,33 @@ function mapPayrollCycleRow(row) {
     orgId: row.org_id ?? DEFAULT_ORG_ID,
     templateId: row.template_id ?? null,
     name: row.name ?? null,
-    startDate: row.start_date,
-    endDate: row.end_date,
+    startDate: normalizeDateOnly(row.start_date) ?? row.start_date,
+    endDate: normalizeDateOnly(row.end_date) ?? row.end_date,
     status: row.status ?? 'open',
     metadata: normalizeMetadata(row.metadata),
+  }
+}
+
+function mapAttendanceEventRow(row) {
+  const workDate = normalizeDateOnly(row.work_date) ?? null
+  return {
+    id: row.id,
+    userId: row.user_id,
+    user_id: row.user_id,
+    orgId: row.org_id ?? DEFAULT_ORG_ID,
+    org_id: row.org_id ?? DEFAULT_ORG_ID,
+    workDate,
+    work_date: workDate,
+    occurredAt: row.occurred_at,
+    occurred_at: row.occurred_at,
+    eventType: row.event_type,
+    event_type: row.event_type,
+    source: row.source ?? 'manual',
+    timezone: row.timezone ?? 'UTC',
+    location: normalizeMetadata(row.location),
+    meta: normalizeMetadata(row.meta),
+    createdAt: row.created_at ?? null,
+    created_at: row.created_at ?? null,
   }
 }
 
@@ -2770,6 +3000,16 @@ function normalizeMetadata(value) {
   return typeof value === 'object' ? value : {}
 }
 
+function mapAttendanceRequestRow(row) {
+  const workDate = normalizeDateOnly(row?.work_date) ?? (typeof row?.work_date === 'string' ? row.work_date.slice(0, 10) : row?.work_date ?? null)
+  return {
+    ...row,
+    workDate,
+    work_date: workDate,
+    metadata: normalizeMetadata(row?.metadata),
+  }
+}
+
 function normalizeObjectPayload(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 }
@@ -2779,6 +3019,25 @@ function firstDefinedValue(...values) {
     if (value !== undefined) return value
   }
   return undefined
+}
+
+function tryParseJsonPayload(value) {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (!trimmed) return value
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return value
+  }
+}
+
+function normalizeNumericPayload(value) {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (!trimmed) return value
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) ? parsed : value
 }
 
 function normalizeGroupMembersPayload(value) {
@@ -2827,10 +3086,11 @@ function normalizeApprovalStepPayload(value) {
 
 function normalizeApprovalFlowPayload(value) {
   const payload = normalizeObjectPayload(value)
+  const normalizedSteps = tryParseJsonPayload(payload.steps)
   return {
     ...payload,
-    requestType: firstDefinedValue(payload.requestType, payload.request_type),
-    steps: Array.isArray(payload.steps) ? payload.steps.map(normalizeApprovalStepPayload) : payload.steps,
+    requestType: firstDefinedValue(payload.requestType, payload.request_type, payload.type),
+    steps: Array.isArray(normalizedSteps) ? normalizedSteps.map(normalizeApprovalStepPayload) : normalizedSteps,
     isActive: firstDefinedValue(payload.isActive, payload.is_active),
   }
 }
@@ -2858,8 +3118,11 @@ function normalizeRotationAssignmentPayload(value) {
 
 function normalizeRuleSetPayload(value) {
   const payload = normalizeObjectPayload(value)
+  const normalizedConfig = tryParseJsonPayload(payload.config)
   return {
     ...payload,
+    version: normalizeNumericPayload(payload.version),
+    config: normalizedConfig,
     isDefault: firstDefinedValue(payload.isDefault, payload.is_default),
   }
 }
@@ -6516,6 +6779,7 @@ module.exports = {
     const holidayCreateSchema = z.object({
       date: z.string().min(1),
       name: z.string().trim().min(1),
+      type: z.enum(['holiday', 'working_day_override']).optional(),
       isWorkingDay: z.boolean().optional(),
       orgId: z.string().optional(),
     })
@@ -6754,7 +7018,7 @@ module.exports = {
       commitToken: z.string().optional(),
       batchMeta: z.record(z.unknown()).optional(),
       columns: z.array(importColumnSchema).optional(),
-      data: z.object({
+	      data: z.object({
         column_vals: z.array(z.object({
           column_vo: z.object({ id: z.union([z.string(), z.number()]) }).optional(),
           column_vals: z.array(z.object({
@@ -6764,6 +7028,7 @@ module.exports = {
         })).optional(),
 	      }).optional(),
 	      csvFileId: z.string().uuid().optional(),
+	      fileId: z.string().uuid().optional(),
 	      csvText: z.string().optional(),
 	      csvOptions: z.object({
 	        delimiter: z.string().optional(),
@@ -6826,6 +7091,13 @@ module.exports = {
 		      return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(text)
 		    }
 
+		    const resolveImportUploadFileId = (payload) => {
+		      const primary = typeof payload?.csvFileId === 'string' ? payload.csvFileId.trim() : ''
+		      if (primary) return primary
+		      const alias = typeof payload?.fileId === 'string' ? payload.fileId.trim() : ''
+		      return alias || ''
+		    }
+
 		    class ImportUploadMeter extends Transform {
 		      constructor(maxBytes) {
 		        super()
@@ -6878,7 +7150,7 @@ module.exports = {
 
 		    const loadImportUploadMetaOrThrow = async ({ orgId, fileId }) => {
 		      if (!isUuidLike(fileId)) {
-		        throw new HttpError(400, 'VALIDATION_ERROR', 'csvFileId must be a UUID')
+		        throw new HttpError(400, 'VALIDATION_ERROR', 'csvFileId/fileId must be a UUID')
 		      }
 		      const meta = await loadImportUploadMeta({ orgId, fileId })
 		      if (!meta) {
@@ -6960,8 +7232,9 @@ module.exports = {
 	      let csvWarnings = []
 	      let csvFileId = null
 		      if (Array.isArray(payload.rows)) return { rows: payload.rows, csvWarnings, csvFileId }
-		      if (typeof payload.csvFileId === 'string' && payload.csvFileId.trim()) {
-		        csvFileId = payload.csvFileId.trim()
+		      const resolvedCsvFileId = resolveImportUploadFileId(payload)
+		      if (resolvedCsvFileId) {
+		        csvFileId = resolvedCsvFileId
 		        const { csvText } = await readImportUploadCsvText({ orgId, fileId: csvFileId })
 		        const result = buildRowsFromCsv({ csvText, csvOptions: payload.csvOptions })
 		        ensureCsvRowsWithinLimit(result)
@@ -7008,8 +7281,8 @@ module.exports = {
 	    })
 
 	    const resolveAsyncImportRowSource = async ({ payload, orgId, fallbackUserId }) => {
-	      if (typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()) {
-	        const csvFileId = payload.csvFileId.trim()
+	      const csvFileId = resolveImportUploadFileId(payload)
+	      if (csvFileId) {
 	        await loadImportUploadMetaOrThrow({ orgId, fileId: csvFileId })
 	        const { csvPath } = getImportUploadPaths({ orgId, fileId: csvFileId })
 	        return {
@@ -7025,12 +7298,12 @@ module.exports = {
 	          },
 	        }
 	      }
-	      const { rows, csvWarnings, csvFileId } = await resolveImportRows({
+	      const { rows, csvWarnings, csvFileId: resolvedCsvFileId } = await resolveImportRows({
 	        payload,
 	        orgId,
 	        fallbackUserId,
 	      })
-	      return createMaterializedImportRowSource({ rows, csvWarnings, csvFileId })
+	      return createMaterializedImportRowSource({ rows, csvWarnings, csvFileId: resolvedCsvFileId })
 	    }
 
 	    // ============================================================
@@ -7079,6 +7352,11 @@ module.exports = {
 		      if (!payload || typeof payload !== 'object') return {}
 		      const next = { ...payload }
 		      const jobType = next.__jobType === 'preview' ? 'preview' : 'commit'
+		      const csvFileId = resolveImportUploadFileId(next)
+		      if (csvFileId) {
+		        next.csvFileId = csvFileId
+		      }
+		      delete next.fileId
 		      // Never persist single-use tokens in the job payload.
 		      delete next.commitToken
 		      // If a server-side upload reference is present, avoid persisting duplicate CSV payloads.
@@ -7367,8 +7645,9 @@ module.exports = {
 		    const estimateImportPayloadRowCount = async ({ payload, orgId }) => {
 		      if (Array.isArray(payload?.rows)) return payload.rows.length
 		      if (Array.isArray(payload?.entries)) return payload.entries.length
-		      if (typeof payload?.csvFileId === 'string' && payload.csvFileId.trim()) {
-		        const meta = await loadImportUploadMetaOrThrow({ orgId, fileId: payload.csvFileId.trim() })
+		      const csvFileId = resolveImportUploadFileId(payload)
+		      if (csvFileId) {
+		        const meta = await loadImportUploadMetaOrThrow({ orgId, fileId: csvFileId })
 		        const hint = Number(meta?.rowCount ?? 0)
 		        return Number.isFinite(hint) && hint > 0 ? hint : 0
 		      }
@@ -7464,7 +7743,7 @@ module.exports = {
 	    }
 
 	    const buildAsyncPreviewResult = async ({ payload, requesterId, orgId }) => {
-	      const profile = findImportProfile(payload.mappingProfileId)
+	      const profile = resolveImportProfileForPayload(payload)
 	      const requiredFields = profile?.requiredFields ?? []
 	      const punchRequiredFields = profile?.punchRequiredFields ?? []
 	      const rowSource = await resolveAsyncImportRowSource({
@@ -7882,7 +8161,7 @@ module.exports = {
 	        if (rows.length) ruleSetConfig = normalizeMetadata(rows[0].config)
 	      }
 
-	      const profile = findImportProfile(payload.mappingProfileId)
+	      const profile = resolveImportProfileForPayload(payload)
 	      const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
 	      const mapping = payload.mapping?.columns
 	        ?? payload.mapping?.fields
@@ -8927,6 +9206,97 @@ module.exports = {
       })
     )
 
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/punch/events',
+      withPermission('attendance:read', async (req, res) => {
+        const schema = z.object({
+          userId: z.string().optional(),
+          from: z.string().optional(),
+          to: z.string().optional(),
+        })
+
+        const parsed = schema.safeParse({
+          userId: typeof req.query.userId === 'string' ? req.query.userId : undefined,
+          from: typeof req.query.from === 'string' ? req.query.from : undefined,
+          to: typeof req.query.to === 'string' ? req.query.to : undefined,
+        })
+
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+
+        const orgId = getOrgId(req)
+        const targetUserId = parsed.data.userId ?? requesterId
+        if (targetUserId !== requesterId) {
+          const allowed = await canAccessOtherUsers(requesterId)
+          if (!allowed) {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'No access to other users' } })
+            return
+          }
+        }
+
+        const { page, pageSize, offset } = parsePagination(req.query)
+        const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
+        if (!dateRange.ok) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: dateRange.message } })
+          return
+        }
+        const { from, to } = dateRange
+
+        try {
+          const countRows = await db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM attendance_events
+             WHERE user_id = $1
+               AND org_id = $2
+               AND work_date BETWEEN $3 AND $4
+               AND event_type = ANY($5)`,
+            [targetUserId, orgId, from, to, ['check_in', 'check_out']]
+          )
+          const total = Number(countRows[0]?.total ?? 0)
+
+          const rows = await db.query(
+            `SELECT *
+             FROM attendance_events
+             WHERE user_id = $1
+               AND org_id = $2
+               AND work_date BETWEEN $3 AND $4
+               AND event_type = ANY($5)
+             ORDER BY occurred_at DESC, created_at DESC
+             LIMIT $6 OFFSET $7`,
+            [targetUserId, orgId, from, to, ['check_in', 'check_out'], pageSize, offset]
+          )
+
+          res.json({
+            ok: true,
+            data: {
+              items: rows.map(mapAttendanceEventRow),
+              total,
+              page,
+              pageSize,
+              from,
+              to,
+            },
+          })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance punch events query failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load punch events' } })
+        }
+      })
+    )
+
       const handleAttendanceRecordsGet = withPermission('attendance:read', async (req, res) => {
         const schema = z.object({
           userId: z.string().optional(),
@@ -9390,178 +9760,232 @@ module.exports = {
       })
     )
 
+    const requestWriteSchema = z.object({
+      workDate: z.string().optional(),
+      date: z.string().optional(),
+      requestType: z.string().optional(),
+      type: z.string().optional(),
+      requestedInAt: z.string().optional(),
+      requested_in_at: z.string().optional(),
+      clockIn: z.string().optional(),
+      requestedOutAt: z.string().optional(),
+      requested_out_at: z.string().optional(),
+      clockOut: z.string().optional(),
+      reason: z.string().optional(),
+      leaveTypeId: z.string().optional(),
+      leaveTypeCode: z.string().optional(),
+      overtimeRuleId: z.string().optional(),
+      overtimeRuleName: z.string().optional(),
+      minutes: z.coerce.number().int().min(0).optional(),
+      attachmentUrl: z.string().optional(),
+      approvalFlowId: z.string().optional(),
+      orgId: z.string().optional(),
+    })
+
+    function normalizeRequestReferenceInput(value, fallback = null) {
+      if (value === undefined) return normalizeOptionalText(fallback)
+      return normalizeOptionalText(value)
+    }
+
+    async function ensureAttendanceRequestAccess(requestRow, requesterId, actionLabel) {
+      if (requestRow.user_id === requesterId) return
+      const allowed = await canAccessOtherUsers(requesterId)
+      if (!allowed) {
+        throw new HttpError(403, 'FORBIDDEN', `No access to ${actionLabel}`)
+      }
+    }
+
+    async function resolveAttendanceRequestDraft(parsedData, existingRequest = null) {
+      const orgId = existingRequest?.org_id ?? DEFAULT_ORG_ID
+      const existingMetadata = normalizeMetadata(existingRequest?.metadata)
+      const existingLeaveType = normalizeMetadata(existingMetadata.leaveType)
+      const existingOvertimeRule = normalizeMetadata(existingMetadata.overtimeRule)
+      const existingApprovalFlow = normalizeMetadata(existingMetadata.approvalFlow)
+
+      const workDate = normalizeDateOnlyValue(
+        firstDefinedValue(parsedData.workDate, parsedData.date, existingRequest?.work_date)
+      )
+      if (!workDate) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'workDate must use YYYY-MM-DD format')
+      }
+
+      const requestType = firstDefinedValue(parsedData.requestType, parsedData.type, existingRequest?.request_type)
+      if (!REQUEST_TYPES.includes(requestType)) {
+        throw new HttpError(400, 'VALIDATION_ERROR', `requestType must be one of: ${REQUEST_TYPES.join(', ')}`)
+      }
+
+      const requestedInSource = firstDefinedValue(
+        parsedData.requestedInAt,
+        parsedData.requested_in_at,
+        parsedData.clockIn,
+        existingRequest?.requested_in_at,
+      )
+      const requestedOutSource = firstDefinedValue(
+        parsedData.requestedOutAt,
+        parsedData.requested_out_at,
+        parsedData.clockOut,
+        existingRequest?.requested_out_at,
+      )
+      const requestedInAt = parseDateInput(requestedInSource)
+      const requestedOutAt = parseDateInput(requestedOutSource)
+
+      if (requestedInAt && requestedOutAt && requestedOutAt <= requestedInAt) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'requestedOutAt must be after requestedInAt')
+      }
+      if (requestType === 'missed_check_in' && !requestedInAt) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'requestedInAt required')
+      }
+      if (requestType === 'missed_check_out' && !requestedOutAt) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'requestedOutAt required')
+      }
+      if (requestType === 'time_correction' && !requestedInAt && !requestedOutAt) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'requestedInAt or requestedOutAt required')
+      }
+
+      let durationMinutes = parsedData.minutes !== undefined
+        ? parsedData.minutes
+        : (Number(existingMetadata.minutes ?? null) || null)
+      if (!durationMinutes) {
+        durationMinutes = calculateDurationMinutes(requestedInAt, requestedOutAt)
+      }
+
+      let leaveType = null
+      let overtimeRule = null
+      if (requestType === 'leave') {
+        leaveType = await loadLeaveType(db, orgId, {
+          id: normalizeRequestReferenceInput(parsedData.leaveTypeId, existingLeaveType.id),
+          code: normalizeRequestReferenceInput(parsedData.leaveTypeCode, existingLeaveType.code),
+        })
+        if (!leaveType) {
+          throw new HttpError(404, 'NOT_FOUND', 'Leave type not found')
+        }
+        if (!leaveType.isActive) {
+          throw new HttpError(400, 'INVALID_STATE', 'Leave type inactive')
+        }
+        if (!durationMinutes) {
+          durationMinutes = leaveType.defaultMinutesPerDay
+        }
+      } else if (requestType === 'overtime') {
+        overtimeRule = await loadOvertimeRule(db, orgId, {
+          id: normalizeRequestReferenceInput(parsedData.overtimeRuleId, existingOvertimeRule.id),
+          name: normalizeRequestReferenceInput(parsedData.overtimeRuleName, existingOvertimeRule.name),
+        })
+        if (!overtimeRule) {
+          throw new HttpError(404, 'NOT_FOUND', 'Overtime rule not found')
+        }
+        if (!overtimeRule.isActive) {
+          throw new HttpError(400, 'INVALID_STATE', 'Overtime rule inactive')
+        }
+        if (!durationMinutes) {
+          throw new HttpError(400, 'VALIDATION_ERROR', 'Duration required for overtime')
+        }
+        durationMinutes = applyOvertimeRule(durationMinutes, overtimeRule)
+      }
+
+      if ((requestType === 'leave' || requestType === 'overtime') && (!durationMinutes || durationMinutes <= 0)) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'Duration required')
+      }
+
+      const approvalFlow = await loadApprovalFlow(db, orgId, {
+        requestType,
+        flowId: normalizeRequestReferenceInput(parsedData.approvalFlowId, existingApprovalFlow.id),
+      })
+
+      const reason = parsedData.reason === undefined
+        ? normalizeOptionalText(existingRequest?.reason)
+        : normalizeOptionalText(parsedData.reason)
+      const attachmentUrl = parsedData.attachmentUrl === undefined
+        ? normalizeOptionalText(existingMetadata.attachmentUrl)
+        : normalizeOptionalText(parsedData.attachmentUrl)
+
+      const metadata = {}
+      if (durationMinutes) metadata.minutes = durationMinutes
+      if (leaveType) {
+        metadata.leaveType = {
+          id: leaveType.id,
+          code: leaveType.code,
+          name: leaveType.name,
+          paid: leaveType.paid,
+          requiresApproval: leaveType.requiresApproval,
+          requiresAttachment: leaveType.requiresAttachment,
+          defaultMinutesPerDay: leaveType.defaultMinutesPerDay,
+        }
+      }
+      if (overtimeRule) {
+        metadata.overtimeRule = {
+          id: overtimeRule.id,
+          name: overtimeRule.name,
+          minMinutes: overtimeRule.minMinutes,
+          roundingMinutes: overtimeRule.roundingMinutes,
+          maxMinutesPerDay: overtimeRule.maxMinutesPerDay,
+          requiresApproval: overtimeRule.requiresApproval,
+        }
+      }
+      if (attachmentUrl) metadata.attachmentUrl = attachmentUrl
+      if (approvalFlow) {
+        metadata.approvalFlow = {
+          id: approvalFlow.id,
+          name: approvalFlow.name,
+          steps: approvalFlow.steps,
+          currentStep: 0,
+        }
+      }
+
+      return {
+        orgId,
+        workDate,
+        requestType,
+        requestedInAt,
+        requestedOutAt,
+        reason,
+        metadata,
+      }
+    }
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/requests',
       withPermission('attendance:write', async (req, res) => {
-        const schema = z.object({
-          workDate: z.string().optional(),
-          date: z.string().optional(),
-          requestType: z.string().optional(),
-          type: z.string().optional(),
-          requestedInAt: z.string().optional(),
-          requested_in_at: z.string().optional(),
-          clockIn: z.string().optional(),
-          requestedOutAt: z.string().optional(),
-          requested_out_at: z.string().optional(),
-          clockOut: z.string().optional(),
-          reason: z.string().optional(),
-          leaveTypeId: z.string().optional(),
-          leaveTypeCode: z.string().optional(),
-          overtimeRuleId: z.string().optional(),
-          overtimeRuleName: z.string().optional(),
-          minutes: z.coerce.number().int().min(0).optional(),
-          attachmentUrl: z.string().optional(),
-          approvalFlowId: z.string().optional(),
-          orgId: z.string().optional(),
-        })
-
-        const parsed = schema.safeParse(req.body)
+        const parsed = requestWriteSchema.safeParse(req.body)
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
 
-		        const userId = getUserId(req)
-		        if (!userId) {
-		          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-		          return
-		        }
-
-		        const orgId = getOrgId(req)
-		        const workDate = normalizeDateOnlyStrict(parsed.data.workDate ?? parsed.data.date)
-		        if (!workDate) {
-		          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'workDate must use YYYY-MM-DD format' } })
-		          return
-		        }
-		        const requestedInAt = parseDateInput(parsed.data.requestedInAt ?? parsed.data.requested_in_at ?? parsed.data.clockIn)
-		        const requestedOutAt = parseDateInput(parsed.data.requestedOutAt ?? parsed.data.requested_out_at ?? parsed.data.clockOut)
-        if (requestedInAt && requestedOutAt && requestedOutAt <= requestedInAt) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedOutAt must be after requestedInAt' } })
+        const userId = getUserId(req)
+        if (!userId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
         }
 
-        const requestType = parsed.data.requestType ?? parsed.data.type
-        if (!REQUEST_TYPES.includes(requestType)) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: `requestType must be one of: ${REQUEST_TYPES.join(', ')}` } })
-          return
-        }
-        if (requestType === 'missed_check_in' && !requestedInAt) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedInAt required' } })
-          return
-        }
-        if (requestType === 'missed_check_out' && !requestedOutAt) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedOutAt required' } })
-          return
-        }
-        if (requestType === 'time_correction' && !requestedInAt && !requestedOutAt) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'requestedInAt or requestedOutAt required' } })
-          return
-        }
-
-        let durationMinutes = parsed.data.minutes ?? null
-        if (!durationMinutes) {
-          durationMinutes = calculateDurationMinutes(requestedInAt, requestedOutAt)
-        }
-
-        let leaveType = null
-        let overtimeRule = null
-        if (requestType === 'leave') {
-          leaveType = await loadLeaveType(db, orgId, {
-            id: parsed.data.leaveTypeId,
-            code: parsed.data.leaveTypeCode,
-          })
-          if (!leaveType) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Leave type not found' } })
+        const orgId = getOrgId(req)
+        let draft
+        try {
+          draft = await resolveAttendanceRequestDraft(parsed.data, { org_id: orgId })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
-          if (!leaveType.isActive) {
-            res.status(400).json({ ok: false, error: { code: 'INVALID_STATE', message: 'Leave type inactive' } })
-            return
-          }
-          if (!durationMinutes) {
-            durationMinutes = leaveType.defaultMinutesPerDay
-          }
-        } else if (requestType === 'overtime') {
-          overtimeRule = await loadOvertimeRule(db, orgId, {
-            id: parsed.data.overtimeRuleId,
-            name: parsed.data.overtimeRuleName,
-          })
-          if (!overtimeRule) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Overtime rule not found' } })
-            return
-          }
-          if (!overtimeRule.isActive) {
-            res.status(400).json({ ok: false, error: { code: 'INVALID_STATE', message: 'Overtime rule inactive' } })
-            return
-          }
-          if (!durationMinutes) {
-            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Duration required for overtime' } })
-            return
-          }
-          durationMinutes = applyOvertimeRule(durationMinutes, overtimeRule)
-        }
-
-        if ((requestType === 'leave' || requestType === 'overtime') && (!durationMinutes || durationMinutes <= 0)) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Duration required' } })
-          return
-        }
-
-	        const approvalFlow = await loadApprovalFlow(db, orgId, {
-	          requestType,
-	          flowId: parsed.data.approvalFlowId,
-	        })
-	        const metadata = {}
-        if (durationMinutes) metadata.minutes = durationMinutes
-        if (leaveType) {
-          metadata.leaveType = {
-            id: leaveType.id,
-            code: leaveType.code,
-            name: leaveType.name,
-            paid: leaveType.paid,
-            requiresApproval: leaveType.requiresApproval,
-            requiresAttachment: leaveType.requiresAttachment,
-            defaultMinutesPerDay: leaveType.defaultMinutesPerDay,
-          }
-        }
-        if (overtimeRule) {
-          metadata.overtimeRule = {
-            id: overtimeRule.id,
-            name: overtimeRule.name,
-            minMinutes: overtimeRule.minMinutes,
-            roundingMinutes: overtimeRule.roundingMinutes,
-            maxMinutesPerDay: overtimeRule.maxMinutesPerDay,
-            requiresApproval: overtimeRule.requiresApproval,
-          }
-        }
-        if (parsed.data.attachmentUrl) {
-          metadata.attachmentUrl = parsed.data.attachmentUrl
-        }
-        if (approvalFlow) {
-          metadata.approvalFlow = {
-            id: approvalFlow.id,
-            name: approvalFlow.name,
-            steps: approvalFlow.steps,
-            currentStep: 0,
-          }
+          throw error
         }
 
         const approvalId = `apv_${randomUUID()}`
 
-	        try {
-	          const request = await db.transaction(async (trx) => {
-	            await acquireAttendanceRequestLock(trx, orgId, userId, workDate, requestType)
-	            const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
-	              orgId,
-	              userId,
-	              workDate,
-	              requestType,
-	            })
-	            if (duplicateRequest) {
-	              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
-	            }
-	            await trx.query(
-	              'INSERT INTO approval_instances (id, status, version) VALUES ($1, $2, $3)',
+        try {
+          const request = await db.transaction(async (trx) => {
+            await acquireAttendanceRequestLock(trx, orgId, userId, draft.workDate, draft.requestType)
+            const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
+              orgId,
+              userId,
+              workDate: draft.workDate,
+              requestType: draft.requestType,
+            })
+            if (duplicateRequest) {
+              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+            }
+            await trx.query(
+              'INSERT INTO approval_instances (id, status, version) VALUES ($1, $2, $3)',
               [approvalId, 'pending', 0]
             )
 
@@ -9570,39 +9994,39 @@ module.exports = {
                (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
                RETURNING *`,
-	              [
-	                randomUUID(),
-	                userId,
-	                orgId,
-	                workDate,
-	                requestType,
-	                requestedInAt,
-                requestedOutAt,
-                parsed.data.reason ?? null,
+              [
+                randomUUID(),
+                userId,
+                orgId,
+                draft.workDate,
+                draft.requestType,
+                draft.requestedInAt,
+                draft.requestedOutAt,
+                draft.reason,
                 'pending',
                 approvalId,
-                JSON.stringify(metadata),
+                JSON.stringify(draft.metadata),
               ]
             )
 
             return rows[0]
           })
 
-	          emitEvent('attendance.requested', {
-	            orgId,
-	            userId,
-	            workDate,
-	            requestType,
-	          })
-	          res.status(201).json({ ok: true, data: { request } })
-	        } catch (error) {
-	          if (error instanceof HttpError) {
-	            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
-	            return
-	          }
-	          if (isDatabaseSchemaError(error)) {
-	            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
-	            return
+          emitEvent('attendance.requested', {
+            orgId,
+            userId,
+            workDate: draft.workDate,
+            requestType: draft.requestType,
+          })
+          res.status(201).json({ ok: true, data: { request: mapAttendanceRequestRow(request) } })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
           }
           logger.error('Attendance request creation failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create request' } })
@@ -9684,7 +10108,7 @@ module.exports = {
             params
           )
 
-	          res.json({ ok: true, success: true, data: { items: rows, total, page, pageSize } })
+          res.json({ ok: true, success: true, data: { items: rows.map(mapAttendanceRequestRow), total, page, pageSize } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -9692,6 +10116,137 @@ module.exports = {
           }
           logger.error('Attendance request list failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list requests' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/requests/:id',
+      withPermission('attendance:read', async (req, res) => {
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_requests WHERE id = $1',
+            [req.params.id]
+          )
+          if (rows.length === 0) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } })
+            return
+          }
+          await ensureAttendanceRequestAccess(rows[0], requesterId, 'view request')
+          res.json({ ok: true, data: { request: mapAttendanceRequestRow(rows[0]) } })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance request item failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load request' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'PUT',
+      '/api/attendance/requests/:id',
+      withPermission('attendance:write', async (req, res) => {
+        const parsed = requestWriteSchema.safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          return
+        }
+
+        const requesterId = getUserId(req)
+        if (!requesterId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+
+        try {
+          const request = await db.transaction(async (trx) => {
+            const requestRows = await trx.query(
+              'SELECT * FROM attendance_requests WHERE id = $1 FOR UPDATE',
+              [req.params.id]
+            )
+            if (requestRows.length === 0) {
+              throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+            }
+
+            const existingRequest = requestRows[0]
+            await ensureAttendanceRequestAccess(existingRequest, requesterId, 'edit request')
+            if (existingRequest.status !== 'pending') {
+              throw new HttpError(400, 'INVALID_STATUS', 'Only pending requests can be edited')
+            }
+
+            const draft = await resolveAttendanceRequestDraft(parsed.data, existingRequest)
+            await acquireAttendanceRequestLock(trx, existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType)
+            const duplicateRows = await trx.query(
+              `SELECT id
+               FROM attendance_requests
+               WHERE org_id = $1
+                 AND user_id = $2
+                 AND work_date = $3
+                 AND request_type = $4
+                 AND status IN ('pending', 'approved')
+                 AND id <> $5
+               LIMIT 1`,
+              [existingRequest.org_id, existingRequest.user_id, draft.workDate, draft.requestType, req.params.id]
+            )
+            if (duplicateRows.length > 0) {
+              throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
+            }
+
+            const rows = await trx.query(
+              `UPDATE attendance_requests
+               SET work_date = $2,
+                   request_type = $3,
+                   requested_in_at = $4,
+                   requested_out_at = $5,
+                   reason = $6,
+                   metadata = $7::jsonb,
+                   updated_at = now()
+               WHERE id = $1
+               RETURNING *`,
+              [
+                req.params.id,
+                draft.workDate,
+                draft.requestType,
+                draft.requestedInAt,
+                draft.requestedOutAt,
+                draft.reason,
+                JSON.stringify(draft.metadata),
+              ]
+            )
+            return rows[0]
+          })
+
+          emitEvent('attendance.request.updated', {
+            requestId: request.id,
+            orgId: request.org_id ?? DEFAULT_ORG_ID,
+            userId: request.user_id,
+          })
+          res.json({ ok: true, data: { request: mapAttendanceRequestRow(request) } })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance request update failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update request' } })
         }
       })
     )
@@ -10075,6 +10630,12 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/requests/:id/cancel',
+      withPermission('attendance:write', async (req, res) => cancelRequest(req, res))
+    )
+
+    context.api.http.addRoute(
+      'DELETE',
+      '/api/attendance/requests/:id',
       withPermission('attendance:write', async (req, res) => cancelRequest(req, res))
     )
 
@@ -10693,6 +11254,35 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/approval-flows/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const flowId = normalizeUuidString(req.params.id)
+        if (!flowId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const flow = await loadApprovalFlow(db, orgId, { flowId })
+          if (!flow) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Approval flow not found' } })
+            return
+          }
+          res.json({ ok: true, data: flow })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance approval flow lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load approval flow' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/approval-flows',
       withPermission('attendance:admin', async (req, res) => {
@@ -11041,6 +11631,39 @@ module.exports = {
           }
           logger.error('Attendance rotation rule update failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update rotation rule' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/rotation-rules/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const ruleId = normalizeUuidString(req.params.id)
+        if (!ruleId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_rotation_rules WHERE id = $1 AND org_id = $2',
+            [ruleId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation rule not found' } })
+            return
+          }
+
+          res.json({ ok: true, data: mapRotationRuleRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rotation rule lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load rotation rule' } })
         }
       })
     )
@@ -11462,6 +12085,38 @@ module.exports = {
           }
           logger.error('Attendance rule sets query failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load rule sets' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/rule-sets/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const ruleSetId = normalizeUuidString(req.params.id)
+        if (!ruleSetId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_rule_sets WHERE id = $1 AND org_id = $2',
+            [ruleSetId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rule set not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapRuleSetRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance rule set lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load rule set' } })
         }
       })
     )
@@ -12033,6 +12688,20 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error } })
           return
         }
+        const format = String(req.query?.format ?? '').trim().toLowerCase()
+        const acceptHeader = String(req.headers.accept ?? '').toLowerCase()
+        if (format === 'csv' || acceptHeader.includes('text/csv')) {
+          const csvText = buildImportTemplateCsv(profile)
+          if (!csvText) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Import template has no CSV columns' } })
+            return
+          }
+
+          res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+          res.setHeader('Content-Disposition', `attachment; filename="${buildImportTemplateFilename(profile)}"`)
+          res.send(csvText)
+          return
+        }
         res.json({
           ok: true,
           data: buildAttendanceImportTemplateData(profile),
@@ -12091,18 +12760,8 @@ module.exports = {
 	          await fsp.mkdir(paths.dir, { recursive: true })
 	          const meter = new ImportUploadMeter(ATTENDANCE_IMPORT_UPLOAD_MAX_BYTES)
 	          await pipeline(req, meter, fs.createWriteStream(paths.csvPath))
-
-	          const endedWithNewline = meter.lastByte === 10
-	          const lines = meter.bytes === 0 ? 0 : meter.newlines + (endedWithNewline ? 0 : 1)
-	          const rowCount = Math.max(0, lines - 1) // header row excluded
-
-	          if (rowCount <= 0) {
-	            await deleteImportUpload({ orgId, fileId })
-	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'CSV must include at least 1 data row' } })
-	            return
-	          }
-
-	          await validateImportUploadCsvOrThrow({ csvPath: paths.csvPath })
+	          const validation = await validateImportUploadCsvOrThrow({ csvPath: paths.csvPath })
+	          const rowCount = validation.rowCount
 
 	          const meta = {
 	            fileId,
@@ -12176,7 +12835,7 @@ module.exports = {
       'POST',
       '/api/attendance/import/preview',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = importPayloadSchema.safeParse(req.body ?? {})
+        const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -12241,7 +12900,7 @@ module.exports = {
             if (rows.length) ruleSetConfig = normalizeMetadata(rows[0].config)
           }
 
-          const profile = findImportProfile(parsed.data.mappingProfileId)
+          const profile = resolveImportProfileForPayload(parsed.data)
           const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
           const mapping = parsed.data.mapping?.columns
             ?? parsed.data.mapping?.fields
@@ -12251,15 +12910,39 @@ module.exports = {
             ?? []
           const requiredFields = profile?.requiredFields ?? []
           const punchRequiredFields = profile?.punchRequiredFields ?? []
+          const headerDiagnostics = await resolveImportHeaderDiagnostics({
+            payload: parsed.data,
+            orgId,
+            mapping,
+            profile,
+            readUploadHeader: async (csvFileId, delimiter) => {
+              const { csvText } = await readImportUploadCsvText({ orgId, fileId: csvFileId })
+              return readImportCsvHeaderFromText(csvText, delimiter)
+            },
+          })
 
-	          const { rows, csvWarnings } = await resolveImportRows({
+	          const { rows, csvWarnings: rawCsvWarnings } = await resolveImportRows({
 	            payload: parsed.data,
 	            orgId,
 	            fallbackUserId: parsed.data.userId ?? userId,
 	          })
+          const csvWarnings = Array.from(new Set([
+            ...rawCsvWarnings,
+            ...buildImportHeaderWarnings(headerDiagnostics),
+          ]))
 
 	          if (rows.length === 0) {
-	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to preview' } })
+	            res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: buildImportEmptyRowsMessage({
+                    operation: 'preview',
+                    payload: parsed.data,
+                    headerDiagnostics,
+                  }),
+                },
+              })
 	            return
 	          }
 
@@ -12628,7 +13311,7 @@ module.exports = {
             })
           }
 
-          const combinedWarnings = [...csvWarnings, ...groupWarnings]
+          const combinedWarnings = Array.from(new Set([...csvWarnings, ...groupWarnings]))
           const previewFailedRows = Math.max(0, Number(previewStats.invalid ?? 0) + Number(previewStats.duplicates ?? 0))
           const previewEngine = resolveImportEngineFromMeta(parsed.data, rows.length)
           const previewElapsedMs = Math.max(0, Date.now() - previewStartedAtMs)
@@ -12674,7 +13357,7 @@ module.exports = {
       'POST',
       '/api/attendance/import/commit',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = importPayloadSchema.safeParse(req.body ?? {})
+        const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -12772,7 +13455,7 @@ module.exports = {
             if (rows.length) ruleSetConfig = normalizeMetadata(rows[0].config)
           }
 
-          const profile = findImportProfile(parsed.data.mappingProfileId)
+          const profile = resolveImportProfileForPayload(parsed.data)
           const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
           const mapping = parsed.data.mapping?.columns
             ?? parsed.data.mapping?.fields
@@ -12782,15 +13465,39 @@ module.exports = {
             ?? []
           const requiredFields = profile?.requiredFields ?? []
           const punchRequiredFields = profile?.punchRequiredFields ?? []
+          const headerDiagnostics = await resolveImportHeaderDiagnostics({
+            payload: parsed.data,
+            orgId,
+            mapping,
+            profile,
+            readUploadHeader: async (csvFileId, delimiter) => {
+              const { csvText } = await readImportUploadCsvText({ orgId, fileId: csvFileId })
+              return readImportCsvHeaderFromText(csvText, delimiter)
+            },
+          })
 
-	          const { rows, csvWarnings, csvFileId } = await resolveImportRows({
+	          const { rows, csvWarnings: rawCsvWarnings, csvFileId } = await resolveImportRows({
 	            payload: parsed.data,
 	            orgId,
 	            fallbackUserId: parsed.data.userId ?? requesterId,
 	          })
+          const csvWarnings = Array.from(new Set([
+            ...rawCsvWarnings,
+            ...buildImportHeaderWarnings(headerDiagnostics),
+          ]))
 
 	          if (rows.length === 0) {
-	            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rows to import' } })
+	            res.status(400).json({
+                ok: false,
+                error: {
+                  code: 'VALIDATION_ERROR',
+                  message: buildImportEmptyRowsMessage({
+                    operation: 'commit',
+                    payload: parsed.data,
+                    headerDiagnostics,
+                  }),
+                },
+              })
 	            return
 	          }
 	          const importEngine = resolveImportEngineByRowCount(rows.length)
@@ -13655,7 +14362,7 @@ module.exports = {
           return
         }
 
-        const parsed = importPayloadSchema.safeParse(req.body ?? {})
+        const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -13721,8 +14428,9 @@ module.exports = {
 	          let total = 0
 	          if (Array.isArray(parsed.data.rows)) total = parsed.data.rows.length
 	          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
-	          else if (typeof parsed.data.csvFileId === 'string' && parsed.data.csvFileId.trim()) {
-	            const meta = await loadImportUploadMeta({ orgId, fileId: parsed.data.csvFileId.trim() })
+	          else if (resolveImportUploadFileId(parsed.data)) {
+	            const csvFileId = resolveImportUploadFileId(parsed.data)
+	            const meta = await loadImportUploadMeta({ orgId, fileId: csvFileId })
 	            if (!meta) {
 	              throw new HttpError(404, 'NOT_FOUND', 'Import upload not found')
 	            }
@@ -13807,7 +14515,7 @@ module.exports = {
           return
         }
 
-        const parsed = importPayloadSchema.safeParse(req.body ?? {})
+        const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -13874,8 +14582,9 @@ module.exports = {
 	          let total = 0
 	          if (Array.isArray(parsed.data.rows)) total = parsed.data.rows.length
 	          else if (Array.isArray(parsed.data.entries)) total = parsed.data.entries.length
-	          else if (typeof parsed.data.csvFileId === 'string' && parsed.data.csvFileId.trim()) {
-	            const meta = await loadImportUploadMeta({ orgId, fileId: parsed.data.csvFileId.trim() })
+	          else if (resolveImportUploadFileId(parsed.data)) {
+	            const csvFileId = resolveImportUploadFileId(parsed.data)
+	            const meta = await loadImportUploadMeta({ orgId, fileId: csvFileId })
 	            if (!meta) {
 	              throw new HttpError(404, 'NOT_FOUND', 'Import upload not found')
 	            }
@@ -13984,7 +14693,7 @@ module.exports = {
       'POST',
       '/api/attendance/import',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = importPayloadSchema.safeParse(req.body ?? {})
+        const parsed = importPayloadSchema.safeParse(normalizeImportPayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -14047,7 +14756,7 @@ module.exports = {
             if (rows.length) ruleSetConfig = normalizeMetadata(rows[0].config)
           }
 
-          const profile = findImportProfile(parsed.data.mappingProfileId)
+          const profile = resolveImportProfileForPayload(parsed.data)
           const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
           const mapping = parsed.data.mapping?.columns
             ?? parsed.data.mapping?.fields
@@ -14798,13 +15507,13 @@ module.exports = {
               skipped = []
             } else {
               const importResponse = await (async () => {
-                const parsedImport = importPayloadSchema.safeParse(payload)
+                const parsedImport = importPayloadSchema.safeParse(normalizeImportPayload(payload))
                 if (!parsedImport.success) throw new Error(parsedImport.error.message)
                 const importUserId = payload.userId ?? requesterId
                 const importOrgId = orgId
                 const importRows = Array.isArray(parsedImport.data.rows) ? parsedImport.data.rows : []
                 let ruleSetConfig = null
-                const profile = findImportProfile(parsedImport.data.mappingProfileId)
+                const profile = resolveImportProfileForPayload(parsedImport.data)
                 const profileMapping = profile?.mapping?.columns ?? profile?.mapping?.fields ?? []
                 const mapping = parsedImport.data.mapping?.columns
                   ?? parsedImport.data.mapping?.fields
@@ -15816,6 +16525,39 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'GET',
+      '/api/attendance/payroll-cycles/:id',
+      withPermission('attendance:admin', async (req, res) => {
+        const orgId = getOrgId(req)
+        const payrollCycleId = normalizeUuidString(req.params.id)
+        if (!payrollCycleId) {
+          respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          const rows = await db.query(
+            'SELECT * FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2',
+            [payrollCycleId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Payroll cycle not found' } })
+            return
+          }
+
+          res.json({ ok: true, data: mapPayrollCycleRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance payroll cycle lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load payroll cycle' } })
+        }
+      })
+    )
+
+    context.api.http.addRoute(
       'POST',
       '/api/attendance/payroll-cycles',
       withPermission('attendance:admin', async (req, res) => {
@@ -16043,7 +16785,11 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const payrollCycleId = req.params.id
+        const payrollCycleId = normalizeUuidString(req.params.id)
+        if (!payrollCycleId) {
+          respondInvalidUuid(res)
+          return
+        }
 
         try {
           const existingRows = await db.query(
@@ -16241,10 +16987,7 @@ module.exports = {
       })
     )
 
-    context.api.http.addRoute(
-      'GET',
-      '/api/attendance/payroll-cycles/:id/summary/export',
-      withPermission('attendance:read', async (req, res) => {
+    const handlePayrollCycleSummaryExport = async (req, res) => {
         const schema = z.object({
           userId: z.string().optional(),
           orgId: z.string().optional(),
@@ -16303,7 +17046,18 @@ module.exports = {
           logger.error('Attendance payroll cycle summary export failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to export payroll summary' } })
         }
-      })
+      }
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/payroll-cycles/:id/summary/export',
+      withPermission('attendance:read', handlePayrollCycleSummaryExport)
+    )
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/payroll-cycles/:id/export',
+      withPermission('attendance:read', handlePayrollCycleSummaryExport)
     )
 
     context.api.http.addRoute(
@@ -17330,6 +18084,63 @@ module.exports = {
       })
     )
 
+    function resolveHolidayWritePayload(input, existing = null) {
+      const dateInput = input.date !== undefined ? input.date : existing?.holiday_date
+      const date = normalizeDateOnlyValue(dateInput)
+      if (!date) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'Holiday date must use YYYY-MM-DD format')
+      }
+
+      const rawName = input.name !== undefined ? input.name : existing?.name
+      const name = typeof rawName === 'string' ? rawName.trim() : ''
+      if (!name) {
+        throw new HttpError(400, 'VALIDATION_ERROR', 'Holiday name is required')
+      }
+
+      const type = input.type
+      let isWorkingDay = input.isWorkingDay
+      if (type) {
+        const derivedWorkingDay = type === 'working_day_override'
+        if (isWorkingDay !== undefined && isWorkingDay !== derivedWorkingDay) {
+          throw new HttpError(400, 'VALIDATION_ERROR', 'type and isWorkingDay must describe the same holiday state')
+        }
+        isWorkingDay = derivedWorkingDay
+      }
+      if (isWorkingDay === undefined) {
+        isWorkingDay = existing ? Boolean(existing.is_working_day) : false
+      }
+
+      return { date, name, isWorkingDay }
+    }
+
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/holidays/:id',
+      withPermission('attendance:read', async (req, res) => {
+        const orgId = getOrgId(req)
+        const holidayId = req.params.id
+
+        try {
+          const rows = await db.query(
+            'SELECT id, org_id, holiday_date, name, is_working_day FROM attendance_holidays WHERE id = $1 AND org_id = $2',
+            [holidayId, orgId]
+          )
+          if (!rows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Holiday not found' } })
+            return
+          }
+          res.json({ ok: true, data: mapHolidayRow(rows[0]) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance holiday lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load holiday' } })
+        }
+      })
+    )
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/holidays/sync',
@@ -17406,13 +18217,9 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const payload = {
-          date: parsed.data.date,
-          name: parsed.data.name.trim(),
-          isWorkingDay: parsed.data.isWorkingDay ?? false,
-        }
 
         try {
+          const payload = resolveHolidayWritePayload(parsed.data)
           const rows = await db.query(
             `INSERT INTO attendance_holidays
              (id, org_id, holiday_date, name, is_working_day)
@@ -17432,6 +18239,10 @@ module.exports = {
         } catch (error) {
           if (error?.code === '23505') {
             res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Holiday already exists' } })
+            return
+          }
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
           if (isDatabaseSchemaError(error)) {
@@ -17468,11 +18279,7 @@ module.exports = {
           }
 
           const existing = existingRows[0]
-          const payload = {
-            date: parsed.data.date ?? existing.holiday_date,
-            name: parsed.data.name ?? existing.name,
-            isWorkingDay: parsed.data.isWorkingDay ?? existing.is_working_day,
-          }
+          const payload = resolveHolidayWritePayload(parsed.data, existing)
 
           const rows = await db.query(
             `UPDATE attendance_holidays
@@ -17491,6 +18298,10 @@ module.exports = {
         } catch (error) {
           if (error?.code === '23505') {
             res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Holiday already exists' } })
+            return
+          }
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
             return
           }
           if (isDatabaseSchemaError(error)) {

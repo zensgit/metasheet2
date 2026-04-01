@@ -159,6 +159,10 @@ if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
   verify_no_github_links "$pkg_root"
 fi
 
+if rg -n 'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' "${pkg_root}/apps/web/dist" >/dev/null 2>&1; then
+  die "Frontend bundle embeds loopback VITE_API_* config; rebuild package with isolated web env"
+fi
+
 info "Package verify OK"
 info "  package: ${PACKAGE_FILE}"
 info "  root: ${pkg_root}"

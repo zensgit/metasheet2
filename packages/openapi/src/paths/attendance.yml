@@ -50,6 +50,51 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/punch/events:
+    x-plugin: plugin-attendance
+    get:
+      summary: List raw punch timeline events
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: userId
+          schema: { type: string }
+          description: Optional target user. Cross-user access requires attendance admin/approver privileges.
+        - in: query
+          name: from
+          schema: { type: string, format: date }
+        - in: query
+          name: to
+          schema: { type: string, format: date }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: pageSize
+          schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/AttendancePunchEvent' }
+                      total: { type: integer }
+                      page: { type: integer }
+                      pageSize: { type: integer }
+                      from: { type: string, format: date }
+                      to: { type: string, format: date }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /api/attendance/records:
     x-plugin: plugin-attendance
     get:
@@ -384,6 +429,132 @@ paths:
                       pageSize: { type: integer }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/attendance/requests/{id}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Get attendance request by id
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      request: { $ref: '#/components/schemas/AttendanceRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: Update a pending attendance request
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workDate:
+                  type: string
+                  format: date
+                date:
+                  type: string
+                  format: date
+                requestType:
+                  type: string
+                  enum: [missed_check_in, missed_check_out, time_correction, leave, overtime]
+                type:
+                  type: string
+                  enum: [missed_check_in, missed_check_out, time_correction, leave, overtime]
+                requestedInAt:
+                  type: string
+                  format: date-time
+                requested_in_at:
+                  type: string
+                  format: date-time
+                clockIn:
+                  type: string
+                  format: date-time
+                requestedOutAt:
+                  type: string
+                  format: date-time
+                requested_out_at:
+                  type: string
+                  format: date-time
+                clockOut:
+                  type: string
+                  format: date-time
+                reason: { type: string }
+                leaveTypeId: { type: string }
+                leaveTypeCode: { type: string }
+                overtimeRuleId: { type: string }
+                overtimeRuleName: { type: string }
+                minutes: { type: integer }
+                attachmentUrl: { type: string }
+                approvalFlowId: { type: string }
+                orgId: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      request: { $ref: '#/components/schemas/AttendanceRequest' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      summary: Cancel attendance request by id
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      requestId: { type: string }
+                      status: { type: string }
+                      orgId: { type: string }
+                      userId: { type: string }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/attendance/requests/{id}/approve:
     x-plugin: plugin-attendance
     post:
@@ -964,6 +1135,9 @@ paths:
               properties:
                 date: { type: string, format: date }
                 name: { type: string, nullable: true }
+                type:
+                  type: string
+                  enum: [holiday, working_day_override]
                 isWorkingDay: { type: boolean }
                 orgId: { type: string }
               required: [date]
@@ -982,6 +1156,27 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/attendance/holidays/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get attendance holiday by id
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceHoliday' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     put:
       summary: Update attendance holiday
       security: [ { bearerAuth: [] } ]
@@ -999,6 +1194,9 @@ paths:
               properties:
                 date: { type: string, format: date }
                 name: { type: string, nullable: true }
+                type:
+                  type: string
+                  enum: [holiday, working_day_override]
                 isWorkingDay: { type: boolean }
                 orgId: { type: string }
       responses:
@@ -1987,6 +2185,28 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/attendance/approval-flows/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get approval flow
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceApprovalFlow' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     put:
       summary: Update approval flow
       security: [ { bearerAuth: [] } ]
@@ -2143,6 +2363,39 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/attendance/rotation-rules/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get rotation rule
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceRotationRule' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: Rotation rule not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  error:
+                    type: object
+                    properties:
+                      code: { type: string }
+                      message: { type: string }
     put:
       summary: Update rotation rule
       security: [ { bearerAuth: [] } ]
@@ -2478,6 +2731,28 @@ paths:
 
   /api/attendance/rule-sets/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get attendance rule set
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendanceRuleSet' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     put:
       summary: Update attendance rule set
       security: [ { bearerAuth: [] } ]
@@ -3318,6 +3593,28 @@ paths:
 
   /api/attendance/payroll-cycles/{id}:
     x-plugin: plugin-attendance
+    get:
+      summary: Get payroll cycle
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  data: { $ref: '#/components/schemas/AttendancePayrollCycle' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     put:
       summary: Update payroll cycle
       security: [ { bearerAuth: [] } ]
@@ -3415,6 +3712,32 @@ paths:
     x-plugin: plugin-attendance
     get:
       summary: Export payroll cycle summary (CSV)
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: userId
+          schema: { type: string }
+        - in: query
+          name: orgId
+          schema: { type: string }
+      responses:
+        '200':
+          description: CSV export
+          content:
+            text/csv:
+              schema:
+                type: string
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/attendance/payroll-cycles/{id}/export:
+    x-plugin: plugin-attendance
+    get:
+      summary: Export payroll cycle summary (CSV compatibility alias)
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path

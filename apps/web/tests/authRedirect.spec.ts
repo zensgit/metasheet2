@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizePostLoginRedirect, normalizePreLoginRedirect } from '../src/utils/authRedirect'
+import { normalizePostLoginRedirect, normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from '../src/utils/authRedirect'
 
 describe('normalizePostLoginRedirect', () => {
   it('drops root and login redirects so login can go straight to the resolved home path', () => {
@@ -28,5 +28,20 @@ describe('normalizePreLoginRedirect', () => {
     expect(normalizePreLoginRedirect('/plm?tab=bom')).toBe('/plm?tab=bom')
     expect(normalizePreLoginRedirect('https://example.com')).toBe('/attendance')
     expect(normalizePreLoginRedirect('//example.com')).toBe('/attendance')
+  })
+})
+
+describe('shouldSkipPreLoginRedirectQuery', () => {
+  it('skips redirect query for root and login routes', () => {
+    expect(shouldSkipPreLoginRedirectQuery('/')).toBe(true)
+    expect(shouldSkipPreLoginRedirectQuery('/?foo=bar')).toBe(true)
+    expect(shouldSkipPreLoginRedirectQuery('/login')).toBe(true)
+    expect(shouldSkipPreLoginRedirectQuery('/login?redirect=%2Fattendance')).toBe(true)
+  })
+
+  it('keeps redirect query for real in-app destinations', () => {
+    expect(shouldSkipPreLoginRedirectQuery('/attendance')).toBe(false)
+    expect(shouldSkipPreLoginRedirectQuery('/plm?tab=bom')).toBe(false)
+    expect(shouldSkipPreLoginRedirectQuery('https://example.com')).toBe(true)
   })
 })

@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/output/releases/attendance-onprem}"
 INSTALL_DEPS="${INSTALL_DEPS:-0}"
-BUILD_WEB="${BUILD_WEB:-0}"
-BUILD_BACKEND="${BUILD_BACKEND:-0}"
+BUILD_WEB="${BUILD_WEB:-1}"
+BUILD_BACKEND="${BUILD_BACKEND:-1}"
 PACKAGE_PREFIX="${PACKAGE_PREFIX:-metasheet-attendance-onprem}"
 PACKAGE_VERSION="${PACKAGE_VERSION:-$(node -p "require('./package.json').version" 2>/dev/null || echo unknown)}"
 PACKAGE_TAG="${PACKAGE_TAG:-$(date +%Y%m%d-%H%M%S)}"
@@ -68,6 +68,14 @@ function run() {
   "$@"
 }
 
+function build_web_dist() {
+  local env_dir
+  env_dir="$(mktemp -d)"
+  trap 'rm -rf "$env_dir"' RETURN
+  info "Using isolated env dir for web build: ${env_dir}"
+  run env METASHEET_ENV_DIR="$env_dir" pnpm --filter @metasheet/web build
+}
+
 function hash_value() {
   local file="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -113,7 +121,7 @@ if [[ "$INSTALL_DEPS" == "1" ]]; then
 fi
 
 if [[ "$BUILD_WEB" == "1" ]]; then
-  run pnpm --filter @metasheet/web build
+  build_web_dist
 fi
 
 if [[ "$BUILD_BACKEND" == "1" ]]; then
