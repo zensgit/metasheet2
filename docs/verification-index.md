@@ -130,6 +130,11 @@ Entry points:
   - Alert drill verification: `docs/development/onprem-alert-drill-and-runbook-verification-20260401.md`
   - Alert drill deployment verification: `docs/deployment/onprem-alert-drill-runbook-verification-20260401.md`
   - Alert drill command: `pnpm ops:onprem-alert-drill`
+  - 7-day stabilization design: `docs/development/dingtalk-oauth-7day-stabilization-design-20260401.md`
+  - 7-day stabilization verification: `docs/development/dingtalk-oauth-7day-stabilization-verification-20260401.md`
+  - 7-day stabilization checklist: `docs/deployment/dingtalk-oauth-7day-stabilization-checklist-20260401.md`
+  - 7-day stabilization Day 0: `docs/deployment/dingtalk-oauth-7day-stabilization-day0-20260401.md`
+  - Stability check command: `pnpm ops:dingtalk-oauth-stability-check`
   - On-prem rollout: `docs/deployment/oauth-state-observability-onprem-rollout-verification-20260401.md`
   - Notes: adds dedicated DingTalk OAuth state metrics, fallback counters, callback rejection logs, Prometheus alert rules, a Grafana overview dashboard, an Alertmanager bridge that translates Slack notifications, and an on-prem firing/resolved drill runbook.
 
