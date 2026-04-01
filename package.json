@@ -29,6 +29,7 @@
     "verify:dingtalk-login-e2e-smoke": "node scripts/dingtalk-login-e2e-smoke.mjs",
     "verify:dingtalk-oauth-observability": "bash scripts/ops/verify-dingtalk-oauth-observability.sh",
     "verify:dingtalk-oauth-alert-notify": "bash scripts/ops/verify-dingtalk-oauth-alert-notify.sh",
+    "verify:dingtalk-oauth-alert-notify:webhooksite": "bash scripts/ops/verify-dingtalk-oauth-alert-notify-webhooksite.sh",
     "ops:onprem-grafana-alert-rollout": "bash scripts/ops/dingtalk-onprem-observability-rollout.sh",
     "ops:onprem-alert-notify-rollout": "bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh",
     "verify:attendance-locale-zh": "node scripts/verify-attendance-locale-zh-smoke.mjs",

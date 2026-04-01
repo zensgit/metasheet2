@@ -32,6 +32,19 @@ ALERTMANAGER_WEBHOOK_URL=https://example.com/your/webhook \
 bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
 ```
 
+若当前没有长期外部 webhook 凭据，但需要验证真实公网通知能力，可执行一次性外部 exercise：
+
+```bash
+pnpm verify:dingtalk-oauth-alert-notify:webhooksite
+```
+
+该脚本会：
+
+1. 创建临时 Webhook.site 端点
+2. 临时覆盖 `ALERTMANAGER_WEBHOOK_URL`
+3. 验证外部投递成功
+4. 自动恢复本地默认 receiver
+
 ## 结果
 
 脚本会：

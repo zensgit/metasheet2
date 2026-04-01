@@ -132,6 +132,16 @@ bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
 
 - `docs/deployment/onprem-alertmanager-webhook-rollout-20260401.md`
 
+若尚未准备长期外部 webhook，但要确认公网 webhook 投递能力，可执行：
+
+```bash
+pnpm verify:dingtalk-oauth-alert-notify:webhooksite
+```
+
+对应验证记录：
+
+- `docs/deployment/onprem-external-webhook-exercise-verification-20260401.md`
+
 ### 手动验证
 
 1. 不配置 DingTalk 环境变量时：
