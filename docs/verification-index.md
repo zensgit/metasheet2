@@ -116,11 +116,17 @@ Entry points:
   - Monitoring verification: `docs/development/oauth-state-monitoring-verification-20260401.md`
   - On-prem Grafana/alert rollout design: `docs/development/onprem-grafana-alert-rollout-design-20260401.md`
   - On-prem Grafana/alert rollout verification: `docs/development/onprem-grafana-alert-rollout-verification-20260401.md`
+  - Alert notify verify: `pnpm verify:dingtalk-oauth-alert-notify`
+  - Alert notify rollout: `pnpm ops:onprem-alert-notify-rollout`
+  - Alert notify design: `docs/development/onprem-alertmanager-webhook-rollout-design-20260401.md`
+  - Alert notify verification: `docs/development/onprem-alertmanager-webhook-rollout-verification-20260401.md`
   - Deployment notes: `docs/deployment/dingtalk-oauth-backend-deploy-20260330.md`
   - Deployment rollout: `docs/deployment/onprem-grafana-alert-rollout-20260401.md`
   - Deployment verification: `docs/deployment/onprem-grafana-alert-rollout-verification-20260401.md`
+  - Alert notify deployment: `docs/deployment/onprem-alertmanager-webhook-rollout-20260401.md`
+  - Alert notify deployment verification: `docs/deployment/onprem-alertmanager-webhook-rollout-verification-20260401.md`
   - On-prem rollout: `docs/deployment/oauth-state-observability-onprem-rollout-verification-20260401.md`
-  - Notes: adds dedicated DingTalk OAuth state metrics, fallback counters, callback rejection logs, Prometheus alert rules, a Grafana overview dashboard, and an on-prem rollout path on top of the Redis-backed state store.
+  - Notes: adds dedicated DingTalk OAuth state metrics, fallback counters, callback rejection logs, Prometheus alert rules, a Grafana overview dashboard, and an on-prem rollout path that now includes Alertmanager -> webhook notification verification.
 
 ## Daily / Pre-PR
 
@@ -902,3 +908,20 @@ Entry points:
 - Repo baseline reconciliation:
   - Design: `docs/development/repo-baseline-reconciliation-design-20260330.md`
   - Verification: `docs/development/repo-baseline-reconciliation-verification-20260330.md`
+
+## 2026-04-01 DingTalk Observability
+
+- OAuth state observability:
+  - Design: `docs/development/oauth-state-observability-design-20260401.md`
+  - Verification: `docs/development/oauth-state-observability-verification-20260401.md`
+  - On-prem rollout verification: `docs/deployment/oauth-state-observability-onprem-rollout-verification-20260331.md`
+- Grafana / Prometheus on-prem rollout:
+  - Design: `docs/development/onprem-grafana-alert-rollout-design-20260401.md`
+  - Verification: `docs/development/onprem-grafana-alert-rollout-verification-20260401.md`
+  - Deployment: `docs/deployment/onprem-grafana-alert-rollout-20260401.md`
+  - Deployment verification: `docs/deployment/onprem-grafana-alert-rollout-verification-20260401.md`
+- Alertmanager / webhook on-prem rollout:
+  - Design: `docs/development/onprem-alertmanager-webhook-rollout-design-20260401.md`
+  - Verification: `docs/development/onprem-alertmanager-webhook-rollout-verification-20260401.md`
+  - Deployment: `docs/deployment/onprem-alertmanager-webhook-rollout-20260401.md`
+  - Deployment verification: `docs/deployment/onprem-alertmanager-webhook-rollout-verification-20260401.md`

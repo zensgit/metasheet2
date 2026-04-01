@@ -1,0 +1,30 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default-webhook
+  group_by:
+    - alertname
+    - component
+    - feature
+    - severity
+  group_wait: 1s
+  group_interval: 30s
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - alertname="DingTalkOAuthAlertNotifyExercise"
+      receiver: local-test-webhook
+      group_wait: 1s
+      repeat_interval: 1m
+
+receivers:
+  - name: default-webhook
+    webhook_configs:
+      - url: "__DEFAULT_WEBHOOK_URL__"
+        send_resolved: true
+
+  - name: local-test-webhook
+    webhook_configs:
+      - url: "http://alert-webhook:8080/notify"
+        send_resolved: true

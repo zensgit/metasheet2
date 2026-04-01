@@ -36,7 +36,7 @@ echo "[onprem-observability] removing legacy Grafana datasource duplication"
 ssh_cmd "rm -f \"${REMOTE_OBS_DIR}/grafana/provisioning/datasources/datasource.yml\""
 
 echo "[onprem-observability] starting Prometheus + Grafana"
-ssh_cmd "cd \"${REMOTE_OBS_DIR}\" && METASHEET_APP_NETWORK=\"${REMOTE_APP_NETWORK}\" ${DOCKER_COMPOSE_BIN} -f docker-compose.onprem.yml up -d"
+ssh_cmd "cd \"${REMOTE_OBS_DIR}\" && METASHEET_APP_NETWORK=\"${REMOTE_APP_NETWORK}\" ${DOCKER_COMPOSE_BIN} -f docker-compose.onprem.yml up -d prometheus grafana"
 
 echo "[onprem-observability] waiting for Prometheus"
 ssh_cmd "for i in \$(seq 1 30); do curl -fsS http://127.0.0.1:9090/-/healthy >/dev/null 2>&1 && exit 0; sleep 2; done; exit 1"

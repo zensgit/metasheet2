@@ -102,5 +102,5 @@ dingtalk-oauth-observability
 
 仍需后续单独推进但不阻塞本轮通过的事项：
 
-1. 当前仅完成 dashboard / rules rollout，尚未接入 Alertmanager 或外部通知渠道
+1. 当前文档只覆盖 dashboard / rules rollout；后续 Alertmanager / webhook 通知链见 `docs/deployment/onprem-alertmanager-webhook-rollout-20260401.md`
 2. `9090` / `3000` 仍只绑定到宿主机 loopback，若需远程查看应通过 SSH tunnel

@@ -114,6 +114,24 @@ bash scripts/ops/dingtalk-onprem-observability-rollout.sh
 
 - `docs/deployment/onprem-grafana-alert-rollout-20260401.md`
 
+若需要把 DingTalk OAuth 告警从“可见”推进到“可通知”，再执行：
+
+```bash
+pnpm verify:dingtalk-oauth-alert-notify
+bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
+```
+
+可选外部 webhook 覆盖：
+
+```bash
+ALERTMANAGER_WEBHOOK_URL=https://example.com/your/webhook \
+bash scripts/ops/dingtalk-onprem-alert-notify-rollout.sh
+```
+
+对应部署说明：
+
+- `docs/deployment/onprem-alertmanager-webhook-rollout-20260401.md`
+
 ### 手动验证
 
 1. 不配置 DingTalk 环境变量时：

@@ -32,6 +32,44 @@ services:
       retries: 3
       start_period: 30s
 
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: metasheet-alertmanager
+    ports:
+      - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - ./alertmanager/alertmanager.onprem.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.listen-address=:9093'
+    networks:
+      - metasheet-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9093/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  alert-webhook:
+    image: python:3.12-alpine
+    container_name: metasheet-alert-webhook
+    volumes:
+      - ./alertmanager/webhook-receiver.py:/app/webhook-receiver.py:ro
+    command: ["python3", "/app/webhook-receiver.py"]
+    networks:
+      - metasheet-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=2).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
   grafana:
     image: grafana/grafana:10.2.2
     container_name: metasheet-grafana
@@ -50,7 +88,8 @@ services:
     networks:
       - metasheet-net
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
@@ -60,6 +99,8 @@ services:
       start_period: 60s
 
 volumes:
+  alertmanager-data:
+    name: metasheet-alertmanager-data
   prometheus-data:
     name: metasheet-prometheus-data
   grafana-data:

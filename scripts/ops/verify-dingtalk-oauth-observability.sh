@@ -11,6 +11,8 @@ ONPREM_COMPOSE_FILE="${ROOT_DIR}/docker/observability/docker-compose.onprem.yml"
 ONPREM_PROM_CONFIG="${ROOT_DIR}/docker/observability/prometheus/prometheus.onprem.yml"
 METRICS_FILE="${ROOT_DIR}/packages/core-backend/src/metrics/metrics.ts"
 DATASOURCE_DIR="${ROOT_DIR}/docker/observability/grafana/provisioning/datasources"
+ALERTMANAGER_CONFIG_EXAMPLE="${ROOT_DIR}/docker/observability/alertmanager/config.example.yml"
+LOCAL_ALERTMANAGER_CONFIG="${ROOT_DIR}/docker/observability/alertmanager/alertmanager.onprem.yml"
 
 echo "[oauth-observability] validating dashboard JSON"
 node --input-type=module -e "JSON.parse(await import('node:fs').then(m => m.readFileSync(process.argv[1], 'utf8')))" "${DASHBOARD_JSON}" >/dev/null
@@ -19,6 +21,17 @@ echo "[oauth-observability] validating metric definitions"
 rg -q 'metasheet_dingtalk_oauth_state_operations_total' "${METRICS_FILE}"
 rg -q 'metasheet_dingtalk_oauth_state_fallback_total' "${METRICS_FILE}"
 rg -q 'redis_operation_duration_seconds' "${METRICS_FILE}"
+
+cleanup_local_alertmanager_config() {
+  if [ -f "${LOCAL_ALERTMANAGER_CONFIG}" ]; then
+    rm -f "${LOCAL_ALERTMANAGER_CONFIG}"
+  fi
+}
+
+trap cleanup_local_alertmanager_config EXIT
+
+echo "[oauth-observability] preparing local Alertmanager config for compose validation"
+cp "${ALERTMANAGER_CONFIG_EXAMPLE}" "${LOCAL_ALERTMANAGER_CONFIG}"
 
 echo "[oauth-observability] validating docker compose wiring"
 docker compose -f "${COMPOSE_FILE}" config >/dev/null

@@ -28,3 +28,8 @@ rule_files:
   - "/etc/prometheus/rules/phase5-alerts.yml"
   - "/etc/prometheus/rules/attendance-alerts.yml"
   - "/etc/prometheus/rules/dingtalk-oauth-alerts.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
