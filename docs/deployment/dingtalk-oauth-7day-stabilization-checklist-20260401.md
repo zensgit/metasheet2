@@ -59,6 +59,12 @@ pnpm ops:onprem-alert-second-operator-drill
 
 并由其在 `#metasheet-alerts` 中核对相同 `drillId` 的 firing / resolved。
 
+若当前只有单一维护者，可先做一次“冷启动自交接模拟”，并在备注中标记：
+
+- `simulated handoff`
+- 使用全新 shell / 新浏览器会话
+- 不依赖历史命令
+
 ## 通过标准
 
 7 天窗口结束时满足：

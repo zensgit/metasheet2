@@ -56,6 +56,33 @@ wrapper 已兼容 `dingtalk-onprem-alert-drill.sh` 的“日志 + 最后一行 J
 - `notifyErrors=0`
 - `healthy=true`
 
+### 单人冷启动模拟
+
+在当前只有单一维护者的前提下，补充执行了一次“单人模拟第二操作者”：
+
+```bash
+env -i HOME="$HOME" PATH="$PATH" SHELL=/bin/zsh TERM=xterm-256color /bin/zsh -lc \
+  'cd /Users/huazhou/Downloads/Github/metasheet2 && pnpm ops:onprem-alert-second-operator-drill'
+```
+
+结果：
+
+```json
+{
+  "alertName": "DingTalkOAuthSlackChannelDrill",
+  "drillId": "drill-1775024157",
+  "firingObserved": true,
+  "resolvedObserved": true
+}
+```
+
+随后在 Slack 频道 `#metasheet-alerts` 中独立核对到同一 `drillId=drill-1775024157` 的两条消息：
+
+- `[FIRING] DingTalkOAuthSlackChannelDrill ...`
+- `[RESOLVED] DingTalkOAuthSlackChannelDrill ...`
+
+该结果证明 runbook 和单命令 wrapper 已足够支持冷启动自交接，但仍不等价于另一位真实人员的交接演练。
+
 ### diff hygiene
 
 - `git diff --check`
@@ -67,5 +94,5 @@ wrapper 已兼容 `dingtalk-onprem-alert-drill.sh` 的“日志 + 最后一行 J
 
 当前剩余的人因动作只剩：
 
-- 由另一位真实操作者亲自执行该命令
+- 条件允许时，由另一位真实操作者亲自执行该命令
 - 在 Slack 频道完成人工确认
