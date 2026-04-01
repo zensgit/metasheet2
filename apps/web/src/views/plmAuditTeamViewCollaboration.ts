@@ -782,6 +782,10 @@ export function resolvePlmAuditTeamViewCollaborationFollowupActionFeedback(optio
     return null
   }
 
+  if (options.actionKind === 'focus-source' && followup.source === 'scene-context') {
+    return null
+  }
+
   if (!target) {
     return {
       kind: 'error',

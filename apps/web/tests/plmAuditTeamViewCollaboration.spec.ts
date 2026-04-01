@@ -1384,6 +1384,20 @@ describe('plmAuditTeamViewCollaboration', () => {
       target: null,
       tr,
     })).toBeNull()
+
+    expect(resolvePlmAuditTeamViewCollaborationFollowupActionFeedback({
+      actionKind: 'focus-source',
+      followup: {
+        teamViewId: 'audit-view-3',
+        source: 'scene-context',
+        action: 'share',
+        logsAnchorId: 'plm-audit-log-results',
+        sourceAnchorId: 'plm-audit-scene-context',
+        sourceSavedViewId: null,
+      },
+      target: null,
+      tr,
+    })).toBeNull()
   })
 
   it('keeps default-log follow-ups actionable without a live team-view record', () => {
