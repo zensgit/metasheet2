@@ -1,0 +1,35 @@
+groups:
+  - name: dingtalk-oauth-observability
+    rules:
+      - alert: DingTalkOAuthStateFallbacksDetected
+        expr: sum(increase(metasheet_dingtalk_oauth_state_fallback_total[10m])) by (operation, reason) > 0
+        for: 10m
+        labels:
+          severity: warning
+          component: auth
+          feature: dingtalk-oauth
+        annotations:
+          summary: DingTalk OAuth state store fallback detected
+          runbook: Check Redis reachability and app env; inspect metasheet_dingtalk_oauth_state_fallback_total, redis_operation_duration_seconds{op=~"dingtalk_oauth_state_write|dingtalk_oauth_state_validate"}, and backend logs for fallback/recovery events. Labels operation={{ $labels.operation }} reason={{ $labels.reason }}.
+
+      - alert: DingTalkOAuthStateValidationSpike
+        expr: sum(increase(metasheet_dingtalk_oauth_state_operations_total{operation="validate",result=~"invalid|expired"}[15m])) by (result) > 10
+        for: 15m
+        labels:
+          severity: warning
+          component: auth
+          feature: dingtalk-oauth
+        annotations:
+          summary: DingTalk OAuth callback state rejections are spiking
+          runbook: Inspect login flow regressions or suspicious callback traffic; review invalid/expired state totals, recent launch volume, and callback rejection logs. Result={{ $labels.result }}.
+
+      - alert: DingTalkOAuthStateRedisLatencyP95High
+        expr: histogram_quantile(0.95, sum(rate(redis_operation_duration_seconds_bucket{op=~"dingtalk_oauth_state_write|dingtalk_oauth_state_validate"}[5m])) by (le, op)) > 0.25
+        for: 10m
+        labels:
+          severity: warning
+          component: auth
+          feature: dingtalk-oauth
+        annotations:
+          summary: DingTalk OAuth Redis state latency p95 is high
+          runbook: Inspect Redis saturation, network latency, and recent deploys; compare write vs validate timings on the DingTalk OAuth dashboard. Op={{ $labels.op }}.

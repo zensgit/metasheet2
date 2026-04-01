@@ -1,0 +1,212 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "${DS_PROM}",
+        "enable": true,
+        "iconColor": "rgba(255, 96, 96, 1)",
+        "name": "Prom Alerts",
+        "target": {
+          "expr": "ALERTS{alertstate=\"firing\"}",
+          "format": "time_series"
+        }
+      }
+    ]
+  },
+  "editable": true,
+  "gnetId": null,
+  "graphTooltip": 0,
+  "id": null,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "State Generate Success (15m)",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(increase(metasheet_dingtalk_oauth_state_operations_total{job=\"$job\",operation=\"generate\",result=\"success\"}[15m]))",
+          "datasource": "${DS_PROM}"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["last"] } },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "State Validate Success (15m)",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(increase(metasheet_dingtalk_oauth_state_operations_total{job=\"$job\",operation=\"validate\",result=\"success\"}[15m]))",
+          "datasource": "${DS_PROM}"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["last"] } },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "type": "stat",
+      "title": "State Rejections (15m)",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(increase(metasheet_dingtalk_oauth_state_operations_total{job=\"$job\",operation=\"validate\",result=~\"missing|invalid|expired|error\"}[15m]))",
+          "datasource": "${DS_PROM}"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["last"] } },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 20 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Fallbacks (15m)",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(increase(metasheet_dingtalk_oauth_state_fallback_total{job=\"$job\"}[15m]))",
+          "datasource": "${DS_PROM}"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["last"] } },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Redis State Write/Validate p95 (5m)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(redis_operation_duration_seconds_bucket{job=\"$job\",op=\"dingtalk_oauth_state_write\"}[5m])) by (le))",
+          "legendFormat": "write p95",
+          "datasource": "${DS_PROM}"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(redis_operation_duration_seconds_bucket{job=\"$job\",op=\"dingtalk_oauth_state_validate\"}[5m])) by (le))",
+          "legendFormat": "validate p95",
+          "datasource": "${DS_PROM}"
+        }
+      ],
+      "options": { "legend": { "displayMode": "table" }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "type": "table",
+      "title": "Recent Validation Outcomes (15m)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        {
+          "expr": "sum(increase(metasheet_dingtalk_oauth_state_operations_total{job=\"$job\",operation=\"validate\"}[15m])) by (store, result)",
+          "datasource": "${DS_PROM}",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "State Generate Operations by Store/Result",
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        {
+          "expr": "sum(rate(metasheet_dingtalk_oauth_state_operations_total{job=\"$job\",operation=\"generate\"}[5m])) by (store, result)",
+          "datasource": "${DS_PROM}",
+          "legendFormat": "{{store}} / {{result}}"
+        }
+      ],
+      "options": { "legend": { "displayMode": "table" }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "State Validate Operations by Store/Result",
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        {
+          "expr": "sum(rate(metasheet_dingtalk_oauth_state_operations_total{job=\"$job\",operation=\"validate\"}[5m])) by (store, result)",
+          "datasource": "${DS_PROM}",
+          "legendFormat": "{{store}} / {{result}}"
+        }
+      ],
+      "options": { "legend": { "displayMode": "table" }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Fallback Reasons (rate)",
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "expr": "sum(rate(metasheet_dingtalk_oauth_state_fallback_total{job=\"$job\"}[5m])) by (operation, reason)",
+          "datasource": "${DS_PROM}",
+          "legendFormat": "{{operation}} / {{reason}}"
+        }
+      ],
+      "options": { "legend": { "displayMode": "table" }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "type": "table",
+      "title": "State Generate Outcomes (15m)",
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "expr": "sum(increase(metasheet_dingtalk_oauth_state_operations_total{job=\"$job\",operation=\"generate\"}[15m])) by (store, result)",
+          "datasource": "${DS_PROM}",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "options": { "showHeader": true },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    }
+  ],
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["auth", "dingtalk", "oauth"],
+  "templating": {
+    "list": [
+      { "type": "datasource", "name": "DS_PROM", "query": "prometheus" },
+      {
+        "type": "query",
+        "name": "job",
+        "datasource": "${DS_PROM}",
+        "refresh": 2,
+        "query": "label_values(up, job)",
+        "current": { "text": "metasheet-backend", "value": "metasheet-backend" }
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "",
+  "title": "DingTalk OAuth Overview",
+  "uid": "dingtalk-oauth-overview",
+  "version": 1
+}

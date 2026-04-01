@@ -37,6 +37,7 @@
 ### Grafana
 - 预配置 Prometheus 数据源
 - 内置 MetaSheet Overview 仪表板
+- 内置 DingTalk OAuth 监控仪表板
 - 自动加载 `grafana/dashboards/` 目录下的 JSON 文件
 
 ## 自定义仪表板
@@ -56,6 +57,8 @@
 - `metasheet_permission_denied_total` - 权限拒绝数
 - `metasheet_db_pool_size` - 数据库连接池大小
 - `metasheet_db_pool_waiting` - 等待连接数
+- `metasheet_dingtalk_oauth_state_operations_total` - DingTalk OAuth state 操作计数
+- `metasheet_dingtalk_oauth_state_fallback_total` - DingTalk OAuth state fallback 次数
 
 ### PromQL 示例
 
@@ -94,6 +97,16 @@ docker ps | grep metasheet-prometheus
 ```bash
 docker compose -f docker/observability/docker-compose.yml down -v
 ```
+
+### DingTalk OAuth 监控
+
+- Dashboard: `grafana/dashboards/dingtalk-oauth-overview.json`
+- Alert rules: `ops/prometheus/dingtalk-oauth-alerts.yml`
+
+关注的核心信号：
+- `metasheet_dingtalk_oauth_state_operations_total`
+- `metasheet_dingtalk_oauth_state_fallback_total`
+- `redis_operation_duration_seconds{op="dingtalk_oauth_state_write|dingtalk_oauth_state_validate"}`
 
 ## 生产环境注意事项
 

@@ -74,6 +74,7 @@ node scripts/dingtalk-oauth-smoke.mjs --base-url http://localhost:7778
 若服务已暴露 Prometheus 指标，可进一步确认 DingTalk OAuth state observability：
 
 ```bash
+pnpm verify:dingtalk-oauth-observability
 curl -s http://localhost:7778/metrics/prom | grep 'metasheet_dingtalk_oauth_state_'
 curl -s http://localhost:7778/metrics/prom | grep 'redis_operation_duration_seconds'
 ```
@@ -87,6 +88,21 @@ curl -s http://localhost:7778/metrics/prom | grep 'redis_operation_duration_seco
 
 - `dingtalk_oauth_state_write`
 - `dingtalk_oauth_state_validate`
+
+本地 observability 资产位置：
+
+- Prometheus alerts: `ops/prometheus/dingtalk-oauth-alerts.yml`
+- Grafana dashboard: `docker/observability/grafana/dashboards/dingtalk-oauth-overview.json`
+
+若使用仓库自带 observability stack：
+
+```bash
+./scripts/observability-stack.sh up
+```
+
+然后在 Grafana 中查看：
+
+- `DingTalk OAuth Overview`
 
 ### 手动验证
 

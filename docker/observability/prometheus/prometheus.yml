@@ -31,6 +31,7 @@ rule_files:
   - "/etc/prometheus/rules/phase5-recording-rules.yml"
   - "/etc/prometheus/rules/phase5-alerts.yml"
   - "/etc/prometheus/rules/attendance-alerts.yml"
+  - "/etc/prometheus/rules/dingtalk-oauth-alerts.yml"
 
 # Alerting configuration (optional)
 # alerting:
