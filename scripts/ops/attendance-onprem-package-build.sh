@@ -15,6 +15,7 @@ PACKAGE_ROOT="${BUILD_ROOT}/${PACKAGE_NAME}"
 ARCHIVE_TGZ_PATH="${OUTPUT_DIR}/${PACKAGE_NAME}.tgz"
 ARCHIVE_ZIP_PATH="${OUTPUT_DIR}/${PACKAGE_NAME}.zip"
 CHECKSUM_FILE="${OUTPUT_DIR}/SHA256SUMS"
+PACKAGE_RUN_LABEL="${PACKAGE_TAG%%-*}"
 
 REQUIRED_PATHS=(
   "apps/web/dist"
@@ -25,6 +26,8 @@ REQUIRED_PATHS=(
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"
   "scripts/ops/attendance-onprem-deploy-easy.sh"
+  "scripts/ops/attendance-onprem-start-pm2.ps1"
+  "scripts/ops/attendance-onprem-deploy-run.ps1"
   "scripts/ops/attendance-onprem-bootstrap.sh"
   "scripts/ops/attendance-onprem-bootstrap-admin.sh"
   "scripts/ops/attendance-onprem-env-check.sh"
@@ -116,6 +119,30 @@ function copy_path() {
   fi
 }
 
+function write_windows_entrypoints() {
+  cat > "${PACKAGE_ROOT}/start-pm2.bat" <<'EOF'
+@echo off
+setlocal
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ops\attendance-onprem-start-pm2.ps1" -RootDir "%~dp0"
+exit /b %ERRORLEVEL%
+EOF
+
+  cat > "${PACKAGE_ROOT}/start-pm2-remote.bat" <<'EOF'
+@echo off
+setlocal
+if not exist "%~dp0output\logs" mkdir "%~dp0output\logs"
+call "%~dp0start-pm2.bat" >> "%~dp0output\logs\start-pm2-remote.log" 2>&1
+exit /b %ERRORLEVEL%
+EOF
+
+  cat > "${PACKAGE_ROOT}/deploy-${PACKAGE_RUN_LABEL}.bat" <<EOF
+@echo off
+setlocal
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\ops\\attendance-onprem-deploy-run.ps1" -RootDir "%~dp0" -RunLabel "${PACKAGE_RUN_LABEL}"
+exit /b %ERRORLEVEL%
+EOF
+}
+
 if [[ "$INSTALL_DEPS" == "1" ]]; then
   run pnpm install --frozen-lockfile
 fi
@@ -140,6 +167,8 @@ command -v zip >/dev/null 2>&1 || die "zip command is required to build Windows 
 for rel in "${REQUIRED_PATHS[@]}"; do
   copy_path "$rel"
 done
+
+write_windows_entrypoints
 
 cat > "${PACKAGE_ROOT}/INSTALL.txt" <<EOF
 MetaSheet Attendance On-Prem Package

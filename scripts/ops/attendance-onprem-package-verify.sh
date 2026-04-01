@@ -115,8 +115,11 @@ esac
 
 pkg_name="$(head -n 1 "$list_file" | cut -d/ -f1)"
 pkg_root="${EXTRACT_ROOT}/${pkg_name}"
+run_label="$(printf '%s' "$pkg_name" | sed -E 's/^.*-(run[0-9]+)(-.+)?$/\1/')"
 
 required=(
+  "start-pm2.bat"
+  "start-pm2-remote.bat"
   "apps/web/dist/index.html"
   "apps/web/package.json"
   "packages/core-backend/dist/src/index.js"
@@ -124,6 +127,8 @@ required=(
   "packages/core-backend/package.json"
   "plugins/plugin-attendance/plugin.json"
   "plugins/plugin-attendance/index.cjs"
+  "scripts/ops/attendance-onprem-start-pm2.ps1"
+  "scripts/ops/attendance-onprem-deploy-run.ps1"
   "scripts/ops/attendance-onprem-package-install.sh"
   "scripts/ops/attendance-onprem-package-upgrade.sh"
   "run-migrate.bat"
@@ -142,6 +147,10 @@ required=(
 for rel in "${required[@]}"; do
   [[ -e "${pkg_root}/${rel}" ]] || die "Required package content missing: ${rel}"
 done
+
+if [[ -n "$run_label" ]]; then
+  [[ -e "${pkg_root}/deploy-${run_label}.bat" ]] || die "Required package content missing: deploy-${run_label}.bat"
+fi
 
 if [[ -d "${pkg_root}/plugins" ]]; then
   extra_plugins="$(
