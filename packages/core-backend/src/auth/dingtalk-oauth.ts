@@ -16,6 +16,7 @@
 
 import { query } from '../db/pg'
 import { Logger } from '../core/logger'
+import { metrics } from '../metrics/metrics'
 import Redis from 'ioredis'
 
 const logger = new Logger('DingTalkOAuth')
@@ -86,6 +87,37 @@ interface StateValidationResult {
   error?: string
 }
 
+function observeRedisStateOperation(op: string, startedAtMs: number): void {
+  try {
+    metrics.redisOperationDuration.labels(op).observe((Date.now() - startedAtMs) / 1000)
+  } catch {
+    // Metrics are non-critical.
+  }
+}
+
+function recordStateOp(
+  operation: 'generate' | 'validate',
+  store: 'redis' | 'memory' | 'none',
+  result: 'success' | 'fallback' | 'missing' | 'invalid' | 'expired' | 'error',
+): void {
+  try {
+    metrics.dingtalkOauthStateOpsTotal.labels(operation, store, result).inc()
+  } catch {
+    // Metrics are non-critical.
+  }
+}
+
+function recordStateFallback(
+  operation: 'generate' | 'validate',
+  reason: 'redis_unavailable' | 'redis_write_failed' | 'redis_validation_failed',
+): void {
+  try {
+    metrics.dingtalkOauthStateFallbackTotal.labels(operation, reason).inc()
+  } catch {
+    // Metrics are non-critical.
+  }
+}
+
 function pruneExpiredStates(): void {
   const now = Date.now()
   for (const [key, expiresAt] of pendingStates) {
@@ -98,6 +130,10 @@ function logRedisFallback(reason: string, error?: unknown): void {
   redisFallbackLogged = true
   logger.warn(
     `Falling back to in-memory DingTalk OAuth state store: ${reason}${error instanceof Error ? ` (${error.message})` : ''}`,
+    {
+      mode: 'memory-fallback',
+      reason,
+    },
   )
 }
 
@@ -147,6 +183,11 @@ async function getRedisStateClient(): Promise<Redis | null> {
       })
 
       await client.connect()
+      if (redisFallbackLogged) {
+        logger.info('Recovered DingTalk OAuth state store to Redis', {
+          mode: 'redis',
+        })
+      }
       redisFallbackLogged = false
       redisStateClient = client
       return client
@@ -200,8 +241,15 @@ async function trimRedisStateIndex(client: Redis): Promise<void> {
 }
 
 async function writeStateToRedis(state: string, expiresAt: number): Promise<boolean> {
+  const startedAtMs = Date.now()
   const client = await getRedisStateClient()
-  if (!client) return false
+  if (!client) {
+    if (buildRedisUrl()) {
+      recordStateFallback('generate', 'redis_unavailable')
+    }
+    recordStateOp('generate', 'redis', 'fallback')
+    return false
+  }
 
   try {
     await pruneRedisStateIndex(client, Date.now())
@@ -212,17 +260,29 @@ async function writeStateToRedis(state: string, expiresAt: number): Promise<bool
       .set(stateRedisKey(state), JSON.stringify({ expiresAt } satisfies StateRecord), 'PX', ttlMs)
       .zadd(STATE_REDIS_INDEX_KEY, expiresAt, state)
       .exec()
+    recordStateOp('generate', 'redis', 'success')
+    observeRedisStateOperation('dingtalk_oauth_state_write', startedAtMs)
     return true
   } catch (error) {
+    recordStateFallback('generate', 'redis_write_failed')
+    recordStateOp('generate', 'redis', 'error')
     logRedisFallback('Redis state write failed', error)
     await invalidateRedisStateClient(client)
+    observeRedisStateOperation('dingtalk_oauth_state_write', startedAtMs)
     return false
   }
 }
 
 async function validateStateFromRedis(state: string): Promise<StateValidationResult | null> {
+  const startedAtMs = Date.now()
   const client = await getRedisStateClient()
-  if (!client) return null
+  if (!client) {
+    if (buildRedisUrl()) {
+      recordStateFallback('validate', 'redis_unavailable')
+    }
+    recordStateOp('validate', 'redis', 'fallback')
+    return null
+  }
 
   try {
     const results = await client.multi()
@@ -233,6 +293,8 @@ async function validateStateFromRedis(state: string): Promise<StateValidationRes
 
     const statePayload = results?.[0]?.[1]
     if (typeof statePayload !== 'string') {
+      recordStateOp('validate', 'redis', 'invalid')
+      observeRedisStateOperation('dingtalk_oauth_state_validate', startedAtMs)
       return { valid: false, error: 'Invalid or unknown state parameter' }
     }
 
@@ -244,17 +306,26 @@ async function validateStateFromRedis(state: string): Promise<StateValidationRes
     }
 
     if (!parsed || typeof parsed.expiresAt !== 'number') {
+      recordStateOp('validate', 'redis', 'invalid')
+      observeRedisStateOperation('dingtalk_oauth_state_validate', startedAtMs)
       return { valid: false, error: 'Invalid or unknown state parameter' }
     }
 
     if (Date.now() > parsed.expiresAt) {
+      recordStateOp('validate', 'redis', 'expired')
+      observeRedisStateOperation('dingtalk_oauth_state_validate', startedAtMs)
       return { valid: false, error: 'State parameter has expired' }
     }
 
+    recordStateOp('validate', 'redis', 'success')
+    observeRedisStateOperation('dingtalk_oauth_state_validate', startedAtMs)
     return { valid: true }
   } catch (error) {
+    recordStateFallback('validate', 'redis_validation_failed')
+    recordStateOp('validate', 'redis', 'error')
     logRedisFallback('Redis state validation failed', error)
     await invalidateRedisStateClient(client)
+    observeRedisStateOperation('dingtalk_oauth_state_validate', startedAtMs)
     return null
   }
 }
@@ -266,13 +337,25 @@ function writeStateToMemory(state: string, expiresAt: number): void {
     if (oldest) pendingStates.delete(oldest)
   }
   pendingStates.set(state, expiresAt)
+  recordStateOp('generate', 'memory', 'success')
 }
 
 function validateStateFromMemory(state: string): StateValidationResult {
+  if (!state) {
+    recordStateOp('validate', 'none', 'missing')
+    return { valid: false, error: 'Missing required parameter: state' }
+  }
   const expiresAt = pendingStates.get(state)
-  if (expiresAt === undefined) return { valid: false, error: 'Invalid or unknown state parameter' }
+  if (expiresAt === undefined) {
+    recordStateOp('validate', 'memory', 'invalid')
+    return { valid: false, error: 'Invalid or unknown state parameter' }
+  }
   pendingStates.delete(state) // consume: one-time use
-  if (Date.now() > expiresAt) return { valid: false, error: 'State parameter has expired' }
+  if (Date.now() > expiresAt) {
+    recordStateOp('validate', 'memory', 'expired')
+    return { valid: false, error: 'State parameter has expired' }
+  }
+  recordStateOp('validate', 'memory', 'success')
   return { valid: true }
 }
 
@@ -289,7 +372,7 @@ export async function generateState(): Promise<string> {
 }
 
 export async function validateState(state: string): Promise<StateValidationResult> {
-  if (!state) return { valid: false, error: 'Missing required parameter: state' }
+  if (!state) return validateStateFromMemory(state)
 
   const redisResult = await validateStateFromRedis(state)
   if (redisResult?.valid) return redisResult

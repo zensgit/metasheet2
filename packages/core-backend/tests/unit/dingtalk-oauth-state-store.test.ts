@@ -36,6 +36,18 @@ const redisMockState = vi.hoisted(() => {
   }
 })
 
+const metricsMocks = vi.hoisted(() => ({
+  dingtalkOauthStateOpsTotal: {
+    labels: vi.fn(() => ({ inc: vi.fn() })),
+  },
+  dingtalkOauthStateFallbackTotal: {
+    labels: vi.fn(() => ({ inc: vi.fn() })),
+  },
+  redisOperationDuration: {
+    labels: vi.fn(() => ({ observe: vi.fn() })),
+  },
+}))
+
 vi.mock('ioredis', () => {
   class MockRedis {
     constructor(_url: string, _opts: Record<string, unknown>) {}
@@ -172,6 +184,10 @@ vi.mock('../../src/db/pg', () => ({
   query: vi.fn(),
 }))
 
+vi.mock('../../src/metrics/metrics', () => ({
+  metrics: metricsMocks,
+}))
+
 import {
   __resetDingTalkOAuthStateStoreForTests,
   generateState,
@@ -183,6 +199,9 @@ describe('DingTalk OAuth state store', () => {
     vi.useRealTimers()
     vi.unstubAllEnvs()
     redisMockState.reset()
+    metricsMocks.dingtalkOauthStateOpsTotal.labels.mockClear()
+    metricsMocks.dingtalkOauthStateFallbackTotal.labels.mockClear()
+    metricsMocks.redisOperationDuration.labels.mockClear()
     await __resetDingTalkOAuthStateStoreForTests()
   })
 
@@ -190,6 +209,9 @@ describe('DingTalk OAuth state store', () => {
     vi.useRealTimers()
     vi.unstubAllEnvs()
     redisMockState.reset()
+    metricsMocks.dingtalkOauthStateOpsTotal.labels.mockClear()
+    metricsMocks.dingtalkOauthStateFallbackTotal.labels.mockClear()
+    metricsMocks.redisOperationDuration.labels.mockClear()
     await __resetDingTalkOAuthStateStoreForTests()
   })
 
@@ -207,6 +229,12 @@ describe('DingTalk OAuth state store', () => {
       valid: false,
       error: 'Invalid or unknown state parameter',
     })
+
+    expect(metricsMocks.dingtalkOauthStateOpsTotal.labels).toHaveBeenCalledWith('generate', 'redis', 'success')
+    expect(metricsMocks.dingtalkOauthStateOpsTotal.labels).toHaveBeenCalledWith('validate', 'redis', 'success')
+    expect(metricsMocks.dingtalkOauthStateOpsTotal.labels).toHaveBeenCalledWith('validate', 'redis', 'invalid')
+    expect(metricsMocks.redisOperationDuration.labels).toHaveBeenCalledWith('dingtalk_oauth_state_write')
+    expect(metricsMocks.redisOperationDuration.labels).toHaveBeenCalledWith('dingtalk_oauth_state_validate')
   })
 
   it('returns expired when a Redis-backed state exceeds its logical TTL', async () => {
@@ -222,6 +250,8 @@ describe('DingTalk OAuth state store', () => {
       valid: false,
       error: 'State parameter has expired',
     })
+
+    expect(metricsMocks.dingtalkOauthStateOpsTotal.labels).toHaveBeenCalledWith('validate', 'redis', 'expired')
   })
 
   it('falls back to in-memory storage when Redis is unavailable', async () => {
@@ -232,5 +262,11 @@ describe('DingTalk OAuth state store', () => {
     const validation = await validateState(state)
 
     expect(validation).toEqual({ valid: true })
+    expect(metricsMocks.dingtalkOauthStateFallbackTotal.labels).toHaveBeenCalledWith('generate', 'redis_unavailable')
+    expect(metricsMocks.dingtalkOauthStateFallbackTotal.labels).toHaveBeenCalledWith('validate', 'redis_unavailable')
+    expect(metricsMocks.dingtalkOauthStateOpsTotal.labels).toHaveBeenCalledWith('generate', 'redis', 'fallback')
+    expect(metricsMocks.dingtalkOauthStateOpsTotal.labels).toHaveBeenCalledWith('generate', 'memory', 'success')
+    expect(metricsMocks.dingtalkOauthStateOpsTotal.labels).toHaveBeenCalledWith('validate', 'redis', 'fallback')
+    expect(metricsMocks.dingtalkOauthStateOpsTotal.labels).toHaveBeenCalledWith('validate', 'memory', 'success')
   })
 })

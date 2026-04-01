@@ -1037,6 +1037,9 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
 
     const stateCheck = await validateState(state)
     if (!stateCheck.valid) {
+      logger.warn('DingTalk callback state rejected', {
+        reason: stateCheck.error ?? 'unknown',
+      })
       return res.status(400).json({
         success: false,
         error: stateCheck.error,

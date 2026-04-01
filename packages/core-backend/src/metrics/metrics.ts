@@ -298,6 +298,18 @@ const fallbackEffectiveTotal = new client.Counter({
   labelNames: ['reason'] as const
 })
 
+const dingtalkOauthStateOpsTotal = new client.Counter({
+  name: 'metasheet_dingtalk_oauth_state_operations_total',
+  help: 'Total DingTalk OAuth state store operations by operation, store, and result',
+  labelNames: ['operation', 'store', 'result'] as const
+})
+
+const dingtalkOauthStateFallbackTotal = new client.Counter({
+  name: 'metasheet_dingtalk_oauth_state_fallback_total',
+  help: 'Total DingTalk OAuth state store fallbacks by operation and reason',
+  labelNames: ['operation', 'reason'] as const
+})
+
 // RBAC table permission check metrics
 const rbacPermissionChecksTotal = new client.Counter({
   name: 'rbac_permission_checks_total',
@@ -445,6 +457,8 @@ registry.registerMetric(cache_enabled)
 registry.registerMetric(cache_candidate_requests)
 registry.registerMetric(fallbackRawTotal)
 registry.registerMetric(fallbackEffectiveTotal)
+registry.registerMetric(dingtalkOauthStateOpsTotal)
+registry.registerMetric(dingtalkOauthStateFallbackTotal)
 registry.registerMetric(redisOperationDuration)
 registry.registerMetric(redisRecoveryAttemptsTotal)
 registry.registerMetric(redisLastFailureTimestamp)
@@ -541,6 +555,8 @@ export const metrics = {
   cache_candidate_requests,
   fallbackRawTotal,
   fallbackEffectiveTotal,
+  dingtalkOauthStateOpsTotal,
+  dingtalkOauthStateFallbackTotal,
   redisOperationDuration,
   redisRecoveryAttemptsTotal,
   redisLastFailureTimestamp,

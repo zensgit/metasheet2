@@ -69,6 +69,25 @@ node scripts/dingtalk-oauth-smoke.mjs --base-url http://localhost:7778
 2. `POST /api/auth/dingtalk/callback` 缺 code → 400
 3. `POST /api/auth/dingtalk/callback` 错误 state → 400
 
+### 可观测性检查
+
+若服务已暴露 Prometheus 指标，可进一步确认 DingTalk OAuth state observability：
+
+```bash
+curl -s http://localhost:7778/metrics/prom | grep 'metasheet_dingtalk_oauth_state_'
+curl -s http://localhost:7778/metrics/prom | grep 'redis_operation_duration_seconds'
+```
+
+应至少能看到：
+
+- `metasheet_dingtalk_oauth_state_operations_total`
+- `metasheet_dingtalk_oauth_state_fallback_total`
+
+其中 `redis_operation_duration_seconds` 会带 DingTalk OAuth 专用 `op` 标签：
+
+- `dingtalk_oauth_state_write`
+- `dingtalk_oauth_state_validate`
+
 ### 手动验证
 
 1. 不配置 DingTalk 环境变量时：

@@ -109,6 +109,12 @@ Entry points:
   - Verification: `docs/development/onprem-docker-run-hardening-verification-20260401.md`
   - Notes: hardens the required `docker run` parameters for `metasheet-backend` and `metasheet-web`, especially `--network-alias backend` and public `8081:80`.
 
+- OAuth state observability:
+  - Design: `docs/development/oauth-state-observability-design-20260401.md`
+  - Verification: `docs/development/oauth-state-observability-verification-20260401.md`
+  - Deployment notes: `docs/deployment/dingtalk-oauth-backend-deploy-20260330.md`
+  - Notes: adds dedicated DingTalk OAuth state metrics, fallback counters, and callback rejection logs on top of the Redis-backed state store.
+
 ## Daily / Pre-PR
 
 - Verification summary (latest):

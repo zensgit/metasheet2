@@ -154,6 +154,18 @@ describe('Metrics Integration', () => {
     })
   })
 
+  describe('DingTalk OAuth State Metrics', () => {
+    it('should have dingtalkOauthStateOpsTotal metric defined', () => {
+      expect(metrics.dingtalkOauthStateOpsTotal).toBeDefined()
+      expect(typeof metrics.dingtalkOauthStateOpsTotal.labels).toBe('function')
+    })
+
+    it('should have dingtalkOauthStateFallbackTotal metric defined', () => {
+      expect(metrics.dingtalkOauthStateFallbackTotal).toBeDefined()
+      expect(typeof metrics.dingtalkOauthStateFallbackTotal.labels).toBe('function')
+    })
+  })
+
   describe('Metrics Export', () => {
     it('should export all required core metrics', () => {
       const requiredMetrics = [
@@ -173,7 +185,9 @@ describe('Metrics Integration', () => {
         'snapshotCreateTotal',
         'cache_hits_total',
         'redisOperationDuration',
-        'fallbackRawTotal'
+        'fallbackRawTotal',
+        'dingtalkOauthStateOpsTotal',
+        'dingtalkOauthStateFallbackTotal'
       ]
 
       requiredMetrics.forEach(metricName => {
@@ -184,8 +198,8 @@ describe('Metrics Integration', () => {
 
     it('should have the expected number of exported metrics', () => {
       const exportedKeys = Object.keys(metrics)
-      // 61 metrics as of current metrics module (including RBAC, SLO, Schema, and BPMN workflow metrics)
-      expect(exportedKeys.length).toBe(61)
+      // 63 metrics as of current metrics module (including DingTalk OAuth state observability)
+      expect(exportedKeys.length).toBe(63)
     })
   })
 })
