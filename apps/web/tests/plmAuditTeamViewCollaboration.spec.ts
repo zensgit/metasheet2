@@ -684,6 +684,43 @@ describe('plmAuditTeamViewCollaboration', () => {
       source: 'recommendation',
       sourceRecommendationFilter: '',
     })
+  })
+
+  it('preserves the active recommendation filter through handoff draft for focus-source round-trip', () => {
+    const handoff = buildPlmAuditTeamViewCollaborationHandoff(
+      { id: 'audit-view-12', name: '近期默认视图' },
+      {
+        source: 'recommendation',
+        mode: 'draft',
+        selectable: true,
+        sourceRecommendationFilter: 'recent-default',
+      },
+      tr,
+    )
+    expect(handoff.draft?.sourceRecommendationFilter).toBe('recent-default')
+
+    // Simulate share → followup → focus-source round-trip
+    const followup = buildPlmAuditTeamViewCollaborationFollowup(
+      'audit-view-12',
+      'recommendation',
+      'share',
+      { sourceRecommendationFilter: 'recent-default' },
+    )
+    const focusIntent = buildPlmAuditTeamViewCollaborationSourceFocusIntent(
+      followup,
+      { id: 'audit-view-12', isDefault: false, lastDefaultSetAt: '2026-03-19T10:00:00.000Z' },
+    )
+    expect(focusIntent.recommendationFilter).toBe('recent-default')
+  })
+
+  it('defaults to empty recommendation filter when sourceRecommendationFilter is omitted from handoff', () => {
+    const handoff = buildPlmAuditTeamViewCollaborationHandoff(
+      { id: 'audit-view-13', name: '无过滤视图' },
+      { source: 'recommendation', mode: 'draft', selectable: true },
+      tr,
+    )
+    // When omitted, resolves to '' (all recommendations)
+    expect(handoff.draft?.sourceRecommendationFilter).toBe('')
 
     expect(buildPlmAuditTeamViewCollaborationHandoff(
       {

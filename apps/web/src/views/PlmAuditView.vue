@@ -2812,6 +2812,7 @@ async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
       source: 'recommendation',
       mode: 'draft',
       selectable: Boolean(auditTeamViewManagementItems.value.find((item) => item.id === target.id)?.selectable),
+      sourceRecommendationFilter: auditTeamViewRecommendationFilter.value,
     },
     tr,
   )
