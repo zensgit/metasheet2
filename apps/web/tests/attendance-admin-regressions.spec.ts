@@ -383,6 +383,10 @@ describe('Attendance admin regressions', () => {
     expect(container!.textContent).toContain('Apply builder to JSON')
     expect(container!.textContent).toContain('Draft preview')
     expect(container!.textContent).toContain('Sample event builder')
+    expect(container!.querySelector('.attendance__rule-set-workbench')).toBeTruthy()
+    expect(container!.querySelector('.attendance__rule-set-basics')).toBeTruthy()
+    expect(container!.querySelector('.attendance__rule-builder-shell')).toBeTruthy()
+    expect(container!.querySelector('.attendance__rule-set-advanced')).toBeTruthy()
 
     const previewButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
       .find(button => button.textContent?.includes('Preview rule set'))
