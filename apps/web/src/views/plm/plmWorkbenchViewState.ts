@@ -156,7 +156,7 @@ export function normalizePlmWorkbenchPanelScope(value: unknown): string | undefi
   if (!selected.size) return undefined
 
   return PLM_PANEL_KEYS
-    .filter((entry) => selected.has(entry))
+    .filter((entry: string) => selected.has(entry))
     .join(',')
 }
 
