@@ -280,7 +280,10 @@ export function resolvePlmAuditTeamViewCollaborationActionTarget<T>(
 }
 
 export function buildPlmAuditTeamViewCollaborationSourceFocusIntent(
-  followup: Pick<PlmAuditTeamViewCollaborationFollowup, 'source' | 'sourceAnchorId' | 'sourceSavedViewId'>,
+  followup: Pick<
+    PlmAuditTeamViewCollaborationFollowup,
+    'source' | 'sourceAnchorId' | 'sourceSavedViewId' | 'sourceRecommendationFilter'
+  >,
   view?: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'isDefault' | 'lastDefaultSetAt'> | null,
 ): PlmAuditTeamViewCollaborationSourceFocusIntent {
   if (followup.source === 'recommendation' && view) {
@@ -288,7 +291,9 @@ export function buildPlmAuditTeamViewCollaborationSourceFocusIntent(
       anchorId: followup.sourceAnchorId,
       focusedRecommendationTeamViewId: view.id,
       focusedSavedViewId: null,
-      recommendationFilter: resolveAuditTeamViewRecommendationFilter(view),
+      recommendationFilter: followup.sourceRecommendationFilter !== undefined
+        ? followup.sourceRecommendationFilter
+        : resolveAuditTeamViewRecommendationFilter(view),
     }
   }
 
@@ -351,6 +356,7 @@ export function buildPlmAuditTeamViewCollaborationActionOutcome(
   options?: {
     sceneContextAvailable?: boolean
     sourceSavedViewId?: string | null
+    sourceRecommendationFilter?: PlmRecommendedAuditTeamViewFilter
   },
 ): PlmAuditTeamViewCollaborationActionOutcome {
   if (!source) {
@@ -609,12 +615,14 @@ export function buildPlmAuditTeamViewCollaborationHandoff(
     sceneContextAvailable?: boolean
     statusSuffix?: string
     sourceSavedViewId?: string | null
+    sourceRecommendationFilter?: PlmRecommendedAuditTeamViewFilter
   },
   tr: (en: string, zh: string) => string,
 ): PlmAuditTeamViewCollaborationHandoff {
   if (options.mode === 'draft') {
     const draft = buildPlmAuditTeamViewCollaborationDraft(view, tr, options.source, {
       sourceSavedViewId: options.sourceSavedViewId,
+      sourceRecommendationFilter: options.sourceRecommendationFilter,
     })
     return {
       selectedTeamViewId: draft.teamViewId,
@@ -636,6 +644,7 @@ export function buildPlmAuditTeamViewCollaborationHandoff(
     {
       sceneContextAvailable: options.sceneContextAvailable,
       sourceSavedViewId: options.sourceSavedViewId,
+      sourceRecommendationFilter: options.sourceRecommendationFilter,
     },
   )
 

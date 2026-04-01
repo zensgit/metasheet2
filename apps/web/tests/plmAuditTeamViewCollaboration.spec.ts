@@ -57,6 +57,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       focusTargetId: 'plm-audit-team-view-controls',
       source: 'recommendation',
       sourceSavedViewId: null,
+      sourceRecommendationFilter: '',
       statusMessage:
         'Prepared collaboration controls for this audit team view.|已为该审计团队视图准备好协作操作。',
     })
@@ -656,6 +657,7 @@ describe('plmAuditTeamViewCollaboration', () => {
         focusTargetId: 'plm-audit-team-view-controls',
         source: 'recommendation',
         sourceSavedViewId: null,
+        sourceRecommendationFilter: '',
         statusMessage:
           'Prepared collaboration controls for this audit team view.|已为该审计团队视图准备好协作操作。',
       },
@@ -663,6 +665,24 @@ describe('plmAuditTeamViewCollaboration', () => {
       scrollTargetId: 'plm-audit-team-view-controls',
       statusMessage:
         'Prepared collaboration controls for this audit team view.|已为该审计团队视图准备好协作操作。',
+    })
+
+    expect(buildPlmAuditTeamViewCollaborationHandoff(
+      {
+        id: 'audit-view-10',
+        name: '推荐团队视图',
+      },
+      {
+        source: 'recommendation',
+        mode: 'draft',
+        selectable: true,
+        sourceRecommendationFilter: '',
+      },
+      tr,
+    ).draft).toMatchObject({
+      teamViewId: 'audit-view-10',
+      source: 'recommendation',
+      sourceRecommendationFilter: '',
     })
 
     expect(buildPlmAuditTeamViewCollaborationHandoff(
@@ -858,6 +878,7 @@ describe('plmAuditTeamViewCollaboration', () => {
     expect(buildPlmAuditTeamViewCollaborationSourceFocusIntent({
       source: 'recommendation',
       sourceAnchorId: 'plm-audit-recommended-team-views',
+      sourceRecommendationFilter: 'recent-default',
     }, {
       id: 'audit-view-4',
       isDefault: false,
@@ -867,6 +888,23 @@ describe('plmAuditTeamViewCollaboration', () => {
       focusedRecommendationTeamViewId: 'audit-view-4',
       focusedSavedViewId: null,
       recommendationFilter: 'recent-default',
+    })
+  })
+
+  it('preserves the original recommendation filter for focus-source instead of recomputing from the live card', () => {
+    expect(buildPlmAuditTeamViewCollaborationSourceFocusIntent({
+      source: 'recommendation',
+      sourceAnchorId: 'plm-audit-recommended-team-views',
+      sourceRecommendationFilter: '',
+    }, {
+      id: 'audit-view-4',
+      isDefault: false,
+      lastDefaultSetAt: '2026-03-19T15:00:00.000Z',
+    })).toEqual({
+      anchorId: 'plm-audit-recommended-team-views',
+      focusedRecommendationTeamViewId: 'audit-view-4',
+      focusedSavedViewId: null,
+      recommendationFilter: '',
     })
   })
 
@@ -918,6 +956,9 @@ describe('plmAuditTeamViewCollaboration', () => {
       'audit-view-4',
       'recommendation',
       'share',
+      {
+        sourceRecommendationFilter: '',
+      },
     )).toEqual({
       teamViewId: 'audit-view-4',
       source: 'recommendation',
@@ -925,6 +966,7 @@ describe('plmAuditTeamViewCollaboration', () => {
       logsAnchorId: 'plm-audit-log-results',
       sourceAnchorId: 'plm-audit-recommended-team-views',
       sourceSavedViewId: null,
+      sourceRecommendationFilter: '',
     })
 
     expect(buildPlmAuditTeamViewCollaborationFollowup(
