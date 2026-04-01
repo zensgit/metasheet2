@@ -1221,10 +1221,6 @@ const auditTeamViewCollaborationDraftTarget = computed(() => findPlmAuditTeamVie
   auditTeamViews.value,
   resolveAuditTeamViewCollaborationRuntimeState().draft,
 ))
-const auditTeamViewShareEntryTarget = computed(() => findPlmAuditTeamViewShareEntryView(
-  auditTeamViews.value,
-  auditTeamViewShareEntry.value,
-))
 const auditTeamViewCollaborationNotice = computed(() => {
   const collaborationState = resolveAuditTeamViewCollaborationRuntimeState()
   const view = auditTeamViewCollaborationDraftTarget.value

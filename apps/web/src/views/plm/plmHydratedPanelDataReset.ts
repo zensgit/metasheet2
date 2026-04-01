@@ -46,18 +46,6 @@ export type PlmHydratedPanelDataReset = {
   clearSubstitutes: boolean
 }
 
-const EMPTY_RESET: PlmHydratedPanelDataReset = {
-  clearSearch: false,
-  clearProduct: false,
-  clearBom: false,
-  clearDocuments: false,
-  clearCad: false,
-  clearApprovals: false,
-  clearWhereUsed: false,
-  clearCompare: false,
-  clearSubstitutes: false,
-}
-
 function normalizeToken(value: unknown): string {
   if (typeof value === 'string') return value.trim()
   if (typeof value === 'number' && Number.isFinite(value)) return String(value)
