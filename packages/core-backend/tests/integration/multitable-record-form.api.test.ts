@@ -407,13 +407,16 @@ describe('Multitable record and form context API', () => {
             ],
           }
         }
-        if (sql.includes('SELECT id, version, data, created_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC')) {
-          expect(params).toEqual(['sheet_orders'])
+        if (sql.includes('SELECT id, version, data, COUNT(*) OVER()::int AS total') && sql.includes('WHERE sheet_id = $1 AND (')) {
+          expect(params).toEqual(['sheet_orders', '%120%', 'fld_name', 'fld_amount', 1, 0])
           return {
             rows: [
-              { id: 'rec_1', version: 1, data: { fld_name: 'Alpha launch', fld_amount: 99 }, created_at: '2026-03-18T09:00:00.000Z' },
-              { id: 'rec_2', version: 2, data: { fld_name: 'Beta rollout', fld_amount: 1200 }, created_at: '2026-03-18T10:00:00.000Z' },
-              { id: 'rec_3', version: 3, data: { fld_name: 'Gamma QA', fld_amount: 1201 }, created_at: '2026-03-18T11:00:00.000Z' },
+              {
+                id: 'rec_2',
+                version: 2,
+                data: { fld_name: 'Beta rollout', fld_amount: 1200 },
+                total: 2,
+              },
             ],
           }
         }
