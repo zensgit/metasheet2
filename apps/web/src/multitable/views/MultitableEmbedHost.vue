@@ -12,6 +12,7 @@
       :record-id="recordId"
       :mode="mode"
       :role="role"
+      @ready="onWorkbenchReady"
       @external-context-result="onWorkbenchExternalContextResult"
     />
   </div>
@@ -332,10 +333,12 @@ function onWorkbenchExternalContextResult(payload: {
   void applyHostOverrides(resolvedContext)
 }
 
+function onWorkbenchReady(payload: { baseId: string; sheetId: string; viewId: string }) {
+  postToParent({ type: 'mt:ready', baseId: payload.baseId, sheetId: payload.sheetId, viewId: payload.viewId })
+}
+
 onMounted(() => {
   window.addEventListener('message', onMessage)
-  // Notify parent that embed is ready
-  postToParent({ type: 'mt:ready', baseId: effectiveBaseId.value, sheetId: effectiveSheetId.value, viewId: effectiveViewId.value })
 })
 
 onBeforeUnmount(() => {

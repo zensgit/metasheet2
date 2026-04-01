@@ -47,6 +47,7 @@ import { AuthService } from '../../src/auth/AuthService'
 
 describe('AuthService.verifyToken', () => {
   beforeEach(() => {
+    process.env.NODE_ENV = 'test'
     process.env.RBAC_TOKEN_TRUST = 'false'
     jwtMocks.verify.mockReset()
     jwtMocks.sign.mockReset()
@@ -160,10 +161,51 @@ describe('AuthService.verifyToken', () => {
     expect(sessionMocks.isUserSessionRevoked).not.toHaveBeenCalled()
     expect(sessionMocks.isUserSessionActive).not.toHaveBeenCalled()
   })
+
+  it('disables trusted token fast path in production even when RBAC_TOKEN_TRUST is enabled', async () => {
+    process.env.NODE_ENV = 'production'
+    process.env.RBAC_TOKEN_TRUST = 'true'
+    jwtMocks.verify.mockReturnValue({
+      id: 'prod-admin',
+      roles: ['admin'],
+      perms: ['multitable:read', 'multitable:write'],
+      sid: 'prod-session',
+      iat: 123,
+      exp: 456,
+    })
+    poolMocks.query.mockResolvedValueOnce({
+      rows: [{
+        id: 'prod-admin',
+        email: 'prod-admin@example.com',
+        name: 'Prod Admin',
+        role: 'user',
+        permissions: ['multitable:read'],
+        password_hash: 'hash',
+        is_active: true,
+        created_at: new Date(),
+        updated_at: new Date(),
+      }]
+    })
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['multitable:read'])
+
+    const auth = new AuthService()
+    const user = await auth.verifyToken('trusted-prod-token')
+
+    expect(user).toBeTruthy()
+    expect(user?.id).toBe('prod-admin')
+    expect(user?.role).toBe('user')
+    expect(user?.permissions).toEqual(['multitable:read'])
+    expect(poolMocks.query).toHaveBeenCalled()
+    expect(sessionMocks.isUserSessionRevoked).toHaveBeenCalledWith('prod-admin', 123)
+    expect(sessionMocks.isUserSessionActive).toHaveBeenCalledWith('prod-admin', 'prod-session')
+  })
 })
 
 describe('AuthService.refreshToken', () => {
   beforeEach(() => {
+    process.env.NODE_ENV = 'test'
+    process.env.RBAC_TOKEN_TRUST = 'false'
     jwtMocks.verify.mockReset()
     jwtMocks.sign.mockReset()
     poolMocks.query.mockReset()

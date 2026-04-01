@@ -92,6 +92,11 @@ export class AuthService {
         issues.push(`BCRYPT_SALT_ROUNDS too low for production (${this.config.saltRounds}, recommended: ≥12)`)
       }
 
+      // Trusted token claims are a local performance escape hatch only.
+      if (process.env.RBAC_TOKEN_TRUST === 'true' || process.env.RBAC_TOKEN_TRUST === '1') {
+        issues.push('RBAC_TOKEN_TRUST is ignored in production and must remain disabled')
+      }
+
       // Check JWT expiry
       if (this.config.jwtExpiry === '24h') {
         this.logger.warn('Using default JWT expiry (24h). Consider shorter expiry for production.')
@@ -109,7 +114,11 @@ export class AuthService {
   }
 
   private trustTokenClaimsEnabled(): boolean {
-    return process.env.RBAC_TOKEN_TRUST === 'true' || process.env.RBAC_TOKEN_TRUST === '1'
+    if (!(process.env.RBAC_TOKEN_TRUST === 'true' || process.env.RBAC_TOKEN_TRUST === '1')) {
+      return false
+    }
+
+    return process.env.NODE_ENV !== 'production'
   }
 
   private normalizeClaimStringArray(value: unknown): string[] {
