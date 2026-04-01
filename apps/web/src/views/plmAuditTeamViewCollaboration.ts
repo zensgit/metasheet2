@@ -143,7 +143,10 @@ export function buildPlmAuditTeamViewCollaborationFollowup(
     action,
     logsAnchorId: PLM_AUDIT_TEAM_VIEW_COLLABORATION_LOGS_ANCHOR_ID,
     sourceAnchorId: resolvePlmAuditTeamViewCollaborationSourceAnchorId(source, options),
-    sourceSavedViewId: source === 'saved-view-promotion' ? options?.sourceSavedViewId || null : null,
+    sourceSavedViewId: resolvePlmAuditTeamViewCollaborationSourceSavedViewId(
+      source,
+      options?.sourceSavedViewId,
+    ),
     sourceRecommendationFilter: resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter(
       source,
       options?.sourceRecommendationFilter,
@@ -794,7 +797,10 @@ export function buildPlmAuditTeamViewCollaborationDraft(
     teamViewOwnerUserId: '',
     focusTargetId: 'plm-audit-team-view-controls',
     source,
-    sourceSavedViewId: source === 'saved-view-promotion' ? options?.sourceSavedViewId || null : null,
+    sourceSavedViewId: resolvePlmAuditTeamViewCollaborationSourceSavedViewId(
+      source,
+      options?.sourceSavedViewId,
+    ),
     sourceRecommendationFilter: resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter(
       source,
       options?.sourceRecommendationFilter,
@@ -825,6 +831,17 @@ export function resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter(
   }
 
   return sourceRecommendationFilter ?? ''
+}
+
+export function resolvePlmAuditTeamViewCollaborationSourceSavedViewId(
+  source: PlmAuditTeamViewCollaborationSource | null | undefined,
+  sourceSavedViewId?: string | null,
+): string | null {
+  if (source !== 'saved-view-promotion') {
+    return null
+  }
+
+  return sourceSavedViewId || null
 }
 
 export function buildPlmAuditTeamViewCollaborationNotice(

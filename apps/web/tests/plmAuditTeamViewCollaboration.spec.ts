@@ -21,6 +21,7 @@ import {
   resolvePlmAuditSavedViewTakeoverCollaborationState,
   resolvePlmAuditTeamViewCollaborationActionFeedback,
   resolvePlmAuditTeamViewCollaborationFollowupActionFeedback,
+  resolvePlmAuditTeamViewCollaborationSourceSavedViewId,
   resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter,
   resolvePlmAuditTeamViewCollaborationRuntimeFollowup,
   resolvePlmAuditTeamViewCollaborationRuntimeState,
@@ -821,6 +822,36 @@ describe('plmAuditTeamViewCollaboration', () => {
     }, tr, 'scene-context', {
       sourceRecommendationFilter: 'recent-default',
     }).sourceRecommendationFilter).toBeUndefined()
+  })
+
+  it('reuses the saved-view provenance normalizer for draft and followup builders', () => {
+    expect(resolvePlmAuditTeamViewCollaborationSourceSavedViewId(
+      'saved-view-promotion',
+      'saved-view-14',
+    )).toBe('saved-view-14')
+    expect(resolvePlmAuditTeamViewCollaborationSourceSavedViewId(
+      'saved-view-promotion',
+    )).toBeNull()
+    expect(resolvePlmAuditTeamViewCollaborationSourceSavedViewId(
+      'scene-context',
+      'saved-view-14',
+    )).toBeNull()
+
+    expect(buildPlmAuditTeamViewCollaborationDraft({
+      id: 'audit-view-16',
+      name: '提升团队视图',
+    }, tr, 'saved-view-promotion', {
+      sourceSavedViewId: 'saved-view-14',
+    }).sourceSavedViewId).toBe('saved-view-14')
+
+    expect(buildPlmAuditTeamViewCollaborationFollowup(
+      'audit-view-16',
+      'scene-context',
+      'share',
+      {
+        sourceSavedViewId: 'saved-view-14',
+      },
+    ).sourceSavedViewId).toBeNull()
   })
 
   it('builds recommendation source focus intent that restores the card filter and focus', () => {
