@@ -12,12 +12,11 @@ import {
   resolvePlmAuditTakeoverTeamViewFormDraftState,
   type PlmAuditTeamViewFormDraftState,
 } from './plmAuditTeamViewOwnership'
-import type { PlmAuditTeamViewShareEntry } from './plmAuditTeamViewShareEntry'
 
 export type PlmAuditTeamViewRouteTakeoverState = {
   attentionFocus: PlmAuditAttentionFocusState
   savedViewAttention: PlmAuditSavedViewAttentionState
-  shareEntry: PlmAuditTeamViewShareEntry | null
+  shareEntry: null
   formDraft: PlmAuditTeamViewFormDraftState
   collaboration: {
     selectedIds: string[]
@@ -29,7 +28,6 @@ export type PlmAuditTeamViewRouteTakeoverState = {
 export function buildPlmAuditTeamViewRouteTakeoverState(options: {
   attentionFocus: PlmAuditAttentionFocusState
   savedViewAttention: PlmAuditSavedViewAttentionState
-  shareEntry: PlmAuditTeamViewShareEntry | null
   formDraft: PlmAuditTeamViewFormDraftState
   collaboration: {
     selectedIds: string[]

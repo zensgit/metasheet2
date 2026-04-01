@@ -1433,7 +1433,6 @@ function applyResolvedTeamViewTakeoverCleanup() {
       shareFollowup: auditSavedViewShareFollowup.value,
       focusedSavedViewId: focusedSavedViewId.value,
     },
-    shareEntry: auditTeamViewShareEntry.value,
     formDraft: {
       draftTeamViewName: auditTeamViewName.value,
       draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,

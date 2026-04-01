@@ -16,9 +16,6 @@ describe('plmAuditTeamViewRouteTakeover', () => {
         },
         focusedSavedViewId: 'saved-view-focus',
       },
-      shareEntry: {
-        teamViewId: 'team-view-legacy',
-      },
       formDraft: {
         draftTeamViewName: 'Rename legacy view',
         draftTeamViewNameOwnerId: 'team-view-legacy',
@@ -79,7 +76,6 @@ describe('plmAuditTeamViewRouteTakeover', () => {
         shareFollowup: null,
         focusedSavedViewId: '',
       },
-      shareEntry: null,
       formDraft: {
         draftTeamViewName: 'Create new view',
         draftTeamViewNameOwnerId: '',
@@ -118,9 +114,6 @@ describe('plmAuditTeamViewRouteTakeover', () => {
           source: 'shared-entry',
         },
         focusedSavedViewId: 'saved-view-archived',
-      },
-      shareEntry: {
-        teamViewId: 'archived-view',
       },
       formDraft: {
         draftTeamViewName: 'Archived legacy draft',
