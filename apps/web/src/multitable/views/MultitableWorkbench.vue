@@ -218,6 +218,7 @@ import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue }
 
 const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; mode?: string; role?: MultitableRole }>()
 const emit = defineEmits<{
+  (e: 'ready', payload: { baseId: string; sheetId: string; viewId: string }): void
   (e: 'external-context-result', payload: {
     status: 'applied' | 'failed' | 'superseded'
     context: { baseId: string; sheetId: string; viewId: string }
@@ -287,6 +288,7 @@ const workbenchReady = ref(false)
 let dialogMetaRefreshTimer: number | null = null
 let dialogMetaRefreshInFlight = false
 let dialogMetaRefreshQueued = false
+let standaloneFormLoadVersion = 0
 
 function showError(msg: string) {
   workbench.error.value = null
@@ -1444,12 +1446,14 @@ const selectedRecordResolved = computed<MetaRecord | null>(() => {
 // --- Standalone form bootstrap ---
 async function loadStandaloneForm() {
   if (activeViewType.value !== 'form' || !workbench.activeViewId.value) return
+  const loadVersion = ++standaloneFormLoadVersion
   try {
     const ctx = await workbench.client.loadFormContext({
       sheetId: workbench.activeSheetId.value || undefined,
       viewId: workbench.activeViewId.value || undefined,
       recordId: selectedRecordId.value || undefined,
     })
+    if (loadVersion !== standaloneFormLoadVersion) return
     if (ctx.fields?.length) grid.fields.value = ctx.fields
     if (ctx.record) {
       deepLinkedRecord.value = ctx.record
@@ -1511,11 +1515,18 @@ onMounted(async () => {
     }
     const deepRecordId = props.recordId ?? parseDeepLink()
     if (deepRecordId) await resolveDeepLink(deepRecordId)
-    if (activeViewType.value === 'form') loadStandaloneForm()
+    if (activeViewType.value === 'form') {
+      await loadStandaloneForm()
+    }
   } catch (e: any) {
     showError(e.message ?? 'Failed to initialize workbench')
   } finally {
     workbenchReady.value = true
+    emit('ready', {
+      baseId: workbench.activeBaseId.value ?? '',
+      sheetId: workbench.activeSheetId.value ?? '',
+      viewId: workbench.activeViewId.value ?? '',
+    })
   }
 })
 
