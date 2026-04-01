@@ -1,0 +1,74 @@
+# MetaSheet V2 Observability Stack (on-prem)
+# Uses the existing application Docker network so Prometheus can scrape `backend:8900`.
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: metasheet-prometheus
+    ports:
+      - "127.0.0.1:${PROM_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus/prometheus.onprem.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../ops/prometheus/phase5-recording-rules.yml:/etc/prometheus/rules/phase5-recording-rules.yml:ro
+      - ../../ops/prometheus/phase5-alerts.yml:/etc/prometheus/rules/phase5-alerts.yml:ro
+      - ../../ops/prometheus/attendance-alerts.yml:/etc/prometheus/rules/attendance-alerts.yml:ro
+      - ../../ops/prometheus/dingtalk-oauth-alerts.yml:/etc/prometheus/rules/dingtalk-oauth-alerts.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=7d'
+      - '--web.enable-lifecycle'
+    networks:
+      - metasheet-net
+      - metasheet-app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  grafana:
+    image: grafana/grafana:10.2.2
+    container_name: metasheet-grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/metasheet-overview.json
+    networks:
+      - metasheet-net
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  prometheus-data:
+    name: metasheet-prometheus-data
+  grafana-data:
+    name: metasheet-grafana-data
+
+networks:
+  metasheet-net:
+    name: metasheet-observability
+    driver: bridge
+  metasheet-app:
+    external: true
+    name: ${METASHEET_APP_NETWORK:-metasheet2_default}

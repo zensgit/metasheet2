@@ -7,7 +7,10 @@ RULES_DIR="${ROOT_DIR}/ops/prometheus"
 DASHBOARD_JSON="${ROOT_DIR}/docker/observability/grafana/dashboards/dingtalk-oauth-overview.json"
 COMPOSE_FILE="${ROOT_DIR}/docker/observability/docker-compose.yml"
 PROM_CONFIG="${ROOT_DIR}/docker/observability/prometheus/prometheus.yml"
+ONPREM_COMPOSE_FILE="${ROOT_DIR}/docker/observability/docker-compose.onprem.yml"
+ONPREM_PROM_CONFIG="${ROOT_DIR}/docker/observability/prometheus/prometheus.onprem.yml"
 METRICS_FILE="${ROOT_DIR}/packages/core-backend/src/metrics/metrics.ts"
+DATASOURCE_DIR="${ROOT_DIR}/docker/observability/grafana/provisioning/datasources"
 
 echo "[oauth-observability] validating dashboard JSON"
 node --input-type=module -e "JSON.parse(await import('node:fs').then(m => m.readFileSync(process.argv[1], 'utf8')))" "${DASHBOARD_JSON}" >/dev/null
@@ -19,6 +22,42 @@ rg -q 'redis_operation_duration_seconds' "${METRICS_FILE}"
 
 echo "[oauth-observability] validating docker compose wiring"
 docker compose -f "${COMPOSE_FILE}" config >/dev/null
+docker compose -f "${ONPREM_COMPOSE_FILE}" config >/dev/null
+
+check_grafana_datasource_defaults() {
+  DATASOURCE_DIR_INPUT="${DATASOURCE_DIR}" node --input-type=module - <<'EOF'
+import fs from 'node:fs'
+import path from 'node:path'
+import yaml from 'js-yaml'
+
+const datasourceDir = process.env.DATASOURCE_DIR_INPUT
+if (!datasourceDir) throw new Error('DATASOURCE_DIR_INPUT is required')
+
+const files = fs.readdirSync(datasourceDir)
+  .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+  .map((name) => path.join(datasourceDir, name))
+
+let defaultCount = 0
+for (const filePath of files) {
+  const parsed = yaml.load(fs.readFileSync(filePath, 'utf8'))
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.datasources)) continue
+  for (const datasource of parsed.datasources) {
+    if (datasource && datasource.isDefault === true) {
+      defaultCount += 1
+    }
+  }
+}
+
+if (defaultCount !== 1) {
+  throw new Error(`expected exactly one default Grafana datasource, found ${defaultCount}`)
+}
+
+console.log('[oauth-observability] grafana datasource provisioning is consistent')
+EOF
+}
+
+echo "[oauth-observability] validating Grafana datasource provisioning"
+check_grafana_datasource_defaults
 
 check_rules_with_promtool() {
   promtool check rules \
@@ -28,6 +67,7 @@ check_rules_with_promtool() {
     "${RULES_DIR}/dingtalk-oauth-alerts.yml"
 
   promtool check config "${PROM_CONFIG}"
+  promtool check config "${ONPREM_PROM_CONFIG}"
 }
 
 check_rules_with_yaml_fallback() {
@@ -94,6 +134,12 @@ elif docker info >/dev/null 2>&1; then
     -v "${RULES_DIR}:/etc/prometheus/rules:ro" \
     prom/prometheus:v2.48.0 \
     promtool check config /etc/prometheus/prometheus.yml
+
+  docker run --rm \
+    -v "${ROOT_DIR}/docker/observability/prometheus:/etc/prometheus:ro" \
+    -v "${RULES_DIR}:/etc/prometheus/rules:ro" \
+    prom/prometheus:v2.48.0 \
+    promtool check config /etc/prometheus/prometheus.onprem.yml
 else
   echo "[oauth-observability] promtool and Docker daemon unavailable; using YAML structural validation fallback"
   (cd "${ROOT_DIR}" && check_rules_with_yaml_fallback)

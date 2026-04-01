@@ -104,6 +104,16 @@ curl -s http://localhost:7778/metrics/prom | grep 'redis_operation_duration_seco
 
 - `DingTalk OAuth Overview`
 
+若目标是 on-prem Docker 主机，请改用专用 rollout：
+
+```bash
+bash scripts/ops/dingtalk-onprem-observability-rollout.sh
+```
+
+对应部署说明：
+
+- `docs/deployment/onprem-grafana-alert-rollout-20260401.md`
+
 ### 手动验证
 
 1. 不配置 DingTalk 环境变量时：

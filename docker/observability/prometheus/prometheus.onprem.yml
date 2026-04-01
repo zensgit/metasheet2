@@ -1,0 +1,30 @@
+# MetaSheet V2 Prometheus Configuration (on-prem)
+# Scrapes metrics from the running backend container on the shared app network.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  - job_name: 'metasheet-backend'
+    metrics_path: '/metrics/prom'
+    static_configs:
+      - targets: ['backend:8900']
+        labels:
+          app: 'metasheet'
+          env: 'onprem'
+    scrape_timeout: 10s
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          app: 'prometheus'
+          env: 'onprem'
+
+rule_files:
+  - "/etc/prometheus/rules/phase5-recording-rules.yml"
+  - "/etc/prometheus/rules/phase5-alerts.yml"
+  - "/etc/prometheus/rules/attendance-alerts.yml"
+  - "/etc/prometheus/rules/dingtalk-oauth-alerts.yml"

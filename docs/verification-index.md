@@ -114,9 +114,13 @@ Entry points:
   - Verification: `docs/development/oauth-state-observability-verification-20260401.md`
   - Monitoring design: `docs/development/oauth-state-monitoring-design-20260401.md`
   - Monitoring verification: `docs/development/oauth-state-monitoring-verification-20260401.md`
+  - On-prem Grafana/alert rollout design: `docs/development/onprem-grafana-alert-rollout-design-20260401.md`
+  - On-prem Grafana/alert rollout verification: `docs/development/onprem-grafana-alert-rollout-verification-20260401.md`
   - Deployment notes: `docs/deployment/dingtalk-oauth-backend-deploy-20260330.md`
+  - Deployment rollout: `docs/deployment/onprem-grafana-alert-rollout-20260401.md`
+  - Deployment verification: `docs/deployment/onprem-grafana-alert-rollout-verification-20260401.md`
   - On-prem rollout: `docs/deployment/oauth-state-observability-onprem-rollout-verification-20260401.md`
-  - Notes: adds dedicated DingTalk OAuth state metrics, fallback counters, callback rejection logs, Prometheus alert rules, and a Grafana overview dashboard on top of the Redis-backed state store.
+  - Notes: adds dedicated DingTalk OAuth state metrics, fallback counters, callback rejection logs, Prometheus alert rules, a Grafana overview dashboard, and an on-prem rollout path on top of the Redis-backed state store.
 
 ## Daily / Pre-PR
 

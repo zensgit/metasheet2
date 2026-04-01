@@ -28,6 +28,7 @@
     "verify:attendance-ui-regression": "node scripts/verify-attendance-ui-regression.mjs",
     "verify:dingtalk-login-e2e-smoke": "node scripts/dingtalk-login-e2e-smoke.mjs",
     "verify:dingtalk-oauth-observability": "bash scripts/ops/verify-dingtalk-oauth-observability.sh",
+    "ops:onprem-grafana-alert-rollout": "bash scripts/ops/dingtalk-onprem-observability-rollout.sh",
     "verify:attendance-locale-zh": "node scripts/verify-attendance-locale-zh-smoke.mjs",
     "verify:attendance-zh-copy-contract": "node scripts/ops/attendance-verify-zh-copy-contract.mjs",
     "print:git-baseline-report": "node scripts/ops/git-baseline-report.mjs",
