@@ -123,7 +123,7 @@ function write_windows_entrypoints() {
   cat > "${PACKAGE_ROOT}/start-pm2.bat" <<'EOF'
 @echo off
 setlocal
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ops\attendance-onprem-start-pm2.ps1" -RootDir "%~dp0"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ops\attendance-onprem-start-pm2.ps1" -RootDir "%~dp0."
 exit /b %ERRORLEVEL%
 EOF
 
@@ -138,7 +138,7 @@ EOF
   cat > "${PACKAGE_ROOT}/deploy-${PACKAGE_RUN_LABEL}.bat" <<EOF
 @echo off
 setlocal
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\ops\\attendance-onprem-deploy-run.ps1" -RootDir "%~dp0" -RunLabel "${PACKAGE_RUN_LABEL}"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\\ops\\attendance-onprem-deploy-run.ps1" -RootDir "%~dp0." -RunLabel "${PACKAGE_RUN_LABEL}"
 exit /b %ERRORLEVEL%
 EOF
 }
