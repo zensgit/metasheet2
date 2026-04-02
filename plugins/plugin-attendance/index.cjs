@@ -6753,7 +6753,7 @@ module.exports = {
     })
 
     const shiftCreateSchema = z.object({
-      name: z.string().min(1),
+      name: z.string().trim().min(1).max(200),
       timezone: z.string().optional(),
       workStartTime: z.string().optional(),
       workEndTime: z.string().optional(),
@@ -6763,7 +6763,7 @@ module.exports = {
       roundingMinutes: z.number().int().min(0).optional(),
       workingDays: z.array(z.number().int().min(0).max(6)).optional(),
       orgId: z.string().optional(),
-    })
+    }).strict()
     const shiftUpdateSchema = shiftCreateSchema.partial()
 
     const assignmentCreateSchema = z.object({

@@ -3776,9 +3776,12 @@ paths:
           application/json:
             schema:
               type: object
+              additionalProperties: false
               properties:
                 name:
                   type: string
+                  minLength: 1
+                  maxLength: 200
                 timezone:
                   type: string
                 workStartTime:
@@ -3894,9 +3897,12 @@ paths:
           application/json:
             schema:
               type: object
+              additionalProperties: false
               properties:
                 name:
                   type: string
+                  minLength: 1
+                  maxLength: 200
                 timezone:
                   type: string
                 workStartTime:
