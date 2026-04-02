@@ -16,15 +16,15 @@ bash -n scripts/ops/attendance-onprem-env-check.sh \
 ```
 
 ```bash
-PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" /opt/homebrew/bin/pnpm --filter @metasheet/core-backend exec vitest run tests/unit/auth-runtime-config.test.ts tests/unit/AuthService.test.ts --watch=false
+pnpm --filter @metasheet/core-backend exec vitest run tests/unit/auth-runtime-config.test.ts tests/unit/AuthService.test.ts --watch=false
 ```
 
 ```bash
-PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" /opt/homebrew/bin/pnpm --filter @metasheet/core-backend exec vitest run tests/unit/auth-login-routes.test.ts tests/unit/auth-invite-routes.test.ts tests/unit/admin-users-routes.test.ts --watch=false
+pnpm --filter @metasheet/core-backend exec vitest run tests/unit/auth-login-routes.test.ts tests/unit/auth-invite-routes.test.ts tests/unit/admin-users-routes.test.ts --watch=false
 ```
 
 ```bash
-PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" /opt/homebrew/bin/pnpm --filter @metasheet/core-backend exec tsc --noEmit
+pnpm --filter @metasheet/core-backend exec tsc --noEmit
 ```
 
 ```bash

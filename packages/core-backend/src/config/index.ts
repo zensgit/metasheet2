@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { Logger } from '../core/logger'
+import { secretManager } from '../security/SecretManager'
 import { DEV_FALLBACK_JWT_SECRET, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
 
 const logger = new Logger('Config')
@@ -61,7 +62,7 @@ export function loadConfig(): AppConfig {
   const cfg: AppConfig = RootSchema.parse({
     server: { host: process.env.HOST, port: process.env.PORT, env: process.env.NODE_ENV },
     db: { url: process.env.DATABASE_URL, poolMax: process.env.PGPOOL_MAX, idleTimeoutMs: process.env.PG_IDLE_TIMEOUT_MS, connTimeoutMs: process.env.PG_CONN_TIMEOUT_MS },
-    jwt: { secret: resolveRuntimeJwtSecret(process.env.JWT_SECRET) },
+    jwt: { secret: resolveRuntimeJwtSecret(secretManager.get('JWT_SECRET', { required: false })) },
     ws: { redisEnabled: process.env.WS_REDIS_ENABLED as 'true' | 'false' | undefined },
     auth: { kanbanAuthRequired: process.env.KANBAN_AUTH_REQUIRED as 'true' | 'false' | undefined },
     featureFlags: {

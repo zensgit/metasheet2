@@ -28,7 +28,7 @@ export function getJwtSecretValidationIssues(secretValue: string | undefined | n
   const normalized = normalizeEnvString(secretValue)
 
   if (!normalized) {
-    issues.push('JWT_SECRET environment variable not set')
+    issues.push('JWT_SECRET not configured / not set')
     return issues
   }
 
@@ -63,16 +63,19 @@ export function getBcryptSaltRounds(env: EnvShape = process.env): number {
   const raw = normalizeEnvString(env.BCRYPT_SALT_ROUNDS)
   if (!raw) return fallback
 
-  const parsed = Number.parseInt(raw, 10)
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed <= 0) return fallback
 
   return parsed
 }
 
-export function getProductionAuthSecurityIssues(env: EnvShape = process.env): string[] {
+export function getProductionAuthSecurityIssues(
+  env: EnvShape = process.env,
+  secretValue: string | undefined | null = env.JWT_SECRET,
+): string[] {
   if (!isProductionRuntime(env)) return []
 
-  const issues = getJwtSecretValidationIssues(env.JWT_SECRET)
+  const issues = getJwtSecretValidationIssues(secretValue)
   const saltRounds = getBcryptSaltRounds(env)
   if (saltRounds < 12) {
     issues.push(`BCRYPT_SALT_ROUNDS too low for production (${saltRounds}, required: >=12)`)

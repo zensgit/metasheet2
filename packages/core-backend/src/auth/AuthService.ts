@@ -60,13 +60,12 @@ export class AuthService {
     }
 
     // Production security validation
-    this.validateProductionSecurity()
+    this.validateProductionSecurity(secret)
   }
 
-  private validateProductionSecurity(): void {
+  private validateProductionSecurity(secretValue?: string): void {
     if (process.env.NODE_ENV === 'production') {
-      const issues = getProductionAuthSecurityIssues()
-        .filter((issue) => !issue.startsWith('JWT_SECRET '))
+      const issues = getProductionAuthSecurityIssues(process.env, secretValue)
 
       // Check JWT expiry
       if (this.config.jwtExpiry === '24h') {
