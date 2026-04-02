@@ -1534,6 +1534,109 @@ describe('Attendance Plugin Integration', () => {
     expect(assignmentRow?.shift?.work_start_time).toBe('08:30:00')
   })
 
+  it('rejects unknown shift fields and overly long shift names on create and update', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-shift-validation-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const longName = `Shift ${'x'.repeat(500)}`
+
+    const breakMinutesCreateRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Validation Shift ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        breakMinutes: -30,
+        workingDays: [1, 2, 3, 4, 5],
+      }),
+    })
+    expect(breakMinutesCreateRes.status).toBe(400)
+    const breakMinutesCreateError = (breakMinutesCreateRes.body as { error?: { code?: string; message?: string } } | undefined)?.error
+    expect(breakMinutesCreateError?.code).toBe('VALIDATION_ERROR')
+    expect(String(breakMinutesCreateError?.message || '')).toContain('breakMinutes')
+
+    const longNameCreateRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: longName,
+        timezone: 'Asia/Shanghai',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        workingDays: [1, 2, 3, 4, 5],
+      }),
+    })
+    expect(longNameCreateRes.status).toBe(400)
+    const longNameCreateError = (longNameCreateRes.body as { error?: { code?: string; message?: string } } | undefined)?.error
+    expect(longNameCreateError?.code).toBe('VALIDATION_ERROR')
+    expect(String(longNameCreateError?.message || '')).toContain('200')
+
+    const validShiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Valid Shift ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        workingDays: [1, 2, 3, 4, 5],
+      }),
+    })
+    expect(validShiftRes.status).toBe(201)
+    const shiftId = (validShiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(shiftId).toBeTruthy()
+    if (!shiftId) return
+
+    const breakMinutesUpdateRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        breakMinutes: -30,
+      }),
+    })
+    expect(breakMinutesUpdateRes.status).toBe(400)
+    const breakMinutesUpdateError = (breakMinutesUpdateRes.body as { error?: { code?: string; message?: string } } | undefined)?.error
+    expect(breakMinutesUpdateError?.code).toBe('VALIDATION_ERROR')
+    expect(String(breakMinutesUpdateError?.message || '')).toContain('breakMinutes')
+
+    const longNameUpdateRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: longName,
+      }),
+    })
+    expect(longNameUpdateRes.status).toBe(400)
+    const longNameUpdateError = (longNameUpdateRes.body as { error?: { code?: string; message?: string } } | undefined)?.error
+    expect(longNameUpdateError?.code).toBe('VALIDATION_ERROR')
+    expect(String(longNameUpdateError?.message || '')).toContain('200')
+  })
+
   it('computes overnight shift metrics against the next-day shift end window', async () => {
     if (!baseUrl) return
 
