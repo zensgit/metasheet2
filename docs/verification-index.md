@@ -102,12 +102,17 @@ Entry points:
   - Verification: `docs/development/dingtalk-login-e2e-smoke-verification-20260331.md`
   - Notes: browser-level DingTalk login smoke, including real login-button/redirect/error flows and a simulated success callback handoff.
 
-- On-prem docker run hardening:
+  - On-prem docker run hardening:
   - Script: `bash scripts/ops/dingtalk-onprem-docker-run.sh`
   - Deployment: `docs/deployment/dingtalk-onprem-docker-run-20260401.md`
   - Design: `docs/development/onprem-docker-run-hardening-design-20260401.md`
   - Verification: `docs/development/onprem-docker-run-hardening-verification-20260401.md`
   - Notes: hardens the required `docker run` parameters for `metasheet-backend` and `metasheet-web`, especially `--network-alias backend` and public `8081:80`.
+
+- On-prem container lifecycle investigation:
+  - Design: `docs/development/onprem-container-lifecycle-investigation-design-20260402.md`
+  - Verification: `docs/development/onprem-container-lifecycle-investigation-verification-20260402.md`
+  - Notes: investigates the Day 1 disappearance of `metasheet-backend` / `metasheet-web` and classifies it as a manual-stop / unsupported-rollout event rather than a host reboot or daemon failure.
 
 - OAuth state observability:
   - Design: `docs/development/oauth-state-observability-design-20260401.md`

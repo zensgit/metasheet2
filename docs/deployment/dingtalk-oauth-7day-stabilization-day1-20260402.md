@@ -75,3 +75,15 @@ JSON_OUTPUT=true pnpm ops:onprem-alert-drill
 - backend/web 容器是否再次意外消失
 - `--restart unless-stopped` 是否被宿主机上的其他操作绕过
 - 日检是否再次出现连接拒绝
+
+后续 investigation 已补充结论：
+
+- 不是宿主机 reboot
+- 不是 Docker daemon shutdown
+- 最可信根因是 `2026-04-01 17:45 UTC` 左右发生过一次批量手工 Docker stop/delete 或不受支持 rollout 动作
+- 具体 actor / 具体命令未能从现有 history 中恢复
+
+详见：
+
+- `docs/development/onprem-container-lifecycle-investigation-design-20260402.md`
+- `docs/development/onprem-container-lifecycle-investigation-verification-20260402.md`

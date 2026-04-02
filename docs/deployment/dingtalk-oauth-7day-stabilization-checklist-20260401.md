@@ -48,6 +48,7 @@ pnpm ops:onprem-alert-drill
 - 是否出现 Alertmanager `Notify for alerts failed`
 - 是否出现 Slack 重复报、漏报、只 firing 不 resolved
 - 是否有误报或噪声过高
+- 是否出现 backend/web 容器缺失；若缺失，先按 `docs/deployment/dingtalk-onprem-docker-run-20260401.md` 保留证据并恢复
 
 ## 第二操作者演练
 
@@ -79,7 +80,7 @@ pnpm ops:onprem-alert-second-operator-drill
 | Day | Date | Machine Check | Drill | Slack Check | Fallback | Notify Errors | Notes |
 |-----|------|---------------|-------|-------------|----------|---------------|-------|
 | 0 | 2026-04-01 | PASS | PASS | PASS | 0 | 0 | Baseline established |
-| 1 | 2026-04-02 | PASS | PASS | PASS | 0 | 0 | Backend/web containers were missing at start of day; recovered via standard docker run and re-check passed |
+| 1 | 2026-04-02 | PASS | PASS | PASS | 0 | 0 | Backend/web containers were missing at start of day; investigation later classified this as a manual-stop / unsupported-rollout lifecycle event, then recovery + re-check passed |
 | 2 | 2026-04-03 |  |  |  |  |  |  |
 | 3 | 2026-04-04 |  |  |  |  |  |  |
 | 4 | 2026-04-05 |  |  |  |  |  |  |
