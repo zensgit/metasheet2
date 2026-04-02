@@ -2352,6 +2352,16 @@ function formatDateOnly(date) {
   return date.toISOString().slice(0, 10)
 }
 
+function resolvePayrollGenerateAnchorDateInput(payload) {
+  if (typeof payload?.anchorDate === 'string' && payload.anchorDate.trim().length > 0) {
+    return payload.anchorDate.trim()
+  }
+  if (Number.isInteger(payload?.year) && Number.isInteger(payload?.month)) {
+    return `${String(payload.year).padStart(4, '0')}-${String(payload.month).padStart(2, '0')}-01`
+  }
+  return null
+}
+
 function resolvePayrollWindow(template, anchorDate) {
   const anchor = anchorDate ?? new Date()
   const { year, month, day } = getUtcParts(anchor)
@@ -9042,12 +9052,33 @@ module.exports = {
     const payrollCycleUpdateSchema = payrollCycleCreateSchema.partial()
     const payrollCycleGenerateSchema = z.object({
       templateId: z.string().uuid().optional(),
-      anchorDate: z.string().min(1),
+      anchorDate: z.string().min(1).optional(),
+      year: z.preprocess(value => value == null || value === '' ? undefined : parseNumber(value, Number.NaN), z.number().int().min(1970).max(9999)).optional(),
+      month: z.preprocess(value => value == null || value === '' ? undefined : parseNumber(value, Number.NaN), z.number().int().min(1).max(12)).optional(),
       count: z.number().int().min(1).max(24).optional(),
       status: z.enum(['open', 'closed', 'archived']).optional(),
       namePrefix: z.string().optional(),
       metadata: z.record(z.unknown()).optional(),
       orgId: z.string().optional(),
+    }).superRefine((value, ctx) => {
+      const hasAnchorDate = typeof value.anchorDate === 'string' && value.anchorDate.trim().length > 0
+      const hasYear = Number.isInteger(value.year)
+      const hasMonth = Number.isInteger(value.month)
+      if (hasAnchorDate) return
+      if (hasYear && hasMonth) return
+      if (hasYear || hasMonth) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Provide both year and month together when anchorDate is omitted',
+          path: hasYear ? ['month'] : ['year'],
+        })
+        return
+      }
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Provide anchorDate or both year and month',
+        path: ['anchorDate'],
+      })
     })
 
     const approvalStepSchema = z.object({
@@ -16704,9 +16735,10 @@ module.exports = {
           return
         }
 
-        const anchorBase = parseDateInput(parsed.data.anchorDate)
+        const anchorInput = resolvePayrollGenerateAnchorDateInput(parsed.data)
+        const anchorBase = anchorInput ? parseDateInput(anchorInput) : null
         if (!anchorBase) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid anchorDate' } })
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid payroll cycle anchorDate/year/month' } })
           return
         }
 
