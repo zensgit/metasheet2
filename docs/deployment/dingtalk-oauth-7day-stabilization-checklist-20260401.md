@@ -79,7 +79,7 @@ pnpm ops:onprem-alert-second-operator-drill
 | Day | Date | Machine Check | Drill | Slack Check | Fallback | Notify Errors | Notes |
 |-----|------|---------------|-------|-------------|----------|---------------|-------|
 | 0 | 2026-04-01 | PASS | PASS | PASS | 0 | 0 | Baseline established |
-| 1 | 2026-04-02 |  |  |  |  |  |  |
+| 1 | 2026-04-02 | PASS | PASS | PASS | 0 | 0 | Backend/web containers were missing at start of day; recovered via standard docker run and re-check passed |
 | 2 | 2026-04-03 |  |  |  |  |  |  |
 | 3 | 2026-04-04 |  |  |  |  |  |  |
 | 4 | 2026-04-05 |  |  |  |  |  |  |
