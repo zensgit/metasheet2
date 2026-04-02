@@ -1637,6 +1637,104 @@ describe('Attendance Plugin Integration', () => {
     expect(String(longNameUpdateError?.message || '')).toContain('200')
   })
 
+  it('accepts payroll cycle generate year/month aliases and reports missing anchors clearly', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-payroll-generate-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const payrollTemplateRes = await requestJson(`${baseUrl}/api/attendance/payroll-templates`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Monthly Payroll ${runSuffix}`,
+        timezone: 'UTC',
+        startDay: 1,
+        endDay: 30,
+        endMonthOffset: 0,
+        autoGenerate: false,
+      }),
+    })
+    expect(payrollTemplateRes.status).toBe(201)
+    const templateId = (payrollTemplateRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(templateId).toBeTruthy()
+    if (!templateId) return
+
+    const missingAnchorRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/generate`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId,
+      }),
+    })
+    expect(missingAnchorRes.status).toBe(400)
+    const missingAnchorError = (missingAnchorRes.body as { error?: { code?: string; message?: string } } | undefined)?.error
+    expect(missingAnchorError?.code).toBe('VALIDATION_ERROR')
+    expect(String(missingAnchorError?.message || '')).toContain('anchorDate or both year and month')
+
+    const partialAliasRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/generate`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId,
+        year: 2026,
+      }),
+    })
+    expect(partialAliasRes.status).toBe(400)
+    const partialAliasError = (partialAliasRes.body as { error?: { code?: string; message?: string } } | undefined)?.error
+    expect(partialAliasError?.code).toBe('VALIDATION_ERROR')
+    expect(String(partialAliasError?.message || '')).toContain('both year and month together')
+
+    const aliasGenerateRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/generate`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        templateId,
+        year: 2026,
+        month: 4,
+        count: 1,
+        status: 'open',
+        namePrefix: `Integration Payroll ${runSuffix}`,
+      }),
+    })
+    expect(aliasGenerateRes.status).toBe(200)
+    const aliasGenerateBody = (aliasGenerateRes.body as {
+      ok?: boolean
+      data?: {
+        created?: { startDate?: string; start_date?: string }[]
+        skipped?: { startDate?: string; start_date?: string }[]
+      }
+    } | undefined)
+    expect(aliasGenerateBody?.ok).toBe(true)
+    const createdCount = Array.isArray(aliasGenerateBody?.data?.created) ? aliasGenerateBody.data.created.length : 0
+    const skippedCount = Array.isArray(aliasGenerateBody?.data?.skipped) ? aliasGenerateBody.data.skipped.length : 0
+    expect(createdCount + skippedCount).toBe(1)
+    const firstWindow =
+      aliasGenerateBody?.data?.created?.[0]?.startDate
+      ?? aliasGenerateBody?.data?.created?.[0]?.start_date
+      ?? aliasGenerateBody?.data?.skipped?.[0]?.startDate
+      ?? aliasGenerateBody?.data?.skipped?.[0]?.start_date
+    expect(firstWindow).toBe('2026-04-01')
+  })
+
   it('computes overnight shift metrics against the next-day shift end window', async () => {
     if (!baseUrl) return
 
