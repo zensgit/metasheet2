@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App as VueApp } from 'vue'
+import { createApp, defineComponent, h, nextTick, onMounted, type App as VueApp } from 'vue'
 import { createMemoryHistory, createRouter, RouterView } from 'vue-router'
 import { buildMultitableRoute } from '../src/router/multitableRoute'
 import { AppRouteNames } from '../src/router/types'
@@ -55,6 +55,13 @@ vi.mock('../src/multitable/views/MultitableWorkbench.vue', () => ({
       replayExternalContextResult = (payload) => {
         emit('external-context-result', payload)
       }
+      onMounted(() => {
+        emit('ready', {
+          baseId: props.baseId ?? '',
+          sheetId: props.sheetId ?? '',
+          viewId: props.viewId ?? '',
+        })
+      })
       expose({
         confirmPageLeave: () => confirmPageLeaveSpy(),
         getEmbedHostState: () => getEmbedHostStateSpy(),
@@ -273,6 +280,28 @@ describe('multitable embed host guards', () => {
     expect(requestExternalContextSyncSpy).not.toHaveBeenCalled()
     expect(host.navigationResults).toEqual([])
     expect(host.navigated).toEqual([])
+  })
+
+  it('forwards mt:ready only after the workbench signals readiness', async () => {
+    await mountRouteHost('/multitable/sheet_orders/view_form?baseId=base_ops')
+
+    await vi.waitFor(() => {
+      const readyCalls = parentPostMessageSpy.mock.calls
+        .map(([payload]) => payload)
+        .filter((payload) => payload?.type === 'mt:ready')
+      expect(readyCalls.length).toBe(1)
+    })
+
+    const readyCall = parentPostMessageSpy.mock.calls
+      .map(([payload]) => payload)
+      .find((payload) => payload?.type === 'mt:ready')
+
+    expect(readyCall).toEqual({
+      type: 'mt:ready',
+      baseId: 'base_ops',
+      sheetId: 'sheet_orders',
+      viewId: 'view_form',
+    })
   })
 
   it('reports the applied target context instead of a stale host snapshot', async () => {

@@ -20,11 +20,24 @@ const rbacMocks = vi.hoisted(() => ({
   listUserPermissions: vi.fn(),
 }))
 
+const sessionMocks = vi.hoisted(() => ({
+  isUserSessionRevoked: vi.fn(),
+  createUserSession: vi.fn(),
+  isUserSessionActive: vi.fn(),
+}))
+
 vi.mock('jsonwebtoken', () => jwtMocks)
 vi.mock('../../src/integration/db/connection-pool', () => ({ poolManager: poolMocks.poolManager }))
 vi.mock('../../src/rbac/service', () => ({
   isAdmin: rbacMocks.isAdmin,
   listUserPermissions: rbacMocks.listUserPermissions,
+}))
+vi.mock('../../src/auth/session-revocation', () => ({
+  isUserSessionRevoked: sessionMocks.isUserSessionRevoked,
+}))
+vi.mock('../../src/auth/session-registry', () => ({
+  createUserSession: sessionMocks.createUserSession,
+  isUserSessionActive: sessionMocks.isUserSessionActive,
 }))
 vi.mock('../../src/security/SecretManager', () => ({
   secretManager: { get: () => 'test-secret' }
@@ -34,12 +47,19 @@ import { AuthService } from '../../src/auth/AuthService'
 
 describe('AuthService.verifyToken', () => {
   beforeEach(() => {
+    process.env.NODE_ENV = 'test'
+    process.env.RBAC_TOKEN_TRUST = 'false'
     jwtMocks.verify.mockReset()
     jwtMocks.sign.mockReset()
     poolMocks.query.mockReset()
     poolMocks.query.mockResolvedValue({ rows: [] })
     rbacMocks.isAdmin.mockReset()
     rbacMocks.listUserPermissions.mockReset()
+    sessionMocks.isUserSessionRevoked.mockReset()
+    sessionMocks.isUserSessionRevoked.mockResolvedValue(false)
+    sessionMocks.createUserSession.mockReset()
+    sessionMocks.isUserSessionActive.mockReset()
+    sessionMocks.isUserSessionActive.mockResolvedValue(true)
   })
 
   it('sanitizes user and uses RBAC role/permissions', async () => {
@@ -119,22 +139,73 @@ describe('AuthService.verifyToken', () => {
     expect(user?.permissions).toContain('attendance:read')
   })
 
-  it('falls back to a synthetic non-production user when the token subject is not in the database', async () => {
-    jwtMocks.verify.mockReturnValue({ id: 'dev-user', email: 'dev@x', role: 'admin', iat: 0, exp: 0 })
-    poolMocks.query.mockResolvedValue({ rows: [] })
+  it('trusts token claims and skips DB lookup when RBAC_TOKEN_TRUST is enabled', async () => {
+    process.env.RBAC_TOKEN_TRUST = 'true'
+    jwtMocks.verify.mockReturnValue({
+      id: 'dev-admin',
+      roles: ['admin'],
+      perms: ['multitable:read', 'multitable:write'],
+      sid: 'dev-session',
+      iat: 0,
+      exp: 0,
+    })
 
     const auth = new AuthService()
-    const user = await auth.verifyToken('dev-token')
+    const user = await auth.verifyToken('trusted-token')
 
     expect(user).toBeTruthy()
-    expect(user?.id).toBe('dev-user')
+    expect(user?.id).toBe('dev-admin')
     expect(user?.role).toBe('admin')
-    expect(user?.permissions).toEqual(['*:*'])
+    expect(user?.permissions).toEqual(['multitable:read', 'multitable:write'])
+    expect(poolMocks.query).not.toHaveBeenCalled()
+    expect(sessionMocks.isUserSessionRevoked).not.toHaveBeenCalled()
+    expect(sessionMocks.isUserSessionActive).not.toHaveBeenCalled()
+  })
+
+  it('disables trusted token fast path in production even when RBAC_TOKEN_TRUST is enabled', async () => {
+    process.env.NODE_ENV = 'production'
+    process.env.RBAC_TOKEN_TRUST = 'true'
+    jwtMocks.verify.mockReturnValue({
+      id: 'prod-admin',
+      roles: ['admin'],
+      perms: ['multitable:read', 'multitable:write'],
+      sid: 'prod-session',
+      iat: 123,
+      exp: 456,
+    })
+    poolMocks.query.mockResolvedValueOnce({
+      rows: [{
+        id: 'prod-admin',
+        email: 'prod-admin@example.com',
+        name: 'Prod Admin',
+        role: 'user',
+        permissions: ['multitable:read'],
+        password_hash: 'hash',
+        is_active: true,
+        created_at: new Date(),
+        updated_at: new Date(),
+      }]
+    })
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['multitable:read'])
+
+    const auth = new AuthService()
+    const user = await auth.verifyToken('trusted-prod-token')
+
+    expect(user).toBeTruthy()
+    expect(user?.id).toBe('prod-admin')
+    expect(user?.role).toBe('user')
+    expect(user?.permissions).toEqual(['multitable:read'])
+    expect(poolMocks.query).toHaveBeenCalled()
+    expect(sessionMocks.isUserSessionRevoked).toHaveBeenCalledWith('prod-admin', 123)
+    expect(sessionMocks.isUserSessionActive).toHaveBeenCalledWith('prod-admin', 'prod-session')
   })
 })
 
 describe('AuthService.refreshToken', () => {
   beforeEach(() => {
+    process.env.NODE_ENV = 'test'
+    process.env.RBAC_TOKEN_TRUST = 'false'
     jwtMocks.verify.mockReset()
     jwtMocks.sign.mockReset()
     poolMocks.query.mockReset()

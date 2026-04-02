@@ -70,6 +70,9 @@ const multitableMulter = loadMulter()
 const multitableUpload = createUploadMiddleware(multitableMulter, { fileSize: ATTACHMENT_UPLOAD_MAX_SIZE })
 
 let multitableAttachmentStorage: StorageServiceImpl | null = null
+const metaSheetSummaryCache = new Map<string, { id: string; name: string }>()
+const metaFieldCache = new Map<string, UniverMetaField[]>()
+const metaViewConfigCache = new Map<string, UniverMetaViewConfig>()
 
 type UniverMetaBase = {
   id: string
@@ -362,6 +365,24 @@ function valueMatchesSearch(value: unknown, search: string): boolean {
 function recordMatchesSearch(record: UniverMetaRecord, fields: UniverMetaField[], search: string): boolean {
   if (!search) return true
   return fields.some((field) => isSearchableFieldType(field.type) && valueMatchesSearch(record.data[field.id], search))
+}
+
+function escapeSqlLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&')
+}
+
+function buildRecordSearchPredicateSql(
+  fieldIds: string[],
+  searchParamIndex: number,
+  firstFieldParamIndex: number,
+  dataExpression = 'data',
+): string {
+  if (fieldIds.length === 0) return 'FALSE'
+  return fieldIds
+    .map((_, index) =>
+      `LOWER(COALESCE(${dataExpression} ->> $${firstFieldParamIndex + index}, '')) LIKE $${searchParamIndex} ESCAPE '\\'`,
+    )
+    .join(' OR ')
 }
 
 function isUndefinedTableError(err: unknown, tableName: string): boolean {
@@ -1003,7 +1024,64 @@ function getDbNotReadyMessage(err: unknown): string | null {
   return null
 }
 
+function invalidateSheetSummaryCache(sheetId: string): void {
+  metaSheetSummaryCache.delete(sheetId)
+}
+
+function invalidateFieldCache(sheetId: string): void {
+  metaFieldCache.delete(sheetId)
+}
+
+function invalidateViewConfigCache(viewId?: string): void {
+  if (typeof viewId === 'string' && viewId.trim().length > 0) {
+    metaViewConfigCache.delete(viewId.trim())
+    return
+  }
+  metaViewConfigCache.clear()
+}
+
+async function loadSheetSummary(
+  pool: { query: QueryFn },
+  sheetId: string,
+): Promise<{ id: string; name: string } | null> {
+  const cached = metaSheetSummaryCache.get(sheetId)
+  if (cached) return cached
+
+  const result = await pool.query(
+    'SELECT id, name FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
+    [sheetId],
+  )
+  if (result.rows.length === 0) return null
+
+  const row: any = result.rows[0]
+  const sheet = {
+    id: String(row.id),
+    name: String(row.name),
+  }
+  metaSheetSummaryCache.set(sheetId, sheet)
+  return sheet
+}
+
+async function loadSheetFields(
+  pool: { query: QueryFn },
+  sheetId: string,
+): Promise<UniverMetaField[]> {
+  const cached = metaFieldCache.get(sheetId)
+  if (cached) return cached
+
+  const fieldRes = await pool.query(
+    'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC',
+    [sheetId],
+  )
+  const fields = fieldRes.rows.map((f: any) => serializeFieldRow(f))
+  metaFieldCache.set(sheetId, fields)
+  return fields
+}
+
 async function tryResolveView(pool: { query: QueryFn }, viewId: string): Promise<UniverMetaViewConfig | null> {
+  const cached = metaViewConfigCache.get(viewId)
+  if (cached) return cached
+
   const result = await pool.query(
     'SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1',
     [viewId],
@@ -1011,7 +1089,7 @@ async function tryResolveView(pool: { query: QueryFn }, viewId: string): Promise
   if (result.rows.length === 0) return null
 
   const row: any = result.rows[0]
-  return {
+  const view = {
     id: String(row.id),
     sheetId: String(row.sheet_id),
     name: String(row.name),
@@ -1022,6 +1100,8 @@ async function tryResolveView(pool: { query: QueryFn }, viewId: string): Promise
     hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
     config: normalizeJson(row.config),
   }
+  metaViewConfigCache.set(viewId, view)
+  return view
 }
 
 function normalizePermissionCodes(value: unknown): string[] {
@@ -2054,6 +2134,7 @@ export function univerMetaRouter(): Router {
         'SELECT id, name, type, property, "order" FROM meta_fields WHERE id = $1',
         [fieldId],
       )
+      invalidateFieldCache(sheetId)
       return res.status(201).json({ ok: true, data: { field: serializeFieldRow((fieldRes as any).rows[0]) } })
     } catch (err: any) {
       if (err instanceof NotFoundError) {
@@ -2123,6 +2204,7 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
+      let sheetId = ''
       const updated = await pool.transaction(async ({ query }) => {
         const existing = await query(
           'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1',
@@ -2131,7 +2213,7 @@ export function univerMetaRouter(): Router {
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
 
         const row = (existing as any).rows[0]
-        const sheetId = String(row.sheet_id)
+        sheetId = String(row.sheet_id)
         const currentOrder = Number(row.order ?? 0)
 
         const nextName = typeof parsed.data.name === 'string' ? parsed.data.name.trim() : String(row.name)
@@ -2175,6 +2257,7 @@ export function univerMetaRouter(): Router {
         return serializeFieldRow(updatedRow)
       })
 
+      invalidateFieldCache(sheetId)
       return res.json({ ok: true, data: { field: updated } })
     } catch (err: any) {
       if (err instanceof NotFoundError) {
@@ -2270,9 +2353,11 @@ export function univerMetaRouter(): Router {
           )
         }
 
-        return { deleted: fieldId }
+        return { deleted: fieldId, sheetId }
       })
 
+      invalidateFieldCache(result.sheetId)
+      invalidateViewConfigCache()
       return res.json({ ok: true, data: result })
     } catch (err: any) {
       if (err instanceof NotFoundError) {
@@ -2396,6 +2481,7 @@ export function univerMetaRouter(): Router {
         config: parsed.data.config ?? {},
       }
 
+      metaViewConfigCache.set(viewId, view)
       return res.status(201).json({ ok: true, data: { view } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
@@ -2473,6 +2559,7 @@ export function univerMetaRouter(): Router {
         config: nextConfig ?? {},
       }
 
+      metaViewConfigCache.set(viewId, view)
       return res.json({ ok: true, data: { view } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
@@ -2494,6 +2581,7 @@ export function univerMetaRouter(): Router {
       if ((del as any).rowCount === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `View not found: ${viewId}` } })
       }
+      invalidateViewConfigCache(viewId)
       return res.json({ ok: true, data: { deleted: viewId } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
@@ -2515,6 +2603,9 @@ export function univerMetaRouter(): Router {
       if ((del as any).rowCount === 0) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
+      invalidateSheetSummaryCache(sheetId)
+      invalidateFieldCache(sheetId)
+      invalidateViewConfigCache()
       return res.json({ ok: true, data: { deleted: sheetId } })
     } catch (err) {
       const hint = getDbNotReadyMessage(err)
@@ -2612,22 +2703,17 @@ export function univerMetaRouter(): Router {
         await createSeededSheet({ sheetId, name: `Seed ${sheetId}` })
       }
 
-      const sheet = await pool.query(
-        'SELECT id, name FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',
-        [sheetId],
-      )
-      if (sheet.rows.length === 0) {
+      const [sheet, fields] = await Promise.all([
+        loadSheetSummary(pool as unknown as { query: QueryFn }, sheetId),
+        loadSheetFields(pool as unknown as { query: QueryFn }, sheetId),
+      ])
+
+      if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
       }
 
-      const fieldRes = await pool.query(
-        'SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC',
-        [sheetId],
-      )
-
-      const fields: UniverMetaField[] = fieldRes.rows.map((f: any) => serializeFieldRow(f))
-
       const fieldTypeById = new Map(fields.map((f) => [f.id, f.type] as const))
+      const searchableFieldIds = fields.filter((field) => isSearchableFieldType(field.type)).map((field) => field.id)
       const warnings: string[] = []
 
       const ignoredSortFieldIds = rawSortRules
@@ -2665,11 +2751,66 @@ export function univerMetaRouter(): Router {
 
       const hasSearch = search.length > 0
       const hasFilterOrSort = sortRules.length > 0 || !!filterInfo
+      const hasSimpleSearchFastPath = hasSearch && !hasFilterOrSort
       const hasInMemoryProcessing = hasFilterOrSort || hasSearch
 
       let computedFilterSort = false
 
-      if (hasInMemoryProcessing) {
+      if (hasSimpleSearchFastPath) {
+        if (searchableFieldIds.length === 0) {
+          rows = []
+          if (limit) page = { offset, limit, total: 0, hasMore: false }
+        } else {
+          const searchLike = `%${escapeSqlLikePattern(search)}%`
+          const firstFieldParamIndex = 3
+          const predicate = buildRecordSearchPredicateSql(searchableFieldIds, 2, firstFieldParamIndex)
+
+          if (limit) {
+            const limitParamIndex = firstFieldParamIndex + searchableFieldIds.length
+            const offsetParamIndex = limitParamIndex + 1
+            const recordRes = await pool.query(
+              `SELECT id, version, data, COUNT(*) OVER()::int AS total
+               FROM meta_records
+               WHERE sheet_id = $1 AND (${predicate})
+               ORDER BY created_at ASC, id ASC
+               LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}`,
+              [sheetId, searchLike, ...searchableFieldIds, limit, offset],
+            )
+
+            rows = recordRes.rows.map((r: any) => ({
+              id: String(r.id),
+              version: Number(r.version ?? 1),
+              data: normalizeJson(r.data),
+            }))
+
+            let total = Number((recordRes.rows[0] as any)?.total ?? 0)
+            if (rows.length === 0 && offset > 0) {
+              const countRes = await pool.query(
+                `SELECT COUNT(*)::int AS total
+                 FROM meta_records
+                 WHERE sheet_id = $1 AND (${predicate})`,
+                [sheetId, searchLike, ...searchableFieldIds],
+              )
+              total = Number((countRes.rows[0] as any)?.total ?? 0)
+            }
+            page = { offset, limit, total, hasMore: offset + rows.length < total }
+          } else {
+            const recordRes = await pool.query(
+              `SELECT id, version, data
+               FROM meta_records
+               WHERE sheet_id = $1 AND (${predicate})
+               ORDER BY created_at ASC, id ASC`,
+              [sheetId, searchLike, ...searchableFieldIds],
+            )
+
+            rows = recordRes.rows.map((r: any) => ({
+              id: String(r.id),
+              version: Number(r.version ?? 1),
+              data: normalizeJson(r.data),
+            }))
+          }
+        }
+      } else if (hasInMemoryProcessing) {
         const recordRes = await pool.query(
           'SELECT id, version, data, created_at FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
           [sheetId],
@@ -2747,22 +2888,39 @@ export function univerMetaRouter(): Router {
         rows = paged.map((r) => ({ id: r.id, version: r.version, data: r.data }))
         if (limit) page = { offset, limit, total, hasMore: offset + rows.length < total }
       } else {
-        const recordSql = limit
-          ? 'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC LIMIT $2 OFFSET $3'
-          : 'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC'
-        const recordParams = limit ? [sheetId, limit, offset] : [sheetId]
-        const recordRes = await pool.query(recordSql, recordParams)
-
-        rows = recordRes.rows.map((r: any) => ({
-          id: String(r.id),
-          version: Number(r.version ?? 1),
-          data: normalizeJson(r.data),
-        }))
-
         if (limit) {
-          const countRes = await pool.query('SELECT COUNT(*)::int AS total FROM meta_records WHERE sheet_id = $1', [sheetId])
-          const total = Number((countRes.rows[0] as any)?.total ?? 0)
+          const recordRes = await pool.query(
+            `SELECT id, version, data, COUNT(*) OVER()::int AS total
+             FROM meta_records
+             WHERE sheet_id = $1
+             ORDER BY created_at ASC, id ASC
+             LIMIT $2 OFFSET $3`,
+            [sheetId, limit, offset],
+          )
+
+          rows = recordRes.rows.map((r: any) => ({
+            id: String(r.id),
+            version: Number(r.version ?? 1),
+            data: normalizeJson(r.data),
+          }))
+
+          let total = Number((recordRes.rows[0] as any)?.total ?? 0)
+          if (rows.length === 0 && offset > 0) {
+            const countRes = await pool.query('SELECT COUNT(*)::int AS total FROM meta_records WHERE sheet_id = $1', [sheetId])
+            total = Number((countRes.rows[0] as any)?.total ?? 0)
+          }
           page = { offset, limit, total, hasMore: offset + rows.length < total }
+        } else {
+          const recordRes = await pool.query(
+            'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY created_at ASC, id ASC',
+            [sheetId],
+          )
+
+          rows = recordRes.rows.map((r: any) => ({
+            id: String(r.id),
+            version: Number(r.version ?? 1),
+            data: normalizeJson(r.data),
+          }))
         }
       }
 

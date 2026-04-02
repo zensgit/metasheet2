@@ -92,6 +92,11 @@ export class AuthService {
         issues.push(`BCRYPT_SALT_ROUNDS too low for production (${this.config.saltRounds}, recommended: ≥12)`)
       }
 
+      // Trusted token claims are a local performance escape hatch only.
+      if (process.env.RBAC_TOKEN_TRUST === 'true' || process.env.RBAC_TOKEN_TRUST === '1') {
+        issues.push('RBAC_TOKEN_TRUST is ignored in production and must remain disabled')
+      }
+
       // Check JWT expiry
       if (this.config.jwtExpiry === '24h') {
         this.logger.warn('Using default JWT expiry (24h). Consider shorter expiry for production.')
@@ -108,6 +113,60 @@ export class AuthService {
     }
   }
 
+  private trustTokenClaimsEnabled(): boolean {
+    if (!(process.env.RBAC_TOKEN_TRUST === 'true' || process.env.RBAC_TOKEN_TRUST === '1')) {
+      return false
+    }
+
+    return process.env.NODE_ENV !== 'production'
+  }
+
+  private normalizeClaimStringArray(value: unknown): string[] {
+    if (!Array.isArray(value)) return []
+    return value
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean)
+  }
+
+  private buildTrustedTokenUser(
+    payload: TokenPayload & { id?: string; sub?: string; roles?: unknown; perms?: unknown; name?: unknown; email?: unknown; role?: unknown },
+  ): User | null {
+    if (!this.trustTokenClaimsEnabled()) return null
+
+    const userId = this.resolveTokenUserId(payload)
+    if (!userId) return null
+
+    const roles = this.normalizeClaimStringArray(payload.roles)
+    const permissions = this.normalizeClaimStringArray(payload.perms)
+    if (roles.length === 0 && permissions.length === 0) return null
+
+    const role =
+      roles.includes('admin')
+        ? 'admin'
+        : (typeof payload.role === 'string' && payload.role.trim() ? payload.role.trim() : roles[0] || 'user')
+    const email =
+      typeof payload.email === 'string' && payload.email.trim().length > 0
+        ? payload.email.trim()
+        : `${userId}@trusted-token.local`
+    const name =
+      typeof payload.name === 'string' && payload.name.trim().length > 0
+        ? payload.name.trim()
+        : 'Trusted Token User'
+
+    return {
+      id: userId,
+      email,
+      name,
+      role,
+      permissions,
+      is_active: true,
+      created_at: new Date(0),
+      updated_at: new Date(0),
+      roles,
+      perms: permissions,
+    }
+  }
+
   /**
    * 验证JWT token
    */
@@ -119,6 +178,13 @@ export class AuthService {
       if (!userId) {
         this.logger.warn('Token verification failed: missing user identity claim')
         return null
+      }
+
+      const trustedUser = this.buildTrustedTokenUser(
+        payload as TokenPayload & { id?: string; sub?: string; roles?: unknown; perms?: unknown; name?: unknown; email?: unknown; role?: unknown },
+      )
+      if (trustedUser) {
+        return trustedUser
       }
 
       // 从数据库获取最新用户信息
