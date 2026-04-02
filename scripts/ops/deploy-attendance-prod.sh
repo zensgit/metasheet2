@@ -19,15 +19,19 @@ function resolve_compose_cmd() {
     echo "docker compose"
     return 0
   fi
-  if command -v docker-compose >/dev/null 2>&1; then
-    echo "docker-compose"
-    return 0
-  fi
   return 1
 }
 
 COMPOSE_CMD="$(resolve_compose_cmd || true)"
-[[ -n "$COMPOSE_CMD" ]] || { echo "[deploy-attendance-prod] ERROR: neither 'docker compose' nor 'docker-compose' is available" >&2; exit 125; }
+if [[ -z "$COMPOSE_CMD" ]]; then
+  if command -v docker-compose >/dev/null 2>&1; then
+    echo "[deploy-attendance-prod] ERROR: legacy 'docker-compose' detected: $(docker-compose --version | head -n 1)" >&2
+    echo "[deploy-attendance-prod] ERROR: install Docker Compose v2 plugin so 'docker compose' is available" >&2
+  else
+    echo "[deploy-attendance-prod] ERROR: neither 'docker compose' nor 'docker-compose' is available" >&2
+  fi
+  exit 125
+fi
 DEPLOY_IMAGE_OWNER="${DEPLOY_IMAGE_OWNER:-zensgit}"
 DEPLOY_IMAGE_TAG="${DEPLOY_IMAGE_TAG:-latest}"
 
@@ -44,6 +48,12 @@ for container_name in metasheet-postgres metasheet-redis metasheet-backend metas
     docker rm -f "${container_name}"
   fi
 done
+
+while IFS= read -r orphan_name; do
+  [[ -n "${orphan_name}" ]] || continue
+  info "Removing hashed legacy metasheet container before recreate: ${orphan_name}"
+  docker rm -f "${orphan_name}"
+done < <(docker ps -a --format '{{.Names}}' | grep -E '^[a-f0-9]+_metasheet-(postgres|redis|backend|web)$' || true)
 
 run "${ROOT_DIR}/scripts/ops/attendance-preflight.sh"
 
