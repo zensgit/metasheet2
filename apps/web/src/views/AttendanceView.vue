@@ -1573,54 +1573,70 @@
                   {{ ruleSetLoading ? tr('Loading...', '加载中...') : tr('Reload rule sets', '重载规则集') }}
                 </button>
               </div>
-              <div class="attendance__admin-grid">
-                <label class="attendance__field" for="attendance-rule-set-name">
-                  <span>{{ tr('Name', '名称') }}</span>
-                  <input id="attendance-rule-set-name" name="ruleSetName" v-model="ruleSetForm.name" type="text" />
-                </label>
-                <label class="attendance__field" for="attendance-rule-set-scope">
-                  <span>{{ tr('Scope', '范围') }}</span>
-                  <select id="attendance-rule-set-scope" name="ruleSetScope" v-model="ruleSetForm.scope">
-                    <option value="org">{{ tr('Org', '组织') }}</option>
-                    <option value="department">{{ tr('Department', '部门') }}</option>
-                    <option value="project">{{ tr('Project', '项目') }}</option>
-                    <option value="user">{{ tr('User', '用户') }}</option>
-                    <option value="custom">{{ tr('Custom', '自定义') }}</option>
-                  </select>
-                </label>
-                <label class="attendance__field" for="attendance-rule-set-version">
-                  <span>{{ tr('Version', '版本') }}</span>
-                  <input
-                    id="attendance-rule-set-version"
-                    name="ruleSetVersion"
-                    v-model.number="ruleSetForm.version"
-                    type="number"
-                    min="1"
-                  />
-                </label>
-                <label class="attendance__field attendance__field--checkbox" for="attendance-rule-set-default">
-                  <span>{{ tr('Default', '默认') }}</span>
-                  <input
-                    id="attendance-rule-set-default"
-                    name="ruleSetDefault"
-                    v-model="ruleSetForm.isDefault"
-                    type="checkbox"
-                  />
-                </label>
-                <label class="attendance__field attendance__field--full" for="attendance-rule-set-description">
-                  <span>{{ tr('Description', '描述') }}</span>
-                  <input
-                    id="attendance-rule-set-description"
-                    name="ruleSetDescription"
-                    v-model="ruleSetForm.description"
-                    type="text"
-                    :placeholder="tr('Optional', '可选')"
-                  />
-                </label>
-                <div class="attendance__field attendance__field--full attendance__rule-builder">
-                  <div class="attendance__admin-section-header">
-                    <div>
-                      <h5 class="attendance__subheading">{{ tr('Structured rule builder', '结构化规则构建器') }}</h5>
+              <div class="attendance__rule-set-workbench">
+                <section class="attendance__rule-set-basics">
+                  <div class="attendance__subheading-row">
+                    <h5 class="attendance__subheading">{{ tr('Rule set basics', '规则集基础信息') }}</h5>
+                    <span class="attendance__field-hint">
+                      {{ tr('Define the identity and default scope first, then tune behavior in the builder below.', '先定义规则集身份与默认范围，再在下方构建器里调整行为。') }}
+                    </span>
+                  </div>
+                  <div class="attendance__admin-grid attendance__rule-set-basics-grid">
+                    <label class="attendance__field" for="attendance-rule-set-name">
+                      <span>{{ tr('Name', '名称') }}</span>
+                      <input id="attendance-rule-set-name" name="ruleSetName" v-model="ruleSetForm.name" type="text" />
+                    </label>
+                    <label class="attendance__field" for="attendance-rule-set-scope">
+                      <span>{{ tr('Scope', '范围') }}</span>
+                      <select id="attendance-rule-set-scope" name="ruleSetScope" v-model="ruleSetForm.scope">
+                        <option value="org">{{ tr('Org', '组织') }}</option>
+                        <option value="department">{{ tr('Department', '部门') }}</option>
+                        <option value="project">{{ tr('Project', '项目') }}</option>
+                        <option value="user">{{ tr('User', '用户') }}</option>
+                        <option value="custom">{{ tr('Custom', '自定义') }}</option>
+                      </select>
+                    </label>
+                    <label class="attendance__field" for="attendance-rule-set-version">
+                      <span>{{ tr('Version', '版本') }}</span>
+                      <input
+                        id="attendance-rule-set-version"
+                        name="ruleSetVersion"
+                        v-model.number="ruleSetForm.version"
+                        type="number"
+                        min="1"
+                      />
+                    </label>
+                    <label class="attendance__field attendance__field--checkbox" for="attendance-rule-set-default">
+                      <span>{{ tr('Default', '默认') }}</span>
+                      <input
+                        id="attendance-rule-set-default"
+                        name="ruleSetDefault"
+                        v-model="ruleSetForm.isDefault"
+                        type="checkbox"
+                      />
+                    </label>
+                    <label class="attendance__field attendance__field--full" for="attendance-rule-set-description">
+                      <span>{{ tr('Description', '描述') }}</span>
+                      <input
+                        id="attendance-rule-set-description"
+                        name="ruleSetDescription"
+                        v-model="ruleSetForm.description"
+                        type="text"
+                        :placeholder="tr('Optional', '可选')"
+                      />
+                    </label>
+                  </div>
+                </section>
+
+                <section class="attendance__rule-builder-shell">
+                  <div class="attendance__rule-builder-overview">
+                    <div class="attendance__rule-builder-intro">
+                      <div class="attendance__subheading-row">
+                        <h5 class="attendance__subheading">{{ tr('Structured rule builder', '结构化规则构建器') }}</h5>
+                        <span class="attendance__field-hint">
+                          {{ tr('Use the builder as the primary workspace. Preview first, then fall back to raw JSON only for advanced tuning.', '优先把构建器当作主工作台，先预演，再只在需要时回到原始 JSON 做高级微调。') }}
+                        </span>
+                      </div>
                       <p class="attendance__field-hint">
                         {{ tr('The builder keeps the core JSON config in sync while preserving any advanced fields already stored in the rule draft.', '构建器会同步核心 JSON 配置，并保留规则草稿里已有的高级字段。') }}
                       </p>
@@ -1635,7 +1651,7 @@
                       <span>{{ tr('Working days', '工作日') }}: <strong>{{ formatRuleBuilderWorkingDaysLabel(ruleBuilderWorkingDaysText) }}</strong></span>
                     </div>
                   </div>
-                  <div class="attendance__admin-grid">
+                  <div class="attendance__admin-grid attendance__rule-builder-grid">
                     <label class="attendance__field" for="attendance-rule-builder-source">
                       <span>{{ tr('Source', '来源') }}</span>
                       <input
@@ -2000,20 +2016,29 @@
                       </div>
                     </div>
                   </div>
-                </div>
-                <label class="attendance__field attendance__field--full attendance__rule-set-json-panel" for="attendance-rule-set-config">
-                  <span>{{ tr('Config (JSON)', '配置（JSON）') }}</span>
-                  <small class="attendance__field-hint">
-                    {{ tr('Advanced mode: inspect or fine-tune the JSON after using the structured builder.', '高级模式：可在使用结构化构建器后继续检查或微调 JSON。') }}
-                  </small>
-                  <textarea
-                    id="attendance-rule-set-config"
-                    name="ruleSetConfig"
-                    v-model="ruleSetForm.config"
-                    rows="4"
-                    placeholder='{"source":"dingtalk","mappings":{"columns":[{"sourceField":"1_on_duty_user_check_time","targetField":"firstInAt"}]}}'
-                  />
-                </label>
+                </section>
+
+                <section class="attendance__rule-set-advanced">
+                  <div class="attendance__subheading-row">
+                    <h5 class="attendance__subheading">{{ tr('Advanced JSON config', '高级 JSON 配置') }}</h5>
+                    <span class="attendance__field-hint">
+                      {{ tr('Inspect the generated payload here after using the builder. Keep this panel for expert edits only.', '先用构建器，再在这里检查生成结果。这个面板只保留给高级编辑。') }}
+                    </span>
+                  </div>
+                  <label class="attendance__field attendance__rule-set-json-panel" for="attendance-rule-set-config">
+                    <span>{{ tr('Config (JSON)', '配置（JSON）') }}</span>
+                    <small class="attendance__field-hint">
+                      {{ tr('Advanced mode: inspect or fine-tune the JSON after using the structured builder.', '高级模式：可在使用结构化构建器后继续检查或微调 JSON。') }}
+                    </small>
+                    <textarea
+                      id="attendance-rule-set-config"
+                      name="ruleSetConfig"
+                      v-model="ruleSetForm.config"
+                      rows="4"
+                      placeholder='{"source":"dingtalk","mappings":{"columns":[{"sourceField":"1_on_duty_user_check_time","targetField":"firstInAt"}]}}'
+                    />
+                  </label>
+                </section>
               </div>
               <div class="attendance__admin-actions">
                 <button class="attendance__btn attendance__btn--primary" :disabled="ruleSetSaving" @click="saveRuleSet">
@@ -12816,32 +12841,65 @@ const holidaySectionBindings = {
 }
 
 .attendance__template-guide,
-.attendance__rule-builder,
 .attendance__holiday-layout {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
-.attendance__rule-builder,
-.attendance__rule-set-json-panel {
-  padding: 16px;
-  border: 1px solid #d9e3f1;
-  border-radius: 14px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+.attendance__rule-set-workbench {
+  display: grid;
+  gap: 16px;
 }
 
-.attendance__rule-builder > .attendance__admin-section-header,
+.attendance__rule-set-basics,
+.attendance__rule-builder-shell,
+.attendance__rule-set-advanced {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid #d9e3f1;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
+}
+
+.attendance__rule-set-basics .attendance__subheading,
+.attendance__rule-builder-shell .attendance__subheading,
+.attendance__rule-set-advanced .attendance__subheading {
+  margin: 0;
+}
+
+.attendance__rule-set-basics-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.attendance__rule-builder-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.95fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.attendance__rule-builder-intro {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.attendance__rule-builder-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.attendance__rule-set-json-panel {
+  display: grid;
+  gap: 10px;
+}
+
 .attendance__rule-builder-preview > .attendance__admin-section-header,
 .attendance__preview-builder > .attendance__admin-section-header {
   align-items: flex-start;
   flex-wrap: wrap;
-}
-
-.attendance__rule-builder > .attendance__admin-section-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 12px;
 }
 
 .attendance__template-guide {
@@ -12932,6 +12990,7 @@ const holidaySectionBindings = {
 .attendance__rule-builder-summary {
   margin-left: 0;
   width: 100%;
+  align-content: start;
 }
 
 .attendance__rule-builder-summary span {
@@ -13318,7 +13377,14 @@ const holidaySectionBindings = {
     width: 100%;
   }
 
-  .attendance__rule-builder > .attendance__admin-section-header,
+  .attendance__rule-builder-overview,
+  .attendance__rule-set-basics,
+  .attendance__rule-builder-shell,
+  .attendance__rule-set-advanced {
+    grid-template-columns: 1fr;
+    padding: 14px;
+  }
+
   .attendance__rule-builder-preview > .attendance__admin-section-header,
   .attendance__preview-builder > .attendance__admin-section-header {
     flex-direction: column;
