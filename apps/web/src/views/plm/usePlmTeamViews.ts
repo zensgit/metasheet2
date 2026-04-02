@@ -1,4 +1,4 @@
-import { computed, ref, shallowRef, type Ref } from 'vue'
+import { computed, ref, shallowRef, watch, type Ref } from 'vue'
 import {
   archivePlmWorkbenchTeamView,
   batchPlmWorkbenchTeamViews,
@@ -18,7 +18,12 @@ import type {
   PlmWorkbenchTeamViewKind,
   PlmWorkbenchTeamViewStateByKind,
 } from './plmPanelModels'
-import { usePlmCollaborativePermissions } from './usePlmCollaborativePermissions'
+import {
+  canApplyPlmCollaborativeEntry,
+  canDuplicatePlmCollaborativeEntry,
+  canRenamePlmCollaborativeEntry,
+  usePlmCollaborativePermissions,
+} from './usePlmCollaborativePermissions'
 
 type UsePlmTeamViewsOptions<Kind extends PlmWorkbenchTeamViewKind> = {
   kind: Kind
@@ -38,6 +43,14 @@ function getErrorMessage(error: unknown, fallback: string) {
     return error.message
   }
   return fallback
+}
+
+function canManageTeamView(view: { canManage?: boolean; permissions?: { canManage?: boolean } } | null) {
+  if (!view) return false
+  if (typeof view.permissions?.canManage === 'boolean') {
+    return view.permissions.canManage
+  }
+  return Boolean(view.canManage)
 }
 
 function getViewTimestamp(view: PlmWorkbenchTeamView) {
@@ -73,7 +86,22 @@ function applyDefaultTeamViewUpdate<Kind extends PlmWorkbenchTeamViewKind>(
 ) {
   const next = views.map((entry) => {
     if (entry.id === view.id) return view
-    return entry.isDefault ? { ...entry, isDefault: false } : entry
+    if (!entry.isDefault) return entry
+
+    const canManage = typeof entry.permissions?.canManage === 'boolean'
+      ? entry.permissions.canManage
+      : Boolean(entry.canManage)
+    return {
+      ...entry,
+      isDefault: false,
+      permissions: entry.permissions
+        ? {
+          ...entry.permissions,
+          canSetDefault: canManage && !entry.isArchived,
+          canClearDefault: false,
+        }
+        : entry.permissions,
+    }
   })
   return sortTeamViews(next as PlmWorkbenchTeamView<Kind>[])
 }
@@ -101,6 +129,22 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   const selectedTeamView = computed(
     () => teamViews.value.find((view) => view.id === teamViewKey.value) || null,
   )
+  const requestedTeamView = computed(() => {
+    const requestedViewId = options.requestedViewId?.value.trim() || ''
+    if (!requestedViewId) return null
+    return teamViews.value.find((view) => view.id === requestedViewId) || null
+  })
+  const hasPendingApplySelection = computed(() => (
+    Boolean(requestedTeamView.value)
+    && Boolean(selectedTeamView.value)
+    && requestedTeamView.value?.id !== selectedTeamView.value?.id
+  ))
+  const selectedManagementTarget = computed(() => (
+    hasPendingApplySelection.value ? null : selectedTeamView.value
+  ))
+  const visibleManagementTarget = computed(() => (
+    hasPendingApplySelection.value ? requestedTeamView.value : selectedTeamView.value
+  ))
   const defaultTeamView = computed(
     () => teamViews.value.find((view) => view.isDefault && !view.isArchived) || null,
   )
@@ -132,35 +176,63 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   const canSaveTeamView = computed(() => Boolean(teamViewName.value.trim()))
   const {
     canManageSelectedEntry: canManageSelectedTeamView,
-    showManagementActions,
-    canApply: canApplyTeamView,
-    canDuplicate: canDuplicateTeamView,
     canShare: canShareTeamView,
     canDelete: canDeleteTeamView,
     canArchive: canArchiveTeamView,
     canRestore: canRestoreTeamView,
     canRename: canRenameTeamView,
+    canTransferTarget: canTransferTargetTeamView,
     canTransfer: canTransferTeamView,
     canSetDefault: canSetTeamViewDefault,
     canClearDefault: canClearTeamViewDefault,
   } = usePlmCollaborativePermissions({
-    selectedEntry: selectedTeamView,
+    selectedEntry: selectedManagementTarget,
     nameRef: teamViewName,
     ownerUserIdRef: teamViewOwnerUserId,
   })
+  const showManagementActions = computed(() => (
+    !visibleManagementTarget.value || canManageTeamView(visibleManagementTarget.value)
+  ))
+  const canApplyTeamView = computed(() => canApplyPlmCollaborativeEntry(selectedTeamView.value))
+  const canDuplicateTeamView = computed(() => canDuplicatePlmCollaborativeEntry(selectedTeamView.value))
   const defaultTeamViewLabel = computed(() => defaultTeamView.value?.name || '')
+  const canRenameTargetTeamView = computed(() => canRenamePlmCollaborativeEntry(selectedTeamView.value))
+
+  watch(teamViewKey, (next, previous) => {
+    if (next !== previous) {
+      teamViewName.value = ''
+      teamViewOwnerUserId.value = ''
+    }
+  }, { flush: 'sync' })
 
   function applyView(view: PlmWorkbenchTeamView<Kind>) {
+    if (teamViewKey.value && teamViewKey.value !== view.id) {
+      teamViewOwnerUserId.value = ''
+    }
+    if (!view.isDefault) {
+      lastAutoAppliedDefaultId.value = ''
+    }
     teamViewKey.value = view.id
     options.syncRequestedViewId?.(view.id)
     options.applyViewState(view.state)
+  }
+
+  function blockPendingApplyManagementAction() {
+    if (!hasPendingApplySelection.value) return false
+    options.setMessage(`请先应用${options.label}团队视角，再执行管理操作。`, true)
+    return true
   }
 
   function maybeAutoApplyDefault(items: PlmWorkbenchTeamView<Kind>[]) {
     if (teamViewKey.value) return
     const requestedViewId = options.requestedViewId?.value.trim() || ''
     if (requestedViewId) {
-      const requestedView = items.find((entry) => entry.id === requestedViewId && !entry.isArchived)
+      const requestedView = items.find(
+        (entry) =>
+          entry.id === requestedViewId &&
+          !entry.isArchived &&
+          canApplyPlmCollaborativeEntry(entry),
+      )
       if (requestedView) {
         applyView(requestedView)
         return
@@ -169,7 +241,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     }
     if (!options.shouldAutoApplyDefault?.()) return
 
-    const view = items.find((entry) => entry.isDefault)
+    const view = items.find(
+      (entry) => entry.isDefault && !entry.isArchived && canApplyPlmCollaborativeEntry(entry),
+    )
     if (!view) return
     if (lastAutoAppliedDefaultId.value === view.id) return
 
@@ -186,11 +260,36 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       const items = result.items as PlmWorkbenchTeamView<Kind>[]
       teamViews.value = sortTeamViews(items)
       const availableIds = new Set(items.map((view) => view.id))
-      teamViewSelection.value = teamViewSelection.value.filter((id) => availableIds.has(id))
-      if (!items.some((view) => view.id === teamViewKey.value)) {
+      teamViewSelection.value = teamViewSelection.value.filter((id) => {
+        if (!availableIds.has(id)) return false
+        const selectedView = items.find((view) => view.id === id)
+        return Boolean(selectedView?.permissions?.canManage ?? selectedView?.canManage)
+      })
+      if (teamViewKey.value && !items.some((view) => view.id === teamViewKey.value)) {
         teamViewKey.value = ''
+        teamViewName.value = ''
+        teamViewOwnerUserId.value = ''
+      } else if (teamViewKey.value) {
+        const activeView = items.find((view) => view.id === teamViewKey.value)
+        if (activeView && !canApplyPlmCollaborativeEntry(activeView)) {
+          teamViewKey.value = ''
+          teamViewName.value = ''
+          teamViewOwnerUserId.value = ''
+        }
       }
-      if (options.requestedViewId?.value && !items.some((view) => view.id === options.requestedViewId?.value)) {
+      const requestedViewId = options.requestedViewId?.value.trim() || ''
+      if (
+        requestedViewId
+        && !items.some((view) => (
+          view.id === requestedViewId
+          && canApplyPlmCollaborativeEntry(view)
+        ))
+      ) {
+        if (teamViewKey.value && teamViewKey.value !== requestedViewId) {
+          teamViewKey.value = ''
+          teamViewName.value = ''
+          teamViewOwnerUserId.value = ''
+        }
         options.syncRequestedViewId?.(undefined)
       }
       maybeAutoApplyDefault(teamViews.value)
@@ -216,8 +315,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
         options.getCurrentViewState(),
       )
       teamViews.value = upsertTeamView(teamViews.value, saved)
+      teamViewSelection.value = []
       applyView(saved)
       teamViewName.value = ''
+      teamViewOwnerUserId.value = ''
       options.setMessage(`已保存${options.label}团队视角。`)
     } catch (error) {
       teamViewsError.value = getErrorMessage(error, `保存${options.label}团队视角失败`)
@@ -233,20 +334,36 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
-    if (view.isArchived) {
-      options.setMessage(`请先恢复${options.label}团队视角，再执行应用。`, true)
+    if (!canApplyPlmCollaborativeEntry(view)) {
+      options.setMessage(
+        view.isArchived
+          ? `请先恢复${options.label}团队视角，再执行应用。`
+          : `当前${options.label}团队视角不可应用。`,
+        true,
+      )
       return
     }
 
+    teamViewSelection.value = []
     applyView(view)
     options.setMessage(`已应用${options.label}团队视角：${view.name}`)
   }
 
   async function deleteTeamView() {
     const view = selectedTeamView.value
-    if (!view) return
-    if (!view.canManage) {
+    if (!view) {
+      options.setMessage(`请选择${options.label}团队视角。`, true)
+      return
+    }
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
+    if (!canManageSelectedTeamView.value) {
       options.setMessage(`仅创建者可删除${options.label}团队视角。`, true)
+      return
+    }
+    if (!canDeleteTeamView.value) {
+      options.setMessage(`当前${options.label}团队视角不可删除。`, true)
       return
     }
 
@@ -255,11 +372,14 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     try {
       await deletePlmWorkbenchTeamView(view.id)
       teamViews.value = teamViews.value.filter((entry) => entry.id !== view.id)
+      teamViewSelection.value = teamViewSelection.value.filter((id) => id !== view.id)
+      const requestedViewId = options.requestedViewId?.value.trim() || ''
       if (teamViewKey.value === view.id) {
         teamViewKey.value = ''
         teamViewName.value = ''
+        teamViewOwnerUserId.value = ''
       }
-      if (options.requestedViewId?.value === view.id) {
+      if (requestedViewId === view.id) {
         options.syncRequestedViewId?.(undefined)
       }
       if (lastAutoAppliedDefaultId.value === view.id) {
@@ -275,17 +395,24 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function archiveTeamView() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
-    if (!view.canManage) {
+    if (!canManageSelectedTeamView.value) {
       options.setMessage(`仅创建者可归档${options.label}团队视角。`, true)
       return
     }
     if (view.isArchived) {
       options.setMessage(`${options.label}团队视角已归档。`)
+      return
+    }
+    if (!canArchiveTeamView.value) {
+      options.setMessage(`当前${options.label}团队视角不可归档。`, true)
       return
     }
 
@@ -294,11 +421,14 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     try {
       const saved = await archivePlmWorkbenchTeamView(options.kind, view.id)
       teamViews.value = replaceTeamView(teamViews.value, saved)
+      teamViewSelection.value = teamViewSelection.value.filter((id) => id !== view.id)
+      const requestedViewId = options.requestedViewId?.value.trim() || ''
       if (teamViewKey.value === view.id) {
         teamViewKey.value = ''
         teamViewName.value = ''
+        teamViewOwnerUserId.value = ''
       }
-      if (options.requestedViewId?.value === view.id) {
+      if (requestedViewId === view.id) {
         options.syncRequestedViewId?.(undefined)
       }
       if (lastAutoAppliedDefaultId.value === view.id) {
@@ -314,17 +444,24 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function restoreTeamView() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
-    if (!view.canManage) {
+    if (!canManageSelectedTeamView.value) {
       options.setMessage(`仅创建者可恢复${options.label}团队视角。`, true)
       return
     }
     if (!view.isArchived) {
       options.setMessage(`${options.label}团队视角无需恢复。`)
+      return
+    }
+    if (!canRestoreTeamView.value) {
+      options.setMessage(`当前${options.label}团队视角不可恢复。`, true)
       return
     }
 
@@ -335,6 +472,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       teamViews.value = replaceTeamView(teamViews.value, saved)
       applyView(saved)
       teamViewName.value = ''
+      teamViewOwnerUserId.value = ''
       options.setMessage(`已恢复${options.label}团队视角：${saved.name}`)
     } catch (error) {
       teamViewsError.value = getErrorMessage(error, `恢复${options.label}团队视角失败`)
@@ -350,6 +488,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
+    if (!canDuplicateTeamView.value) {
+      options.setMessage(`当前${options.label}团队视角不可复制。`, true)
+      return
+    }
 
     teamViewsLoading.value = true
     teamViewsError.value = ''
@@ -360,8 +502,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
         teamViewName.value.trim() || undefined,
       )
       teamViews.value = upsertTeamView(teamViews.value, duplicated)
+      teamViewSelection.value = []
       applyView(duplicated)
       teamViewName.value = ''
+      teamViewOwnerUserId.value = ''
       options.setMessage(`已复制${options.label}团队视角：${duplicated.name}`)
     } catch (error) {
       teamViewsError.value = getErrorMessage(error, `复制${options.label}团队视角失败`)
@@ -372,6 +516,9 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function shareTeamView() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
@@ -382,7 +529,12 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       return
     }
     if (!canShareTeamView.value) {
-      options.setMessage(`仅创建者可分享${options.label}团队视角。`, true)
+      options.setMessage(
+        canManageSelectedTeamView.value
+          ? `当前${options.label}团队视角不可分享。`
+          : `仅创建者可分享${options.label}团队视角。`,
+        true,
+      )
       return
     }
     if (!options.buildShareUrl || !options.copyShareUrl) {
@@ -390,7 +542,13 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       return
     }
 
-    const ok = await options.copyShareUrl(options.buildShareUrl(view))
+    const url = options.buildShareUrl(view)
+    if (!url) {
+      options.setMessage(`生成${options.label}团队视角分享链接失败。`, true)
+      return
+    }
+
+    const ok = await options.copyShareUrl(url)
     if (!ok) {
       options.setMessage(`复制${options.label}团队视角分享链接失败`, true)
       return
@@ -399,17 +557,31 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function renameTeamView() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
-    if (!view.canManage) {
-      options.setMessage(`仅创建者可重命名${options.label}团队视角。`, true)
+    if (!canRenameTargetTeamView.value) {
+      options.setMessage(
+        view.isArchived
+          ? `请先恢复${options.label}团队视角，再执行重命名。`
+          : canManageSelectedTeamView.value
+            ? `当前${options.label}团队视角不可重命名。`
+            : `仅创建者可重命名${options.label}团队视角。`,
+        true,
+      )
       return
     }
     if (!teamViewName.value.trim()) {
       options.setMessage(`请输入${options.label}团队视角名称。`, true)
+      return
+    }
+    if (!canRenameTeamView.value) {
+      options.setMessage(`当前${options.label}团队视角不可重命名。`, true)
       return
     }
 
@@ -424,6 +596,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       teamViews.value = replaceTeamView(teamViews.value, renamed)
       applyView(renamed)
       teamViewName.value = ''
+      teamViewOwnerUserId.value = ''
       options.setMessage(`已重命名${options.label}团队视角：${renamed.name}`)
     } catch (error) {
       teamViewsError.value = getErrorMessage(error, `重命名${options.label}团队视角失败`)
@@ -434,17 +607,28 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function setTeamViewDefault() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
-    if (!view.canManage) {
+    if (!canManageSelectedTeamView.value) {
       options.setMessage(`仅创建者可设置${options.label}默认团队视角。`, true)
       return
     }
     if (view.isArchived) {
       options.setMessage(`请先恢复${options.label}团队视角，再设为默认。`, true)
+      return
+    }
+    if (view.isDefault) {
+      options.setMessage(`${options.label}团队视角已设为默认。`)
+      return
+    }
+    if (!canSetTeamViewDefault.value) {
+      options.setMessage(`当前${options.label}团队视角不可设为默认。`, true)
       return
     }
 
@@ -465,8 +649,10 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function transferTeamView() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
-    const targetOwnerUserId = teamViewOwnerUserId.value.trim()
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
@@ -475,6 +661,16 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`请先恢复${options.label}团队视角，再执行转移所有者。`, true)
       return
     }
+    if (!canTransferTargetTeamView.value) {
+      options.setMessage(
+        canManageSelectedTeamView.value
+          ? `当前${options.label}团队视角不可转移所有者。`
+          : `仅创建者可转移${options.label}团队视角。`,
+        true,
+      )
+      return
+    }
+    const targetOwnerUserId = teamViewOwnerUserId.value.trim()
     if (!targetOwnerUserId) {
       options.setMessage(`请输入${options.label}团队视角目标用户 ID。`, true)
       return
@@ -483,8 +679,8 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
       options.setMessage(`${options.label}团队视角已经属于该用户。`)
       return
     }
-    if (!canManageSelectedTeamView.value) {
-      options.setMessage(`仅创建者可转移${options.label}团队视角。`, true)
+    if (!canTransferTeamView.value) {
+      options.setMessage(`当前${options.label}团队视角不可转移所有者。`, true)
       return
     }
 
@@ -493,8 +689,14 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     try {
       const saved = await transferPlmWorkbenchTeamView(options.kind, view.id, targetOwnerUserId)
       teamViews.value = replaceTeamView(teamViews.value, saved)
+      if (!canManageTeamView(saved)) {
+        teamViewSelection.value = teamViewSelection.value.filter((id) => id !== saved.id)
+        teamViewName.value = ''
+        teamViewOwnerUserId.value = ''
+      } else {
+        teamViewOwnerUserId.value = ''
+      }
       applyView(saved)
-      teamViewOwnerUserId.value = ''
       options.setMessage(`已将${options.label}团队视角转移给：${saved.ownerUserId}`)
     } catch (error) {
       teamViewsError.value = getErrorMessage(error, `转移${options.label}团队视角失败`)
@@ -505,17 +707,28 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
   }
 
   async function clearTeamViewDefault() {
+    if (blockPendingApplyManagementAction()) {
+      return
+    }
     const view = selectedTeamView.value
     if (!view) {
       options.setMessage(`请选择${options.label}团队视角。`, true)
       return
     }
-    if (!view.canManage) {
+    if (!canManageSelectedTeamView.value) {
       options.setMessage(`仅创建者可取消${options.label}默认团队视角。`, true)
       return
     }
     if (view.isArchived) {
       options.setMessage(`请先恢复${options.label}团队视角，再取消默认。`, true)
+      return
+    }
+    if (!view.isDefault) {
+      options.setMessage(`当前${options.label}团队视角尚未设为默认。`)
+      return
+    }
+    if (!canClearTeamViewDefault.value) {
+      options.setMessage(`当前${options.label}团队视角不可取消默认。`, true)
       return
     }
 
@@ -553,6 +766,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     }
 
     const selectedIdBeforeAction = teamViewKey.value
+    const requestedIdBeforeAction = options.requestedViewId?.value.trim() || ''
     teamViewsLoading.value = true
     teamViewsError.value = ''
     try {
@@ -568,17 +782,35 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
         )
       }
 
+      const processedRequestedId = requestedIdBeforeAction && processedSet.has(requestedIdBeforeAction)
       if (selectedIdBeforeAction && processedSet.has(selectedIdBeforeAction)) {
         if (action === 'restore') {
-          const restored = result.items.find((view) => view.id === selectedIdBeforeAction)
+          const restoreTargetId = processedRequestedId
+            ? requestedIdBeforeAction
+            : requestedIdBeforeAction
+              ? ''
+              : selectedIdBeforeAction
+          const restored = restoreTargetId
+            ? result.items.find((view) => view.id === restoreTargetId)
+            : null
           if (restored) {
             applyView(restored)
+            teamViewName.value = ''
+            teamViewOwnerUserId.value = ''
+          }
+          if (!restored) {
+            teamViewName.value = ''
+            teamViewOwnerUserId.value = ''
           }
         } else {
           teamViewKey.value = ''
           teamViewName.value = ''
-          options.syncRequestedViewId?.(undefined)
+          teamViewOwnerUserId.value = ''
         }
+      }
+
+      if (processedRequestedId && action !== 'restore') {
+        options.syncRequestedViewId?.(undefined)
       }
 
       if (lastAutoAppliedDefaultId.value && processedSet.has(lastAutoAppliedDefaultId.value) && action !== 'restore') {
@@ -625,6 +857,7 @@ export function usePlmTeamViews<Kind extends PlmWorkbenchTeamViewKind>(
     canArchiveTeamView,
     canRestoreTeamView,
     canRenameTeamView,
+    canTransferTargetTeamView,
     canTransferTeamView,
     canSetTeamViewDefault,
     canClearTeamViewDefault,

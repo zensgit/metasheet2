@@ -8,26 +8,37 @@
         <router-link v-if="attendanceFocused" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
 
         <template v-else>
-          <router-link to="/grid" class="nav-link">{{ navLabels.grid }}</router-link>
-          <router-link to="/spreadsheets" class="nav-link">{{ navLabels.spreadsheets }}</router-link>
-          <router-link to="/kanban" class="nav-link">{{ navLabels.kanban }}</router-link>
-          <router-link to="/calendar" class="nav-link">{{ navLabels.calendar }}</router-link>
-          <router-link to="/gallery" class="nav-link">{{ navLabels.gallery }}</router-link>
-          <router-link to="/form" class="nav-link">{{ navLabels.form }}</router-link>
-          <router-link
-            v-for="item in pluginNavItems"
-            :key="item.id"
-            :to="item.path"
-            class="nav-link"
-          >
-            {{ item.label }}
-          </router-link>
-          <router-link v-if="canManageUsers" to="/admin/users" class="nav-link">{{ navLabels.users }}</router-link>
-          <router-link v-if="canManageUsers" to="/admin/roles" class="nav-link">{{ navLabels.roles }}</router-link>
-          <router-link v-if="canManageUsers" to="/admin/permissions" class="nav-link">{{ navLabels.permissions }}</router-link>
-          <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
-          <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
-          <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
+          <template v-if="plmWorkbenchFocused">
+            <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
+            <router-link to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
+            <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
+            <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+          </template>
+          <template v-else>
+            <router-link to="/grid" class="nav-link">{{ navLabels.grid }}</router-link>
+            <router-link to="/spreadsheets" class="nav-link">{{ navLabels.spreadsheets }}</router-link>
+            <router-link to="/kanban" class="nav-link">{{ navLabels.kanban }}</router-link>
+            <router-link to="/calendar" class="nav-link">{{ navLabels.calendar }}</router-link>
+            <router-link to="/gallery" class="nav-link">{{ navLabels.gallery }}</router-link>
+            <router-link to="/form" class="nav-link">{{ navLabels.form }}</router-link>
+            <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
+            <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
+            <router-link
+              v-for="item in pluginNavItems"
+              :key="item.id"
+              :to="item.path"
+              class="nav-link"
+            >
+              {{ item.label }}
+            </router-link>
+            <router-link v-if="canManageUsers" to="/admin/users" class="nav-link">{{ navLabels.users }}</router-link>
+            <router-link v-if="canManageUsers" to="/admin/roles" class="nav-link">{{ navLabels.roles }}</router-link>
+            <router-link v-if="canManageUsers" to="/admin/permissions" class="nav-link">{{ navLabels.permissions }}</router-link>
+            <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
+            <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
+            <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
+            <router-link to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
+          </template>
         </template>
       </div>
 
@@ -69,7 +80,7 @@ import { getApiBase } from './utils/api'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
-const { loadProductFeatures, isAttendanceFocused, hasFeature } = useFeatureFlags()
+const { isAttendanceFocused, isPlmWorkbenchFocused, hasFeature, loadProductFeatures } = useFeatureFlags()
 const { clearToken, getAccessSnapshot, getToken } = useAuth()
 const { locale, isZh, setLocale } = useLocale()
 
@@ -81,6 +92,7 @@ const isPublicRoute = computed(() => {
   return route.path === '/login' || route.meta?.requiresAuth === false || route.meta?.requiresGuest === true
 })
 const attendanceFocused = computed(() => isAttendanceFocused())
+const plmWorkbenchFocused = computed(() => isPlmWorkbenchFocused())
 const isAdmin = computed(() => hasFeature('attendanceAdmin'))
 const canManageUsers = computed(() => {
   void route.fullPath
@@ -100,12 +112,16 @@ const navLabels = computed(() => {
       calendar: '日历',
       gallery: '画廊',
       form: '表单',
+      workflows: '流程',
+      approvals: '审批中心',
       users: '用户',
       roles: '角色',
       permissions: '权限',
       adminAudit: '管理审计',
       plugins: '插件',
       plm: 'PLM',
+      audit: '审计',
+      plmWorkbench: 'PLM 工作台',
       mySessions: '我的会话',
       signOut: '退出登录',
       language: '语言',
@@ -119,12 +135,16 @@ const navLabels = computed(() => {
     calendar: 'Calendar',
     gallery: 'Gallery',
     form: 'Form',
+    workflows: 'Workflows',
+    approvals: 'Approvals',
     users: 'Users',
     roles: 'Roles',
     permissions: 'Permissions',
     adminAudit: 'Admin Audit',
     plugins: 'Plugins',
     plm: 'PLM',
+    audit: 'Audit',
+    plmWorkbench: 'PLM Workbench',
     mySessions: 'My Sessions',
     signOut: 'Sign out',
     language: 'Language',
@@ -133,6 +153,7 @@ const navLabels = computed(() => {
 
 const brandText = computed(() => {
   if (attendanceFocused.value) return navLabels.value.attendance
+  if (plmWorkbenchFocused.value) return navLabels.value.plmWorkbench
   return 'MetaSheet'
 })
 
@@ -177,7 +198,7 @@ onMounted(async () => {
   await loadProductFeatures(false, {
     skipSessionProbe: isPublicRoute.value,
   }).catch(() => null)
-  if (isPublicRoute.value || attendanceFocused.value) {
+  if (isPublicRoute.value || attendanceFocused.value || plmWorkbenchFocused.value) {
     return
   }
   await fetchPlugins()

@@ -31,6 +31,14 @@ components:
               type: string
             message:
               type: string
+    DirectErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          default: false
+        error:
+          type: string
     User:
       type: object
       properties:
@@ -1903,6 +1911,26 @@ components:
                 error:
                   code: "INVALID_FORMAT"
                   message: "Request body must be valid JSON"
+    Conflict:
+      description: Conflict - Request conflicts with current resource state
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+          examples:
+            optimistic_lock_conflict:
+              summary: Version Conflict
+              value:
+                ok: false
+                error:
+                  code: "CONFLICT"
+                  message: "Resource state changed. Refresh and try again."
+            duplicate_code_conflict:
+              summary: Duplicate Code
+              value:
+                ok: false
+                error:
+                  code: "DUPLICATE_CODE"
+                  message: "Code already exists."
     NotFound:
       description: Not found - Resource does not exist
       content:

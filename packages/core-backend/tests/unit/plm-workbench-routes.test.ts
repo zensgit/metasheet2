@@ -161,12 +161,23 @@ describe('plm-workbench routes', () => {
         updated_at: '2026-03-09T00:11:00.000Z',
       },
     ])
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [
+        {
+          resource_id: 'view-1',
+          last_default_set_at: '2026-03-09T00:30:00.000Z',
+        },
+      ],
+    })
+
     const response = await request(app).get('/api/plm-workbench/views/team?kind=documents')
 
     expect(response.status).toBe(200)
     expect(response.body.data[0]).toMatchObject({
       id: 'view-1',
+      lastDefaultSetAt: '2026-03-09T00:30:00.000Z',
     })
+    expect(response.body.data[1].lastDefaultSetAt).toBeUndefined()
     expect(response.body.metadata).toMatchObject({
       total: 2,
       tenantId: 'tenant-a',
@@ -440,7 +451,7 @@ describe('plm-workbench routes', () => {
         kind: 'workbench',
         name: '旧工作台视图',
         name_key: '旧工作台视图',
-        is_default: false,
+        is_default: true,
         state: JSON.stringify({ query: { documentFilter: 'gear' } }),
         created_at: '2026-03-09T00:00:00.000Z',
         updated_at: '2026-03-09T00:12:00.000Z',
@@ -455,10 +466,18 @@ describe('plm-workbench routes', () => {
       kind: 'workbench',
       name: '新工作台视图',
       name_key: '新工作台视图',
-      is_default: false,
+      is_default: true,
       state: JSON.stringify({ query: { documentFilter: 'gear' } }),
       created_at: '2026-03-09T00:00:00.000Z',
       updated_at: '2026-03-09T00:20:00.000Z',
+    })
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [
+        {
+          resource_id: 'view-rename',
+          last_default_set_at: '2026-03-09T00:11:00.000Z',
+        },
+      ],
     })
 
     const response = await request(app)
@@ -470,6 +489,35 @@ describe('plm-workbench routes', () => {
       id: 'view-rename',
       kind: 'workbench',
       name: '新工作台视图',
+      isDefault: true,
+      lastDefaultSetAt: '2026-03-09T00:11:00.000Z',
+    })
+  })
+
+  it('rejects renaming archived team views', async () => {
+    routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
+      id: 'view-archived-rename',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'workbench',
+      name: '已归档工作台视图',
+      name_key: '已归档工作台视图',
+      is_default: false,
+      archived_at: '2026-03-09T00:21:00.000Z',
+      state: JSON.stringify({ query: { documentFilter: 'gear' } }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-09T00:20:00.000Z',
+    })
+
+    const response = await request(app)
+      .patch('/api/plm-workbench/views/team/view-archived-rename')
+      .send({ name: '不应该成功' })
+
+    expect(response.status).toBe(409)
+    expect(response.body).toEqual({
+      success: false,
+      error: 'Archived PLM team views cannot be renamed',
     })
   })
 
@@ -682,6 +730,15 @@ describe('plm-workbench routes', () => {
       isArchived: true,
       archivedAt: '2026-03-10T08:00:00.000Z',
     })
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO operation_audit_logs'),
+      expect.arrayContaining([
+        'owner-1',
+        'archive',
+        'plm-team-view-batch',
+        'view-archive',
+      ]),
+    )
   })
 
   it('restores an archived workbench team view for the owner', async () => {
@@ -722,6 +779,50 @@ describe('plm-workbench routes', () => {
       kind: 'workbench',
       isArchived: false,
     })
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO operation_audit_logs'),
+      expect.arrayContaining([
+        'owner-1',
+        'restore',
+        'plm-team-view-batch',
+        'view-restore',
+      ]),
+    )
+  })
+
+  it('deletes a workbench team view for the owner and writes audit', async () => {
+    routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
+      id: 'view-delete',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'audit',
+      name: '待删除审计视图',
+      name_key: '待删除审计视图',
+      is_default: false,
+      archived_at: null,
+      state: JSON.stringify({ page: 1, q: '', actorId: '', kind: '', action: '', resourceType: '', from: '', to: '', windowMinutes: 180 }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-09T00:12:00.000Z',
+    })
+    routeMocks.state.builder.execute.mockResolvedValueOnce(undefined)
+
+    const response = await request(app).delete('/api/plm-workbench/views/team/view-delete')
+
+    expect(response.status).toBe(200)
+    expect(response.body.data).toEqual({
+      id: 'view-delete',
+      message: 'PLM team view deleted successfully',
+    })
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO operation_audit_logs'),
+      expect.arrayContaining([
+        'owner-1',
+        'delete',
+        'plm-team-view-batch',
+        'view-delete',
+      ]),
+    )
   })
 
   it('batch archives manageable team views and reports skipped ids', async () => {
@@ -872,7 +973,7 @@ describe('plm-workbench routes', () => {
         kind: 'bom',
         name: '旧团队预设',
         name_key: '旧团队预设',
-        is_default: false,
+        is_default: true,
         state: JSON.stringify({ field: 'path', value: 'root/a', group: '机械' }),
         created_at: '2026-03-09T00:00:00.000Z',
         updated_at: '2026-03-09T00:12:00.000Z',
@@ -887,10 +988,18 @@ describe('plm-workbench routes', () => {
       kind: 'bom',
       name: '新团队预设',
       name_key: '新团队预设',
-      is_default: false,
+      is_default: true,
       state: JSON.stringify({ field: 'path', value: 'root/a', group: '机械' }),
       created_at: '2026-03-09T00:00:00.000Z',
       updated_at: '2026-03-09T00:20:00.000Z',
+    })
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [
+        {
+          resource_id: 'preset-rename',
+          last_default_set_at: '2026-03-09T00:11:00.000Z',
+        },
+      ],
     })
 
     const response = await request(app)
@@ -902,6 +1011,8 @@ describe('plm-workbench routes', () => {
       id: 'preset-rename',
       kind: 'bom',
       name: '新团队预设',
+      isDefault: true,
+      lastDefaultSetAt: '2026-03-09T00:11:00.000Z',
     })
   })
 
@@ -1049,6 +1160,58 @@ describe('plm-workbench routes', () => {
     expect(response.body.error).toContain('Target owner user not found')
   })
 
+  it('rejects transferring archived team presets', async () => {
+    routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
+      id: 'preset-archived-transfer',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'bom',
+      name: '归档团队预设',
+      name_key: '归档团队预设',
+      is_default: false,
+      archived_at: '2026-03-11T01:00:00.000Z',
+      state: JSON.stringify({ field: 'path', value: 'root/archive', group: '机械' }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-11T01:00:00.000Z',
+    })
+
+    const response = await request(app)
+      .post('/api/plm-workbench/filter-presets/team/preset-archived-transfer/transfer')
+      .send({ ownerUserId: 'owner-2' })
+
+    expect(response.status).toBe(409)
+    expect(response.body.error).toContain('Archived PLM team presets cannot be transferred')
+  })
+
+  it('rejects clearing default for archived team presets', async () => {
+    routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
+      id: 'preset-archived-default',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'bom',
+      name: '归档默认团队预设',
+      name_key: '归档默认团队预设',
+      is_default: true,
+      archived_at: '2026-03-11T01:00:00.000Z',
+      state: JSON.stringify({ field: 'path', value: 'root/archive', group: '机械' }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-11T01:00:00.000Z',
+    })
+
+    const response = await request(app)
+      .delete('/api/plm-workbench/filter-presets/team/preset-archived-default/default')
+
+    expect(response.status).toBe(409)
+    expect(response.body.error).toContain('Archived PLM team presets cannot clear the default')
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('id', '=', 'preset-archived-default')
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('tenant_id', '=', 'tenant-a')
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('scope', '=', 'team')
+    expect(routeMocks.state.builder.executeTakeFirstOrThrow).not.toHaveBeenCalled()
+    expect(pgMocks.query).not.toHaveBeenCalled()
+  })
+
   it('archives a team preset for the owner', async () => {
     routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
       id: 'preset-archive',
@@ -1089,6 +1252,15 @@ describe('plm-workbench routes', () => {
       isArchived: true,
       archivedAt: '2026-03-10T08:00:00.000Z',
     })
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO operation_audit_logs'),
+      expect.arrayContaining([
+        'owner-1',
+        'archive',
+        'plm-team-preset-batch',
+        'preset-archive',
+      ]),
+    )
   })
 
   it('restores an archived team preset for the owner', async () => {
@@ -1129,6 +1301,53 @@ describe('plm-workbench routes', () => {
       kind: 'where-used',
       isArchived: false,
     })
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO operation_audit_logs'),
+      expect.arrayContaining([
+        'owner-1',
+        'restore',
+        'plm-team-preset-batch',
+        'preset-restore',
+      ]),
+    )
+  })
+
+  it('deletes a team preset for the owner and writes audit', async () => {
+    routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
+      id: 'preset-delete',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'where-used',
+      name: '待删除团队预设',
+      name_key: '待删除团队预设',
+      is_default: false,
+      archived_at: null,
+      state: JSON.stringify({ field: 'parent', value: 'assy-del', group: '装配' }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-09T00:12:00.000Z',
+    })
+    routeMocks.state.builder.execute.mockResolvedValueOnce(undefined)
+
+    const response = await request(app).delete('/api/plm-workbench/filter-presets/team/preset-delete')
+
+    expect(response.status).toBe(200)
+    expect(response.body.data).toEqual({
+      id: 'preset-delete',
+      message: 'PLM team preset deleted successfully',
+    })
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('id', '=', 'preset-delete')
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('tenant_id', '=', 'tenant-a')
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('scope', '=', 'team')
+    expect(pgMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO operation_audit_logs'),
+      expect.arrayContaining([
+        'owner-1',
+        'delete',
+        'plm-team-preset-batch',
+        'preset-delete',
+      ]),
+    )
   })
 
   it('batch archives manageable team presets and reports skipped ids', async () => {
@@ -1193,6 +1412,14 @@ describe('plm-workbench routes', () => {
           updated_at: '2026-03-11T10:00:00.000Z',
         },
       ])
+    pgMocks.query.mockResolvedValueOnce({
+      rows: [
+        {
+          resource_id: '11111111-1111-4111-8111-111111111111',
+          last_default_set_at: '2026-03-10T07:30:00.000Z',
+        },
+      ],
+    })
 
     const response = await request(app)
       .post('/api/plm-workbench/filter-presets/team/batch')
@@ -1220,6 +1447,7 @@ describe('plm-workbench routes', () => {
       id: '11111111-1111-4111-8111-111111111111',
       isArchived: true,
       isDefault: false,
+      lastDefaultSetAt: '2026-03-10T07:30:00.000Z',
     })
   })
 
@@ -1279,6 +1507,167 @@ describe('plm-workbench routes', () => {
     })
   })
 
+  it('sets default team preset for the owner only', async () => {
+    routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
+      id: 'preset-default',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'bom',
+      name: 'BOM 默认预设',
+      name_key: 'bom 默认预设',
+      is_default: false,
+      archived_at: null,
+      state: JSON.stringify({ field: 'path', value: 'root/default', group: '机械' }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-09T00:10:00.000Z',
+    })
+    routeMocks.state.trxBuilder.execute.mockResolvedValueOnce(undefined)
+    routeMocks.state.trxBuilder.executeTakeFirstOrThrow.mockResolvedValueOnce({
+      id: 'preset-default',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'bom',
+      name: 'BOM 默认预设',
+      name_key: 'bom 默认预设',
+      is_default: true,
+      archived_at: null,
+      state: JSON.stringify({ field: 'path', value: 'root/default', group: '机械' }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-09T00:20:00.000Z',
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            resource_id: 'preset-default',
+            last_default_set_at: '2026-03-09T00:20:00.000Z',
+          },
+        ],
+      })
+
+    const response = await request(app).post('/api/plm-workbench/filter-presets/team/preset-default/default')
+
+    expect(response.status).toBe(200)
+    expect(response.body.data).toMatchObject({
+      id: 'preset-default',
+      kind: 'bom',
+      isDefault: true,
+      canManage: true,
+      lastDefaultSetAt: '2026-03-09T00:20:00.000Z',
+    })
+    expect(routeMocks.db.transaction).toHaveBeenCalledTimes(1)
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('id', '=', 'preset-default')
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('tenant_id', '=', 'tenant-a')
+    expect(routeMocks.state.builder.where).toHaveBeenCalledWith('scope', '=', 'team')
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('INSERT INTO operation_audit_logs'),
+      expect.arrayContaining([
+        'owner-1',
+        'set-default',
+        'plm-team-preset-default',
+        'preset-default',
+      ]),
+    )
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('SELECT resource_id, MAX(COALESCE(occurred_at, created_at)) AS last_default_set_at'),
+      [['preset-default']],
+    )
+  })
+
+  it('rejects setting default for archived team presets', async () => {
+    routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
+      id: 'preset-archived-default',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'where-used',
+      name: '归档默认预设',
+      name_key: '归档默认预设',
+      is_default: false,
+      archived_at: '2026-03-11T01:00:00.000Z',
+      state: JSON.stringify({ field: 'part', value: 'P-100', group: '归档' }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-11T01:00:00.000Z',
+    })
+
+    const response = await request(app).post('/api/plm-workbench/filter-presets/team/preset-archived-default/default')
+
+    expect(response.status).toBe(409)
+    expect(response.body.error).toContain('Archived PLM team presets cannot be set as default')
+    expect(pgMocks.query).not.toHaveBeenCalled()
+  })
+
+  it('clears default team preset state', async () => {
+    routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
+      id: 'preset-default',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'bom',
+      name: 'BOM 默认预设',
+      name_key: 'bom 默认预设',
+      is_default: true,
+      archived_at: null,
+      state: JSON.stringify({ field: 'path', value: 'root/default', group: '机械' }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-09T00:20:00.000Z',
+    })
+    routeMocks.state.builder.executeTakeFirstOrThrow.mockResolvedValueOnce({
+      id: 'preset-default',
+      tenant_id: 'tenant-a',
+      owner_user_id: 'owner-1',
+      scope: 'team',
+      kind: 'bom',
+      name: 'BOM 默认预设',
+      name_key: 'bom 默认预设',
+      is_default: false,
+      archived_at: null,
+      state: JSON.stringify({ field: 'path', value: 'root/default', group: '机械' }),
+      created_at: '2026-03-09T00:00:00.000Z',
+      updated_at: '2026-03-09T00:21:00.000Z',
+    })
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            resource_id: 'preset-default',
+            last_default_set_at: '2026-03-09T00:20:00.000Z',
+          },
+        ],
+      })
+
+    const response = await request(app).delete('/api/plm-workbench/filter-presets/team/preset-default/default')
+
+    expect(response.status).toBe(200)
+    expect(response.body.data).toMatchObject({
+      id: 'preset-default',
+      kind: 'bom',
+      isDefault: false,
+      lastDefaultSetAt: '2026-03-09T00:20:00.000Z',
+    })
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('INSERT INTO operation_audit_logs'),
+      expect.arrayContaining([
+        'owner-1',
+        'clear-default',
+        'plm-team-preset-default',
+        'preset-default',
+      ]),
+    )
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('SELECT resource_id, MAX(COALESCE(occurred_at, created_at)) AS last_default_set_at'),
+      [['preset-default']],
+    )
+  })
+
   it('sets default team view for the owner only', async () => {
     routeMocks.state.builder.executeTakeFirst.mockResolvedValueOnce({
       id: 'view-1',
@@ -1307,7 +1696,16 @@ describe('plm-workbench routes', () => {
       created_at: '2026-03-09T00:00:00.000Z',
       updated_at: '2026-03-09T00:20:00.000Z',
     })
-    pgMocks.query.mockResolvedValueOnce({ rows: [] })
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            resource_id: 'view-1',
+            last_default_set_at: '2026-03-09T00:20:00.000Z',
+          },
+        ],
+      })
 
     const response = await request(app).post('/api/plm-workbench/views/team/view-1/default')
 
@@ -1317,6 +1715,7 @@ describe('plm-workbench routes', () => {
       kind: 'cad',
       isDefault: true,
       canManage: true,
+      lastDefaultSetAt: '2026-03-09T00:20:00.000Z',
     })
     expect(routeMocks.db.transaction).toHaveBeenCalledTimes(1)
     expect(pgMocks.query).toHaveBeenNthCalledWith(
@@ -1328,6 +1727,11 @@ describe('plm-workbench routes', () => {
         'plm-team-view-default',
         'view-1',
       ]),
+    )
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('SELECT resource_id, MAX(COALESCE(occurred_at, created_at)) AS last_default_set_at'),
+      [['view-1']],
     )
   })
 
@@ -1379,7 +1783,16 @@ describe('plm-workbench routes', () => {
       created_at: '2026-03-09T00:00:00.000Z',
       updated_at: '2026-03-09T00:21:00.000Z',
     })
-    pgMocks.query.mockResolvedValueOnce({ rows: [] })
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            resource_id: 'view-1',
+            last_default_set_at: '2026-03-09T00:20:00.000Z',
+          },
+        ],
+      })
 
     const response = await request(app).delete('/api/plm-workbench/views/team/view-1/default')
 
@@ -1388,6 +1801,7 @@ describe('plm-workbench routes', () => {
       id: 'view-1',
       kind: 'approvals',
       isDefault: false,
+      lastDefaultSetAt: '2026-03-09T00:20:00.000Z',
     })
     expect(pgMocks.query).toHaveBeenNthCalledWith(
       1,
@@ -1398,6 +1812,11 @@ describe('plm-workbench routes', () => {
         'plm-team-view-default',
         'view-1',
       ]),
+    )
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('SELECT resource_id, MAX(COALESCE(occurred_at, created_at)) AS last_default_set_at'),
+      [['view-1']],
     )
   })
 
@@ -1439,7 +1858,16 @@ describe('plm-workbench routes', () => {
       created_at: '2026-03-09T00:00:00.000Z',
       updated_at: '2026-03-09T00:22:00.000Z',
     })
-    pgMocks.query.mockResolvedValueOnce({ rows: [] })
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            resource_id: 'view-save-default',
+            last_default_set_at: '2026-03-09T00:22:00.000Z',
+          },
+        ],
+      })
 
     const response = await request(app)
       .post('/api/plm-workbench/views/team')
@@ -1457,6 +1885,7 @@ describe('plm-workbench routes', () => {
       id: 'view-save-default',
       kind: 'workbench',
       isDefault: true,
+      lastDefaultSetAt: '2026-03-09T00:22:00.000Z',
     })
     expect(pgMocks.query).toHaveBeenNthCalledWith(
       1,
@@ -1467,6 +1896,11 @@ describe('plm-workbench routes', () => {
         'plm-team-view-default',
         'view-save-default',
       ]),
+    )
+    expect(pgMocks.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('SELECT resource_id, MAX(COALESCE(occurred_at, created_at)) AS last_default_set_at'),
+      [['view-save-default']],
     )
   })
 

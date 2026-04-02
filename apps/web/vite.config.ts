@@ -31,6 +31,52 @@ export default defineConfig(({ mode }) => {
         '@': resolve(__dirname, 'src')
       }
     },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return
+            if (
+              id.includes('bpmn-js')
+            ) {
+              return 'workflow-bpmn-js'
+            }
+            if (
+              id.includes('diagram-js') ||
+              id.includes('@bpmn-io+diagram-js-ui')
+            ) {
+              return 'workflow-diagram-js'
+            }
+            if (
+              id.includes('bpmn-moddle') ||
+              id.includes('moddle-xml') ||
+              id.includes('/moddle@')
+            ) {
+              return 'workflow-moddle'
+            }
+            if (
+              id.includes('min-dash') ||
+              id.includes('min-dom') ||
+              id.includes('tiny-svg') ||
+              id.includes('ids') ||
+              id.includes('path-intersection') ||
+              id.includes('tiny-emitter')
+            ) {
+              return 'workflow-bpmn-vendor'
+            }
+            if (id.includes('xlsx') || id.includes('file-saver')) {
+              return 'vendor-export'
+            }
+            if (id.includes('element-plus') || id.includes('@element-plus')) {
+              return 'vendor-element-plus'
+            }
+            if (id.includes('vue') || id.includes('pinia') || id.includes('vue-router')) {
+              return 'vendor-vue'
+            }
+          },
+        },
+      },
+    },
     test: {
       environment: 'jsdom'
     }

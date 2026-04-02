@@ -1,2226 +1,198 @@
 <template>
   <div class="plm-page">
-    <PlmSearchShell
-      :search-query="searchQuery"
-      :search-item-type="searchItemType"
-      :search-limit="searchLimit"
-      :search-results="searchResults"
-      :search-total="searchTotal"
-      :search-loading="searchLoading"
-      :search-error="searchError"
-      @update:search-query="searchQuery = $event"
-      @update:search-item-type="searchItemType = $event"
-      @update:search-limit="searchLimit = $event"
-      @search="searchProducts"
-      @apply-item="applySearchItem"
-      @compare-item="applyCompareFromSearch"
-      @copy-item="copySearchValue"
-    />
+    <PlmSearchPanel :panel="searchPanel" />
 
-    <section class="panel">
-      <PlmWorkbenchShell
-        :auth-state-text="authStateText"
-        :auth-state-class="authStateClass"
-        :auth-expiry-text="authExpiryText || ''"
-        :auth-hint="authHint || ''"
-        :auth-error="authError || ''"
-        :plm-auth-state-text="plmAuthStateText"
-        :plm-auth-state-class="plmAuthStateClass"
-        :plm-auth-expiry-text="plmAuthExpiryText || ''"
-        :plm-auth-hint="plmAuthHint || ''"
-        :deep-link-status="deepLinkStatus || ''"
-        :deep-link-error="deepLinkError || ''"
-        :deep-link-preset="deepLinkPreset"
-        :deep-link-presets="deepLinkPresets"
-        :deep-link-panel-options="deepLinkPanelOptions"
-        :deep-link-scope="deepLinkScope"
-        :custom-preset-name="customPresetName"
-        :editing-preset-label="editingPresetLabel"
-        :import-preset-text="importPresetText"
-        :is-preset-drop-active="isPresetDropActive"
-        @refresh-auth-status="refreshAuthStatus"
-        @copy-deep-link="copyDeepLink()"
-        @reset="resetAll"
-        @update:deep-link-preset="deepLinkPreset = $event"
-        @apply-deep-link-preset="applyDeepLinkPreset"
-        @move-preset="movePreset"
-        @update:deep-link-scope="deepLinkScope = $event"
-        @clear-deep-link-scope="clearDeepLinkScope"
-        @update:custom-preset-name="customPresetName = $event"
-        @save-deep-link-preset="saveDeepLinkPreset"
-        @delete-deep-link-preset="deleteDeepLinkPreset"
-        @update:editing-preset-label="editingPresetLabel = $event"
-        @apply-preset-rename="applyPresetRename"
-        @export-custom-presets="exportCustomPresets"
-        @update:import-preset-text="importPresetText = $event"
-        @import-custom-presets="importCustomPresets"
-        @file-import="handlePresetFileImport"
-        @preset-drag-enter="handlePresetDragEnter"
-        @preset-drag-over="handlePresetDragOver"
-        @preset-drag-leave="handlePresetDragLeave"
-        @preset-drop="handlePresetDrop"
-      />
+    <PlmProductPanel :panel="productPanel" />
 
-      <div class="form-grid">
-        <label for="plm-product-id">
-          产品 ID
-          <input
-            id="plm-product-id"
-            v-model.trim="productId"
-            name="plmProductId"
-            placeholder="输入 PLM 产品 ID"
-          />
-        </label>
-        <label for="plm-item-number">
-          Item Number
-          <input
-            id="plm-item-number"
-            v-model.trim="productItemNumber"
-            name="plmItemNumber"
-            placeholder="输入 item_number（可选）"
-          />
-        </label>
-        <label for="plm-item-type">
-          Item Type
-          <input
-            id="plm-item-type"
-            v-model.trim="itemType"
-            name="plmItemType"
-            placeholder="Part"
-          />
-        </label>
-        <button class="btn primary" :disabled="(!productId && !productItemNumber) || productLoading" @click="loadProduct">
-          {{ productLoading ? '加载中...' : '加载产品' }}
-        </button>
-      </div>
+    <PlmBomPanel :panel="bomPanel" />
 
-      <p v-if="productError" class="status error">{{ productError }}</p>
-      <p v-else-if="productLoading" class="status">产品加载中...</p>
+    <PlmDocumentsPanel :panel="documentsPanel" />
 
-      <div v-if="product" class="detail-grid">
-        <div>
-          <span>ID</span>
-          <strong class="mono">{{ productView.id || '-' }}</strong>
-        </div>
-        <div>
-          <span>名称</span>
-          <strong>{{ productView.name }}</strong>
-        </div>
-        <div>
-          <span>料号</span>
-          <strong>{{ productView.partNumber }}</strong>
-        </div>
-        <div>
-          <span>版本</span>
-          <strong>{{ productView.revision }}</strong>
-        </div>
-        <div>
-          <span>状态</span>
-          <strong>{{ productView.status }}</strong>
-        </div>
-        <div>
-          <span>类型</span>
-          <strong>{{ productView.itemType }}</strong>
-        </div>
-        <div>
-          <span>更新时间</span>
-          <strong>{{ formatTime(productView.updatedAt) }}</strong>
-        </div>
-        <div>
-          <span>创建时间</span>
-          <strong>{{ formatTime(productView.createdAt) }}</strong>
-        </div>
-      </div>
-      <div v-if="product" class="inline-actions">
-        <button class="btn ghost mini" :disabled="!hasProductCopyValue('id')" @click="copyProductField('id')">
-          复制 ID
-        </button>
-        <button class="btn ghost mini" :disabled="!hasProductCopyValue('number')" @click="copyProductField('number')">
-          复制料号
-        </button>
-        <button
-          class="btn ghost mini"
-          :disabled="!hasProductCopyValue('revision')"
-          @click="copyProductField('revision')"
-        >
-          复制版本
-        </button>
-        <button class="btn ghost mini" :disabled="!hasProductCopyValue('type')" @click="copyProductField('type')">
-          复制类型
-        </button>
-        <button class="btn ghost mini" :disabled="!hasProductCopyValue('status')" @click="copyProductField('status')">
-          复制状态
-        </button>
-      </div>
-      <div v-else class="empty">
-        暂无产品详情
-        <span class="empty-hint">（输入产品 ID 或 item number 后加载）</span>
-      </div>
+    <PlmCadPanel :panel="cadPanel" />
 
-      <p v-if="productView.description" class="description">{{ productView.description }}</p>
-      <p v-else-if="product" class="muted">暂无描述</p>
+    <PlmApprovalsPanel :panel="approvalsPanel" />
 
-      <details v-if="product" class="field-map">
-        <summary>字段对照清单</summary>
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>字段</th>
-              <th>Key</th>
-              <th>来源</th>
-              <th>回退</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="field in productFieldCatalog" :key="field.key">
-              <td>{{ field.label }}</td>
-              <td class="mono">{{ field.key }}</td>
-              <td>{{ field.source }}</td>
-              <td class="muted">{{ field.fallback }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </details>
+    <PlmWhereUsedPanel :panel="whereUsedPanel" />
+    <PlmComparePanel :panel="comparePanel" />
 
-      <details v-if="product" class="json-block">
-        <summary>原始数据</summary>
-        <pre>{{ formatJson(product) }}</pre>
-      </details>
-    </section>
-
-    <section class="panel">
-      <PlmBomHeader
-        :bom-view="bomView"
-        :bom-has-tree="bomHasTree"
-        :bom-table-path-ids-count="bomTablePathIdsCount"
-        :bom-tree-path-ids-count="bomTreePathIdsCount"
-        :bom-selected-count="bomSelectedCount"
-        :bom-export-count="bomExportCount"
-        :product-id="productId"
-        :bom-loading="bomLoading"
-        :bom-depth="bomDepth"
-        :bom-effective-at="bomEffectiveAt"
-        :quick-depth-options="BOM_DEPTH_QUICK_OPTIONS"
-        @expand-all="expandAllBom"
-        @collapse-all="collapseAllBom"
-        @expand-to-depth="expandBomToDepth"
-        @copy-table-path-ids="copyBomTablePathIdsBulk"
-        @copy-tree-path-ids="copyBomTreePathIdsBulk"
-        @copy-selected-child-ids="copyBomSelectedChildIds"
-        @clear-selection="clearBomSelection"
-        @export-csv="exportBomCsv"
-        @refresh-bom="loadBom"
-        @update:bom-depth="bomDepth = $event"
-        @set-depth-quick="setBomDepthQuick"
-        @update:bom-effective-at="bomEffectiveAt = $event"
-        @update:bom-view="bomView = $event"
-      />
-      <div class="form-grid compact">
-        <PlmBomFilterShell
-          :bom-filter-field="bomFilterField"
-          :bom-filter-field-options="bomFilterFieldOptions"
-          :bom-filter="bomFilter"
-          :bom-filter-placeholder="bomFilterPlaceholder"
-          :bom-filter-preset-group-filter="bomFilterPresetGroupFilter"
-          :bom-filter-preset-groups="bomFilterPresetGroups"
-          :bom-filter-preset-key="bomFilterPresetKey"
-          :bom-filtered-presets="bomFilteredPresets"
-          :bom-filter-preset-name="bomFilterPresetName"
-          :bom-filter-preset-group="bomFilterPresetGroup"
-          :can-save-bom-filter-preset="canSaveBomFilterPreset"
-          :bom-filter-presets-count="bomFilterPresets.length"
-          :bom-filter-preset-import-text="bomFilterPresetImportText"
-          :bom-filter-preset-import-mode="bomFilterPresetImportMode"
-          :show-bom-preset-manager="showBomPresetManager"
-          :bom-preset-selection="bomPresetSelection"
-          :bom-preset-selection-count="bomPresetSelectionCount"
-          :bom-preset-batch-group="bomPresetBatchGroup"
-          @update:bom-filter-field="bomFilterField = $event"
-          @update:bom-filter="bomFilter = $event"
-          @update:bom-filter-preset-group-filter="bomFilterPresetGroupFilter = $event"
-          @update:bom-filter-preset-key="bomFilterPresetKey = $event"
-          @apply-bom-filter-preset="applyBomFilterPreset"
-          @delete-bom-filter-preset="deleteBomFilterPreset"
-          @share-bom-filter-preset="shareBomFilterPreset"
-          @assign-bom-preset-group="assignBomPresetGroup"
-          @update:bom-filter-preset-name="bomFilterPresetName = $event"
-          @update:bom-filter-preset-group="bomFilterPresetGroup = $event"
-          @save-bom-filter-preset="saveBomFilterPreset"
-          @export-bom-filter-presets="exportBomFilterPresets"
-          @update:bom-filter-preset-import-text="bomFilterPresetImportText = $event"
-          @update:bom-filter-preset-import-mode="bomFilterPresetImportMode = $event"
-          @import-bom-filter-presets="importBomFilterPresets"
-          @file-import="handleBomFilterPresetFileImport"
-          @clear-bom-filter-presets="clearBomFilterPresets"
-          @toggle-bom-preset-manager="showBomPresetManager = !showBomPresetManager"
-          @select-all-bom-presets="selectAllBomPresets"
-          @clear-bom-preset-selection="clearBomPresetSelection"
-          @update:bom-preset-batch-group="bomPresetBatchGroup = $event"
-          @apply-bom-preset-batch-group="applyBomPresetBatchGroup"
-          @delete-bom-preset-selection="deleteBomPresetSelection"
-          @update:bom-preset-selection="bomPresetSelection = $event"
-        />
-      </div>
-      <p v-if="bomError" class="status error">{{ bomError }}</p>
-      <p v-if="bomItems.length" class="status">共 {{ bomItems.length }} 条，展示 {{ bomDisplayCount }} 条</p>
-      <div v-if="!bomItems.length" class="empty">
-        暂无 BOM 数据
-        <span class="empty-hint">（可在 PLM 关联 BOM 行后刷新）</span>
-      </div>
-      <div v-else-if="bomView === 'tree' && !bomTreeVisibleCount" class="empty">
-        暂无匹配项
-        <span class="empty-hint">（可清空过滤条件）</span>
-      </div>
-      <div v-else-if="bomView === 'table' && !bomFilteredItems.length" class="empty">
-        暂无匹配项
-        <span class="empty-hint">（可清空过滤条件）</span>
-      </div>
-      <div v-else-if="bomView === 'tree'" class="bom-tree">
-        <div class="tree-row tree-header bom-tree-header">
-          <div class="tree-cell">组件</div>
-          <div class="tree-cell">名称</div>
-          <div class="tree-cell">数量</div>
-          <div class="tree-cell">单位</div>
-          <div class="tree-cell">Find #</div>
-          <div class="tree-cell">Refdes</div>
-          <div class="tree-cell">BOM 行 ID</div>
-          <div class="tree-cell">操作</div>
-        </div>
-        <div
-          v-for="row in bomTreeVisibleRows"
-          :key="row.key"
-          class="tree-row"
-          :class="{ 'tree-root': row.depth === 0, selected: isBomTreeSelected(row) }"
-          @click="selectBomTreeRow(row)"
-          :data-line-id="row.line ? resolveBomLineId(row.line) : ''"
-        >
-          <div class="tree-cell tree-node" :style="{ paddingLeft: `${row.depth * 16}px` }">
-            <button class="tree-toggle" :disabled="!row.hasChildren" @click.stop="toggleBomNode(row.key)">
-              {{ row.hasChildren ? (isBomCollapsed(row.key) ? '▸' : '▾') : '•' }}
-            </button>
-            <div class="tree-node-meta">
-              <span class="mono">{{ row.label }}</span>
-              <span v-if="row.componentId && row.componentId !== row.label" class="muted mono">
-                {{ row.componentId }}
-              </span>
-            </div>
-          </div>
-          <div class="tree-cell">{{ row.name || '-' }}</div>
-          <div class="tree-cell">{{ row.line?.quantity ?? '-' }}</div>
-          <div class="tree-cell">{{ row.line?.unit ?? row.line?.uom ?? '-' }}</div>
-          <div class="tree-cell">{{ row.line ? formatBomFindNum(row.line) : '-' }}</div>
-          <div class="tree-cell">{{ row.line ? formatBomRefdes(row.line) : '-' }}</div>
-          <div class="tree-cell">
-            <div class="tree-bom-meta">
-              <span class="mono">{{ row.line ? resolveBomLineId(row.line) || '-' : '-' }}</span>
-              <button
-                class="btn ghost mini"
-                :disabled="!formatBomPathIds(row)"
-                :title="formatBomPathIds(row)"
-                @click="copyBomPathIds(row)"
-              >
-                路径 ID
-              </button>
-            </div>
-          </div>
-            <div class="tree-cell">
-              <div class="inline-actions">
-                <button
-                  class="btn ghost mini"
-                  :disabled="!row.line || (!resolveBomChildId(row.line) && !resolveBomChildNumber(row.line)) || productLoading"
-                  @click.stop="row.line && applyProductFromBom(row.line)"
-                >
-                  产品
-                </button>
-                <button
-                  class="btn ghost mini"
-                  :disabled="!row.line || !resolveBomChildId(row.line) || whereUsedLoading"
-                  @click.stop="row.line && applyWhereUsedFromBom(row.line)"
-                >
-                  Where-Used
-                </button>
-                <button
-                  class="btn ghost mini"
-                  :disabled="!row.line || !resolveBomLineId(row.line) || substitutesLoading"
-                  @click.stop="row.line && applySubstitutesFromBom(row.line)"
-                >
-                  替代件
-                </button>
-                <button
-                  class="btn ghost mini"
-                  :disabled="!row.line || (!resolveBomChildId(row.line) && !resolveBomChildNumber(row.line))"
-                  @click.stop="row.line && copyBomChildId(row.line)"
-                >
-                  复制子件
-                </button>
-              </div>
-          </div>
-        </div>
-      </div>
-      <table v-else class="data-table">
-        <thead>
-          <tr>
-            <th>层级</th>
-            <th>组件编码</th>
-            <th>组件名称</th>
-            <th>数量</th>
-            <th>单位</th>
-            <th>Find #</th>
-            <th>Refdes</th>
-            <th>路径 ID</th>
-            <th>BOM 行 ID</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="item in bomFilteredItems"
-            :key="item.id"
-            :class="{ 'row-selected': isBomItemSelected(item) }"
-            @click="selectBomTableRow(item)"
-          >
-            <td>{{ item.level }}</td>
-            <td>
-              <div>{{ item.component_code || item.component_id }}</div>
-              <div v-if="item.component_id" class="muted mono">{{ item.component_id }}</div>
-            </td>
-            <td>{{ item.component_name }}</td>
-            <td>{{ item.quantity }}</td>
-            <td>{{ item.unit }}</td>
-            <td>{{ formatBomFindNum(item) }}</td>
-            <td>{{ formatBomRefdes(item) }}</td>
-            <td>
-              <div class="tree-bom-meta">
-                <span class="mono">{{ formatBomTablePathIds(item) || '-' }}</span>
-                <button
-                  class="btn ghost mini"
-                  :disabled="!formatBomTablePathIds(item)"
-                  :title="formatBomTablePathIds(item)"
-                  @click="copyBomTablePathIds(item)"
-                >
-                  路径 ID
-                </button>
-              </div>
-            </td>
-            <td :data-bom-line-id="item.id || ''">
-              <div class="mono">{{ item.id || '-' }}</div>
-              <div v-if="item.parent_item_id" class="muted">父: {{ item.parent_item_id }}</div>
-            </td>
-            <td>
-              <div class="inline-actions">
-                <button
-                  class="btn ghost mini"
-                  :disabled="(!resolveBomChildId(item) && !resolveBomChildNumber(item)) || productLoading"
-                  @click="applyProductFromBom(item)"
-                >
-                  切换产品
-                </button>
-              <button
-                class="btn ghost mini"
-                :disabled="!resolveBomChildId(item) || whereUsedLoading"
-                @click.stop="applyWhereUsedFromBom(item)"
-              >
-                Where-Used
-              </button>
-              <button
-                class="btn ghost mini"
-                :disabled="!resolveBomLineId(item) || substitutesLoading"
-                @click.stop="applySubstitutesFromBom(item)"
-              >
-                替代件
-              </button>
-              <button
-                class="btn ghost mini"
-                :disabled="!resolveBomChildId(item) && !resolveBomChildNumber(item)"
-                @click.stop="copyBomChildId(item)"
-              >
-                复制子件
-              </button>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </section>
-
-    <section class="panel">
-      <div class="panel-header">
-        <h2>关联文档</h2>
-        <div class="panel-actions">
-          <button class="btn ghost" @click="copyDeepLink('documents')">复制深链接</button>
-          <button class="btn ghost" :disabled="!documentsFiltered.length" @click="exportDocumentsCsv">
-            导出 CSV
-          </button>
-          <button class="btn" :disabled="!productId || documentsLoading" @click="loadDocuments">
-            {{ documentsLoading ? '加载中...' : '刷新文档' }}
-          </button>
-        </div>
-      </div>
-      <div class="form-grid compact">
-        <label for="plm-document-role">
-          文档角色
-          <input
-            id="plm-document-role"
-            v-model.trim="documentRole"
-            name="plmDocumentRole"
-            placeholder="primary / secondary"
-          />
-        </label>
-        <label for="plm-document-filter">
-          过滤
-          <input
-            id="plm-document-filter"
-            v-model.trim="documentFilter"
-            name="plmDocumentFilter"
-            placeholder="名称/类型/作者/MIME"
-          />
-        </label>
-        <label for="plm-document-sort">
-          排序
-          <select id="plm-document-sort" v-model="documentSortKey" name="plmDocumentSort">
-            <option value="updated">更新时间</option>
-            <option value="created">创建时间</option>
-            <option value="name">名称</option>
-            <option value="type">类型</option>
-            <option value="revision">版本</option>
-            <option value="role">角色</option>
-            <option value="mime">MIME</option>
-            <option value="size">大小</option>
-          </select>
-        </label>
-        <label for="plm-document-sort-dir">
-          顺序
-          <select id="plm-document-sort-dir" v-model="documentSortDir" name="plmDocumentSortDir">
-            <option value="desc">降序</option>
-            <option value="asc">升序</option>
-          </select>
-        </label>
-      </div>
-      <div class="toggle-grid">
-        <span class="toggle-label">显示列</span>
-        <label v-for="col in documentColumnOptions" :key="col.key" class="checkbox-field" :for="`plm-document-column-${col.key}`">
-          <input
-            :id="`plm-document-column-${col.key}`"
-            :name="`plmDocumentColumn-${col.key}`"
-            type="checkbox"
-            v-model="documentColumns[col.key]"
-          />
-          <span>{{ col.label }}</span>
-        </label>
-      </div>
-      <p v-if="documentsError" class="status error">{{ documentsError }}</p>
-      <div v-if="!documents.length" class="empty">
-        暂无文档
-        <span class="empty-hint">（可先在 PLM 关联文件或设置文档角色过滤）</span>
-      </div>
-      <p v-else class="status">共 {{ documents.length }} 条，展示 {{ documentsSorted.length }} 条</p>
-      <div v-if="documents.length && !documentsSorted.length" class="empty">
-        暂无匹配项
-        <span class="empty-hint">（可清空过滤条件）</span>
-      </div>
-      <table v-else class="data-table">
-        <thead>
-          <tr>
-            <th>名称</th>
-            <th v-if="documentColumns.fileId">File ID</th>
-            <th v-if="documentColumns.type">类型</th>
-            <th v-if="documentColumns.revision">版本</th>
-            <th v-if="documentColumns.role">角色</th>
-            <th v-if="documentColumns.author">作者</th>
-            <th v-if="documentColumns.sourceSystem">来源系统</th>
-            <th v-if="documentColumns.sourceVersion">来源版本</th>
-            <th v-if="documentColumns.mime">MIME</th>
-            <th v-if="documentColumns.size">大小</th>
-            <th v-if="documentColumns.created">创建时间</th>
-            <th v-if="documentColumns.updated">更新时间</th>
-            <th v-if="documentColumns.preview">预览</th>
-            <th v-if="documentColumns.download">下载</th>
-            <th v-if="documentColumns.cad">CAD</th>
-            <th v-if="documentColumns.actions">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="doc in documentsSorted" :key="doc.id">
-            <td>{{ getDocumentName(doc) }}</td>
-            <td v-if="documentColumns.fileId" class="mono">{{ getDocumentId(doc) }}</td>
-            <td v-if="documentColumns.type">{{ getDocumentType(doc) }}</td>
-            <td v-if="documentColumns.revision">{{ getDocumentRevision(doc) }}</td>
-            <td v-if="documentColumns.role">
-              <span class="tag status-neutral">{{ getDocumentRole(doc) }}</span>
-            </td>
-            <td v-if="documentColumns.author">{{ getDocumentAuthor(doc) }}</td>
-            <td v-if="documentColumns.sourceSystem">{{ getDocumentSourceSystem(doc) }}</td>
-            <td v-if="documentColumns.sourceVersion">{{ getDocumentSourceVersion(doc) }}</td>
-            <td v-if="documentColumns.mime">{{ getDocumentMime(doc) }}</td>
-            <td v-if="documentColumns.size">{{ formatBytes(getDocumentSize(doc)) }}</td>
-            <td v-if="documentColumns.created">{{ formatTime(getDocumentCreatedAt(doc)) }}</td>
-            <td v-if="documentColumns.updated">{{ formatTime(getDocumentUpdatedAt(doc)) }}</td>
-            <td v-if="documentColumns.preview">
-              <a
-                v-if="getDocumentPreviewUrl(doc)"
-                :href="getDocumentPreviewUrl(doc)"
-                target="_blank"
-                rel="noopener"
-              >查看</a>
-              <span v-else>-</span>
-            </td>
-            <td v-if="documentColumns.download">
-              <a
-                v-if="getDocumentDownloadUrl(doc)"
-                :href="getDocumentDownloadUrl(doc)"
-                target="_blank"
-                rel="noopener"
-              >下载</a>
-              <span v-else>-</span>
-            </td>
-            <td v-if="documentColumns.cad">
-              <div class="inline-actions">
-                <button class="btn ghost mini" @click="selectCadFile(doc, 'primary')">主</button>
-                <button class="btn ghost mini" @click="selectCadFile(doc, 'other')">对比</button>
-              </div>
-            </td>
-            <td v-if="documentColumns.actions">
-              <div class="inline-actions">
-                <button class="btn ghost mini" @click="copyDocumentId(doc)">复制 ID</button>
-                <button
-                  class="btn ghost mini"
-                  :disabled="!getDocumentDownloadUrl(doc)"
-                  @click="copyDocumentUrl(doc, 'download')"
-                >
-                  复制下载
-                </button>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-      <details class="field-map">
-        <summary>字段对照清单</summary>
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>字段</th>
-              <th>Key</th>
-              <th>来源</th>
-              <th>回退</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="field in documentFieldCatalog" :key="field.key">
-              <td>{{ field.label }}</td>
-              <td class="mono">{{ field.key }}</td>
-              <td>{{ field.source }}</td>
-              <td class="muted">{{ field.fallback }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </details>
-    </section>
-
-    <section class="panel">
-      <div class="panel-header">
-        <h2>CAD 元数据</h2>
-        <div class="panel-actions">
-          <button class="btn ghost" @click="copyDeepLink('cad')">复制深链接</button>
-          <button class="btn" :disabled="!cadFileId || cadLoading" @click="loadCadMetadata">
-            {{ cadLoading ? '加载中...' : '刷新 CAD' }}
-          </button>
-        </div>
-      </div>
-      <div class="form-grid compact">
-        <label for="plm-cad-file-id">
-          CAD File ID
-          <input
-            id="plm-cad-file-id"
-            v-model.trim="cadFileId"
-            name="plmCadFileId"
-            placeholder="从文档选择或输入 file_id"
-          />
-        </label>
-        <label for="plm-cad-other-file-id">
-          对比 File ID
-          <input
-            id="plm-cad-other-file-id"
-            v-model.trim="cadOtherFileId"
-            name="plmCadOtherFileId"
-            placeholder="可选，用于差异对比"
-          />
-        </label>
-      </div>
-      <p v-if="cadStatus" class="status">{{ cadStatus }}</p>
-      <p v-if="cadError" class="status error">{{ cadError }}</p>
-      <p v-if="cadActionStatus" class="status">{{ cadActionStatus }}</p>
-      <p v-if="cadActionError" class="status error">{{ cadActionError }}</p>
-      <div class="cad-grid">
-        <div class="cad-card">
-          <div class="cad-card-header">
-            <h3>属性</h3>
-            <button class="btn ghost mini" :disabled="!cadFileId || cadUpdating" @click="updateCadProperties">
-              {{ cadUpdating ? '处理中...' : '更新' }}
-            </button>
-          </div>
-          <textarea
-            v-model="cadPropertiesDraft"
-            class="cad-textarea"
-            rows="6"
-            placeholder='{"properties": {"material": "AL-6061"}, "source": "metasheet"}'
-          ></textarea>
-          <details class="json-block">
-            <summary>原始数据</summary>
-            <pre>{{ formatJson(cadProperties) }}</pre>
-          </details>
-        </div>
-        <div class="cad-card">
-          <div class="cad-card-header">
-            <h3>视图状态</h3>
-            <button class="btn ghost mini" :disabled="!cadFileId || cadUpdating" @click="updateCadViewState">
-              {{ cadUpdating ? '处理中...' : '更新' }}
-            </button>
-          </div>
-          <textarea
-            v-model="cadViewStateDraft"
-            class="cad-textarea"
-            rows="6"
-            placeholder='{"hidden_entity_ids": [12, 15], "notes": [{"entity_id": 12, "note": "check hole"}]}'
-          ></textarea>
-          <details class="json-block">
-            <summary>原始数据</summary>
-            <pre>{{ formatJson(cadViewState) }}</pre>
-          </details>
-        </div>
-        <div class="cad-card">
-          <div class="cad-card-header">
-            <h3>评审</h3>
-            <button class="btn ghost mini" :disabled="!cadFileId || cadUpdating" @click="updateCadReview">
-              {{ cadUpdating ? '处理中...' : '提交' }}
-            </button>
-          </div>
-          <div class="form-grid compact cad-review-form">
-            <label for="plm-cad-review-state">
-              状态
-              <input
-                id="plm-cad-review-state"
-                v-model.trim="cadReviewState"
-                name="plmCadReviewState"
-                placeholder="approved / rejected"
-              />
-            </label>
-            <label for="plm-cad-review-note">
-              备注
-              <input
-                id="plm-cad-review-note"
-                v-model.trim="cadReviewNote"
-                name="plmCadReviewNote"
-                placeholder="可选"
-              />
-            </label>
-          </div>
-          <details class="json-block">
-            <summary>原始数据</summary>
-            <pre>{{ formatJson(cadReview) }}</pre>
-          </details>
-        </div>
-        <div class="cad-card cad-span">
-          <div class="cad-card-header">
-            <h3>变更历史</h3>
-          </div>
-          <div v-if="!cadHistoryEntries.length" class="empty">暂无历史</div>
-          <table v-else class="data-table">
-            <thead>
-              <tr>
-                <th>动作</th>
-                <th>时间</th>
-                <th>用户</th>
-                <th>Payload</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="entry in cadHistoryEntries" :key="entry.id">
-                <td>{{ entry.action }}</td>
-                <td>{{ formatTime(entry.created_at) }}</td>
-                <td>{{ entry.user_id ?? '-' }}</td>
-                <td>
-                  <details class="inline-details">
-                    <summary>查看</summary>
-                    <pre class="inline-pre">{{ formatJson(entry.payload) }}</pre>
-                  </details>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-          <details class="json-block">
-            <summary>原始数据</summary>
-            <pre>{{ formatJson(cadHistory) }}</pre>
-          </details>
-        </div>
-        <div class="cad-card">
-          <div class="cad-card-header">
-            <h3>差异</h3>
-            <button
-              class="btn ghost mini"
-              :disabled="!cadFileId || !cadOtherFileId || cadDiffLoading"
-              @click="loadCadDiff"
-            >
-              {{ cadDiffLoading ? '对比中...' : '加载' }}
-            </button>
-          </div>
-          <div v-if="!cadDiff" class="empty">暂无差异数据</div>
-          <details v-else class="json-block">
-            <summary>原始数据</summary>
-            <pre>{{ formatJson(cadDiff) }}</pre>
-          </details>
-        </div>
-        <div class="cad-card">
-          <div class="cad-card-header">
-            <h3>网格统计</h3>
-          </div>
-          <div v-if="!cadMeshStats" class="empty">暂无网格统计</div>
-          <details v-else class="json-block">
-            <summary>原始数据</summary>
-            <pre>{{ formatJson(cadMeshStats) }}</pre>
-          </details>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-header">
-        <h2>审批</h2>
-        <div class="panel-actions">
-          <button class="btn ghost" @click="copyDeepLink('approvals')">复制深链接</button>
-          <button class="btn ghost" :disabled="!approvalsFiltered.length" @click="exportApprovalsCsv">
-            导出 CSV
-          </button>
-          <button class="btn" :disabled="approvalsLoading" @click="loadApprovals">
-            {{ approvalsLoading ? '加载中...' : '刷新审批' }}
-          </button>
-        </div>
-      </div>
-      <div class="form-grid compact">
-        <label for="plm-approvals-status">
-          状态
-          <select id="plm-approvals-status" v-model="approvalsStatus" name="plmApprovalsStatus">
-            <option value="all">全部</option>
-            <option value="pending">待处理</option>
-            <option value="approved">已通过</option>
-            <option value="rejected">已拒绝</option>
-          </select>
-        </label>
-        <label for="plm-approvals-filter">
-          过滤
-          <input
-            id="plm-approvals-filter"
-            v-model.trim="approvalsFilter"
-            name="plmApprovalsFilter"
-            placeholder="标题/发起人/产品"
-          />
-        </label>
-        <label for="plm-approvals-comment">
-          审批备注
-          <input
-            id="plm-approvals-comment"
-            v-model.trim="approvalComment"
-            name="plmApprovalsComment"
-            placeholder="拒绝必填，可选用于通过"
-          />
-        </label>
-        <label for="plm-approvals-sort">
-          排序
-          <select id="plm-approvals-sort" v-model="approvalSortKey" name="plmApprovalsSort">
-            <option value="created">创建时间</option>
-            <option value="title">标题</option>
-            <option value="status">状态</option>
-            <option value="requester">发起人</option>
-            <option value="product">产品</option>
-          </select>
-        </label>
-        <label for="plm-approvals-sort-dir">
-          顺序
-          <select id="plm-approvals-sort-dir" v-model="approvalSortDir" name="plmApprovalsSortDir">
-            <option value="desc">降序</option>
-            <option value="asc">升序</option>
-          </select>
-        </label>
-      </div>
-      <div class="toggle-grid">
-        <span class="toggle-label">显示列</span>
-        <label v-for="col in approvalColumnOptions" :key="col.key" class="checkbox-field" :for="`plm-approval-column-${col.key}`">
-          <input
-            :id="`plm-approval-column-${col.key}`"
-            :name="`plmApprovalColumn-${col.key}`"
-            type="checkbox"
-            v-model="approvalColumns[col.key]"
-          />
-          <span>{{ col.label }}</span>
-        </label>
-      </div>
-      <p v-if="approvalActionError" class="status error">{{ approvalActionError }}</p>
-      <p v-else-if="approvalActionStatus" class="status">{{ approvalActionStatus }}</p>
-      <p v-if="approvalsError" class="status error">{{ approvalsError }}</p>
-      <div v-if="!approvals.length" class="empty">
-        暂无审批数据
-        <span class="empty-hint">（可调整状态筛选或创建 ECO 流程）</span>
-      </div>
-      <p v-else class="status">共 {{ approvals.length }} 条，展示 {{ approvalsSorted.length }} 条</p>
-      <div v-if="approvals.length && !approvalsSorted.length" class="empty">
-        暂无匹配项
-        <span class="empty-hint">（可清空过滤条件）</span>
-      </div>
-      <table v-else class="data-table">
-        <thead>
-          <tr>
-            <th v-if="approvalColumns.id">审批 ID</th>
-            <th>标题</th>
-            <th v-if="approvalColumns.status">状态</th>
-            <th v-if="approvalColumns.type">类型</th>
-            <th v-if="approvalColumns.requester">发起人</th>
-            <th v-if="approvalColumns.requesterId">发起人 ID</th>
-            <th v-if="approvalColumns.created">创建时间</th>
-            <th v-if="approvalColumns.product">产品</th>
-            <th v-if="approvalColumns.productId">产品 ID</th>
-            <th v-if="approvalColumns.actions">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="approval in approvalsSorted" :key="approval.id">
-            <td v-if="approvalColumns.id" class="mono">{{ getApprovalId(approval) }}</td>
-            <td>{{ getApprovalTitle(approval) }}</td>
-            <td v-if="approvalColumns.status">
-              <span class="tag" :class="approvalStatusClass(getApprovalStatus(approval))">
-                {{ getApprovalStatus(approval) }}
-              </span>
-            </td>
-            <td v-if="approvalColumns.type">{{ getApprovalType(approval) }}</td>
-            <td v-if="approvalColumns.requester">{{ getApprovalRequester(approval) }}</td>
-            <td v-if="approvalColumns.requesterId" class="mono">{{ getApprovalRequesterId(approval) }}</td>
-            <td v-if="approvalColumns.created">{{ formatTime(getApprovalCreatedAt(approval)) }}</td>
-            <td v-if="approvalColumns.product">
-              <div>{{ getApprovalProductNumber(approval) }}</div>
-              <div class="muted">{{ getApprovalProductName(approval) }}</div>
-            </td>
-            <td v-if="approvalColumns.productId" class="mono">{{ getApprovalProductId(approval) }}</td>
-            <td v-if="approvalColumns.actions">
-              <div class="inline-actions">
-                <button class="btn ghost mini" @click="applyProductFromApproval(approval)">切换产品</button>
-                <button class="btn ghost mini" @click="copyApprovalId(approval)">复制 ID</button>
-                <button class="btn ghost mini" @click="loadApprovalHistory(approval)">记录</button>
-                <button
-                  v-if="isApprovalPending(approval)"
-                  class="btn ghost mini"
-                  :disabled="approvalActingId === getApprovalId(approval) || getApprovalId(approval) === '-'"
-                  @click="approveApproval(approval)"
-                >
-                  通过
-                </button>
-                <button
-                  v-if="isApprovalPending(approval)"
-                  class="btn ghost mini"
-                  :disabled="approvalActingId === getApprovalId(approval) || getApprovalId(approval) === '-'"
-                  @click="rejectApproval(approval)"
-                >
-                  拒绝
-                </button>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-      <div class="compare-detail" data-approval-history="true">
-        <div class="compare-detail-header">
-          <h3>审批记录</h3>
-          <div class="compare-detail-actions">
-            <span v-if="approvalHistoryLabel" class="muted mono">{{ approvalHistoryLabel }}</span>
-            <button
-              class="btn ghost mini"
-              :disabled="!approvalHistoryFor || approvalHistoryLoading"
-              @click="loadApprovalHistory()"
-            >
-              刷新记录
-            </button>
-            <button class="btn ghost mini" :disabled="!approvalHistoryFor" @click="clearApprovalHistory">
-              清空
-            </button>
-          </div>
-        </div>
-        <p v-if="approvalHistoryError" class="status error">{{ approvalHistoryError }}</p>
-        <div v-if="!approvalHistoryFor" class="empty">选择审批记录查看详情</div>
-        <div v-else-if="approvalHistoryLoading" class="status">审批记录加载中...</div>
-        <div v-else-if="!approvalHistoryRows.length" class="empty">暂无审批记录</div>
-        <table v-else class="data-table compact">
-          <thead>
-            <tr>
-              <th>状态</th>
-              <th>阶段</th>
-              <th>审批类型</th>
-              <th>角色</th>
-              <th>用户</th>
-              <th>备注</th>
-              <th>批准时间</th>
-              <th>创建时间</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="entry in approvalHistoryRows" :key="entry.id">
-              <td>
-                <span class="tag" :class="approvalStatusClass(getApprovalHistoryStatus(entry))">
-                  {{ getApprovalHistoryStatus(entry) }}
-                </span>
-              </td>
-              <td class="mono">{{ getApprovalHistoryStage(entry) }}</td>
-              <td>{{ getApprovalHistoryType(entry) }}</td>
-              <td>{{ getApprovalHistoryRole(entry) }}</td>
-              <td class="mono">{{ getApprovalHistoryUser(entry) }}</td>
-              <td>{{ getApprovalHistoryComment(entry) }}</td>
-              <td>{{ formatTime(getApprovalHistoryApprovedAt(entry)) }}</td>
-              <td>{{ formatTime(getApprovalHistoryCreatedAt(entry)) }}</td>
-            </tr>
-          </tbody>
-        </table>
-        <details v-if="approvalHistoryFor" class="json-block">
-          <summary>原始数据</summary>
-          <pre>{{ formatJson(approvalHistory) }}</pre>
-        </details>
-      </div>
-      <details class="field-map">
-        <summary>字段对照清单</summary>
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>字段</th>
-              <th>Key</th>
-              <th>来源</th>
-              <th>回退</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="field in approvalFieldCatalog" :key="field.key">
-              <td>{{ field.label }}</td>
-              <td class="mono">{{ field.key }}</td>
-              <td>{{ field.source }}</td>
-              <td class="muted">{{ field.fallback }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </details>
-    </section>
-
-    <section class="panel">
-      <div class="panel-header">
-        <h2>Where-Used</h2>
-        <div class="panel-actions">
-          <button class="btn ghost" @click="copyDeepLink('where-used')">复制深链接</button>
-          <button
-            class="btn ghost"
-            :disabled="whereUsedView !== 'tree' || !whereUsedHasTree"
-            @click="expandAllWhereUsed"
-          >
-            展开全部
-          </button>
-          <button
-            class="btn ghost"
-            :disabled="whereUsedView !== 'tree' || !whereUsedHasTree"
-            @click="collapseAllWhereUsed"
-          >
-            折叠全部
-          </button>
-          <button
-            class="btn ghost"
-            :disabled="whereUsedView !== 'table' || !whereUsedPathIdsCount"
-            @click="copyWhereUsedTablePathIdsBulk"
-          >
-            复制所有路径 ID
-          </button>
-          <button
-            class="btn ghost"
-            :disabled="whereUsedView !== 'tree' || !whereUsedTreePathIdsCount"
-            @click="copyWhereUsedTreePathIdsBulk"
-          >
-            复制树形路径 ID
-          </button>
-          <button class="btn ghost" :disabled="!whereUsedSelectedCount" @click="copyWhereUsedSelectedParents">
-            复制选中父件
-          </button>
-          <button class="btn ghost" :disabled="!whereUsedSelectedCount" @click="clearWhereUsedSelection">
-            清空选择
-          </button>
-          <span v-if="whereUsedSelectedCount" class="muted">已选 {{ whereUsedSelectedCount }}</span>
-          <button class="btn ghost" :disabled="!whereUsedFilteredRows.length" @click="exportWhereUsedCsv">
-            导出 CSV
-          </button>
-          <button class="btn" :disabled="!whereUsedItemId || whereUsedLoading" @click="loadWhereUsed">
-            {{ whereUsedLoading ? '加载中...' : '查询' }}
-          </button>
-        </div>
-      </div>
-      <div class="form-grid compact">
-        <label for="plm-where-used-item-id">
-          子件 ID
-          <input
-            id="plm-where-used-item-id"
-            v-model.trim="whereUsedItemId"
-            name="plmWhereUsedItemId"
-            placeholder="输入子件 ID"
-          />
-        </label>
-        <label for="plm-where-used-quick-pick">
-          快速选择
-          <select
-            id="plm-where-used-quick-pick"
-            v-model="whereUsedQuickPick"
-            name="plmWhereUsedQuickPick"
-            :disabled="!whereUsedQuickOptions.length"
-            @change="applyWhereUsedQuickPick"
-          >
-            <option value="">从 BOM / 搜索结果选择</option>
-            <option v-for="option in whereUsedQuickOptions" :key="option.key" :value="option.value">
-              {{ option.label }}
-            </option>
-          </select>
-        </label>
-        <label for="plm-where-used-recursive">
-          递归
-          <select
-            id="plm-where-used-recursive"
-            v-model="whereUsedRecursive"
-            name="plmWhereUsedRecursive"
-          >
-            <option :value="true">是</option>
-            <option :value="false">否</option>
-          </select>
-        </label>
-        <label for="plm-where-used-max-levels">
-          最大层级
-          <input
-            id="plm-where-used-max-levels"
-            v-model.number="whereUsedMaxLevels"
-            name="plmWhereUsedMaxLevels"
-            type="number"
-            min="1"
-            max="20"
-          />
-        </label>
-        <label for="plm-where-used-view">
-          视图
-          <select id="plm-where-used-view" v-model="whereUsedView" name="plmWhereUsedView">
-            <option value="table">表格</option>
-            <option value="tree">树形</option>
-          </select>
-        </label>
-        <label for="plm-where-used-filter">
-          过滤
-          <div class="field-inline">
-            <select id="plm-where-used-filter-field" v-model="whereUsedFilterField" name="plmWhereUsedFilterField">
-              <option v-for="option in whereUsedFilterFieldOptions" :key="option.value" :value="option.value">
-                {{ option.label }}
-              </option>
-            </select>
-            <input
-              id="plm-where-used-filter"
-              v-model.trim="whereUsedFilter"
-              name="plmWhereUsedFilter"
-              :placeholder="whereUsedFilterPlaceholder"
-            />
-          </div>
-        </label>
-        <label for="plm-where-used-filter-preset">
-          预设
-          <div class="field-inline">
-            <select
-              id="plm-where-used-filter-preset-group-filter"
-              v-model="whereUsedFilterPresetGroupFilter"
-              name="plmWhereUsedFilterPresetGroupFilter"
-            >
-              <option value="all">全部分组</option>
-              <option value="ungrouped">未分组</option>
-              <option v-for="group in whereUsedFilterPresetGroups" :key="group" :value="group">
-                {{ group }}
-              </option>
-            </select>
-            <select
-              id="plm-where-used-filter-preset"
-              v-model="whereUsedFilterPresetKey"
-              name="plmWhereUsedFilterPreset"
-            >
-              <option value="">选择预设</option>
-              <option v-for="preset in whereUsedFilteredPresets" :key="preset.key" :value="preset.key">
-                {{ preset.label }}{{ preset.group ? ` (${preset.group})` : '' }}
-              </option>
-            </select>
-            <button
-              class="btn ghost mini"
-              :disabled="!whereUsedFilterPresetKey"
-              @click="applyWhereUsedFilterPreset"
-            >
-              应用
-            </button>
-            <button
-              class="btn ghost mini"
-              :disabled="!whereUsedFilterPresetKey"
-              @click="deleteWhereUsedFilterPreset"
-            >
-              删除
-            </button>
-            <button
-              class="btn ghost mini"
-              :disabled="!whereUsedFilterPresetKey"
-              @click="shareWhereUsedFilterPreset"
-            >
-              分享
-            </button>
-            <button
-              class="btn ghost mini"
-              :disabled="!whereUsedFilterPresetKey"
-              @click="assignWhereUsedPresetGroup"
-            >
-              设为分组
-            </button>
-          </div>
-          <div class="field-inline">
-            <input
-              id="plm-where-used-filter-preset-name"
-              v-model.trim="whereUsedFilterPresetName"
-              name="plmWhereUsedFilterPresetName"
-              placeholder="新预设名称"
-            />
-            <input
-              id="plm-where-used-filter-preset-group"
-              v-model.trim="whereUsedFilterPresetGroup"
-              name="plmWhereUsedFilterPresetGroup"
-              class="deep-link-input"
-              placeholder="分组（可选）"
-            />
-            <button
-              class="btn ghost mini"
-              :disabled="!canSaveWhereUsedFilterPreset"
-              @click="saveWhereUsedFilterPreset"
-            >
-              保存
-            </button>
-          </div>
-          <div class="field-inline field-actions">
-            <button
-              class="btn ghost mini"
-              :disabled="!whereUsedFilterPresets.length"
-              @click="exportWhereUsedFilterPresets"
-            >
-              导出
-            </button>
-            <input
-              id="plm-where-used-filter-preset-import"
-              v-model.trim="whereUsedFilterPresetImportText"
-              name="plmWhereUsedFilterPresetImport"
-              class="deep-link-input"
-              placeholder="粘贴 JSON"
-            />
-            <select
-              id="plm-where-used-filter-preset-import-mode"
-              v-model="whereUsedFilterPresetImportMode"
-              name="plmWhereUsedFilterPresetImportMode"
-              class="deep-link-select"
-            >
-              <option value="merge">合并</option>
-              <option value="replace">覆盖</option>
-            </select>
-            <button
-              class="btn ghost mini"
-              :disabled="!whereUsedFilterPresetImportText"
-              @click="importWhereUsedFilterPresets"
-            >
-              导入
-            </button>
-            <button class="btn ghost mini" @click="triggerWhereUsedFilterPresetFileImport">文件</button>
-            <input
-              ref="whereUsedFilterPresetFileInput"
-              id="plm-where-used-filter-preset-file"
-              name="plmWhereUsedFilterPresetFile"
-              class="deep-link-file"
-              type="file"
-              accept=".json,application/json"
-              @change="handleWhereUsedFilterPresetFileImport"
-            />
-            <button
-              id="plm-where-used-filter-preset-clear"
-              class="btn ghost mini"
-              :disabled="!whereUsedFilterPresets.length"
-              @click="clearWhereUsedFilterPresets"
-            >
-              清空
-            </button>
-            <button class="btn ghost mini" @click="showWhereUsedPresetManager = !showWhereUsedPresetManager">
-              {{ showWhereUsedPresetManager ? '收起' : '管理' }}
-            </button>
-          </div>
-          <div v-if="showWhereUsedPresetManager" class="preset-manager">
-            <div class="field-inline field-actions">
-              <button
-                class="btn ghost mini"
-                :disabled="!whereUsedFilteredPresets.length"
-                @click="selectAllWhereUsedPresets"
-              >
-                全选
-              </button>
-              <button
-                class="btn ghost mini"
-                :disabled="!whereUsedPresetSelectionCount"
-                @click="clearWhereUsedPresetSelection"
-              >
-                清空选择
-              </button>
-              <span class="muted">已选 {{ whereUsedPresetSelectionCount }}/{{ whereUsedFilteredPresets.length }}</span>
-            </div>
-            <div class="field-inline field-actions">
-              <input
-                id="plm-where-used-filter-preset-batch-group"
-                v-model.trim="whereUsedPresetBatchGroup"
-                name="plmWhereUsedFilterPresetBatchGroup"
-                class="deep-link-input"
-                placeholder="批量分组（留空清除）"
-              />
-              <button
-                class="btn ghost mini"
-                :disabled="!whereUsedPresetSelectionCount"
-                @click="applyWhereUsedPresetBatchGroup"
-              >
-                应用分组
-              </button>
-              <button
-                class="btn ghost mini danger"
-                :disabled="!whereUsedPresetSelectionCount"
-                @click="deleteWhereUsedPresetSelection"
-              >
-                批量删除
-              </button>
-            </div>
-            <div class="preset-list">
-              <label v-for="preset in whereUsedFilteredPresets" :key="preset.key" class="preset-item">
-                <input type="checkbox" :value="preset.key" v-model="whereUsedPresetSelection" />
-                <span>{{ preset.label }}{{ preset.group ? ` (${preset.group})` : '' }}</span>
-              </label>
-            </div>
-          </div>
-        </label>
-      </div>
-      <p v-if="!whereUsedItemId" class="hint">
-        提示：可从 BOM / 对比 / 替代件面板点击 Where-Used 自动填入。
-      </p>
-      <p v-if="whereUsedError" class="status error">{{ whereUsedError }}</p>
-      <div v-if="!whereUsed" class="empty">
-        暂无 where-used 数据
-        <span class="empty-hint">（输入子件 ID 后查询）</span>
-      </div>
-      <div v-else>
-        <p class="status">共 {{ whereUsed.count || 0 }} 条，展示 {{ whereUsedFilteredRows.length }} 条</p>
-        <div v-if="!whereUsedFilteredRows.length" class="empty">
-          暂无匹配项
-          <span class="empty-hint">（可清空过滤条件）</span>
-        </div>
-        <div v-else-if="whereUsedView === 'tree'" class="where-used-tree">
-          <div class="tree-row tree-header">
-            <div class="tree-cell">节点</div>
-            <div class="tree-cell">名称</div>
-            <div class="tree-cell">数量</div>
-            <div class="tree-cell">单位</div>
-            <div class="tree-cell">Find #</div>
-            <div class="tree-cell">Refdes</div>
-            <div class="tree-cell">关系 ID</div>
-            <div class="tree-cell">操作</div>
-          </div>
-          <div
-            v-for="row in whereUsedTreeVisibleRows"
-            :key="row.key"
-            class="tree-row"
-            :class="{ 'tree-root': row.depth === 0, selected: isWhereUsedTreeSelected(row) }"
-            @click="selectWhereUsedTreeRow(row)"
-            :data-entry-count="row.entryCount"
-          >
-            <div class="tree-cell tree-node" :style="{ paddingLeft: `${row.depth * 16}px` }">
-              <button
-                class="tree-toggle"
-                :disabled="!row.hasChildren"
-                @click.stop="toggleWhereUsedNode(row.key)"
-              >
-                {{ row.hasChildren ? (isWhereUsedCollapsed(row.key) ? '▸' : '▾') : '•' }}
-              </button>
-              <span class="mono">{{ row.label || row.id }}</span>
-              <span v-if="row.entryCount > 1" class="tree-multi">×{{ row.entryCount }}</span>
-            </div>
-            <div class="tree-cell">{{ row.name || '-' }}</div>
-            <div class="tree-cell">{{ getWhereUsedTreeLineValue(row, 'quantity') }}</div>
-            <div class="tree-cell">{{ getWhereUsedTreeLineValue(row, 'uom') }}</div>
-            <div class="tree-cell">{{ getWhereUsedTreeLineValue(row, 'find_num') }}</div>
-            <div class="tree-cell">{{ getWhereUsedTreeRefdes(row) }}</div>
-            <div class="tree-cell">
-              <div class="tree-bom-meta">
-                <span class="mono">{{ getWhereUsedTreeRelationship(row) }}</span>
-                <button
-                  class="btn ghost mini"
-                  :disabled="!formatWhereUsedPathIds(row)"
-                  :title="formatWhereUsedPathIds(row)"
-                  @click="copyWhereUsedPathIds(row)"
-                >
-                  路径 ID
-                </button>
-              </div>
-            </div>
-            <div class="tree-cell">
-              <button
-                class="btn ghost mini"
-                :disabled="!row.id || productLoading"
-                @click.stop="applyProductFromWhereUsedRow(row)"
-              >
-                产品
-              </button>
-            </div>
-          </div>
-        </div>
-        <table v-else class="data-table">
-          <thead>
-            <tr>
-              <th>层级</th>
-              <th>父件编号</th>
-              <th>父件名称</th>
-              <th>路径</th>
-              <th>路径 ID</th>
-              <th>数量</th>
-              <th>单位</th>
-              <th>Find #</th>
-              <th>Refdes</th>
-              <th>关系 ID</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="entry in whereUsedFilteredRows"
-              :key="entry._key"
-              :class="{ 'row-selected': isWhereUsedEntrySelected(entry) }"
-              @click="selectWhereUsedTableRow(entry)"
-            >
-              <td>{{ entry.level }}</td>
-              <td>{{ getItemNumber(entry.parent) }}</td>
-              <td>{{ getItemName(entry.parent) }}</td>
-              <td>
-                <details class="inline-details" v-if="entry.pathLabel">
-                  <summary>{{ entry.pathLabel }}</summary>
-                  <div class="path-list">
-                    <div v-for="(node, idx) in entry.pathNodes" :key="`${entry._key}-path-${idx}`" class="path-node">
-                      <span class="path-index">{{ idx }}</span>
-                      <span class="mono">{{ node.label }}</span>
-                      <span v-if="node.name && node.name !== node.label" class="muted">{{ node.name }}</span>
-                      <span class="muted">{{ node.id }}</span>
-                    </div>
-                  </div>
-                </details>
-                <span v-else>-</span>
-              </td>
-              <td>
-                <div class="tree-bom-meta">
-                  <span class="mono">{{ formatWhereUsedEntryPathIds(entry) || '-' }}</span>
-                  <button
-                    class="btn ghost mini"
-                    :disabled="!formatWhereUsedEntryPathIds(entry)"
-                    :title="formatWhereUsedEntryPathIds(entry)"
-                    @click="copyWhereUsedEntryPathIds(entry)"
-                  >
-                    路径 ID
-                  </button>
-                </div>
-              </td>
-              <td>{{ getWhereUsedLineValue(entry, 'quantity') }}</td>
-              <td>{{ getWhereUsedLineValue(entry, 'uom') }}</td>
-              <td>{{ getWhereUsedLineValue(entry, 'find_num') }}</td>
-              <td>{{ getWhereUsedRefdes(entry) }}</td>
-              <td>{{ entry.relationship?.id || '-' }}</td>
-              <td>
-                <button
-                  class="btn ghost mini"
-                  :disabled="!resolveWhereUsedParentId(entry) || productLoading"
-                  @click.stop="applyProductFromWhereUsed(entry)"
-                >
-                  产品
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <details class="json-block">
-          <summary>原始数据</summary>
-          <pre>{{ formatJson(whereUsed) }}</pre>
-        </details>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-header">
-        <h2>BOM 对比</h2>
-        <div class="panel-actions">
-          <button class="btn ghost" :disabled="!productId" @click="applyCompareFromProduct('left')">
-            左=当前产品
-          </button>
-          <button class="btn ghost" :disabled="!productId" @click="applyCompareFromProduct('right')">
-            右=当前产品
-          </button>
-          <button
-            class="btn ghost"
-            :disabled="!compareLeftId || !compareRightId"
-            @click="swapCompareSides"
-          >
-            交换左右
-          </button>
-          <button class="btn ghost" @click="copyDeepLink('compare')">复制深链接</button>
-          <button class="btn ghost" :disabled="compareTotalFiltered === 0" @click="exportBomCompareCsv">
-            导出 CSV
-          </button>
-          <button class="btn" :disabled="!compareLeftId || !compareRightId || compareLoading" @click="loadBomCompare">
-            {{ compareLoading ? '加载中...' : '对比' }}
-          </button>
-        </div>
-      </div>
-      <div class="form-grid">
-        <label for="plm-compare-left-id">
-          左侧 ID
-          <input
-            id="plm-compare-left-id"
-            v-model.trim="compareLeftId"
-            name="plmCompareLeftId"
-            placeholder="左侧 item/version ID"
-          />
-        </label>
-        <label for="plm-compare-left-quick-pick">
-          左侧快选
-          <select
-            id="plm-compare-left-quick-pick"
-            v-model="compareLeftQuickPick"
-            name="plmCompareLeftQuickPick"
-            :disabled="!compareQuickOptions.length"
-            @change="applyCompareQuickPick('left')"
-          >
-            <option value="">从搜索结果选择</option>
-            <option v-for="option in compareQuickOptions" :key="`left-${option.key}`" :value="option.value">
-              {{ option.label }}
-            </option>
-          </select>
-        </label>
-        <label for="plm-compare-right-id">
-          右侧 ID
-          <input
-            id="plm-compare-right-id"
-            v-model.trim="compareRightId"
-            name="plmCompareRightId"
-            placeholder="右侧 item/version ID"
-          />
-        </label>
-        <label for="plm-compare-right-quick-pick">
-          右侧快选
-          <select
-            id="plm-compare-right-quick-pick"
-            v-model="compareRightQuickPick"
-            name="plmCompareRightQuickPick"
-            :disabled="!compareQuickOptions.length"
-            @change="applyCompareQuickPick('right')"
-          >
-            <option value="">从搜索结果选择</option>
-            <option v-for="option in compareQuickOptions" :key="`right-${option.key}`" :value="option.value">
-              {{ option.label }}
-            </option>
-          </select>
-        </label>
-        <label for="plm-compare-max-levels">
-          最大层级
-          <input
-            id="plm-compare-max-levels"
-            v-model.number="compareMaxLevels"
-            name="plmCompareMaxLevels"
-            type="number"
-            min="-1"
-            max="20"
-          />
-        </label>
-        <label for="plm-compare-line-key">
-          Line Key
-          <select id="plm-compare-line-key" v-model="compareLineKey" name="plmCompareLineKey">
-            <option v-for="option in compareLineKeyOptions" :key="option" :value="option">
-              {{ option }}
-            </option>
-          </select>
-        </label>
-        <label for="plm-compare-mode">
-          Compare Mode
-          <input
-            id="plm-compare-mode"
-            v-model.trim="compareMode"
-            name="plmCompareMode"
-            list="plm-compare-mode-options"
-            placeholder="only_product / summarized / num_qty"
-          />
-          <datalist id="plm-compare-mode-options">
-            <option v-for="mode in compareModeOptions" :key="mode.mode" :value="mode.mode">
-              {{ mode.description || mode.mode }}
-            </option>
-          </datalist>
-        </label>
-        <label for="plm-compare-effective-at">
-          生效时间
-          <input
-            id="plm-compare-effective-at"
-            v-model="compareEffectiveAt"
-            name="plmCompareEffectiveAt"
-            type="datetime-local"
-          />
-        </label>
-        <label for="plm-compare-rel-props">
-          关系字段
-          <input
-            id="plm-compare-rel-props"
-            v-model.trim="compareRelationshipProps"
-            name="plmCompareRelProps"
-            placeholder="quantity,uom,find_num,refdes"
-          />
-        </label>
-        <label for="plm-compare-filter">
-          过滤
-          <input
-            id="plm-compare-filter"
-            v-model.trim="compareFilter"
-            name="plmCompareFilter"
-            placeholder="编号/名称/Line ID"
-          />
-        </label>
-        <label class="checkbox-field" for="plm-compare-include-child">
-          <span>包含父/子字段</span>
-          <input
-            id="plm-compare-include-child"
-            name="plmCompareIncludeChild"
-            v-model="compareIncludeChildFields"
-            type="checkbox"
-          />
-        </label>
-        <label class="checkbox-field" for="plm-compare-include-subs">
-          <span>包含替代件</span>
-          <input
-            id="plm-compare-include-subs"
-            name="plmCompareIncludeSubs"
-            v-model="compareIncludeSubstitutes"
-            type="checkbox"
-          />
-        </label>
-        <label class="checkbox-field" for="plm-compare-include-effectivity">
-          <span>包含生效性</span>
-          <input
-            id="plm-compare-include-effectivity"
-            name="plmCompareIncludeEffectivity"
-            v-model="compareIncludeEffectivity"
-            type="checkbox"
-          />
-        </label>
-        <label class="checkbox-field" for="plm-compare-sync">
-          <span>联动 Where-Used / 替代件</span>
-          <input
-            id="plm-compare-sync"
-            name="plmCompareSync"
-            v-model="compareSyncEnabled"
-            type="checkbox"
-          />
-        </label>
-      </div>
-      <p v-if="!compareLeftId && !compareRightId" class="hint">
-        提示：左右 ID 支持 item / version，可用“左/右=当前产品”或快选填入。
-      </p>
-      <p v-if="compareSchemaLoading" class="status">对比字段加载中...</p>
-      <p v-else-if="compareSchemaError" class="status error">{{ compareSchemaError }}（已回退默认字段）</p>
-      <p v-if="compareError" class="status error">{{ compareError }}</p>
-      <div v-if="!bomCompare" class="empty">
-        暂无对比数据
-        <span class="empty-hint">（填写左右 ID 后对比）</span>
-      </div>
-      <div v-else>
-        <div class="summary-row">
-          <span>新增: {{ compareSummary.added ?? 0 }}</span>
-          <span>删除: {{ compareSummary.removed ?? 0 }}</span>
-          <span>变更: {{ compareSummary.changed ?? 0 }}</span>
-          <span>重大: {{ compareSummary.changed_major ?? 0 }}</span>
-          <span>轻微: {{ compareSummary.changed_minor ?? 0 }}</span>
-          <span>提示: {{ compareSummary.changed_info ?? 0 }}</span>
-          <span class="muted">展示: {{ compareTotalFiltered }}</span>
-        </div>
-        <div class="compare-section">
-          <h3>新增 ({{ compareAddedFiltered.length }}/{{ compareAdded.length }})</h3>
-          <div v-if="!compareAddedFiltered.length" class="empty">无新增</div>
-          <table v-else class="data-table">
-            <thead>
-              <tr>
-                <th>层级</th>
-                <th>父件</th>
-                <th>子件</th>
-                <th>数量</th>
-                <th>单位</th>
-                <th>Find #</th>
-                <th>Refdes</th>
-                <th>生效</th>
-                <th>替代件</th>
-                <th>Line</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="entry in compareAddedFiltered"
-                :key="entry.relationship_id || entry.line_key || entry.child_id"
-                :class="{ 'row-selected': isCompareEntrySelected(entry, 'added') }"
-                :data-compare-child="resolveCompareChildKey(entry)"
-                :data-compare-line="resolveCompareLineId(entry)"
-                @click="selectCompareEntry(entry, 'added')"
-              >
-                <td>{{ entry.level ?? '-' }}</td>
-                <td>
-                  <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
-                  <div class="muted">{{ getItemName(getCompareParent(entry)) }}</div>
-                  <div class="inline-actions">
-                    <button
-                      class="btn ghost mini"
-                      :disabled="!resolveCompareParentKey(entry) || productLoading"
-                      @click="applyProductFromCompareParent(entry)"
-                    >
-                      产品
-                    </button>
-                  </div>
-                </td>
-                <td>
-                  <div>{{ getItemNumber(getCompareChild(entry)) }}</div>
-                  <div class="muted">{{ getItemName(getCompareChild(entry)) }}</div>
-                </td>
-                <td>{{ getCompareProp(entry, 'quantity') }}</td>
-                <td>{{ getCompareProp(entry, 'uom') }}</td>
-                <td>{{ getCompareProp(entry, 'find_num') }}</td>
-                <td>{{ getCompareProp(entry, 'refdes') }}</td>
-                <td>{{ formatEffectivity(entry) }}</td>
-                <td>{{ formatSubstituteCount(entry) }}</td>
-                <td>
-                  <div class="mono">{{ entry.line_key || '-' }}</div>
-                  <div class="muted">{{ entry.relationship_id || '-' }}</div>
-                  <div class="inline-actions">
-                    <button
-                      class="btn ghost mini"
-                      :disabled="!resolveCompareChildKey(entry) || whereUsedLoading"
-                      @click="applyWhereUsedFromCompare(entry)"
-                    >
-                      Where-Used
-                    </button>
-                    <button
-                      class="btn ghost mini"
-                      :disabled="!resolveCompareLineId(entry) || substitutesLoading"
-                      @click="applySubstitutesFromCompare(entry)"
-                    >
-                      替代件
-                    </button>
-                    <button
-                      class="btn ghost mini"
-                      :disabled="!resolveCompareLineId(entry)"
-                      @click="copyCompareLineId(entry)"
-                    >
-                      复制 Line
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="compare-section">
-          <h3>删除 ({{ compareRemovedFiltered.length }}/{{ compareRemoved.length }})</h3>
-          <div v-if="!compareRemovedFiltered.length" class="empty">无删除</div>
-          <table v-else class="data-table">
-            <thead>
-              <tr>
-                <th>层级</th>
-                <th>父件</th>
-                <th>子件</th>
-                <th>数量</th>
-                <th>单位</th>
-                <th>Find #</th>
-                <th>Refdes</th>
-                <th>生效</th>
-                <th>替代件</th>
-                <th>Line</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="entry in compareRemovedFiltered"
-                :key="entry.relationship_id || entry.line_key || entry.child_id"
-                :class="{ 'row-selected': isCompareEntrySelected(entry, 'removed') }"
-                :data-compare-child="resolveCompareChildKey(entry)"
-                :data-compare-line="resolveCompareLineId(entry)"
-                @click="selectCompareEntry(entry, 'removed')"
-              >
-                <td>{{ entry.level ?? '-' }}</td>
-                <td>
-                  <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
-                  <div class="muted">{{ getItemName(getCompareParent(entry)) }}</div>
-                  <div class="inline-actions">
-                    <button
-                      class="btn ghost mini"
-                      :disabled="!resolveCompareParentKey(entry) || productLoading"
-                      @click="applyProductFromCompareParent(entry)"
-                    >
-                      产品
-                    </button>
-                  </div>
-                </td>
-                <td>
-                  <div>{{ getItemNumber(getCompareChild(entry)) }}</div>
-                  <div class="muted">{{ getItemName(getCompareChild(entry)) }}</div>
-                </td>
-                <td>{{ getCompareProp(entry, 'quantity') }}</td>
-                <td>{{ getCompareProp(entry, 'uom') }}</td>
-                <td>{{ getCompareProp(entry, 'find_num') }}</td>
-                <td>{{ getCompareProp(entry, 'refdes') }}</td>
-                <td>{{ formatEffectivity(entry) }}</td>
-                <td>{{ formatSubstituteCount(entry) }}</td>
-                <td>
-                  <div class="mono">{{ entry.line_key || '-' }}</div>
-                  <div class="muted">{{ entry.relationship_id || '-' }}</div>
-                  <div class="inline-actions">
-                    <button
-                      class="btn ghost mini"
-                      :disabled="!resolveCompareChildKey(entry) || whereUsedLoading"
-                      @click="applyWhereUsedFromCompare(entry)"
-                    >
-                      Where-Used
-                    </button>
-                    <button
-                      class="btn ghost mini"
-                      :disabled="!resolveCompareLineId(entry) || substitutesLoading"
-                      @click="applySubstitutesFromCompare(entry)"
-                    >
-                      替代件
-                    </button>
-                    <button
-                      class="btn ghost mini"
-                      :disabled="!resolveCompareLineId(entry)"
-                      @click="copyCompareLineId(entry)"
-                    >
-                      复制 Line
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="compare-section">
-          <h3>变更 ({{ compareChangedFiltered.length }}/{{ compareChanged.length }})</h3>
-          <div v-if="!compareChangedFiltered.length" class="empty">无变更</div>
-          <table v-else class="data-table">
-            <thead>
-              <tr>
-                <th>层级</th>
-                <th>父件</th>
-                <th>子件</th>
-                <th>严重度</th>
-                <th>变更项</th>
-                <th>生效</th>
-                <th>替代件</th>
-                <th>Line</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="entry in compareChangedFiltered"
-                :key="entry.relationship_id || entry.line_key || entry.child_id"
-                :class="[compareRowClass(entry), { 'row-selected': isCompareEntrySelected(entry, 'changed') }]"
-                :data-compare-child="resolveCompareChildKey(entry)"
-                :data-compare-line="resolveCompareLineId(entry)"
-                @click="selectCompareEntry(entry, 'changed')"
-              >
-                <td>{{ entry.level ?? '-' }}</td>
-                <td>
-                  <div>{{ getItemNumber(getCompareParent(entry)) }}</div>
-                  <div class="muted">{{ getItemName(getCompareParent(entry)) }}</div>
-                  <div class="inline-actions">
-                    <button
-                      class="btn ghost mini"
-                      :disabled="!resolveCompareParentKey(entry) || productLoading"
-                      @click="applyProductFromCompareParent(entry)"
-                    >
-                      产品
-                    </button>
-                  </div>
-                </td>
-                <td>
-                  <div>{{ getItemNumber(getCompareChild(entry)) }}</div>
-                  <div class="muted">{{ getItemName(getCompareChild(entry)) }}</div>
-                </td>
-                <td>
-                  <span class="tag" :class="severityClass(getCompareEntrySeverity(entry))">
-                    {{ getCompareEntrySeverity(entry) }}
-                  </span>
-                </td>
-                <td>
-                  <div v-if="entry.changes?.length" class="diff-list">
-                    <div v-for="change in getCompareChangeRows(entry)" :key="change.key" class="diff-row">
-                      <span class="tag" :class="severityClass(change.severity)">{{ change.severity }}</span>
-                      <span class="diff-field" :title="change.description || ''">
-                        {{ change.label }}
-                        <span v-if="compareFieldLabelMap.has(change.field)" class="diff-field-code">
-                          ({{ change.field }})
-                        </span>
-                        <span v-if="change.normalized && change.normalized !== '-'" class="diff-field-meta">
-                          {{ change.normalized }}
-                        </span>
-                      </span>
-                      <span class="diff-value">
-                        <span class="diff-value-left">{{ formatDiffValue(change.left) }}</span>
-                        <span class="diff-arrow">→</span>
-                        <span class="diff-value-right">{{ formatDiffValue(change.right) }}</span>
-                      </span>
-                    </div>
-                  </div>
-                  <span v-else class="muted">-</span>
-                </td>
-                <td>{{ formatEffectivity(entry) }}</td>
-                <td>{{ formatSubstituteCount(entry) }}</td>
-                <td>
-                  <div class="mono">{{ entry.line_key || '-' }}</div>
-                  <div class="muted">{{ entry.relationship_id || '-' }}</div>
-                  <div class="inline-actions">
-                    <button
-                      class="btn ghost mini"
-                      :disabled="!resolveCompareChildKey(entry) || whereUsedLoading"
-                      @click="applyWhereUsedFromCompare(entry)"
-                    >
-                      Where-Used
-                    </button>
-                    <button
-                      class="btn ghost mini"
-                      :disabled="!resolveCompareLineId(entry) || substitutesLoading"
-                      @click="applySubstitutesFromCompare(entry)"
-                    >
-                      替代件
-                    </button>
-                    <button
-                      class="btn ghost mini"
-                      :disabled="!resolveCompareLineId(entry)"
-                      @click="copyCompareLineId(entry)"
-                    >
-                      复制 Line
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="compare-detail" data-compare-detail="true">
-          <div class="compare-detail-header">
-            <h3>字段级对照</h3>
-            <div class="compare-detail-actions">
-              <template v-if="compareSelectedMeta">
-                <span class="tag" :class="compareSelectedMeta.tagClass">{{ compareSelectedMeta.kindLabel }}</span>
-                <span v-if="compareSelectedMeta.lineKey" class="mono">Line: {{ compareSelectedMeta.lineKey }}</span>
-                <span v-if="compareSelectedMeta.relationshipId" class="muted mono">
-                  {{ compareSelectedMeta.relationshipId }}
-                </span>
-                <span v-if="compareSelectedMeta.pathLabel" class="muted">
-                  {{ compareSelectedMeta.pathLabel }}
-                </span>
-              </template>
-              <button class="btn ghost mini" :disabled="!compareDetailRows.length" @click="copyCompareDetailRows">
-                复制字段对照
-              </button>
-              <button class="btn ghost mini" :disabled="!compareDetailRows.length" @click="exportCompareDetailCsv">
-                导出字段对照
-              </button>
-              <button class="btn ghost mini" :disabled="!compareSelectedEntry" @click="clearCompareSelection">
-                清空选择
-              </button>
-            </div>
-          </div>
-          <div v-if="!compareSelectedEntry" class="empty">点击上方条目查看字段级对照</div>
-          <table v-else class="data-table compact">
-            <thead>
-              <tr>
-                <th>字段</th>
-                <th>左侧</th>
-                <th>右侧</th>
-                <th>严重度</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="row in compareDetailRows"
-                :key="row.key"
-                :class="{ 'compare-field-row': true, changed: row.changed }"
-                :data-field-key="row.key"
-              >
-                <td>
-                  <div class="diff-field" :title="row.description || ''">{{ row.label }}</div>
-                  <div class="muted mono">{{ row.key }}</div>
-                </td>
-                <td>
-                  <div class="diff-value-left">{{ row.left }}</div>
-                  <div v-if="row.normalizedLeft" class="muted">规范化: {{ row.normalizedLeft }}</div>
-                </td>
-                <td>
-                  <div class="diff-value-right">{{ row.right }}</div>
-                  <div v-if="row.normalizedRight" class="muted">规范化: {{ row.normalizedRight }}</div>
-                </td>
-                <td>
-                  <span v-if="row.severity" class="tag" :class="severityClass(row.severity)">{{ row.severity }}</span>
-                  <span v-else class="muted">-</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <details class="field-map">
-          <summary>字段对照清单</summary>
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>字段</th>
-                <th>Key</th>
-                <th>来源</th>
-                <th>默认严重度</th>
-                <th>归一化</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="field in compareFieldCatalog" :key="field.key">
-                <td>{{ field.label }}</td>
-                <td class="mono">{{ field.key }}</td>
-                <td>{{ field.source }}</td>
-                <td>
-                  <span class="tag" :class="severityClass(field.severity)">{{ field.severity }}</span>
-                </td>
-                <td class="muted">{{ field.normalized }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </details>
-        <details class="json-block">
-          <summary>详细结果</summary>
-          <pre>{{ formatJson(bomCompare) }}</pre>
-        </details>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-header">
-        <h2>替代件</h2>
-        <div class="panel-actions">
-          <button class="btn ghost" @click="copyDeepLink('substitutes')">复制深链接</button>
-          <button class="btn ghost" :disabled="!substitutesRows.length" @click="exportSubstitutesCsv">
-            导出 CSV
-          </button>
-          <button class="btn" :disabled="!bomLineId || substitutesLoading" @click="loadSubstitutes">
-            {{ substitutesLoading ? '加载中...' : '查询' }}
-          </button>
-        </div>
-      </div>
-      <div class="form-grid compact">
-        <label for="plm-bom-line-id">
-          BOM Line ID
-          <input
-            id="plm-bom-line-id"
-            v-model.trim="bomLineId"
-            name="plmBomLineId"
-            placeholder="输入 BOM 行 ID"
-          />
-        </label>
-        <label for="plm-bom-line-quick-pick">
-          BOM 行快选
-          <select
-            id="plm-bom-line-quick-pick"
-            v-model="bomLineQuickPick"
-            name="plmBomLineQuickPick"
-            :disabled="!bomLineOptions.length"
-            @change="applyBomLineQuickPick"
-          >
-            <option value="">从 BOM 选择</option>
-            <option v-for="option in bomLineOptions" :key="option.key" :value="option.value">
-              {{ option.label }}
-            </option>
-          </select>
-        </label>
-        <label for="plm-substitutes-filter">
-          过滤
-          <input
-            id="plm-substitutes-filter"
-            v-model.trim="substitutesFilter"
-            name="plmSubstitutesFilter"
-            placeholder="替代件/原件编号"
-          />
-        </label>
-      </div>
-      <p v-if="!bomLineId" class="hint">提示：从 BOM 或 BOM 对比表中点击“替代件”可自动填入。</p>
-      <div v-if="bomLineId" class="context-row">
-        <span class="context-title">BOM 行</span>
-        <span class="mono">{{ bomLineId }}</span>
-        <button class="btn ghost mini" @click="copyBomLineId()">复制 BOM 行</button>
-        <template v-if="bomLineContext">
-          <span class="context-divider"></span>
-          <span>
-            子件:
-            <strong>{{ bomLineContext.component_code || bomLineContext.component_id || '-' }}</strong>
-          </span>
-          <span v-if="bomLineContext.component_name" class="muted">{{ bomLineContext.component_name }}</span>
-          <span class="muted">数量: {{ bomLineContext.quantity ?? '-' }} {{ bomLineContext.unit || '' }}</span>
-          <span class="muted">Find: {{ bomLineContext.sequence ?? '-' }}</span>
-          <button
-            class="btn ghost mini"
-            :disabled="whereUsedLoading"
-            @click="applyWhereUsedFromBom(bomLineContext)"
-          >
-            Where-Used
-          </button>
-        </template>
-        <span v-else class="muted">未在当前 BOM 中找到</span>
-      </div>
-      <div class="form-grid compact">
-        <label for="plm-substitute-item-id">
-          替代件 ID
-          <input
-            id="plm-substitute-item-id"
-            v-model.trim="substituteItemId"
-            name="plmSubstituteItemId"
-            placeholder="输入替代件 Item ID"
-          />
-        </label>
-        <label for="plm-substitute-quick-pick">
-          替代件快选
-          <select
-            id="plm-substitute-quick-pick"
-            v-model="substituteQuickPick"
-            name="plmSubstituteQuickPick"
-            :disabled="!substituteQuickOptions.length"
-            @change="applySubstituteQuickPick"
-          >
-            <option value="">从 BOM / 搜索结果选择</option>
-            <option v-for="option in substituteQuickOptions" :key="option.key" :value="option.value">
-              {{ option.label }}
-            </option>
-          </select>
-        </label>
-        <label for="plm-substitute-rank">
-          优先级
-          <input
-            id="plm-substitute-rank"
-            v-model.trim="substituteRank"
-            name="plmSubstituteRank"
-            placeholder="可选"
-          />
-        </label>
-        <label for="plm-substitute-note">
-          备注
-          <input
-            id="plm-substitute-note"
-            v-model.trim="substituteNote"
-            name="plmSubstituteNote"
-            placeholder="可选"
-          />
-        </label>
-      </div>
-      <div class="panel-actions">
-        <button
-          class="btn"
-          :disabled="!bomLineId || !substituteItemId || substitutesMutating"
-          @click="addSubstitute"
-        >
-          {{ substitutesMutating ? '处理中...' : '新增替代件' }}
-        </button>
-      </div>
-      <p v-if="substitutesActionStatus" class="status">{{ substitutesActionStatus }}</p>
-      <p v-if="substitutesActionError" class="status error">{{ substitutesActionError }}</p>
-      <p v-if="substitutesError" class="status error">{{ substitutesError }}</p>
-      <div v-if="!substitutes" class="empty">
-        暂无替代件数据
-        <span class="empty-hint">（填写 BOM Line ID 后查询）</span>
-      </div>
-      <div v-else>
-        <p class="status">共 {{ substitutes.count || 0 }} 条，展示 {{ substitutesRows.length }} 条</p>
-        <div v-if="!substitutesRows.length" class="empty">
-          暂无匹配项
-          <span class="empty-hint">（可清空过滤条件）</span>
-        </div>
-        <table v-else class="data-table">
-          <thead>
-            <tr>
-              <th>替代件编号</th>
-              <th>替代件名称</th>
-              <th>状态</th>
-              <th>原件编号</th>
-              <th>原件名称</th>
-              <th>优先级</th>
-              <th>备注</th>
-              <th>关系 ID</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="entry in substitutesRows" :key="entry.relationship?.id || entry.id">
-              <td>
-                <div>{{ getSubstituteNumber(entry) }}</div>
-                <div class="muted">{{ getSubstituteId(entry) }}</div>
-              </td>
-              <td>{{ getSubstituteName(entry) }}</td>
-              <td>
-                <span class="tag" :class="itemStatusClass(getSubstituteStatus(entry))">
-                  {{ getSubstituteStatus(entry) }}
-                </span>
-              </td>
-              <td>
-                <div>{{ getItemNumber(entry.part) }}</div>
-                <div class="muted">{{ entry.part?.id || '-' }}</div>
-              </td>
-              <td>{{ getItemName(entry.part) }}</td>
-              <td>{{ formatSubstituteRank(entry) }}</td>
-              <td>{{ formatSubstituteNote(entry) }}</td>
-              <td>{{ entry.relationship?.id || '-' }}</td>
-              <td>
-                <div class="inline-actions">
-                  <button
-                    class="btn ghost mini"
-                    :disabled="!resolveSubstituteTargetKey(entry, 'substitute') || productLoading"
-                    @click="applyProductFromSubstitute(entry, 'substitute')"
-                  >
-                    替代件
-                  </button>
-                  <button
-                    class="btn ghost mini"
-                    :disabled="!resolveSubstituteTargetKey(entry, 'part') || productLoading"
-                    @click="applyProductFromSubstitute(entry, 'part')"
-                  >
-                    原件
-                  </button>
-                  <button
-                    class="btn ghost"
-                    :disabled="substitutesMutating || substitutesDeletingId === (entry.relationship?.id || entry.id)"
-                    @click="removeSubstitute(entry)"
-                  >
-                    {{ substitutesDeletingId === (entry.relationship?.id || entry.id) ? '删除中...' : '删除' }}
-                  </button>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <details class="json-block">
-          <summary>原始数据</summary>
-          <pre>{{ formatJson(substitutes) }}</pre>
-        </details>
-      </div>
-    </section>
+    <PlmSubstitutesPanel :panel="substitutesPanel" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { type LocationQueryValue, useRoute, useRouter } from 'vue-router'
-import { apiGet, apiPost } from '../utils/api'
-import PlmBomHeader from '../components/plm/PlmBomHeader.vue'
-import PlmBomFilterShell from '../components/plm/PlmBomFilterShell.vue'
-import PlmSearchShell from '../components/plm/PlmSearchShell.vue'
-import PlmWorkbenchShell from '../components/plm/PlmWorkbenchShell.vue'
+import PlmApprovalsPanel from '../components/plm/PlmApprovalsPanel.vue'
+import PlmBomPanel from '../components/plm/PlmBomPanel.vue'
+import PlmCadPanel from '../components/plm/PlmCadPanel.vue'
+import PlmComparePanel from '../components/plm/PlmComparePanel.vue'
+import PlmDocumentsPanel from '../components/plm/PlmDocumentsPanel.vue'
+import PlmProductPanel from '../components/plm/PlmProductPanel.vue'
+import PlmSearchPanel from '../components/plm/PlmSearchPanel.vue'
+import PlmSubstitutesPanel from '../components/plm/PlmSubstitutesPanel.vue'
+import PlmWhereUsedPanel from '../components/plm/PlmWhereUsedPanel.vue'
+import { plmService } from '../services/PlmService'
+import type { PlmTeamFilterPresetBatchResult } from '../services/plm/plmWorkbenchClient'
+import { copyListToClipboard, copyTextToClipboard } from './plm/plmClipboard'
+import { downloadCsvFile } from './plm/plmCsv'
+import { resolveApprovalActionVersion } from './approvalInboxActionPayload'
+import {
+  reconcileApprovalInboxConflictVersion,
+  resolveApprovalInboxThrownErrorRecord,
+} from './approvalInboxFeedback'
+import type {
+  ApprovalEntry,
+  ApprovalHistoryEntry,
+  BomLineRecord,
+  BomTreeRowModel,
+  CadHistoryEntry,
+  CadHistoryPayload,
+  CadPayload,
+  CompareEffectivityEntry,
+  CompareLineProps,
+  CompareChangeRow,
+  CompareEntry,
+  ComparePayload,
+  CompareSchemaPayload,
+  DeepLinkPreset,
+  DocumentMetadata,
+  DocumentEntry,
+  FilterPreset,
+  FilterFieldOption,
+  PlmApprovalsPanelModel,
+  PlmCadPanelModel,
+  PlmDocumentsPanelModel,
+  ProductRecord,
+  ProductCopyKind,
+  PlmRecommendedWorkbenchScene,
+  QuickPickOption,
+  SubstituteEntry,
+  SubstituteMutationResult,
+  SubstitutePartRecord,
+  SubstitutesPayload,
+  UnknownRecord,
+  PlmWorkbenchViewQueryState,
+  WhereUsedEntry,
+  WhereUsedPayload,
+  WhereUsedTreeRowModel,
+} from './plm/plmPanelModels'
+import { usePlmBomPanel } from './plm/usePlmBomPanel'
+import { usePlmBomState } from './plm/usePlmBomState'
+import { usePlmAuthStatus } from './plm/usePlmAuthStatus'
+import { usePlmComparePanel } from './plm/usePlmComparePanel'
+import { usePlmCrossPanelActions } from './plm/usePlmCrossPanelActions'
+import { usePlmDeepLinkState } from './plm/usePlmDeepLinkState'
+import { usePlmExportActions } from './plm/usePlmExportActions'
+import { usePlmProductPanel } from './plm/usePlmProductPanel'
+import { usePlmSearchPanel } from './plm/usePlmSearchPanel'
+import { usePlmSubstitutesPanel } from './plm/usePlmSubstitutesPanel'
+import { usePlmTeamFilterPresets } from './plm/usePlmTeamFilterPresets'
+import { usePlmTeamViews } from './plm/usePlmTeamViews'
+import {
+  canApplyPlmCollaborativeEntry,
+  canSharePlmCollaborativeEntry,
+} from './plm/usePlmCollaborativePermissions'
+import {
+  applyPlmDeferredRouteQueryPatch,
+  mergePlmDeferredRouteQueryPatch,
+  resolvePlmDeferredRouteQueryPatch,
+} from './plm/plmRouteHydrationPatch'
+import { usePlmWhereUsedPanel } from './plm/usePlmWhereUsedPanel'
+import { usePlmWhereUsedState } from './plm/usePlmWhereUsedState'
+import {
+  buildRecommendedWorkbenchScenes,
+  buildWorkbenchSceneCatalogOwnerOptions,
+  buildWorkbenchSceneSummaryChips,
+  buildWorkbenchSceneSummaryHint,
+  WORKBENCH_SCENE_RECOMMENDATION_OPTIONS,
+} from './plm/plmWorkbenchSceneCatalog'
+import {
+  buildPlmWorkbenchLegacyLocalDraftQueryPatch,
+  hasExplicitPlmBomTeamPresetAutoApplyQueryState,
+  hasExplicitPlmApprovalsAutoApplyQueryState,
+  hasExplicitPlmCadAutoApplyQueryState,
+  hasExplicitPlmDocumentAutoApplyQueryState,
+  buildPlmWorkbenchResetHydratedPanelQueryPatch,
+  buildPlmWorkbenchRoutePath,
+  buildPlmWorkbenchTeamViewShareUrl,
+  hasExplicitPlmWorkbenchAutoApplyQueryState,
+  hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState,
+  matchPlmWorkbenchQuerySnapshot,
+  mergePlmWorkbenchRouteQuery,
+  normalizePlmWorkbenchCollaborativeQuerySnapshot,
+  resolvePlmFilterFieldQueryValue,
+  normalizePlmWorkbenchLocalRouteQuerySnapshot,
+  normalizePlmWorkbenchPanelScope,
+  shouldAutoloadPlmProductContext,
+  shouldAutoloadPlmWorkbenchSnapshot,
+} from './plm/plmWorkbenchViewState'
+import {
+  matchPlmTeamViewStateSnapshot,
+  mergePlmTeamViewBooleanMapDefaults,
+  pickPlmTeamViewStateKeys,
+} from './plm/plmTeamViewStateMatch'
+import {
+  matchPlmTeamFilterPresetStateSnapshot,
+  pickPlmTeamFilterPresetRouteOwnerState,
+} from './plm/plmTeamFilterPresetStateMatch'
+import {
+  resolvePlmHydratedRemovedTeamPresetOwner,
+  resolvePlmHydratedTeamPresetOwnerTakeover,
+} from './plm/plmHydratedTeamPresetOwnerTakeover'
+import {
+  type PlmHydratedPanelDataRouteState,
+  resolvePlmHydratedPanelDataReset,
+} from './plm/plmHydratedPanelDataReset'
+import { resolvePlmHydratedRouteQueryTransition } from './plm/plmHydratedRouteQueryTransition'
+import { resolvePlmHydratedLocalFilterPresetTakeover } from './plm/plmHydratedLocalFilterPresetTakeover'
+import {
+  buildPlmLocalFilterPresetRouteOwnerWatchKey,
+  resolvePlmLocalFilterPresetRouteIdentity,
+} from './plm/plmLocalFilterPresetRouteIdentity'
+import {
+  resolvePlmHydratedRemovedTeamViewOwner,
+  resolvePlmHydratedTeamViewOwnerTakeover,
+} from './plm/plmHydratedTeamViewOwnerTakeover'
+import {
+  buildClearedPlmLocalPresetManagementState,
+  runPlmLocalPresetOwnershipAction,
+  shouldClearLocalPresetOwnerAfterTeamPresetAction,
+  shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore,
+  shouldClearLocalPresetOwnerAfterTeamPresetSingleRestore,
+} from './plm/plmLocalPresetOwnership'
+import {
+  canActOnPlmApproval,
+  getPlmApprovalApproverId,
+  resolvePlmApprovalActorIds,
+} from './plm/plmApprovalActionability'
+import {
+  resolvePlmApprovalHistoryActorLabel,
+  resolvePlmApprovalHistoryVersionLabel,
+} from './plm/plmApprovalHistoryDisplay'
+import {
+  buildRecommendedWorkbenchSceneAuditQuery,
+  buildWorkbenchAuditQuery,
+} from './plm/plmWorkbenchSceneAudit'
+import {
+  readWorkbenchSceneFocus,
+} from './plm/plmWorkbenchSceneFocus'
+import {
+  applyFilterPreset,
+  buildFilterPresetShareUrl,
+  buildTeamFilterPresetShareUrl,
+  duplicateFilterPreset,
+  renameFilterPreset,
+  confirmFilterPresetImport,
+  decodeFilterPresetSharePayload,
+  exportFilterPresetsFile,
+  loadStoredFilterPresets,
+  mergeImportedFilterPresets,
+  parseFilterPresetImport,
+  persistFilterPresets,
+  resolveFilterPresetCatalogDraftState,
+  resolveFilterPresetShareMode,
+  upsertFilterPreset,
+} from './plm/plmFilterPresetUtils'
 
 const route = useRoute()
 const router = useRouter()
@@ -2248,130 +220,53 @@ const DEFAULT_COMPARE_LINE_KEYS = [
   'child_id_find_num_qty',
   'line_full',
 ]
-
-const searchQuery = ref('')
-const searchItemType = ref(DEFAULT_ITEM_TYPE)
-const searchLimit = ref(DEFAULT_SEARCH_LIMIT)
-const searchResults = ref<any[]>([])
-const searchTotal = ref(0)
-const searchLoading = ref(false)
-const searchError = ref('')
-
-type AuthState = 'missing' | 'invalid' | 'expired' | 'expiring' | 'valid'
-
-type CompareSchemaField = {
-  field: string
-  severity: string
-  normalized: string
-  description?: string
+const deepLinkPanelOptions = [
+  { key: 'search', label: '搜索' },
+  { key: 'product', label: '产品' },
+  { key: 'documents', label: '文档' },
+  { key: 'approvals', label: '审批' },
+  { key: 'cad', label: 'CAD 元数据' },
+  { key: 'where-used', label: 'Where-Used' },
+  { key: 'compare', label: 'BOM 对比' },
+  { key: 'substitutes', label: '替代件' },
+]
+const deepLinkPanelLabels: Record<string, string> = {
+  all: '全部',
+  search: '搜索',
+  product: '产品',
+  documents: '文档',
+  approvals: '审批',
+  cad: 'CAD 元数据',
+  'where-used': 'Where-Used',
+  compare: 'BOM 对比',
+  substitutes: '替代件',
 }
+const builtInDeepLinkPresets: DeepLinkPreset[] = [
+  { key: 'cad-meta', label: 'CAD 元数据', panels: ['cad'] },
+  { key: 'product-where-used', label: '产品 + Where-Used', panels: ['product', 'where-used'] },
+  { key: 'product-bom-tree', label: '产品 + BOM 树形', panels: ['product'], params: { bomView: 'tree' } },
+  { key: 'compare-substitutes', label: 'BOM 对比 + 替代件', panels: ['compare', 'substitutes'] },
+  { key: 'docs-approvals', label: '文档 + 审批', panels: ['documents', 'approvals'] },
+  { key: 'full-bom', label: '产品 + BOM 全链路', panels: ['product', 'where-used', 'compare', 'substitutes'] },
+]
 
-type CompareSchemaMode = {
-  mode: string
-  line_key?: string
-  include_relationship_props?: string[]
-  aggregate_quantities?: boolean
-  aliases?: string[]
-  description?: string
-}
-
-type CompareSchemaPayload = {
-  line_fields: CompareSchemaField[]
-  compare_modes: CompareSchemaMode[]
-  line_key_options: string[]
-  defaults?: Record<string, unknown>
-}
-
-type WhereUsedTreeNode = {
-  id: string
-  label: string
-  name: string
-  children: WhereUsedTreeNode[]
-  entries: any[]
-}
-
-type WhereUsedTreeRow = {
-  key: string
-  parentKey?: string
-  id: string
-  label: string
-  name: string
-  depth: number
-  hasChildren: boolean
-  entries: any[]
-  entryCount: number
-  pathLabels: string[]
-  pathIds: string[]
-}
-
-type DeepLinkPreset = {
-  key: string
-  label: string
-  panels: string[]
-  params?: Record<string, string | number | boolean>
-}
-
-type QuickPickOption = {
-  key: string
-  value: string
-  label: string
-}
-
-type FilterPreset = {
-  key: string
-  label: string
-  field: string
-  value: string
-  group?: string
-}
-
-type FilterPresetImportEntry = {
-  key: string
-  label: string
-  field: string
-  value: string
-  group?: string
-}
-
-type BomTreeRow = {
-  key: string
-  parentKey?: string
-  depth: number
-  line?: any
-  label: string
-  name: string
-  componentId: string
-  lineId: string
-  hasChildren: boolean
-  pathLabels: string[]
-  pathIds: string[]
-}
-
-const authState = ref<AuthState>('missing')
-const authExpiresAt = ref<number | null>(null)
-const plmAuthState = ref<AuthState>('missing')
-const plmAuthExpiresAt = ref<number | null>(null)
-const plmAuthLegacy = ref(false)
-const authError = ref('')
-let authTimer: number | undefined
-const deepLinkStatus = ref('')
-const deepLinkError = ref('')
-let deepLinkTimer: number | undefined
-let querySyncTimer: number | undefined
-let querySyncPending: Record<string, string | number | boolean | undefined> = {}
-const deepLinkScope = ref<string[]>([])
-const deepLinkPreset = ref('')
-const customPresetName = ref('')
-const editingPresetLabel = ref('')
-const importPresetText = ref('')
-const isPresetDropActive = ref(false)
-let presetDropDepth = 0
-const customDeepLinkPresets = ref<DeepLinkPreset[]>([])
+const {
+  authState,
+  authExpiresAt,
+  plmAuthState,
+  plmAuthExpiresAt,
+  plmAuthLegacy,
+  authError,
+  refreshAuthStatus,
+  handleAuthError,
+  startAuthStatusPolling,
+  stopAuthStatusPolling,
+} = usePlmAuthStatus()
 
 const productId = ref('')
 const productItemNumber = ref('')
 const itemType = ref(DEFAULT_ITEM_TYPE)
-const product = ref<any | null>(null)
+const product = ref<ProductRecord | null>(null)
 const productLoading = ref(false)
 const productError = ref('')
 const productView = computed(() => {
@@ -2446,7 +341,7 @@ const productView = computed(() => {
     ''
   return {
     id: String(data.id || ''),
-    name,
+    name: String(name),
     partNumber,
     revision,
     status,
@@ -2456,14 +351,6 @@ const productView = computed(() => {
     updatedAt,
   }
 })
-
-const bomItems = ref<any[]>([])
-const bomLoading = ref(false)
-const bomError = ref('')
-const bomDepth = ref(DEFAULT_BOM_DEPTH)
-const bomEffectiveAt = ref('')
-const bomView = ref<'table' | 'tree'>('table')
-const bomCollapsed = ref<Set<string>>(new Set())
 
 const documentRole = ref('')
 const documentFilter = ref('')
@@ -2504,18 +391,18 @@ const documentColumnOptions = [
   { key: 'cad', label: 'CAD' },
   { key: 'actions', label: '操作' },
 ]
-const documents = ref<any[]>([])
+const documents = ref<DocumentEntry[]>([])
 const documentsLoading = ref(false)
 const documentsError = ref('')
 
 const cadFileId = ref('')
 const cadOtherFileId = ref('')
-const cadProperties = ref<any | null>(null)
-const cadViewState = ref<any | null>(null)
-const cadReview = ref<any | null>(null)
-const cadHistory = ref<any | null>(null)
-const cadDiff = ref<any | null>(null)
-const cadMeshStats = ref<any | null>(null)
+const cadProperties = ref<CadPayload | null>(null)
+const cadViewState = ref<CadPayload | null>(null)
+const cadReview = ref<CadPayload | null>(null)
+const cadHistory = ref<CadHistoryPayload | null>(null)
+const cadDiff = ref<CadPayload | null>(null)
+const cadMeshStats = ref<CadPayload | null>(null)
 const cadPropertiesDraft = ref('')
 const cadViewStateDraft = ref('')
 const cadReviewState = ref('')
@@ -2528,7 +415,7 @@ const cadError = ref('')
 const cadActionStatus = ref('')
 const cadActionError = ref('')
 
-const approvals = ref<any[]>([])
+const approvals = ref<ApprovalEntry[]>([])
 const approvalsStatus = ref<'all' | 'pending' | 'approved' | 'rejected'>(DEFAULT_APPROVAL_STATUS)
 const approvalsLoading = ref(false)
 const approvalsError = ref('')
@@ -2536,9 +423,12 @@ const approvalComment = ref('')
 const approvalActionStatus = ref('')
 const approvalActionError = ref('')
 const approvalActingId = ref('')
+const approvalActionabilityById = ref<Record<string, boolean>>({})
+const approvalActionabilityLoadingById = ref<Record<string, boolean>>({})
+const approvalActionabilityActorKey = ref('')
 const approvalHistoryFor = ref('')
 const approvalHistoryLabel = ref('')
-const approvalHistory = ref<any[]>([])
+const approvalHistory = ref<ApprovalHistoryEntry[]>([])
 const approvalHistoryLoading = ref(false)
 const approvalHistoryError = ref('')
 const approvalsFilter = ref('')
@@ -2568,11 +458,6 @@ const approvalColumnOptions = [
   { key: 'actions', label: '操作' },
 ]
 
-const whereUsedItemId = ref('')
-const whereUsedQuickPick = ref('')
-const whereUsedRecursive = ref(true)
-const whereUsedMaxLevels = ref(DEFAULT_WHERE_USED_MAX_LEVELS)
-const whereUsedView = ref<'table' | 'tree'>('table')
 const whereUsedFilterFieldOptions = [
   { value: 'all', label: '全部', placeholder: '父件/路径/关系 ID' },
   { value: 'parent_number', label: '父件编号', placeholder: '父件编号' },
@@ -2584,304 +469,84 @@ const whereUsedFilterFieldOptions = [
   { value: 'quantity', label: '数量', placeholder: '数量' },
   { value: 'uom', label: '单位', placeholder: '单位' },
 ]
-const whereUsedFilterField = ref('all')
-const whereUsedFilter = ref('')
-const whereUsedFilterPresetKey = ref('')
-const whereUsedFilterPresetName = ref('')
-const whereUsedFilterPresets = ref<FilterPreset[]>([])
-const whereUsedFilterPresetImportText = ref('')
-const whereUsedFilterPresetImportMode = ref<'merge' | 'replace'>('merge')
-const whereUsedFilterPresetGroup = ref('')
-const whereUsedFilterPresetGroupFilter = ref('all')
-const whereUsedFilterPresetFileInput = ref<HTMLInputElement | null>(null)
-const showWhereUsedPresetManager = ref(false)
-const whereUsedPresetSelection = ref<string[]>([])
-const whereUsedPresetBatchGroup = ref('')
-const whereUsed = ref<any | null>(null)
-const whereUsedLoading = ref(false)
-const whereUsedError = ref('')
-const whereUsedCollapsed = ref<Set<string>>(new Set())
-const whereUsedSelectedEntryKeys = ref<Set<string>>(new Set())
-const whereUsedFilterPlaceholder = computed(() => {
-  const option = whereUsedFilterFieldOptions.find((entry) => entry.value === whereUsedFilterField.value)
-  return option?.placeholder || '父件/路径/关系 ID'
+const {
+  deepLinkStatus,
+  deepLinkError,
+  deepLinkScope,
+  deepLinkPreset,
+  customPresetName,
+  editingPresetLabel,
+  importPresetText,
+  importFileInput,
+  isPresetDropActive,
+  deepLinkPresets,
+  scheduleQuerySync: scheduleBaseQuerySync,
+  cancelScheduledQuerySync,
+  setDeepLinkMessage,
+  resetDeepLinkState,
+  clearDeepLinkScope,
+  applyDeepLinkPreset,
+  saveDeepLinkPreset,
+  deleteDeepLinkPreset,
+  applyPresetRename,
+  movePreset,
+  exportCustomPresets,
+  importCustomPresets,
+  triggerPresetFileImport,
+  handlePresetFileImport,
+  handlePresetDragEnter,
+  handlePresetDragOver,
+  handlePresetDragLeave,
+  handlePresetDrop,
+  parseDeepLinkPanels,
+  copyDeepLink,
+  cleanupDeepLinkState,
+} = usePlmDeepLinkState({
+  builtInPresets: builtInDeepLinkPresets,
+  panelLabels: deepLinkPanelLabels,
+  syncQueryParams,
+  buildDeepLinkUrl,
+  formatDeepLinkTargets,
+  applyPresetParams,
+  copyText: copyToClipboard,
 })
-const canSaveWhereUsedFilterPreset = computed(
-  () => Boolean(whereUsedFilter.value.trim() && whereUsedFilterPresetName.value.trim())
-)
-const whereUsedFilterPresetGroups = computed(() => {
-  const groups = new Set<string>()
-  for (const preset of whereUsedFilterPresets.value) {
-    const group = String(preset.group || '').trim()
-    if (group) groups.add(group)
+const isApplyingRouteQueryState = ref(false)
+let pendingRouteQueryHydration = false
+let deferredRouteQueryPatch: Record<string, string | number | boolean | undefined> | null = null
+
+function scheduleQuerySync(patch: Record<string, string | number | boolean | undefined>) {
+  if (isApplyingRouteQueryState.value) {
+    deferredRouteQueryPatch = mergePlmDeferredRouteQueryPatch(deferredRouteQueryPatch, patch)
+    return
   }
-  return Array.from(groups).sort((left, right) => left.localeCompare(right))
-})
-const whereUsedFilteredPresets = computed(() => {
-  const filter = whereUsedFilterPresetGroupFilter.value
-  if (filter === 'all') return whereUsedFilterPresets.value
-  if (filter === 'ungrouped') {
-    return whereUsedFilterPresets.value.filter((preset) => !String(preset.group || '').trim())
-  }
-  return whereUsedFilterPresets.value.filter(
-    (preset) => String(preset.group || '').trim() === filter
-  )
-})
-const whereUsedPresetSelectionCount = computed(() => whereUsedPresetSelection.value.length)
-
-const whereUsedRows = computed(() => {
-  const payload = whereUsed.value
-  const parents = payload?.parents || []
-  const rootId = payload?.item_id || ''
-  if (!parents.length) return []
-
-  const levelIndex = new Map<number, Map<string, any>>()
-  for (const entry of parents) {
-    const level = Number(entry?.level || 1)
-    const parentId = entry?.parent?.id || entry?.relationship?.source_id
-    if (!parentId) continue
-    if (!levelIndex.has(level)) {
-      levelIndex.set(level, new Map())
-    }
-    levelIndex.get(level)?.set(parentId, entry)
-  }
-
-  const buildNode = (item: any, fallbackId?: string) => {
-    const id = item?.id || fallbackId || ''
-    const label = item?.item_number || item?.itemNumber || item?.code || item?.name || id
-    return { id, label, name: item?.name || '' }
-  }
-
-  const buildPath = (entry: any) => {
-    const nodes = []
-    const parentNode = buildNode(entry.parent, entry?.relationship?.source_id)
-    if (parentNode.id) nodes.unshift(parentNode)
-
-    let currentLevel = Number(entry?.level || 1)
-    let childId = entry?.relationship?.related_id
-    while (currentLevel > 1 && childId) {
-      const prevEntry = levelIndex.get(currentLevel - 1)?.get(childId)
-      if (!prevEntry) break
-      const node = buildNode(prevEntry.parent, prevEntry?.relationship?.source_id)
-      if (node.id) nodes.unshift(node)
-      childId = prevEntry?.relationship?.related_id
-      currentLevel = Number(prevEntry?.level || (currentLevel - 1))
-    }
-
-    if (rootId) {
-      nodes.unshift({ id: rootId, label: rootId, name: '' })
-    }
-    return nodes
-  }
-
-  return parents.map((entry: any, idx: number) => {
-    const nodes = buildPath(entry)
-    const pathLabel = nodes.map((node) => node.label).filter(Boolean).join(' → ')
-    const key = entry?.relationship?.id || `${entry?.parent?.id || 'row'}-${idx}`
-    return { ...entry, _key: key, pathNodes: nodes, pathLabel }
-  })
-})
-
-const whereUsedFilteredRows = computed(() => {
-  const needle = normalizeFilterNeedle(whereUsedFilter.value)
-  if (!needle) return whereUsedRows.value
-  return whereUsedRows.value.filter((entry: any) => {
-    const tokens = getWhereUsedFilterTokens(entry, whereUsedFilterField.value)
-    return matchesFilter(needle, tokens)
-  })
-})
-
-const whereUsedPathIdsList = computed(() => {
-  const seen = new Set<string>()
-  const list: string[] = []
-  for (const entry of whereUsedFilteredRows.value) {
-    const pathIds = formatWhereUsedEntryPathIds(entry)
-    if (!pathIds || seen.has(pathIds)) continue
-    seen.add(pathIds)
-    list.push(pathIds)
-  }
-  return list
-})
-
-const whereUsedPathIdsCount = computed(() => whereUsedPathIdsList.value.length)
-
-const whereUsedSelectedEntries = computed(() => {
-  const selected = whereUsedSelectedEntryKeys.value
-  if (!selected.size) return []
-  return whereUsedRows.value.filter((entry: any) => {
-    const key = resolveWhereUsedEntryKey(entry)
-    return key && selected.has(key)
-  })
-})
-
-const whereUsedSelectedParents = computed(() => {
-  const seen = new Set<string>()
-  const list: string[] = []
-  for (const entry of whereUsedSelectedEntries.value) {
-    const parentId = resolveWhereUsedParentId(entry)
-    const fallback = parentId || getItemNumber(entry.parent)
-    if (!fallback || seen.has(fallback)) continue
-    seen.add(fallback)
-    list.push(fallback)
-  }
-  return list
-})
-
-const whereUsedSelectedCount = computed(() => whereUsedSelectedEntryKeys.value.size)
-
-const whereUsedTree = computed<WhereUsedTreeNode | null>(() => {
-  const rows = whereUsedFilteredRows.value
-  if (!rows.length) return null
-
-  const firstPathNode = rows[0]?.pathNodes?.[0] || {}
-  const fallbackRootId = whereUsed.value?.item_id || whereUsedItemId.value || ''
-  const rootId = firstPathNode.id || fallbackRootId || firstPathNode.label || 'root'
-  const rootLabel = firstPathNode.label || rootId
-  const rootName = firstPathNode.name || ''
-  const root: WhereUsedTreeNode = {
-    id: rootId,
-    label: rootLabel,
-    name: rootName,
-    children: [],
-    entries: [],
-  }
-
-  const isRootNode = (node: any) => {
-    const nodeId = node?.id || ''
-    const nodeLabel = node?.label || ''
-    return (nodeId && nodeId === root.id) || (nodeLabel && nodeLabel === root.label)
-  }
-
-  const getNodeId = (node: any) => {
-    const nodeId = node?.id || node?.label || ''
-    return nodeId || 'unknown'
-  }
-
-  const getNodeLabel = (node: any, id: string) => node?.label || node?.id || id
-
-  for (const entry of rows) {
-    const pathNodes = Array.isArray(entry.pathNodes) ? entry.pathNodes : []
-    if (!pathNodes.length) {
-      root.entries.push(entry)
-      continue
-    }
-    let current = root
-    const startIndex = isRootNode(pathNodes[0]) ? 1 : 0
-    for (let i = startIndex; i < pathNodes.length; i += 1) {
-      const info = pathNodes[i]
-      const nodeId = getNodeId(info)
-      const nodeLabel = getNodeLabel(info, nodeId)
-      const nodeName = info?.name || ''
-      let child = current.children.find((item) => item.id === nodeId && item.label === nodeLabel)
-      if (!child) {
-        child = { id: nodeId, label: nodeLabel, name: nodeName, children: [], entries: [] }
-        current.children.push(child)
-      }
-      current = child
-    }
-    current.entries.push(entry)
-  }
-
-  return root
-})
-
-const whereUsedTreeRows = computed<WhereUsedTreeRow[]>(() => {
-  const root = whereUsedTree.value
-  if (!root) return []
-  const rows: WhereUsedTreeRow[] = []
-  const walk = (
-    node: WhereUsedTreeNode,
-    depth: number,
-    path: string,
-    parentKey: string | undefined,
-    pathLabels: string[],
-    pathIds: string[]
-  ) => {
-    const key = path ? `${path}/${node.id}` : node.id
-    const labelToken = String(node.label || node.id || key)
-    const idToken = String(node.id || node.label || key)
-    const nextLabels = [...pathLabels, labelToken]
-    const nextIds = [...pathIds, idToken]
-    rows.push({
-      key,
-      parentKey,
-      id: node.id,
-      label: node.label,
-      name: node.name,
-      depth,
-      hasChildren: node.children.length > 0,
-      entries: node.entries,
-      entryCount: node.entries.length,
-      pathLabels: nextLabels,
-      pathIds: nextIds,
-    })
-    for (const child of node.children) {
-      walk(child, depth + 1, key, key, nextLabels, nextIds)
-    }
-  }
-  walk(root, 0, '', undefined, [], [])
-  return rows
-})
-
-const whereUsedTreeVisibleRows = computed<WhereUsedTreeRow[]>(() => {
-  const rows = whereUsedTreeRows.value
-  if (!rows.length) return []
-  const parentMap = new Map(rows.map((row) => [row.key, row.parentKey || '']))
-  const collapsed = whereUsedCollapsed.value
-  const isHidden = (row: WhereUsedTreeRow) => {
-    let parentKey = row.parentKey
-    while (parentKey) {
-      if (collapsed.has(parentKey)) return true
-      parentKey = parentMap.get(parentKey) || ''
-    }
-    return false
-  }
-  return rows.filter((row) => !isHidden(row))
-})
-
-const whereUsedHasTree = computed(() => whereUsedTreeRows.value.some((row) => row.hasChildren))
-
-const whereUsedTreePathIdsList = computed(() => {
-  const seen = new Set<string>()
-  const list: string[] = []
-  for (const row of whereUsedTreeVisibleRows.value) {
-    const pathIds = formatWhereUsedPathIds(row)
-    if (!pathIds || seen.has(pathIds)) continue
-    seen.add(pathIds)
-    list.push(pathIds)
-  }
-  return list
-})
-
-const whereUsedTreePathIdsCount = computed(() => whereUsedTreePathIdsList.value.length)
-
+  scheduleBaseQuerySync(patch)
+}
 const compareLeftId = ref('')
 const compareRightId = ref('')
-const compareLeftQuickPick = ref('')
-const compareRightQuickPick = ref('')
-const compareMode = ref('')
-const compareMaxLevels = ref(DEFAULT_COMPARE_MAX_LEVELS)
-const compareLineKey = ref(DEFAULT_COMPARE_LINE_KEY)
-const compareIncludeChildFields = ref(true)
-const compareIncludeSubstitutes = ref(false)
-const compareIncludeEffectivity = ref(false)
-const compareSyncEnabled = ref(true)
-const compareEffectiveAt = ref('')
-const compareFilter = ref('')
-const compareRelationshipProps = ref(DEFAULT_COMPARE_REL_PROPS)
-const bomCompare = ref<any | null>(null)
-const compareLoading = ref(false)
-const compareError = ref('')
-const compareSchema = ref<CompareSchemaPayload | null>(null)
-const compareSchemaLoading = ref(false)
-const compareSchemaError = ref('')
+const {
+  searchQuery,
+  searchItemType,
+  searchLimit,
+  searchResults,
+  searchTotal,
+  searchError,
+  searchProducts,
+  searchPanel,
+} = usePlmSearchPanel({
+  defaultItemType: DEFAULT_ITEM_TYPE,
+  defaultSearchLimit: DEFAULT_SEARCH_LIMIT,
+  productId,
+  productItemNumber,
+  itemType,
+  compareLeftId,
+  compareRightId,
+  loadProduct,
+  scheduleQuerySync,
+  setDeepLinkMessage,
+  copyToClipboard,
+  handleAuthError,
+})
 type CompareSelectionKind = 'added' | 'removed' | 'changed'
-type CompareSelection = {
-  kind: CompareSelectionKind
-  key: string
-  entry: Record<string, any>
-}
-const compareSelected = ref<CompareSelection | null>(null)
 const productFieldCatalog = [
   {
     key: 'name',
@@ -3142,96 +807,6 @@ const defaultCompareFieldCatalog = [
     normalized: 'sorted tuples',
   },
 ]
-const compareFieldCatalog = computed(() => {
-  const fields = compareSchema.value?.line_fields || []
-  if (!fields.length) return defaultCompareFieldCatalog
-  return fields.map((entry) => ({
-    key: entry.field,
-    label: compareFieldLabels[entry.field] || entry.field,
-    source: entry.description || '-',
-    severity: entry.severity || 'info',
-    normalized: entry.normalized || '-',
-  }))
-})
-const compareFieldLabelMap = computed(
-  () => new Map(compareFieldCatalog.value.map((entry) => [entry.key, entry.label]))
-)
-const compareFieldMetaMap = computed(
-  () => new Map(compareFieldCatalog.value.map((entry) => [entry.key, entry]))
-)
-const compareSelectedEntry = computed(() => compareSelected.value?.entry || null)
-const compareSelectedMeta = computed(() => {
-  const selection = compareSelected.value
-  if (!selection) return null
-  const { entry, kind } = selection
-  const parent = getCompareParent(entry)
-  const child = getCompareChild(entry)
-  const parentNumber = getItemNumber(parent)
-  const parentName = getItemName(parent)
-  const parentLabel = parentNumber !== '-' ? parentNumber : parentName !== '-' ? parentName : ''
-  const childNumber = getItemNumber(child)
-  const childName = getItemName(child)
-  const childLabel = childNumber !== '-' ? childNumber : childName !== '-' ? childName : ''
-  const pathLabel = [parentLabel, childLabel].filter(Boolean).join(' → ')
-  return {
-    kindLabel: kind === 'added' ? '新增' : kind === 'removed' ? '删除' : '变更',
-    tagClass: `compare-kind-${kind}`,
-    lineKey: entry?.line_key || '',
-    relationshipId: entry?.relationship_id || '',
-    pathLabel,
-  }
-})
-const compareDetailRows = computed(() => {
-  const selection = compareSelected.value
-  if (!selection) return []
-  const { entry, kind } = selection
-  const changeMap = new Map<string, Record<string, any>>()
-  const changes = Array.isArray(entry?.changes) ? entry.changes : []
-  for (const change of changes) {
-    if (change?.field) {
-      changeMap.set(change.field, change)
-    }
-  }
-  return compareFieldCatalog.value.map((field) => {
-    const change = changeMap.get(field.key)
-    const left = resolveCompareFieldValue(entry, kind, 'left', field.key)
-    const right = resolveCompareFieldValue(entry, kind, 'right', field.key)
-    const normalizedLeft = resolveCompareNormalizedValue(entry, kind, 'left', field.key, change)
-    const normalizedRight = resolveCompareNormalizedValue(entry, kind, 'right', field.key, change)
-    return {
-      key: field.key,
-      label: field.label,
-      description: field.source && field.source !== '-' ? field.source : '',
-      left,
-      right,
-      normalizedLeft,
-      normalizedRight,
-      severity: change?.severity || '',
-      changed: Boolean(change),
-    }
-  })
-})
-const compareLineKeyOptions = computed(() => {
-  const options = compareSchema.value?.line_key_options
-  return options && options.length ? options : DEFAULT_COMPARE_LINE_KEYS
-})
-const compareModeOptions = computed(() => compareSchema.value?.compare_modes || [])
-
-const bomLineId = ref('')
-const bomLineQuickPick = ref('')
-const substitutes = ref<any | null>(null)
-const substitutesLoading = ref(false)
-const substitutesError = ref('')
-const substitutesFilter = ref('')
-const substituteItemId = ref('')
-const substituteQuickPick = ref('')
-const substituteRank = ref('')
-const substituteNote = ref('')
-const substitutesActionStatus = ref('')
-const substitutesActionError = ref('')
-const substitutesMutating = ref(false)
-const substitutesDeletingId = ref<string | null>(null)
-const bomSelectedLineIds = ref<Set<string>>(new Set())
 const bomFilterFieldOptions = [
   { value: 'all', label: '全部', placeholder: '编号/名称/行 ID' },
   { value: 'component', label: '组件编码/ID', placeholder: '组件编码/ID' },
@@ -3244,177 +819,6 @@ const bomFilterFieldOptions = [
   { value: 'quantity', label: '数量', placeholder: '数量' },
   { value: 'unit', label: '单位', placeholder: '单位' },
 ]
-const bomFilterField = ref('all')
-const bomFilter = ref('')
-const bomFilterPresetKey = ref('')
-const bomFilterPresetName = ref('')
-const bomFilterPresets = ref<FilterPreset[]>([])
-const bomFilterPresetImportText = ref('')
-const bomFilterPresetImportMode = ref<'merge' | 'replace'>('merge')
-const bomFilterPresetGroup = ref('')
-const bomFilterPresetGroupFilter = ref('all')
-const bomFilterPresetFileInput = ref<HTMLInputElement | null>(null)
-const showBomPresetManager = ref(false)
-const bomPresetSelection = ref<string[]>([])
-const bomPresetBatchGroup = ref('')
-const bomFilterPlaceholder = computed(() => {
-  const option = bomFilterFieldOptions.find((entry) => entry.value === bomFilterField.value)
-  return option?.placeholder || '编号/名称/行 ID'
-})
-const canSaveBomFilterPreset = computed(
-  () => Boolean(bomFilter.value.trim() && bomFilterPresetName.value.trim())
-)
-const bomFilterPresetGroups = computed(() => {
-  const groups = new Set<string>()
-  for (const preset of bomFilterPresets.value) {
-    const group = String(preset.group || '').trim()
-    if (group) groups.add(group)
-  }
-  return Array.from(groups).sort((left, right) => left.localeCompare(right))
-})
-const bomFilteredPresets = computed(() => {
-  const filter = bomFilterPresetGroupFilter.value
-  if (filter === 'all') return bomFilterPresets.value
-  if (filter === 'ungrouped') {
-    return bomFilterPresets.value.filter((preset) => !String(preset.group || '').trim())
-  }
-  return bomFilterPresets.value.filter((preset) => String(preset.group || '').trim() === filter)
-})
-const bomPresetSelectionCount = computed(() => bomPresetSelection.value.length)
-
-function normalizeFilterNeedle(value: string): string {
-  return value.trim().toLowerCase()
-}
-
-function matchesFilter(needle: string, tokens: unknown[]): boolean {
-  if (!needle) return true
-  return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
-}
-
-function getBomFilterTokens(item: Record<string, any>, field: string): unknown[] {
-  const lineId = resolveBomLineId(item)
-  const tokens = {
-    component: [item.component_code, item.component_id],
-    name: [item.component_name],
-    line_id: [lineId, item.id],
-    parent_id: [item.parent_item_id],
-    find_num: [formatBomFindNum(item)],
-    refdes: [formatBomRefdes(item)],
-    path: [formatBomTablePathIds(item)],
-    quantity: [item.quantity],
-    unit: [item.unit],
-  }
-  if (field === 'all') {
-    return [
-      ...tokens.component,
-      ...tokens.name,
-      ...tokens.line_id,
-      ...tokens.parent_id,
-      ...tokens.find_num,
-      ...tokens.refdes,
-      ...tokens.path,
-      ...tokens.quantity,
-      ...tokens.unit,
-    ]
-  }
-  return tokens[field as keyof typeof tokens] || []
-}
-
-function getBomTreeFilterTokens(row: BomTreeRow, field: string): unknown[] {
-  const line = row.line || {}
-  const lineId = row.lineId || (row.line ? resolveBomLineId(row.line) : '')
-  const tokens = {
-    component: [row.label, row.componentId],
-    name: [row.name],
-    line_id: [lineId],
-    parent_id: [line?.parent_item_id ?? line?.parentItemId],
-    find_num: [row.line ? formatBomFindNum(row.line) : ''],
-    refdes: [row.line ? formatBomRefdes(row.line) : ''],
-    path: [formatBomPathIds(row)],
-    quantity: [row.line?.quantity],
-    unit: [row.line?.unit ?? row.line?.uom],
-  }
-  if (field === 'all') {
-    return [
-      ...tokens.component,
-      ...tokens.name,
-      ...tokens.line_id,
-      ...tokens.parent_id,
-      ...tokens.find_num,
-      ...tokens.refdes,
-      ...tokens.path,
-      ...tokens.quantity,
-      ...tokens.unit,
-    ]
-  }
-  return tokens[field as keyof typeof tokens] || []
-}
-
-function getWhereUsedFilterTokens(entry: Record<string, any>, field: string): unknown[] {
-  const tokens = {
-    parent_number: [getItemNumber(entry.parent)],
-    parent_name: [getItemName(entry.parent)],
-    relationship_id: [entry?.relationship?.id],
-    path: [entry?.pathLabel, formatWhereUsedEntryPathIds(entry)],
-    find_num: [getWhereUsedLineValue(entry, 'find_num')],
-    refdes: [getWhereUsedRefdes(entry)],
-    quantity: [getWhereUsedLineValue(entry, 'quantity')],
-    uom: [getWhereUsedLineValue(entry, 'uom')],
-  }
-  if (field === 'all') {
-    return [
-      ...tokens.parent_number,
-      ...tokens.parent_name,
-      ...tokens.relationship_id,
-      ...tokens.path,
-      ...tokens.find_num,
-      ...tokens.refdes,
-      ...tokens.quantity,
-      ...tokens.uom,
-    ]
-  }
-  return tokens[field as keyof typeof tokens] || []
-}
-
-const bomFilteredItems = computed(() => {
-  const needle = normalizeFilterNeedle(bomFilter.value)
-  if (!needle) return bomItems.value
-  return bomItems.value.filter((item: any) => {
-    const tokens = getBomFilterTokens(item, bomFilterField.value)
-    return matchesFilter(needle, tokens)
-  })
-})
-
-const bomFilteredLineIds = computed(() => {
-  const ids = new Set<string>()
-  for (const item of bomFilteredItems.value) {
-    const lineId = resolveBomLineId(item)
-    if (lineId) ids.add(lineId)
-  }
-  return ids
-})
-
-const bomSelectedItems = computed(() => {
-  const selected = bomSelectedLineIds.value
-  if (!selected.size) return []
-  return bomItems.value.filter((item: any) => {
-    const lineId = resolveBomLineId(item)
-    return lineId && selected.has(lineId)
-  })
-})
-
-const bomSelectedChildIds = computed(() => {
-  const seen = new Set<string>()
-  const list: string[] = []
-  for (const item of bomSelectedItems.value) {
-    const target = resolveBomChildId(item) || resolveBomChildNumber(item)
-    if (!target || seen.has(target)) continue
-    seen.add(target)
-    list.push(target)
-  }
-  return list
-})
-
 function buildQuickPickLabel(source: string, main: string, name: string, id: string): string {
   const mainLabel = main && main !== '-' ? main : id
   const nameLabel = name && name !== '-' ? name : ''
@@ -3452,43 +856,73 @@ const searchResultOptions = computed<QuickPickOption[]>(() => {
   return options
 })
 
-const bomChildOptions = computed<QuickPickOption[]>(() => {
-  const options: QuickPickOption[] = []
-  const seen = new Set<string>()
-  const source = bomFilteredItems.value.length ? bomFilteredItems.value : bomItems.value
-  for (const item of source) {
-    const childId = resolveBomChildId(item)
-    if (!childId || seen.has(childId)) continue
-    seen.add(childId)
-    const code = resolveBomChildNumber(item) || childId
-    const name = String(item?.component_name || '')
-    options.push({
-      key: `bom-child:${childId}`,
-      value: childId,
-      label: buildQuickPickLabel('BOM', code, name, childId),
-    })
-  }
-  return options
-})
-
-const bomLineOptions = computed<QuickPickOption[]>(() => {
-  const options: QuickPickOption[] = []
-  const seen = new Set<string>()
-  const source = bomFilteredItems.value.length ? bomFilteredItems.value : bomItems.value
-  for (const item of source) {
-    const lineId = resolveBomLineId(item)
-    if (!lineId || seen.has(lineId)) continue
-    seen.add(lineId)
-    const childId = resolveBomChildId(item)
-    const code = resolveBomChildNumber(item) || childId || lineId
-    const name = String(item?.component_name || '')
-    options.push({
-      key: `bom-line:${lineId}`,
-      value: lineId,
-      label: buildQuickPickLabel('BOM 行', code, name, lineId),
-    })
-  }
-  return options
+const {
+  bomItems,
+  bomLoading,
+  bomError,
+  bomDepth,
+  bomEffectiveAt,
+  bomView,
+  bomCollapsed,
+  bomFilterField,
+  bomFilter,
+  bomFilterPresetKey,
+  bomFilterPresetName,
+  bomFilterPresets,
+  bomFilterPresetImportText,
+  bomFilterPresetImportMode,
+  bomFilterPresetGroup,
+  bomFilterPresetGroupFilter,
+  bomFilterPresetFileInput,
+  showBomPresetManager,
+  bomPresetSelection,
+  bomPresetBatchGroup,
+  bomFilterPlaceholder,
+  canSaveBomFilterPreset,
+  bomFilterPresetGroups,
+  bomFilteredPresets,
+  bomPresetSelectionCount,
+  bomFilteredItems,
+  bomSelectedChildIds,
+  bomChildOptions,
+  bomLineOptions,
+  bomSelectedCount,
+  bomTreeRows,
+  bomTreeFilteredKeys,
+  bomTreeVisibleRows,
+  bomTreeVisibleCount,
+  bomTablePathIdsList,
+  bomTablePathIdsCount,
+  bomTreePathIdsList,
+  bomTreePathIdsCount,
+  bomHasTree,
+  bomDisplayCount,
+  bomExportCount,
+  setBomDepthQuick,
+  clearBomSelection,
+  isBomItemSelected,
+  isBomTreeSelected,
+  selectBomTreeRow,
+  selectBomTableRow,
+  isBomCollapsed,
+  toggleBomNode,
+  expandAllBom,
+  collapseAllBom,
+  expandBomToDepth,
+} = usePlmBomState({
+  defaultBomDepth: DEFAULT_BOM_DEPTH,
+  bomDepthQuickOptions: BOM_DEPTH_QUICK_OPTIONS,
+  filterFieldOptions: bomFilterFieldOptions,
+  productId,
+  productView,
+  searchResultOptions,
+  resolveBomLineId,
+  resolveBomChildId,
+  resolveBomChildNumber,
+  formatBomFindNum,
+  formatBomRefdes,
+  formatBomPathIds,
+  formatBomTablePathIds,
 })
 
 const whereUsedQuickOptions = computed(() =>
@@ -3499,139 +933,313 @@ const substituteQuickOptions = computed(() =>
 )
 const compareQuickOptions = computed(() => searchResultOptions.value)
 
-const bomSelectedCount = computed(() => bomSelectedLineIds.value.size)
-
-const bomTablePathIdsList = computed(() => {
-  const seen = new Set<string>()
-  const list: string[] = []
-  for (const item of bomFilteredItems.value) {
-    const pathIds = formatBomTablePathIds(item)
-    if (!pathIds || seen.has(pathIds)) continue
-    seen.add(pathIds)
-    list.push(pathIds)
-  }
-  return list
+const {
+  whereUsedItemId,
+  whereUsedQuickPick,
+  whereUsedRecursive,
+  whereUsedMaxLevels,
+  whereUsedView,
+  whereUsedFilterField,
+  whereUsedFilter,
+  whereUsedFilterPresetKey,
+  whereUsedFilterPresetName,
+  whereUsedFilterPresets,
+  whereUsedFilterPresetImportText,
+  whereUsedFilterPresetImportMode,
+  whereUsedFilterPresetGroup,
+  whereUsedFilterPresetGroupFilter,
+  whereUsedFilterPresetFileInput,
+  showWhereUsedPresetManager,
+  whereUsedPresetSelection,
+  whereUsedPresetBatchGroup,
+  whereUsed,
+  whereUsedLoading,
+  whereUsedError,
+  whereUsedFilterPlaceholder,
+  canSaveWhereUsedFilterPreset,
+  whereUsedFilterPresetGroups,
+  whereUsedFilteredPresets,
+  whereUsedPresetSelectionCount,
+  whereUsedFilteredRows,
+  whereUsedPathIdsList,
+  whereUsedPathIdsCount,
+  whereUsedSelectedParents,
+  whereUsedSelectedCount,
+  whereUsedTreeVisibleRows,
+  whereUsedHasTree,
+  whereUsedTreePathIdsList,
+  whereUsedTreePathIdsCount,
+  clearWhereUsedSelection,
+  isWhereUsedEntrySelected,
+  isWhereUsedTreeSelected,
+  selectWhereUsedTreeRow,
+  selectWhereUsedTableRow,
+  isWhereUsedCollapsed,
+  toggleWhereUsedNode,
+  expandAllWhereUsed,
+  collapseAllWhereUsed,
+} = usePlmWhereUsedState({
+  defaultWhereUsedMaxLevels: DEFAULT_WHERE_USED_MAX_LEVELS,
+  filterFieldOptions: whereUsedFilterFieldOptions,
+  getItemNumber,
+  getItemName,
+  getWhereUsedLineValue,
+  getWhereUsedRefdes,
+  resolveWhereUsedParentId,
+  formatWhereUsedEntryPathIds,
 })
 
-const bomTablePathIdsCount = computed(() => bomTablePathIdsList.value.length)
-
-const bomTreeRows = computed<BomTreeRow[]>(() => {
-  const items = bomItems.value
-  if (!items.length) return []
-
-  const parentMap = new Map<string, any[]>()
-  for (const line of items) {
-    const parentId = String(line?.parent_item_id || '')
-    if (!parentMap.has(parentId)) {
-      parentMap.set(parentId, [])
-    }
-    parentMap.get(parentId)?.push(line)
-  }
-
-  const rows: BomTreeRow[] = []
-  const rootId = productId.value || productView.value.id || ''
-  const rootLabel =
-    productView.value.partNumber && productView.value.partNumber !== '-' ? productView.value.partNumber : rootId || 'root'
-  const rootName = productView.value.name || ''
-  const rootKey = rootId || rootLabel || 'root'
-  const rootPathLabel = String(rootLabel || rootId || rootKey)
-  const rootPathId = String(rootId || rootLabel || rootKey)
-
-  const rootRow: BomTreeRow = {
-    key: rootKey,
-    parentKey: undefined,
-    depth: 0,
-    line: undefined,
-    label: rootLabel,
-    name: rootName,
-    componentId: rootId,
-    lineId: '',
-    hasChildren: false,
-    pathLabels: [rootPathLabel],
-    pathIds: [rootPathId],
-  }
-  rows.push(rootRow)
-
-  const sortLines = (lines: any[]) =>
-    [...lines].sort((a, b) => {
-      const aKey = String(a?.find_num ?? a?.findNum ?? a?.component_code ?? a?.component_id ?? a?.id ?? '')
-      const bKey = String(b?.find_num ?? b?.findNum ?? b?.component_code ?? b?.component_id ?? b?.id ?? '')
-      return aKey.localeCompare(bKey)
-    })
-
-  const seen = new Set<string>()
-  const rootLines = [
-    ...(parentMap.get(rootId) || []),
-    ...(parentMap.get('') || []),
-  ].filter((line) => {
-    const key = resolveBomLineId(line) || `${resolveBomChildId(line)}-${resolveBomChildNumber(line)}`
-    if (!key) return true
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-
-  let autoIndex = 0
-  const makeLineKey = (line: any) => {
-    const base = resolveBomLineId(line) || resolveBomChildId(line) || resolveBomChildNumber(line)
-    if (base) return base
-    autoIndex += 1
-    return `line-${autoIndex}`
-  }
-
-  const walk = (
-    line: any,
-    depth: number,
-    parentKey: string,
-    path: Set<string>,
-    pathLabels: string[],
-    pathIds: string[]
-  ) => {
-    const componentId = resolveBomChildId(line)
-    const lineKey = makeLineKey(line)
-    const key = `${parentKey}/${lineKey}`
-    const label = line?.component_code || line?.component_id || componentId || resolveBomChildNumber(line) || lineKey
-    const name = line?.component_name || ''
-    const lineId = resolveBomLineId(line)
-    const labelToken = String(label || componentId || lineKey)
-    const idToken = String(componentId || label || lineKey)
-    const nextLabels = [...pathLabels, labelToken]
-    const nextIds = [...pathIds, idToken]
-    const nextPath = new Set(path)
-    const hasCycle = componentId ? nextPath.has(componentId) : false
-    if (componentId && !hasCycle) {
-      nextPath.add(componentId)
-    }
-    const children = componentId && !hasCycle ? parentMap.get(componentId) || [] : []
-    rows.push({
-      key,
-      parentKey,
-      depth,
-      line,
-      label,
-      name,
-      componentId,
-      lineId,
-      hasChildren: children.length > 0,
-      pathLabels: nextLabels,
-      pathIds: nextIds,
-    })
-    for (const child of sortLines(children)) {
-      walk(child, depth + 1, key, nextPath, nextLabels, nextIds)
-    }
-  }
-
-  for (const line of sortLines(rootLines)) {
-    walk(line, 1, rootKey, new Set(rootId ? [rootId] : []), rootRow.pathLabels, rootRow.pathIds)
-  }
-  rootRow.hasChildren = rows.length > 1
-  return rows
+const {
+  applyWhereUsedFromBom,
+  applySubstitutesFromBom,
+  applyProductFromBom,
+  applySubstitutesFromCompare,
+  applyProductFromWhereUsed,
+  applyProductFromWhereUsedRow,
+  applyProductFromCompareParent,
+  applyWhereUsedFromCompare,
+  copyCompareLineId,
+  applyProductFromSubstitute,
+} = usePlmCrossPanelActions({
+  setDeepLinkMessage,
+  scheduleQuerySync,
+  copyToClipboard,
+  resolveBomChildId,
+  resolveBomChildNumber,
+  resolveBomLineId,
+  resolveCompareLineId,
+  resolveWhereUsedParentId,
+  resolveItemKey,
+  getCompareParent,
+  getCompareChild,
+  resolveSubstituteTarget,
+  setProductTarget: (target) => {
+    productId.value = target.id
+    productItemNumber.value = target.itemNumber
+  },
+  clearProductError: () => {
+    productError.value = ''
+  },
+  loadProduct: () => loadProduct(),
+  setWhereUsedItemId: (value) => {
+    whereUsedItemId.value = value
+  },
+  clearWhereUsedError: () => {
+    whereUsedError.value = ''
+  },
+  isWhereUsedLoading: () => whereUsedLoading.value,
+  loadWhereUsed: () => loadWhereUsed(),
+  setBomLineId: (value) => {
+    bomLineId.value = value
+  },
+  clearSubstitutesState: () => {
+    substitutesError.value = ''
+    substitutesActionStatus.value = ''
+    substitutesActionError.value = ''
+  },
+  isSubstitutesLoading: () => substitutesLoading.value,
+  loadSubstitutes: () => loadSubstitutes(),
 })
+
+const {
+  exportWhereUsedCsv,
+  exportBomCompareCsv,
+  copyCompareDetailRows,
+  exportCompareDetailCsv,
+  exportBomCsv,
+  exportSubstitutesCsv,
+  exportDocumentsCsv,
+  exportApprovalsCsv,
+} = usePlmExportActions({
+  setDeepLinkMessage,
+  copyToClipboard,
+  downloadCsv,
+  getWhereUsedFilteredRows: () => whereUsedFilteredRows.value,
+  formatWhereUsedEntryPathIds,
+  getWhereUsedLineValue,
+  getWhereUsedRefdes,
+  getItemNumber,
+  getItemName,
+  getCompareAddedFiltered: () => compareAddedFiltered.value,
+  getCompareRemovedFiltered: () => compareRemovedFiltered.value,
+  getCompareChangedFiltered: () => compareChangedFiltered.value,
+  getCompareProp,
+  formatEffectivity,
+  formatSubstituteCount,
+  getCompareDetailRows: () => compareDetailRows.value,
+  getBomView: () => bomView.value,
+  getBomTreeRows: () => bomTreeRows.value,
+  getBomTreeFilteredKeys: () => bomTreeFilteredKeys.value,
+  getBomFilteredItems: () => bomFilteredItems.value,
+  getProductId: () => productId.value,
+  getProductView: () => productView.value,
+  resolveBomChildId,
+  resolveBomLineId,
+  formatBomFindNum,
+  formatBomRefdes,
+  formatBomTablePathIds,
+  getSubstitutesRows: () => substitutesRows.value,
+  getSubstitutesPayload: () => substitutes.value,
+  getSubstituteSourcePart,
+  getSubstituteId,
+  getSubstituteNumber,
+  getSubstituteName,
+  getSubstituteStatus,
+  formatSubstituteRank,
+  formatSubstituteNote,
+  getDocumentsSorted: () => documentsSorted.value,
+  getDocumentName,
+  getDocumentType,
+  getDocumentRevision,
+  getDocumentRole,
+  getDocumentAuthor,
+  getDocumentSourceSystem,
+  getDocumentSourceVersion,
+  getDocumentMime,
+  getDocumentSize,
+  getDocumentCreatedAt,
+  getDocumentUpdatedAt,
+  getDocumentPreviewUrl,
+  getDocumentDownloadUrl,
+  getApprovalsSorted: () => approvalsSorted.value,
+  getApprovalTitle,
+  getApprovalStatus,
+  getApprovalType,
+  getApprovalRequester,
+  getApprovalRequesterId,
+  getApprovalCreatedAt,
+  getApprovalProductNumber,
+  getApprovalProductName,
+  getApprovalProductId,
+})
+
+const {
+  bomLineId,
+  substitutes,
+  substitutesLoading,
+  substitutesError,
+  substitutesFilter,
+  substituteItemId,
+  substituteRank,
+  substituteNote,
+  substitutesActionStatus,
+  substitutesActionError,
+  substitutesMutating,
+  substitutesDeletingId,
+  substitutesRows,
+  substitutesPanel,
+} = usePlmSubstitutesPanel({
+  productLoading,
+  whereUsedLoading,
+  copyToClipboard,
+  setDeepLinkMessage,
+  scheduleQuerySync,
+  bomLineOptions,
+  substituteQuickOptions,
+  bomItems,
+  getSubstituteNumber,
+  getSubstituteName,
+  getSubstituteStatus,
+  formatSubstituteRank,
+  formatSubstituteNote,
+  copyDeepLink,
+  loadSubstitutes,
+  addSubstitute,
+  removeSubstitute,
+  applyWhereUsedFromBom,
+  resolveSubstituteTargetKey,
+  applyProductFromSubstitute,
+  getSubstituteId,
+  getItemNumber,
+  getItemName,
+  itemStatusClass,
+  exportSubstitutesCsv,
+  formatJson,
+})
+
+const {
+  compareMode,
+  compareMaxLevels,
+  compareLineKey,
+  compareIncludeChildFields,
+  compareIncludeSubstitutes,
+  compareIncludeEffectivity,
+  compareSyncEnabled,
+  compareEffectiveAt,
+  compareFilter,
+  compareRelationshipProps,
+  bomCompare,
+  compareLoading,
+  compareError,
+  compareSchema,
+  compareSchemaLoading,
+  compareSchemaError,
+  compareSelected,
+  compareFieldCatalog,
+  compareDetailRows,
+  compareAddedFiltered,
+  compareRemovedFiltered,
+  compareChangedFiltered,
+  comparePanel,
+} = usePlmComparePanel({
+  defaultCompareMaxLevels: DEFAULT_COMPARE_MAX_LEVELS,
+  defaultCompareLineKey: DEFAULT_COMPARE_LINE_KEY,
+  defaultCompareRelationshipProps: DEFAULT_COMPARE_REL_PROPS,
+  defaultCompareLineKeys: DEFAULT_COMPARE_LINE_KEYS,
+  compareLeftId,
+  compareRightId,
+  productId,
+  productLoading,
+  whereUsedLoading,
+  substitutesLoading,
+  copyToClipboard,
+  setDeepLinkMessage,
+  scheduleQuerySync,
+  compareQuickOptions,
+  filterCompareEntries,
+  compareFieldLabels,
+  defaultCompareFieldCatalog,
+  resolveCompareFieldValue,
+  resolveCompareNormalizedValue,
+  copyDeepLink,
+  applyCompareFromProduct,
+  loadBomCompare,
+  selectCompareEntry,
+  clearCompareSelection,
+  isCompareEntrySelected,
+  resolveCompareChildKey,
+  resolveCompareLineId,
+  resolveCompareParentKey,
+  getCompareParent,
+  getCompareChild,
+  getCompareProp,
+  applyProductFromCompareParent,
+  applyWhereUsedFromCompare,
+  applySubstitutesFromCompare,
+  copyCompareLineId,
+  formatEffectivity,
+  formatSubstituteCount,
+  getCompareEntrySeverity,
+  getCompareChangeRows,
+  formatDiffValue,
+  severityClass,
+  compareRowClass,
+  copyCompareDetailRows,
+  exportCompareDetailCsv,
+  exportBomCompareCsv,
+  getItemNumber,
+  getItemName,
+  formatJson,
+})
+
+const compareFieldMetaMap = computed(
+  () => new Map(compareFieldCatalog.value.map((entry) => [entry.key, entry])),
+)
 
 const bomPathRowMaps = computed(() => {
   const rows = bomTreeRows.value
-  const byLineId = new Map<string, BomTreeRow>()
-  const byPair = new Map<string, BomTreeRow>()
+  const byLineId = new Map<string, BomTreeRowModel>()
+  const byPair = new Map<string, BomTreeRowModel>()
   const rowMap = new Map(rows.map((row) => [row.key, row]))
   for (const row of rows) {
     if (!row.line) continue
@@ -3653,86 +1261,10 @@ const bomPathRowMaps = computed(() => {
   return { byLineId, byPair }
 })
 
-const bomTreeFilteredKeys = computed(() => {
-  const rows = bomTreeRows.value
-  if (!rows.length) return new Set<string>()
-  const needle = normalizeFilterNeedle(bomFilter.value)
-  if (!needle) return new Set(rows.map((row) => row.key))
-
-  const matches = new Set<string>()
-  for (const row of rows) {
-    const tokens = getBomTreeFilterTokens(row, bomFilterField.value)
-    if (matchesFilter(needle, tokens)) {
-      matches.add(row.key)
-    }
-  }
-
-  const parentMap = new Map(rows.map((row) => [row.key, row.parentKey || '']))
-  const included = new Set<string>()
-  for (const key of matches) {
-    let current = key
-    while (current) {
-      included.add(current)
-      current = parentMap.get(current) || ''
-    }
-  }
-  return included
-})
-
-const bomTreeVisibleRows = computed<BomTreeRow[]>(() => {
-  const rows = bomTreeRows.value
-  if (!rows.length) return []
-  const included = bomTreeFilteredKeys.value
-  const parentMap = new Map(rows.map((row) => [row.key, row.parentKey || '']))
-  const collapsed = bomCollapsed.value
-  const isHidden = (row: BomTreeRow) => {
-    if (!included.has(row.key)) return true
-    let parentKey = row.parentKey
-    while (parentKey) {
-      if (collapsed.has(parentKey)) return true
-      parentKey = parentMap.get(parentKey) || ''
-    }
-    return false
-  }
-  return rows.filter((row) => !isHidden(row))
-})
-
-const bomTreeVisibleCount = computed(() => bomTreeVisibleRows.value.filter((row) => row.line).length)
-
-const bomTreePathIdsList = computed(() => {
-  const seen = new Set<string>()
-  const list: string[] = []
-  for (const row of bomTreeVisibleRows.value) {
-    if (!row.line) continue
-    const pathIds = formatBomPathIds(row)
-    if (!pathIds || seen.has(pathIds)) continue
-    seen.add(pathIds)
-    list.push(pathIds)
-  }
-  return list
-})
-
-const bomTreePathIdsCount = computed(() => bomTreePathIdsList.value.length)
-
-const bomTreeFilteredCount = computed(() => {
-  const included = bomTreeFilteredKeys.value
-  return bomTreeRows.value.filter((row) => row.line && included.has(row.key)).length
-})
-
-const bomHasTree = computed(() => bomTreeRows.value.some((row) => row.hasChildren))
-
-const bomDisplayCount = computed(() =>
-  bomView.value === 'tree' ? bomTreeVisibleCount.value : bomFilteredItems.value.length
-)
-
-const bomExportCount = computed(() =>
-  bomView.value === 'tree' ? bomTreeFilteredCount.value : bomFilteredItems.value.length
-)
-
 const documentsFiltered = computed(() => {
   const needle = documentFilter.value.trim().toLowerCase()
   if (!needle) return documents.value
-  return documents.value.filter((doc: any) => {
+  return documents.value.filter((doc) => {
     const tokens = [
       getDocumentName(doc),
       getDocumentId(doc),
@@ -3750,27 +1282,27 @@ const documentsFiltered = computed(() => {
   })
 })
 
-const documentSortConfig: SortConfig = {
-  name: { type: 'string', accessor: (doc: any) => getDocumentName(doc) },
-  type: { type: 'string', accessor: (doc: any) => getDocumentType(doc) },
-  revision: { type: 'string', accessor: (doc: any) => getDocumentRevision(doc) },
-  role: { type: 'string', accessor: (doc: any) => getDocumentRole(doc) },
-  mime: { type: 'string', accessor: (doc: any) => getDocumentMime(doc) },
-  size: { type: 'number', accessor: (doc: any) => getDocumentSize(doc) ?? 0 },
-  created: { type: 'date', accessor: (doc: any) => getDocumentCreatedAt(doc) },
-  updated: { type: 'date', accessor: (doc: any) => getDocumentUpdatedAt(doc) },
+const documentSortConfig: SortConfig<DocumentEntry> = {
+  name: { type: 'string', accessor: (doc) => getDocumentName(doc) },
+  type: { type: 'string', accessor: (doc) => getDocumentType(doc) },
+  revision: { type: 'string', accessor: (doc) => getDocumentRevision(doc) },
+  role: { type: 'string', accessor: (doc) => getDocumentRole(doc) },
+  mime: { type: 'string', accessor: (doc) => getDocumentMime(doc) },
+  size: { type: 'number', accessor: (doc) => getDocumentSize(doc) ?? 0 },
+  created: { type: 'date', accessor: (doc) => getDocumentCreatedAt(doc) },
+  updated: { type: 'date', accessor: (doc) => getDocumentUpdatedAt(doc) },
 }
 
 const documentsSorted = computed(() =>
   sortRows(documentsFiltered.value, documentSortKey.value, documentSortDir.value, documentSortConfig)
 )
 
-const cadHistoryEntries = computed(() => cadHistory.value?.entries || [])
+const cadHistoryEntries = computed<CadHistoryEntry[]>(() => cadHistory.value?.entries || [])
 
 const approvalsFiltered = computed(() => {
   const needle = approvalsFilter.value.trim().toLowerCase()
   if (!needle) return approvals.value
-  return approvals.value.filter((entry: any) => {
+  return approvals.value.filter((entry) => {
     const tokens = [
       getApprovalTitle(entry),
       getApprovalRequester(entry),
@@ -3785,12 +1317,12 @@ const approvalsFiltered = computed(() => {
   })
 })
 
-const approvalSortConfig: SortConfig = {
-  created: { type: 'date', accessor: (entry: any) => getApprovalCreatedAt(entry) },
-  title: { type: 'string', accessor: (entry: any) => getApprovalTitle(entry) },
-  status: { type: 'string', accessor: (entry: any) => getApprovalStatus(entry) },
-  requester: { type: 'string', accessor: (entry: any) => getApprovalRequester(entry) },
-  product: { type: 'string', accessor: (entry: any) => getApprovalProductNumber(entry) },
+const approvalSortConfig: SortConfig<ApprovalEntry> = {
+  created: { type: 'date', accessor: (entry) => getApprovalCreatedAt(entry) },
+  title: { type: 'string', accessor: (entry) => getApprovalTitle(entry) },
+  status: { type: 'string', accessor: (entry) => getApprovalStatus(entry) },
+  requester: { type: 'string', accessor: (entry) => getApprovalRequester(entry) },
+  product: { type: 'string', accessor: (entry) => getApprovalProductNumber(entry) },
 }
 
 const approvalsSorted = computed(() =>
@@ -3800,7 +1332,7 @@ const approvalsSorted = computed(() =>
 const approvalHistoryRows = computed(() => {
   const rows = approvalHistory.value || []
   const sorted = [...rows]
-  sorted.sort((left: any, right: any) => {
+  sorted.sort((left, right) => {
     const leftTime = Date.parse(getApprovalHistoryApprovedAt(left) || getApprovalHistoryCreatedAt(left) || '')
     const rightTime = Date.parse(getApprovalHistoryApprovedAt(right) || getApprovalHistoryCreatedAt(right) || '')
     return (Number.isNaN(rightTime) ? 0 : rightTime) - (Number.isNaN(leftTime) ? 0 : leftTime)
@@ -3808,154 +1340,13 @@ const approvalHistoryRows = computed(() => {
   return sorted
 })
 
-const compareSummary = computed(() => bomCompare.value?.summary || {})
-const compareAdded = computed(() => bomCompare.value?.added || [])
-const compareRemoved = computed(() => bomCompare.value?.removed || [])
-const compareChanged = computed(() => bomCompare.value?.changed || [])
-const compareAddedFiltered = computed(() => filterCompareEntries(compareAdded.value))
-const compareRemovedFiltered = computed(() => filterCompareEntries(compareRemoved.value))
-const compareChangedFiltered = computed(() => filterCompareEntries(compareChanged.value))
-const compareTotalFiltered = computed(
-  () => compareAddedFiltered.value.length + compareRemovedFiltered.value.length + compareChangedFiltered.value.length
-)
-
-const substitutesRows = computed(() => {
-  const list = substitutes.value?.substitutes || []
-  const needle = substitutesFilter.value.trim().toLowerCase()
-  if (!needle) return list
-  return list.filter((entry: any) => {
-    const tokens = [
-      getSubstituteNumber(entry),
-      getSubstituteName(entry),
-      getSubstituteStatus(entry),
-      getItemNumber(entry.part),
-      getItemName(entry.part),
-      formatSubstituteRank(entry),
-      formatSubstituteNote(entry),
-      entry?.id,
-      entry?.relationship?.id,
-    ]
-    return tokens.some((token) => String(token || '').toLowerCase().includes(needle))
-  })
-})
-
-const bomLineContext = computed(() => {
-  const lineId = bomLineId.value.trim()
-  if (!lineId) return null
-  return bomItems.value.find((item) => String(item.id) === lineId) || null
-})
-
-const authStateText = computed(() => {
-  switch (authState.value) {
-    case 'valid':
-      return '已登录'
-    case 'expiring':
-      return '即将过期'
-    case 'expired':
-      return '已过期'
-    case 'invalid':
-      return '无效 Token'
-    default:
-      return '未登录'
-  }
-})
-
-const authStateClass = computed(() => `auth-${authState.value}`)
-
-const authExpiryText = computed(() => {
-  if (!authExpiresAt.value) return ''
-  const date = new Date(authExpiresAt.value)
-  if (Number.isNaN(date.getTime())) return ''
-  return `有效至 ${date.toLocaleString()}`
-})
-
-const authHint = computed(() => {
-  if (authState.value === 'missing') {
-    return '未检测到 auth_token（MetaSheet token），请在 localStorage 写入后刷新。'
-  }
-  if (authState.value === 'invalid') {
-    return 'MetaSheet Token 解析失败，请重新获取并写入 auth_token。'
-  }
-  if (authState.value === 'expired') {
-    return 'MetaSheet Token 已过期，请重新登录或刷新 Token。'
-  }
-  if (authState.value === 'expiring') {
-    return 'MetaSheet Token 即将过期，建议提前刷新。'
-  }
-  return ''
-})
-
-const plmAuthStateText = computed(() => {
-  switch (plmAuthState.value) {
-    case 'valid':
-      return '已登录'
-    case 'expiring':
-      return '即将过期'
-    case 'expired':
-      return '已过期'
-    case 'invalid':
-      return '无效 Token'
-    default:
-      return '未设置'
-  }
-})
-
-const plmAuthStateClass = computed(() => `auth-${plmAuthState.value}`)
-
-const plmAuthExpiryText = computed(() => {
-  if (!plmAuthExpiresAt.value) return ''
-  const date = new Date(plmAuthExpiresAt.value)
-  if (Number.isNaN(date.getTime())) return ''
-  return `有效至 ${date.toLocaleString()}`
-})
-
-const plmAuthHint = computed(() => {
-  if (plmAuthLegacy.value) {
-    return '检测到旧字段 jwt，建议迁移为 plm_token。'
-  }
-  if (plmAuthState.value === 'missing') {
-    return '未检测到 plm_token（可选，仅用于显示 PLM Token 状态）。'
-  }
-  if (plmAuthState.value === 'invalid') {
-    return 'PLM Token 解析失败，请重新获取并写入 plm_token。'
-  }
-  if (plmAuthState.value === 'expired') {
-    return 'PLM Token 已过期，请重新登录或刷新 Token。'
-  }
-  if (plmAuthState.value === 'expiring') {
-    return 'PLM Token 即将过期，建议提前刷新。'
-  }
-  return ''
-})
-
 const DOCUMENT_COLUMNS_STORAGE_KEY = 'plm_document_columns'
 const APPROVAL_COLUMNS_STORAGE_KEY = 'plm_approval_columns'
-const DEEP_LINK_PRESETS_STORAGE_KEY = 'plm_deep_link_presets'
 const BOM_COLLAPSE_STORAGE_KEY = 'plm_bom_tree_collapsed'
 const BOM_FILTER_PRESETS_STORAGE_KEY = 'plm_bom_filter_presets'
 const WHERE_USED_FILTER_PRESETS_STORAGE_KEY = 'plm_where_used_filter_presets'
-const deepLinkPanelOptions = [
-  { key: 'search', label: '搜索' },
-  { key: 'product', label: '产品' },
-  { key: 'documents', label: '文档' },
-  { key: 'approvals', label: '审批' },
-  { key: 'cad', label: 'CAD 元数据' },
-  { key: 'where-used', label: 'Where-Used' },
-  { key: 'compare', label: 'BOM 对比' },
-  { key: 'substitutes', label: '替代件' },
-]
-const builtInDeepLinkPresets: DeepLinkPreset[] = [
-  { key: 'cad-meta', label: 'CAD 元数据', panels: ['cad'] },
-  { key: 'product-where-used', label: '产品 + Where-Used', panels: ['product', 'where-used'] },
-  { key: 'product-bom-tree', label: '产品 + BOM 树形', panels: ['product'], params: { bomView: 'tree' } },
-  { key: 'compare-substitutes', label: 'BOM 对比 + 替代件', panels: ['compare', 'substitutes'] },
-  { key: 'docs-approvals', label: '文档 + 审批', panels: ['documents', 'approvals'] },
-  { key: 'full-bom', label: '产品 + BOM 全链路', panels: ['product', 'where-used', 'compare', 'substitutes'] },
-]
-const deepLinkPresets = computed<DeepLinkPreset[]>(() => [
-  ...builtInDeepLinkPresets,
-  ...customDeepLinkPresets.value,
-])
+const bomFilterPresetQuery = ref('')
+const whereUsedFilterPresetQuery = ref('')
 
 function formatJson(payload: unknown): string {
   return JSON.stringify(payload, null, 2)
@@ -3983,15 +1374,12 @@ function resetAll() {
   product.value = null
   productError.value = ''
   authError.value = ''
-  deepLinkStatus.value = ''
-  deepLinkError.value = ''
-  deepLinkScope.value = []
-  deepLinkPreset.value = ''
-  customPresetName.value = ''
-  editingPresetLabel.value = ''
-  importPresetText.value = ''
-  isPresetDropActive.value = false
-  presetDropDepth = 0
+  resetDeepLinkState()
+  workbenchTeamViewQuery.value = ''
+  workbenchTeamViewKey.value = ''
+  workbenchTeamViewName.value = ''
+  workbenchTeamViewOwnerUserId.value = ''
+  workbenchTeamViewsError.value = ''
   searchQuery.value = ''
   searchItemType.value = DEFAULT_ITEM_TYPE
   searchLimit.value = DEFAULT_SEARCH_LIMIT
@@ -4009,6 +1397,13 @@ function resetAll() {
   bomFilterPresetImportText.value = ''
   bomFilterPresetImportMode.value = 'merge'
   bomFilterPresetGroup.value = ''
+  bomFilterPresetQuery.value = ''
+  bomTeamPresetQuery.value = ''
+  bomTeamPresetKey.value = ''
+  bomTeamPresetName.value = ''
+  bomTeamPresetGroup.value = ''
+  bomTeamPresetOwnerUserId.value = ''
+  bomTeamPresetsError.value = ''
   bomFilterPresetGroupFilter.value = 'all'
   showBomPresetManager.value = false
   bomPresetSelection.value = []
@@ -4022,6 +1417,11 @@ function resetAll() {
   documentsError.value = ''
   documentFilter.value = ''
   documentColumns.value = { ...defaultDocumentColumns }
+  documentTeamViewQuery.value = ''
+  documentTeamViewKey.value = ''
+  documentTeamViewName.value = ''
+  documentTeamViewOwnerUserId.value = ''
+  documentTeamViewsError.value = ''
   cadFileId.value = ''
   cadOtherFileId.value = ''
   cadProperties.value = null
@@ -4034,6 +1434,11 @@ function resetAll() {
   cadViewStateDraft.value = ''
   cadReviewState.value = ''
   cadReviewNote.value = ''
+  cadTeamViewQuery.value = ''
+  cadTeamViewKey.value = ''
+  cadTeamViewName.value = ''
+  cadTeamViewOwnerUserId.value = ''
+  cadTeamViewsError.value = ''
   cadLoading.value = false
   cadDiffLoading.value = false
   cadUpdating.value = false
@@ -4050,6 +1455,9 @@ function resetAll() {
   approvalActionStatus.value = ''
   approvalActionError.value = ''
   approvalActingId.value = ''
+  approvalActionabilityById.value = {}
+  approvalActionabilityLoadingById.value = {}
+  approvalActionabilityActorKey.value = ''
   approvalHistoryFor.value = ''
   approvalHistoryLabel.value = ''
   approvalHistory.value = []
@@ -4057,6 +1465,11 @@ function resetAll() {
   approvalHistoryLoading.value = false
   approvalsFilter.value = ''
   approvalColumns.value = { ...defaultApprovalColumns }
+  approvalsTeamViewQuery.value = ''
+  approvalsTeamViewKey.value = ''
+  approvalsTeamViewName.value = ''
+  approvalsTeamViewOwnerUserId.value = ''
+  approvalsTeamViewsError.value = ''
   whereUsedItemId.value = ''
   whereUsedRecursive.value = true
   whereUsedMaxLevels.value = DEFAULT_WHERE_USED_MAX_LEVELS
@@ -4094,6 +1507,13 @@ function resetAll() {
   whereUsedFilter.value = ''
   whereUsedFilterPresetKey.value = ''
   whereUsedFilterPresetName.value = ''
+  whereUsedFilterPresetQuery.value = ''
+  whereUsedTeamPresetQuery.value = ''
+  whereUsedTeamPresetKey.value = ''
+  whereUsedTeamPresetName.value = ''
+  whereUsedTeamPresetGroup.value = ''
+  whereUsedTeamPresetOwnerUserId.value = ''
+  whereUsedTeamPresetsError.value = ''
   whereUsedFilterPresetImportText.value = ''
   whereUsedFilterPresetImportMode.value = 'merge'
   whereUsedFilterPresetGroup.value = ''
@@ -4102,6 +1522,7 @@ function resetAll() {
   whereUsedPresetSelection.value = []
   whereUsedPresetBatchGroup.value = ''
   syncQueryParams({
+    ...buildPlmWorkbenchResetHydratedPanelQueryPatch(),
     searchQuery: '',
     searchItemType: '',
     searchLimit: undefined,
@@ -4117,6 +1538,8 @@ function resetAll() {
     whereUsedItemId: '',
     whereUsedRecursive: undefined,
     whereUsedMaxLevels: undefined,
+    whereUsedFilterPreset: '',
+    whereUsedTeamPreset: '',
     whereUsedFilter: '',
     whereUsedFilterField: '',
     compareLeftId: '',
@@ -4133,6 +1556,8 @@ function resetAll() {
     compareFilter: '',
     bomDepth: undefined,
     bomEffectiveAt: '',
+    bomFilterPreset: '',
+    bomTeamPreset: '',
     bomFilter: '',
     bomFilterField: '',
     bomView: '',
@@ -4143,139 +1568,6 @@ function resetAll() {
     autoload: undefined,
   })
 }
-
-function decodeJwtPayload(token: string): { exp?: number } | null {
-  const segments = token.split('.')
-  if (segments.length < 2) return null
-  const payload = segments[1]
-  try {
-    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
-    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')
-    return JSON.parse(atob(padded))
-  } catch (_err) {
-    return null
-  }
-}
-
-function resolveTokenStatus(token: string): { state: AuthState; expiresAt: number | null } {
-  if (!token) {
-    return { state: 'missing', expiresAt: null }
-  }
-  const payload = decodeJwtPayload(token)
-  const expSeconds = payload?.exp
-  if (!expSeconds) {
-    return { state: 'invalid', expiresAt: null }
-  }
-  const expMs = expSeconds * 1000
-  const timeLeftMs = expMs - Date.now()
-  if (timeLeftMs <= 0) {
-    return { state: 'expired', expiresAt: expMs }
-  }
-  if (timeLeftMs <= 10 * 60 * 1000) {
-    return { state: 'expiring', expiresAt: expMs }
-  }
-  return { state: 'valid', expiresAt: expMs }
-}
-
-function refreshAuthStatus() {
-  const metaToken = localStorage.getItem('auth_token') || ''
-  const metaStatus = resolveTokenStatus(metaToken)
-  authState.value = metaStatus.state
-  authExpiresAt.value = metaStatus.expiresAt
-
-  const plmToken = localStorage.getItem('plm_token') || ''
-  const legacyToken = localStorage.getItem('jwt') || ''
-  plmAuthLegacy.value = !plmToken && Boolean(legacyToken)
-  const plmStatus = resolveTokenStatus(plmToken || legacyToken)
-  plmAuthState.value = plmStatus.state
-  plmAuthExpiresAt.value = plmStatus.expiresAt
-}
-
-function handleAuthError(error: any) {
-  const message = error?.message || ''
-  if (!message.includes('401')) return
-  refreshAuthStatus()
-  if (authState.value === 'valid' || authState.value === 'expiring') {
-    authState.value = 'invalid'
-  }
-  authError.value = `鉴权失败（${message.replace('API error: ', '')}）。请刷新 Token。`
-}
-
-async function searchProducts() {
-  searchLoading.value = true
-  searchError.value = ''
-  try {
-    const filters: Record<string, unknown> = {}
-    if (searchQuery.value) filters.query = searchQuery.value
-    if (searchItemType.value) filters.itemType = searchItemType.value
-    const result = await apiPost<{
-      ok: boolean
-      data: { items: any[]; total: number }
-      error?: { message?: string }
-    }>('/api/federation/plm/query', {
-      operation: 'products',
-      pagination: { limit: searchLimit.value || 10, offset: 0 },
-      filters: Object.keys(filters).length ? filters : undefined,
-    })
-    if (!result.ok) {
-      throw new Error(result.error?.message || '搜索失败')
-    }
-    searchResults.value = result.data?.items || []
-    searchTotal.value = result.data?.total ?? searchResults.value.length
-  } catch (error: any) {
-    handleAuthError(error)
-    searchError.value = error?.message || '搜索失败'
-  } finally {
-    searchLoading.value = false
-  }
-}
-
-async function applySearchItem(item: any) {
-  if (!item?.id) return
-  productId.value = item.id
-  productItemNumber.value = item.partNumber || item.item_number || item.itemNumber || item.code || ''
-  if (item.itemType) {
-    itemType.value = item.itemType
-  }
-  await loadProduct()
-}
-
-function applyCompareFromSearch(item: any, side: 'left' | 'right') {
-  const targetId = item?.id || item?.item_id || item?.itemId
-  const targetNumber = item?.partNumber || item?.item_number || item?.itemNumber || item?.code || ''
-  if (!targetId && !targetNumber) {
-    setDeepLinkMessage('搜索结果缺少 ID', true)
-    return
-  }
-  if (side === 'left') {
-    compareLeftId.value = targetId ? String(targetId) : String(targetNumber)
-  } else {
-    compareRightId.value = targetId ? String(targetId) : String(targetNumber)
-  }
-  scheduleQuerySync({
-    compareLeftId: compareLeftId.value || undefined,
-    compareRightId: compareRightId.value || undefined,
-  })
-  setDeepLinkMessage(`已设为对比${side === 'left' ? '左' : '右'}侧：${targetId || targetNumber}`)
-}
-
-async function copySearchValue(item: any, kind: 'id' | 'number') {
-  const idValue = item?.id || item?.item_id || item?.itemId
-  const numberValue = item?.partNumber || item?.item_number || item?.itemNumber || item?.code || ''
-  const value = kind === 'id' ? idValue : numberValue
-  if (!value) {
-    setDeepLinkMessage(kind === 'id' ? '缺少 ID' : '缺少料号', true)
-    return
-  }
-  const ok = await copyToClipboard(String(value))
-  if (!ok) {
-    setDeepLinkMessage('复制失败，请手动复制', true)
-    return
-  }
-  setDeepLinkMessage(`已复制${kind === 'id' ? ' ID' : '料号'}：${value}`)
-}
-
-type ProductCopyKind = 'id' | 'number' | 'revision' | 'type' | 'status'
 
 function normalizeProductCopyValue(value?: string): string {
   if (!value) return ''
@@ -4344,28 +1636,19 @@ async function loadProduct() {
   productLoading.value = true
   productError.value = ''
   try {
-    const params = new URLSearchParams()
-    if (itemType.value) {
-      params.set('itemType', itemType.value)
-    }
-    if (productItemNumber.value) {
-      params.set('itemNumber', productItemNumber.value)
-    }
-    const result = await apiGet<{ ok: boolean; data: any; error?: { message?: string } }>(
-      `/api/federation/plm/products/${encodeURIComponent(resolvedId)}?${params.toString()}`
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || '加载产品失败')
-    }
-    product.value = result.data
+    const result = await plmService.getProduct<ProductRecord>(resolvedId, {
+      itemType: itemType.value || undefined,
+      itemNumber: productItemNumber.value || undefined,
+    })
+    product.value = result
     if (productView.value.partNumber && !productItemNumber.value) {
       productItemNumber.value = productView.value.partNumber === '-' ? '' : productView.value.partNumber
     }
     if (productView.value.itemType && (itemType.value === DEFAULT_ITEM_TYPE || !itemType.value)) {
       itemType.value = productView.value.itemType
     }
-    if (result.data?.id && result.data.id !== productId.value) {
-      productId.value = String(result.data.id)
+    if (result?.id && result.id !== productId.value) {
+      productId.value = String(result.id)
       syncQueryParams({ productId: productId.value })
     }
     await Promise.all([loadBom(), loadDocuments(), loadApprovals()])
@@ -4382,24 +1665,13 @@ async function loadBom() {
   bomLoading.value = true
   bomError.value = ''
   try {
-    const params = new URLSearchParams()
     const depthValue = Number.isFinite(bomDepth.value) ? Math.max(1, Math.floor(bomDepth.value)) : undefined
-    if (depthValue) {
-      params.set('depth', String(depthValue))
-    }
     const effectiveAt = normalizeEffectiveAt(bomEffectiveAt.value)
-    if (effectiveAt) {
-      params.set('effective_at', effectiveAt)
-    }
-    const query = params.toString()
-    const endpoint = query
-      ? `/api/federation/plm/products/${encodeURIComponent(productId.value)}/bom?${query}`
-      : `/api/federation/plm/products/${encodeURIComponent(productId.value)}/bom`
-    const result = await apiGet<{ ok: boolean; data: { items: any[] } }>(endpoint)
-    if (!result.ok) {
-      throw new Error('加载 BOM 失败')
-    }
-    bomItems.value = result.data?.items || []
+    const result = await plmService.getBom<BomLineRecord>(productId.value, {
+      depth: depthValue,
+      effectiveAt,
+    })
+    bomItems.value = result.items || []
   } catch (error: any) {
     handleAuthError(error)
     bomError.value = error?.message || '加载 BOM 失败'
@@ -4408,12 +1680,12 @@ async function loadBom() {
   }
 }
 
-function resolveBomChildId(item: any): string {
+function resolveBomChildId(item: BomLineRecord | null | undefined): string {
   const value = item?.component_id ?? item?.componentId ?? item?.child_id ?? item?.childId
   return value ? String(value) : ''
 }
 
-function resolveBomChildNumber(item: any): string {
+function resolveBomChildNumber(item: BomLineRecord | null | undefined): string {
   const value =
     item?.component_code ??
     item?.componentCode ??
@@ -4425,20 +1697,20 @@ function resolveBomChildNumber(item: any): string {
   return value ? String(value) : ''
 }
 
-function resolveBomLineId(item: any): string {
+function resolveBomLineId(item: BomLineRecord | null | undefined): string {
   const value = item?.id ?? item?.bom_line_id ?? item?.relationship_id ?? item?.relationshipId
   return value ? String(value) : ''
 }
 
-function formatBomPathIds(row: BomTreeRow): string {
+function formatBomPathIds(row: BomTreeRowModel): string {
   if (!row?.pathIds?.length) return ''
   return row.pathIds.filter((token) => String(token || '').length > 0).join(' / ')
 }
 
-function formatBomTablePathIds(item: Record<string, any>): string {
+function formatBomTablePathIds(item?: BomLineRecord | null): string {
   const lineId = resolveBomLineId(item)
   const { byLineId, byPair } = bomPathRowMaps.value
-  let row: BomTreeRow | undefined
+  let row: BomTreeRowModel | undefined
   if (lineId) {
     row = byLineId.get(lineId)
   }
@@ -4453,7 +1725,7 @@ function formatBomTablePathIds(item: Record<string, any>): string {
   return row.pathIds.filter((token) => String(token || '').length > 0).join(' / ')
 }
 
-function formatBomFindNum(item: any): string {
+function formatBomFindNum(item: BomLineRecord | null | undefined): string {
   const value = item?.find_num ?? item?.findNum ?? item?.find_number ?? item?.sequence
   if (Array.isArray(value)) {
     return value.map((entry) => String(entry)).join(', ')
@@ -4464,7 +1736,7 @@ function formatBomFindNum(item: any): string {
   return String(value)
 }
 
-function formatBomRefdes(item: any): string {
+function formatBomRefdes(item: BomLineRecord | null | undefined): string {
   const value = item?.refdes ?? item?.refDes ?? item?.reference_designator
   if (Array.isArray(value)) {
     return value.map((entry) => String(entry)).join(', ')
@@ -4475,12 +1747,7 @@ function formatBomRefdes(item: any): string {
   return String(value)
 }
 
-function setBomDepthQuick(value: number): void {
-  const next = Number.isFinite(value) ? Math.max(1, Math.floor(value)) : DEFAULT_BOM_DEPTH
-  bomDepth.value = next
-}
-
-function resolveCompareLineId(entry: any): string {
+function resolveCompareLineId(entry: CompareEntry): string {
   const value =
     entry?.relationship_id ??
     entry?.relationship?.id ??
@@ -4492,28 +1759,10 @@ function resolveCompareLineId(entry: any): string {
 }
 
 async function copyToClipboard(value: string): Promise<boolean> {
-  if (!value) return false
-  try {
-    if (navigator?.clipboard?.writeText) {
-      await navigator.clipboard.writeText(value)
-      return true
-    }
-  } catch (_err) {
-    // fallback below
-  }
-  const textarea = document.createElement('textarea')
-  textarea.value = value
-  textarea.setAttribute('readonly', 'true')
-  textarea.style.position = 'absolute'
-  textarea.style.left = '-9999px'
-  document.body.appendChild(textarea)
-  textarea.select()
-  const ok = document.execCommand('copy')
-  document.body.removeChild(textarea)
-  return ok
+  return copyTextToClipboard(value)
 }
 
-function resolveWhereUsedParentId(entry: any): string {
+function resolveWhereUsedParentId(entry: WhereUsedEntry): string {
   const value =
     entry?.parent?.id ??
     entry?.relationship?.source_id ??
@@ -4521,21 +1770,6 @@ function resolveWhereUsedParentId(entry: any): string {
     entry?.parent_id ??
     ''
   return value ? String(value) : ''
-}
-
-function applyWhereUsedFromBom(item: any) {
-  const childId = resolveBomChildId(item)
-  if (!childId) {
-    setDeepLinkMessage('BOM 行缺少子件 ID', true)
-    return
-  }
-  whereUsedItemId.value = childId
-  whereUsedError.value = ''
-  scheduleQuerySync({ whereUsedItemId: childId })
-  setDeepLinkMessage(`已填入 Where-Used 子件 ID：${childId}`)
-  if (!whereUsedLoading.value) {
-    void loadWhereUsed()
-  }
 }
 
 function applyWhereUsedQuickPick() {
@@ -4548,61 +1782,7 @@ function applyWhereUsedQuickPick() {
   whereUsedQuickPick.value = ''
 }
 
-function applySubstitutesFromBom(item: any) {
-  const lineId = resolveBomLineId(item)
-  if (!lineId) {
-    setDeepLinkMessage('BOM 行缺少行 ID', true)
-    return
-  }
-  bomLineId.value = lineId
-  substitutesError.value = ''
-  substitutesActionStatus.value = ''
-  substitutesActionError.value = ''
-  scheduleQuerySync({ bomLineId: lineId })
-  setDeepLinkMessage(`已填入替代件 BOM 行 ID：${lineId}`)
-  if (!substitutesLoading.value) {
-    void loadSubstitutes()
-  }
-}
-
-function applyBomLineQuickPick() {
-  const value = bomLineQuickPick.value
-  if (!value) return
-  bomLineId.value = value
-  substitutesError.value = ''
-  substitutesActionStatus.value = ''
-  substitutesActionError.value = ''
-  scheduleQuerySync({ bomLineId: value })
-  setDeepLinkMessage(`已填入替代件 BOM 行 ID：${value}`)
-  bomLineQuickPick.value = ''
-}
-
-function applySubstituteQuickPick() {
-  const value = substituteQuickPick.value
-  if (!value) return
-  substituteItemId.value = value
-  substitutesActionStatus.value = ''
-  substitutesActionError.value = ''
-  setDeepLinkMessage(`已填入替代件 ID：${value}`)
-  substituteQuickPick.value = ''
-}
-
-function applyProductFromBom(item: any) {
-  const childId = resolveBomChildId(item)
-  const childNumber = resolveBomChildNumber(item)
-  const target = childId || childNumber
-  if (!target) {
-    setDeepLinkMessage('BOM 行缺少子件标识', true)
-    return
-  }
-  productId.value = childId
-  productItemNumber.value = childId ? '' : childNumber
-  productError.value = ''
-  setDeepLinkMessage(`已切换到子件产品：${target}`)
-  void loadProduct()
-}
-
-async function copyBomChildId(item: any) {
+async function copyBomChildId(item: BomLineRecord) {
   const childId = resolveBomChildId(item)
   const childNumber = resolveBomChildNumber(item)
   const target = childId || childNumber
@@ -4619,7 +1799,7 @@ async function copyBomChildId(item: any) {
   setDeepLinkMessage(`已复制子件${label}：${target}`)
 }
 
-async function copyBomPathIds(row: BomTreeRow) {
+async function copyBomPathIds(row: BomTreeRowModel) {
   const pathIds = formatBomPathIds(row)
   if (!pathIds) {
     setDeepLinkMessage('缺少路径 ID', true)
@@ -4634,7 +1814,7 @@ async function copyBomPathIds(row: BomTreeRow) {
   setDeepLinkMessage(`已复制路径 ID（末级：${lastToken}）`)
 }
 
-async function copyBomTablePathIds(item: Record<string, any>) {
+async function copyBomTablePathIds(item: BomLineRecord) {
   const pathIds = formatBomTablePathIds(item)
   if (!pathIds) {
     setDeepLinkMessage('缺少路径 ID', true)
@@ -4654,7 +1834,7 @@ async function copyPathIdsList(label: string, list: string[]) {
     setDeepLinkMessage(`暂无${label}路径 ID`, true)
     return
   }
-  const ok = await copyToClipboard(list.join('\n'))
+  const ok = await copyListToClipboard(list)
   if (!ok) {
     setDeepLinkMessage(`复制${label}路径 ID 失败`, true)
     return
@@ -4667,7 +1847,7 @@ async function copyValueList(label: string, list: string[]) {
     setDeepLinkMessage(`暂无${label}`, true)
     return
   }
-  const ok = await copyToClipboard(list.join('\n'))
+  const ok = await copyListToClipboard(list)
   if (!ok) {
     setDeepLinkMessage(`复制${label}失败`, true)
     return
@@ -4701,12 +1881,12 @@ async function copyWhereUsedPathIdsValue(pathIds: string) {
   setDeepLinkMessage(`已复制路径 ID（末级：${lastToken}）`)
 }
 
-async function copyWhereUsedPathIds(row: WhereUsedTreeRow) {
+async function copyWhereUsedPathIds(row: WhereUsedTreeRowModel) {
   const pathIds = formatWhereUsedPathIds(row)
   await copyWhereUsedPathIdsValue(pathIds)
 }
 
-async function copyWhereUsedEntryPathIds(entry: Record<string, any>) {
+async function copyWhereUsedEntryPathIds(entry: WhereUsedEntry) {
   const pathIds = formatWhereUsedEntryPathIds(entry)
   await copyWhereUsedPathIdsValue(pathIds)
 }
@@ -4721,273 +1901,6 @@ async function copyWhereUsedTreePathIdsBulk() {
 
 async function copyWhereUsedSelectedParents() {
   await copyValueList('父件', whereUsedSelectedParents.value)
-}
-
-function clearWhereUsedSelection() {
-  whereUsedSelectedEntryKeys.value = new Set()
-}
-
-function setWhereUsedSelection(keys: string[]) {
-  const nextKeys = keys.filter(Boolean)
-  if (!nextKeys.length) {
-    whereUsedSelectedEntryKeys.value = new Set()
-    return
-  }
-  const next = new Set(whereUsedSelectedEntryKeys.value)
-  const hasAll = nextKeys.every((key) => next.has(key))
-  for (const key of nextKeys) {
-    if (hasAll) {
-      next.delete(key)
-    } else {
-      next.add(key)
-    }
-  }
-  whereUsedSelectedEntryKeys.value = next
-}
-
-function isWhereUsedEntrySelected(entry: Record<string, any>): boolean {
-  const key = resolveWhereUsedEntryKey(entry)
-  return key ? whereUsedSelectedEntryKeys.value.has(key) : false
-}
-
-function isWhereUsedTreeSelected(row: WhereUsedTreeRow): boolean {
-  if (!row.entries.length) return false
-  const selected = whereUsedSelectedEntryKeys.value
-  for (const entry of row.entries) {
-    const key = resolveWhereUsedEntryKey(entry)
-    if (key && selected.has(key)) return true
-  }
-  return false
-}
-
-function selectWhereUsedTreeRow(row: WhereUsedTreeRow): void {
-  const keys = row.entries.map((entry) => resolveWhereUsedEntryKey(entry)).filter(Boolean)
-  setWhereUsedSelection(keys)
-}
-
-function selectWhereUsedTableRow(entry: Record<string, any>): void {
-  const key = resolveWhereUsedEntryKey(entry)
-  setWhereUsedSelection(key ? [key] : [])
-}
-
-function setBomSelection(lineIds: string[]) {
-  const nextIds = lineIds.filter(Boolean)
-  if (!nextIds.length) {
-    bomSelectedLineIds.value = new Set()
-    return
-  }
-  const next = new Set(bomSelectedLineIds.value)
-  const hasAll = nextIds.every((id) => next.has(id))
-  for (const id of nextIds) {
-    if (hasAll) {
-      next.delete(id)
-    } else {
-      next.add(id)
-    }
-  }
-  bomSelectedLineIds.value = next
-}
-
-function clearBomSelection() {
-  bomSelectedLineIds.value = new Set()
-}
-
-function isBomItemSelected(item: Record<string, any>): boolean {
-  const lineId = resolveBomLineId(item)
-  return lineId ? bomSelectedLineIds.value.has(lineId) : false
-}
-
-function isBomTreeSelected(row: BomTreeRow): boolean {
-  const lineId = row.line ? resolveBomLineId(row.line) : ''
-  return lineId ? bomSelectedLineIds.value.has(lineId) : false
-}
-
-function selectBomTreeRow(row: BomTreeRow): void {
-  const lineId = row.line ? resolveBomLineId(row.line) : ''
-  setBomSelection(lineId ? [lineId] : [])
-}
-
-function selectBomTableRow(item: Record<string, any>): void {
-  const lineId = resolveBomLineId(item)
-  setBomSelection(lineId ? [lineId] : [])
-}
-
-function isBomCollapsed(key: string): boolean {
-  return bomCollapsed.value.has(key)
-}
-
-function toggleBomNode(key: string): void {
-  const next = new Set(bomCollapsed.value)
-  if (next.has(key)) {
-    next.delete(key)
-  } else {
-    next.add(key)
-  }
-  applyBomCollapsedState(next)
-}
-
-function expandAllBom(): void {
-  applyBomCollapsedState(new Set())
-}
-
-function collapseAllBom(): void {
-  const next = new Set<string>()
-  for (const row of bomTreeRows.value) {
-    if (row.hasChildren) {
-      next.add(row.key)
-    }
-  }
-  applyBomCollapsedState(next)
-}
-
-function expandBomToDepth(depth: number): void {
-  const target = Number.isFinite(depth) ? Math.max(1, Math.floor(depth)) : DEFAULT_BOM_DEPTH
-  const next = new Set<string>()
-  for (const row of bomTreeRows.value) {
-    if (row.hasChildren && row.depth >= target) {
-      next.add(row.key)
-    }
-  }
-  applyBomCollapsedState(next)
-}
-
-function applySubstitutesFromCompare(entry: any) {
-  const lineId = resolveCompareLineId(entry)
-  if (!lineId) {
-    setDeepLinkMessage('对比行缺少关系 ID', true)
-    return
-  }
-  bomLineId.value = lineId
-  substitutesError.value = ''
-  substitutesActionStatus.value = ''
-  substitutesActionError.value = ''
-  scheduleQuerySync({ bomLineId: lineId })
-  setDeepLinkMessage(`已填入替代件 BOM 行 ID：${lineId}`)
-  if (!substitutesLoading.value) {
-    void loadSubstitutes()
-  }
-}
-
-function applyProductFromWhereUsed(entry: any) {
-  const parentId = resolveWhereUsedParentId(entry)
-  if (!parentId) {
-    setDeepLinkMessage('缺少父件 ID', true)
-    return
-  }
-  productId.value = parentId
-  productItemNumber.value = ''
-  productError.value = ''
-  setDeepLinkMessage(`已切换到产品：${parentId}`)
-  void loadProduct()
-}
-
-function applyProductFromWhereUsedRow(row: WhereUsedTreeRow) {
-  const parentId = row?.id
-  if (!parentId) {
-    setDeepLinkMessage('缺少父件 ID', true)
-    return
-  }
-  applyProductFromWhereUsed({ parent: { id: parentId } })
-}
-
-function isWhereUsedCollapsed(key: string): boolean {
-  return whereUsedCollapsed.value.has(key)
-}
-
-function toggleWhereUsedNode(key: string): void {
-  const next = new Set(whereUsedCollapsed.value)
-  if (next.has(key)) {
-    next.delete(key)
-  } else {
-    next.add(key)
-  }
-  whereUsedCollapsed.value = next
-}
-
-function expandAllWhereUsed(): void {
-  whereUsedCollapsed.value = new Set()
-}
-
-function collapseAllWhereUsed(): void {
-  const next = new Set<string>()
-  for (const row of whereUsedTreeRows.value) {
-    if (row.hasChildren) {
-      next.add(row.key)
-    }
-  }
-  whereUsedCollapsed.value = next
-}
-
-function applyProductFromCompareParent(entry: any) {
-  const parent = getCompareParent(entry)
-  const { id, itemNumber } = resolveItemKey(parent)
-  if (!id && !itemNumber) {
-    setDeepLinkMessage('缺少父件 ID', true)
-    return
-  }
-  productId.value = id || ''
-  productItemNumber.value = id ? '' : itemNumber
-  productError.value = ''
-  setDeepLinkMessage(`已切换到产品：${id || itemNumber}`)
-  void loadProduct()
-}
-
-function applyWhereUsedFromCompare(entry: any) {
-  const child = getCompareChild(entry)
-  const { id, itemNumber } = resolveItemKey(child)
-  const target = id || itemNumber
-  if (!target) {
-    setDeepLinkMessage('缺少子件 ID', true)
-    return
-  }
-  whereUsedItemId.value = target
-  whereUsedError.value = ''
-  scheduleQuerySync({ whereUsedItemId: target })
-  setDeepLinkMessage(`已切换 Where-Used 子件：${target}`)
-  if (!whereUsedLoading.value) {
-    void loadWhereUsed()
-  }
-}
-
-async function copyCompareLineId(entry: any) {
-  const lineId = resolveCompareLineId(entry)
-  if (!lineId) {
-    setDeepLinkMessage('缺少 Line ID', true)
-    return
-  }
-  const ok = await copyToClipboard(lineId)
-  if (!ok) {
-    setDeepLinkMessage('复制失败，请手动复制', true)
-    return
-  }
-  setDeepLinkMessage(`已复制 Line ID：${lineId}`)
-}
-
-function applyProductFromSubstitute(entry: any, target: 'substitute' | 'part') {
-  const { id, itemNumber } = resolveItemKey(resolveSubstituteTarget(entry, target))
-  if (!id && !itemNumber) {
-    setDeepLinkMessage('缺少产品标识', true)
-    return
-  }
-  productId.value = id || ''
-  productItemNumber.value = id ? '' : itemNumber
-  productError.value = ''
-  const label = target === 'substitute' ? '替代件' : '原件'
-  setDeepLinkMessage(`已切换到${label}产品：${id || itemNumber}`)
-  void loadProduct()
-}
-
-async function copyBomLineId() {
-  if (!bomLineId.value) {
-    setDeepLinkMessage('缺少 BOM 行 ID', true)
-    return
-  }
-  const ok = await copyToClipboard(bomLineId.value)
-  if (!ok) {
-    setDeepLinkMessage('复制失败，请手动复制', true)
-    return
-  }
-  setDeepLinkMessage(`已复制 BOM 行 ID：${bomLineId.value}`)
 }
 
 function applyCompareFromProduct(side: 'left' | 'right') {
@@ -5007,56 +1920,16 @@ function applyCompareFromProduct(side: 'left' | 'right') {
   setDeepLinkMessage(`已设为对比${side === 'left' ? '左' : '右'}侧：${productId.value}`)
 }
 
-function applyCompareQuickPick(side: 'left' | 'right') {
-  const value = side === 'left' ? compareLeftQuickPick.value : compareRightQuickPick.value
-  if (!value) return
-  if (side === 'left') {
-    compareLeftId.value = value
-    compareLeftQuickPick.value = ''
-  } else {
-    compareRightId.value = value
-    compareRightQuickPick.value = ''
-  }
-  compareError.value = ''
-  scheduleQuerySync({
-    compareLeftId: compareLeftId.value || undefined,
-    compareRightId: compareRightId.value || undefined,
-  })
-  setDeepLinkMessage(`已填入对比${side === 'left' ? '左' : '右'}侧 ID：${value}`)
-}
-
-function swapCompareSides() {
-  if (!compareLeftId.value || !compareRightId.value) return
-  const left = compareLeftId.value
-  compareLeftId.value = compareRightId.value
-  compareRightId.value = left
-  scheduleQuerySync({
-    compareLeftId: compareLeftId.value || undefined,
-    compareRightId: compareRightId.value || undefined,
-  })
-  setDeepLinkMessage('已交换对比左右')
-}
-
 async function loadDocuments() {
   if (!productId.value) return
   documentsLoading.value = true
   documentsError.value = ''
   try {
-    const filters: Record<string, unknown> = {}
-    if (documentRole.value) filters.role = documentRole.value
-    const result = await apiPost<{ ok: boolean; data: { items: any[] }; error?: { message?: string } }>(
-      '/api/federation/plm/query',
-      {
-        operation: 'documents',
-        productId: productId.value,
-        pagination: { limit: 100, offset: 0 },
-        filters: Object.keys(filters).length ? filters : undefined
-      }
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || '加载文档失败')
-    }
-    documents.value = result.data?.items || []
+    const result = await plmService.listDocuments<DocumentEntry>({
+      productId: productId.value,
+      role: documentRole.value || undefined,
+    })
+    documents.value = result.items || []
   } catch (error: any) {
     handleAuthError(error)
     documentsError.value = error?.message || '加载文档失败'
@@ -5065,12 +1938,12 @@ async function loadDocuments() {
   }
 }
 
-function resolveCadFileId(doc: any): string {
+function resolveCadFileId(doc: DocumentEntry): string {
   const fileId = doc?.id || doc?.file_id
   return fileId ? String(fileId) : ''
 }
 
-function selectCadFile(doc: any, target: 'primary' | 'other' = 'primary') {
+function selectCadFile(doc: DocumentEntry, target: 'primary' | 'other' = 'primary') {
   const fileId = resolveCadFileId(doc)
   if (!fileId) return
   if (target === 'other') {
@@ -5092,17 +1965,6 @@ function resolveErrorMessage(error: unknown, fallback: string): string {
   return fallback
 }
 
-async function queryCad<T>(operation: string, payload: Record<string, unknown>, fallback: string): Promise<T> {
-  const result = await apiPost<{ ok: boolean; data: T; error?: { message?: string } }>(
-    '/api/federation/plm/query',
-    { operation, ...payload }
-  )
-  if (!result.ok) {
-    throw new Error(result.error?.message || fallback)
-  }
-  return result.data
-}
-
 async function loadCadMetadata() {
   if (!cadFileId.value) return
   syncQueryParams({ cadFileId: cadFileId.value, cadOtherFileId: cadOtherFileId.value })
@@ -5113,7 +1975,7 @@ async function loadCadMetadata() {
   const tasks = [
     {
       label: '属性',
-      run: () => queryCad<any>('cad_properties', payload, '加载属性失败'),
+      run: () => plmService.getCadProperties<CadPayload>(payload.fileId as string),
       apply: (data: any) => {
         cadProperties.value = data
         cadPropertiesDraft.value = JSON.stringify({ properties: data?.properties ?? {} }, null, 2)
@@ -5121,7 +1983,7 @@ async function loadCadMetadata() {
     },
     {
       label: '视图状态',
-      run: () => queryCad<any>('cad_view_state', payload, '加载视图状态失败'),
+      run: () => plmService.getCadViewState<CadPayload>(payload.fileId as string),
       apply: (data: any) => {
         cadViewState.value = data
         cadViewStateDraft.value = JSON.stringify({
@@ -5132,7 +1994,7 @@ async function loadCadMetadata() {
     },
     {
       label: '评审',
-      run: () => queryCad<any>('cad_review', payload, '加载评审失败'),
+      run: () => plmService.getCadReview<CadPayload>(payload.fileId as string),
       apply: (data: any) => {
         cadReview.value = data
         cadReviewState.value = data?.state || ''
@@ -5141,14 +2003,14 @@ async function loadCadMetadata() {
     },
     {
       label: '历史',
-      run: () => queryCad<any>('cad_history', payload, '加载历史失败'),
+      run: () => plmService.getCadHistory<CadHistoryPayload>(payload.fileId as string),
       apply: (data: any) => {
         cadHistory.value = data
       },
     },
     {
       label: '网格统计',
-      run: () => queryCad<any>('cad_mesh_stats', payload, '加载网格统计失败'),
+      run: () => plmService.getCadMeshStats<CadPayload>(payload.fileId as string),
       apply: (data: any) => {
         cadMeshStats.value = data
       },
@@ -5178,11 +2040,10 @@ async function loadCadDiff() {
   cadDiffLoading.value = true
   cadError.value = ''
   try {
-    cadDiff.value = await queryCad<any>(
-      'cad_diff',
-      { fileId: cadFileId.value, otherFileId: cadOtherFileId.value },
-      '加载差异失败'
-    )
+    cadDiff.value = await plmService.getCadDiff<CadPayload>({
+      fileId: cadFileId.value,
+      otherFileId: cadOtherFileId.value,
+    })
     cadStatus.value = 'CAD 差异已加载'
   } catch (error: any) {
     handleAuthError(error)
@@ -5215,19 +2076,12 @@ async function updateCadProperties() {
   try {
     const payload = parseJsonObject(cadPropertiesDraft.value, '属性')
     if (!payload) return
-    const result = await apiPost<{ ok: boolean; data: any; error?: { message?: string } }>(
-      '/api/federation/plm/mutate',
-      {
-        operation: 'cad_properties_update',
-        fileId: cadFileId.value,
-        payload,
-      }
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || '更新属性失败')
-    }
-    cadProperties.value = result.data
-    cadPropertiesDraft.value = JSON.stringify({ properties: result.data?.properties ?? {} }, null, 2)
+    const result = await plmService.updateCadProperties<CadPayload>({
+      fileId: cadFileId.value,
+      payload,
+    })
+    cadProperties.value = result
+    cadPropertiesDraft.value = JSON.stringify({ properties: result?.properties ?? {} }, null, 2)
     cadActionStatus.value = '已更新属性'
   } catch (error: any) {
     handleAuthError(error)
@@ -5245,21 +2099,14 @@ async function updateCadViewState() {
   try {
     const payload = parseJsonObject(cadViewStateDraft.value, '视图状态')
     if (!payload) return
-    const result = await apiPost<{ ok: boolean; data: any; error?: { message?: string } }>(
-      '/api/federation/plm/mutate',
-      {
-        operation: 'cad_view_state_update',
-        fileId: cadFileId.value,
-        payload,
-      }
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || '更新视图状态失败')
-    }
-    cadViewState.value = result.data
+    const result = await plmService.updateCadViewState<CadPayload>({
+      fileId: cadFileId.value,
+      payload,
+    })
+    cadViewState.value = result
     cadViewStateDraft.value = JSON.stringify({
-      hidden_entity_ids: result.data?.hidden_entity_ids ?? [],
-      notes: result.data?.notes ?? [],
+      hidden_entity_ids: result?.hidden_entity_ids ?? [],
+      notes: result?.notes ?? [],
     }, null, 2)
     cadActionStatus.value = '已更新视图状态'
   } catch (error: any) {
@@ -5285,20 +2132,13 @@ async function updateCadReview() {
     if (cadReviewNote.value.trim()) {
       payload.note = cadReviewNote.value.trim()
     }
-    const result = await apiPost<{ ok: boolean; data: any; error?: { message?: string } }>(
-      '/api/federation/plm/mutate',
-      {
-        operation: 'cad_review_update',
-        fileId: cadFileId.value,
-        payload,
-      }
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || '提交评审失败')
-    }
-    cadReview.value = result.data
-    cadReviewState.value = result.data?.state || state
-    cadReviewNote.value = result.data?.note || cadReviewNote.value
+    const result = await plmService.updateCadReview<CadPayload>({
+      fileId: cadFileId.value,
+      payload,
+    })
+    cadReview.value = result
+    cadReviewState.value = typeof result?.state === 'string' ? result.state : state
+    cadReviewNote.value = typeof result?.note === 'string' ? result.note : cadReviewNote.value
     cadActionStatus.value = '评审已提交'
   } catch (error: any) {
     handleAuthError(error)
@@ -5312,23 +2152,12 @@ async function loadApprovals() {
   approvalsLoading.value = true
   approvalsError.value = ''
   try {
-    const filters: Record<string, unknown> = {}
-    if (approvalsStatus.value !== 'all') {
-      filters.status = approvalsStatus.value
-    }
-    const result = await apiPost<{ ok: boolean; data: { items: any[] }; error?: { message?: string } }>(
-      '/api/federation/plm/query',
-      {
-        operation: 'approvals',
-        productId: productId.value || undefined,
-        pagination: { limit: 100, offset: 0 },
-        filters: Object.keys(filters).length ? filters : undefined
-      }
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || '加载审批失败')
-    }
-    approvals.value = result.data?.items || []
+    const result = await plmService.listApprovals<ApprovalEntry>({
+      productId: productId.value || undefined,
+      status: approvalsStatus.value,
+    })
+    approvals.value = result.items || []
+    void warmApprovalActionability(approvals.value)
   } catch (error: any) {
     handleAuthError(error)
     approvalsError.value = error?.message || '加载审批失败'
@@ -5347,19 +2176,11 @@ async function loadWhereUsed() {
   whereUsedLoading.value = true
   whereUsedError.value = ''
   try {
-    const result = await apiPost<{ ok: boolean; data: any; error?: { message?: string } }>(
-      '/api/federation/plm/query',
-      {
-        operation: 'where_used',
-        itemId: whereUsedItemId.value,
-        recursive: whereUsedRecursive.value,
-        maxLevels: whereUsedMaxLevels.value
-      }
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || '查询 where-used 失败')
-    }
-    whereUsed.value = result.data
+    whereUsed.value = await plmService.getWhereUsed<WhereUsedPayload>({
+      itemId: whereUsedItemId.value,
+      recursive: whereUsedRecursive.value,
+      maxLevels: whereUsedMaxLevels.value,
+    })
   } catch (error: any) {
     handleAuthError(error)
     whereUsedError.value = error?.message || '查询 where-used 失败'
@@ -5397,15 +2218,9 @@ async function loadBomCompareSchema() {
   compareSchemaLoading.value = true
   compareSchemaError.value = ''
   try {
-    const result = await apiPost<{ ok: boolean; data: CompareSchemaPayload; error?: { message?: string } }>(
-      '/api/federation/plm/query',
-      { operation: 'bom_compare_schema' }
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || '加载 BOM 对比字段失败')
-    }
-    compareSchema.value = result.data
-    applyCompareSchemaDefaults(result.data)
+    const result = await plmService.getBomCompareSchema<CompareSchemaPayload>()
+    compareSchema.value = result
+    applyCompareSchemaDefaults(result)
   } catch (error: any) {
     handleAuthError(error)
     compareSchemaError.value = error?.message || '加载 BOM 对比字段失败'
@@ -5436,28 +2251,20 @@ async function loadBomCompare() {
       .map((value) => value.trim())
       .filter(Boolean)
     const effectiveAt = normalizeEffectiveAt(compareEffectiveAt.value)
-    const result = await apiPost<{ ok: boolean; data: any; error?: { message?: string } }>(
-      '/api/federation/plm/query',
-      {
-        operation: 'bom_compare',
-        leftId: compareLeftId.value,
-        rightId: compareRightId.value,
-        leftType: 'item',
-        rightType: 'item',
-        maxLevels: compareMaxLevels.value,
-        compareMode: compareMode.value || undefined,
-        lineKey: compareLineKey.value || undefined,
-        includeChildFields: compareIncludeChildFields.value,
-        includeSubstitutes: compareIncludeSubstitutes.value,
-        includeEffectivity: compareIncludeEffectivity.value,
-        includeRelationshipProps: relProps.length ? relProps : undefined,
-        effectiveAt
-      }
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || 'BOM 对比失败')
-    }
-    bomCompare.value = result.data
+    bomCompare.value = await plmService.getBomCompare<ComparePayload>({
+      leftId: compareLeftId.value,
+      rightId: compareRightId.value,
+      leftType: 'item',
+      rightType: 'item',
+      maxLevels: compareMaxLevels.value,
+      compareMode: compareMode.value || undefined,
+      lineKey: compareLineKey.value || undefined,
+      includeChildFields: compareIncludeChildFields.value,
+      includeSubstitutes: compareIncludeSubstitutes.value,
+      includeEffectivity: compareIncludeEffectivity.value,
+      includeRelationshipProps: relProps.length ? relProps : undefined,
+      effectiveAt,
+    })
   } catch (error: any) {
     handleAuthError(error)
     compareError.value = error?.message || 'BOM 对比失败'
@@ -5472,17 +2279,7 @@ async function loadSubstitutes() {
   substitutesLoading.value = true
   substitutesError.value = ''
   try {
-    const result = await apiPost<{ ok: boolean; data: any; error?: { message?: string } }>(
-      '/api/federation/plm/query',
-      {
-        operation: 'substitutes',
-        bomLineId: bomLineId.value
-      }
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || '查询替代件失败')
-    }
-    substitutes.value = result.data
+    substitutes.value = await plmService.listSubstitutes<SubstitutesPayload>(bomLineId.value)
   } catch (error: any) {
     handleAuthError(error)
     substitutesError.value = error?.message || '查询替代件失败'
@@ -5512,20 +2309,13 @@ async function addSubstitute() {
   substitutesActionError.value = ''
   substitutesActionStatus.value = ''
   try {
-    const result = await apiPost<{ ok: boolean; data?: any; error?: { message?: string } }>(
-      '/api/federation/plm/mutate',
-      {
-        operation: 'substitutes_add',
-        bomLineId: bomLineId.value,
-        substituteItemId: substituteItemId.value,
-        properties: buildSubstituteProperties(),
-      }
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || '新增替代件失败')
-    }
-    const relationId = result.data?.substitute_id
-    const itemId = result.data?.substitute_item_id || requestedId
+    const result = await plmService.addSubstitute<SubstituteMutationResult>({
+      bomLineId: bomLineId.value,
+      substituteItemId: substituteItemId.value,
+      properties: buildSubstituteProperties(),
+    })
+    const relationId = result?.substitute_id
+    const itemId = result?.substitute_item_id || requestedId
     substitutesActionStatus.value = relationId
       ? `已新增替代件 ${itemId}（关系 ${relationId}）`
       : `已新增替代件 ${itemId}`
@@ -5541,7 +2331,7 @@ async function addSubstitute() {
   }
 }
 
-async function removeSubstitute(entry: any) {
+async function removeSubstitute(entry: SubstituteEntry) {
   if (!bomLineId.value) return
   const substituteId = entry?.id || entry?.relationship?.id
   if (!substituteId) {
@@ -5556,17 +2346,10 @@ async function removeSubstitute(entry: any) {
   substitutesActionError.value = ''
   substitutesActionStatus.value = ''
   try {
-    const result = await apiPost<{ ok: boolean; data?: any; error?: { message?: string } }>(
-      '/api/federation/plm/mutate',
-      {
-        operation: 'substitutes_remove',
-        bomLineId: bomLineId.value,
-        substituteId,
-      }
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || '删除替代件失败')
-    }
+    await plmService.removeSubstitute({
+      bomLineId: bomLineId.value,
+      substituteId,
+    })
     substitutesActionStatus.value = `已删除替代件 ${substituteId}`
     await loadSubstitutes()
   } catch (error: any) {
@@ -5578,17 +2361,17 @@ async function removeSubstitute(entry: any) {
   }
 }
 
-function getItemNumber(item?: Record<string, any> | null): string {
+function getItemNumber(item?: UnknownRecord | null): string {
   if (!item) return '-'
-  return item.item_number || item.itemNumber || item.code || item.id || '-'
+  return String(item.item_number || item.itemNumber || item.code || item.id || '-')
 }
 
-function getItemName(item?: Record<string, any> | null): string {
+function getItemName(item?: UnknownRecord | null): string {
   if (!item) return '-'
-  return item.name || item.label || item.title || '-'
+  return String(item.name || item.label || item.title || '-')
 }
 
-function resolveItemKey(item?: Record<string, any> | null): { id: string; itemNumber: string } {
+function resolveItemKey(item?: UnknownRecord | null): { id: string; itemNumber: string } {
   if (!item) return { id: '', itemNumber: '' }
   const id = item.id || item.item_id || item.itemId || ''
   const itemNumber = item.item_number || item.itemNumber || item.code || ''
@@ -5600,16 +2383,16 @@ function normalizeText(value: unknown, fallback = '-'): string {
   return String(value)
 }
 
-function getDocumentMetadata(doc: Record<string, any>): Record<string, any> {
+function getDocumentMetadata(doc: DocumentEntry): DocumentMetadata {
   return doc?.metadata || {}
 }
 
-function getDocumentId(doc: Record<string, any>): string {
+function getDocumentId(doc: DocumentEntry): string {
   const metadata = getDocumentMetadata(doc)
   return String(doc?.id || doc?.file_id || metadata.file_id || metadata.id || '')
 }
 
-function getDocumentName(doc: Record<string, any>): string {
+function getDocumentName(doc: DocumentEntry): string {
   const metadata = getDocumentMetadata(doc)
   return normalizeText(
     doc?.name ||
@@ -5622,7 +2405,7 @@ function getDocumentName(doc: Record<string, any>): string {
   )
 }
 
-function getDocumentType(doc: Record<string, any>): string {
+function getDocumentType(doc: DocumentEntry): string {
   const metadata = getDocumentMetadata(doc)
   return normalizeText(
     doc?.document_type || metadata.document_type || doc?.file_type || metadata.file_type,
@@ -5630,7 +2413,7 @@ function getDocumentType(doc: Record<string, any>): string {
   )
 }
 
-function getDocumentRevision(doc: Record<string, any>): string {
+function getDocumentRevision(doc: DocumentEntry): string {
   const metadata = getDocumentMetadata(doc)
   return normalizeText(
     doc?.engineering_revision ||
@@ -5641,7 +2424,7 @@ function getDocumentRevision(doc: Record<string, any>): string {
   )
 }
 
-function getDocumentRole(doc: Record<string, any>): string {
+function getDocumentRole(doc: DocumentEntry): string {
   const metadata = getDocumentMetadata(doc)
   return normalizeText(
     doc?.engineering_state || metadata.file_role || doc?.file_role || metadata.role,
@@ -5649,12 +2432,12 @@ function getDocumentRole(doc: Record<string, any>): string {
   )
 }
 
-function getDocumentMime(doc: Record<string, any>): string {
+function getDocumentMime(doc: DocumentEntry): string {
   const metadata = getDocumentMetadata(doc)
   return normalizeText(doc?.mime_type || metadata.mime_type || doc?.file_type, '-')
 }
 
-function getDocumentSize(doc: Record<string, any>): number | undefined {
+function getDocumentSize(doc: DocumentEntry): number | undefined {
   const metadata = getDocumentMetadata(doc)
   const raw = doc?.file_size ?? metadata.file_size ?? doc?.size
   if (raw === undefined || raw === null || raw === '') return undefined
@@ -5662,7 +2445,7 @@ function getDocumentSize(doc: Record<string, any>): number | undefined {
   return Number.isFinite(size) ? size : undefined
 }
 
-function getDocumentUpdatedAt(doc: Record<string, any>): string {
+function getDocumentUpdatedAt(doc: DocumentEntry): string {
   const metadata = getDocumentMetadata(doc)
   return normalizeText(
     doc?.updated_at || doc?.created_at || metadata.updated_at || metadata.created_at,
@@ -5670,37 +2453,37 @@ function getDocumentUpdatedAt(doc: Record<string, any>): string {
   )
 }
 
-function getDocumentPreviewUrl(doc: Record<string, any>): string {
+function getDocumentPreviewUrl(doc: DocumentEntry): string {
   const metadata = getDocumentMetadata(doc)
   return normalizeText(doc?.preview_url || metadata.preview_url, '')
 }
 
-function getDocumentDownloadUrl(doc: Record<string, any>): string {
+function getDocumentDownloadUrl(doc: DocumentEntry): string {
   const metadata = getDocumentMetadata(doc)
   return normalizeText(doc?.download_url || metadata.download_url, '')
 }
 
-function getDocumentAuthor(doc: Record<string, any>): string {
+function getDocumentAuthor(doc: DocumentEntry): string {
   const metadata = getDocumentMetadata(doc)
   return normalizeText(doc?.author || metadata.author, '-')
 }
 
-function getDocumentSourceSystem(doc: Record<string, any>): string {
+function getDocumentSourceSystem(doc: DocumentEntry): string {
   const metadata = getDocumentMetadata(doc)
   return normalizeText(doc?.source_system || metadata.source_system, '-')
 }
 
-function getDocumentSourceVersion(doc: Record<string, any>): string {
+function getDocumentSourceVersion(doc: DocumentEntry): string {
   const metadata = getDocumentMetadata(doc)
   return normalizeText(doc?.source_version || metadata.source_version, '-')
 }
 
-function getDocumentCreatedAt(doc: Record<string, any>): string {
+function getDocumentCreatedAt(doc: DocumentEntry): string {
   const metadata = getDocumentMetadata(doc)
   return normalizeText(doc?.created_at || metadata.created_at, '')
 }
 
-async function copyDocumentId(doc: Record<string, any>) {
+async function copyDocumentId(doc: DocumentEntry) {
   const value = getDocumentId(doc)
   if (!value) {
     setDeepLinkMessage('文档缺少 ID。', true)
@@ -5714,7 +2497,7 @@ async function copyDocumentId(doc: Record<string, any>) {
   setDeepLinkMessage(`已复制文档 ID：${value}`)
 }
 
-async function copyDocumentUrl(doc: Record<string, any>, kind: 'preview' | 'download') {
+async function copyDocumentUrl(doc: DocumentEntry, kind: 'preview' | 'download') {
   const url = kind === 'preview' ? getDocumentPreviewUrl(doc) : getDocumentDownloadUrl(doc)
   if (!url) {
     setDeepLinkMessage(`文档缺少${kind === 'preview' ? '预览' : '下载'}链接。`, true)
@@ -5728,23 +2511,23 @@ async function copyDocumentUrl(doc: Record<string, any>, kind: 'preview' | 'down
   setDeepLinkMessage(`已复制${kind === 'preview' ? '预览' : '下载'}链接。`)
 }
 
-function getApprovalTitle(entry: Record<string, any>): string {
+function getApprovalTitle(entry: ApprovalEntry): string {
   return normalizeText(entry?.title || entry?.name || entry?.id, '-')
 }
 
-function getApprovalId(entry: Record<string, any>): string {
+function getApprovalId(entry: ApprovalEntry): string {
   return normalizeText(entry?.id || entry?.request_id, '-')
 }
 
-function getApprovalStatus(entry: Record<string, any>): string {
+function getApprovalStatus(entry: ApprovalEntry): string {
   return normalizeText(entry?.status || entry?.state, '-')
 }
 
-function getApprovalType(entry: Record<string, any>): string {
+function getApprovalType(entry: ApprovalEntry): string {
   return normalizeText(entry?.request_type || entry?.type || entry?.eco_type, '-')
 }
 
-function getApprovalRequester(entry: Record<string, any>): string {
+function getApprovalRequester(entry: ApprovalEntry): string {
   return normalizeText(
     entry?.requester_name ||
       entry?.created_by_name ||
@@ -5754,15 +2537,15 @@ function getApprovalRequester(entry: Record<string, any>): string {
   )
 }
 
-function getApprovalRequesterId(entry: Record<string, any>): string {
+function getApprovalRequesterId(entry: ApprovalEntry): string {
   return normalizeText(entry?.requester_id || entry?.created_by_id, '-')
 }
 
-function getApprovalCreatedAt(entry: Record<string, any>): string {
+function getApprovalCreatedAt(entry: ApprovalEntry): string {
   return normalizeText(entry?.created_at || entry?.createdAt || entry?.updated_at, '')
 }
 
-function getApprovalProductNumber(entry: Record<string, any>): string {
+function getApprovalProductNumber(entry: ApprovalEntry): string {
   return normalizeText(
     entry?.product_number ||
       entry?.productNumber ||
@@ -5772,15 +2555,15 @@ function getApprovalProductNumber(entry: Record<string, any>): string {
   )
 }
 
-function getApprovalProductId(entry: Record<string, any>): string {
+function getApprovalProductId(entry: ApprovalEntry): string {
   return normalizeText(entry?.product_id || entry?.productId || entry?.product?.id, '-')
 }
 
-function getApprovalProductName(entry: Record<string, any>): string {
+function getApprovalProductName(entry: ApprovalEntry): string {
   return normalizeText(entry?.product_name || entry?.productName, '-')
 }
 
-function resolveApprovalProductKey(entry: Record<string, any>): { id: string; itemNumber: string } {
+function resolveApprovalProductKey(entry: ApprovalEntry): { id: string; itemNumber: string } {
   const id = entry?.product_id || entry?.productId || entry?.product?.id || ''
   const itemNumber =
     entry?.product_number ||
@@ -5791,7 +2574,7 @@ function resolveApprovalProductKey(entry: Record<string, any>): { id: string; it
   return { id: id ? String(id) : '', itemNumber: itemNumber ? String(itemNumber) : '' }
 }
 
-async function applyProductFromApproval(entry: Record<string, any>) {
+async function applyProductFromApproval(entry: ApprovalEntry) {
   const { id, itemNumber } = resolveApprovalProductKey(entry)
   if (!id && !itemNumber) {
     setDeepLinkMessage('审批记录缺少产品标识。', true)
@@ -5804,7 +2587,7 @@ async function applyProductFromApproval(entry: Record<string, any>) {
   await loadProduct()
 }
 
-async function copyApprovalId(entry: Record<string, any>) {
+async function copyApprovalId(entry: ApprovalEntry) {
   const value = entry?.id ? String(entry.id) : ''
   if (!value) {
     setDeepLinkMessage('审批记录缺少 ID。', true)
@@ -5818,7 +2601,7 @@ async function copyApprovalId(entry: Record<string, any>) {
   setDeepLinkMessage(`已复制审批 ID：${value}`)
 }
 
-async function loadApprovalHistory(entry?: Record<string, any>) {
+async function loadApprovalHistory(entry?: ApprovalEntry) {
   const approvalId = entry ? getApprovalId(entry) : approvalHistoryFor.value
   if (!approvalId || approvalId === '-') {
     approvalHistoryError.value = '缺少审批 ID'
@@ -5831,17 +2614,8 @@ async function loadApprovalHistory(entry?: Record<string, any>) {
   approvalHistoryLoading.value = true
   approvalHistoryError.value = ''
   try {
-    const result = await apiPost<{ ok: boolean; data?: { items?: any[] }; error?: { message?: string } }>(
-      '/api/federation/plm/query',
-      {
-        operation: 'approval_history',
-        approvalId,
-      }
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || '加载审批记录失败')
-    }
-    approvalHistory.value = result.data?.items || []
+    const result = await plmService.getApprovalHistory<ApprovalHistoryEntry>(approvalId)
+    approvalHistory.value = result.items || []
   } catch (error: any) {
     handleAuthError(error)
     approvalHistoryError.value = error?.message || '加载审批记录失败'
@@ -5858,32 +2632,185 @@ function clearApprovalHistory() {
   approvalHistoryLoading.value = false
 }
 
-function isApprovalPending(entry: Record<string, any>): boolean {
+function getApprovalActionStorage() {
+  return typeof localStorage !== 'undefined' ? localStorage : null
+}
+
+function getApprovalActorIds(): string[] {
+  return resolvePlmApprovalActorIds(getApprovalActionStorage())
+}
+
+function getApprovalActorKey(actorIds: readonly string[]): string {
+  return actorIds.join('|')
+}
+
+function trimApprovalActionabilityCache(entries: ApprovalEntry[], actorKey: string) {
+  const pendingIds = new Set(
+    entries
+      .filter((entry) => isApprovalPending(entry))
+      .map((entry) => getApprovalId(entry))
+      .filter((approvalId) => approvalId && approvalId !== '-'),
+  )
+
+  const nextActionability: Record<string, boolean> = {}
+  const nextLoading: Record<string, boolean> = {}
+
+  if (approvalActionabilityActorKey.value === actorKey) {
+    Object.entries(approvalActionabilityById.value).forEach(([approvalId, actionable]) => {
+      if (pendingIds.has(approvalId)) {
+        nextActionability[approvalId] = actionable
+      }
+    })
+    Object.entries(approvalActionabilityLoadingById.value).forEach(([approvalId, loading]) => {
+      if (pendingIds.has(approvalId) && loading) {
+        nextLoading[approvalId] = true
+      }
+    })
+  }
+
+  approvalActionabilityById.value = nextActionability
+  approvalActionabilityLoadingById.value = nextLoading
+  approvalActionabilityActorKey.value = actorKey
+}
+
+async function resolveApprovalActionability(entry: ApprovalEntry, actorIds: readonly string[]): Promise<boolean> {
+  const approvalId = getApprovalId(entry)
+  if (!approvalId || approvalId === '-') {
+    return false
+  }
+
+  const actorKey = getApprovalActorKey(actorIds)
+  const directApproverId = getPlmApprovalApproverId(entry)
+  if (directApproverId) {
+    const actionable = canActOnPlmApproval(entry, actorIds)
+    approvalActionabilityById.value = {
+      ...approvalActionabilityById.value,
+      [approvalId]: actionable,
+    }
+    return actionable
+  }
+
+  approvalActionabilityLoadingById.value = {
+    ...approvalActionabilityLoadingById.value,
+    [approvalId]: true,
+  }
+
+  try {
+    const result = await plmService.getApprovalHistory<ApprovalHistoryEntry>(approvalId)
+    const actionable = canActOnPlmApproval(entry, actorIds, result.items || [])
+    if (approvalActionabilityActorKey.value === actorKey) {
+      approvalActionabilityById.value = {
+        ...approvalActionabilityById.value,
+        [approvalId]: actionable,
+      }
+    }
+    return actionable
+  } catch (error: any) {
+    handleAuthError(error)
+    if (approvalActionabilityActorKey.value === actorKey) {
+      approvalActionabilityById.value = {
+        ...approvalActionabilityById.value,
+        [approvalId]: false,
+      }
+    }
+    return false
+  } finally {
+    if (approvalActionabilityActorKey.value === actorKey) {
+      const nextLoading = { ...approvalActionabilityLoadingById.value }
+      delete nextLoading[approvalId]
+      approvalActionabilityLoadingById.value = nextLoading
+    }
+  }
+}
+
+async function warmApprovalActionability(entries: ApprovalEntry[]) {
+  const actorIds = getApprovalActorIds()
+  const actorKey = getApprovalActorKey(actorIds)
+  trimApprovalActionabilityCache(entries, actorKey)
+
+  if (!actorIds.length) {
+    return
+  }
+
+  await Promise.all(
+    entries.map(async (entry) => {
+      if (!isApprovalPending(entry)) {
+        return
+      }
+      const approvalId = getApprovalId(entry)
+      if (!approvalId || approvalId === '-') {
+        return
+      }
+      if (approvalActionabilityLoadingById.value[approvalId]) {
+        return
+      }
+      if (getPlmApprovalApproverId(entry) || approvalId in approvalActionabilityById.value) {
+        await resolveApprovalActionability(entry, actorIds)
+        return
+      }
+      await resolveApprovalActionability(entry, actorIds)
+    }),
+  )
+}
+
+function isApprovalPending(entry: ApprovalEntry): boolean {
   return getApprovalStatus(entry).toLowerCase() === 'pending'
 }
 
-async function approveApproval(entry: Record<string, any>) {
+function canActOnApproval(entry: ApprovalEntry): boolean {
+  if (!isApprovalPending(entry)) {
+    return false
+  }
+
+  const actorIds = getApprovalActorIds()
+  if (!actorIds.length) {
+    return false
+  }
+
+  const approvalId = getApprovalId(entry)
+  if (!approvalId || approvalId === '-') {
+    return false
+  }
+
+  if (getPlmApprovalApproverId(entry)) {
+    return canActOnPlmApproval(entry, actorIds)
+  }
+
+  return approvalActionabilityActorKey.value === getApprovalActorKey(actorIds)
+    && approvalActionabilityById.value[approvalId] === true
+}
+
+async function approveApproval(entry: ApprovalEntry) {
   const approvalId = getApprovalId(entry)
   if (!approvalId || approvalId === '-') {
     approvalActionError.value = '审批记录缺少 ID'
     return
   }
-  approvalActingId.value = approvalId
   approvalActionStatus.value = ''
   approvalActionError.value = ''
+  if (!isApprovalPending(entry)) {
+    approvalActionError.value = '当前审批已不是待处理状态'
+    return
+  }
+  const actorIds = getApprovalActorIds()
+  const actionable = await resolveApprovalActionability(entry, actorIds)
+  if (!actionable) {
+    approvalActionError.value = '当前登录用户不是该审批的审批人'
+    return
+  }
+  approvalActingId.value = approvalId
   try {
     const comment = approvalComment.value.trim()
-    const result = await apiPost<{ ok: boolean; data?: any; error?: { message?: string } }>(
-      '/api/federation/plm/mutate',
-      {
-        operation: 'approval_approve',
-        approvalId,
-        comment: comment || undefined,
-      }
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || '审批通过失败')
+    const version = resolveApprovalActionVersion(entry)
+    if (version === null) {
+      approvalActionError.value = '审批版本不可用'
+      return
     }
+    await plmService.approveApproval({
+      approvalId,
+      version,
+      comment: comment || undefined,
+    })
     approvalActionStatus.value = `已通过审批 ${approvalId}`
     approvalComment.value = ''
     await loadApprovals()
@@ -5892,16 +2819,40 @@ async function approveApproval(entry: Record<string, any>) {
     }
   } catch (error: any) {
     handleAuthError(error)
-    approvalActionError.value = error?.message || '审批通过失败'
+    const failure = resolveApprovalInboxThrownErrorRecord(error, '审批通过失败')
+    if (failure.code === 'APPROVAL_VERSION_CONFLICT') {
+      approvals.value = reconcileApprovalInboxConflictVersion(approvals.value, approvalId, failure.currentVersion)
+      await loadApprovals()
+      if (approvalHistoryFor.value === approvalId) {
+        await loadApprovalHistory()
+      }
+      if (!approvalActionError.value) {
+        approvalActionError.value = failure.message
+      }
+      return
+    }
+    approvalActionError.value = failure.message
   } finally {
     approvalActingId.value = ''
   }
 }
 
-async function rejectApproval(entry: Record<string, any>) {
+async function rejectApproval(entry: ApprovalEntry) {
   const approvalId = getApprovalId(entry)
   if (!approvalId || approvalId === '-') {
     approvalActionError.value = '审批记录缺少 ID'
+    return
+  }
+  approvalActionStatus.value = ''
+  approvalActionError.value = ''
+  if (!isApprovalPending(entry)) {
+    approvalActionError.value = '当前审批已不是待处理状态'
+    return
+  }
+  const actorIds = getApprovalActorIds()
+  const actionable = await resolveApprovalActionability(entry, actorIds)
+  if (!actionable) {
+    approvalActionError.value = '当前登录用户不是该审批的审批人'
     return
   }
   const comment = approvalComment.value.trim()
@@ -5913,20 +2864,18 @@ async function rejectApproval(entry: Record<string, any>) {
     return
   }
   approvalActingId.value = approvalId
-  approvalActionStatus.value = ''
-  approvalActionError.value = ''
   try {
-    const result = await apiPost<{ ok: boolean; data?: any; error?: { message?: string } }>(
-      '/api/federation/plm/mutate',
-      {
-        operation: 'approval_reject',
-        approvalId,
-        comment,
-      }
-    )
-    if (!result.ok) {
-      throw new Error(result.error?.message || '审批拒绝失败')
+    const version = resolveApprovalActionVersion(entry)
+    if (version === null) {
+      approvalActionError.value = '审批版本不可用'
+      return
     }
+    await plmService.rejectApproval({
+      approvalId,
+      version,
+      reason: comment,
+      comment,
+    })
     approvalActionStatus.value = `已拒绝审批 ${approvalId}`
     approvalComment.value = ''
     await loadApprovals()
@@ -5935,94 +2884,110 @@ async function rejectApproval(entry: Record<string, any>) {
     }
   } catch (error: any) {
     handleAuthError(error)
-    approvalActionError.value = error?.message || '审批拒绝失败'
+    const failure = resolveApprovalInboxThrownErrorRecord(error, '审批拒绝失败')
+    if (failure.code === 'APPROVAL_VERSION_CONFLICT') {
+      approvals.value = reconcileApprovalInboxConflictVersion(approvals.value, approvalId, failure.currentVersion)
+      await loadApprovals()
+      if (approvalHistoryFor.value === approvalId) {
+        await loadApprovalHistory()
+      }
+      if (!approvalActionError.value) {
+        approvalActionError.value = failure.message
+      }
+      return
+    }
+    approvalActionError.value = failure.message
   } finally {
     approvalActingId.value = ''
   }
 }
 
-function getApprovalHistoryStatus(entry: Record<string, any>): string {
+function getApprovalHistoryStatus(entry: ApprovalHistoryEntry): string {
   return normalizeText(entry?.status || entry?.state, '-')
 }
 
-function getApprovalHistoryStage(entry: Record<string, any>): string {
+function getApprovalHistoryStage(entry: ApprovalHistoryEntry): string {
   return normalizeText(entry?.stage_id || entry?.stageId, '-')
 }
 
-function getApprovalHistoryType(entry: Record<string, any>): string {
+function getApprovalHistoryType(entry: ApprovalHistoryEntry): string {
   return normalizeText(entry?.approval_type || entry?.approvalType, '-')
 }
 
-function getApprovalHistoryRole(entry: Record<string, any>): string {
+function getApprovalHistoryRole(entry: ApprovalHistoryEntry): string {
   return normalizeText(entry?.required_role || entry?.requiredRole, '-')
 }
 
-function getApprovalHistoryUser(entry: Record<string, any>): string {
-  return normalizeText(entry?.user_id || entry?.userId, '-')
+function getApprovalHistoryUser(entry: ApprovalHistoryEntry): string {
+  return resolvePlmApprovalHistoryActorLabel(entry)
 }
 
-function getApprovalHistoryComment(entry: Record<string, any>): string {
+function getApprovalHistoryVersion(entry: ApprovalHistoryEntry): string {
+  return resolvePlmApprovalHistoryVersionLabel(entry)
+}
+
+function getApprovalHistoryComment(entry: ApprovalHistoryEntry): string {
   return normalizeText(entry?.comment, '-')
 }
 
-function getApprovalHistoryApprovedAt(entry: Record<string, any>): string {
+function getApprovalHistoryApprovedAt(entry: ApprovalHistoryEntry): string {
   return normalizeText(entry?.approved_at || entry?.approvedAt, '')
 }
 
-function getApprovalHistoryCreatedAt(entry: Record<string, any>): string {
+function getApprovalHistoryCreatedAt(entry: ApprovalHistoryEntry): string {
   return normalizeText(entry?.created_at || entry?.createdAt, '')
 }
 
-function getSubstitutePart(entry: Record<string, any>): Record<string, any> {
+function getSubstitutePart(entry: SubstituteEntry): SubstitutePartRecord {
   return entry?.substitute_part || entry?.substitutePart || {}
 }
 
-function getSubstituteSourcePart(entry: Record<string, any>): Record<string, any> {
+function getSubstituteSourcePart(entry: SubstituteEntry): SubstitutePartRecord {
   return entry?.part || entry?.source_part || entry?.original_part || {}
 }
 
-function getSubstituteNumber(entry: Record<string, any>): string {
+function getSubstituteNumber(entry: SubstituteEntry): string {
   const part = getSubstitutePart(entry)
-  return part.item_number || part.itemNumber || part.code || part.id || entry.id || '-'
+  return String(part.item_number || part.itemNumber || part.code || part.id || entry.id || '-')
 }
 
-function getSubstituteId(entry: Record<string, any>): string {
+function getSubstituteId(entry: SubstituteEntry): string {
   const part = getSubstitutePart(entry)
-  return part.id || entry.id || '-'
+  return String(part.id || entry.id || '-')
 }
 
-function getSubstituteName(entry: Record<string, any>): string {
+function getSubstituteName(entry: SubstituteEntry): string {
   const part = getSubstitutePart(entry)
-  return part.name || part.label || part.title || '-'
+  return String(part.name || part.label || part.title || '-')
 }
 
-function getSubstituteStatus(entry: Record<string, any>): string {
+function getSubstituteStatus(entry: SubstituteEntry): string {
   const part = getSubstitutePart(entry)
-  return part.state || part.status || part.lifecycle_state || '-'
+  return String(part.state || part.status || part.lifecycle_state || '-')
 }
 
-function resolveSubstituteTarget(entry: Record<string, any>, target: 'substitute' | 'part'): Record<string, any> {
+function resolveSubstituteTarget(entry: SubstituteEntry, target: 'substitute' | 'part'): SubstitutePartRecord {
   return target === 'substitute' ? getSubstitutePart(entry) : getSubstituteSourcePart(entry)
 }
 
-function resolveSubstituteTargetKey(entry: Record<string, any>, target: 'substitute' | 'part'): string {
+function resolveSubstituteTargetKey(entry: SubstituteEntry, target: 'substitute' | 'part'): string {
   const { id, itemNumber } = resolveItemKey(resolveSubstituteTarget(entry, target))
   return id || itemNumber || ''
 }
 
-function formatSubstituteRank(entry: Record<string, any>): string {
+function formatSubstituteRank(entry: SubstituteEntry): string {
   const value = entry?.rank ?? entry?.relationship?.properties?.rank
   if (value === undefined || value === null || value === '') return '-'
   return String(value)
 }
 
-function formatSubstituteNote(entry: Record<string, any>): string {
+function formatSubstituteNote(entry: SubstituteEntry): string {
   const value = entry?.relationship?.properties?.note || entry?.relationship?.properties?.comment
   if (value === undefined || value === null || value === '') return '-'
   return String(value)
 }
 
-function getCompareParent(entry?: Record<string, any> | null): Record<string, any> | null {
+function getCompareParent(entry?: CompareEntry | null): UnknownRecord | null {
   if (!entry) return null
   if (entry.parent) return entry.parent
   const path = entry.path
@@ -6032,19 +2997,19 @@ function getCompareParent(entry?: Record<string, any> | null): Record<string, an
   return null
 }
 
-function resolveCompareParentKey(entry?: Record<string, any> | null): string {
+function resolveCompareParentKey(entry?: CompareEntry | null): string {
   const parent = getCompareParent(entry)
   const { id, itemNumber } = resolveItemKey(parent)
   return id || itemNumber || ''
 }
 
-function resolveCompareChildKey(entry?: Record<string, any> | null): string {
+function resolveCompareChildKey(entry?: CompareEntry | null): string {
   const child = getCompareChild(entry)
   const { id, itemNumber } = resolveItemKey(child)
   return id || itemNumber || ''
 }
 
-function getCompareChild(entry?: Record<string, any> | null): Record<string, any> | null {
+function getCompareChild(entry?: CompareEntry | null): UnknownRecord | null {
   if (!entry) return null
   if (entry.child) return entry.child
   const path = entry.path
@@ -6054,13 +3019,13 @@ function getCompareChild(entry?: Record<string, any> | null): Record<string, any
   return null
 }
 
-function resolveCompareLineProps(entry?: Record<string, any> | null): Record<string, any> {
+function resolveCompareLineProps(entry?: CompareEntry | null): CompareLineProps {
   if (!entry) return {}
   return (
     entry.line ||
     entry.properties ||
     entry.relationship?.properties ||
-    entry.relationship ||
+    (entry.relationship as CompareLineProps | undefined) ||
     {}
   )
 }
@@ -6069,7 +3034,7 @@ function resolveSnakeToCamel(key: string): string {
   return key.replace(/_([a-z])/g, (_, ch) => String(ch).toUpperCase())
 }
 
-function getCompareProp(entry: Record<string, any>, key: string): string {
+function getCompareProp(entry: CompareEntry, key: string): string {
   const props = resolveCompareLineProps(entry)
   const value =
     props[key] ??
@@ -6078,21 +3043,21 @@ function getCompareProp(entry: Record<string, any>, key: string): string {
   return String(value)
 }
 
-function resolveCompareEntryKey(entry?: Record<string, any> | null): string {
+function resolveCompareEntryKey(entry?: CompareEntry | null): string {
   if (!entry) return ''
   return entry.relationship_id || entry.line_key || entry.child_id || ''
 }
 
-function resolveCompareLineValue(source: Record<string, any> | null, key: string): unknown {
+function resolveCompareLineValue(source: UnknownRecord | null, key: string): unknown {
   if (!source) return undefined
   return source[key] ?? source[resolveSnakeToCamel(key)]
 }
 
 function resolveCompareEntryLine(
-  entry: Record<string, any>,
+  entry: CompareEntry,
   kind: CompareSelectionKind,
   side: 'left' | 'right'
-): Record<string, any> | null {
+): UnknownRecord | null {
   if (kind === 'added') {
     return side === 'right' ? resolveCompareLineProps(entry) : null
   }
@@ -6106,10 +3071,10 @@ function resolveCompareEntryLine(
 }
 
 function resolveCompareEntryNormalized(
-  entry: Record<string, any>,
+  entry: CompareEntry,
   kind: CompareSelectionKind,
   side: 'left' | 'right'
-): Record<string, any> | null {
+): UnknownRecord | null {
   if (kind === 'added') {
     return side === 'right' ? entry.line_normalized || null : null
   }
@@ -6145,7 +3110,7 @@ function formatCompareFieldValue(value: unknown): string {
 }
 
 function resolveCompareFieldValue(
-  entry: Record<string, any>,
+  entry: CompareEntry,
   kind: CompareSelectionKind,
   side: 'left' | 'right',
   key: string
@@ -6156,11 +3121,11 @@ function resolveCompareFieldValue(
 }
 
 function resolveCompareNormalizedValue(
-  entry: Record<string, any>,
+  entry: CompareEntry,
   kind: CompareSelectionKind,
   side: 'left' | 'right',
   key: string,
-  change?: Record<string, any>
+  change?: UnknownRecord
 ): string {
   let normalizedValue: unknown = undefined
   if (change) {
@@ -6177,7 +3142,7 @@ function resolveCompareNormalizedValue(
   return formatted
 }
 
-function selectCompareEntry(entry: Record<string, any>, kind: CompareSelectionKind): void {
+function selectCompareEntry(entry: CompareEntry, kind: CompareSelectionKind): void {
   const key = resolveCompareEntryKey(entry)
   if (!key) return
   const current = compareSelected.value
@@ -6193,13 +3158,13 @@ function clearCompareSelection(): void {
   compareSelected.value = null
 }
 
-function isCompareEntrySelected(entry: Record<string, any>, kind: CompareSelectionKind): boolean {
+function isCompareEntrySelected(entry: CompareEntry, kind: CompareSelectionKind): boolean {
   const key = resolveCompareEntryKey(entry)
   if (!key) return false
   return Boolean(compareSelected.value && compareSelected.value.key === key && compareSelected.value.kind === kind)
 }
 
-function syncCompareTargets(entry: Record<string, any>): void {
+function syncCompareTargets(entry: CompareEntry): void {
   if (!compareSyncEnabled.value) return
   const child = getCompareChild(entry)
   const { id, itemNumber } = resolveItemKey(child)
@@ -6231,55 +3196,51 @@ function syncCompareTargets(entry: Record<string, any>): void {
   setDeepLinkMessage(`已联动 ${messages.join('；')}`)
 }
 
-function getWhereUsedRefdes(entry: Record<string, any>): string {
+function getWhereUsedRefdes(entry: WhereUsedEntry): string {
   const line = entry?.line || entry?.relationship?.properties || entry?.relationship || {}
   const value = line.refdes ?? line.ref_des
   if (value === undefined || value === null || value === '') return '-'
   return String(value)
 }
 
-function getWhereUsedLineValue(entry: Record<string, any>, key: string): string {
+function getWhereUsedLineValue(entry: WhereUsedEntry, key: string): string {
   const line = entry?.line || entry?.relationship?.properties || entry?.relationship || {}
   const value = line[key]
   if (value === undefined || value === null || value === '') return '-'
   return String(value)
 }
 
-function resolveWhereUsedEntryKey(entry: Record<string, any>): string {
-  return entry?._key || entry?.relationship?.id || ''
-}
-
-function getWhereUsedTreeEntry(row: WhereUsedTreeRow): Record<string, any> | null {
+function getWhereUsedTreeEntry(row: WhereUsedTreeRowModel): WhereUsedEntry | null {
   return row.entries.length ? row.entries[0] : null
 }
 
-function getWhereUsedTreeLineValue(row: WhereUsedTreeRow, key: string): string {
+function getWhereUsedTreeLineValue(row: WhereUsedTreeRowModel, key: string): string {
   const entry = getWhereUsedTreeEntry(row)
   if (!entry) return '-'
   return getWhereUsedLineValue(entry, key)
 }
 
-function getWhereUsedTreeRefdes(row: WhereUsedTreeRow): string {
+function getWhereUsedTreeRefdes(row: WhereUsedTreeRowModel): string {
   const entry = getWhereUsedTreeEntry(row)
   if (!entry) return '-'
   return getWhereUsedRefdes(entry)
 }
 
-function getWhereUsedTreeRelationship(row: WhereUsedTreeRow): string {
+function getWhereUsedTreeRelationship(row: WhereUsedTreeRowModel): string {
   const entry = getWhereUsedTreeEntry(row)
   return entry?.relationship?.id || '-'
 }
 
-function formatWhereUsedEntryPathIds(entry: Record<string, any>): string {
+function formatWhereUsedEntryPathIds(entry: WhereUsedEntry): string {
   const nodes = Array.isArray(entry?.pathNodes) ? entry.pathNodes : []
   if (!nodes.length) return ''
   return nodes
-    .map((node: any) => node?.id || node?.label)
+    .map((node) => node?.id || node?.label)
     .filter((token) => String(token || '').length > 0)
     .join(' / ')
 }
 
-function formatWhereUsedPathIds(row: WhereUsedTreeRow): string {
+function formatWhereUsedPathIds(row: WhereUsedTreeRowModel): string {
   if (!row?.pathIds?.length) return ''
   return row.pathIds.filter((token) => String(token || '').length > 0).join(' / ')
 }
@@ -6362,10 +3323,7 @@ function syncBomCollapsedQuery(value: Set<string>): void {
 }
 
 function applyBomCollapsedState(value: Set<string>): void {
-  const filtered = filterBomCollapsed(value)
-  bomCollapsed.value = filtered
-  persistBomCollapsed(filtered)
-  syncBomCollapsedQuery(filtered)
+  bomCollapsed.value = filterBomCollapsed(value)
 }
 
 function readQueryParam(key: string): string | undefined {
@@ -6393,6 +3351,55 @@ function parseQueryNumber(value?: string): number | undefined {
   return parsed
 }
 
+function hasExplicitWorkbenchQueryState() {
+  return hasExplicitPlmWorkbenchAutoApplyQueryState(
+    applyPlmDeferredRouteQueryPatch(
+      route.query as Record<string, unknown>,
+      deferredRouteQueryPatch,
+    ),
+  )
+}
+
+function serializeColumnQuery(
+  columns: Record<string, boolean>,
+  defaults: Record<string, boolean>,
+): string | undefined {
+  const enabled = Object.keys(defaults).filter((key) => Boolean(columns[key]))
+  const defaultEnabled = Object.keys(defaults).filter((key) => Boolean(defaults[key]))
+  if (enabled.length === defaultEnabled.length && enabled.every((key, index) => key === defaultEnabled[index])) {
+    return undefined
+  }
+  return enabled.join(',')
+}
+
+function parseColumnQuery(
+  value: string | undefined,
+  defaults: Record<string, boolean>,
+): Record<string, boolean> | undefined {
+  if (value === undefined) return undefined
+  const tokens = value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+  if (!tokens.length) {
+    return { ...defaults }
+  }
+
+  const next = Object.keys(defaults).reduce<Record<string, boolean>>((acc, key) => {
+    acc[key] = false
+    return acc
+  }, {})
+
+  let hasKnownKey = false
+  for (const token of tokens) {
+    if (!(token in defaults)) continue
+    next[token] = true
+    hasKnownKey = true
+  }
+
+  return hasKnownKey ? next : { ...defaults }
+}
+
 function syncQueryParams(patch: Record<string, string | number | boolean | undefined>) {
   const nextQuery: Record<string, LocationQueryValue | LocationQueryValue[] | undefined> = { ...route.query }
   let changed = false
@@ -6416,50 +3423,6 @@ function syncQueryParams(patch: Record<string, string | number | boolean | undef
   router.replace({ query: nextQuery }).catch(() => null)
 }
 
-function scheduleQuerySync(patch: Record<string, string | number | boolean | undefined>) {
-  querySyncPending = { ...querySyncPending, ...patch }
-  if (querySyncTimer) {
-    window.clearTimeout(querySyncTimer)
-  }
-  querySyncTimer = window.setTimeout(() => {
-    syncQueryParams(querySyncPending)
-    querySyncPending = {}
-    querySyncTimer = undefined
-  }, 250)
-}
-
-function setDeepLinkMessage(message: string, isError = false) {
-  if (deepLinkTimer) {
-    window.clearTimeout(deepLinkTimer)
-  }
-  deepLinkStatus.value = isError ? '' : message
-  deepLinkError.value = isError ? message : ''
-  deepLinkTimer = window.setTimeout(() => {
-    deepLinkStatus.value = ''
-    deepLinkError.value = ''
-  }, 4000)
-}
-
-let applyingPreset = false
-
-const deepLinkPanelLabels: Record<string, string> = {
-  all: '全部',
-  search: '搜索',
-  product: '产品',
-  documents: '文档',
-  approvals: '审批',
-  cad: 'CAD 元数据',
-  'where-used': 'Where-Used',
-  compare: 'BOM 对比',
-  substitutes: '替代件',
-}
-
-function clearDeepLinkScope() {
-  deepLinkScope.value = []
-  deepLinkPreset.value = ''
-  customPresetName.value = ''
-}
-
 function applyPresetParams(preset?: DeepLinkPreset | null): void {
   if (!preset?.params) return
   const bomViewParam = preset.params.bomView
@@ -6469,154 +3432,6 @@ function applyPresetParams(preset?: DeepLinkPreset | null): void {
       bomView.value = normalized as typeof bomView.value
     }
   }
-}
-
-function applyDeepLinkPreset() {
-  if (!deepLinkPreset.value) {
-    deepLinkScope.value = []
-    return
-  }
-  const preset = deepLinkPresets.value.find((entry) => entry.key === deepLinkPreset.value)
-  applyingPreset = true
-  deepLinkScope.value = preset ? [...preset.panels] : []
-  applyPresetParams(preset || null)
-  window.setTimeout(() => {
-    applyingPreset = false
-  }, 0)
-}
-
-function sanitizePresetPanels(panels: unknown): string[] {
-  if (!Array.isArray(panels)) return []
-  const allowed = new Set(Object.keys(deepLinkPanelLabels).filter((entry) => entry !== 'all'))
-  const normalized = panels
-    .map((entry) => String(entry || '').trim().toLowerCase())
-    .filter((entry) => entry && allowed.has(entry))
-  return Array.from(new Set(normalized))
-}
-
-function saveDeepLinkPreset() {
-  const name = customPresetName.value.trim()
-  if (!name) {
-    setDeepLinkMessage('请输入预设名称。', true)
-    return
-  }
-  const panels = sanitizePresetPanels(deepLinkScope.value)
-  if (!panels.length) {
-    setDeepLinkMessage('请选择范围后再保存。', true)
-    return
-  }
-  const preset = { key: `custom:${Date.now()}`, label: name, panels }
-  customDeepLinkPresets.value = [...customDeepLinkPresets.value, preset]
-  deepLinkPreset.value = preset.key
-  applyDeepLinkPreset()
-  customPresetName.value = ''
-  editingPresetLabel.value = ''
-  setDeepLinkMessage('已保存预设。')
-}
-
-function deleteDeepLinkPreset() {
-  if (!deepLinkPreset.value.startsWith('custom:')) return
-  customDeepLinkPresets.value = customDeepLinkPresets.value.filter(
-    (preset) => preset.key !== deepLinkPreset.value
-  )
-  deepLinkPreset.value = ''
-  editingPresetLabel.value = ''
-  setDeepLinkMessage('已删除预设。')
-}
-
-function selectedPreset() {
-  return deepLinkPresets.value.find((entry) => entry.key === deepLinkPreset.value)
-}
-
-function startPresetRename() {
-  const preset = selectedPreset()
-  if (!preset || !preset.key.startsWith('custom:')) return
-  editingPresetLabel.value = preset.label
-}
-
-function applyPresetRename() {
-  if (!deepLinkPreset.value.startsWith('custom:')) return
-  const name = editingPresetLabel.value.trim()
-  if (!name) {
-    setDeepLinkMessage('预设名称不能为空。', true)
-    return
-  }
-  customDeepLinkPresets.value = customDeepLinkPresets.value.map((preset) =>
-    preset.key === deepLinkPreset.value ? { ...preset, label: name } : preset
-  )
-  setDeepLinkMessage('已更新预设名称。')
-}
-
-function cancelPresetRename() {
-  editingPresetLabel.value = ''
-}
-
-function movePreset(direction: 'up' | 'down') {
-  if (!deepLinkPreset.value.startsWith('custom:')) return
-  const index = customDeepLinkPresets.value.findIndex((preset) => preset.key === deepLinkPreset.value)
-  if (index < 0) return
-  const nextIndex = direction === 'up' ? index - 1 : index + 1
-  if (nextIndex < 0 || nextIndex >= customDeepLinkPresets.value.length) return
-  const next = [...customDeepLinkPresets.value]
-  const [current] = next.splice(index, 1)
-  next.splice(nextIndex, 0, current)
-  customDeepLinkPresets.value = next
-}
-
-function exportCustomPresets() {
-  if (!customDeepLinkPresets.value.length) {
-    setDeepLinkMessage('暂无可导出的自定义预设。', true)
-    return
-  }
-  const payload = JSON.stringify(customDeepLinkPresets.value, null, 2)
-  const blob = new Blob([payload], { type: 'application/json;charset=utf-8;' })
-  const link = document.createElement('a')
-  link.href = URL.createObjectURL(blob)
-  link.download = `plm-deep-link-presets-${Date.now()}.json`
-  link.click()
-  URL.revokeObjectURL(link.href)
-  setDeepLinkMessage('已导出自定义预设。')
-}
-
-function createFilterPresetKey(prefix: string): string {
-  const suffix = Math.random().toString(36).slice(2, 6)
-  return `${prefix}:${Date.now().toString(36)}-${suffix}`
-}
-
-function upsertFilterPreset(
-  presets: FilterPreset[],
-  label: string,
-  field: string,
-  value: string,
-  group: string,
-  prefix: string
-): { presets: FilterPreset[]; key: string } {
-  const trimmedLabel = label.trim()
-  const trimmedValue = value.trim()
-  const trimmedGroup = group.trim()
-  if (!trimmedLabel || !trimmedValue) {
-    return { presets, key: '' }
-  }
-  const existingIndex = presets.findIndex((preset) => preset.label === trimmedLabel)
-  if (existingIndex >= 0) {
-    const updated = { ...presets[existingIndex], field, value: trimmedValue, group: trimmedGroup }
-    const next = [...presets]
-    next[existingIndex] = updated
-    return { presets: next, key: updated.key }
-  }
-  const key = createFilterPresetKey(prefix)
-  return {
-    presets: [...presets, { key, label: trimmedLabel, field, value: trimmedValue, group: trimmedGroup }],
-    key,
-  }
-}
-
-function applyFilterPreset(
-  presets: FilterPreset[],
-  key: string
-): FilterPreset | null {
-  const preset = presets.find((entry) => entry.key === key)
-  return preset || null
 }
 
 function saveBomFilterPreset() {
@@ -6634,7 +3449,10 @@ function saveBomFilterPreset() {
   )
   bomFilterPresets.value = presets
   persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, presets)
-  bomFilterPresetKey.value = key
+  const saved = presets.find((preset) => preset.key === key) || null
+  if (saved) {
+    applyBomLocalFilterPresetIdentity(saved)
+  }
   bomFilterPresetName.value = ''
   bomFilterPresetGroup.value = ''
   setDeepLinkMessage('已保存 BOM 过滤预设。')
@@ -6646,17 +3464,78 @@ function applyBomFilterPreset() {
     setDeepLinkMessage('请选择 BOM 过滤预设。', true)
     return
   }
-  bomFilterField.value = preset.field
-  bomFilter.value = preset.value
+  applyBomLocalFilterPresetIdentity(preset)
   setDeepLinkMessage(`已应用 BOM 过滤预设：${preset.label}`)
+}
+
+function duplicateBomFilterPreset() {
+  if (!bomFilterPresetKey.value) {
+    setDeepLinkMessage('请选择 BOM 过滤预设后复制。', true)
+    return
+  }
+  const { presets, preset } = duplicateFilterPreset(bomFilterPresets.value, bomFilterPresetKey.value, 'bom')
+  if (!preset) {
+    setDeepLinkMessage('复制 BOM 过滤预设失败。', true)
+    return
+  }
+  bomFilterPresets.value = presets
+  persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, presets)
+  applyBomLocalFilterPresetIdentity(preset)
+  setDeepLinkMessage(`已复制 BOM 过滤预设：${preset.label}`)
+}
+
+function renameBomFilterPreset() {
+  const preset = applyFilterPreset(bomFilterPresets.value, bomFilterPresetKey.value)
+  if (!preset) {
+    setDeepLinkMessage('请选择 BOM 过滤预设后重命名。', true)
+    return
+  }
+  const nextLabel = prompt('BOM 过滤预设名称：', preset.label)
+  if (nextLabel === null) return
+  const { presets, preset: renamed, error } = renameFilterPreset(
+    bomFilterPresets.value,
+    bomFilterPresetKey.value,
+    nextLabel,
+  )
+  if (error === 'empty') {
+    setDeepLinkMessage('BOM 过滤预设名称不能为空。', true)
+    return
+  }
+  if (error === 'duplicate') {
+    setDeepLinkMessage('已存在同名 BOM 过滤预设。', true)
+    return
+  }
+  if (!renamed) {
+    setDeepLinkMessage('重命名 BOM 过滤预设失败。', true)
+    return
+  }
+  bomFilterPresets.value = presets
+  persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, presets)
+  applyBomLocalFilterPresetIdentity(renamed)
+  setDeepLinkMessage(`已重命名 BOM 过滤预设：${renamed.label}`)
 }
 
 function deleteBomFilterPreset() {
   if (!bomFilterPresetKey.value) return
+  const deletedKey = bomFilterPresetKey.value
   const next = bomFilterPresets.value.filter((preset) => preset.key !== bomFilterPresetKey.value)
   bomFilterPresets.value = next
   persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, next)
-  bomFilterPresetKey.value = ''
+  const nextSelection = resolveFilterPresetCatalogDraftState({
+    availablePresets: next,
+    selectedPresetKey: deletedKey,
+    routePresetKey: bomFilterPresetQuery.value,
+    nameDraft: bomFilterPresetName.value,
+    groupDraft: bomFilterPresetGroup.value,
+    selectionKeys: bomPresetSelection.value,
+    batchGroupDraft: bomPresetBatchGroup.value,
+  })
+  bomFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+  bomFilterPresetName.value = nextSelection.nextNameDraft
+  bomFilterPresetGroup.value = nextSelection.nextGroupDraft
+  bomPresetSelection.value = nextSelection.nextSelectionKeys
+  bomPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
+  syncBomFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
   setDeepLinkMessage('已删除 BOM 过滤预设。')
 }
 
@@ -6677,7 +3556,18 @@ async function shareBomFilterPreset() {
     setDeepLinkMessage('请选择 BOM 过滤预设后分享。', true)
     return
   }
-  const url = buildPresetShareUrl('bom', preset, bomFilterPresetImportMode.value)
+  const url = buildFilterPresetShareUrl(
+    'bom',
+    preset,
+    bomFilterPresetImportMode.value,
+    route.path,
+    undefined,
+    {
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : '',
+    },
+  )
   if (!url) {
     setDeepLinkMessage('生成 BOM 过滤预设分享链接失败。', true)
     return
@@ -6721,10 +3611,21 @@ function deleteBomPresetSelection() {
   const next = bomFilterPresets.value.filter((preset) => !selected.has(preset.key))
   bomFilterPresets.value = next
   persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, next)
-  if (!next.some((preset) => preset.key === bomFilterPresetKey.value)) {
-    bomFilterPresetKey.value = ''
-  }
-  bomPresetSelection.value = []
+  const nextSelection = resolveFilterPresetCatalogDraftState({
+    availablePresets: next,
+    selectedPresetKey: bomFilterPresetKey.value,
+    routePresetKey: bomFilterPresetQuery.value,
+    nameDraft: bomFilterPresetName.value,
+    groupDraft: bomFilterPresetGroup.value,
+    selectionKeys: bomPresetSelection.value,
+    batchGroupDraft: bomPresetBatchGroup.value,
+  })
+  bomFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+  bomFilterPresetName.value = nextSelection.nextNameDraft
+  bomFilterPresetGroup.value = nextSelection.nextGroupDraft
+  bomPresetSelection.value = nextSelection.nextSelectionKeys
+  bomPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
+  syncBomFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
   setDeepLinkMessage(`已删除 ${selected.size} 条 BOM 过滤预设。`)
 }
 
@@ -6743,7 +3644,10 @@ function saveWhereUsedFilterPreset() {
   )
   whereUsedFilterPresets.value = presets
   persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, presets)
-  whereUsedFilterPresetKey.value = key
+  const saved = presets.find((preset) => preset.key === key) || null
+  if (saved) {
+    applyWhereUsedLocalFilterPresetIdentity(saved)
+  }
   whereUsedFilterPresetName.value = ''
   whereUsedFilterPresetGroup.value = ''
   setDeepLinkMessage('已保存 Where-Used 过滤预设。')
@@ -6755,19 +3659,84 @@ function applyWhereUsedFilterPreset() {
     setDeepLinkMessage('请选择 Where-Used 过滤预设。', true)
     return
   }
-  whereUsedFilterField.value = preset.field
-  whereUsedFilter.value = preset.value
+  applyWhereUsedLocalFilterPresetIdentity(preset)
   setDeepLinkMessage(`已应用 Where-Used 过滤预设：${preset.label}`)
+}
+
+function duplicateWhereUsedFilterPreset() {
+  if (!whereUsedFilterPresetKey.value) {
+    setDeepLinkMessage('请选择 Where-Used 过滤预设后复制。', true)
+    return
+  }
+  const { presets, preset } = duplicateFilterPreset(
+    whereUsedFilterPresets.value,
+    whereUsedFilterPresetKey.value,
+    'where-used',
+  )
+  if (!preset) {
+    setDeepLinkMessage('复制 Where-Used 过滤预设失败。', true)
+    return
+  }
+  whereUsedFilterPresets.value = presets
+  persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, presets)
+  applyWhereUsedLocalFilterPresetIdentity(preset)
+  setDeepLinkMessage(`已复制 Where-Used 过滤预设：${preset.label}`)
+}
+
+function renameWhereUsedFilterPreset() {
+  const preset = applyFilterPreset(whereUsedFilterPresets.value, whereUsedFilterPresetKey.value)
+  if (!preset) {
+    setDeepLinkMessage('请选择 Where-Used 过滤预设后重命名。', true)
+    return
+  }
+  const nextLabel = prompt('Where-Used 过滤预设名称：', preset.label)
+  if (nextLabel === null) return
+  const { presets, preset: renamed, error } = renameFilterPreset(
+    whereUsedFilterPresets.value,
+    whereUsedFilterPresetKey.value,
+    nextLabel,
+  )
+  if (error === 'empty') {
+    setDeepLinkMessage('Where-Used 过滤预设名称不能为空。', true)
+    return
+  }
+  if (error === 'duplicate') {
+    setDeepLinkMessage('已存在同名 Where-Used 过滤预设。', true)
+    return
+  }
+  if (!renamed) {
+    setDeepLinkMessage('重命名 Where-Used 过滤预设失败。', true)
+    return
+  }
+  whereUsedFilterPresets.value = presets
+  persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, presets)
+  applyWhereUsedLocalFilterPresetIdentity(renamed)
+  setDeepLinkMessage(`已重命名 Where-Used 过滤预设：${renamed.label}`)
 }
 
 function deleteWhereUsedFilterPreset() {
   if (!whereUsedFilterPresetKey.value) return
+  const deletedKey = whereUsedFilterPresetKey.value
   const next = whereUsedFilterPresets.value.filter(
     (preset) => preset.key !== whereUsedFilterPresetKey.value
   )
   whereUsedFilterPresets.value = next
   persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, next)
-  whereUsedFilterPresetKey.value = ''
+  const nextSelection = resolveFilterPresetCatalogDraftState({
+    availablePresets: next,
+    selectedPresetKey: deletedKey,
+    routePresetKey: whereUsedFilterPresetQuery.value,
+    nameDraft: whereUsedFilterPresetName.value,
+    groupDraft: whereUsedFilterPresetGroup.value,
+    selectionKeys: whereUsedPresetSelection.value,
+    batchGroupDraft: whereUsedPresetBatchGroup.value,
+  })
+  whereUsedFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+  whereUsedFilterPresetName.value = nextSelection.nextNameDraft
+  whereUsedFilterPresetGroup.value = nextSelection.nextGroupDraft
+  whereUsedPresetSelection.value = nextSelection.nextSelectionKeys
+  whereUsedPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
+  syncWhereUsedFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
   setDeepLinkMessage('已删除 Where-Used 过滤预设。')
 }
 
@@ -6790,7 +3759,19 @@ async function shareWhereUsedFilterPreset() {
     setDeepLinkMessage('请选择 Where-Used 过滤预设后分享。', true)
     return
   }
-  const url = buildPresetShareUrl('where-used', preset, whereUsedFilterPresetImportMode.value)
+  const url = buildFilterPresetShareUrl(
+    'where-used',
+    preset,
+    whereUsedFilterPresetImportMode.value,
+    route.path,
+    undefined,
+    {
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : '',
+      whereUsedItemId: whereUsedItemId.value,
+    },
+  )
   if (!url) {
     setDeepLinkMessage('生成 Where-Used 过滤预设分享链接失败。', true)
     return
@@ -6834,124 +3815,26 @@ function deleteWhereUsedPresetSelection() {
   const next = whereUsedFilterPresets.value.filter((preset) => !selected.has(preset.key))
   whereUsedFilterPresets.value = next
   persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, next)
-  if (!next.some((preset) => preset.key === whereUsedFilterPresetKey.value)) {
-    whereUsedFilterPresetKey.value = ''
-  }
-  whereUsedPresetSelection.value = []
+  const nextSelection = resolveFilterPresetCatalogDraftState({
+    availablePresets: next,
+    selectedPresetKey: whereUsedFilterPresetKey.value,
+    routePresetKey: whereUsedFilterPresetQuery.value,
+    nameDraft: whereUsedFilterPresetName.value,
+    groupDraft: whereUsedFilterPresetGroup.value,
+    selectionKeys: whereUsedPresetSelection.value,
+    batchGroupDraft: whereUsedPresetBatchGroup.value,
+  })
+  whereUsedFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+  whereUsedFilterPresetName.value = nextSelection.nextNameDraft
+  whereUsedFilterPresetGroup.value = nextSelection.nextGroupDraft
+  whereUsedPresetSelection.value = nextSelection.nextSelectionKeys
+  whereUsedPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
+  syncWhereUsedFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
   setDeepLinkMessage(`已删除 ${selected.size} 条 Where-Used 过滤预设。`)
 }
 
-function formatPresetLabelPreview(labels: string[]): string {
-  if (!labels.length) return ''
-  const sample = labels.slice(0, 3).join('、')
-  return labels.length > 3 ? `${sample} 等` : sample
-}
-
-function encodeBase64Url(value: string): string {
-  const bytes = new TextEncoder().encode(value)
-  let binary = ''
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte)
-  }
-  const base64 = btoa(binary)
-  return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
-}
-
-function decodeBase64Url(value: string): string | null {
-  if (!value) return null
-  const normalized = value.replace(/-/g, '+').replace(/_/g, '/')
-  const pad = normalized.length % 4
-  const padded = pad ? normalized + '='.repeat(4 - pad) : normalized
-  try {
-    const binary = atob(padded)
-    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
-    return new TextDecoder().decode(bytes)
-  } catch (_err) {
-    return null
-  }
-}
-
-function encodePresetSharePayload(preset: FilterPreset): string {
-  const payload = JSON.stringify({
-    label: preset.label,
-    field: preset.field,
-    value: preset.value,
-    group: preset.group || '',
-  })
-  return encodeBase64Url(payload)
-}
-
-function decodePresetSharePayload(
-  raw: string,
-  fieldOptions: Array<{ value: string }>
-): FilterPresetImportEntry | null {
-  const decoded = decodeBase64Url(raw)
-  if (!decoded) return null
-  try {
-    const parsed = JSON.parse(decoded)
-    if (!parsed || typeof parsed !== 'object') return null
-    const record = parsed as Record<string, unknown>
-    const label = String(record.label ?? '').trim()
-    const value = String(record.value ?? '').trim()
-    if (!label || !value) return null
-    const rawField = String(record.field ?? '').trim()
-    const allowedFields = new Set(fieldOptions.map((option) => option.value))
-    const field = allowedFields.has(rawField) ? rawField : 'all'
-    const group = String(record.group ?? '').trim()
-    return { key: '', label, field, value, group }
-  } catch (_err) {
-    return null
-  }
-}
-
-function resolvePresetShareMode(value?: string): 'merge' | 'replace' {
-  if (!value) return 'merge'
-  return value.trim().toLowerCase() === 'replace' ? 'replace' : 'merge'
-}
-
-function buildPresetShareUrl(
-  kind: 'bom' | 'where-used',
-  preset: FilterPreset,
-  mode: 'merge' | 'replace'
-): string {
-  if (typeof window === 'undefined') return ''
-  const encoded = encodePresetSharePayload(preset)
-  if (!encoded) return ''
-  const base = `${window.location.origin}${route.path}`
-  const params = new URLSearchParams()
-  if (kind === 'bom') {
-    params.set('bomPresetShare', encoded)
-    if (mode === 'replace') params.set('bomPresetShareMode', mode)
-  } else {
-    params.set('whereUsedPresetShare', encoded)
-    if (mode === 'replace') params.set('whereUsedPresetShareMode', mode)
-  }
-  const query = params.toString()
-  return query ? `${base}?${query}` : base
-}
-
-function confirmFilterPresetImport(
-  label: string,
-  mode: 'merge' | 'replace',
-  existingLabels: string[],
-  conflictLabels: string[]
-): boolean {
-  if (typeof window === 'undefined') return true
-  if (mode === 'replace' && existingLabels.length) {
-    const sample = formatPresetLabelPreview(existingLabels)
-    const hint = sample ? `（如：${sample}）` : ''
-    return window.confirm(`将覆盖现有 ${existingLabels.length} 条${label}过滤预设${hint}，继续导入？`)
-  }
-  if (mode === 'merge' && conflictLabels.length) {
-    const sample = formatPresetLabelPreview(conflictLabels)
-    const hint = sample ? `（如：${sample}）` : ''
-    return window.confirm(`检测到 ${conflictLabels.length} 条同名${label}过滤预设${hint}，将覆盖现有预设。是否继续？`)
-  }
-  return true
-}
-
 function importBomFilterPresetShare(raw: string, mode: 'merge' | 'replace') {
-  const entry = decodePresetSharePayload(raw, bomFilterFieldOptions)
+  const entry = decodeFilterPresetSharePayload(raw, bomFilterFieldOptions)
   if (!entry) {
     setDeepLinkMessage('BOM 过滤预设分享链接解析失败。', true)
     return
@@ -6974,6 +3857,10 @@ function importBomFilterPresetShare(raw: string, mode: 'merge' | 'replace') {
   persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, presets)
   const imported = presets.find((preset) => preset.label === entry.label)
   bomFilterPresetKey.value = imported?.key || ''
+  if (bomFilterPresetQuery.value && !presets.some((preset) => preset.key === bomFilterPresetQuery.value)) {
+    syncBomFilterPresetQuery(undefined)
+  }
+  reconcileBomLocalFilterPresetIdentityAfterImport()
   const importedCount = added + updated
   if (importedCount) {
     setDeepLinkMessage(
@@ -6985,7 +3872,7 @@ function importBomFilterPresetShare(raw: string, mode: 'merge' | 'replace') {
 }
 
 function importWhereUsedFilterPresetShare(raw: string, mode: 'merge' | 'replace') {
-  const entry = decodePresetSharePayload(raw, whereUsedFilterFieldOptions)
+  const entry = decodeFilterPresetSharePayload(raw, whereUsedFilterFieldOptions)
   if (!entry) {
     setDeepLinkMessage('Where-Used 过滤预设分享链接解析失败。', true)
     return
@@ -7008,6 +3895,13 @@ function importWhereUsedFilterPresetShare(raw: string, mode: 'merge' | 'replace'
   persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, presets)
   const imported = presets.find((preset) => preset.label === entry.label)
   whereUsedFilterPresetKey.value = imported?.key || ''
+  if (
+    whereUsedFilterPresetQuery.value
+    && !presets.some((preset) => preset.key === whereUsedFilterPresetQuery.value)
+  ) {
+    syncWhereUsedFilterPresetQuery(undefined)
+  }
+  reconcileWhereUsedLocalFilterPresetIdentityAfterImport()
   const importedCount = added + updated
   if (importedCount) {
     setDeepLinkMessage(
@@ -7016,103 +3910,6 @@ function importWhereUsedFilterPresetShare(raw: string, mode: 'merge' | 'replace'
   } else {
     setDeepLinkMessage('未导入 Where-Used 过滤预设。', true)
   }
-}
-
-function parseFilterPresetImport(
-  raw: string,
-  fieldOptions: Array<{ value: string }>
-): {
-  entries: FilterPresetImportEntry[]
-  skippedInvalid: number
-  skippedMissing: number
-  duplicateCount: number
-} {
-  const allowedFields = new Set(fieldOptions.map((option) => option.value))
-  const map = new Map<string, FilterPresetImportEntry>()
-  let skippedInvalid = 0
-  let skippedMissing = 0
-  let validCount = 0
-  const parsed = JSON.parse(raw)
-  if (!Array.isArray(parsed)) {
-    throw new Error('not-array')
-  }
-  for (const entry of parsed) {
-    const isObject = entry && typeof entry === 'object'
-    if (!isObject) {
-      skippedInvalid += 1
-      continue
-    }
-    const record = entry as Record<string, unknown>
-    const label = String(record.label ?? '').trim()
-    const value = String(record.value ?? '').trim()
-    if (!label || !value) {
-      skippedMissing += 1
-      continue
-    }
-    const rawField = String(record.field ?? '').trim()
-    const field = allowedFields.has(rawField) ? rawField : 'all'
-    const key = String(record.key ?? '').trim()
-    const group = String(record.group ?? '').trim()
-    validCount += 1
-    map.set(label, { key, label, field, value, group })
-  }
-  return {
-    entries: Array.from(map.values()),
-    skippedInvalid,
-    skippedMissing,
-    duplicateCount: Math.max(0, validCount - map.size),
-  }
-}
-
-function mergeImportedFilterPresets(
-  entries: FilterPresetImportEntry[],
-  presets: FilterPreset[],
-  prefix: string,
-  mode: 'merge' | 'replace'
-): { presets: FilterPreset[]; added: number; updated: number } {
-  const next = mode === 'replace' ? [] : [...presets]
-  const usedKeys = new Set(next.map((preset) => preset.key))
-  let added = 0
-  let updated = 0
-  const ensureKey = (rawKey: string): string => {
-    let key = rawKey || createFilterPresetKey(prefix)
-    while (usedKeys.has(key)) {
-      key = createFilterPresetKey(prefix)
-    }
-    usedKeys.add(key)
-    return key
-  }
-  for (const entry of entries) {
-    const label = entry.label
-    const value = entry.value
-    const field = entry.field
-    const group = String(entry.group || '').trim()
-    const rawKey = entry.key
-    const existingIndex = next.findIndex((preset) => preset.label === label)
-    if (existingIndex >= 0) {
-      next[existingIndex] = { ...next[existingIndex], field, value, group }
-      updated += 1
-      continue
-    }
-    next.push({ key: ensureKey(rawKey), label, field, value, group })
-    added += 1
-  }
-  return { presets: next, added, updated }
-}
-
-function exportFilterPresets(presets: FilterPreset[], label: string, filenamePrefix: string) {
-  if (!presets.length) {
-    setDeepLinkMessage(`暂无可导出的${label}过滤预设。`, true)
-    return
-  }
-  const payload = JSON.stringify(presets, null, 2)
-  const blob = new Blob([payload], { type: 'application/json;charset=utf-8;' })
-  const link = document.createElement('a')
-  link.href = URL.createObjectURL(blob)
-  link.download = `${filenamePrefix}-${Date.now()}.json`
-  link.click()
-  URL.revokeObjectURL(link.href)
-  setDeepLinkMessage(`已导出${label}过滤预设。`)
 }
 
 function importBomFilterPresetsFromText(raw: string) {
@@ -7163,9 +3960,22 @@ function importBomFilterPresetsFromText(raw: string) {
     bomFilterPresets.value = presets
     persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, presets)
     bomFilterPresetImportText.value = ''
-    if (!presets.some((preset) => preset.key === bomFilterPresetKey.value)) {
-      bomFilterPresetKey.value = ''
-    }
+    const nextSelection = resolveFilterPresetCatalogDraftState({
+      availablePresets: presets,
+      selectedPresetKey: bomFilterPresetKey.value,
+      routePresetKey: bomFilterPresetQuery.value,
+      nameDraft: bomFilterPresetName.value,
+      groupDraft: bomFilterPresetGroup.value,
+      selectionKeys: bomPresetSelection.value,
+      batchGroupDraft: bomPresetBatchGroup.value,
+    })
+    bomFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+    bomFilterPresetName.value = nextSelection.nextNameDraft
+    bomFilterPresetGroup.value = nextSelection.nextGroupDraft
+    bomPresetSelection.value = nextSelection.nextSelectionKeys
+    bomPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
+    syncBomFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
+    reconcileBomLocalFilterPresetIdentityAfterImport()
     const importedCount = added + updated
     if (importedCount) {
       setDeepLinkMessage(
@@ -7190,7 +4000,11 @@ function importBomFilterPresets() {
 }
 
 function exportBomFilterPresets() {
-  exportFilterPresets(bomFilterPresets.value, 'BOM', 'plm-bom-filter-presets')
+  if (!exportFilterPresetsFile(bomFilterPresets.value, 'plm-bom-filter-presets')) {
+    setDeepLinkMessage('暂无可导出的BOM过滤预设。', true)
+    return
+  }
+  setDeepLinkMessage('已导出BOM过滤预设。')
 }
 
 function triggerBomFilterPresetFileImport() {
@@ -7223,7 +4037,21 @@ function clearBomFilterPresets() {
   if (!bomFilterPresets.value.length) return
   bomFilterPresets.value = []
   persistFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY, [])
-  bomFilterPresetKey.value = ''
+  const nextSelection = resolveFilterPresetCatalogDraftState({
+    availablePresets: [],
+    selectedPresetKey: bomFilterPresetKey.value,
+    routePresetKey: bomFilterPresetQuery.value,
+    nameDraft: bomFilterPresetName.value,
+    groupDraft: bomFilterPresetGroup.value,
+    selectionKeys: bomPresetSelection.value,
+    batchGroupDraft: bomPresetBatchGroup.value,
+  })
+  bomFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+  bomFilterPresetName.value = nextSelection.nextNameDraft
+  bomFilterPresetGroup.value = nextSelection.nextGroupDraft
+  bomPresetSelection.value = nextSelection.nextSelectionKeys
+  bomPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
+  syncBomFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
   bomFilterPresetGroupFilter.value = 'all'
   setDeepLinkMessage('已清空 BOM 过滤预设。')
 }
@@ -7276,9 +4104,22 @@ function importWhereUsedFilterPresetsFromText(raw: string) {
     whereUsedFilterPresets.value = presets
     persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, presets)
     whereUsedFilterPresetImportText.value = ''
-    if (!presets.some((preset) => preset.key === whereUsedFilterPresetKey.value)) {
-      whereUsedFilterPresetKey.value = ''
-    }
+    const nextSelection = resolveFilterPresetCatalogDraftState({
+      availablePresets: presets,
+      selectedPresetKey: whereUsedFilterPresetKey.value,
+      routePresetKey: whereUsedFilterPresetQuery.value,
+      nameDraft: whereUsedFilterPresetName.value,
+      groupDraft: whereUsedFilterPresetGroup.value,
+      selectionKeys: whereUsedPresetSelection.value,
+      batchGroupDraft: whereUsedPresetBatchGroup.value,
+    })
+    whereUsedFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+    whereUsedFilterPresetName.value = nextSelection.nextNameDraft
+    whereUsedFilterPresetGroup.value = nextSelection.nextGroupDraft
+    whereUsedPresetSelection.value = nextSelection.nextSelectionKeys
+    whereUsedPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
+    syncWhereUsedFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
+    reconcileWhereUsedLocalFilterPresetIdentityAfterImport()
     const importedCount = added + updated
     if (importedCount) {
       setDeepLinkMessage(
@@ -7303,7 +4144,11 @@ function importWhereUsedFilterPresets() {
 }
 
 function exportWhereUsedFilterPresets() {
-  exportFilterPresets(whereUsedFilterPresets.value, 'Where-Used', 'plm-where-used-filter-presets')
+  if (!exportFilterPresetsFile(whereUsedFilterPresets.value, 'plm-where-used-filter-presets')) {
+    setDeepLinkMessage('暂无可导出的Where-Used过滤预设。', true)
+    return
+  }
+  setDeepLinkMessage('已导出Where-Used过滤预设。')
 }
 
 function triggerWhereUsedFilterPresetFileImport() {
@@ -7336,127 +4181,1316 @@ function clearWhereUsedFilterPresets() {
   if (!whereUsedFilterPresets.value.length) return
   whereUsedFilterPresets.value = []
   persistFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY, [])
-  whereUsedFilterPresetKey.value = ''
+  const nextSelection = resolveFilterPresetCatalogDraftState({
+    availablePresets: [],
+    selectedPresetKey: whereUsedFilterPresetKey.value,
+    routePresetKey: whereUsedFilterPresetQuery.value,
+    nameDraft: whereUsedFilterPresetName.value,
+    groupDraft: whereUsedFilterPresetGroup.value,
+    selectionKeys: whereUsedPresetSelection.value,
+    batchGroupDraft: whereUsedPresetBatchGroup.value,
+  })
+  whereUsedFilterPresetKey.value = nextSelection.nextSelectedPresetKey
+  whereUsedFilterPresetName.value = nextSelection.nextNameDraft
+  whereUsedFilterPresetGroup.value = nextSelection.nextGroupDraft
+  whereUsedPresetSelection.value = nextSelection.nextSelectionKeys
+  whereUsedPresetBatchGroup.value = nextSelection.nextBatchGroupDraft
+  syncWhereUsedFilterPresetQuery(nextSelection.nextRoutePresetKey || undefined)
   whereUsedFilterPresetGroupFilter.value = 'all'
   setDeepLinkMessage('已清空 Where-Used 过滤预设。')
 }
 
-function mergeImportedPresets(entries: unknown[]): number {
-  const existing = new Map(customDeepLinkPresets.value.map((entry) => [entry.key, entry]))
-  let importedCount = 0
-  for (const entry of entries) {
-    const record = entry && typeof entry === 'object'
-      ? (entry as Record<string, unknown>)
-      : {}
-    const label = String(record.label ?? '').trim()
-    const panels = sanitizePresetPanels(record.panels)
-    if (!label || !panels.length) continue
-    const key = String(record.key ?? '').trim() || `custom:${Date.now()}-${Math.random().toString(16).slice(2)}`
-    if (existing.has(key)) continue
-    existing.set(key, { key, label, panels })
-    importedCount += 1
-  }
-  customDeepLinkPresets.value = Array.from(existing.values())
-  return importedCount
+function syncBomFilterPresetQuery(value?: string) {
+  bomFilterPresetQuery.value = value || ''
+  scheduleQuerySync({ bomFilterPreset: value || undefined })
 }
 
-function importCustomPresetsFromText(raw: string) {
-  const trimmed = raw.trim()
-  if (!trimmed) {
-    setDeepLinkMessage('请粘贴预设 JSON。', true)
+function syncWhereUsedFilterPresetQuery(value?: string) {
+  whereUsedFilterPresetQuery.value = value || ''
+  scheduleQuerySync({ whereUsedFilterPreset: value || undefined })
+}
+
+function clearBomLocalFilterPresetIdentity() {
+  const nextIdentity = buildClearedPlmLocalPresetManagementState()
+  bomFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+  bomFilterPresetName.value = nextIdentity.nextNameDraft
+  bomFilterPresetGroup.value = nextIdentity.nextGroupDraft
+  bomPresetSelection.value = nextIdentity.nextSelectionKeys
+  bomPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
+  syncBomFilterPresetQuery(undefined)
+}
+
+function clearWhereUsedLocalFilterPresetIdentity() {
+  const nextIdentity = buildClearedPlmLocalPresetManagementState()
+  whereUsedFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+  whereUsedFilterPresetName.value = nextIdentity.nextNameDraft
+  whereUsedFilterPresetGroup.value = nextIdentity.nextGroupDraft
+  whereUsedPresetSelection.value = nextIdentity.nextSelectionKeys
+  whereUsedPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
+  syncWhereUsedFilterPresetQuery(undefined)
+}
+
+function reconcileBomLocalFilterPresetIdentityAfterImport() {
+  const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+    routePresetKey: bomFilterPresetQuery.value,
+    selectedPresetKey: bomFilterPresetKey.value,
+    nameDraft: bomFilterPresetName.value,
+    groupDraft: bomFilterPresetGroup.value,
+    activePreset: activeBomLocalRoutePreset.value,
+    currentState: {
+      field: bomFilterField.value,
+      value: bomFilter.value,
+    },
+    selectionKeys: bomPresetSelection.value,
+    batchGroupDraft: bomPresetBatchGroup.value,
+    preserveSelectedPresetKeyOnClear: true,
+  })
+  if (!nextIdentity.shouldClear) {
     return
   }
-  try {
-    const parsed = JSON.parse(trimmed)
-    if (!Array.isArray(parsed)) {
-      setDeepLinkMessage('预设 JSON 需要是数组。', true)
+  bomFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+  bomFilterPresetName.value = nextIdentity.nextNameDraft
+  bomFilterPresetGroup.value = nextIdentity.nextGroupDraft
+  bomPresetSelection.value = nextIdentity.nextSelectionKeys
+  bomPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
+  syncBomFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
+}
+
+function reconcileWhereUsedLocalFilterPresetIdentityAfterImport() {
+  const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+    routePresetKey: whereUsedFilterPresetQuery.value,
+    selectedPresetKey: whereUsedFilterPresetKey.value,
+    nameDraft: whereUsedFilterPresetName.value,
+    groupDraft: whereUsedFilterPresetGroup.value,
+    activePreset: activeWhereUsedLocalRoutePreset.value,
+    currentState: {
+      field: whereUsedFilterField.value,
+      value: whereUsedFilter.value,
+    },
+    selectionKeys: whereUsedPresetSelection.value,
+    batchGroupDraft: whereUsedPresetBatchGroup.value,
+    preserveSelectedPresetKeyOnClear: true,
+  })
+  if (!nextIdentity.shouldClear) {
+    return
+  }
+  whereUsedFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+  whereUsedFilterPresetName.value = nextIdentity.nextNameDraft
+  whereUsedFilterPresetGroup.value = nextIdentity.nextGroupDraft
+  whereUsedPresetSelection.value = nextIdentity.nextSelectionKeys
+  whereUsedPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
+  syncWhereUsedFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
+}
+
+function hasProcessedTeamPresetChanges(result: PlmTeamFilterPresetBatchResult | null | undefined) {
+  return Boolean(result?.processedIds.length)
+}
+
+function clearBomTeamPresetIdentity() {
+  bomTeamPresetKey.value = ''
+  bomTeamPresetQuery.value = ''
+  scheduleQuerySync({ bomTeamPreset: undefined })
+}
+
+function clearWhereUsedTeamPresetIdentity() {
+  whereUsedTeamPresetKey.value = ''
+  whereUsedTeamPresetQuery.value = ''
+  scheduleQuerySync({ whereUsedTeamPreset: undefined })
+}
+
+function applyBomLocalFilterPresetIdentity(preset: FilterPreset) {
+  clearBomTeamPresetIdentity()
+  bomFilterPresetKey.value = preset.key
+  syncBomFilterPresetQuery(preset.key)
+  bomFilterField.value = preset.field
+  bomFilter.value = preset.value
+}
+
+function applyWhereUsedLocalFilterPresetIdentity(preset: FilterPreset) {
+  clearWhereUsedTeamPresetIdentity()
+  whereUsedFilterPresetKey.value = preset.key
+  syncWhereUsedFilterPresetQuery(preset.key)
+  whereUsedFilterField.value = preset.field
+  whereUsedFilter.value = preset.value
+}
+
+const bomTeamPresetQuery = ref('')
+const whereUsedTeamPresetQuery = ref('')
+
+const {
+  teamPresetKey: bomTeamPresetKey,
+  teamPresetName: bomTeamPresetName,
+  teamPresetGroup: bomTeamPresetGroup,
+  teamPresetOwnerUserId: bomTeamPresetOwnerUserId,
+  teamPresets: bomTeamPresets,
+  teamPresetsLoading: bomTeamPresetsLoading,
+  teamPresetsError: bomTeamPresetsError,
+  canSaveTeamPreset: canSaveBomTeamPreset,
+  canApplyTeamPreset: canApplyBomTeamPreset,
+  showManagementActions: showManageBomTeamPresetActions,
+  canDuplicateTeamPreset: canDuplicateBomTeamPreset,
+  canShareTeamPreset: canShareBomTeamPreset,
+  canDeleteTeamPreset: canDeleteBomTeamPreset,
+  canArchiveTeamPreset: canArchiveBomTeamPreset,
+  canRestoreTeamPreset: canRestoreBomTeamPreset,
+  canRenameTeamPreset: canRenameBomTeamPreset,
+  canTransferTargetTeamPreset: canTransferTargetBomTeamPreset,
+  canTransferTeamPreset: canTransferBomTeamPreset,
+  canSetTeamPresetDefault: canSetBomTeamPresetDefault,
+  canClearTeamPresetDefault: canClearBomTeamPresetDefault,
+  defaultTeamPresetLabel: bomDefaultTeamPresetLabel,
+  hasManageableTeamPresets: hasManageableBomTeamPresets,
+  showTeamPresetManager: showBomTeamPresetManager,
+  teamPresetSelection: bomTeamPresetSelection,
+  teamPresetSelectionCount: bomTeamPresetSelectionCount,
+  selectedBatchArchivableTeamPresetIds: selectedBatchArchivableBomTeamPresetIds,
+  selectedBatchRestorableTeamPresetIds: selectedBatchRestorableBomTeamPresetIds,
+  selectedBatchDeletableTeamPresetIds: selectedBatchDeletableBomTeamPresetIds,
+  refreshTeamPresets: refreshBomTeamPresets,
+  saveTeamPreset: saveBomTeamPresetBase,
+  promoteFilterPresetToTeam: promoteBomFilterPresetToTeamBase,
+  promoteFilterPresetToTeamDefault: promoteBomFilterPresetToTeamDefaultBase,
+  applyTeamPreset: applyBomTeamPresetBase,
+  shareTeamPreset: shareBomTeamPreset,
+  duplicateTeamPreset: duplicateBomTeamPresetBase,
+  archiveTeamPreset: archiveBomTeamPresetBase,
+  restoreTeamPreset: restoreBomTeamPresetBase,
+  deleteTeamPreset: deleteBomTeamPreset,
+  renameTeamPreset: renameBomTeamPresetBase,
+  transferTeamPreset: transferBomTeamPresetBase,
+  setTeamPresetDefault: setBomTeamPresetDefaultBase,
+  clearTeamPresetDefault: clearBomTeamPresetDefaultBase,
+  selectAllTeamPresets: selectAllBomTeamPresets,
+  clearTeamPresetSelection: clearBomTeamPresetSelection,
+  archiveTeamPresetSelection: archiveBomTeamPresetSelectionBase,
+  restoreTeamPresetSelection: restoreBomTeamPresetSelectionBase,
+  deleteTeamPresetSelection: deleteBomTeamPresetSelectionBase,
+} = usePlmTeamFilterPresets({
+  kind: 'bom',
+  label: 'BOM',
+  getCurrentPresetState: () => ({
+    field: bomFilterField.value,
+    value: bomFilter.value,
+    group: bomFilterPresetGroup.value,
+  }),
+  applyPreset: (preset) => {
+    bomFilterField.value = preset.field
+    bomFilter.value = preset.value
+    bomFilterPresetGroup.value = preset.group || ''
+  },
+  setMessage: setDeepLinkMessage,
+  requestedPresetId: bomTeamPresetQuery,
+  syncRequestedPresetId: (value) => {
+    bomTeamPresetQuery.value = value || ''
+    scheduleQuerySync({ bomTeamPreset: value || undefined })
+  },
+  buildShareUrl: (preset) => buildTeamFilterPresetShareUrl(
+    'bom',
+    preset,
+    route.path,
+    'bom',
+    undefined,
+    {
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : '',
+    },
+  ),
+  copyShareUrl: copyToClipboard,
+  shouldAutoApplyDefault: () => {
+    const effectiveQuery = applyPlmDeferredRouteQueryPatch(
+      route.query as Record<string, unknown>,
+      deferredRouteQueryPatch,
+    )
+    const localPresetKey = typeof effectiveQuery.bomFilterPreset === 'string'
+      ? effectiveQuery.bomFilterPreset.trim()
+      : ''
+    return (
+      !hasExplicitPlmBomTeamPresetAutoApplyQueryState(effectiveQuery, {
+        hasLocalFilterPresetOwner: !localPresetKey
+          || bomFilterPresets.value.some((entry) => entry.key === localPresetKey),
+      })
+      && !bomFilter.value.trim()
+    )
+  },
+  hasPendingExternalOwnerDrift: () => hasActiveBomLocalPresetOwner.value && Boolean(bomTeamPresetKey.value.trim()),
+})
+
+const activeBomRoutePreset = computed(() => {
+  const presetId = bomTeamPresetQuery.value.trim()
+  if (!presetId) return null
+  return bomTeamPresets.value.find((entry) => entry.id === presetId) || null
+})
+
+const activeBomLocalRoutePreset = computed(() => {
+  const presetKey = bomFilterPresetQuery.value.trim()
+  if (!presetKey) return null
+  return bomFilterPresets.value.find((entry) => entry.key === presetKey) || null
+})
+
+const hasActiveBomLocalPresetOwner = computed(() => {
+  const preset = activeBomLocalRoutePreset.value
+  if (!preset) return false
+  return matchPlmTeamFilterPresetStateSnapshot(
+    pickPlmTeamFilterPresetRouteOwnerState(preset),
+    {
+      field: bomFilterField.value,
+      value: bomFilter.value,
+    },
+  )
+})
+
+const {
+  teamPresetKey: whereUsedTeamPresetKey,
+  teamPresetName: whereUsedTeamPresetName,
+  teamPresetGroup: whereUsedTeamPresetGroup,
+  teamPresetOwnerUserId: whereUsedTeamPresetOwnerUserId,
+  teamPresets: whereUsedTeamPresets,
+  teamPresetsLoading: whereUsedTeamPresetsLoading,
+  teamPresetsError: whereUsedTeamPresetsError,
+  canSaveTeamPreset: canSaveWhereUsedTeamPreset,
+  canApplyTeamPreset: canApplyWhereUsedTeamPreset,
+  showManagementActions: showManageWhereUsedTeamPresetActions,
+  canDuplicateTeamPreset: canDuplicateWhereUsedTeamPreset,
+  canShareTeamPreset: canShareWhereUsedTeamPreset,
+  canDeleteTeamPreset: canDeleteWhereUsedTeamPreset,
+  canArchiveTeamPreset: canArchiveWhereUsedTeamPreset,
+  canRestoreTeamPreset: canRestoreWhereUsedTeamPreset,
+  canRenameTeamPreset: canRenameWhereUsedTeamPreset,
+  canTransferTargetTeamPreset: canTransferTargetWhereUsedTeamPreset,
+  canTransferTeamPreset: canTransferWhereUsedTeamPreset,
+  canSetTeamPresetDefault: canSetWhereUsedTeamPresetDefault,
+  canClearTeamPresetDefault: canClearWhereUsedTeamPresetDefault,
+  defaultTeamPresetLabel: whereUsedDefaultTeamPresetLabel,
+  hasManageableTeamPresets: hasManageableWhereUsedTeamPresets,
+  showTeamPresetManager: showWhereUsedTeamPresetManager,
+  teamPresetSelection: whereUsedTeamPresetSelection,
+  teamPresetSelectionCount: whereUsedTeamPresetSelectionCount,
+  selectedBatchArchivableTeamPresetIds: selectedBatchArchivableWhereUsedTeamPresetIds,
+  selectedBatchRestorableTeamPresetIds: selectedBatchRestorableWhereUsedTeamPresetIds,
+  selectedBatchDeletableTeamPresetIds: selectedBatchDeletableWhereUsedTeamPresetIds,
+  refreshTeamPresets: refreshWhereUsedTeamPresets,
+  saveTeamPreset: saveWhereUsedTeamPresetBase,
+  promoteFilterPresetToTeam: promoteWhereUsedFilterPresetToTeamBase,
+  promoteFilterPresetToTeamDefault: promoteWhereUsedFilterPresetToTeamDefaultBase,
+  applyTeamPreset: applyWhereUsedTeamPresetBase,
+  shareTeamPreset: shareWhereUsedTeamPreset,
+  duplicateTeamPreset: duplicateWhereUsedTeamPresetBase,
+  archiveTeamPreset: archiveWhereUsedTeamPresetBase,
+  restoreTeamPreset: restoreWhereUsedTeamPresetBase,
+  deleteTeamPreset: deleteWhereUsedTeamPreset,
+  renameTeamPreset: renameWhereUsedTeamPresetBase,
+  transferTeamPreset: transferWhereUsedTeamPresetBase,
+  setTeamPresetDefault: setWhereUsedTeamPresetDefaultBase,
+  clearTeamPresetDefault: clearWhereUsedTeamPresetDefaultBase,
+  selectAllTeamPresets: selectAllWhereUsedTeamPresets,
+  clearTeamPresetSelection: clearWhereUsedTeamPresetSelection,
+  archiveTeamPresetSelection: archiveWhereUsedTeamPresetSelectionBase,
+  restoreTeamPresetSelection: restoreWhereUsedTeamPresetSelectionBase,
+  deleteTeamPresetSelection: deleteWhereUsedTeamPresetSelectionBase,
+} = usePlmTeamFilterPresets({
+  kind: 'where-used',
+  label: 'Where-Used',
+  getCurrentPresetState: () => ({
+    field: whereUsedFilterField.value,
+    value: whereUsedFilter.value,
+    group: whereUsedFilterPresetGroup.value,
+  }),
+  applyPreset: (preset) => {
+    whereUsedFilterField.value = preset.field
+    whereUsedFilter.value = preset.value
+    whereUsedFilterPresetGroup.value = preset.group || ''
+  },
+  setMessage: setDeepLinkMessage,
+  requestedPresetId: whereUsedTeamPresetQuery,
+  syncRequestedPresetId: (value) => {
+    whereUsedTeamPresetQuery.value = value || ''
+    scheduleQuerySync({ whereUsedTeamPreset: value || undefined })
+  },
+  buildShareUrl: (preset) => buildTeamFilterPresetShareUrl(
+    'where-used',
+    preset,
+    route.path,
+    'where-used',
+    undefined,
+    {
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : '',
+      whereUsedItemId: whereUsedItemId.value,
+    },
+  ),
+  copyShareUrl: copyToClipboard,
+  shouldAutoApplyDefault: () => {
+    const effectiveQuery = applyPlmDeferredRouteQueryPatch(
+      route.query as Record<string, unknown>,
+      deferredRouteQueryPatch,
+    )
+    const localPresetKey = typeof effectiveQuery.whereUsedFilterPreset === 'string'
+      ? effectiveQuery.whereUsedFilterPreset.trim()
+      : ''
+    return (
+      !hasExplicitPlmWhereUsedTeamPresetAutoApplyQueryState(effectiveQuery, {
+        hasLocalFilterPresetOwner: !localPresetKey
+          || whereUsedFilterPresets.value.some((entry) => entry.key === localPresetKey),
+      })
+      && !whereUsedFilter.value.trim()
+    )
+  },
+  hasPendingExternalOwnerDrift: () => hasActiveWhereUsedLocalPresetOwner.value && Boolean(whereUsedTeamPresetKey.value.trim()),
+})
+
+const activeWhereUsedRoutePreset = computed(() => {
+  const presetId = whereUsedTeamPresetQuery.value.trim()
+  if (!presetId) return null
+  return whereUsedTeamPresets.value.find((entry) => entry.id === presetId) || null
+})
+
+const activeWhereUsedLocalRoutePreset = computed(() => {
+  const presetKey = whereUsedFilterPresetQuery.value.trim()
+  if (!presetKey) return null
+  return whereUsedFilterPresets.value.find((entry) => entry.key === presetKey) || null
+})
+
+const hasActiveWhereUsedLocalPresetOwner = computed(() => {
+  const preset = activeWhereUsedLocalRoutePreset.value
+  if (!preset) return false
+  return matchPlmTeamFilterPresetStateSnapshot(
+    pickPlmTeamFilterPresetRouteOwnerState(preset),
+    {
+      field: whereUsedFilterField.value,
+      value: whereUsedFilter.value,
+    },
+  )
+})
+
+async function applyBomTeamPreset() {
+  await runPlmLocalPresetOwnershipAction(
+    async () => applyBomTeamPresetBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function duplicateBomTeamPreset() {
+  await runPlmLocalPresetOwnershipAction(
+    () => duplicateBomTeamPresetBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function archiveBomTeamPreset() {
+  await runPlmLocalPresetOwnershipAction(
+    () => archiveBomTeamPresetBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => shouldClearLocalPresetOwnerAfterTeamPresetAction('archive', saved),
+    },
+  )
+}
+
+async function restoreBomTeamPreset() {
+  const hadLocalOwnerBeforeAction = hasActiveBomLocalPresetOwner.value
+  await runPlmLocalPresetOwnershipAction(
+    () => restoreBomTeamPresetBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => shouldClearLocalPresetOwnerAfterTeamPresetSingleRestore(
+        saved,
+        hadLocalOwnerBeforeAction,
+      ),
+    },
+  )
+}
+
+async function renameBomTeamPreset() {
+  await runPlmLocalPresetOwnershipAction(
+    () => renameBomTeamPresetBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function transferBomTeamPreset() {
+  await runPlmLocalPresetOwnershipAction(
+    () => transferBomTeamPresetBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function saveBomTeamPreset() {
+  await runPlmLocalPresetOwnershipAction(
+    () => saveBomTeamPresetBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function promoteBomFilterPresetToTeam() {
+  const preset = bomFilterPresets.value.find((entry) => entry.key === bomFilterPresetKey.value)
+  if (!preset) {
+    setDeepLinkMessage('请选择 BOM 过滤预设后再升为团队预设。', true)
+    return
+  }
+  await runPlmLocalPresetOwnershipAction(
+    () => promoteBomFilterPresetToTeamBase(preset),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function promoteBomFilterPresetToTeamDefault() {
+  const preset = bomFilterPresets.value.find((entry) => entry.key === bomFilterPresetKey.value)
+  if (!preset) {
+    setDeepLinkMessage('请选择 BOM 过滤预设后再升为默认团队预设。', true)
+    return
+  }
+  await runPlmLocalPresetOwnershipAction(
+    () => promoteBomFilterPresetToTeamDefaultBase(preset),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function setBomTeamPresetDefault() {
+  await runPlmLocalPresetOwnershipAction(
+    () => setBomTeamPresetDefaultBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function clearBomTeamPresetDefault() {
+  await runPlmLocalPresetOwnershipAction(
+    () => clearBomTeamPresetDefaultBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (saved) => shouldClearLocalPresetOwnerAfterTeamPresetAction('clear-default', saved),
+    },
+  )
+}
+
+async function archiveBomTeamPresetSelection() {
+  await runPlmLocalPresetOwnershipAction(
+    () => archiveBomTeamPresetSelectionBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (result) => (
+        hasProcessedTeamPresetChanges(result)
+        && shouldClearLocalPresetOwnerAfterTeamPresetAction('batch-archive', result)
+      ),
+    },
+  )
+}
+
+async function restoreBomTeamPresetSelection() {
+  const hadLocalOwnerBeforeAction = hasActiveBomLocalPresetOwner.value
+  const activeTeamPresetIdBeforeAction = bomTeamPresetKey.value
+  const requestedTeamPresetIdBeforeAction = bomTeamPresetQuery.value
+  await runPlmLocalPresetOwnershipAction(
+    () => restoreBomTeamPresetSelectionBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (result) => shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore(
+        result,
+        activeTeamPresetIdBeforeAction,
+        requestedTeamPresetIdBeforeAction,
+        hadLocalOwnerBeforeAction,
+      ),
+    },
+  )
+}
+
+async function deleteBomTeamPresetSelection() {
+  await runPlmLocalPresetOwnershipAction(
+    () => deleteBomTeamPresetSelectionBase(),
+    {
+      clearLocalOwner: clearBomLocalFilterPresetIdentity,
+      shouldClear: (result) => (
+        hasProcessedTeamPresetChanges(result)
+        && shouldClearLocalPresetOwnerAfterTeamPresetAction('batch-delete', result)
+      ),
+    },
+  )
+}
+
+async function applyWhereUsedTeamPreset() {
+  await runPlmLocalPresetOwnershipAction(
+    async () => applyWhereUsedTeamPresetBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function duplicateWhereUsedTeamPreset() {
+  await runPlmLocalPresetOwnershipAction(
+    () => duplicateWhereUsedTeamPresetBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function archiveWhereUsedTeamPreset() {
+  await runPlmLocalPresetOwnershipAction(
+    () => archiveWhereUsedTeamPresetBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => shouldClearLocalPresetOwnerAfterTeamPresetAction('archive', saved),
+    },
+  )
+}
+
+async function restoreWhereUsedTeamPreset() {
+  const hadLocalOwnerBeforeAction = hasActiveWhereUsedLocalPresetOwner.value
+  await runPlmLocalPresetOwnershipAction(
+    () => restoreWhereUsedTeamPresetBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => shouldClearLocalPresetOwnerAfterTeamPresetSingleRestore(
+        saved,
+        hadLocalOwnerBeforeAction,
+      ),
+    },
+  )
+}
+
+async function renameWhereUsedTeamPreset() {
+  await runPlmLocalPresetOwnershipAction(
+    () => renameWhereUsedTeamPresetBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function transferWhereUsedTeamPreset() {
+  await runPlmLocalPresetOwnershipAction(
+    () => transferWhereUsedTeamPresetBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function saveWhereUsedTeamPreset() {
+  await runPlmLocalPresetOwnershipAction(
+    () => saveWhereUsedTeamPresetBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function promoteWhereUsedFilterPresetToTeam() {
+  const preset = whereUsedFilterPresets.value.find((entry) => entry.key === whereUsedFilterPresetKey.value)
+  if (!preset) {
+    setDeepLinkMessage('请选择 Where-Used 过滤预设后再升为团队预设。', true)
+    return
+  }
+  await runPlmLocalPresetOwnershipAction(
+    () => promoteWhereUsedFilterPresetToTeamBase(preset),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function promoteWhereUsedFilterPresetToTeamDefault() {
+  const preset = whereUsedFilterPresets.value.find((entry) => entry.key === whereUsedFilterPresetKey.value)
+  if (!preset) {
+    setDeepLinkMessage('请选择 Where-Used 过滤预设后再升为默认团队预设。', true)
+    return
+  }
+  await runPlmLocalPresetOwnershipAction(
+    () => promoteWhereUsedFilterPresetToTeamDefaultBase(preset),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function setWhereUsedTeamPresetDefault() {
+  await runPlmLocalPresetOwnershipAction(
+    () => setWhereUsedTeamPresetDefaultBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => Boolean(saved),
+    },
+  )
+}
+
+async function clearWhereUsedTeamPresetDefault() {
+  await runPlmLocalPresetOwnershipAction(
+    () => clearWhereUsedTeamPresetDefaultBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (saved) => shouldClearLocalPresetOwnerAfterTeamPresetAction('clear-default', saved),
+    },
+  )
+}
+
+async function archiveWhereUsedTeamPresetSelection() {
+  await runPlmLocalPresetOwnershipAction(
+    () => archiveWhereUsedTeamPresetSelectionBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (result) => (
+        hasProcessedTeamPresetChanges(result)
+        && shouldClearLocalPresetOwnerAfterTeamPresetAction('batch-archive', result)
+      ),
+    },
+  )
+}
+
+async function restoreWhereUsedTeamPresetSelection() {
+  const hadLocalOwnerBeforeAction = hasActiveWhereUsedLocalPresetOwner.value
+  const activeTeamPresetIdBeforeAction = whereUsedTeamPresetKey.value
+  const requestedTeamPresetIdBeforeAction = whereUsedTeamPresetQuery.value
+  await runPlmLocalPresetOwnershipAction(
+    () => restoreWhereUsedTeamPresetSelectionBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (result) => shouldClearLocalPresetOwnerAfterTeamPresetBatchRestore(
+        result,
+        activeTeamPresetIdBeforeAction,
+        requestedTeamPresetIdBeforeAction,
+        hadLocalOwnerBeforeAction,
+      ),
+    },
+  )
+}
+
+async function deleteWhereUsedTeamPresetSelection() {
+  await runPlmLocalPresetOwnershipAction(
+    () => deleteWhereUsedTeamPresetSelectionBase(),
+    {
+      clearLocalOwner: clearWhereUsedLocalFilterPresetIdentity,
+      shouldClear: (result) => (
+        hasProcessedTeamPresetChanges(result)
+        && shouldClearLocalPresetOwnerAfterTeamPresetAction('batch-delete', result)
+      ),
+    },
+  )
+}
+
+function buildWorkbenchTeamViewState(): PlmWorkbenchViewQueryState {
+  const query = normalizePlmWorkbenchCollaborativeQuerySnapshot(buildDeepLinkParams(true))
+  return {
+    query,
+  }
+}
+
+async function applyWorkbenchTeamViewState(state: PlmWorkbenchViewQueryState) {
+  const nextQuery = mergePlmWorkbenchRouteQuery(route.query, normalizePlmWorkbenchCollaborativeQuerySnapshot(state.query))
+  if (workbenchTeamViewQuery.value) {
+    nextQuery.workbenchTeamView = workbenchTeamViewQuery.value
+  }
+  await router.replace({ query: nextQuery }).catch(() => null)
+  await nextTick()
+  await applyQueryState()
+}
+
+const workbenchTeamViewQuery = ref('')
+const sceneCatalogOwnerFilter = ref('')
+const sceneCatalogAutoFocusSceneId = ref('')
+const sceneCatalogRecommendationFilter = ref<''
+| 'default'
+| 'recent-default'
+| 'recent-update'>('')
+const sceneCatalogRecommendationOptions: FilterFieldOption[] = WORKBENCH_SCENE_RECOMMENDATION_OPTIONS
+const {
+  teamViewKey: workbenchTeamViewKey,
+  teamViewName: workbenchTeamViewName,
+  teamViewOwnerUserId: workbenchTeamViewOwnerUserId,
+  teamViews: workbenchTeamViews,
+  teamViewsLoading: workbenchTeamViewsLoading,
+  teamViewsError: workbenchTeamViewsError,
+  canSaveTeamView: canSaveWorkbenchTeamView,
+  canApplyTeamView: canApplyWorkbenchTeamView,
+  showManagementActions: showManageWorkbenchTeamViewActions,
+  canDuplicateTeamView: canDuplicateWorkbenchTeamView,
+  canShareTeamView: canShareWorkbenchTeamView,
+  canDeleteTeamView: canDeleteWorkbenchTeamView,
+  canArchiveTeamView: canArchiveWorkbenchTeamView,
+  canRestoreTeamView: canRestoreWorkbenchTeamView,
+  canRenameTeamView: canRenameWorkbenchTeamView,
+  canTransferTargetTeamView: canTransferWorkbenchTeamViewTarget,
+  canTransferTeamView: canTransferWorkbenchTeamView,
+  canSetTeamViewDefault: canSetWorkbenchTeamViewDefault,
+  canClearTeamViewDefault: canClearWorkbenchTeamViewDefault,
+  defaultTeamViewLabel: workbenchDefaultTeamViewLabel,
+  hasManageableTeamViews: hasManageableWorkbenchTeamViews,
+  showTeamViewManager: showWorkbenchTeamViewManager,
+  teamViewSelection: workbenchTeamViewSelection,
+  teamViewSelectionCount: workbenchTeamViewSelectionCount,
+  selectedBatchArchivableTeamViewIds: selectedBatchArchivableWorkbenchTeamViewIds,
+  selectedBatchRestorableTeamViewIds: selectedBatchRestorableWorkbenchTeamViewIds,
+  selectedBatchDeletableTeamViewIds: selectedBatchDeletableWorkbenchTeamViewIds,
+  refreshTeamViews: refreshWorkbenchTeamViews,
+  saveTeamView: saveWorkbenchTeamView,
+  applyTeamView: applyWorkbenchTeamView,
+  duplicateTeamView: duplicateWorkbenchTeamView,
+  shareTeamView: shareWorkbenchTeamView,
+  deleteTeamView: deleteWorkbenchTeamView,
+  archiveTeamView: archiveWorkbenchTeamView,
+  restoreTeamView: restoreWorkbenchTeamView,
+  renameTeamView: renameWorkbenchTeamView,
+  transferTeamView: transferWorkbenchTeamView,
+  setTeamViewDefault: setWorkbenchTeamViewDefault,
+  clearTeamViewDefault: clearWorkbenchTeamViewDefault,
+  selectAllTeamViews: selectAllWorkbenchTeamViews,
+  clearTeamViewSelection: clearWorkbenchTeamViewSelection,
+  archiveTeamViewSelection: archiveWorkbenchTeamViewSelection,
+  restoreTeamViewSelection: restoreWorkbenchTeamViewSelection,
+  deleteTeamViewSelection: deleteWorkbenchTeamViewSelection,
+} = usePlmTeamViews({
+  kind: 'workbench',
+  label: '工作台',
+  getCurrentViewState: () => buildWorkbenchTeamViewState(),
+  applyViewState: (state) => {
+    void applyWorkbenchTeamViewState(state)
+  },
+  setMessage: setDeepLinkMessage,
+  requestedViewId: workbenchTeamViewQuery,
+  syncRequestedViewId: (value) => {
+    workbenchTeamViewQuery.value = value || ''
+    scheduleQuerySync({ workbenchTeamView: value || undefined })
+  },
+  buildShareUrl: (view) => buildPlmWorkbenchTeamViewShareUrl('workbench', view, route.path),
+  copyShareUrl: copyToClipboard,
+  shouldAutoApplyDefault: () => !hasExplicitWorkbenchQueryState(),
+})
+
+const sceneCatalogOwnerOptions = computed(() =>
+  buildWorkbenchSceneCatalogOwnerOptions(workbenchTeamViews.value),
+)
+
+const recommendedWorkbenchScenes = computed<PlmRecommendedWorkbenchScene[]>(() =>
+  buildRecommendedWorkbenchScenes(workbenchTeamViews.value, {
+    ownerUserId: sceneCatalogOwnerFilter.value,
+    recommendationFilter: sceneCatalogRecommendationFilter.value,
+  }),
+)
+
+const activeWorkbenchRouteView = computed(() => {
+  const viewId = workbenchTeamViewQuery.value.trim()
+  if (!viewId) return null
+  return workbenchTeamViews.value.find((entry) => entry.id === viewId) || null
+})
+
+watch(
+  () => [
+    workbenchTeamViewQuery.value,
+    activeWorkbenchRouteView.value?.id || '',
+    JSON.stringify(buildWorkbenchTeamViewState().query),
+  ],
+  ([viewId, activeViewId]) => {
+    if (!viewId || !activeViewId) return
+    const activeView = activeWorkbenchRouteView.value
+    if (!activeView) return
+    if (matchPlmWorkbenchQuerySnapshot(activeView.state.query, buildWorkbenchTeamViewState().query)) return
+    workbenchTeamViewQuery.value = ''
+    scheduleQuerySync({ workbenchTeamView: undefined })
+  },
+)
+
+const sceneCatalogSummaryChips = computed(() =>
+  buildWorkbenchSceneSummaryChips(workbenchTeamViews.value, {
+    ownerUserId: sceneCatalogOwnerFilter.value,
+    recommendationFilter: sceneCatalogRecommendationFilter.value,
+  }),
+)
+
+const sceneCatalogSummaryHint = computed(() =>
+  buildWorkbenchSceneSummaryHint(sceneCatalogSummaryChips.value),
+)
+
+function clearSceneCatalogAutoFocusSceneId() {
+  if (!sceneCatalogAutoFocusSceneId.value) return
+  sceneCatalogAutoFocusSceneId.value = ''
+  syncQueryParams({ sceneFocus: undefined })
+}
+
+function setSceneCatalogRecommendationFilter(value: '' | 'default' | 'recent-default' | 'recent-update') {
+  sceneCatalogRecommendationFilter.value = value
+}
+
+function applyRecommendedWorkbenchScene(viewId: string) {
+  const view = workbenchTeamViews.value.find((entry) => entry.id === viewId)
+  if (!view || !canApplyPlmCollaborativeEntry(view)) return
+  workbenchTeamViewKey.value = viewId
+  applyWorkbenchTeamView()
+}
+
+async function copyRecommendedWorkbenchSceneLink(viewId: string) {
+  const view = workbenchTeamViews.value.find((entry) => entry.id === viewId)
+  if (!view) {
+    setDeepLinkMessage('未找到团队场景。', true)
+    return
+  }
+  if (!canSharePlmCollaborativeEntry(view)) {
+    setDeepLinkMessage(`当前账号无权分享团队场景：${view.name}`, true)
+    return
+  }
+  const copied = await copyToClipboard(
+    buildPlmWorkbenchTeamViewShareUrl('workbench', view, route.path),
+  )
+  if (!copied) {
+    setDeepLinkMessage(`复制团队场景链接失败：${view.name}`, true)
+    return
+  }
+  setDeepLinkMessage(`已复制团队场景链接：${view.name}`)
+}
+
+async function openRecommendedWorkbenchSceneAudit(scene: PlmRecommendedWorkbenchScene) {
+  const returnToPlmPath = buildPlmWorkbenchRoutePath(
+    route.path,
+    buildDeepLinkParams(true),
+    {
+      hash: route.hash,
+      extraQuery: { sceneFocus: scene.id },
+    },
+  )
+  await router.push({
+    name: 'plm-audit',
+    query: buildRecommendedWorkbenchSceneAuditQuery(
+      scene,
+      returnToPlmPath,
+    ),
+  })
+}
+
+async function openWorkbenchSceneAudit() {
+  const returnToPlmPath = buildPlmWorkbenchRoutePath(
+    route.path,
+    buildDeepLinkParams(true),
+    {
+      hash: route.hash,
+    },
+  )
+  await router.push({
+    name: 'plm-audit',
+    query: buildWorkbenchAuditQuery(returnToPlmPath),
+  })
+}
+
+const documentTeamViewQuery = ref('')
+const cadTeamViewQuery = ref('')
+const approvalsTeamViewQuery = ref('')
+
+const {
+  teamViewKey: documentTeamViewKey,
+  teamViewName: documentTeamViewName,
+  teamViewOwnerUserId: documentTeamViewOwnerUserId,
+  teamViews: documentTeamViews,
+  teamViewsLoading: documentTeamViewsLoading,
+  teamViewsError: documentTeamViewsError,
+  canSaveTeamView: canSaveDocumentTeamView,
+  canApplyTeamView: canApplyDocumentTeamView,
+  showManagementActions: showManageDocumentTeamViewActions,
+  canDuplicateTeamView: canDuplicateDocumentTeamView,
+  canShareTeamView: canShareDocumentTeamView,
+  canDeleteTeamView: canDeleteDocumentTeamView,
+  canArchiveTeamView: canArchiveDocumentTeamView,
+  canRestoreTeamView: canRestoreDocumentTeamView,
+  canRenameTeamView: canRenameDocumentTeamView,
+  canTransferTargetTeamView: canTransferDocumentTeamViewTarget,
+  canTransferTeamView: canTransferDocumentTeamView,
+  canSetTeamViewDefault: canSetDocumentTeamViewDefault,
+  canClearTeamViewDefault: canClearDocumentTeamViewDefault,
+  defaultTeamViewLabel: documentDefaultTeamViewLabel,
+  hasManageableTeamViews: hasManageableDocumentTeamViews,
+  showTeamViewManager: showDocumentTeamViewManager,
+  teamViewSelection: documentTeamViewSelection,
+  teamViewSelectionCount: documentTeamViewSelectionCount,
+  selectedBatchArchivableTeamViewIds: selectedBatchArchivableDocumentTeamViewIds,
+  selectedBatchRestorableTeamViewIds: selectedBatchRestorableDocumentTeamViewIds,
+  selectedBatchDeletableTeamViewIds: selectedBatchDeletableDocumentTeamViewIds,
+  refreshTeamViews: refreshDocumentTeamViews,
+  saveTeamView: saveDocumentTeamView,
+  applyTeamView: applyDocumentTeamView,
+  duplicateTeamView: duplicateDocumentTeamView,
+  shareTeamView: shareDocumentTeamView,
+  deleteTeamView: deleteDocumentTeamView,
+  archiveTeamView: archiveDocumentTeamView,
+  restoreTeamView: restoreDocumentTeamView,
+  renameTeamView: renameDocumentTeamView,
+  transferTeamView: transferDocumentTeamView,
+  setTeamViewDefault: setDocumentTeamViewDefault,
+  clearTeamViewDefault: clearDocumentTeamViewDefault,
+  selectAllTeamViews: selectAllDocumentTeamViews,
+  clearTeamViewSelection: clearDocumentTeamViewSelection,
+  archiveTeamViewSelection: archiveDocumentTeamViewSelection,
+  restoreTeamViewSelection: restoreDocumentTeamViewSelection,
+  deleteTeamViewSelection: deleteDocumentTeamViewSelection,
+} = usePlmTeamViews({
+  kind: 'documents',
+  label: '文档',
+  getCurrentViewState: () => ({
+    role: documentRole.value,
+    filter: documentFilter.value,
+    sortKey: documentSortKey.value,
+    sortDir: documentSortDir.value,
+    columns: { ...documentColumns.value },
+  }),
+  applyViewState: (state) => {
+    documentRole.value = state.role
+    documentFilter.value = state.filter
+    documentSortKey.value = state.sortKey
+    documentSortDir.value = state.sortDir
+    documentColumns.value = { ...defaultDocumentColumns, ...state.columns }
+  },
+  setMessage: setDeepLinkMessage,
+  requestedViewId: documentTeamViewQuery,
+  syncRequestedViewId: (value) => {
+    documentTeamViewQuery.value = value || ''
+    scheduleQuerySync({ documentTeamView: value || undefined })
+  },
+  buildShareUrl: (view) => buildPlmWorkbenchTeamViewShareUrl(
+    'documents',
+    view,
+    route.path,
+    undefined,
+    {
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : '',
+    },
+  ),
+  copyShareUrl: copyToClipboard,
+  shouldAutoApplyDefault: () => (
+    !hasExplicitPlmDocumentAutoApplyQueryState(
+      applyPlmDeferredRouteQueryPatch(
+        route.query as Record<string, unknown>,
+        deferredRouteQueryPatch,
+      ),
+      defaultDocumentColumns,
+    )
+    && !documentRole.value.trim()
+    && !documentFilter.value.trim()
+    && documentSortKey.value === 'updated'
+    && documentSortDir.value === 'desc'
+  ),
+})
+
+const activeDocumentRouteView = computed(() => {
+  const viewId = documentTeamViewQuery.value.trim()
+  if (!viewId) return null
+  return documentTeamViews.value.find((entry) => entry.id === viewId) || null
+})
+
+watch(
+  () => [
+    documentTeamViewQuery.value,
+    activeDocumentRouteView.value?.id || '',
+    JSON.stringify({
+      role: documentRole.value,
+      filter: documentFilter.value,
+      sortKey: documentSortKey.value,
+      sortDir: documentSortDir.value,
+      columns: { ...documentColumns.value },
+    }),
+  ],
+  ([viewId, activeViewId]) => {
+    if (!viewId || !activeViewId) return
+    const activeView = activeDocumentRouteView.value
+    if (!activeView) return
+    if (matchPlmTeamViewStateSnapshot({
+      ...pickPlmTeamViewStateKeys(activeView.state, ['role', 'filter', 'sortKey', 'sortDir']),
+      columns: mergePlmTeamViewBooleanMapDefaults(defaultDocumentColumns, activeView.state.columns),
+    }, {
+      role: documentRole.value,
+      filter: documentFilter.value,
+      sortKey: documentSortKey.value,
+      sortDir: documentSortDir.value,
+      columns: mergePlmTeamViewBooleanMapDefaults(defaultDocumentColumns, documentColumns.value),
+    })) {
       return
     }
-    const importedCount = mergeImportedPresets(parsed)
-    importPresetText.value = ''
-    if (importedCount) {
-      setDeepLinkMessage(`已导入 ${importedCount} 条预设。`)
-    } else {
-      setDeepLinkMessage('未发现可导入的预设。', true)
+    documentTeamViewQuery.value = ''
+    scheduleQuerySync({ documentTeamView: undefined })
+  },
+)
+
+const {
+  teamViewKey: cadTeamViewKey,
+  teamViewName: cadTeamViewName,
+  teamViewOwnerUserId: cadTeamViewOwnerUserId,
+  teamViews: cadTeamViews,
+  teamViewsLoading: cadTeamViewsLoading,
+  teamViewsError: cadTeamViewsError,
+  canSaveTeamView: canSaveCadTeamView,
+  canApplyTeamView: canApplyCadTeamView,
+  showManagementActions: showManageCadTeamViewActions,
+  canDuplicateTeamView: canDuplicateCadTeamView,
+  canShareTeamView: canShareCadTeamView,
+  canDeleteTeamView: canDeleteCadTeamView,
+  canArchiveTeamView: canArchiveCadTeamView,
+  canRestoreTeamView: canRestoreCadTeamView,
+  canRenameTeamView: canRenameCadTeamView,
+  canTransferTargetTeamView: canTransferCadTeamViewTarget,
+  canTransferTeamView: canTransferCadTeamView,
+  canSetTeamViewDefault: canSetCadTeamViewDefault,
+  canClearTeamViewDefault: canClearCadTeamViewDefault,
+  defaultTeamViewLabel: cadDefaultTeamViewLabel,
+  hasManageableTeamViews: hasManageableCadTeamViews,
+  showTeamViewManager: showCadTeamViewManager,
+  teamViewSelection: cadTeamViewSelection,
+  teamViewSelectionCount: cadTeamViewSelectionCount,
+  selectedBatchArchivableTeamViewIds: selectedBatchArchivableCadTeamViewIds,
+  selectedBatchRestorableTeamViewIds: selectedBatchRestorableCadTeamViewIds,
+  selectedBatchDeletableTeamViewIds: selectedBatchDeletableCadTeamViewIds,
+  refreshTeamViews: refreshCadTeamViews,
+  saveTeamView: saveCadTeamView,
+  applyTeamView: applyCadTeamView,
+  duplicateTeamView: duplicateCadTeamView,
+  shareTeamView: shareCadTeamView,
+  deleteTeamView: deleteCadTeamView,
+  archiveTeamView: archiveCadTeamView,
+  restoreTeamView: restoreCadTeamView,
+  renameTeamView: renameCadTeamView,
+  transferTeamView: transferCadTeamView,
+  setTeamViewDefault: setCadTeamViewDefault,
+  clearTeamViewDefault: clearCadTeamViewDefault,
+  selectAllTeamViews: selectAllCadTeamViews,
+  clearTeamViewSelection: clearCadTeamViewSelection,
+  archiveTeamViewSelection: archiveCadTeamViewSelection,
+  restoreTeamViewSelection: restoreCadTeamViewSelection,
+  deleteTeamViewSelection: deleteCadTeamViewSelection,
+} = usePlmTeamViews({
+  kind: 'cad',
+  label: 'CAD',
+  getCurrentViewState: () => ({
+    fileId: cadFileId.value,
+    otherFileId: cadOtherFileId.value,
+    reviewState: cadReviewState.value,
+    reviewNote: cadReviewNote.value,
+  }),
+  applyViewState: (state) => {
+    cadFileId.value = state.fileId
+    cadOtherFileId.value = state.otherFileId
+    cadReviewState.value = state.reviewState
+    cadReviewNote.value = state.reviewNote
+  },
+  setMessage: setDeepLinkMessage,
+  requestedViewId: cadTeamViewQuery,
+  syncRequestedViewId: (value) => {
+    cadTeamViewQuery.value = value || ''
+    scheduleQuerySync({ cadTeamView: value || undefined })
+  },
+  buildShareUrl: (view) => buildPlmWorkbenchTeamViewShareUrl('cad', view, route.path),
+  copyShareUrl: copyToClipboard,
+  shouldAutoApplyDefault: () => (
+    !hasExplicitPlmCadAutoApplyQueryState(
+      applyPlmDeferredRouteQueryPatch(
+        route.query as Record<string, unknown>,
+        deferredRouteQueryPatch,
+      ),
+    )
+    && !cadFileId.value.trim()
+    && !cadOtherFileId.value.trim()
+    && !cadReviewState.value.trim()
+    && !cadReviewNote.value.trim()
+  ),
+})
+
+const activeCadRouteView = computed(() => {
+  const viewId = cadTeamViewQuery.value.trim()
+  if (!viewId) return null
+  return cadTeamViews.value.find((entry) => entry.id === viewId) || null
+})
+
+watch(
+  () => [
+    cadTeamViewQuery.value,
+    activeCadRouteView.value?.id || '',
+    JSON.stringify({
+      fileId: cadFileId.value,
+      otherFileId: cadOtherFileId.value,
+      reviewState: cadReviewState.value,
+      reviewNote: cadReviewNote.value,
+    }),
+  ],
+  ([viewId, activeViewId]) => {
+    if (!viewId || !activeViewId) return
+    const activeView = activeCadRouteView.value
+    if (!activeView) return
+    if (matchPlmTeamViewStateSnapshot(
+      pickPlmTeamViewStateKeys(activeView.state, ['fileId', 'otherFileId', 'reviewState', 'reviewNote']),
+      {
+      fileId: cadFileId.value,
+      otherFileId: cadOtherFileId.value,
+      reviewState: cadReviewState.value,
+      reviewNote: cadReviewNote.value,
+    },
+    )) {
+      return
     }
-  } catch (_err) {
-    setDeepLinkMessage('预设 JSON 解析失败。', true)
-  }
-}
+    cadTeamViewQuery.value = ''
+    scheduleQuerySync({ cadTeamView: undefined })
+  },
+)
 
-function importCustomPresets() {
-  importCustomPresetsFromText(importPresetText.value)
-}
+const {
+  teamViewKey: approvalsTeamViewKey,
+  teamViewName: approvalsTeamViewName,
+  teamViewOwnerUserId: approvalsTeamViewOwnerUserId,
+  teamViews: approvalsTeamViews,
+  teamViewsLoading: approvalsTeamViewsLoading,
+  teamViewsError: approvalsTeamViewsError,
+  canSaveTeamView: canSaveApprovalsTeamView,
+  canApplyTeamView: canApplyApprovalsTeamView,
+  showManagementActions: showManageApprovalsTeamViewActions,
+  canDuplicateTeamView: canDuplicateApprovalsTeamView,
+  canShareTeamView: canShareApprovalsTeamView,
+  canDeleteTeamView: canDeleteApprovalsTeamView,
+  canArchiveTeamView: canArchiveApprovalsTeamView,
+  canRestoreTeamView: canRestoreApprovalsTeamView,
+  canRenameTeamView: canRenameApprovalsTeamView,
+  canTransferTargetTeamView: canTransferApprovalsTeamViewTarget,
+  canTransferTeamView: canTransferApprovalsTeamView,
+  canSetTeamViewDefault: canSetApprovalsTeamViewDefault,
+  canClearTeamViewDefault: canClearApprovalsTeamViewDefault,
+  defaultTeamViewLabel: approvalsDefaultTeamViewLabel,
+  hasManageableTeamViews: hasManageableApprovalsTeamViews,
+  showTeamViewManager: showApprovalsTeamViewManager,
+  teamViewSelection: approvalsTeamViewSelection,
+  teamViewSelectionCount: approvalsTeamViewSelectionCount,
+  selectedBatchArchivableTeamViewIds: selectedBatchArchivableApprovalsTeamViewIds,
+  selectedBatchRestorableTeamViewIds: selectedBatchRestorableApprovalsTeamViewIds,
+  selectedBatchDeletableTeamViewIds: selectedBatchDeletableApprovalsTeamViewIds,
+  refreshTeamViews: refreshApprovalsTeamViews,
+  saveTeamView: saveApprovalsTeamView,
+  applyTeamView: applyApprovalsTeamView,
+  duplicateTeamView: duplicateApprovalsTeamView,
+  shareTeamView: shareApprovalsTeamView,
+  deleteTeamView: deleteApprovalsTeamView,
+  archiveTeamView: archiveApprovalsTeamView,
+  restoreTeamView: restoreApprovalsTeamView,
+  renameTeamView: renameApprovalsTeamView,
+  transferTeamView: transferApprovalsTeamView,
+  setTeamViewDefault: setApprovalsTeamViewDefault,
+  clearTeamViewDefault: clearApprovalsTeamViewDefault,
+  selectAllTeamViews: selectAllApprovalsTeamViews,
+  clearTeamViewSelection: clearApprovalsTeamViewSelection,
+  archiveTeamViewSelection: archiveApprovalsTeamViewSelection,
+  restoreTeamViewSelection: restoreApprovalsTeamViewSelection,
+  deleteTeamViewSelection: deleteApprovalsTeamViewSelection,
+} = usePlmTeamViews({
+  kind: 'approvals',
+  label: '审批',
+  getCurrentViewState: () => ({
+    status: approvalsStatus.value,
+    filter: approvalsFilter.value,
+    sortKey: approvalSortKey.value,
+    sortDir: approvalSortDir.value,
+    columns: { ...approvalColumns.value },
+  }),
+  applyViewState: (state) => {
+    approvalsStatus.value = state.status
+    approvalsFilter.value = state.filter
+    approvalSortKey.value = state.sortKey
+    approvalSortDir.value = state.sortDir
+    approvalColumns.value = { ...defaultApprovalColumns, ...state.columns }
+  },
+  setMessage: setDeepLinkMessage,
+  requestedViewId: approvalsTeamViewQuery,
+  syncRequestedViewId: (value) => {
+    approvalsTeamViewQuery.value = value || ''
+    scheduleQuerySync({ approvalsTeamView: value || undefined })
+  },
+  buildShareUrl: (view) => buildPlmWorkbenchTeamViewShareUrl(
+    'approvals',
+    view,
+    route.path,
+    undefined,
+    {
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : '',
+    },
+  ),
+  copyShareUrl: copyToClipboard,
+  shouldAutoApplyDefault: () => (
+    !hasExplicitPlmApprovalsAutoApplyQueryState(
+      applyPlmDeferredRouteQueryPatch(
+        route.query as Record<string, unknown>,
+        deferredRouteQueryPatch,
+      ),
+      defaultApprovalColumns,
+    )
+    && approvalsStatus.value === DEFAULT_APPROVAL_STATUS
+    && !approvalsFilter.value.trim()
+    && approvalSortKey.value === 'created'
+    && approvalSortDir.value === 'desc'
+  ),
+})
 
-async function importPresetFile(file: File) {
-  if (!file) return
-  if (file.type && !file.type.includes('json') && !file.name.endsWith('.json')) {
-    setDeepLinkMessage('仅支持 JSON 预设文件。', true)
-    return
-  }
-  try {
-    const text = await file.text()
-    importCustomPresetsFromText(text)
-  } catch (_err) {
-    setDeepLinkMessage('读取预设文件失败。', true)
-  }
-}
+const activeApprovalsRouteView = computed(() => {
+  const viewId = approvalsTeamViewQuery.value.trim()
+  if (!viewId) return null
+  return approvalsTeamViews.value.find((entry) => entry.id === viewId) || null
+})
 
-async function handlePresetFileImport(event: Event) {
-  const target = event.target as HTMLInputElement
-  const file = target.files?.[0]
-  if (!file) return
-  await importPresetFile(file)
-  target.value = ''
-}
-
-function handlePresetDragEnter(event: DragEvent) {
-  event.preventDefault()
-  presetDropDepth += 1
-  isPresetDropActive.value = true
-}
-
-function handlePresetDragOver(event: DragEvent) {
-  event.preventDefault()
-}
-
-function handlePresetDragLeave(event: DragEvent) {
-  event.preventDefault()
-  presetDropDepth = Math.max(0, presetDropDepth - 1)
-  if (presetDropDepth === 0) {
-    isPresetDropActive.value = false
-  }
-}
-
-async function handlePresetDrop(event: DragEvent) {
-  event.preventDefault()
-  presetDropDepth = 0
-  isPresetDropActive.value = false
-  const file = event.dataTransfer?.files?.[0]
-  if (!file) return
-  await importPresetFile(file)
-}
-
-function parseDeepLinkPanels(value?: string): Set<string> {
-  const allowed = new Set(Object.keys(deepLinkPanelLabels))
-  if (!value) return new Set(['all'])
-  const raw = value
-    .split(',')
-    .map((entry) => entry.trim().toLowerCase())
-    .filter(Boolean)
-  const filtered = raw.filter((entry) => allowed.has(entry))
-  return filtered.length ? new Set(filtered) : new Set(['all'])
-}
-
-function resolvePanelOverride(panel?: string): string | undefined {
-  if (panel) return panel
-  if (!deepLinkScope.value.length) return undefined
-  const allowed = new Set(Object.keys(deepLinkPanelLabels))
-  const selected = Array.from(new Set(deepLinkScope.value))
-    .map((entry) => entry.trim().toLowerCase())
-    .filter((entry) => entry && entry !== 'all' && allowed.has(entry))
-  return selected.length ? selected.join(',') : undefined
-}
+watch(
+  () => [
+    approvalsTeamViewQuery.value,
+    activeApprovalsRouteView.value?.id || '',
+    JSON.stringify({
+      status: approvalsStatus.value,
+      filter: approvalsFilter.value,
+      sortKey: approvalSortKey.value,
+      sortDir: approvalSortDir.value,
+      columns: { ...approvalColumns.value },
+    }),
+  ],
+  ([viewId, activeViewId]) => {
+    if (!viewId || !activeViewId) return
+    const activeView = activeApprovalsRouteView.value
+    if (!activeView) return
+    if (matchPlmTeamViewStateSnapshot({
+      ...pickPlmTeamViewStateKeys(activeView.state, ['status', 'filter', 'sortKey', 'sortDir']),
+      columns: mergePlmTeamViewBooleanMapDefaults(defaultApprovalColumns, activeView.state.columns),
+    }, {
+      status: approvalsStatus.value,
+      filter: approvalsFilter.value,
+      sortKey: approvalSortKey.value,
+      sortDir: approvalSortDir.value,
+      columns: mergePlmTeamViewBooleanMapDefaults(defaultApprovalColumns, approvalColumns.value),
+    })) {
+      return
+    }
+    approvalsTeamViewQuery.value = ''
+    scheduleQuerySync({ approvalsTeamView: undefined })
+  },
+)
 
 function formatDeepLinkTargets(panel?: string): string {
   if (panel) {
@@ -7465,14 +5499,35 @@ function formatDeepLinkTargets(panel?: string): string {
       return selected.map((entry) => deepLinkPanelLabels[entry] || entry).join(' / ')
     }
   }
+
+  const hasDocumentsState =
+    Boolean(documentRole.value.trim())
+    || Boolean(documentFilter.value.trim())
+    || documentSortKey.value !== 'updated'
+    || documentSortDir.value !== 'desc'
+    || !areColumnStatesEqual(documentColumns.value, defaultDocumentColumns)
+
+  const hasCadState =
+    Boolean(cadFileId.value.trim())
+    || Boolean(cadOtherFileId.value.trim())
+    || Boolean(cadReviewState.value.trim())
+    || Boolean(cadReviewNote.value.trim())
+
+  const hasApprovalsState =
+    approvalsStatus.value !== DEFAULT_APPROVAL_STATUS
+    || Boolean(approvalsFilter.value.trim())
+    || approvalSortKey.value !== 'created'
+    || approvalSortDir.value !== 'desc'
+    || !areColumnStatesEqual(approvalColumns.value, defaultApprovalColumns)
+
   const targets = []
   if (searchQuery.value) targets.push(deepLinkPanelLabels.search)
   if (productId.value || productItemNumber.value) targets.push(deepLinkPanelLabels.product)
-  if (documentRole.value || documentFilter.value) targets.push(deepLinkPanelLabels.documents)
-  if (approvalsStatus.value !== DEFAULT_APPROVAL_STATUS || approvalsFilter.value) {
+  if (hasDocumentsState) targets.push(deepLinkPanelLabels.documents)
+  if (hasApprovalsState) {
     targets.push(deepLinkPanelLabels.approvals)
   }
-  if (cadFileId.value) targets.push(deepLinkPanelLabels.cad)
+  if (hasCadState) targets.push(deepLinkPanelLabels.cad)
   if (whereUsedItemId.value) targets.push(deepLinkPanelLabels['where-used'])
   if (compareLeftId.value && compareRightId.value) targets.push(deepLinkPanelLabels.compare)
   if (bomLineId.value) targets.push(deepLinkPanelLabels.substitutes)
@@ -7485,28 +5540,51 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
     if (value === undefined || value === null || value === '') return
     params[key] = value
   }
+  const resolvedPanel = normalizePlmWorkbenchPanelScope(panelOverride ?? readQueryParam('panel'))
 
   append('searchQuery', searchQuery.value)
   append('searchItemType', searchItemType.value !== DEFAULT_ITEM_TYPE ? searchItemType.value : undefined)
   append('searchLimit', searchLimit.value !== DEFAULT_SEARCH_LIMIT ? searchLimit.value : undefined)
+  append('workbenchTeamView', workbenchTeamViewQuery.value)
   append('productId', productId.value)
   append('itemNumber', productItemNumber.value)
   append('itemType', itemType.value !== DEFAULT_ITEM_TYPE ? itemType.value : undefined)
+  append('documentTeamView', documentTeamViewQuery.value)
+  append('cadTeamView', cadTeamViewQuery.value)
+  append('approvalsTeamView', approvalsTeamViewQuery.value)
   append('cadFileId', cadFileId.value)
   append('cadOtherFileId', cadOtherFileId.value)
+  append('cadReviewState', cadReviewState.value)
+  append('cadReviewNote', cadReviewNote.value)
   append('documentRole', documentRole.value)
   append('documentFilter', documentFilter.value)
+  append('documentSort', documentSortKey.value !== 'updated' ? documentSortKey.value : undefined)
+  append('documentSortDir', documentSortDir.value !== 'desc' ? documentSortDir.value : undefined)
+  append('documentColumns', serializeColumnQuery(documentColumns.value, defaultDocumentColumns))
   append('approvalsStatus', approvalsStatus.value !== DEFAULT_APPROVAL_STATUS ? approvalsStatus.value : undefined)
   append('approvalsFilter', approvalsFilter.value)
+  append('approvalSort', approvalSortKey.value !== 'created' ? approvalSortKey.value : undefined)
+  append('approvalSortDir', approvalSortDir.value !== 'desc' ? approvalSortDir.value : undefined)
+  append('approvalColumns', serializeColumnQuery(approvalColumns.value, defaultApprovalColumns))
   append('whereUsedItemId', whereUsedItemId.value)
   append('whereUsedRecursive', whereUsedRecursive.value !== true ? whereUsedRecursive.value : undefined)
   append('whereUsedMaxLevels', whereUsedMaxLevels.value !== DEFAULT_WHERE_USED_MAX_LEVELS ? whereUsedMaxLevels.value : undefined)
+  append('whereUsedFilterPreset', whereUsedFilterPresetQuery.value)
+  append('whereUsedTeamPreset', whereUsedTeamPresetQuery.value)
   append('whereUsedFilter', whereUsedFilter.value)
-  append('whereUsedFilterField', whereUsedFilterField.value !== 'all' ? whereUsedFilterField.value : undefined)
+  append(
+    'whereUsedFilterField',
+    resolvePlmFilterFieldQueryValue(whereUsedFilter.value, whereUsedFilterField.value),
+  )
   append('bomDepth', bomDepth.value !== DEFAULT_BOM_DEPTH ? bomDepth.value : undefined)
   append('bomEffectiveAt', bomEffectiveAt.value)
+  append('bomFilterPreset', bomFilterPresetQuery.value)
+  append('bomTeamPreset', bomTeamPresetQuery.value)
   append('bomFilter', bomFilter.value)
-  append('bomFilterField', bomFilterField.value !== 'all' ? bomFilterField.value : undefined)
+  append(
+    'bomFilterField',
+    resolvePlmFilterFieldQueryValue(bomFilter.value, bomFilterField.value),
+  )
   append('bomView', bomView.value !== 'table' ? bomView.value : undefined)
   if (bomView.value === 'tree' && bomCollapsed.value.size) {
     const collapsedValue = serializeBomCollapsed(bomCollapsed.value)
@@ -7526,21 +5604,10 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
   append('compareFilter', compareFilter.value)
   append('bomLineId', bomLineId.value)
   append('substitutesFilter', substitutesFilter.value)
-  if (panelOverride && panelOverride !== 'all') {
-    append('panel', panelOverride)
-  }
+  append('panel', resolvedPanel)
 
-  if (includeAutoload) {
-    const shouldAutoload =
-      Boolean(productId.value || productItemNumber.value) ||
-      Boolean(cadFileId.value) ||
-      Boolean(whereUsedItemId.value) ||
-      Boolean(compareLeftId.value && compareRightId.value) ||
-      Boolean(bomLineId.value) ||
-      Boolean(searchQuery.value)
-    if (shouldAutoload) {
-      params.autoload = true
-    }
+  if (includeAutoload && shouldAutoloadPlmWorkbenchSnapshot(params as Record<string, string>)) {
+    params.autoload = true
   }
 
   return params
@@ -7549,8 +5616,9 @@ function buildDeepLinkParams(includeAutoload: boolean, panelOverride?: string): 
 function buildDeepLinkUrl(panelOverride?: string): string {
   if (typeof window === 'undefined') return ''
   const base = `${window.location.origin}${route.path}`
-  const resolvedPanel = resolvePanelOverride(panelOverride)
-  const params = buildDeepLinkParams(true, resolvedPanel)
+  const params = normalizePlmWorkbenchLocalRouteQuerySnapshot(
+    buildDeepLinkParams(true, panelOverride),
+  )
   const search = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) {
     search.set(key, String(value))
@@ -7559,254 +5627,935 @@ function buildDeepLinkUrl(panelOverride?: string): string {
   return query ? `${base}?${query}` : base
 }
 
-async function copyDeepLink(panel?: string) {
-  const resolvedPanel = resolvePanelOverride(panel)
-  const url = buildDeepLinkUrl(resolvedPanel)
-  if (!url) {
-    setDeepLinkMessage('当前页面无法生成深链接。', true)
-    return
+function applyHydratedTeamViewOwnerTakeover(options: {
+  routeOwnerId: string
+  teamViewKey: { value: string }
+  teamViewName: { value: string }
+  teamViewOwnerUserId: { value: string }
+  teamViewSelection: { value: string[] }
+}) {
+  const takeover = resolvePlmHydratedTeamViewOwnerTakeover({
+    routeOwnerId: options.routeOwnerId,
+    localSelectorId: options.teamViewKey.value,
+    localNameDraft: options.teamViewName.value,
+    localOwnerUserIdDraft: options.teamViewOwnerUserId.value,
+    localSelectionIds: options.teamViewSelection.value,
+  })
+  if (!takeover.shouldClearLocalSelector) return
+  options.teamViewKey.value = takeover.nextSelectorId
+  options.teamViewName.value = takeover.nextNameDraft
+  options.teamViewOwnerUserId.value = takeover.nextOwnerUserIdDraft
+  options.teamViewSelection.value = takeover.nextSelectionIds
+}
+
+function applyHydratedRemovedTeamViewOwner(options: {
+  removedRouteOwnerId: string
+  teamViewQuery: { value: string }
+  teamViewKey: { value: string }
+  teamViewName: { value: string }
+  teamViewOwnerUserId: { value: string }
+  teamViewSelection: { value: string[] }
+}) {
+  const takeover = resolvePlmHydratedRemovedTeamViewOwner({
+    removedRouteOwnerId: options.removedRouteOwnerId,
+    localSelectorId: options.teamViewKey.value,
+    localNameDraft: options.teamViewName.value,
+    localOwnerUserIdDraft: options.teamViewOwnerUserId.value,
+    localSelectionIds: options.teamViewSelection.value,
+  })
+  options.teamViewQuery.value = ''
+  if (!takeover.shouldClearLocalSelector) return
+  options.teamViewKey.value = takeover.nextSelectorId
+  options.teamViewName.value = takeover.nextNameDraft
+  options.teamViewOwnerUserId.value = takeover.nextOwnerUserIdDraft
+  options.teamViewSelection.value = takeover.nextSelectionIds
+}
+
+function applyHydratedTeamPresetOwnerTakeover(options: {
+  routeOwnerId: string
+  teamPresetKey: { value: string }
+  teamPresetName: { value: string }
+  teamPresetGroup: { value: string }
+  teamPresetOwnerUserId: { value: string }
+  teamPresetSelection: { value: string[] }
+}) {
+  const takeover = resolvePlmHydratedTeamPresetOwnerTakeover({
+    routeOwnerId: options.routeOwnerId,
+    localSelectorId: options.teamPresetKey.value,
+    localNameDraft: options.teamPresetName.value,
+    localGroupDraft: options.teamPresetGroup.value,
+    localOwnerUserIdDraft: options.teamPresetOwnerUserId.value,
+    localSelectionIds: options.teamPresetSelection.value,
+  })
+  if (!takeover.shouldClearLocalSelector) return
+  options.teamPresetKey.value = takeover.nextSelectorId
+  options.teamPresetName.value = takeover.nextNameDraft
+  options.teamPresetGroup.value = takeover.nextGroupDraft
+  options.teamPresetOwnerUserId.value = takeover.nextOwnerUserIdDraft
+  options.teamPresetSelection.value = takeover.nextSelectionIds
+}
+
+function applyHydratedRemovedTeamPresetOwner(options: {
+  removedRouteOwnerId: string
+  teamPresetQuery: { value: string }
+  teamPresetKey: { value: string }
+  teamPresetName: { value: string }
+  teamPresetGroup: { value: string }
+  teamPresetOwnerUserId: { value: string }
+  teamPresetSelection: { value: string[] }
+}) {
+  const takeover = resolvePlmHydratedRemovedTeamPresetOwner({
+    removedRouteOwnerId: options.removedRouteOwnerId,
+    localSelectorId: options.teamPresetKey.value,
+    localNameDraft: options.teamPresetName.value,
+    localGroupDraft: options.teamPresetGroup.value,
+    localOwnerUserIdDraft: options.teamPresetOwnerUserId.value,
+    localSelectionIds: options.teamPresetSelection.value,
+  })
+  options.teamPresetQuery.value = ''
+  if (!takeover.shouldClearLocalSelector) return
+  options.teamPresetKey.value = takeover.nextSelectorId
+  options.teamPresetName.value = takeover.nextNameDraft
+  options.teamPresetGroup.value = takeover.nextGroupDraft
+  options.teamPresetOwnerUserId.value = takeover.nextOwnerUserIdDraft
+  options.teamPresetSelection.value = takeover.nextSelectionIds
+}
+
+function applyHydratedPanelDataReset(options: {
+  previousRouteState: PlmHydratedPanelDataRouteState
+  nextRouteState: PlmHydratedPanelDataRouteState
+}) {
+  const reset = resolvePlmHydratedPanelDataReset(options)
+  if (reset.clearSearch) {
+    searchResults.value = []
+    searchTotal.value = 0
+    searchError.value = ''
   }
-  try {
-    await navigator.clipboard.writeText(url)
-    setDeepLinkMessage(`已复制深链接（包含：${formatDeepLinkTargets(resolvedPanel)}）。`)
-  } catch (_err) {
-    try {
-      const textarea = document.createElement('textarea')
-      textarea.value = url
-      textarea.style.position = 'fixed'
-      textarea.style.top = '-1000px'
-      document.body.appendChild(textarea)
-      textarea.focus()
-      textarea.select()
-      document.execCommand('copy')
-      document.body.removeChild(textarea)
-      setDeepLinkMessage(`已复制深链接（包含：${formatDeepLinkTargets(resolvedPanel)}）。`)
-    } catch (_fallbackErr) {
-      setDeepLinkMessage('复制失败，请手动复制地址栏链接。', true)
-    }
+  if (reset.clearProduct) {
+    product.value = null
+    productLoading.value = false
+    productError.value = ''
+  }
+  if (reset.clearBom) {
+    bomItems.value = []
+    bomLoading.value = false
+    bomError.value = ''
+    clearBomSelection()
+  }
+  if (reset.clearDocuments) {
+    documents.value = []
+    documentsLoading.value = false
+    documentsError.value = ''
+  }
+  if (reset.clearCad) {
+    cadProperties.value = null
+    cadViewState.value = null
+    cadReview.value = null
+    cadHistory.value = null
+    cadDiff.value = null
+    cadMeshStats.value = null
+    cadPropertiesDraft.value = ''
+    cadViewStateDraft.value = ''
+    cadReviewState.value = ''
+    cadReviewNote.value = ''
+    cadLoading.value = false
+    cadDiffLoading.value = false
+    cadUpdating.value = false
+    cadStatus.value = ''
+    cadError.value = ''
+    cadActionStatus.value = ''
+    cadActionError.value = ''
+  }
+  if (reset.clearApprovals) {
+    approvals.value = []
+    approvalsLoading.value = false
+    approvalsError.value = ''
+    approvalActionStatus.value = ''
+    approvalActionError.value = ''
+    approvalActingId.value = ''
+    approvalActionabilityById.value = {}
+    approvalActionabilityLoadingById.value = {}
+    approvalActionabilityActorKey.value = ''
+    approvalHistoryFor.value = ''
+    approvalHistoryLabel.value = ''
+    approvalHistory.value = []
+    approvalHistoryLoading.value = false
+    approvalHistoryError.value = ''
+  }
+  if (reset.clearWhereUsed) {
+    whereUsed.value = null
+    whereUsedLoading.value = false
+    whereUsedError.value = ''
+    clearWhereUsedSelection()
+  }
+  if (reset.clearCompare) {
+    bomCompare.value = null
+    compareLoading.value = false
+    compareError.value = ''
+    clearCompareSelection()
+  }
+  if (reset.clearSubstitutes) {
+    substitutes.value = null
+    substitutesLoading.value = false
+    substitutesError.value = ''
+    substituteItemId.value = ''
+    substituteRank.value = ''
+    substituteNote.value = ''
+    substitutesActionStatus.value = ''
+    substitutesActionError.value = ''
+    substitutesMutating.value = false
+    substitutesDeletingId.value = null
   }
 }
 
 async function applyQueryState() {
-  const productParam = readQueryParam('productId')
-  if (productParam !== undefined) {
-    productId.value = productParam
-  }
-  const itemNumberParam = readQueryParam('itemNumber')
-  if (itemNumberParam !== undefined) {
-    productItemNumber.value = itemNumberParam
-  }
-  const itemTypeParam = readQueryParam('itemType')
-  if (itemTypeParam !== undefined) {
-    itemType.value = itemTypeParam || DEFAULT_ITEM_TYPE
-  }
-  const searchQueryParam = readQueryParam('searchQuery')
-  if (searchQueryParam !== undefined) {
-    searchQuery.value = searchQueryParam
-  }
-  const searchItemTypeParam = readQueryParam('searchItemType')
-  if (searchItemTypeParam !== undefined) {
-    searchItemType.value = searchItemTypeParam || DEFAULT_ITEM_TYPE
-  }
-  const searchLimitParam = parseQueryNumber(readQueryParam('searchLimit'))
-  if (searchLimitParam !== undefined) {
-    const clamped = Math.min(50, Math.max(1, Math.floor(searchLimitParam)))
-    searchLimit.value = clamped
-  }
-  const documentRoleParam = readQueryParam('documentRole')
-  if (documentRoleParam !== undefined) {
-    documentRole.value = documentRoleParam
-  }
-  const documentFilterParam = readQueryParam('documentFilter')
-  if (documentFilterParam !== undefined) {
-    documentFilter.value = documentFilterParam
-  }
-  const cadFileParam = readQueryParam('cadFileId')
-  if (cadFileParam !== undefined) {
-    cadFileId.value = cadFileParam
-  }
-  const cadOtherParam = readQueryParam('cadOtherFileId')
-  if (cadOtherParam !== undefined) {
-    cadOtherFileId.value = cadOtherParam
-  }
-  const approvalsStatusParam = readQueryParam('approvalsStatus')
-  if (approvalsStatusParam !== undefined) {
-    const normalized = approvalsStatusParam.trim().toLowerCase()
-    if (['all', 'pending', 'approved', 'rejected'].includes(normalized)) {
-      approvalsStatus.value = normalized as typeof approvalsStatus.value
-    }
-  }
-  const approvalsFilterParam = readQueryParam('approvalsFilter')
-  if (approvalsFilterParam !== undefined) {
-    approvalsFilter.value = approvalsFilterParam
-  }
-  const whereUsedParam = readQueryParam('whereUsedItemId')
-  if (whereUsedParam !== undefined) {
-    whereUsedItemId.value = whereUsedParam
-  }
-  const whereUsedRecursiveParam = parseQueryBoolean(readQueryParam('whereUsedRecursive'))
-  if (whereUsedRecursiveParam !== undefined) {
-    whereUsedRecursive.value = whereUsedRecursiveParam
-  }
-  const whereUsedMaxLevelsParam = parseQueryNumber(readQueryParam('whereUsedMaxLevels'))
-  if (whereUsedMaxLevelsParam !== undefined) {
-    whereUsedMaxLevels.value = Math.max(1, Math.floor(whereUsedMaxLevelsParam))
-  }
-  const whereUsedFilterParam = readQueryParam('whereUsedFilter')
-  if (whereUsedFilterParam !== undefined) {
-    whereUsedFilter.value = whereUsedFilterParam
-  }
-  const whereUsedFilterFieldParam = readQueryParam('whereUsedFilterField')
-  if (whereUsedFilterFieldParam !== undefined) {
-    const matched = whereUsedFilterFieldOptions.find(
-      (entry) => entry.value === whereUsedFilterFieldParam
-    )
-    if (matched) {
-      whereUsedFilterField.value = matched.value
-    }
-  }
-  const bomDepthParam = parseQueryNumber(readQueryParam('bomDepth'))
-  if (bomDepthParam !== undefined) {
-    bomDepth.value = Math.max(1, Math.floor(bomDepthParam))
-  }
-  const bomEffectiveAtParam = readQueryParam('bomEffectiveAt')
-  if (bomEffectiveAtParam !== undefined) {
-    bomEffectiveAt.value = bomEffectiveAtParam
-  }
-  const bomFilterParam = readQueryParam('bomFilter')
-  if (bomFilterParam !== undefined) {
-    bomFilter.value = bomFilterParam
-  }
-  const bomFilterFieldParam = readQueryParam('bomFilterField')
-  if (bomFilterFieldParam !== undefined) {
-    const matched = bomFilterFieldOptions.find((entry) => entry.value === bomFilterFieldParam)
-    if (matched) {
-      bomFilterField.value = matched.value
-    }
-  }
-  const bomViewParam = readQueryParam('bomView')
-  if (bomViewParam !== undefined) {
-    const normalized = bomViewParam.trim().toLowerCase()
-    if (normalized === 'tree' || normalized === 'table') {
-      bomView.value = normalized as typeof bomView.value
-    }
-  }
-  const bomCollapsedParam = readQueryParam('bomCollapsed')
-  if (bomCollapsedParam !== undefined) {
-    const parsed = filterBomCollapsed(parseBomCollapsed(bomCollapsedParam))
-    bomCollapsed.value = parsed
-    persistBomCollapsed(parsed)
-  } else if (bomView.value === 'tree') {
-    const stored = loadStoredBomCollapsed()
-    if (stored) {
-      bomCollapsed.value = filterBomCollapsed(stored)
-    }
-  }
-  const compareLeftParam = readQueryParam('compareLeftId')
-  if (compareLeftParam !== undefined) {
-    compareLeftId.value = compareLeftParam
-  }
-  const compareRightParam = readQueryParam('compareRightId')
-  if (compareRightParam !== undefined) {
-    compareRightId.value = compareRightParam
-  }
-  const compareModeParam = readQueryParam('compareMode')
-  if (compareModeParam !== undefined) {
-    compareMode.value = compareModeParam
-  }
-  const compareLineKeyParam = readQueryParam('compareLineKey')
-  if (compareLineKeyParam !== undefined) {
-    compareLineKey.value = compareLineKeyParam
-  }
-  const compareMaxLevelsParam = parseQueryNumber(readQueryParam('compareMaxLevels'))
-  if (compareMaxLevelsParam !== undefined) {
-    compareMaxLevels.value = Math.max(1, Math.floor(compareMaxLevelsParam))
-  }
-  const compareEffectiveAtParam = readQueryParam('compareEffectiveAt')
-  if (compareEffectiveAtParam !== undefined) {
-    compareEffectiveAt.value = compareEffectiveAtParam
-  }
-  const compareRelPropsParam = readQueryParam('compareRelationshipProps')
-  if (compareRelPropsParam !== undefined) {
-    compareRelationshipProps.value = compareRelPropsParam
-  }
-  const compareFilterParam = readQueryParam('compareFilter')
-  if (compareFilterParam !== undefined) {
-    compareFilter.value = compareFilterParam
-  }
-  const includeChildFieldsParam = parseQueryBoolean(readQueryParam('compareIncludeChildFields'))
-  if (includeChildFieldsParam !== undefined) {
-    compareIncludeChildFields.value = includeChildFieldsParam
-  }
-  const includeSubstitutesParam = parseQueryBoolean(readQueryParam('compareIncludeSubstitutes'))
-  if (includeSubstitutesParam !== undefined) {
-    compareIncludeSubstitutes.value = includeSubstitutesParam
-  }
-  const includeEffectivityParam = parseQueryBoolean(readQueryParam('compareIncludeEffectivity'))
-  if (includeEffectivityParam !== undefined) {
-    compareIncludeEffectivity.value = includeEffectivityParam
-  }
-  const compareSyncParam = parseQueryBoolean(readQueryParam('compareSync'))
-  if (compareSyncParam !== undefined) {
-    compareSyncEnabled.value = compareSyncParam
-  }
-  const bomLineParam = readQueryParam('bomLineId')
-  if (bomLineParam !== undefined) {
-    bomLineId.value = bomLineParam
-  }
-  const substitutesFilterParam = readQueryParam('substitutesFilter')
-  if (substitutesFilterParam !== undefined) {
-    substitutesFilter.value = substitutesFilterParam
+  if (isApplyingRouteQueryState.value) {
+    pendingRouteQueryHydration = true
+    return
   }
 
-  const bomPresetShareParam = readQueryParam('bomPresetShare')
-  if (bomPresetShareParam !== undefined) {
-    if (bomPresetShareParam) {
-      const mode = resolvePresetShareMode(readQueryParam('bomPresetShareMode'))
-      importBomFilterPresetShare(bomPresetShareParam, mode)
+  isApplyingRouteQueryState.value = true
+
+  try {
+    const previousHydratedRouteQuery = {
+      workbenchTeamView: workbenchTeamViewQuery.value,
+      documentTeamView: documentTeamViewQuery.value,
+      cadTeamView: cadTeamViewQuery.value,
+      approvalsTeamView: approvalsTeamViewQuery.value,
+      whereUsedFilterPreset: whereUsedFilterPresetQuery.value,
+      whereUsedTeamPreset: whereUsedTeamPresetQuery.value,
+      bomFilterPreset: bomFilterPresetQuery.value,
+      bomTeamPreset: bomTeamPresetQuery.value,
     }
-    syncQueryParams({ bomPresetShare: undefined, bomPresetShareMode: undefined })
-  }
-  const whereUsedPresetShareParam = readQueryParam('whereUsedPresetShare')
-  if (whereUsedPresetShareParam !== undefined) {
-    if (whereUsedPresetShareParam) {
-      const mode = resolvePresetShareMode(readQueryParam('whereUsedPresetShareMode'))
-      importWhereUsedFilterPresetShare(whereUsedPresetShareParam, mode)
+    const previousHydratedPanelDataRouteState: PlmHydratedPanelDataRouteState = {
+      searchQuery: searchQuery.value,
+      searchItemType: searchItemType.value,
+      searchLimit: searchLimit.value,
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value,
+      bomDepth: bomDepth.value,
+      bomEffectiveAt: bomEffectiveAt.value,
+      documentRole: documentRole.value,
+      approvalsStatus: approvalsStatus.value,
+      cadFileId: cadFileId.value,
+      cadOtherFileId: cadOtherFileId.value,
+      whereUsedItemId: whereUsedItemId.value,
+      whereUsedRecursive: whereUsedRecursive.value,
+      whereUsedMaxLevels: whereUsedMaxLevels.value,
+      compareLeftId: compareLeftId.value,
+      compareRightId: compareRightId.value,
+      compareMode: compareMode.value,
+      compareLineKey: compareLineKey.value,
+      compareMaxLevels: compareMaxLevels.value,
+      compareIncludeChildFields: compareIncludeChildFields.value,
+      compareIncludeSubstitutes: compareIncludeSubstitutes.value,
+      compareIncludeEffectivity: compareIncludeEffectivity.value,
+      compareEffectiveAt: compareEffectiveAt.value,
+      compareRelationshipProps: compareRelationshipProps.value,
+      bomLineId: bomLineId.value,
     }
-    syncQueryParams({ whereUsedPresetShare: undefined, whereUsedPresetShareMode: undefined })
+    productId.value = ''
+    productItemNumber.value = ''
+    itemType.value = DEFAULT_ITEM_TYPE
+    searchQuery.value = ''
+    searchItemType.value = DEFAULT_ITEM_TYPE
+    searchLimit.value = DEFAULT_SEARCH_LIMIT
+    workbenchTeamViewQuery.value = ''
+    sceneCatalogAutoFocusSceneId.value = ''
+    documentTeamViewQuery.value = ''
+    cadTeamViewQuery.value = ''
+    approvalsTeamViewQuery.value = ''
+    documentRole.value = ''
+    documentFilter.value = ''
+    documentSortKey.value = 'updated'
+    documentSortDir.value = 'desc'
+    documentColumns.value = loadStoredColumns(DOCUMENT_COLUMNS_STORAGE_KEY, defaultDocumentColumns)
+    cadFileId.value = ''
+    cadOtherFileId.value = ''
+    cadReviewState.value = ''
+    cadReviewNote.value = ''
+    approvalsStatus.value = DEFAULT_APPROVAL_STATUS
+    approvalsFilter.value = ''
+    approvalComment.value = ''
+    approvalSortKey.value = 'created'
+    approvalSortDir.value = 'desc'
+    approvalColumns.value = loadStoredColumns(APPROVAL_COLUMNS_STORAGE_KEY, defaultApprovalColumns)
+    whereUsedItemId.value = ''
+    whereUsedRecursive.value = true
+    whereUsedMaxLevels.value = DEFAULT_WHERE_USED_MAX_LEVELS
+    whereUsedFilterPresetQuery.value = ''
+    whereUsedTeamPresetQuery.value = ''
+    whereUsedFilter.value = ''
+    whereUsedFilterField.value = 'all'
+    bomDepth.value = DEFAULT_BOM_DEPTH
+    bomEffectiveAt.value = ''
+    bomFilterPresetQuery.value = ''
+    bomTeamPresetQuery.value = ''
+    bomFilter.value = ''
+    bomFilterField.value = 'all'
+    bomView.value = 'table'
+    bomCollapsed.value = new Set()
+    compareLeftId.value = ''
+    compareRightId.value = ''
+    compareMode.value = ''
+    compareLineKey.value = DEFAULT_COMPARE_LINE_KEY
+    compareMaxLevels.value = DEFAULT_COMPARE_MAX_LEVELS
+    compareEffectiveAt.value = ''
+    compareRelationshipProps.value = DEFAULT_COMPARE_REL_PROPS
+    compareFilter.value = ''
+    compareIncludeChildFields.value = true
+    compareIncludeSubstitutes.value = false
+    compareIncludeEffectivity.value = false
+    compareSyncEnabled.value = true
+    bomLineId.value = ''
+    substitutesFilter.value = ''
+    const productParam = readQueryParam('productId')
+    if (productParam !== undefined) {
+      productId.value = productParam
+    }
+    const itemNumberParam = readQueryParam('itemNumber')
+    if (itemNumberParam !== undefined) {
+      productItemNumber.value = itemNumberParam
+    }
+    const itemTypeParam = readQueryParam('itemType')
+    if (itemTypeParam !== undefined) {
+      itemType.value = itemTypeParam || DEFAULT_ITEM_TYPE
+    }
+    const searchQueryParam = readQueryParam('searchQuery')
+    if (searchQueryParam !== undefined) {
+      searchQuery.value = searchQueryParam
+    }
+    const searchItemTypeParam = readQueryParam('searchItemType')
+    if (searchItemTypeParam !== undefined) {
+      searchItemType.value = searchItemTypeParam || DEFAULT_ITEM_TYPE
+    }
+    const searchLimitParam = parseQueryNumber(readQueryParam('searchLimit'))
+    if (searchLimitParam !== undefined) {
+      const clamped = Math.min(50, Math.max(1, Math.floor(searchLimitParam)))
+      searchLimit.value = clamped
+    }
+    const workbenchTeamViewParam = readQueryParam('workbenchTeamView')
+    const workbenchTeamViewTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.workbenchTeamView,
+      nextRouteValue: workbenchTeamViewParam,
+    })
+    if (workbenchTeamViewTransition.kind === 'apply') {
+      applyHydratedTeamViewOwnerTakeover({
+        routeOwnerId: workbenchTeamViewTransition.routeValue,
+        teamViewKey: workbenchTeamViewKey,
+        teamViewName: workbenchTeamViewName,
+        teamViewOwnerUserId: workbenchTeamViewOwnerUserId,
+        teamViewSelection: workbenchTeamViewSelection,
+      })
+      workbenchTeamViewQuery.value = workbenchTeamViewTransition.routeValue
+    } else if (workbenchTeamViewTransition.kind === 'remove') {
+      applyHydratedRemovedTeamViewOwner({
+        removedRouteOwnerId: workbenchTeamViewTransition.removedRouteValue,
+        teamViewQuery: workbenchTeamViewQuery,
+        teamViewKey: workbenchTeamViewKey,
+        teamViewName: workbenchTeamViewName,
+        teamViewOwnerUserId: workbenchTeamViewOwnerUserId,
+        teamViewSelection: workbenchTeamViewSelection,
+      })
+    }
+    const sceneFocus = readWorkbenchSceneFocus(route.query)
+    sceneCatalogAutoFocusSceneId.value = sceneFocus || ''
+    const documentTeamViewParam = readQueryParam('documentTeamView')
+    const documentTeamViewTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.documentTeamView,
+      nextRouteValue: documentTeamViewParam,
+    })
+    if (documentTeamViewTransition.kind === 'apply') {
+      applyHydratedTeamViewOwnerTakeover({
+        routeOwnerId: documentTeamViewTransition.routeValue,
+        teamViewKey: documentTeamViewKey,
+        teamViewName: documentTeamViewName,
+        teamViewOwnerUserId: documentTeamViewOwnerUserId,
+        teamViewSelection: documentTeamViewSelection,
+      })
+      documentTeamViewQuery.value = documentTeamViewTransition.routeValue
+    } else if (documentTeamViewTransition.kind === 'remove') {
+      applyHydratedRemovedTeamViewOwner({
+        removedRouteOwnerId: documentTeamViewTransition.removedRouteValue,
+        teamViewQuery: documentTeamViewQuery,
+        teamViewKey: documentTeamViewKey,
+        teamViewName: documentTeamViewName,
+        teamViewOwnerUserId: documentTeamViewOwnerUserId,
+        teamViewSelection: documentTeamViewSelection,
+      })
+    }
+    const cadTeamViewParam = readQueryParam('cadTeamView')
+    const cadTeamViewTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.cadTeamView,
+      nextRouteValue: cadTeamViewParam,
+    })
+    if (cadTeamViewTransition.kind === 'apply') {
+      applyHydratedTeamViewOwnerTakeover({
+        routeOwnerId: cadTeamViewTransition.routeValue,
+        teamViewKey: cadTeamViewKey,
+        teamViewName: cadTeamViewName,
+        teamViewOwnerUserId: cadTeamViewOwnerUserId,
+        teamViewSelection: cadTeamViewSelection,
+      })
+      cadTeamViewQuery.value = cadTeamViewTransition.routeValue
+    } else if (cadTeamViewTransition.kind === 'remove') {
+      applyHydratedRemovedTeamViewOwner({
+        removedRouteOwnerId: cadTeamViewTransition.removedRouteValue,
+        teamViewQuery: cadTeamViewQuery,
+        teamViewKey: cadTeamViewKey,
+        teamViewName: cadTeamViewName,
+        teamViewOwnerUserId: cadTeamViewOwnerUserId,
+        teamViewSelection: cadTeamViewSelection,
+      })
+    }
+    const approvalsTeamViewParam = readQueryParam('approvalsTeamView')
+    const approvalsTeamViewTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.approvalsTeamView,
+      nextRouteValue: approvalsTeamViewParam,
+    })
+    if (approvalsTeamViewTransition.kind === 'apply') {
+      applyHydratedTeamViewOwnerTakeover({
+        routeOwnerId: approvalsTeamViewTransition.routeValue,
+        teamViewKey: approvalsTeamViewKey,
+        teamViewName: approvalsTeamViewName,
+        teamViewOwnerUserId: approvalsTeamViewOwnerUserId,
+        teamViewSelection: approvalsTeamViewSelection,
+      })
+      approvalsTeamViewQuery.value = approvalsTeamViewTransition.routeValue
+    } else if (approvalsTeamViewTransition.kind === 'remove') {
+      applyHydratedRemovedTeamViewOwner({
+        removedRouteOwnerId: approvalsTeamViewTransition.removedRouteValue,
+        teamViewQuery: approvalsTeamViewQuery,
+        teamViewKey: approvalsTeamViewKey,
+        teamViewName: approvalsTeamViewName,
+        teamViewOwnerUserId: approvalsTeamViewOwnerUserId,
+        teamViewSelection: approvalsTeamViewSelection,
+      })
+    }
+    const documentRoleParam = readQueryParam('documentRole')
+    if (documentRoleParam !== undefined) {
+      documentRole.value = documentRoleParam
+    }
+    const documentFilterParam = readQueryParam('documentFilter')
+    if (documentFilterParam !== undefined) {
+      documentFilter.value = documentFilterParam
+    }
+    const documentSortParam = readQueryParam('documentSort')
+    if (documentSortParam !== undefined) {
+      const normalized = documentSortParam.trim().toLowerCase()
+      if (['updated', 'created', 'name', 'type', 'revision', 'role', 'mime', 'size'].includes(normalized)) {
+        documentSortKey.value = normalized as typeof documentSortKey.value
+      }
+    }
+    const documentSortDirParam = readQueryParam('documentSortDir')
+    if (documentSortDirParam !== undefined) {
+      const normalized = documentSortDirParam.trim().toLowerCase()
+      if (normalized === 'asc' || normalized === 'desc') {
+        documentSortDir.value = normalized as typeof documentSortDir.value
+      }
+    }
+    const documentColumnsParam = parseColumnQuery(readQueryParam('documentColumns'), defaultDocumentColumns)
+    if (documentColumnsParam) {
+      documentColumns.value = documentColumnsParam
+    }
+    const cadFileParam = readQueryParam('cadFileId')
+    if (cadFileParam !== undefined) {
+      cadFileId.value = cadFileParam
+    }
+    const cadOtherParam = readQueryParam('cadOtherFileId')
+    if (cadOtherParam !== undefined) {
+      cadOtherFileId.value = cadOtherParam
+    }
+    const cadReviewStateParam = readQueryParam('cadReviewState')
+    if (cadReviewStateParam !== undefined) {
+      cadReviewState.value = cadReviewStateParam
+    }
+    const cadReviewNoteParam = readQueryParam('cadReviewNote')
+    if (cadReviewNoteParam !== undefined) {
+      cadReviewNote.value = cadReviewNoteParam
+    }
+    const approvalsStatusParam = readQueryParam('approvalsStatus')
+    if (approvalsStatusParam !== undefined) {
+      const normalized = approvalsStatusParam.trim().toLowerCase()
+      if (['all', 'pending', 'approved', 'rejected'].includes(normalized)) {
+        approvalsStatus.value = normalized as typeof approvalsStatus.value
+      }
+    }
+    const approvalsFilterParam = readQueryParam('approvalsFilter')
+    if (approvalsFilterParam !== undefined) {
+      approvalsFilter.value = approvalsFilterParam
+    }
+    if (readQueryParam('approvalComment') !== undefined) {
+      scheduleQuerySync(
+        buildPlmWorkbenchLegacyLocalDraftQueryPatch(route.query as Record<string, unknown>),
+      )
+    }
+    const approvalSortParam = readQueryParam('approvalSort')
+    if (approvalSortParam !== undefined) {
+      const normalized = approvalSortParam.trim().toLowerCase()
+      if (['created', 'title', 'status', 'requester', 'product'].includes(normalized)) {
+        approvalSortKey.value = normalized as typeof approvalSortKey.value
+      }
+    }
+    const approvalSortDirParam = readQueryParam('approvalSortDir')
+    if (approvalSortDirParam !== undefined) {
+      const normalized = approvalSortDirParam.trim().toLowerCase()
+      if (normalized === 'asc' || normalized === 'desc') {
+        approvalSortDir.value = normalized as typeof approvalSortDir.value
+      }
+    }
+    const approvalColumnsParam = parseColumnQuery(readQueryParam('approvalColumns'), defaultApprovalColumns)
+    if (approvalColumnsParam) {
+      approvalColumns.value = approvalColumnsParam
+    }
+    if (['valid', 'expiring'].includes(authState.value)) {
+      const teamViewRefreshTasks: Array<Promise<void>> = []
+      if (workbenchTeamViewQuery.value) {
+        teamViewRefreshTasks.push(refreshWorkbenchTeamViews())
+      }
+      if (documentTeamViewQuery.value) {
+        teamViewRefreshTasks.push(refreshDocumentTeamViews())
+      }
+      if (cadTeamViewQuery.value) {
+        teamViewRefreshTasks.push(refreshCadTeamViews())
+      }
+      if (approvalsTeamViewQuery.value) {
+        teamViewRefreshTasks.push(refreshApprovalsTeamViews())
+      }
+      if (teamViewRefreshTasks.length) {
+        await Promise.all(teamViewRefreshTasks)
+      }
+    }
+    const whereUsedParam = readQueryParam('whereUsedItemId')
+    if (whereUsedParam !== undefined) {
+      whereUsedItemId.value = whereUsedParam
+    }
+    const whereUsedRecursiveParam = parseQueryBoolean(readQueryParam('whereUsedRecursive'))
+    if (whereUsedRecursiveParam !== undefined) {
+      whereUsedRecursive.value = whereUsedRecursiveParam
+    }
+    const whereUsedMaxLevelsParam = parseQueryNumber(readQueryParam('whereUsedMaxLevels'))
+    if (whereUsedMaxLevelsParam !== undefined) {
+      whereUsedMaxLevels.value = Math.max(1, Math.floor(whereUsedMaxLevelsParam))
+    }
+    const whereUsedFilterPresetParam = readQueryParam('whereUsedFilterPreset')
+    const whereUsedFilterPresetTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.whereUsedFilterPreset,
+      nextRouteValue: whereUsedFilterPresetParam,
+    })
+    if (whereUsedFilterPresetTransition.kind === 'apply') {
+      const hydratedTakeover = resolvePlmHydratedLocalFilterPresetTakeover({
+        routePresetKey: whereUsedFilterPresetTransition.routeValue,
+        localSelectorKey: whereUsedFilterPresetKey.value,
+        localNameDraft: whereUsedFilterPresetName.value,
+        localGroupDraft: whereUsedFilterPresetGroup.value,
+        localSelectionKeys: whereUsedPresetSelection.value,
+        localBatchGroupDraft: whereUsedPresetBatchGroup.value,
+      })
+      whereUsedFilterPresetKey.value = hydratedTakeover.nextSelectorKey
+      whereUsedFilterPresetName.value = hydratedTakeover.nextNameDraft
+      whereUsedFilterPresetGroup.value = hydratedTakeover.nextGroupDraft
+      whereUsedPresetSelection.value = hydratedTakeover.nextSelectionKeys
+      whereUsedPresetBatchGroup.value = hydratedTakeover.nextBatchGroupDraft
+      whereUsedFilterPresetQuery.value = whereUsedFilterPresetTransition.routeValue
+    } else if (whereUsedFilterPresetTransition.kind === 'remove') {
+      const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+        routePresetKey: whereUsedFilterPresetTransition.removedRouteValue,
+        selectedPresetKey: whereUsedFilterPresetKey.value,
+        nameDraft: whereUsedFilterPresetName.value,
+        groupDraft: whereUsedFilterPresetGroup.value,
+        selectionKeys: whereUsedPresetSelection.value,
+        batchGroupDraft: whereUsedPresetBatchGroup.value,
+        activePreset: null,
+        currentState: {
+          field: whereUsedFilterField.value,
+          value: whereUsedFilter.value,
+        },
+      })
+      whereUsedFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+      whereUsedFilterPresetName.value = nextIdentity.nextNameDraft
+      whereUsedFilterPresetGroup.value = nextIdentity.nextGroupDraft
+      whereUsedPresetSelection.value = nextIdentity.nextSelectionKeys
+      whereUsedPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
+      whereUsedFilterPresetQuery.value = nextIdentity.nextRoutePresetKey
+    }
+    const whereUsedTeamPresetParam = readQueryParam('whereUsedTeamPreset')
+    const whereUsedTeamPresetTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.whereUsedTeamPreset,
+      nextRouteValue: whereUsedTeamPresetParam,
+    })
+    if (whereUsedTeamPresetTransition.kind === 'apply') {
+      applyHydratedTeamPresetOwnerTakeover({
+        routeOwnerId: whereUsedTeamPresetTransition.routeValue,
+        teamPresetKey: whereUsedTeamPresetKey,
+        teamPresetName: whereUsedTeamPresetName,
+        teamPresetGroup: whereUsedTeamPresetGroup,
+        teamPresetOwnerUserId: whereUsedTeamPresetOwnerUserId,
+        teamPresetSelection: whereUsedTeamPresetSelection,
+      })
+      whereUsedTeamPresetQuery.value = whereUsedTeamPresetTransition.routeValue
+    } else if (whereUsedTeamPresetTransition.kind === 'remove') {
+      applyHydratedRemovedTeamPresetOwner({
+        removedRouteOwnerId: whereUsedTeamPresetTransition.removedRouteValue,
+        teamPresetQuery: whereUsedTeamPresetQuery,
+        teamPresetKey: whereUsedTeamPresetKey,
+        teamPresetName: whereUsedTeamPresetName,
+        teamPresetGroup: whereUsedTeamPresetGroup,
+        teamPresetOwnerUserId: whereUsedTeamPresetOwnerUserId,
+        teamPresetSelection: whereUsedTeamPresetSelection,
+      })
+    }
+    const whereUsedFilterParam = readQueryParam('whereUsedFilter')
+    if (whereUsedFilterParam !== undefined) {
+      whereUsedFilter.value = whereUsedFilterParam
+    }
+    const whereUsedFilterFieldParam = readQueryParam('whereUsedFilterField')
+    if (whereUsedFilterFieldParam !== undefined) {
+      const matched = whereUsedFilterFieldOptions.find(
+        (entry) => entry.value === whereUsedFilterFieldParam
+      )
+      if (matched) {
+        whereUsedFilterField.value = matched.value
+      }
+    }
+    const bomDepthParam = parseQueryNumber(readQueryParam('bomDepth'))
+    if (bomDepthParam !== undefined) {
+      bomDepth.value = Math.max(1, Math.floor(bomDepthParam))
+    }
+    const bomEffectiveAtParam = readQueryParam('bomEffectiveAt')
+    if (bomEffectiveAtParam !== undefined) {
+      bomEffectiveAt.value = bomEffectiveAtParam
+    }
+    const bomFilterPresetParam = readQueryParam('bomFilterPreset')
+    const bomFilterPresetTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.bomFilterPreset,
+      nextRouteValue: bomFilterPresetParam,
+    })
+    if (bomFilterPresetTransition.kind === 'apply') {
+      const hydratedTakeover = resolvePlmHydratedLocalFilterPresetTakeover({
+        routePresetKey: bomFilterPresetTransition.routeValue,
+        localSelectorKey: bomFilterPresetKey.value,
+        localNameDraft: bomFilterPresetName.value,
+        localGroupDraft: bomFilterPresetGroup.value,
+        localSelectionKeys: bomPresetSelection.value,
+        localBatchGroupDraft: bomPresetBatchGroup.value,
+      })
+      bomFilterPresetKey.value = hydratedTakeover.nextSelectorKey
+      bomFilterPresetName.value = hydratedTakeover.nextNameDraft
+      bomFilterPresetGroup.value = hydratedTakeover.nextGroupDraft
+      bomPresetSelection.value = hydratedTakeover.nextSelectionKeys
+      bomPresetBatchGroup.value = hydratedTakeover.nextBatchGroupDraft
+      bomFilterPresetQuery.value = bomFilterPresetTransition.routeValue
+    } else if (bomFilterPresetTransition.kind === 'remove') {
+      const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+        routePresetKey: bomFilterPresetTransition.removedRouteValue,
+        selectedPresetKey: bomFilterPresetKey.value,
+        nameDraft: bomFilterPresetName.value,
+        groupDraft: bomFilterPresetGroup.value,
+        selectionKeys: bomPresetSelection.value,
+        batchGroupDraft: bomPresetBatchGroup.value,
+        activePreset: null,
+        currentState: {
+          field: bomFilterField.value,
+          value: bomFilter.value,
+        },
+      })
+      bomFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+      bomFilterPresetName.value = nextIdentity.nextNameDraft
+      bomFilterPresetGroup.value = nextIdentity.nextGroupDraft
+      bomPresetSelection.value = nextIdentity.nextSelectionKeys
+      bomPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
+      bomFilterPresetQuery.value = nextIdentity.nextRoutePresetKey
+    }
+    const bomTeamPresetParam = readQueryParam('bomTeamPreset')
+    const bomTeamPresetTransition = resolvePlmHydratedRouteQueryTransition({
+      previousRouteValue: previousHydratedRouteQuery.bomTeamPreset,
+      nextRouteValue: bomTeamPresetParam,
+    })
+    if (bomTeamPresetTransition.kind === 'apply') {
+      applyHydratedTeamPresetOwnerTakeover({
+        routeOwnerId: bomTeamPresetTransition.routeValue,
+        teamPresetKey: bomTeamPresetKey,
+        teamPresetName: bomTeamPresetName,
+        teamPresetGroup: bomTeamPresetGroup,
+        teamPresetOwnerUserId: bomTeamPresetOwnerUserId,
+        teamPresetSelection: bomTeamPresetSelection,
+      })
+      bomTeamPresetQuery.value = bomTeamPresetTransition.routeValue
+    } else if (bomTeamPresetTransition.kind === 'remove') {
+      applyHydratedRemovedTeamPresetOwner({
+        removedRouteOwnerId: bomTeamPresetTransition.removedRouteValue,
+        teamPresetQuery: bomTeamPresetQuery,
+        teamPresetKey: bomTeamPresetKey,
+        teamPresetName: bomTeamPresetName,
+        teamPresetGroup: bomTeamPresetGroup,
+        teamPresetOwnerUserId: bomTeamPresetOwnerUserId,
+        teamPresetSelection: bomTeamPresetSelection,
+      })
+    }
+    const bomFilterParam = readQueryParam('bomFilter')
+    if (bomFilterParam !== undefined) {
+      bomFilter.value = bomFilterParam
+    }
+    const bomFilterFieldParam = readQueryParam('bomFilterField')
+    if (bomFilterFieldParam !== undefined) {
+      const matched = bomFilterFieldOptions.find((entry) => entry.value === bomFilterFieldParam)
+      if (matched) {
+        bomFilterField.value = matched.value
+      }
+    }
+    const bomViewParam = readQueryParam('bomView')
+    if (bomViewParam !== undefined) {
+      const normalized = bomViewParam.trim().toLowerCase()
+      if (normalized === 'tree' || normalized === 'table') {
+        bomView.value = normalized as typeof bomView.value
+      }
+    }
+    const bomCollapsedParam = readQueryParam('bomCollapsed')
+    const currentBomView = String(bomView.value)
+    if (bomCollapsedParam !== undefined) {
+      const parsed = filterBomCollapsed(parseBomCollapsed(bomCollapsedParam))
+      bomCollapsed.value = parsed
+      persistBomCollapsed(parsed)
+    } else if (currentBomView === 'tree') {
+      const stored = loadStoredBomCollapsed()
+      if (stored) {
+        bomCollapsed.value = filterBomCollapsed(stored)
+      }
+    }
+    if (['valid', 'expiring'].includes(authState.value)) {
+      const teamPresetRefreshTasks: Array<Promise<void>> = []
+      if (bomTeamPresetQuery.value) {
+        teamPresetRefreshTasks.push(refreshBomTeamPresets())
+      }
+      if (whereUsedTeamPresetQuery.value) {
+        teamPresetRefreshTasks.push(refreshWhereUsedTeamPresets())
+      }
+      if (teamPresetRefreshTasks.length) {
+        await Promise.all(teamPresetRefreshTasks)
+      }
+    }
+    if (bomFilterPresetQuery.value) {
+      const preset = applyFilterPreset(bomFilterPresets.value, bomFilterPresetQuery.value)
+      if (preset) {
+        applyBomLocalFilterPresetIdentity(preset)
+      } else {
+        const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+          routePresetKey: bomFilterPresetQuery.value,
+          selectedPresetKey: bomFilterPresetKey.value,
+          nameDraft: bomFilterPresetName.value,
+          groupDraft: bomFilterPresetGroup.value,
+          selectionKeys: bomPresetSelection.value,
+          batchGroupDraft: bomPresetBatchGroup.value,
+          activePreset: null,
+          currentState: {
+            field: bomFilterField.value,
+            value: bomFilter.value,
+          },
+        })
+        bomFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+        bomFilterPresetName.value = nextIdentity.nextNameDraft
+        bomFilterPresetGroup.value = nextIdentity.nextGroupDraft
+        bomPresetSelection.value = nextIdentity.nextSelectionKeys
+        bomPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
+        syncBomFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
+      }
+    }
+    if (whereUsedFilterPresetQuery.value) {
+      const preset = applyFilterPreset(whereUsedFilterPresets.value, whereUsedFilterPresetQuery.value)
+      if (preset) {
+        applyWhereUsedLocalFilterPresetIdentity(preset)
+      } else {
+        const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+          routePresetKey: whereUsedFilterPresetQuery.value,
+          selectedPresetKey: whereUsedFilterPresetKey.value,
+          nameDraft: whereUsedFilterPresetName.value,
+          groupDraft: whereUsedFilterPresetGroup.value,
+          selectionKeys: whereUsedPresetSelection.value,
+          batchGroupDraft: whereUsedPresetBatchGroup.value,
+          activePreset: null,
+          currentState: {
+            field: whereUsedFilterField.value,
+            value: whereUsedFilter.value,
+          },
+        })
+        whereUsedFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+        whereUsedFilterPresetName.value = nextIdentity.nextNameDraft
+        whereUsedFilterPresetGroup.value = nextIdentity.nextGroupDraft
+        whereUsedPresetSelection.value = nextIdentity.nextSelectionKeys
+        whereUsedPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
+        syncWhereUsedFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
+      }
+    }
+    const compareLeftParam = readQueryParam('compareLeftId')
+    if (compareLeftParam !== undefined) {
+      compareLeftId.value = compareLeftParam
+    }
+    const compareRightParam = readQueryParam('compareRightId')
+    if (compareRightParam !== undefined) {
+      compareRightId.value = compareRightParam
+    }
+    const compareModeParam = readQueryParam('compareMode')
+    if (compareModeParam !== undefined) {
+      compareMode.value = compareModeParam
+    }
+    const compareLineKeyParam = readQueryParam('compareLineKey')
+    if (compareLineKeyParam !== undefined) {
+      compareLineKey.value = compareLineKeyParam
+    }
+    const compareMaxLevelsParam = parseQueryNumber(readQueryParam('compareMaxLevels'))
+    if (compareMaxLevelsParam !== undefined) {
+      compareMaxLevels.value = Math.max(1, Math.floor(compareMaxLevelsParam))
+    }
+    const compareEffectiveAtParam = readQueryParam('compareEffectiveAt')
+    if (compareEffectiveAtParam !== undefined) {
+      compareEffectiveAt.value = compareEffectiveAtParam
+    }
+    const compareRelPropsParam = readQueryParam('compareRelationshipProps')
+    if (compareRelPropsParam !== undefined) {
+      compareRelationshipProps.value = compareRelPropsParam
+    }
+    const compareFilterParam = readQueryParam('compareFilter')
+    if (compareFilterParam !== undefined) {
+      compareFilter.value = compareFilterParam
+    }
+    const includeChildFieldsParam = parseQueryBoolean(readQueryParam('compareIncludeChildFields'))
+    if (includeChildFieldsParam !== undefined) {
+      compareIncludeChildFields.value = includeChildFieldsParam
+    }
+    const includeSubstitutesParam = parseQueryBoolean(readQueryParam('compareIncludeSubstitutes'))
+    if (includeSubstitutesParam !== undefined) {
+      compareIncludeSubstitutes.value = includeSubstitutesParam
+    }
+    const includeEffectivityParam = parseQueryBoolean(readQueryParam('compareIncludeEffectivity'))
+    if (includeEffectivityParam !== undefined) {
+      compareIncludeEffectivity.value = includeEffectivityParam
+    }
+    const compareSyncParam = parseQueryBoolean(readQueryParam('compareSync'))
+    if (compareSyncParam !== undefined) {
+      compareSyncEnabled.value = compareSyncParam
+    }
+    const bomLineParam = readQueryParam('bomLineId')
+    if (bomLineParam !== undefined) {
+      bomLineId.value = bomLineParam
+    }
+    const substitutesFilterParam = readQueryParam('substitutesFilter')
+    if (substitutesFilterParam !== undefined) {
+      substitutesFilter.value = substitutesFilterParam
+    }
+
+    const bomPresetShareParam = readQueryParam('bomPresetShare')
+    if (bomPresetShareParam !== undefined) {
+      if (bomPresetShareParam) {
+        const mode = resolveFilterPresetShareMode(readQueryParam('bomPresetShareMode'))
+        importBomFilterPresetShare(bomPresetShareParam, mode)
+      }
+      syncQueryParams({ bomPresetShare: undefined, bomPresetShareMode: undefined })
+    }
+    const whereUsedPresetShareParam = readQueryParam('whereUsedPresetShare')
+    if (whereUsedPresetShareParam !== undefined) {
+      if (whereUsedPresetShareParam) {
+        const mode = resolveFilterPresetShareMode(readQueryParam('whereUsedPresetShareMode'))
+        importWhereUsedFilterPresetShare(whereUsedPresetShareParam, mode)
+      }
+      syncQueryParams({ whereUsedPresetShare: undefined, whereUsedPresetShareMode: undefined })
+    }
+
+    const panelParam = readQueryParam('panel')
+    if (panelParam !== undefined) {
+      const selectedPanels = Array.from(parseDeepLinkPanels(panelParam)).filter((entry) => entry !== 'all')
+      deepLinkScope.value = selectedPanels
+      deepLinkPreset.value = ''
+      editingPresetLabel.value = ''
+    }
+    const panelTargets = parseDeepLinkPanels(panelParam)
+    const allowAllPanels = panelTargets.has('all')
+    const allowsPanel = (key: string) => allowAllPanels || panelTargets.has(key)
+
+    const autoLoad = parseQueryBoolean(readQueryParam('autoload')) ?? false
+    const nextHydratedPanelDataRouteState: PlmHydratedPanelDataRouteState = {
+      autoload: autoLoad,
+      panel: panelParam,
+      searchQuery: searchQuery.value,
+      searchItemType: searchItemType.value,
+      searchLimit: searchLimit.value,
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+      itemType: itemType.value,
+      bomDepth: bomDepth.value,
+      bomEffectiveAt: bomEffectiveAt.value,
+      documentRole: documentRole.value,
+      approvalsStatus: approvalsStatus.value,
+      cadFileId: cadFileId.value,
+      cadOtherFileId: cadOtherFileId.value,
+      whereUsedItemId: whereUsedItemId.value,
+      whereUsedRecursive: whereUsedRecursive.value,
+      whereUsedMaxLevels: whereUsedMaxLevels.value,
+      compareLeftId: compareLeftId.value,
+      compareRightId: compareRightId.value,
+      compareMode: compareMode.value,
+      compareLineKey: compareLineKey.value,
+      compareMaxLevels: compareMaxLevels.value,
+      compareIncludeChildFields: compareIncludeChildFields.value,
+      compareIncludeSubstitutes: compareIncludeSubstitutes.value,
+      compareIncludeEffectivity: compareIncludeEffectivity.value,
+      compareEffectiveAt: compareEffectiveAt.value,
+      compareRelationshipProps: compareRelationshipProps.value,
+      bomLineId: bomLineId.value,
+    }
+    applyHydratedPanelDataReset({
+      previousRouteState: previousHydratedPanelDataRouteState,
+      nextRouteState: nextHydratedPanelDataRouteState,
+    })
+    if (!autoLoad) {
+      return
+    }
+    const tasks: Array<Promise<void>> = []
+    if (allowsPanel('search') && searchQuery.value) tasks.push(searchProducts())
+    const shouldBootstrapProductContext = shouldAutoloadPlmProductContext({
+      panel: panelParam,
+      productId: productId.value,
+      itemNumber: productItemNumber.value,
+    })
+    if (shouldBootstrapProductContext) {
+      tasks.push(loadProduct())
+    } else {
+      if (allowsPanel('documents') && productId.value) tasks.push(loadDocuments())
+      if (allowsPanel('approvals') && productId.value) tasks.push(loadApprovals())
+    }
+    if (allowsPanel('cad') && cadFileId.value) tasks.push(loadCadMetadata())
+    if (allowsPanel('where-used') && whereUsedItemId.value) tasks.push(loadWhereUsed())
+    if (allowsPanel('compare') && compareLeftId.value && compareRightId.value) tasks.push(loadBomCompare())
+    if (allowsPanel('substitutes') && bomLineId.value) tasks.push(loadSubstitutes())
+    if (allowsPanel('cad') && cadFileId.value && cadOtherFileId.value) tasks.push(loadCadDiff())
+    if (tasks.length) {
+      await Promise.all(tasks)
+    }
+  } finally {
+    isApplyingRouteQueryState.value = false
   }
 
-  const panelParam = readQueryParam('panel')
-  if (panelParam !== undefined) {
-    const selectedPanels = Array.from(parseDeepLinkPanels(panelParam)).filter((entry) => entry !== 'all')
-    deepLinkScope.value = selectedPanels
-    deepLinkPreset.value = ''
-    editingPresetLabel.value = ''
-  }
-  const panelTargets = parseDeepLinkPanels(panelParam)
-  const allowAllPanels = panelTargets.has('all')
-  const allowsPanel = (key: string) => allowAllPanels || panelTargets.has(key)
+  const { pendingPatch, flushPatch } = resolvePlmDeferredRouteQueryPatch(
+    deferredRouteQueryPatch,
+    pendingRouteQueryHydration,
+  )
+  deferredRouteQueryPatch = pendingPatch
 
-  const autoLoad = parseQueryBoolean(readQueryParam('autoload')) ?? false
-  if (!autoLoad) return
-  const tasks: Array<Promise<void>> = []
-  if (allowsPanel('search') && searchQuery.value) tasks.push(searchProducts())
-  if (allowsPanel('product') && productId.value) tasks.push(loadProduct())
-  if (allowsPanel('documents') && productId.value) tasks.push(loadDocuments())
-  if (allowsPanel('approvals') && productId.value) tasks.push(loadApprovals())
-  if (allowsPanel('cad') && cadFileId.value) tasks.push(loadCadMetadata())
-  if (allowsPanel('where-used') && whereUsedItemId.value) tasks.push(loadWhereUsed())
-  if (allowsPanel('compare') && compareLeftId.value && compareRightId.value) tasks.push(loadBomCompare())
-  if (allowsPanel('substitutes') && bomLineId.value) tasks.push(loadSubstitutes())
-  if (allowsPanel('cad') && cadFileId.value && cadOtherFileId.value) tasks.push(loadCadDiff())
-  if (tasks.length) {
-    await Promise.all(tasks)
+  if (pendingRouteQueryHydration) {
+    pendingRouteQueryHydration = false
+    await applyQueryState()
+    return
+  }
+
+  if (flushPatch) {
+    syncQueryParams(flushPatch)
   }
 }
 
 type SortDirection = 'asc' | 'desc'
 type SortType = 'string' | 'number' | 'date'
-type SortConfig = Record<string, { type: SortType; accessor: (row: any) => unknown }>
+type SortConfig<T> = Record<string, { type: SortType; accessor: (row: T) => unknown }>
 
 function loadStoredColumns<T extends Record<string, boolean>>(key: string, defaults: T): T {
   if (typeof localStorage === 'undefined') {
@@ -7830,72 +6579,6 @@ function loadStoredColumns<T extends Record<string, boolean>>(key: string, defau
   }
 }
 
-function loadStoredPresets(): DeepLinkPreset[] {
-  if (typeof localStorage === 'undefined') {
-    return []
-  }
-  try {
-    const raw = localStorage.getItem(DEEP_LINK_PRESETS_STORAGE_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed
-      .map((entry) => {
-        const key = String(entry?.key || '').trim()
-        const label = String(entry?.label || '').trim()
-        const panels = sanitizePresetPanels(entry?.panels)
-        if (!key || !label || !panels.length) return null
-        return { key, label, panels }
-      })
-      .filter(Boolean) as DeepLinkPreset[]
-  } catch (_err) {
-    return []
-  }
-}
-
-function loadStoredFilterPresets(storageKey: string): FilterPreset[] {
-  if (typeof localStorage === 'undefined') {
-    return []
-  }
-  try {
-    const raw = localStorage.getItem(storageKey)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed
-      .map((entry) => {
-        const key = String(entry?.key || '').trim()
-        const label = String(entry?.label || '').trim()
-        const field = String(entry?.field || '').trim()
-        const value = String(entry?.value || '').trim()
-        const group = String(entry?.group || '').trim()
-        if (!key || !label || !field || !value) return null
-        return { key, label, field, value, group }
-      })
-      .filter(Boolean) as FilterPreset[]
-  } catch (_err) {
-    return []
-  }
-}
-
-function persistPresets(presets: DeepLinkPreset[]) {
-  if (typeof localStorage === 'undefined') return
-  try {
-    localStorage.setItem(DEEP_LINK_PRESETS_STORAGE_KEY, JSON.stringify(presets))
-  } catch (_err) {
-    // ignore storage errors
-  }
-}
-
-function persistFilterPresets(storageKey: string, presets: FilterPreset[]) {
-  if (typeof localStorage === 'undefined') return
-  try {
-    localStorage.setItem(storageKey, JSON.stringify(presets))
-  } catch (_err) {
-    // ignore storage errors
-  }
-}
-
 function persistColumns(key: string, value: Record<string, boolean>) {
   if (typeof localStorage === 'undefined') return
   try {
@@ -7905,7 +6588,20 @@ function persistColumns(key: string, value: Record<string, boolean>) {
   }
 }
 
-function sortRows<T>(rows: T[], key: string, dir: SortDirection, config: SortConfig): T[] {
+function areColumnStatesEqual(
+  value: Record<string, boolean>,
+  defaults: Record<string, boolean>,
+) {
+  const keys = new Set([...Object.keys(defaults), ...Object.keys(value)])
+  for (const key of keys) {
+    if (Boolean(value[key]) !== Boolean(defaults[key])) {
+      return false
+    }
+  }
+  return true
+}
+
+function sortRows<T>(rows: T[], key: string, dir: SortDirection, config: SortConfig<T>): T[] {
   const entry = config[key]
   if (!entry) return rows
   const multiplier = dir === 'desc' ? -1 : 1
@@ -7932,7 +6628,14 @@ function normalizeSortValue(value: unknown, type: SortType): string | number {
   return String(value ?? '').toLowerCase()
 }
 
-function formatEffectivityProps(props: Record<string, any>): string {
+function formatCompareEffectivityEntry(entry: CompareEffectivityEntry): string {
+  const start = entry?.start_date || entry?.start || ''
+  const end = entry?.end_date || entry?.end || ''
+  const range = start || end ? `${start || '-'}~${end || '-'}` : ''
+  return entry?.type ? `${entry.type}:${range}` : range
+}
+
+function formatEffectivityProps(props: CompareLineProps): string {
   const from = props.effectivity_from ?? props.effectivityFrom ?? props.effectivity_from_date
   const to = props.effectivity_to ?? props.effectivityTo ?? props.effectivity_to_date
   if (from || to) {
@@ -7941,19 +6644,14 @@ function formatEffectivityProps(props: Record<string, any>): string {
   const effectivities = props.effectivities
   if (Array.isArray(effectivities) && effectivities.length) {
     return effectivities
-      .map((eff: any) => {
-        const start = eff?.start_date || eff?.start || ''
-        const end = eff?.end_date || eff?.end || ''
-        const range = start || end ? `${start || '-'}~${end || '-'}` : ''
-        return eff?.type ? `${eff.type}:${range}` : range
-      })
+      .map((entry) => formatCompareEffectivityEntry(entry))
       .filter(Boolean)
       .join('; ')
   }
   return '-'
 }
 
-function formatEffectivity(entry: Record<string, any>): string {
+function formatEffectivity(entry: CompareEntry): string {
   const props = resolveCompareLineProps(entry)
   const primary = formatEffectivityProps(props)
   if (primary !== '-') return primary
@@ -7971,8 +6669,8 @@ function formatEffectivity(entry: Record<string, any>): string {
   return '-'
 }
 
-function formatSubstituteCount(entry: Record<string, any>): string {
-  const resolveCount = (props: Record<string, any>): number | null => {
+function formatSubstituteCount(entry: CompareEntry): string {
+  const resolveCount = (props: CompareLineProps): number | null => {
     const subs = props.substitutes ?? props.substitute_items
     if (Array.isArray(subs)) return subs.length
     const raw = props.substitute_count ?? props.substitutes_count ?? props.substituteCount
@@ -8002,12 +6700,12 @@ function formatSubstituteCount(entry: Record<string, any>): string {
   return '-'
 }
 
-function filterCompareEntries(entries: any[]): any[] {
+function filterCompareEntries(entries: CompareEntry[]): CompareEntry[] {
   const needle = compareFilter.value.trim().toLowerCase()
   if (!needle) return entries
   return entries.filter((entry) => {
     const pathNodes = Array.isArray(entry?.path) ? entry.path : []
-    const pathTokens = pathNodes.flatMap((node: any) => [
+    const pathTokens = pathNodes.flatMap((node) => [
       node?.id,
       node?.item_number,
       node?.itemNumber,
@@ -8033,362 +6731,8 @@ function filterCompareEntries(entries: any[]): any[] {
   })
 }
 
-function csvEscape(value: unknown): string {
-  if (value === null || value === undefined) return ''
-  const str = String(value)
-  if (/[",\n]/.test(str)) {
-    return `"${str.replace(/"/g, '""')}"`
-  }
-  return str
-}
-
 function downloadCsv(filename: string, headers: string[], rows: Array<string[]>): void {
-  const lines = [
-    headers.map(csvEscape).join(','),
-    ...rows.map((row) => row.map(csvEscape).join(',')),
-  ]
-  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' })
-  const link = document.createElement('a')
-  link.href = URL.createObjectURL(blob)
-  link.download = filename
-  link.click()
-  URL.revokeObjectURL(link.href)
-}
-
-function exportWhereUsedCsv() {
-  const headers = [
-    'level',
-    'parent_id',
-    'parent_number',
-    'parent_name',
-    'path',
-    'path_ids',
-    'quantity',
-    'uom',
-    'find_num',
-    'refdes',
-    'relationship_id',
-  ]
-  const rows = whereUsedFilteredRows.value.map((entry: any) => [
-    String(entry.level ?? ''),
-    String(entry.parent?.id || entry.relationship?.source_id || ''),
-    getItemNumber(entry.parent),
-    getItemName(entry.parent),
-    entry.pathLabel || '',
-    formatWhereUsedEntryPathIds(entry),
-    (() => {
-      const value = getWhereUsedLineValue(entry, 'quantity')
-      return value === '-' ? '' : value
-    })(),
-    (() => {
-      const value = getWhereUsedLineValue(entry, 'uom')
-      return value === '-' ? '' : value
-    })(),
-    (() => {
-      const value = getWhereUsedLineValue(entry, 'find_num')
-      return value === '-' ? '' : value
-    })(),
-    (() => {
-      const refdes = getWhereUsedRefdes(entry)
-      return refdes === '-' ? '' : refdes
-    })(),
-    String(entry.relationship?.id || ''),
-  ])
-  downloadCsv(`plm-where-used-${Date.now()}.csv`, headers, rows)
-}
-
-function exportBomCompareCsv() {
-  const headers = [
-    'change_type',
-    'severity',
-    'parent_id',
-    'parent_number',
-    'parent_name',
-    'child_id',
-    'child_number',
-    'child_name',
-    'quantity',
-    'uom',
-    'find_num',
-    'refdes',
-    'effectivity',
-    'substitutes',
-    'line_key',
-    'relationship_id',
-    'changes',
-  ]
-  const buildRow = (entry: any, type: string) => [
-    type,
-    String(entry.severity || ''),
-    String(entry.parent?.id || entry.parent_id || ''),
-    getItemNumber(entry.parent),
-    getItemName(entry.parent),
-    String(entry.child?.id || entry.child_id || ''),
-    getItemNumber(entry.child),
-    getItemName(entry.child),
-    getCompareProp(entry, 'quantity'),
-    getCompareProp(entry, 'uom'),
-    getCompareProp(entry, 'find_num'),
-    getCompareProp(entry, 'refdes'),
-    formatEffectivity(entry),
-    formatSubstituteCount(entry),
-    String(entry.line_key || ''),
-    String(entry.relationship_id || ''),
-    Array.isArray(entry.changes)
-      ? entry.changes.map((change: any) => `${change.field}:${change.left ?? ''}->${change.right ?? ''}`).join('; ')
-      : '',
-  ]
-  const rows = [
-    ...compareAddedFiltered.value.map((entry) => buildRow(entry, 'added')),
-    ...compareRemovedFiltered.value.map((entry) => buildRow(entry, 'removed')),
-    ...compareChangedFiltered.value.map((entry) => buildRow(entry, 'changed')),
-  ]
-  downloadCsv(`plm-bom-compare-${Date.now()}.csv`, headers, rows)
-}
-
-async function copyCompareDetailRows() {
-  if (!compareDetailRows.value.length) {
-    setDeepLinkMessage('暂无字段对照', true)
-    return
-  }
-  const headers = [
-    'field_key',
-    'field_label',
-    'description',
-    'left',
-    'right',
-    'severity',
-    'normalized_left',
-    'normalized_right',
-  ]
-  const rows = compareDetailRows.value.map((row) => [
-    row.key,
-    row.label,
-    row.description || '',
-    row.left === '-' ? '' : row.left,
-    row.right === '-' ? '' : row.right,
-    row.severity || '',
-    row.normalizedLeft || '',
-    row.normalizedRight || '',
-  ])
-  const lines = [headers, ...rows].map((line) => line.join('\t')).join('\n')
-  const ok = await copyToClipboard(lines)
-  if (!ok) {
-    setDeepLinkMessage('复制字段对照失败', true)
-    return
-  }
-  setDeepLinkMessage(`已复制字段对照：${rows.length} 行`)
-}
-
-function exportCompareDetailCsv() {
-  if (!compareDetailRows.value.length) {
-    setDeepLinkMessage('暂无字段对照', true)
-    return
-  }
-  const headers = [
-    'field_key',
-    'field_label',
-    'description',
-    'left',
-    'right',
-    'severity',
-    'normalized_left',
-    'normalized_right',
-  ]
-  const rows = compareDetailRows.value.map((row) => [
-    row.key,
-    row.label,
-    row.description || '',
-    row.left === '-' ? '' : row.left,
-    row.right === '-' ? '' : row.right,
-    row.severity || '',
-    row.normalizedLeft || '',
-    row.normalizedRight || '',
-  ])
-  downloadCsv(`plm-bom-compare-detail-${Date.now()}.csv`, headers, rows)
-  setDeepLinkMessage('已导出字段对照。')
-}
-
-
-function exportBomCsv() {
-  const normalize = (value: string) => (value === '-' ? '' : value)
-  if (bomView.value === 'tree') {
-    const headers = [
-      'root_product_id',
-      'depth',
-      'path',
-      'path_ids',
-      'component_code',
-      'component_name',
-      'component_id',
-      'quantity',
-      'unit',
-      'find_num',
-      'refdes',
-      'bom_line_id',
-      'parent_component_id',
-      'parent_line_id',
-    ]
-    const rowMap = new Map(bomTreeRows.value.map((row) => [row.key, row]))
-    const included = bomTreeFilteredKeys.value
-    const rootProductId = String(productId.value || productView.value.id || '')
-    const rows = bomTreeRows.value
-      .filter((row) => row.line && included.has(row.key))
-      .map((row) => {
-        const line = row.line || {}
-        const labels = row.pathLabels?.length
-          ? row.pathLabels
-          : [String(row.label || row.componentId || row.key)]
-        const idChain = row.pathIds?.length
-          ? row.pathIds
-          : [String(row.componentId || row.label || row.key)]
-        const parentRow = row.parentKey ? rowMap.get(row.parentKey) : undefined
-        const parentComponentId = parentRow?.componentId || ''
-        const parentLineId = parentRow?.line ? resolveBomLineId(parentRow.line) : ''
-        return [
-          rootProductId,
-          String(row.depth ?? ''),
-          labels.join(' / '),
-          idChain.join(' / '),
-          normalize(String(line.component_code ?? line.componentCode ?? '')),
-          normalize(String(line.component_name ?? line.componentName ?? '')),
-          String(resolveBomChildId(line) || row.componentId || ''),
-          normalize(String(line.quantity ?? '')),
-          normalize(String(line.unit ?? line.uom ?? '')),
-          normalize(String(formatBomFindNum(line) || '')),
-          normalize(String(formatBomRefdes(line) || '')),
-          String(resolveBomLineId(line) || ''),
-          String(parentComponentId || ''),
-          String(parentLineId || ''),
-        ]
-      })
-    downloadCsv(`plm-bom-tree-${Date.now()}.csv`, headers, rows)
-    return
-  }
-  const headers = [
-    'level',
-    'component_code',
-    'component_name',
-    'component_id',
-    'quantity',
-    'unit',
-    'find_num',
-    'refdes',
-    'path_ids',
-    'bom_line_id',
-    'parent_item_id',
-  ]
-  const rows = bomFilteredItems.value.map((item: any) => [
-    String(item.level ?? ''),
-    normalize(String(item.component_code ?? item.componentCode ?? '')),
-    normalize(String(item.component_name ?? item.componentName ?? '')),
-    String(resolveBomChildId(item) || ''),
-    normalize(String(item.quantity ?? '')),
-    normalize(String(item.unit ?? '')),
-    normalize(String(formatBomFindNum(item) || '')),
-    normalize(String(formatBomRefdes(item) || '')),
-    String(formatBomTablePathIds(item) || ''),
-    String(resolveBomLineId(item) || ''),
-    String(item.parent_item_id ?? item.parentItemId ?? ''),
-  ])
-  downloadCsv(`plm-bom-${Date.now()}.csv`, headers, rows)
-}
-
-function exportSubstitutesCsv() {
-  const normalize = (value: string) => (value === '-' ? '' : value)
-  const headers = [
-    'bom_line_id',
-    'substitute_id',
-    'substitute_number',
-    'substitute_name',
-    'substitute_status',
-    'part_id',
-    'part_number',
-    'part_name',
-    'part_status',
-    'rank',
-    'note',
-    'relationship_id',
-  ]
-  const rows = substitutesRows.value.map((entry: any) => [
-    String(substitutes.value?.bom_line_id || ''),
-    normalize(String(getSubstituteId(entry) || '')),
-    normalize(String(getSubstituteNumber(entry) || '')),
-    normalize(String(getSubstituteName(entry) || '')),
-    normalize(String(getSubstituteStatus(entry) || '')),
-    String(entry.part?.id || ''),
-    String(entry.part?.item_number || ''),
-    String(entry.part?.name || ''),
-    String(entry.part?.state || entry.part?.status || ''),
-    normalize(String(formatSubstituteRank(entry) || '')),
-    normalize(String(formatSubstituteNote(entry) || '')),
-    String(entry.relationship?.id || ''),
-  ])
-  downloadCsv(`plm-substitutes-${Date.now()}.csv`, headers, rows)
-}
-
-function exportDocumentsCsv() {
-  const headers = [
-    'id',
-    'name',
-    'document_type',
-    'revision',
-    'role',
-    'author',
-    'source_system',
-    'source_version',
-    'mime_type',
-    'file_size',
-    'created_at',
-    'updated_at',
-    'preview_url',
-    'download_url',
-  ]
-  const rows = documentsSorted.value.map((doc: any) => [
-    String(doc.id || ''),
-    String(getDocumentName(doc) || ''),
-    String(getDocumentType(doc) || ''),
-    String(getDocumentRevision(doc) || ''),
-    String(getDocumentRole(doc) || ''),
-    String(getDocumentAuthor(doc) || ''),
-    String(getDocumentSourceSystem(doc) || ''),
-    String(getDocumentSourceVersion(doc) || ''),
-    String(getDocumentMime(doc) || ''),
-    String(getDocumentSize(doc) ?? ''),
-    String(getDocumentCreatedAt(doc) || ''),
-    String(getDocumentUpdatedAt(doc) || ''),
-    String(getDocumentPreviewUrl(doc) || ''),
-    String(getDocumentDownloadUrl(doc) || ''),
-  ])
-  downloadCsv(`plm-documents-${Date.now()}.csv`, headers, rows)
-}
-
-function exportApprovalsCsv() {
-  const headers = [
-    'id',
-    'title',
-    'status',
-    'type',
-    'requester',
-    'requester_id',
-    'created_at',
-    'product_number',
-    'product_name',
-    'product_id',
-  ]
-  const rows = approvalsSorted.value.map((entry: any) => [
-    String(entry.id || ''),
-    String(getApprovalTitle(entry) || ''),
-    String(getApprovalStatus(entry) || ''),
-    String(getApprovalType(entry) || ''),
-    String(getApprovalRequester(entry) || ''),
-    String(getApprovalRequesterId(entry) || ''),
-    String(getApprovalCreatedAt(entry) || ''),
-    String(getApprovalProductNumber(entry) || ''),
-    String(getApprovalProductName(entry) || ''),
-    String(getApprovalProductId(entry) || ''),
-  ])
-  downloadCsv(`plm-approvals-${Date.now()}.csv`, headers, rows)
+  downloadCsvFile(filename, headers, rows)
 }
 
 function approvalStatusClass(value?: string): string {
@@ -8407,10 +6751,6 @@ function itemStatusClass(value?: string): string {
   return 'status-neutral'
 }
 
-function getCompareFieldLabel(field: string): string {
-  return compareFieldLabelMap.value.get(field) || field
-}
-
 function normalizeCompareSeverity(value?: string): string {
   const normalized = (value || '').toLowerCase()
   if (normalized === 'major') return 'major'
@@ -8425,7 +6765,7 @@ function compareSeverityRank(value?: string): number {
   return 1
 }
 
-function getCompareEntrySeverity(entry: Record<string, any>): string {
+function getCompareEntrySeverity(entry: CompareEntry): string {
   const explicit = entry?.severity
   if (explicit) return normalizeCompareSeverity(explicit)
   const changes = Array.isArray(entry?.changes) ? entry.changes : []
@@ -8433,7 +6773,7 @@ function getCompareEntrySeverity(entry: Record<string, any>): string {
   let best = 'info'
   let bestRank = 0
   for (const change of changes) {
-    const meta = compareFieldMetaMap.value.get(change.field)
+    const meta = compareFieldMetaMap.value.get(String(change.field || ''))
     const resolved = normalizeCompareSeverity(change.severity || meta?.severity)
     const rank = compareSeverityRank(resolved)
     if (rank > bestRank) {
@@ -8444,14 +6784,14 @@ function getCompareEntrySeverity(entry: Record<string, any>): string {
   return best
 }
 
-function getCompareChangeRows(entry: Record<string, any>) {
+function getCompareChangeRows(entry: CompareEntry): CompareChangeRow[] {
   const changes = Array.isArray(entry?.changes) ? entry.changes : []
-  const rows = changes.map((change: any, idx: number) => {
-    const meta = compareFieldMetaMap.value.get(change.field)
+  const rows: CompareChangeRow[] = changes.map((change, idx: number) => {
+    const meta = compareFieldMetaMap.value.get(String(change.field || ''))
     const severity = normalizeCompareSeverity(change.severity || meta?.severity)
     return {
       key: `${change.field || 'field'}-${idx}`,
-      field: change.field,
+      field: String(change.field || ''),
       label: meta?.label || change.field || '-',
       description: meta?.source || '',
       normalized: meta?.normalized || '',
@@ -8460,7 +6800,7 @@ function getCompareChangeRows(entry: Record<string, any>) {
       right: change.right,
     }
   })
-  rows.sort((a: any, b: any) => {
+  rows.sort((a, b) => {
     const rankDiff = compareSeverityRank(b.severity) - compareSeverityRank(a.severity)
     if (rankDiff) return rankDiff
     return String(a.label).localeCompare(String(b.label))
@@ -8480,37 +6820,674 @@ function severityClass(value?: string): string {
   return 'severity-info'
 }
 
-function compareRowClass(entry: Record<string, any>): string {
+function compareRowClass(entry: CompareEntry): string {
   const severity = getCompareEntrySeverity(entry)
   return `compare-row compare-row-${severity}`
 }
 
+const { productPanel } = usePlmProductPanel({
+  authState,
+  authExpiresAt,
+  plmAuthState,
+  plmAuthExpiresAt,
+  plmAuthLegacy,
+  authError,
+  refreshAuthStatus,
+  deepLinkStatus,
+  deepLinkError,
+  copyDeepLink,
+  resetAll,
+  refreshWorkbenchTeamViews,
+  applyWorkbenchTeamView,
+  duplicateWorkbenchTeamView,
+  shareWorkbenchTeamView,
+  deleteWorkbenchTeamView,
+  archiveWorkbenchTeamView,
+  restoreWorkbenchTeamView,
+  renameWorkbenchTeamView,
+  transferWorkbenchTeamView,
+  saveWorkbenchTeamView,
+  setWorkbenchTeamViewDefault,
+  clearWorkbenchTeamViewDefault,
+  deepLinkPreset,
+  applyDeepLinkPreset,
+  deepLinkPresets,
+  movePreset,
+  deepLinkPanelOptions,
+  deepLinkScope,
+  clearDeepLinkScope,
+  customPresetName,
+  saveDeepLinkPreset,
+  deleteDeepLinkPreset,
+  editingPresetLabel,
+  applyPresetRename,
+  exportCustomPresets,
+  importPresetText,
+  importCustomPresets,
+  triggerPresetFileImport,
+  importFileInput,
+  handlePresetFileImport,
+  isPresetDropActive,
+  handlePresetDragEnter,
+  handlePresetDragOver,
+  handlePresetDragLeave,
+  handlePresetDrop,
+  workbenchTeamViewKey,
+  workbenchTeamViewName,
+  workbenchTeamViewOwnerUserId,
+  showManageWorkbenchTeamViewActions,
+  canSaveWorkbenchTeamView,
+  canApplyWorkbenchTeamView,
+  canDuplicateWorkbenchTeamView,
+  canShareWorkbenchTeamView,
+  canDeleteWorkbenchTeamView,
+  canArchiveWorkbenchTeamView,
+  canRestoreWorkbenchTeamView,
+  canRenameWorkbenchTeamView,
+  canTransferWorkbenchTeamViewTarget,
+  canTransferWorkbenchTeamView,
+  canSetWorkbenchTeamViewDefault,
+  canClearWorkbenchTeamViewDefault,
+  workbenchDefaultTeamViewLabel,
+  workbenchTeamViews,
+  workbenchTeamViewsLoading,
+  workbenchTeamViewsError,
+  hasManageableWorkbenchTeamViews,
+  showWorkbenchTeamViewManager,
+  workbenchTeamViewSelection,
+  workbenchTeamViewSelectionCount,
+  selectedBatchArchivableWorkbenchTeamViewIds,
+  selectedBatchRestorableWorkbenchTeamViewIds,
+  selectedBatchDeletableWorkbenchTeamViewIds,
+  sceneCatalogOwnerFilter,
+  sceneCatalogOwnerOptions,
+  sceneCatalogRecommendationFilter,
+  sceneCatalogRecommendationOptions,
+  sceneCatalogSummaryChips,
+  sceneCatalogSummaryHint,
+  sceneCatalogAutoFocusSceneId,
+  clearSceneCatalogAutoFocusSceneId,
+  setSceneCatalogRecommendationFilter,
+  recommendedWorkbenchScenes,
+  selectAllWorkbenchTeamViews,
+  clearWorkbenchTeamViewSelection,
+  archiveWorkbenchTeamViewSelection,
+  restoreWorkbenchTeamViewSelection,
+  deleteWorkbenchTeamViewSelection,
+  applyRecommendedWorkbenchScene,
+  openRecommendedWorkbenchSceneAudit,
+  copyRecommendedWorkbenchSceneLink,
+  openWorkbenchSceneAudit,
+  productId,
+  productItemNumber,
+  itemType,
+  productLoading,
+  loadProduct,
+  productError,
+  product,
+  productView,
+  formatTime,
+  hasProductCopyValue,
+  copyProductField,
+  productFieldCatalog,
+  formatJson,
+})
+
+const { bomPanel } = usePlmBomPanel({
+  copyDeepLink,
+  loadBom,
+  expandAllBom,
+  collapseAllBom,
+  expandBomToDepth,
+  copyBomTablePathIdsBulk,
+  copyBomTreePathIdsBulk,
+  copyBomSelectedChildIds,
+  clearBomSelection,
+  exportBomCsv,
+  setBomDepthQuick,
+  applyBomFilterPreset,
+  duplicateBomFilterPreset,
+  renameBomFilterPreset,
+  deleteBomFilterPreset,
+  promoteBomFilterPresetToTeam,
+  promoteBomFilterPresetToTeamDefault,
+  shareBomFilterPreset,
+  assignBomPresetGroup,
+  saveBomFilterPreset,
+  refreshBomTeamPresets,
+  applyBomTeamPreset,
+  shareBomTeamPreset,
+  duplicateBomTeamPreset,
+  archiveBomTeamPreset,
+  restoreBomTeamPreset,
+  deleteBomTeamPreset,
+  renameBomTeamPreset,
+  transferBomTeamPreset,
+  saveBomTeamPreset,
+  setBomTeamPresetDefault,
+  clearBomTeamPresetDefault,
+  selectAllBomTeamPresets,
+  clearBomTeamPresetSelection,
+  archiveBomTeamPresetSelection,
+  restoreBomTeamPresetSelection,
+  deleteBomTeamPresetSelection,
+  exportBomFilterPresets,
+  importBomFilterPresets,
+  triggerBomFilterPresetFileImport,
+  handleBomFilterPresetFileImport,
+  clearBomFilterPresets,
+  selectAllBomPresets,
+  clearBomPresetSelection,
+  applyBomPresetBatchGroup,
+  deleteBomPresetSelection,
+  toggleBomNode,
+  isBomCollapsed,
+  isBomTreeSelected,
+  selectBomTreeRow,
+  resolveBomLineId,
+  formatBomFindNum,
+  formatBomRefdes,
+  formatBomPathIds,
+  copyBomPathIds,
+  resolveBomChildId,
+  resolveBomChildNumber,
+  applyProductFromBom,
+  applyWhereUsedFromBom,
+  applySubstitutesFromBom,
+  copyBomChildId,
+  isBomItemSelected,
+  selectBomTableRow,
+  formatBomTablePathIds,
+  copyBomTablePathIds,
+  BOM_DEPTH_QUICK_OPTIONS,
+  bomView,
+  bomHasTree,
+  bomTablePathIdsCount,
+  bomTreePathIdsCount,
+  bomSelectedCount,
+  bomExportCount,
+  productId,
+  bomLoading,
+  bomDepth,
+  bomEffectiveAt,
+  bomFilterFieldOptions,
+  bomFilterField,
+  bomFilter,
+  bomFilterPlaceholder,
+  bomFilterPresetGroupFilter,
+  bomFilterPresetGroups,
+  bomFilterPresetKey,
+  bomFilteredPresets,
+  bomFilterPresetName,
+  bomFilterPresetGroup,
+  canSaveBomFilterPreset,
+  bomFilterPresets,
+  bomTeamPresetKey,
+  bomTeamPresetName,
+  bomTeamPresetGroup,
+  bomTeamPresetOwnerUserId,
+  showManageBomTeamPresetActions,
+  canSaveBomTeamPreset,
+  canApplyBomTeamPreset,
+  canDuplicateBomTeamPreset,
+  canShareBomTeamPreset,
+  canDeleteBomTeamPreset,
+  canArchiveBomTeamPreset,
+  canRestoreBomTeamPreset,
+  canRenameBomTeamPreset,
+  canTransferTargetBomTeamPreset,
+  canTransferBomTeamPreset,
+  canSetBomTeamPresetDefault,
+  canClearBomTeamPresetDefault,
+  bomDefaultTeamPresetLabel,
+  hasManageableBomTeamPresets,
+  bomTeamPresets,
+  bomTeamPresetsLoading,
+  bomTeamPresetsError,
+  showBomTeamPresetManager,
+  bomTeamPresetSelectionCount,
+  bomTeamPresetSelection,
+  selectedBatchArchivableBomTeamPresetIds,
+  selectedBatchRestorableBomTeamPresetIds,
+  selectedBatchDeletableBomTeamPresetIds,
+  bomFilterPresetImportText,
+  bomFilterPresetImportMode,
+  bomFilterPresetFileInput,
+  showBomPresetManager,
+  bomPresetSelectionCount,
+  bomPresetBatchGroup,
+  bomPresetSelection,
+  bomError,
+  bomItems,
+  bomDisplayCount,
+  bomTreeVisibleCount,
+  bomFilteredItems,
+  bomTreeVisibleRows,
+  productLoading,
+  whereUsedLoading,
+  substitutesLoading,
+})
+
+const documentsPanel = {
+  copyDeepLink,
+  exportDocumentsCsv,
+  loadDocuments,
+  refreshDocumentTeamViews,
+  applyDocumentTeamView,
+  duplicateDocumentTeamView,
+  shareDocumentTeamView,
+  deleteDocumentTeamView,
+  archiveDocumentTeamView,
+  restoreDocumentTeamView,
+  renameDocumentTeamView,
+  transferDocumentTeamView,
+  saveDocumentTeamView,
+  setDocumentTeamViewDefault,
+  clearDocumentTeamViewDefault,
+  selectCadFile,
+  copyDocumentId,
+  copyDocumentUrl,
+  getDocumentName,
+  getDocumentId,
+  getDocumentType,
+  getDocumentRevision,
+  getDocumentRole,
+  getDocumentAuthor,
+  getDocumentSourceSystem,
+  getDocumentSourceVersion,
+  getDocumentMime,
+  getDocumentSize,
+  getDocumentCreatedAt,
+  getDocumentUpdatedAt,
+  getDocumentPreviewUrl,
+  getDocumentDownloadUrl,
+  formatBytes,
+  formatTime,
+  productId,
+  documentRole,
+  documentFilter,
+  documentSortKey,
+  documentSortDir,
+  documentColumnOptions,
+  documentColumns,
+  documentTeamViewKey,
+  documentTeamViewName,
+  documentTeamViewOwnerUserId,
+  showManageDocumentTeamViewActions,
+  canSaveDocumentTeamView,
+  canApplyDocumentTeamView,
+  canDuplicateDocumentTeamView,
+  canShareDocumentTeamView,
+  canDeleteDocumentTeamView,
+  canArchiveDocumentTeamView,
+  canRestoreDocumentTeamView,
+  canRenameDocumentTeamView,
+  canTransferDocumentTeamViewTarget,
+  canTransferDocumentTeamView,
+  canSetDocumentTeamViewDefault,
+  canClearDocumentTeamViewDefault,
+  documentDefaultTeamViewLabel,
+  hasManageableDocumentTeamViews,
+  showDocumentTeamViewManager,
+  documentTeamViewSelection,
+  documentTeamViewSelectionCount,
+  selectedBatchArchivableDocumentTeamViewIds,
+  selectedBatchRestorableDocumentTeamViewIds,
+  selectedBatchDeletableDocumentTeamViewIds,
+  documentTeamViews,
+  documentTeamViewsLoading,
+  documentTeamViewsError,
+  selectAllDocumentTeamViews,
+  clearDocumentTeamViewSelection,
+  archiveDocumentTeamViewSelection,
+  restoreDocumentTeamViewSelection,
+  deleteDocumentTeamViewSelection,
+  documents,
+  documentsLoading,
+  documentsError,
+  documentsFiltered,
+  documentsSorted,
+  documentFieldCatalog,
+} satisfies PlmDocumentsPanelModel
+
+const cadPanel = {
+  copyDeepLink,
+  loadCadMetadata,
+  loadCadDiff,
+  updateCadProperties,
+  updateCadViewState,
+  updateCadReview,
+  refreshCadTeamViews,
+  applyCadTeamView,
+  duplicateCadTeamView,
+  shareCadTeamView,
+  deleteCadTeamView,
+  archiveCadTeamView,
+  restoreCadTeamView,
+  renameCadTeamView,
+  transferCadTeamView,
+  saveCadTeamView,
+  setCadTeamViewDefault,
+  clearCadTeamViewDefault,
+  formatJson,
+  formatTime,
+  cadFileId,
+  cadOtherFileId,
+  cadTeamViewKey,
+  cadTeamViewName,
+  cadTeamViewOwnerUserId,
+  showManageCadTeamViewActions,
+  canSaveCadTeamView,
+  canApplyCadTeamView,
+  canDuplicateCadTeamView,
+  canShareCadTeamView,
+  canDeleteCadTeamView,
+  canArchiveCadTeamView,
+  canRestoreCadTeamView,
+  canRenameCadTeamView,
+  canTransferCadTeamViewTarget,
+  canTransferCadTeamView,
+  canSetCadTeamViewDefault,
+  canClearCadTeamViewDefault,
+  cadDefaultTeamViewLabel,
+  hasManageableCadTeamViews,
+  showCadTeamViewManager,
+  cadTeamViewSelection,
+  cadTeamViewSelectionCount,
+  selectedBatchArchivableCadTeamViewIds,
+  selectedBatchRestorableCadTeamViewIds,
+  selectedBatchDeletableCadTeamViewIds,
+  cadTeamViews,
+  cadTeamViewsLoading,
+  cadTeamViewsError,
+  selectAllCadTeamViews,
+  clearCadTeamViewSelection,
+  archiveCadTeamViewSelection,
+  restoreCadTeamViewSelection,
+  deleteCadTeamViewSelection,
+  cadProperties,
+  cadViewState,
+  cadReview,
+  cadHistory,
+  cadDiff,
+  cadMeshStats,
+  cadPropertiesDraft,
+  cadViewStateDraft,
+  cadReviewState,
+  cadReviewNote,
+  cadLoading,
+  cadDiffLoading,
+  cadUpdating,
+  cadStatus,
+  cadError,
+  cadActionStatus,
+  cadActionError,
+  cadHistoryEntries,
+} satisfies PlmCadPanelModel
+
+const approvalsPanel = {
+  copyDeepLink,
+  exportApprovalsCsv,
+  loadApprovals,
+  refreshApprovalsTeamViews,
+  applyApprovalsTeamView,
+  duplicateApprovalsTeamView,
+  shareApprovalsTeamView,
+  deleteApprovalsTeamView,
+  archiveApprovalsTeamView,
+  restoreApprovalsTeamView,
+  renameApprovalsTeamView,
+  transferApprovalsTeamView,
+  saveApprovalsTeamView,
+  setApprovalsTeamViewDefault,
+  clearApprovalsTeamViewDefault,
+  approvalsLoading,
+  approvalsStatus,
+  approvalsFilter,
+  approvalComment,
+  approvalSortKey,
+  approvalSortDir,
+  approvalColumnOptions,
+  approvalColumns,
+  approvalsTeamViewKey,
+  approvalsTeamViewName,
+  approvalsTeamViewOwnerUserId,
+  showManageApprovalsTeamViewActions,
+  canSaveApprovalsTeamView,
+  canApplyApprovalsTeamView,
+  canDuplicateApprovalsTeamView,
+  canShareApprovalsTeamView,
+  canDeleteApprovalsTeamView,
+  canArchiveApprovalsTeamView,
+  canRestoreApprovalsTeamView,
+  canRenameApprovalsTeamView,
+  canTransferApprovalsTeamViewTarget,
+  canTransferApprovalsTeamView,
+  canSetApprovalsTeamViewDefault,
+  canClearApprovalsTeamViewDefault,
+  approvalsDefaultTeamViewLabel,
+  hasManageableApprovalsTeamViews,
+  showApprovalsTeamViewManager,
+  approvalsTeamViewSelection,
+  approvalsTeamViewSelectionCount,
+  selectedBatchArchivableApprovalsTeamViewIds,
+  selectedBatchRestorableApprovalsTeamViewIds,
+  selectedBatchDeletableApprovalsTeamViewIds,
+  approvalsTeamViews,
+  approvalsTeamViewsLoading,
+  approvalsTeamViewsError,
+  selectAllApprovalsTeamViews,
+  clearApprovalsTeamViewSelection,
+  archiveApprovalsTeamViewSelection,
+  restoreApprovalsTeamViewSelection,
+  deleteApprovalsTeamViewSelection,
+  approvalActionError,
+  approvalActionStatus,
+  approvalsError,
+  approvals,
+  approvalsFiltered,
+  approvalsSorted,
+  approvalActingId,
+  approvalHistoryFor,
+  approvalHistoryLabel,
+  approvalHistoryLoading,
+  approvalHistoryError,
+  approvalHistory,
+  approvalHistoryRows,
+  approvalFieldCatalog,
+  formatJson,
+  formatTime,
+  approvalStatusClass,
+  getApprovalId,
+  getApprovalTitle,
+  getApprovalStatus,
+  getApprovalType,
+  getApprovalRequester,
+  getApprovalRequesterId,
+  getApprovalCreatedAt,
+  getApprovalProductNumber,
+  getApprovalProductName,
+  getApprovalProductId,
+  getApprovalHistoryStatus,
+  getApprovalHistoryStage,
+  getApprovalHistoryType,
+  getApprovalHistoryRole,
+  getApprovalHistoryUser,
+  getApprovalHistoryVersion,
+  getApprovalHistoryComment,
+  getApprovalHistoryApprovedAt,
+  getApprovalHistoryCreatedAt,
+  applyProductFromApproval,
+  copyApprovalId,
+  loadApprovalHistory,
+  clearApprovalHistory,
+  isApprovalPending,
+  canActOnApproval,
+  approveApproval,
+  rejectApproval,
+} satisfies PlmApprovalsPanelModel
+
+const { whereUsedPanel } = usePlmWhereUsedPanel({
+  copyDeepLink,
+  expandAllWhereUsed,
+  collapseAllWhereUsed,
+  copyWhereUsedTablePathIdsBulk,
+  copyWhereUsedTreePathIdsBulk,
+  copyWhereUsedSelectedParents,
+  clearWhereUsedSelection,
+  exportWhereUsedCsv,
+  loadWhereUsed,
+  applyWhereUsedQuickPick,
+  applyWhereUsedFilterPreset,
+  duplicateWhereUsedFilterPreset,
+  renameWhereUsedFilterPreset,
+  deleteWhereUsedFilterPreset,
+  promoteWhereUsedFilterPresetToTeam,
+  promoteWhereUsedFilterPresetToTeamDefault,
+  shareWhereUsedFilterPreset,
+  assignWhereUsedPresetGroup,
+  saveWhereUsedFilterPreset,
+  refreshWhereUsedTeamPresets,
+  applyWhereUsedTeamPreset,
+  shareWhereUsedTeamPreset,
+  duplicateWhereUsedTeamPreset,
+  archiveWhereUsedTeamPreset,
+  restoreWhereUsedTeamPreset,
+  deleteWhereUsedTeamPreset,
+  renameWhereUsedTeamPreset,
+  transferWhereUsedTeamPreset,
+  saveWhereUsedTeamPreset,
+  setWhereUsedTeamPresetDefault,
+  clearWhereUsedTeamPresetDefault,
+  selectAllWhereUsedTeamPresets,
+  clearWhereUsedTeamPresetSelection,
+  archiveWhereUsedTeamPresetSelection,
+  restoreWhereUsedTeamPresetSelection,
+  deleteWhereUsedTeamPresetSelection,
+  exportWhereUsedFilterPresets,
+  importWhereUsedFilterPresets,
+  triggerWhereUsedFilterPresetFileImport,
+  handleWhereUsedFilterPresetFileImport,
+  clearWhereUsedFilterPresets,
+  selectAllWhereUsedPresets,
+  clearWhereUsedPresetSelection,
+  applyWhereUsedPresetBatchGroup,
+  deleteWhereUsedPresetSelection,
+  toggleWhereUsedNode,
+  isWhereUsedCollapsed,
+  isWhereUsedTreeSelected,
+  selectWhereUsedTreeRow,
+  getWhereUsedTreeLineValue,
+  getWhereUsedTreeRefdes,
+  getWhereUsedTreeRelationship,
+  formatWhereUsedPathIds,
+  copyWhereUsedPathIds,
+  applyProductFromWhereUsedRow,
+  isWhereUsedEntrySelected,
+  selectWhereUsedTableRow,
+  getItemNumber,
+  getItemName,
+  formatWhereUsedEntryPathIds,
+  copyWhereUsedEntryPathIds,
+  getWhereUsedLineValue,
+  getWhereUsedRefdes,
+  resolveWhereUsedParentId,
+  applyProductFromWhereUsed,
+  formatJson,
+  whereUsedView,
+  whereUsedHasTree,
+  whereUsedPathIdsCount,
+  whereUsedTreePathIdsCount,
+  whereUsedSelectedCount,
+  whereUsedFilteredRows,
+  whereUsedItemId,
+  whereUsedLoading,
+  whereUsedQuickPick,
+  whereUsedQuickOptions,
+  whereUsedRecursive,
+  whereUsedMaxLevels,
+  whereUsedFilterFieldOptions,
+  whereUsedFilterField,
+  whereUsedFilter,
+  whereUsedFilterPlaceholder,
+  whereUsedFilterPresetGroupFilter,
+  whereUsedFilterPresetGroups,
+  whereUsedFilterPresetKey,
+  whereUsedFilteredPresets,
+  whereUsedFilterPresetName,
+  whereUsedFilterPresetGroup,
+  canSaveWhereUsedFilterPreset,
+  whereUsedFilterPresets,
+  whereUsedTeamPresetKey,
+  whereUsedTeamPresetName,
+  whereUsedTeamPresetGroup,
+  whereUsedTeamPresetOwnerUserId,
+  showManageWhereUsedTeamPresetActions,
+  canSaveWhereUsedTeamPreset,
+  canApplyWhereUsedTeamPreset,
+  canDuplicateWhereUsedTeamPreset,
+  canShareWhereUsedTeamPreset,
+  canDeleteWhereUsedTeamPreset,
+  canArchiveWhereUsedTeamPreset,
+  canRestoreWhereUsedTeamPreset,
+  canRenameWhereUsedTeamPreset,
+  canTransferTargetWhereUsedTeamPreset,
+  canTransferWhereUsedTeamPreset,
+  canSetWhereUsedTeamPresetDefault,
+  canClearWhereUsedTeamPresetDefault,
+  whereUsedDefaultTeamPresetLabel,
+  hasManageableWhereUsedTeamPresets,
+  whereUsedTeamPresets,
+  whereUsedTeamPresetsLoading,
+  whereUsedTeamPresetsError,
+  showWhereUsedTeamPresetManager,
+  whereUsedTeamPresetSelectionCount,
+  whereUsedTeamPresetSelection,
+  selectedBatchArchivableWhereUsedTeamPresetIds,
+  selectedBatchRestorableWhereUsedTeamPresetIds,
+  selectedBatchDeletableWhereUsedTeamPresetIds,
+  whereUsedFilterPresetImportText,
+  whereUsedFilterPresetImportMode,
+  whereUsedFilterPresetFileInput,
+  showWhereUsedPresetManager,
+  whereUsedPresetSelectionCount,
+  whereUsedPresetBatchGroup,
+  whereUsedPresetSelection,
+  whereUsedError,
+  whereUsed,
+  whereUsedTreeVisibleRows,
+  productLoading,
+})
+
 onMounted(() => {
-  refreshAuthStatus()
-  authTimer = window.setInterval(refreshAuthStatus, 30000)
-  window.addEventListener('storage', refreshAuthStatus)
+  startAuthStatusPolling()
   documentColumns.value = loadStoredColumns(DOCUMENT_COLUMNS_STORAGE_KEY, defaultDocumentColumns)
   approvalColumns.value = loadStoredColumns(APPROVAL_COLUMNS_STORAGE_KEY, defaultApprovalColumns)
-  customDeepLinkPresets.value = loadStoredPresets()
   bomFilterPresets.value = loadStoredFilterPresets(BOM_FILTER_PRESETS_STORAGE_KEY)
   whereUsedFilterPresets.value = loadStoredFilterPresets(WHERE_USED_FILTER_PRESETS_STORAGE_KEY)
   if (['valid', 'expiring'].includes(authState.value)) {
+    void refreshWorkbenchTeamViews()
+    void refreshBomTeamPresets()
+    void refreshWhereUsedTeamPresets()
+    void refreshDocumentTeamViews()
+    void refreshCadTeamViews()
+    void refreshApprovalsTeamViews()
     void loadBomCompareSchema()
   }
   void applyQueryState()
 })
 
+watch(
+  () => route.fullPath,
+  () => {
+    cancelScheduledQuerySync()
+    void applyQueryState()
+  },
+)
+
 onBeforeUnmount(() => {
-  if (authTimer) {
-    window.clearInterval(authTimer)
-  }
-  if (deepLinkTimer) {
-    window.clearTimeout(deepLinkTimer)
-  }
-  if (querySyncTimer) {
-    window.clearTimeout(querySyncTimer)
-  }
-  window.removeEventListener('storage', refreshAuthStatus)
+  stopAuthStatusPolling()
+  cleanupDeepLinkState()
 })
 
 watch(
@@ -8530,59 +7507,6 @@ watch(
 )
 
 watch(
-  customDeepLinkPresets,
-  (value) => {
-    persistPresets(value)
-  },
-  { deep: true }
-)
-
-watch(
-  deepLinkScope,
-  () => {
-    if (applyingPreset) return
-    if (deepLinkPreset.value) {
-      deepLinkPreset.value = ''
-    }
-  },
-  { deep: true }
-)
-
-watch(
-  () => [bomFilterPresetGroupFilter.value, bomFilterPresets.value],
-  () => {
-    if (!bomFilteredPresets.value.some((preset) => preset.key === bomFilterPresetKey.value)) {
-      bomFilterPresetKey.value = ''
-    }
-    const allowed = new Set(bomFilteredPresets.value.map((preset) => preset.key))
-    bomPresetSelection.value = bomPresetSelection.value.filter((key) => allowed.has(key))
-  }
-)
-
-watch(
-  () => [whereUsedFilterPresetGroupFilter.value, whereUsedFilterPresets.value],
-  () => {
-    if (!whereUsedFilteredPresets.value.some((preset) => preset.key === whereUsedFilterPresetKey.value)) {
-      whereUsedFilterPresetKey.value = ''
-    }
-    const allowed = new Set(whereUsedFilteredPresets.value.map((preset) => preset.key))
-    whereUsedPresetSelection.value = whereUsedPresetSelection.value.filter((key) => allowed.has(key))
-  }
-)
-
-watch(showBomPresetManager, (value) => {
-  if (value) return
-  bomPresetSelection.value = []
-  bomPresetBatchGroup.value = ''
-})
-
-watch(showWhereUsedPresetManager, (value) => {
-  if (value) return
-  whereUsedPresetSelection.value = []
-  whereUsedPresetBatchGroup.value = ''
-})
-
-watch(
   () => [searchQuery.value, searchItemType.value, searchLimit.value],
   ([query, type, limit]) => {
     scheduleQuerySync({
@@ -8594,23 +7518,173 @@ watch(
 )
 
 watch(
-  () => [documentRole.value, documentFilter.value],
-  ([role, filter]) => {
+  () => [
+    documentRole.value,
+    documentFilter.value,
+    documentSortKey.value,
+    documentSortDir.value,
+    serializeColumnQuery(documentColumns.value, defaultDocumentColumns),
+  ],
+  ([role, filter, sortKey, sortDir, columns]) => {
     scheduleQuerySync({
+      documentTeamView: documentTeamViewQuery.value || undefined,
       documentRole: role || undefined,
       documentFilter: filter || undefined,
+      documentSort: sortKey !== 'updated' ? sortKey : undefined,
+      documentSortDir: sortDir !== 'desc' ? sortDir : undefined,
+      documentColumns: columns,
     })
   }
 )
 
 watch(
-  () => [approvalsStatus.value, approvalsFilter.value],
-  ([status, filter]) => {
+  () => [
+    approvalsStatus.value,
+    approvalsFilter.value,
+    approvalSortKey.value,
+    approvalSortDir.value,
+    serializeColumnQuery(approvalColumns.value, defaultApprovalColumns),
+  ],
+  ([status, filter, sortKey, sortDir, columns]) => {
     scheduleQuerySync({
+      approvalsTeamView: approvalsTeamViewQuery.value || undefined,
       approvalsStatus: status !== DEFAULT_APPROVAL_STATUS ? status : undefined,
       approvalsFilter: filter || undefined,
+      approvalSort: sortKey !== 'created' ? sortKey : undefined,
+      approvalSortDir: sortDir !== 'desc' ? sortDir : undefined,
+      approvalColumns: columns,
     })
   }
+)
+
+watch(
+  () => [
+    bomFilterPresetQuery.value,
+    bomFilterPresetKey.value,
+    buildPlmLocalFilterPresetRouteOwnerWatchKey(activeBomLocalRoutePreset.value),
+    JSON.stringify({
+      field: bomFilterField.value,
+      value: bomFilter.value,
+    }),
+  ],
+  ([routePresetKey, selectedPresetKey, activePresetKey]) => {
+    if (!routePresetKey || !activePresetKey) return
+    const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+      routePresetKey,
+      selectedPresetKey,
+      nameDraft: bomFilterPresetName.value,
+      groupDraft: bomFilterPresetGroup.value,
+      selectionKeys: bomPresetSelection.value,
+      batchGroupDraft: bomPresetBatchGroup.value,
+      activePreset: activeBomLocalRoutePreset.value,
+      currentState: {
+        field: bomFilterField.value,
+        value: bomFilter.value,
+      },
+    })
+    if (!nextIdentity.shouldClear) {
+      return
+    }
+    bomFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+    bomFilterPresetName.value = nextIdentity.nextNameDraft
+    bomFilterPresetGroup.value = nextIdentity.nextGroupDraft
+    bomPresetSelection.value = nextIdentity.nextSelectionKeys
+    bomPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
+    syncBomFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
+  },
+)
+
+watch(
+  () => [
+    whereUsedFilterPresetQuery.value,
+    whereUsedFilterPresetKey.value,
+    buildPlmLocalFilterPresetRouteOwnerWatchKey(activeWhereUsedLocalRoutePreset.value),
+    JSON.stringify({
+      field: whereUsedFilterField.value,
+      value: whereUsedFilter.value,
+    }),
+  ],
+  ([routePresetKey, selectedPresetKey, activePresetKey]) => {
+    if (!routePresetKey || !activePresetKey) return
+    const nextIdentity = resolvePlmLocalFilterPresetRouteIdentity({
+      routePresetKey,
+      selectedPresetKey,
+      nameDraft: whereUsedFilterPresetName.value,
+      groupDraft: whereUsedFilterPresetGroup.value,
+      selectionKeys: whereUsedPresetSelection.value,
+      batchGroupDraft: whereUsedPresetBatchGroup.value,
+      activePreset: activeWhereUsedLocalRoutePreset.value,
+      currentState: {
+        field: whereUsedFilterField.value,
+        value: whereUsedFilter.value,
+      },
+    })
+    if (!nextIdentity.shouldClear) {
+      return
+    }
+    whereUsedFilterPresetKey.value = nextIdentity.nextSelectedPresetKey
+    whereUsedFilterPresetName.value = nextIdentity.nextNameDraft
+    whereUsedFilterPresetGroup.value = nextIdentity.nextGroupDraft
+    whereUsedPresetSelection.value = nextIdentity.nextSelectionKeys
+    whereUsedPresetBatchGroup.value = nextIdentity.nextBatchGroupDraft
+    syncWhereUsedFilterPresetQuery(nextIdentity.nextRoutePresetKey || undefined)
+  },
+)
+
+watch(
+  () => [
+    bomTeamPresetQuery.value,
+    activeBomRoutePreset.value?.id || '',
+    JSON.stringify({
+      field: bomFilterField.value,
+      value: bomFilter.value,
+      group: bomFilterPresetGroup.value,
+    }),
+  ],
+  ([presetId, activePresetId]) => {
+    if (!presetId || !activePresetId) return
+    const activePreset = activeBomRoutePreset.value
+    if (!activePreset) return
+    if (matchPlmTeamFilterPresetStateSnapshot(
+      pickPlmTeamFilterPresetRouteOwnerState(activePreset.state),
+      {
+        field: bomFilterField.value,
+        value: bomFilter.value,
+      },
+    )) {
+      return
+    }
+    bomTeamPresetQuery.value = ''
+    scheduleQuerySync({ bomTeamPreset: undefined })
+  },
+)
+
+watch(
+  () => [
+    whereUsedTeamPresetQuery.value,
+    activeWhereUsedRoutePreset.value?.id || '',
+    JSON.stringify({
+      field: whereUsedFilterField.value,
+      value: whereUsedFilter.value,
+      group: whereUsedFilterPresetGroup.value,
+    }),
+  ],
+  ([presetId, activePresetId]) => {
+    if (!presetId || !activePresetId) return
+    const activePreset = activeWhereUsedRoutePreset.value
+    if (!activePreset) return
+    if (matchPlmTeamFilterPresetStateSnapshot(
+      pickPlmTeamFilterPresetRouteOwnerState(activePreset.state),
+      {
+        field: whereUsedFilterField.value,
+        value: whereUsedFilter.value,
+      },
+    )) {
+      return
+    }
+    whereUsedTeamPresetQuery.value = ''
+    scheduleQuerySync({ whereUsedTeamPreset: undefined })
+  },
 )
 
 watch(
@@ -8625,20 +7699,12 @@ watch(
   ([whereUsed, whereUsedField, compareValue, substituteValue, bomFilterValue, bomFilterFieldValue]) => {
     scheduleQuerySync({
       whereUsedFilter: whereUsed || undefined,
-      whereUsedFilterField: whereUsedField !== 'all' ? whereUsedField : undefined,
+      whereUsedFilterField: resolvePlmFilterFieldQueryValue(whereUsed, whereUsedField),
       compareFilter: compareValue || undefined,
       substitutesFilter: substituteValue || undefined,
       bomFilter: bomFilterValue || undefined,
-      bomFilterField: bomFilterFieldValue !== 'all' ? bomFilterFieldValue : undefined,
+      bomFilterField: resolvePlmFilterFieldQueryValue(bomFilterValue, bomFilterFieldValue),
     })
-  }
-)
-
-watch(
-  whereUsed,
-  () => {
-    whereUsedCollapsed.value = new Set()
-    whereUsedSelectedEntryKeys.value = new Set()
   }
 )
 
@@ -8646,9 +7712,13 @@ watch(
   bomItems,
   () => {
     applyBomCollapsedState(resolveBomCollapsedState())
-    bomSelectedLineIds.value = new Set()
   }
 )
+
+watch(bomCollapsed, (value) => {
+  persistBomCollapsed(value)
+  syncBomCollapsedQuery(value)
+})
 
 watch(
   bomCompare,
@@ -8669,10 +7739,25 @@ watch(
 )
 
 watch(authState, (value) => {
+  if (['valid', 'expiring'].includes(value)) {
+    void refreshWorkbenchTeamViews()
+    void refreshBomTeamPresets()
+    void refreshWhereUsedTeamPresets()
+    void refreshDocumentTeamViews()
+    void refreshCadTeamViews()
+    void refreshApprovalsTeamViews()
+  }
   if (!compareSchema.value && !compareSchemaLoading.value && ['valid', 'expiring'].includes(value)) {
     void loadBomCompareSchema()
   }
 })
+
+watch(
+  () => [authState.value, plmAuthState.value, plmAuthLegacy.value],
+  () => {
+    void warmApprovalActionability(approvals.value)
+  },
+)
 
 watch(
   () => [
@@ -8680,6 +7765,8 @@ watch(
     itemType.value,
     cadFileId.value,
     cadOtherFileId.value,
+    cadReviewState.value,
+    cadReviewNote.value,
     whereUsedItemId.value,
     whereUsedRecursive.value,
     whereUsedMaxLevels.value,
@@ -8704,6 +7791,8 @@ watch(
     itemTypeValue,
     cadFileValue,
     cadOtherValue,
+    cadReviewStateValue,
+    cadReviewNoteValue,
     whereUsedValue,
     whereUsedRecursiveValue,
     whereUsedLevelsValue,
@@ -8726,8 +7815,11 @@ watch(
     scheduleQuerySync({
       productId: productValue || undefined,
       itemType: itemTypeValue !== DEFAULT_ITEM_TYPE ? itemTypeValue : undefined,
+      cadTeamView: cadTeamViewQuery.value || undefined,
       cadFileId: cadFileValue || undefined,
       cadOtherFileId: cadOtherValue || undefined,
+      cadReviewState: cadReviewStateValue || undefined,
+      cadReviewNote: cadReviewNoteValue || undefined,
       whereUsedItemId: whereUsedValue || undefined,
       whereUsedRecursive: whereUsedRecursiveValue !== true ? whereUsedRecursiveValue : undefined,
       whereUsedMaxLevels:

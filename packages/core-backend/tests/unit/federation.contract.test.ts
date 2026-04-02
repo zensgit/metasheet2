@@ -84,8 +84,12 @@ function createPlmAdapterMock(runtimeStatus: RuntimeStatus = {}) {
       data: [plmContractFixtures.substituteAdded],
       metadata: { totalCount: 1 },
     })),
-    rejectApproval: vi.fn(async (approvalId: string, comment: string) => ({
-      data: [{ id: approvalId, comment }],
+    approveApproval: vi.fn(async (approvalId: string, version: number, comment?: string) => ({
+      data: [{ id: approvalId, version, comment: comment ?? null }],
+      metadata: { totalCount: 1 },
+    })),
+    rejectApproval: vi.fn(async (approvalId: string, version: number, comment: string) => ({
+      data: [{ id: approvalId, version, comment }],
       metadata: { totalCount: 1 },
     })),
   }
@@ -287,7 +291,7 @@ describe('Federation contract routes', () => {
     expect(bomCompareResponse.body.data).toEqual(plmContractFixtures.bomCompare)
   })
 
-  it('supports PLM mutation contracts for substitute add and approval reject', async () => {
+  it('supports PLM mutation contracts for substitute add and versioned approval actions', async () => {
     const plmAdapter = createPlmAdapterMock()
     const app = createFederationApp({ plmAdapter })
 
@@ -304,11 +308,45 @@ describe('Federation contract routes', () => {
     expect(plmAdapter.addBomSubstitute).toHaveBeenCalledWith('line-1', 'part-2', { preference: 'alternate' })
     expect(addResponse.body.data).toEqual(plmContractFixtures.substituteAdded)
 
+    const missingVersionResponse = await request(app)
+      .post('/api/federation/plm/mutate')
+      .send({
+        operation: 'approval_approve',
+        approvalId: 'eco-1',
+      })
+      .expect(400)
+
+    expect(missingVersionResponse.body).toEqual({
+      ok: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'version is required for approval actions',
+      },
+    })
+
+    const approveResponse = await request(app)
+      .post('/api/federation/plm/mutate')
+      .send({
+        operation: 'approval_approve',
+        approvalId: 'eco-1',
+        version: 2,
+        comment: 'looks good',
+      })
+      .expect(200)
+
+    expect(plmAdapter.approveApproval).toHaveBeenCalledWith('eco-1', 2, 'looks good')
+    expect(approveResponse.body.data).toEqual({
+      id: 'eco-1',
+      version: 2,
+      comment: 'looks good',
+    })
+
     const missingCommentResponse = await request(app)
       .post('/api/federation/plm/mutate')
       .send({
         operation: 'approval_reject',
         approvalId: 'eco-1',
+        version: 3,
       })
       .expect(400)
 
@@ -325,13 +363,15 @@ describe('Federation contract routes', () => {
       .send({
         operation: 'approval_reject',
         approvalId: 'eco-1',
+        version: 4,
         comment: 'missing test evidence',
       })
       .expect(200)
 
-    expect(plmAdapter.rejectApproval).toHaveBeenCalledWith('eco-1', 'missing test evidence')
+    expect(plmAdapter.rejectApproval).toHaveBeenCalledWith('eco-1', 4, 'missing test evidence')
     expect(rejectResponse.body.data).toEqual({
       id: 'eco-1',
+      version: 4,
       comment: 'missing test evidence',
     })
   })

@@ -41,6 +41,17 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import {
+  ElButton,
+  ElInput,
+  ElTable,
+  ElTableColumn,
+  ElTag,
+} from 'element-plus'
+import 'element-plus/es/components/button/style/css'
+import 'element-plus/es/components/input/style/css'
+import 'element-plus/es/components/table/style/css'
+import 'element-plus/es/components/tag/style/css'
 import { formulaEngine, type CellValue } from '../utils/formulaEngine'
 
 const testFormula = ref('')

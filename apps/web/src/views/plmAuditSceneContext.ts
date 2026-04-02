@@ -1,4 +1,8 @@
-import type { PlmAuditRouteState } from './plmAuditQueryState'
+import {
+  buildPlmAuditTeamViewState,
+  type PlmAuditRouteState,
+  type PlmAuditTeamViewState,
+} from './plmAuditQueryState'
 
 export function buildPlmAuditSceneQueryValue(state: Pick<PlmAuditRouteState, 'sceneId' | 'sceneName'>) {
   return state.sceneId || state.sceneName || ''
@@ -15,6 +19,58 @@ export function isPlmAuditSceneQueryContextActive(
 ) {
   const sceneQuery = buildPlmAuditSceneQueryValue(state)
   return Boolean(sceneQuery) && state.q === sceneQuery
+}
+
+export function isPlmAuditSceneContextActive(
+  state: Pick<
+    PlmAuditRouteState,
+    | 'q'
+    | 'sceneId'
+    | 'sceneName'
+    | 'sceneOwnerUserId'
+    | 'sceneRecommendationReason'
+    | 'sceneRecommendationSourceLabel'
+    | 'returnToPlmPath'
+  >,
+) {
+  return isPlmAuditSceneOwnerContextActive(state) || isPlmAuditSceneQueryContextActive(state)
+}
+
+export function shouldTakeOverPlmAuditSceneContextOnRouteChange(options: {
+  previousState: Pick<
+    PlmAuditRouteState,
+    | 'q'
+    | 'sceneId'
+    | 'sceneName'
+    | 'sceneOwnerUserId'
+    | 'sceneRecommendationReason'
+    | 'sceneRecommendationSourceLabel'
+    | 'returnToPlmPath'
+  >
+  nextState: Pick<
+    PlmAuditRouteState,
+    | 'q'
+    | 'sceneId'
+    | 'sceneName'
+    | 'sceneOwnerUserId'
+    | 'sceneRecommendationReason'
+    | 'sceneRecommendationSourceLabel'
+    | 'returnToPlmPath'
+  >
+}) {
+  if (!isPlmAuditSceneContextActive(options.nextState)) return false
+
+  if (!isPlmAuditSceneContextActive(options.previousState)) {
+    return true
+  }
+
+  return options.previousState.q !== options.nextState.q
+    || options.previousState.sceneId !== options.nextState.sceneId
+    || options.previousState.sceneName !== options.nextState.sceneName
+    || options.previousState.sceneOwnerUserId !== options.nextState.sceneOwnerUserId
+    || options.previousState.sceneRecommendationReason !== options.nextState.sceneRecommendationReason
+    || options.previousState.sceneRecommendationSourceLabel !== options.nextState.sceneRecommendationSourceLabel
+    || options.previousState.returnToPlmPath !== options.nextState.returnToPlmPath
 }
 
 export function withPlmAuditSceneOwnerContext(state: PlmAuditRouteState): PlmAuditRouteState {
@@ -35,5 +91,33 @@ export function withPlmAuditSceneQueryContext(state: PlmAuditRouteState): PlmAud
     ...state,
     page: 1,
     q: nextQuery,
+  }
+}
+
+export function buildPlmAuditSceneSavedViewState(state: PlmAuditRouteState): PlmAuditRouteState {
+  if (isPlmAuditSceneOwnerContextActive(state)) {
+    return withPlmAuditSceneOwnerContext(state)
+  }
+
+  if (buildPlmAuditSceneQueryValue(state)) {
+    return withPlmAuditSceneQueryContext(state)
+  }
+
+  return withPlmAuditSceneOwnerContext(state)
+}
+
+export function buildPlmAuditSceneTeamViewState(state: PlmAuditRouteState): PlmAuditTeamViewState {
+  return buildPlmAuditTeamViewState(buildPlmAuditSceneSavedViewState(state))
+}
+
+export function withoutPlmAuditSceneContext(state: PlmAuditRouteState): PlmAuditRouteState {
+  return {
+    ...state,
+    sceneId: '',
+    sceneName: '',
+    sceneOwnerUserId: '',
+    sceneRecommendationReason: '',
+    sceneRecommendationSourceLabel: '',
+    returnToPlmPath: '',
   }
 }

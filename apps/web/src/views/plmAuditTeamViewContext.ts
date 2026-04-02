@@ -1,4 +1,5 @@
 import {
+  buildPlmAuditSceneActionLabel,
   buildPlmAuditSceneSourceCopy,
   buildPlmAuditTeamViewContextDescription,
 } from './plmAuditSceneCopy'
@@ -21,6 +22,18 @@ export function buildPlmAuditTeamViewContextNote(
 ): PlmAuditTeamViewContextNote | null {
   if (!token) return null
 
+  const shouldExposeSceneReapply = token.kind === 'scene' || (token.kind === 'owner' && token.active)
+  const actions = shouldExposeSceneReapply
+    ? [
+      {
+        kind: 'reapply-scene' as const,
+        label: buildPlmAuditSceneActionLabel('reapply-scene', tr),
+        emphasis: 'primary' as const,
+      },
+      ...token.actions.filter((item) => item.kind === 'clear'),
+    ]
+    : token.actions
+
   return {
     kind: token.kind,
     sourceLabel: buildPlmAuditSceneSourceCopy('team-view', tr).label,
@@ -29,6 +42,6 @@ export function buildPlmAuditTeamViewContextNote(
     description: buildPlmAuditTeamViewContextDescription(token.active, tr),
     localOnly: true,
     active: token.active,
-    actions: token.actions,
+    actions,
   }
 }

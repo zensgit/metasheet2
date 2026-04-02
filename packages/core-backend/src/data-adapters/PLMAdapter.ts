@@ -1419,12 +1419,13 @@ export class PLMAdapter extends HTTPAdapter {
     }
   }
 
-  async approveApproval(approvalId: string, comment?: string): Promise<QueryResult<Record<string, unknown>>> {
+  async approveApproval(approvalId: string, version: number, comment?: string): Promise<QueryResult<Record<string, unknown>>> {
     if (this.mockMode) {
       return {
         data: [{
           id: approvalId,
           status: 'approved',
+          version,
           comment: comment || null,
         }],
         metadata: { totalCount: 1 },
@@ -1433,19 +1434,20 @@ export class PLMAdapter extends HTTPAdapter {
     if (this.apiMode !== 'yuantus') {
       return { data: [], error: new Error('Approval actions are not supported for this PLM API mode') }
     }
-    const payload = comment ? { comment } : {}
+    const payload = comment ? { version, comment } : { version }
     return this.select<Record<string, unknown>>(`/api/v1/eco/${approvalId}/approve`, {
       method: 'POST',
       data: payload,
     })
   }
 
-  async rejectApproval(approvalId: string, comment: string): Promise<QueryResult<Record<string, unknown>>> {
+  async rejectApproval(approvalId: string, version: number, comment: string): Promise<QueryResult<Record<string, unknown>>> {
     if (this.mockMode) {
       return {
         data: [{
           id: approvalId,
           status: 'rejected',
+          version,
           comment,
         }],
         metadata: { totalCount: 1 },
@@ -1456,7 +1458,7 @@ export class PLMAdapter extends HTTPAdapter {
     }
     return this.select<Record<string, unknown>>(`/api/v1/eco/${approvalId}/reject`, {
       method: 'POST',
-      data: { comment },
+      data: { version, comment },
     })
   }
 

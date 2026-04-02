@@ -1,5 +1,6 @@
 import type { LocationQuery, LocationQueryRaw } from 'vue-router'
 import type { PlmCollaborativeAuditAction, PlmCollaborativeAuditResourceType } from '../services/plm/plmWorkbenchClient'
+import { normalizePlmAuditDateTimeTransport } from './plmAuditDateTimeTransport'
 
 export interface PlmAuditTeamViewState {
   page: number
@@ -27,6 +28,9 @@ export interface PlmAuditRouteState {
   sceneId: string
   sceneName: string
   sceneOwnerUserId: string
+  sceneRecommendationReason: string
+  sceneRecommendationSourceLabel: string
+  returnToPlmPath: string
 }
 
 export const DEFAULT_PLM_AUDIT_ROUTE_STATE: PlmAuditRouteState = {
@@ -43,6 +47,9 @@ export const DEFAULT_PLM_AUDIT_ROUTE_STATE: PlmAuditRouteState = {
   sceneId: '',
   sceneName: '',
   sceneOwnerUserId: '',
+  sceneRecommendationReason: '',
+  sceneRecommendationSourceLabel: '',
+  returnToPlmPath: '',
 }
 
 function readString(value: unknown) {
@@ -81,22 +88,28 @@ export function parsePlmAuditRouteState(query: LocationQuery): PlmAuditRouteStat
         : '',
     resourceType:
       resourceType === 'plm-team-preset-batch'
+      || resourceType === 'plm-team-preset-default'
       || resourceType === 'plm-team-view-batch'
       || resourceType === 'plm-team-view-default'
         ? resourceType
         : '',
-    from: readString(query.auditFrom),
-    to: readString(query.auditTo),
+    from: normalizePlmAuditDateTimeTransport(readString(query.auditFrom)),
+    to: normalizePlmAuditDateTimeTransport(readString(query.auditTo)),
     windowMinutes: normalizeWindowMinutes(query.auditWindow),
     teamViewId: readString(query.auditTeamView),
     sceneId: readString(query.auditSceneId),
     sceneName: readString(query.auditSceneName),
     sceneOwnerUserId: readString(query.auditSceneOwner),
+    sceneRecommendationReason: readString(query.auditSceneReason),
+    sceneRecommendationSourceLabel: readString(query.auditSceneSource),
+    returnToPlmPath: readString(query.auditReturnTo),
   }
 }
 
 export function buildPlmAuditRouteQuery(state: PlmAuditRouteState): LocationQueryRaw {
   const query: LocationQueryRaw = {}
+  const from = normalizePlmAuditDateTimeTransport(state.from)
+  const to = normalizePlmAuditDateTimeTransport(state.to)
 
   if (state.page > DEFAULT_PLM_AUDIT_ROUTE_STATE.page) query.auditPage = String(state.page)
   if (state.q) query.auditQ = state.q
@@ -104,8 +117,8 @@ export function buildPlmAuditRouteQuery(state: PlmAuditRouteState): LocationQuer
   if (state.kind) query.auditKind = state.kind
   if (state.action) query.auditAction = state.action
   if (state.resourceType) query.auditType = state.resourceType
-  if (state.from) query.auditFrom = state.from
-  if (state.to) query.auditTo = state.to
+  if (from) query.auditFrom = from
+  if (to) query.auditTo = to
   if (state.windowMinutes !== DEFAULT_PLM_AUDIT_ROUTE_STATE.windowMinutes) {
     query.auditWindow = String(state.windowMinutes)
   }
@@ -113,6 +126,11 @@ export function buildPlmAuditRouteQuery(state: PlmAuditRouteState): LocationQuer
   if (state.sceneId) query.auditSceneId = state.sceneId
   if (state.sceneName) query.auditSceneName = state.sceneName
   if (state.sceneOwnerUserId) query.auditSceneOwner = state.sceneOwnerUserId
+  if (state.sceneRecommendationReason) query.auditSceneReason = state.sceneRecommendationReason
+  if (state.sceneRecommendationSourceLabel) {
+    query.auditSceneSource = state.sceneRecommendationSourceLabel
+  }
+  if (state.returnToPlmPath) query.auditReturnTo = state.returnToPlmPath
 
   return query
 }
@@ -125,8 +143,8 @@ export function buildPlmAuditTeamViewState(state: PlmAuditRouteState): PlmAuditT
     kind: state.kind,
     action: state.action,
     resourceType: state.resourceType,
-    from: state.from,
-    to: state.to,
+    from: normalizePlmAuditDateTimeTransport(state.from),
+    to: normalizePlmAuditDateTimeTransport(state.to),
     windowMinutes: state.windowMinutes,
   }
 }
@@ -138,8 +156,44 @@ export function buildPlmAuditRouteStateFromTeamView(
   return {
     ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
     ...state,
+    from: normalizePlmAuditDateTimeTransport(state.from),
+    to: normalizePlmAuditDateTimeTransport(state.to),
     teamViewId,
   }
+}
+
+export function resetPlmAuditRouteFilters(state: PlmAuditRouteState): PlmAuditRouteState {
+  return {
+    ...DEFAULT_PLM_AUDIT_ROUTE_STATE,
+    teamViewId: state.teamViewId,
+    sceneId: state.sceneId,
+    sceneName: state.sceneName,
+    sceneOwnerUserId: state.sceneOwnerUserId,
+    sceneRecommendationReason: state.sceneRecommendationReason,
+    sceneRecommendationSourceLabel: state.sceneRecommendationSourceLabel,
+    returnToPlmPath: state.returnToPlmPath,
+  }
+}
+
+export function hasPlmAuditSceneContext(
+  state: Pick<
+    PlmAuditRouteState,
+    | 'sceneId'
+    | 'sceneName'
+    | 'sceneOwnerUserId'
+    | 'sceneRecommendationReason'
+    | 'sceneRecommendationSourceLabel'
+    | 'returnToPlmPath'
+  >,
+) {
+  return Boolean(
+    state.sceneId
+    || state.sceneName
+    || state.sceneOwnerUserId
+    || state.sceneRecommendationReason
+    || state.sceneRecommendationSourceLabel
+    || state.returnToPlmPath,
+  )
 }
 
 export function hasExplicitPlmAuditFilters(state: PlmAuditRouteState) {
@@ -168,4 +222,7 @@ export function isPlmAuditRouteStateEqual(left: PlmAuditRouteState, right: PlmAu
     && left.sceneId === right.sceneId
     && left.sceneName === right.sceneName
     && left.sceneOwnerUserId === right.sceneOwnerUserId
+    && left.sceneRecommendationReason === right.sceneRecommendationReason
+    && left.sceneRecommendationSourceLabel === right.sceneRecommendationSourceLabel
+    && left.returnToPlmPath === right.returnToPlmPath
 }

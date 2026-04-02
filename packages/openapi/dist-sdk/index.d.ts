@@ -3,1553 +3,12905 @@
  * Do not make direct changes to the file.
  */
 
-
 export interface paths {
-  "/api/approvals/{id}": {
-    /** Get approval instance */
-    get: {
-      parameters: {
-        path: {
-          id: string;
+    "/api/admin/plugins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: never;
-        };
-        /** @description Not found */
-        404: {
-          content: never;
-        };
-      };
-    };
-  };
-  "/api/approvals/{id}/approve": {
-    /** Approve instance with optimistic locking */
-    post: {
-      parameters: {
-        path: {
-          id: string;
-        };
-      };
-      requestBody: {
-        content: {
-          "application/json": {
-            version: number;
-          };
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              /** @example true */
-              ok?: boolean;
-              data?: {
-                /** @example demo-1 */
-                id?: string;
-                /** @example APPROVED */
-                status?: string;
-                /** @example 1 */
-                version?: number;
-                /** @example 0 */
-                prevVersion?: number;
-              };
+        /** List plugins (admin) */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
             };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-        /** @description Version conflict */
-        409: {
-          content: {
-            "application/json": components["schemas"]["ErrorResponse"];
-          };
-        };
-      };
-    };
-  };
-  "/api/approvals/{id}/reject": {
-    /** Reject instance with optimistic locking */
-    post: {
-      parameters: {
-        path: {
-          id: string;
-        };
-      };
-      requestBody: {
-        content: {
-          "application/json": {
-            version: number;
-          };
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              /** @example true */
-              ok?: boolean;
-              data?: {
-                /** @example demo-1 */
-                id?: string;
-                /** @example REJECTED */
-                status?: string;
-                /** @example 2 */
-                version?: number;
-                /** @example 1 */
-                prevVersion?: number;
-              };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            success?: boolean;
+                            count?: number;
+                            list?: components["schemas"]["PluginAdminEntry"][];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
             };
-          };
         };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-        409: components["responses"]["ValidationError"];
-      };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-  };
-  "/api/approvals/{id}/return": {
-    /** Return instance with optimistic locking */
-    post: {
-      parameters: {
-        path: {
-          id: string;
+    "/api/admin/plugins/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-      };
-      requestBody: {
-        content: {
-          "application/json": {
-            version: number;
-          };
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              /** @example true */
-              ok?: boolean;
-              data?: {
-                /** @example demo-1 */
-                id?: string;
-                /** @example RETURNED */
-                status?: string;
-                /** @example 3 */
-                version?: number;
-                /** @example 2 */
-                prevVersion?: number;
-              };
+        /** Plugin health status (admin) */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
             };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-        409: components["responses"]["ValidationError"];
-      };
-    };
-  };
-  "/api/approvals/{id}/revoke": {
-    /** Revoke instance with optimistic locking */
-    post: {
-      parameters: {
-        path: {
-          id: string;
-        };
-      };
-      requestBody: {
-        content: {
-          "application/json": {
-            version: number;
-          };
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              /** @example true */
-              ok?: boolean;
-              data?: {
-                /** @example demo-1 */
-                id?: string;
-                /** @example REVOKED */
-                status?: string;
-                /** @example 4 */
-                version?: number;
-                /** @example 3 */
-                prevVersion?: number;
-              };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            success?: boolean;
+                            count?: number;
+                            health?: Record<string, never>[];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
             };
-          };
         };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-        409: components["responses"]["ValidationError"];
-      };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-  };
-  "/api/approvals/{id}/history": {
-    /** Get approval history (from approval_records) */
-    get: {
-      parameters: {
-        query?: {
-          page?: number;
-          pageSize?: number;
+    "/api/admin/plugins/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-        path: {
-          id: string;
+        /** Get plugin detail (admin) */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            success?: boolean;
+                            plugin?: components["schemas"]["PluginAdminEntry"];
+                            config?: components["schemas"]["PluginConfigEntry"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Not Found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
         };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": components["schemas"]["Pagination"];
-          };
+        put?: never;
+        post?: never;
+        /** Unload plugin (admin) */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
         };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-        503: components["responses"]["ServiceUnavailable"];
-      };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-  };
-  "/api/attendance/punch": {
-    /** Punch attendance (check in/out) */
-    post: {
-      requestBody: {
-        content: {
-          "application/json": {
-            /** @enum {string} */
-            eventType: "check_in" | "check_out";
+    "/api/admin/plugins/{id}/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Enable plugin (admin) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/plugins/{id}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Disable plugin (admin) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/plugins/{id}/reload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reload plugin (admin) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/plugins/reload-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reload all plugins (admin) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/plugins/{id}/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get plugin config (admin) */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            success?: boolean;
+                            pluginId?: string;
+                            config?: components["schemas"]["PluginConfigEntry"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        /** Update plugin config (admin) */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        config: Record<string, never>;
+                        schema?: Record<string, never> | null;
+                        version?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get pending approvals for current actor */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get approval instance */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/{id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Approve instance with optimistic locking */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        version: number;
+                        comment?: string;
+                        metadata?: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                /** @example demo-1 */
+                                id?: string;
+                                /** @example approved */
+                                status?: string;
+                                /** @example 1 */
+                                version?: number;
+                                /** @example 0 */
+                                prevVersion?: number;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Version conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/{id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reject instance with optimistic locking */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        version: number;
+                        reason?: string;
+                        comment?: string;
+                        metadata?: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                /** @example demo-1 */
+                                id?: string;
+                                /** @example rejected */
+                                status?: string;
+                                /** @example 2 */
+                                version?: number;
+                                /** @example 1 */
+                                prevVersion?: number;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Version conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/{id}/return": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Return instance with optimistic locking */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        version: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                /** @example demo-1 */
+                                id?: string;
+                                /** @example RETURNED */
+                                status?: string;
+                                /** @example 3 */
+                                version?: number;
+                                /** @example 2 */
+                                prevVersion?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                409: components["responses"]["ValidationError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/{id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke instance with optimistic locking */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        version: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                /** @example demo-1 */
+                                id?: string;
+                                /** @example REVOKED */
+                                status?: string;
+                                /** @example 4 */
+                                version?: number;
+                                /** @example 3 */
+                                prevVersion?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                409: components["responses"]["ValidationError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/{id}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get approval history (from approval_records) */
+        get: {
+            parameters: {
+                query?: {
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                items?: {
+                                    /** @example rec-1 */
+                                    id?: string;
+                                    /**
+                                     * Format: date-time
+                                     * @example 2025-09-19T09:12:00Z
+                                     */
+                                    occurred_at?: string;
+                                    /** @example u1 */
+                                    actor_id?: string;
+                                    /** @example Reviewer One */
+                                    actor_name?: string;
+                                    /** @example approve */
+                                    action?: string;
+                                    /** @example LGTM */
+                                    comment?: string;
+                                    /** @example PENDING */
+                                    from_status?: string;
+                                    /** @example APPROVED */
+                                    to_status?: string;
+                                    /** @example 1 */
+                                    version?: number;
+                                    /** @example 0 */
+                                    from_version?: number | null;
+                                    /** @example 1 */
+                                    to_version?: number;
+                                }[];
+                                /** @example 1 */
+                                page?: number;
+                                /** @example 50 */
+                                pageSize?: number;
+                                /** @example 4 */
+                                total?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/punch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Punch attendance (check in/out) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        eventType: "check_in" | "check_out";
+                        /**
+                         * Format: date-time
+                         * @description Preferred punch timestamp in ISO 8601 format.
+                         */
+                        occurredAt?: string;
+                        /**
+                         * Format: date-time
+                         * @description Compatibility alias for occurredAt.
+                         */
+                        occurred_at?: string;
+                        timezone?: string;
+                        source?: string;
+                        location?: Record<string, never>;
+                        meta?: Record<string, never>;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                event?: components["schemas"]["AttendanceEvent"];
+                                record?: components["schemas"]["AttendanceRecord"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/records": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List attendance records */
+        get: {
+            parameters: {
+                query?: {
+                    userId?: string;
+                    orgId?: string;
+                    from?: string;
+                    to?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceRecord"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/calendar": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List attendance records for calendar views (compatibility alias) */
+        get: {
+            parameters: {
+                query?: {
+                    userId?: string;
+                    orgId?: string;
+                    from?: string;
+                    to?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceRecord"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/anomalies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List attendance anomalies (workday records needing attention) */
+        get: {
+            parameters: {
+                query?: {
+                    userId?: string;
+                    orgId?: string;
+                    from?: string;
+                    to?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceAnomaly"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                                /** Format: date */
+                                from?: string;
+                                /** Format: date */
+                                to?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Attendance summary */
+        get: {
+            parameters: {
+                query?: {
+                    userId?: string;
+                    orgId?: string;
+                    from?: string;
+                    to?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceSummary"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List attendance requests */
+        get: {
+            parameters: {
+                query?: {
+                    userId?: string;
+                    orgId?: string;
+                    status?: string;
+                    from?: string;
+                    to?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceRequest"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create attendance adjustment request */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /**
+                         * Format: date
+                         * @description Work date in YYYY-MM-DD format.
+                         */
+                        workDate: string;
+                        /**
+                         * Format: date
+                         * @description Compatibility alias for workDate.
+                         */
+                        date?: string;
+                        /**
+                         * @description Request type.
+                         * @enum {string}
+                         */
+                        requestType: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime";
+                        /**
+                         * @description Compatibility alias for requestType.
+                         * @enum {string}
+                         */
+                        type?: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime";
+                        /**
+                         * Format: date-time
+                         * @description Required for missed_check_in. Optional for time_correction, leave, and overtime.
+                         */
+                        requestedInAt?: string;
+                        /**
+                         * Format: date-time
+                         * @description Compatibility alias for requestedInAt.
+                         */
+                        requested_in_at?: string;
+                        /**
+                         * Format: date-time
+                         * @description Compatibility alias for requestedInAt.
+                         */
+                        clockIn?: string;
+                        /**
+                         * Format: date-time
+                         * @description Required for missed_check_out. Optional for time_correction, leave, and overtime.
+                         */
+                        requestedOutAt?: string;
+                        /**
+                         * Format: date-time
+                         * @description Compatibility alias for requestedOutAt.
+                         */
+                        requested_out_at?: string;
+                        /**
+                         * Format: date-time
+                         * @description Compatibility alias for requestedOutAt.
+                         */
+                        clockOut?: string;
+                        reason?: string;
+                        /** @description Required for leave requests unless leaveTypeCode is provided. */
+                        leaveTypeId?: string;
+                        /** @description Required for leave requests unless leaveTypeId is provided. */
+                        leaveTypeCode?: string;
+                        /** @description Required for overtime requests unless overtimeRuleName is provided. */
+                        overtimeRuleId?: string;
+                        /** @description Required for overtime requests unless overtimeRuleId is provided. */
+                        overtimeRuleName?: string;
+                        /** @description Required for overtime unless derived from requestedInAt/requestedOutAt. */
+                        minutes?: number;
+                        attachmentUrl?: string;
+                        approvalFlowId?: string;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                request?: components["schemas"]["AttendanceRequest"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/requests/{id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Approve attendance request */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        comment?: string;
+                        metadata?: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                requestId?: string;
+                                status?: string;
+                                orgId?: string;
+                                userId?: string;
+                                record?: components["schemas"]["AttendanceRecord"];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/requests/{id}/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reject attendance request */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        comment?: string;
+                        metadata?: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                requestId?: string;
+                                status?: string;
+                                orgId?: string;
+                                userId?: string;
+                                record?: components["schemas"]["AttendanceRecord"] | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/requests/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel attendance request */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        comment?: string;
+                        metadata?: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                requestId?: string;
+                                status?: string;
+                                orgId?: string;
+                                userId?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/rules/default": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get default attendance rule */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceRule"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        /** Update default attendance rule */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        timezone?: string;
+                        workStartTime?: string;
+                        /** @deprecated */
+                        work_start_time?: string;
+                        /** @deprecated */
+                        start_time?: string;
+                        workEndTime?: string;
+                        /** @deprecated */
+                        work_end_time?: string;
+                        /** @deprecated */
+                        end_time?: string;
+                        isOvernight?: boolean;
+                        /** @deprecated */
+                        is_overnight?: boolean;
+                        lateGraceMinutes?: number;
+                        /** @deprecated */
+                        late_grace_minutes?: number;
+                        earlyGraceMinutes?: number;
+                        /** @deprecated */
+                        early_grace_minutes?: number;
+                        roundingMinutes?: number;
+                        /** @deprecated */
+                        rounding_minutes?: number;
+                        workingDays?: number[];
+                        /** @deprecated */
+                        working_days?: number[];
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceRule"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/shifts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List attendance shifts */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceShift"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create attendance shift */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        timezone?: string;
+                        workStartTime?: string;
+                        /** @deprecated */
+                        work_start_time?: string;
+                        /** @deprecated */
+                        start_time?: string;
+                        workEndTime?: string;
+                        /** @deprecated */
+                        work_end_time?: string;
+                        /** @deprecated */
+                        end_time?: string;
+                        isOvernight?: boolean;
+                        /** @deprecated */
+                        is_overnight?: boolean;
+                        lateGraceMinutes?: number;
+                        /** @deprecated */
+                        late_grace_minutes?: number;
+                        earlyGraceMinutes?: number;
+                        /** @deprecated */
+                        early_grace_minutes?: number;
+                        roundingMinutes?: number;
+                        /** @deprecated */
+                        rounding_minutes?: number;
+                        workingDays?: number[];
+                        /** @deprecated */
+                        working_days?: number[];
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceShift"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/shifts/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get attendance shift */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceShift"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        /** Update attendance shift */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        timezone?: string;
+                        workStartTime?: string;
+                        workEndTime?: string;
+                        lateGraceMinutes?: number;
+                        earlyGraceMinutes?: number;
+                        roundingMinutes?: number;
+                        workingDays?: number[];
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceShift"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        /** Delete attendance shift */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/assignments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List attendance shift assignments */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    userId?: string;
+                    /** @description Legacy snake_case alias for userId. */
+                    user_id?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: {
+                                    assignment?: components["schemas"]["AttendanceShiftAssignment"];
+                                    shift?: components["schemas"]["AttendanceShift"];
+                                }[];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create attendance shift assignment */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        userId: string;
+                        shiftId: string;
+                        /** Format: date */
+                        startDate: string;
+                        /** Format: date */
+                        endDate?: string | null;
+                        isActive?: boolean;
+                        orgId?: string;
+                        /** @description Legacy snake_case alias for userId. */
+                        user_id?: string;
+                        /** @description Legacy snake_case alias for shiftId. */
+                        shift_id?: string;
+                        /**
+                         * Format: date
+                         * @description Legacy snake_case alias for startDate.
+                         */
+                        start_date?: string;
+                        /**
+                         * Format: date
+                         * @description Legacy snake_case alias for endDate.
+                         */
+                        end_date?: string | null;
+                        /** @description Legacy snake_case alias for isActive. */
+                        is_active?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                assignment?: components["schemas"]["AttendanceShiftAssignment"];
+                                shift?: components["schemas"]["AttendanceShift"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/assignments/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update attendance shift assignment */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        userId?: string;
+                        shiftId?: string;
+                        /** Format: date */
+                        startDate?: string;
+                        /** Format: date */
+                        endDate?: string | null;
+                        isActive?: boolean;
+                        orgId?: string;
+                        user_id?: string;
+                        shift_id?: string;
+                        /** Format: date */
+                        start_date?: string;
+                        /** Format: date */
+                        end_date?: string | null;
+                        is_active?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                assignment?: components["schemas"]["AttendanceShiftAssignment"];
+                                shift?: components["schemas"]["AttendanceShift"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        /** Delete attendance shift assignment */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/holidays": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List attendance holidays */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    from?: string;
+                    to?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceHoliday"][];
+                                total?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create attendance holiday */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** Format: date */
+                        date: string;
+                        name?: string | null;
+                        isWorkingDay?: boolean;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceHoliday"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/holidays/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update attendance holiday */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** Format: date */
+                        date?: string;
+                        name?: string | null;
+                        isWorkingDay?: boolean;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceHoliday"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        /** Delete attendance holiday */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get attendance settings */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceSettings"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        /** Update attendance settings */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceSettings"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceSettings"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Export attendance records as CSV or JSON */
+        get: {
+            parameters: {
+                query?: {
+                    userId?: string;
+                    orgId?: string;
+                    from?: string;
+                    to?: string;
+                    limit?: number;
+                    format?: "csv" | "json";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Export result */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/csv": string;
+                        "application/json": {
+                            ok?: boolean;
+                            success?: boolean;
+                            data?: {
+                                items?: {
+                                    user_id?: string;
+                                    org_id?: string;
+                                    /** Format: date */
+                                    work_date?: string;
+                                    timezone?: string;
+                                    first_in_at?: string;
+                                    last_out_at?: string;
+                                    work_minutes?: number;
+                                    late_minutes?: number;
+                                    early_leave_minutes?: number;
+                                    status?: string;
+                                    is_workday?: boolean;
+                                }[];
+                                total?: number;
+                                /** Format: date */
+                                from?: string;
+                                /** Format: date */
+                                to?: string;
+                                /** @enum {string} */
+                                format?: "json";
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/reports/requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Attendance request report */
+        get: {
+            parameters: {
+                query?: {
+                    userId?: string;
+                    orgId?: string;
+                    from?: string;
+                    to?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceRequestReportItem"][];
+                                /** Format: date */
+                                from?: string;
+                                /** Format: date */
+                                to?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List attendance groups */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceGroup"][];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create attendance group */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        code?: string;
+                        timezone: string;
+                        ruleSetId?: string;
+                        description?: string;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceGroup"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get attendance group by id */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceGroup"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        /** Update attendance group */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        code?: string;
+                        timezone?: string;
+                        ruleSetId?: string;
+                        description?: string;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceGroup"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                409: components["responses"]["Conflict"];
+            };
+        };
+        post?: never;
+        /** Delete attendance group */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List attendance group members */
+        get: {
+            parameters: {
+                query?: {
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceGroupMember"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Add attendance group members */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        userId?: string;
+                        userIds?: string[];
+                        /** @description Legacy snake_case alias for userId. */
+                        user_id?: string;
+                        /** @description Legacy snake_case alias for userIds. */
+                        user_ids?: string[];
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceGroupMember"][];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/groups/{id}/members/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove an attendance group member */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    userId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/leave-types": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List leave types */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    isActive?: boolean;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceLeaveType"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create leave type */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        code?: string;
+                        name: string;
+                        paid?: boolean;
+                        requiresApproval?: boolean;
+                        requiresAttachment?: boolean;
+                        defaultMinutesPerDay?: number;
+                        /** @description Compatibility alias for defaultMinutesPerDay. */
+                        daily_minutes?: number;
+                        isActive?: boolean;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceLeaveType"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/leave-types/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get leave type by id */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceLeaveType"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        /** Update leave type */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        code?: string;
+                        name?: string;
+                        paid?: boolean;
+                        requiresApproval?: boolean;
+                        requiresAttachment?: boolean;
+                        defaultMinutesPerDay?: number;
+                        /** @description Compatibility alias for defaultMinutesPerDay. */
+                        daily_minutes?: number;
+                        isActive?: boolean;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceLeaveType"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        /** Delete leave type */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/rule-templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get rule templates */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                system?: Record<string, never>[];
+                                library?: Record<string, never>[];
+                                versions?: {
+                                    id?: string;
+                                    version?: number;
+                                    createdAt?: string | null;
+                                    createdBy?: string | null;
+                                    sourceVersionId?: string | null;
+                                    itemCount?: number;
+                                }[];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        /** Save rule template library */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        templates: Record<string, never>[];
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                templates?: Record<string, never>[];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/rule-templates/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore rule template library from a version */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        versionId?: string;
+                        version?: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                templates?: Record<string, never>[];
+                                restoredFrom?: string | null;
+                                version?: number;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/rule-templates/versions/{versionId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get rule template version contents */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    versionId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                                version?: number;
+                                createdAt?: string | null;
+                                createdBy?: string | null;
+                                sourceVersionId?: string | null;
+                                itemCount?: number;
+                                templates?: Record<string, never>[];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/overtime-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List overtime rules */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    isActive?: boolean;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceOvertimeRule"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create overtime rule */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        minMinutes?: number;
+                        roundingMinutes?: number;
+                        maxMinutesPerDay?: number;
+                        requiresApproval?: boolean;
+                        isActive?: boolean;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceOvertimeRule"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/overtime-rules/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get overtime rule */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceOvertimeRule"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        /** Update overtime rule */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        minMinutes?: number;
+                        roundingMinutes?: number;
+                        maxMinutesPerDay?: number;
+                        requiresApproval?: boolean;
+                        isActive?: boolean;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceOvertimeRule"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        /** Delete overtime rule */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/approval-flows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List approval flows */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    requestType?: string;
+                    isActive?: boolean;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceApprovalFlow"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create approval flow */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        requestType: string;
+                        steps?: components["schemas"]["AttendanceApprovalStep"][];
+                        isActive?: boolean;
+                        orgId?: string;
+                        /** @description Legacy snake_case alias for requestType. */
+                        request_type?: string;
+                        /** @description Legacy snake_case alias for isActive. */
+                        is_active?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceApprovalFlow"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/approval-flows/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update approval flow */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        requestType?: string;
+                        steps?: components["schemas"]["AttendanceApprovalStep"][];
+                        isActive?: boolean;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceApprovalFlow"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        /** Delete approval flow */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/rotation-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List rotation rules */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    isActive?: boolean;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceRotationRule"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create rotation rule */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        timezone?: string;
+                        shiftSequence: string[];
+                        isActive?: boolean;
+                        orgId?: string;
+                        /** @description Legacy snake_case alias for shiftSequence. */
+                        shift_sequence?: string[];
+                        /** @description Legacy snake_case alias for isActive. */
+                        is_active?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceRotationRule"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/rotation-rules/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update rotation rule */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        timezone?: string;
+                        shiftSequence?: string[];
+                        isActive?: boolean;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceRotationRule"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        /** Delete rotation rule */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/rotation-assignments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List rotation assignments */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceRotationAssignmentItem"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create rotation assignment */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        userId: string;
+                        rotationRuleId: string;
+                        /** Format: date */
+                        startDate: string;
+                        /** Format: date */
+                        endDate?: string | null;
+                        isActive?: boolean;
+                        orgId?: string;
+                        /** @description Legacy snake_case alias for userId. */
+                        user_id?: string;
+                        /** @description Legacy snake_case alias for rotationRuleId. */
+                        rotation_rule_id?: string;
+                        /**
+                         * Format: date
+                         * @description Legacy snake_case alias for startDate.
+                         */
+                        start_date?: string;
+                        /**
+                         * Format: date
+                         * @description Legacy snake_case alias for endDate.
+                         */
+                        end_date?: string | null;
+                        /** @description Legacy snake_case alias for isActive. */
+                        is_active?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                assignment?: components["schemas"]["AttendanceRotationAssignment"];
+                                rotation?: components["schemas"]["AttendanceRotationRule"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/rotation-assignments/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update rotation assignment */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        userId?: string;
+                        rotationRuleId?: string;
+                        /** Format: date */
+                        startDate?: string;
+                        /** Format: date */
+                        endDate?: string | null;
+                        isActive?: boolean;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                assignment?: components["schemas"]["AttendanceRotationAssignment"];
+                                rotation?: components["schemas"]["AttendanceRotationRule"];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        /** Delete rotation assignment */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/rule-sets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List attendance rule sets */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceRuleSet"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create attendance rule set */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        description?: string | null;
+                        version?: number;
+                        scope?: string;
+                        config?: Record<string, never>;
+                        isDefault?: boolean;
+                        orgId?: string;
+                        /** @description Legacy snake_case alias for isDefault. */
+                        is_default?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceRuleSet"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/rule-sets/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update attendance rule set */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        description?: string | null;
+                        version?: number;
+                        scope?: string;
+                        config?: Record<string, never>;
+                        isDefault?: boolean;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceRuleSet"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        /** Delete attendance rule set */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/rule-sets/template": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get rule set template */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: Record<string, never>;
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/rule-sets/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview rule set evaluation */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        ruleSetId?: string;
+                        config?: Record<string, never>;
+                        events?: {
+                            eventType?: string;
+                            /** Format: date-time */
+                            occurredAt?: string;
+                            /** Format: date */
+                            workDate?: string;
+                            userId?: string;
+                        }[];
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: Record<string, never>;
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/import/template": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get attendance import template */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional import mapping profile ID used to shape the template payload. */
+                    profileId?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceImportTemplate"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/import/template.csv": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Download attendance import CSV template */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Optional import mapping profile ID used to shape the CSV template. */
+                    profileId?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/csv": string;
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/import/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upload attendance import CSV and receive csvFileId */
+        post: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    filename?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "text/csv": string;
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceImportUploadData"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/import/prepare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Prepare attendance import commit token */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceImportPrepareData"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/import/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview attendance import */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceImportRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceImportPreviewData"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/import/preview-async": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Enqueue attendance import preview async job */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceImportRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceImportAsyncJobData"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/import/commit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Commit attendance import */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceImportRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceImportResult"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/import/commit-async": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Enqueue attendance import commit async job */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceImportRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceImportAsyncJobData"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/import/jobs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get attendance import job */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceImportJob"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Import attendance data */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceImportRequest"];
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceImportResult"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/integrations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List attendance integrations */
+        get: {
+            parameters: {
+                query?: {
+                    status?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceIntegration"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create attendance integration */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        type?: string;
+                        status?: string;
+                        config?: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceIntegration"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/integrations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update attendance integration */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        type?: string;
+                        status?: string;
+                        config?: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendanceIntegration"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        post?: never;
+        /** Delete attendance integration */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/integrations/{id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List attendance integration runs */
+        get: {
+            parameters: {
+                query?: {
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendanceIntegrationRun"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/integrations/{id}/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run attendance integration sync */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        from?: string;
+                        to?: string;
+                        dryRun?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                integrationId?: string;
+                                imported?: number;
+                                skipped?: Record<string, never>[];
+                                batchId?: string | null;
+                                run?: components["schemas"]["AttendanceIntegrationRun"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/payroll-templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List payroll templates */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendancePayrollTemplate"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create payroll template */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        timezone?: string;
+                        startDay?: number;
+                        endDay?: number;
+                        endMonthOffset?: number;
+                        autoGenerate?: boolean;
+                        config?: Record<string, never>;
+                        isDefault?: boolean;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendancePayrollTemplate"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/payroll-templates/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get payroll template by id */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendancePayrollTemplate"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        /** Update payroll template */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        timezone?: string;
+                        startDay?: number;
+                        endDay?: number;
+                        endMonthOffset?: number;
+                        autoGenerate?: boolean;
+                        config?: Record<string, never>;
+                        isDefault?: boolean;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendancePayrollTemplate"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        /** Delete payroll template */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/payroll-cycles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List payroll cycles */
+        get: {
+            parameters: {
+                query?: {
+                    orgId?: string;
+                    status?: string;
+                    startDate?: string;
+                    endDate?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["AttendancePayrollCycle"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create payroll cycle */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        templateId?: string;
+                        name?: string;
+                        /** Format: date */
+                        anchorDate?: string;
+                        /** Format: date */
+                        startDate?: string;
+                        /** Format: date */
+                        endDate?: string;
+                        status?: string;
+                        metadata?: Record<string, never>;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendancePayrollCycle"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/payroll-cycles/generate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Batch generate payroll cycles from a template */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        templateId?: string;
+                        /** Format: date */
+                        anchorDate: string;
+                        /** @default 1 */
+                        count?: number;
+                        /** @default open */
+                        status?: string;
+                        namePrefix?: string;
+                        metadata?: Record<string, never>;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                templateId?: string;
+                                created?: components["schemas"]["AttendancePayrollCycle"][];
+                                skipped?: {
+                                    /** Format: date */
+                                    startDate?: string;
+                                    /** Format: date */
+                                    endDate?: string;
+                                }[];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/payroll-cycles/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update payroll cycle */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        templateId?: string;
+                        name?: string;
+                        /** Format: date */
+                        anchorDate?: string;
+                        /** Format: date */
+                        startDate?: string;
+                        /** Format: date */
+                        endDate?: string;
+                        status?: string;
+                        metadata?: Record<string, never>;
+                        orgId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["AttendancePayrollCycle"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        /** Delete payroll cycle */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/payroll-cycles/{id}/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Payroll cycle summary */
+        get: {
+            parameters: {
+                query?: {
+                    userId?: string;
+                    orgId?: string;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                cycle?: components["schemas"]["AttendancePayrollCycle"];
+                                summary?: components["schemas"]["AttendanceSummary"];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/payroll-cycles/{id}/summary/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Export payroll cycle summary (CSV) */
+        get: {
+            parameters: {
+                query?: {
+                    userId?: string;
+                    orgId?: string;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description CSV export */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/csv": string;
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/audit-logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Admin-only audit log query */
+        get: {
+            parameters: {
+                query?: {
+                    actorId?: string;
+                    resourceType?: string;
+                    resourceId?: string;
+                    action?: string;
+                    from?: string;
+                    to?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Forbidden */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/dev-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Issue dev token (non-production) */
+        get: {
+            parameters: {
+                query?: {
+                    userId?: string;
+                    roles?: string;
+                    perms?: string;
+                    expiresIn?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            token?: string;
+                            payload?: Record<string, never>;
+                        };
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** User login */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        email: string;
+                        password: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            success?: boolean;
+                            data?: {
+                                user?: components["schemas"]["User"];
+                                token?: string;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                /** @description Too many requests */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** User registration */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        email: string;
+                        password: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            success?: boolean;
+                            data?: {
+                                user?: components["schemas"]["User"];
+                                token?: string;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Too many requests */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/refresh-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Refresh JWT token */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        token: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            success?: boolean;
+                            data?: {
+                                token?: string;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Verify JWT token */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            success?: boolean;
+                            data?: {
+                                user?: components["schemas"]["User"];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get current user */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            success?: boolean;
+                            data?: {
+                                user?: components["schemas"]["User"];
+                                /** @description Product capability flags for UI shells. */
+                                features?: {
+                                    attendance?: boolean;
+                                    workflow?: boolean;
+                                    attendanceAdmin?: boolean;
+                                    attendanceImport?: boolean;
+                                    /** @enum {string} */
+                                    mode?: "platform" | "attendance";
+                                };
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List users for admin consoles */
+        get: {
+            parameters: {
+                query?: {
+                    q?: string;
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            success?: boolean;
+                            data?: {
+                                items?: components["schemas"]["User"][];
+                                total?: number;
+                                page?: number;
+                                pageSize?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/comments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List comments */
+        get: {
+            parameters: {
+                query: {
+                    spreadsheetId: string;
+                    rowId?: string;
+                    resolved?: boolean;
+                    limit?: number;
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CommentsListResponse"];
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create comment */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        spreadsheetId: string;
+                        rowId: string;
+                        fieldId?: string;
+                        content: string;
+                        parentId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                comment?: components["schemas"]["Comment"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/comments/{commentId}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resolve a comment */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    commentId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description No Content */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List data sources */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create data source */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-sources/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get data source */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        /** Update data source */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        post?: never;
+        /** Delete data source */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-sources/{id}/connect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Connect data source */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-sources/{id}/disconnect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Disconnect data source */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-sources/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Test data source connection */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-sources/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Data sources health check */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-sources/{id}/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run SQL query */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        sql: string;
+                        params?: unknown[];
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-sources/{id}/select": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Select from table */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        table: string;
+                        select?: string[];
+                        where?: Record<string, never>;
+                        orderBy?: {
+                            column?: string;
+                            direction?: string;
+                        }[];
+                        limit?: number;
+                        offset?: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-sources/{id}/schema": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get data source schema */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-sources/{id}/tables/{table}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get table schema */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    table: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/bases": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List multitable bases */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                bases?: components["schemas"]["MultitableBase"][];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create multitable base */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        id?: string;
+                        name: string;
+                        icon?: string;
+                        color?: string;
+                        ownerId?: string;
+                        workspaceId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                base?: components["schemas"]["MultitableBase"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Load multitable workbench context */
+        get: {
+            parameters: {
+                query?: {
+                    baseId?: string;
+                    /** @description When `viewId` is omitted, provide `sheetId` to resolve the active sheet. */
+                    sheetId?: string;
+                    /** @description Alternative to `sheetId` for resolving the active sheet and view. */
+                    viewId?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["MultitableContext"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/sheets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List multitable sheets */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                sheets?: components["schemas"]["MultitableSheet"][];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create multitable sheet */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        id?: string;
+                        baseId?: string;
+                        name?: string;
+                        description?: string;
+                        seed?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                sheet?: components["schemas"]["MultitableSheet"] & {
+                                    seeded?: boolean;
+                                };
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/sheets/{sheetId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a multitable sheet */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    sheetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                deleted: string;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/fields": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List multitable fields */
+        get: {
+            parameters: {
+                query: {
+                    sheetId: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                fields: components["schemas"]["MultitableField"][];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        /** Create a multitable field */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        id?: string;
+                        sheetId: string;
+                        name: string;
+                        /** @enum {string} */
+                        type?: "string" | "number" | "boolean" | "date" | "formula" | "select" | "link" | "lookup" | "rollup" | "attachment";
+                        property?: {
+                            [key: string]: unknown;
+                        };
+                        order?: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                field: components["schemas"]["MultitableField"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/fields/{fieldId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a multitable field */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    fieldId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                deleted: string;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Update a multitable field */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    fieldId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        /** @enum {string} */
+                        type?: "string" | "number" | "boolean" | "date" | "formula" | "select" | "link" | "lookup" | "rollup" | "attachment";
+                        property?: {
+                            [key: string]: unknown;
+                        };
+                        order?: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                field: components["schemas"]["MultitableField"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
+    "/api/multitable/views": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List multitable views */
+        get: {
+            parameters: {
+                query: {
+                    sheetId: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                views: components["schemas"]["MultitableView"][];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        /** Create a multitable view */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        id?: string;
+                        sheetId: string;
+                        name: string;
+                        type?: string;
+                        filterInfo?: {
+                            [key: string]: unknown;
+                        };
+                        sortInfo?: {
+                            [key: string]: unknown;
+                        };
+                        groupInfo?: {
+                            [key: string]: unknown;
+                        };
+                        hiddenFieldIds?: string[];
+                        config?: {
+                            [key: string]: unknown;
+                        };
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                view: components["schemas"]["MultitableView"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/views/{viewId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a multitable view */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    viewId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                deleted: string;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Update a multitable view */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    viewId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        type?: string;
+                        filterInfo?: {
+                            [key: string]: unknown;
+                        };
+                        sortInfo?: {
+                            [key: string]: unknown;
+                        };
+                        groupInfo?: {
+                            [key: string]: unknown;
+                        };
+                        hiddenFieldIds?: string[];
+                        config?: {
+                            [key: string]: unknown;
+                        };
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                view: components["schemas"]["MultitableView"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/multitable/view": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Load multitable grid view data */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Provide `sheetId` when `viewId` is omitted. */
+                    sheetId?: string;
+                    /** @description Alternative to `sheetId`; at least one of `sheetId` or `viewId` should be provided. */
+                    viewId?: string;
+                    seed?: boolean;
+                    limit?: number;
+                    offset?: number;
+                    includeLinkSummaries?: boolean;
+                    /** @description Case-insensitive partial match across text/number fields */
+                    search?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["MultitableViewData"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/person-fields/prepare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Prepare a multitable person field preset */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        sheetId: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["MultitablePersonFieldPrepareResult"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/attachments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upload a multitable attachment */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "multipart/form-data": {
+                        /** Format: binary */
+                        file: string;
+                        sheetId: string;
+                        recordId?: string | null;
+                        fieldId?: string | null;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                attachment: components["schemas"]["MultitableAttachment"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/attachments/{attachmentId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Download or preview a multitable attachment */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Best-effort image thumbnail preview; falls back to the original file stream. */
+                    thumbnail?: boolean;
+                };
+                header?: never;
+                path: {
+                    attachmentId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Attachment stream */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/octet-stream": string;
+                        "image/*": string;
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        /** Delete a multitable attachment */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    attachmentId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                deleted: string;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/form-context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Load multitable form workbench context */
+        get: {
+            parameters: {
+                query?: {
+                    /** @description Provide `sheetId` when `viewId` is omitted. */
+                    sheetId?: string;
+                    /** @description Alternative to `sheetId`; at least one of `sheetId` or `viewId` should be provided. */
+                    viewId?: string;
+                    recordId?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["MultitableFormContext"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/records/{recordId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Load multitable record drawer context */
+        get: {
+            parameters: {
+                query?: {
+                    sheetId?: string;
+                    viewId?: string;
+                };
+                header?: never;
+                path: {
+                    recordId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["MultitableRecordContext"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        /** Delete a multitable record */
+        delete: {
+            parameters: {
+                query?: {
+                    expectedVersion?: number;
+                };
+                header?: never;
+                path: {
+                    recordId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                deleted: string;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Version conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"] & {
+                            error?: {
+                                code?: string;
+                                message?: string;
+                                serverVersion?: number;
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Patch a single multitable record */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    recordId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        sheetId?: string;
+                        viewId?: string;
+                        expectedVersion?: number;
+                        data?: {
+                            [key: string]: unknown;
+                        };
+                    } | unknown | unknown;
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["MultitableRecordMutationResult"];
+                        };
+                    };
+                };
+                /** @description Validation error */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"] & {
+                            error?: {
+                                code?: string;
+                                message?: string;
+                                fieldErrors?: {
+                                    [key: string]: string;
+                                };
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Version conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"] & {
+                            error?: {
+                                code?: string;
+                                message?: string;
+                                serverVersion?: number;
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
+    "/api/multitable/views/{viewId}/submit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Submit a multitable form view */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    viewId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        recordId?: string;
+                        expectedVersion?: number;
+                        data?: {
+                            [key: string]: unknown;
+                        };
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["MultitableFormSubmitResult"];
+                        };
+                    };
+                };
+                /** @description Validation error */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"] & {
+                            error?: {
+                                code?: string;
+                                message?: string;
+                                fieldErrors?: {
+                                    [key: string]: string;
+                                };
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Version conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"] & {
+                            error?: {
+                                code?: string;
+                                message?: string;
+                                serverVersion?: number;
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/fields/{fieldId}/link-options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List link field options for a multitable field */
+        get: {
+            parameters: {
+                query?: {
+                    recordId?: string;
+                    search?: string;
+                    limit?: number;
+                    offset?: number;
+                };
+                header?: never;
+                path: {
+                    fieldId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                field: components["schemas"]["MultitableLinkFieldRef"];
+                                targetSheet: components["schemas"]["MultitableSheet"];
+                                selected: components["schemas"]["MultitableLinkedRecordSummary"][];
+                                records: components["schemas"]["MultitableLinkedRecordSummary"][];
+                                page: components["schemas"]["MultitablePage"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/records-summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List multitable record summaries */
+        get: {
+            parameters: {
+                query: {
+                    sheetId: string;
+                    displayFieldId?: string;
+                    search?: string;
+                    limit?: number;
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                records: components["schemas"]["MultitableLinkedRecordSummary"][];
+                                displayMap: {
+                                    [key: string]: string;
+                                };
+                                page: components["schemas"]["MultitablePage"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/records": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a multitable record */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        viewId?: string;
+                        sheetId?: string;
+                        data?: {
+                            [key: string]: unknown;
+                        };
+                    } | unknown | unknown;
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                record: components["schemas"]["MultitableRecord"];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/multitable/patch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Patch multitable cell values */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        viewId?: string;
+                        sheetId?: string;
+                        changes: {
+                            recordId: string;
+                            fieldId: string;
+                            value?: unknown;
+                            expectedVersion?: number;
+                        }[];
+                    } | unknown | unknown;
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: components["schemas"]["MultitablePatchResult"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"] & {
+                            error?: {
+                                code?: string;
+                                message?: string;
+                                serverVersion?: number;
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List all permissions */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            data?: components["schemas"]["Permission"][];
+                            total?: number;
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/permissions/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get current user permissions */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            userId?: string;
+                            permissions?: string[];
+                            isAdmin?: boolean;
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/permissions/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Check permission for a user */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        permission: string;
+                        userId?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            userId?: string;
+                            permission?: string;
+                            allowed?: boolean;
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/permissions/grant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Grant permission (admin only) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        userId: string;
+                        permission: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/permissions/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke permission (admin only) */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        userId: string;
+                        permission: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/permissions/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Permissions health check */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            status?: string;
+                            degraded?: boolean;
+                            timestamp?: string;
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/audit-logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List PLM workbench collaborative audit logs */
+        get: {
+            parameters: {
+                query?: {
+                    page?: number;
+                    pageSize?: number;
+                    q?: string;
+                    actorId?: string;
+                    action?: "archive" | "restore" | "delete" | "set-default" | "clear-default";
+                    resourceType?: "plm-team-preset-batch" | "plm-team-preset-default" | "plm-team-view-batch" | "plm-team-view-default";
+                    kind?: string;
+                    from?: string;
+                    to?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                items?: {
+                                    id?: string;
+                                    actorId?: string;
+                                    actorType?: string;
+                                    action?: string;
+                                    /** @enum {string} */
+                                    resourceType?: "plm-team-preset-batch" | "plm-team-preset-default" | "plm-team-view-batch" | "plm-team-view-default";
+                                    resourceId?: string;
+                                    requestId?: string;
+                                    ip?: string;
+                                    userAgent?: string;
+                                    /** Format: date-time */
+                                    occurredAt?: string;
+                                    meta?: {
+                                        tenantId?: string;
+                                        ownerUserId?: string;
+                                        audit?: string;
+                                        kind?: string;
+                                        viewName?: string;
+                                        requestedIds?: string[];
+                                        processedIds?: string[];
+                                        skippedIds?: string[];
+                                        processedKinds?: string[];
+                                        requestedTotal?: number;
+                                        processedTotal?: number;
+                                        skippedTotal?: number;
+                                    };
+                                }[];
+                                page?: number;
+                                pageSize?: number;
+                                total?: number;
+                            };
+                            metadata?: {
+                                resourceTypes?: ("plm-team-preset-batch" | "plm-team-preset-default" | "plm-team-view-batch" | "plm-team-view-default")[];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                /** @description Internal Server Error */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DirectErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/audit-logs/export.csv": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Export PLM workbench collaborative audit logs as CSV */
+        get: {
+            parameters: {
+                query?: {
+                    q?: string;
+                    actorId?: string;
+                    action?: "archive" | "restore" | "delete" | "set-default" | "clear-default";
+                    resourceType?: "plm-team-preset-batch" | "plm-team-preset-default" | "plm-team-view-batch" | "plm-team-view-default";
+                    kind?: string;
+                    from?: string;
+                    to?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description CSV export */
+                200: {
+                    headers: {
+                        "Content-Disposition"?: string;
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/csv": string;
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                /** @description Internal Server Error */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DirectErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/audit-logs/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get PLM workbench collaborative audit summary */
+        get: {
+            parameters: {
+                query?: {
+                    windowMinutes?: number;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                windowMinutes?: number;
+                                actions?: {
+                                    total?: number;
+                                    action?: string;
+                                    /** @enum {string} */
+                                    resourceType?: "plm-team-preset-batch" | "plm-team-preset-default" | "plm-team-view-batch" | "plm-team-view-default";
+                                }[];
+                                resourceTypes?: {
+                                    total?: number;
+                                    action?: string;
+                                    /** @enum {string} */
+                                    resourceType?: "plm-team-preset-batch" | "plm-team-preset-default" | "plm-team-view-batch" | "plm-team-view-default";
+                                }[];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                /** @description Internal Server Error */
+                500: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DirectErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/views/team": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List PLM workbench team views */
+        get: {
+            parameters: {
+                query?: {
+                    kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            }[];
+                            metadata?: {
+                                total?: number;
+                                activeTotal?: number;
+                                archivedTotal?: number;
+                                tenantId?: string;
+                                kind?: string;
+                                defaultViewId?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        put?: never;
+        /** Save PLM workbench team view */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        kind: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                        name: string;
+                        state: {
+                            [key: string]: unknown;
+                        };
+                        isDefault?: boolean;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/views/team/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete PLM workbench team view */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                message?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Rename PLM workbench team view */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/plm-workbench/views/team/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Batch process PLM workbench team views */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        action: "archive" | "restore" | "delete";
+                        ids: string[];
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                /** @enum {string} */
+                                action?: "archive" | "restore" | "delete";
+                                processedIds?: string[];
+                                skippedIds?: string[];
+                                items?: {
+                                    id?: string;
+                                    /** @enum {string} */
+                                    kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                    /** @enum {string} */
+                                    scope?: "team";
+                                    name?: string;
+                                    ownerUserId?: string;
+                                    canManage?: boolean;
+                                    permissions?: {
+                                        [key: string]: boolean;
+                                    };
+                                    isDefault?: boolean;
+                                    isArchived?: boolean;
+                                    state?: {
+                                        [key: string]: unknown;
+                                    };
+                                    /** Format: date-time */
+                                    archivedAt?: string | null;
+                                    /** Format: date-time */
+                                    createdAt?: string | null;
+                                    /** Format: date-time */
+                                    updatedAt?: string | null;
+                                    /** Format: date-time */
+                                    lastDefaultSetAt?: string | null;
+                                }[];
+                            };
+                            metadata?: {
+                                requestedTotal?: number;
+                                processedTotal?: number;
+                                skippedTotal?: number;
+                                processedKinds?: string[];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/views/team/{id}/default": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Set default PLM workbench team view */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        /** Clear default PLM workbench team view */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/views/team/{id}/duplicate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Duplicate PLM workbench team view */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/views/team/{id}/transfer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Transfer PLM workbench team view */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        ownerUserId: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/views/team/{id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Archive PLM workbench team view */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/views/team/{id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore PLM workbench team view */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "documents" | "cad" | "approvals" | "workbench" | "audit";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    [key: string]: unknown;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/filter-presets/team": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List PLM workbench team filter presets */
+        get: {
+            parameters: {
+                query?: {
+                    kind?: "bom" | "where-used";
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            }[];
+                            metadata?: {
+                                total?: number;
+                                activeTotal?: number;
+                                archivedTotal?: number;
+                                tenantId?: string;
+                                kind?: string;
+                                defaultPresetId?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        put?: never;
+        /** Save PLM workbench team filter preset */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        kind: "bom" | "where-used";
+                        name: string;
+                        state: {
+                            field?: string;
+                            value?: string;
+                            group?: string;
+                        };
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/filter-presets/team/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete PLM workbench team filter preset */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                message?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        options?: never;
+        head?: never;
+        /** Rename PLM workbench team filter preset */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        trace?: never;
+    };
+    "/api/plm-workbench/filter-presets/team/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Batch process PLM workbench team filter presets */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @enum {string} */
+                        action: "archive" | "restore" | "delete";
+                        ids: string[];
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                /** @enum {string} */
+                                action?: "archive" | "restore" | "delete";
+                                processedIds?: string[];
+                                skippedIds?: string[];
+                                items?: {
+                                    id?: string;
+                                    /** @enum {string} */
+                                    kind?: "bom" | "where-used";
+                                    /** @enum {string} */
+                                    scope?: "team";
+                                    name?: string;
+                                    ownerUserId?: string;
+                                    canManage?: boolean;
+                                    permissions?: {
+                                        [key: string]: boolean;
+                                    };
+                                    isDefault?: boolean;
+                                    isArchived?: boolean;
+                                    state?: {
+                                        field?: string;
+                                        value?: string;
+                                        group?: string;
+                                    };
+                                    /** Format: date-time */
+                                    archivedAt?: string | null;
+                                    /** Format: date-time */
+                                    createdAt?: string | null;
+                                    /** Format: date-time */
+                                    updatedAt?: string | null;
+                                    /** Format: date-time */
+                                    lastDefaultSetAt?: string | null;
+                                }[];
+                            };
+                            metadata?: {
+                                requestedTotal?: number;
+                                processedTotal?: number;
+                                skippedTotal?: number;
+                                processedKinds?: string[];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/filter-presets/team/{id}/default": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Set default PLM workbench team filter preset */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        /** Clear default PLM workbench team filter preset */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/filter-presets/team/{id}/duplicate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Duplicate PLM workbench team filter preset */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/filter-presets/team/{id}/transfer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Transfer PLM workbench team filter preset */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        ownerUserId: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/filter-presets/team/{id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Archive PLM workbench team filter preset */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/plm-workbench/filter-presets/team/{id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore PLM workbench team filter preset */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            success?: boolean;
+                            data?: {
+                                id?: string;
+                                /** @enum {string} */
+                                kind?: "bom" | "where-used";
+                                /** @enum {string} */
+                                scope?: "team";
+                                name?: string;
+                                ownerUserId?: string;
+                                canManage?: boolean;
+                                permissions?: {
+                                    [key: string]: boolean;
+                                };
+                                isDefault?: boolean;
+                                isArchived?: boolean;
+                                state?: {
+                                    field?: string;
+                                    value?: string;
+                                    group?: string;
+                                };
+                                /** Format: date-time */
+                                archivedAt?: string | null;
+                                /** Format: date-time */
+                                createdAt?: string | null;
+                                /** Format: date-time */
+                                updatedAt?: string | null;
+                                /** Format: date-time */
+                                lastDefaultSetAt?: string | null;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+                503: components["responses"]["ServiceUnavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/roles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List roles */
+        get: {
+            parameters: {
+                query?: {
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["Role"][];
+                                page?: number;
+                                pageSize?: number;
+                                total?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create role */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        id?: string;
+                        name?: string;
+                        permissions?: string[];
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/roles/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update role */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        permissions?: string[];
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        post?: never;
+        /** Delete role */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/spreadsheets/{id}/permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List spreadsheet permissions */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                items?: {
+                                    userId?: string;
+                                    permissions?: string[];
+                                }[];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/spreadsheets/{id}/permissions/grant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Grant spreadsheet permission */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        userId: string;
+                        permission: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/spreadsheets/{id}/permissions/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke spreadsheet permission */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        userId: string;
+                        permission: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/spreadsheets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List spreadsheets */
+        get: {
+            parameters: {
+                query?: {
+                    page?: number;
+                    pageSize?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                items?: components["schemas"]["Spreadsheet"][];
+                                page?: number;
+                                pageSize?: number;
+                                total?: number;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        /** Create spreadsheet */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        id?: string;
+                        name: string;
+                        owner_id?: string;
+                        ownerId?: string;
+                        workspace_id?: string;
+                        initial_sheets?: {
+                            id?: string;
+                            name: string;
+                        }[];
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                spreadsheet?: components["schemas"]["Spreadsheet"];
+                                sheets?: components["schemas"]["Sheet"][];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/spreadsheets/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get spreadsheet */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["Spreadsheet"] & {
+                                sheets?: components["schemas"]["Sheet"][];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        /** Update spreadsheet */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["Spreadsheet"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        post?: never;
+        /** Delete spreadsheet */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                id?: string;
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/spreadsheets/{id}/sheets/{sheetId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update sheet metadata */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    sheetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        row_count?: number;
+                        rowCount?: number;
+                        column_count?: number;
+                        columnCount?: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: components["schemas"]["Sheet"];
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/spreadsheets/{id}/sheets/{sheetId}/cells": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get spreadsheet cells */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    sheetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                sheet?: components["schemas"]["Sheet"];
+                                cells?: components["schemas"]["Cell"][];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        /** Update spreadsheet cells */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                    sheetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        cells: {
+                            row: number;
+                            col: number;
+                            value?: unknown;
+                            formula?: string;
+                            dataType?: string;
+                            data_type?: string;
+                        }[];
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @example true */
+                            ok?: boolean;
+                            data?: {
+                                cells?: components["schemas"]["Cell"][];
+                            };
+                        };
+                    };
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/views/{viewId}/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get view configuration */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    viewId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        /** Update view configuration */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    viewId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        post?: never;
+        /** Delete view configuration */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    viewId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/views/{viewId}/data": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get view data */
+        get: {
+            parameters: {
+                query?: {
+                    page?: number;
+                    pageSize?: number;
+                    sort?: string;
+                    order?: string;
+                    search?: string;
+                    searchFields?: string;
+                    groupBy?: string;
+                };
+                header?: never;
+                path: {
+                    viewId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/views/{viewId}/state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get view state */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    viewId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        /** Update view state */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    viewId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/hub-views/team": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List workflow hub team views */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        /** Save workflow hub team view */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        state: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/hub-views/team/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete workflow hub team view */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/node-types": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List workflow designer node types */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List workflow templates */
+        get: {
+            parameters: {
+                query?: {
+                    category?: string;
+                    featured?: boolean;
+                    search?: string;
+                    source?: "all" | "builtin" | "database";
+                    sortBy?: "usage_count" | "name" | "updated_at";
+                    sortOrder?: "asc" | "desc";
+                    limit?: number;
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/templates/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get workflow template detail */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/templates/{id}/instantiate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Instantiate workflow from template */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        description?: string;
+                        category?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/workflows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List workflows */
+        get: {
+            parameters: {
+                query?: {
+                    category?: string;
+                    status?: string;
+                    search?: string;
+                    sortBy?: "updated_at" | "created_at" | "name";
+                    sortOrder?: "asc" | "desc";
+                    limit?: number;
+                    offset?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        /** Create workflow */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name: string;
+                        description?: string;
+                        category?: string;
+                        bpmnXml?: string;
+                        nodes?: Record<string, never>[];
+                        edges?: Record<string, never>[];
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/workflows/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get workflow details */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        /** Update workflow */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                        description?: string;
+                        category?: string;
+                        bpmnXml?: string;
+                        nodes?: Record<string, never>[];
+                        edges?: Record<string, never>[];
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/workflows/{id}/duplicate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Duplicate workflow draft */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        name?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/workflows/{id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Archive workflow draft */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/workflows/{id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore archived workflow draft */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/workflows/{id}/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validate workflow */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/workflows/{id}/deploy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Deploy workflow */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Forbidden"];
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/workflows/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Test workflow */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        variables?: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/workflows/{id}/executions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List workflow executions */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                };
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow-designer/workflows/{id}/share": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Share workflow */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        userId: string;
+                        role: string;
+                        permissions?: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow/deploy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Deploy workflow definition */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "multipart/form-data": {
+                        /** Format: binary */
+                        bpmnFile?: string;
+                        key?: string;
+                        name?: string;
+                        category?: string;
+                        description?: string;
+                    };
+                    "application/json": {
+                        bpmnXml: string;
+                        key?: string;
+                        name: string;
+                        category?: string;
+                        description?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                400: components["responses"]["ValidationError"];
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow/definitions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List workflow definitions */
+        get: {
+            parameters: {
+                query?: {
+                    category?: string;
+                    latest?: boolean;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow/start/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start workflow instance */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    key: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        businessKey?: string;
+                        variables?: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description Created */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow/instances": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List workflow instances */
+        get: {
+            parameters: {
+                query?: {
+                    state?: string;
+                    processKey?: string;
+                    businessKey?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow/instances/{instanceId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get workflow instance detail */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    instanceId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List workflow tasks */
+        get: {
+            parameters: {
+                query?: {
+                    assignee?: string;
+                    candidateUser?: string;
+                    candidateGroup?: string;
+                    processInstanceId?: string;
+                    state?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow/tasks/{taskId}/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Claim workflow task */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    taskId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+                /** @description Conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow/tasks/{taskId}/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Complete workflow task */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    taskId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": {
+                        variables?: Record<string, never>;
+                        formData?: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow/message": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Send workflow message event */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        messageName: string;
+                        correlationKey?: string;
+                        variables?: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow/signal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Broadcast workflow signal event */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        signalName: string;
+                        variables?: Record<string, never>;
+                    };
+                };
+            };
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow/incidents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List workflow incidents */
+        get: {
+            parameters: {
+                query?: {
+                    state?: string;
+                    processInstanceId?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow/incidents/{incidentId}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resolve workflow incident */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    incidentId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workflow/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get workflow audit log */
+        get: {
+            parameters: {
+                query?: {
+                    processInstanceId?: string;
+                    taskId?: string;
+                    userId?: string;
+                    from?: string;
+                    to?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+}
+export type webhooks = Record<string, never>;
+export interface components {
+    schemas: {
+        StandardResponse: {
+            ok?: boolean;
+            data?: unknown;
+        };
+        ErrorResponse: {
+            /** @default false */
+            ok: boolean;
+            error?: {
+                code?: string;
+                message?: string;
+            };
+        };
+        DirectErrorResponse: {
+            /** @default false */
+            success: boolean;
+            error?: string;
+        };
+        User: {
+            id?: string;
+            email?: string;
+            name?: string;
+            roles?: string[];
+            perms?: string[];
+        };
+        Permission: {
+            code?: string;
+            name?: string;
+            description?: string | null;
             /** Format: date-time */
-            occurredAt?: string;
-            timezone?: string;
+            created_at?: string;
+        };
+        Role: {
+            id?: string;
+            name?: string;
+            permissions?: string[];
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            updated_at?: string;
+        };
+        Comment: {
+            id?: string;
+            targetType?: string | null;
+            targetId?: string | null;
+            targetFieldId?: string | null;
+            containerType?: string | null;
+            containerId?: string | null;
+            spreadsheetId?: string | null;
+            rowId?: string | null;
+            fieldId?: string | null;
+            content?: string;
+            authorId?: string;
+            parentId?: string | null;
+            resolved?: boolean;
+            createdAt?: string;
+            updatedAt?: string;
+            mentions?: string[];
+        };
+        CommentsListResponse: {
+            /** @example true */
+            ok?: boolean;
+            data?: {
+                items?: components["schemas"]["Comment"][];
+                /** @example 1 */
+                total?: number;
+                /** @example 50 */
+                limit?: number;
+                /** @example 0 */
+                offset?: number;
+            };
+        };
+        PluginAdminEntry: {
+            name?: string;
+            displayName?: string | null;
+            description?: string | null;
+            version?: string | null;
+            author?: string | null;
+            /** @enum {string} */
+            status?: "active" | "inactive" | "failed";
+            error?: string | null;
+            lastAttempt?: string | null;
+            registryStatus?: string | null;
+            lastActivated?: string | null;
+        };
+        PluginConfigEntry: {
+            config?: Record<string, never>;
+            schema?: Record<string, never> | null;
+            version?: string | null;
+            last_modified?: string | null;
+            modified_by?: string | null;
+        };
+        AttendanceEvent: {
+            id?: string;
+            user_id?: string;
+            org_id?: string;
+            /** Format: date */
+            work_date?: string;
+            /** Format: date-time */
+            occurred_at?: string;
+            /** @enum {string} */
+            event_type?: "check_in" | "check_out" | "adjustment";
             source?: string;
+            timezone?: string;
             location?: Record<string, never>;
             meta?: Record<string, never>;
-            orgId?: string;
-          };
+            /** Format: date-time */
+            created_at?: string;
         };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: {
-                event?: components["schemas"]["AttendanceEvent"];
-                record?: components["schemas"]["AttendanceRecord"];
-              };
-            };
-          };
-        };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/attendance/records": {
-    /** List attendance records */
-    get: {
-      parameters: {
-        query?: {
-          userId?: string;
-          orgId?: string;
-          from?: string;
-          to?: string;
-          page?: number;
-          pageSize?: number;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: {
-                items?: components["schemas"]["AttendanceRecord"][];
-                total?: number;
-                page?: number;
-                pageSize?: number;
-              };
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/attendance/summary": {
-    /** Attendance summary */
-    get: {
-      parameters: {
-        query?: {
-          userId?: string;
-          orgId?: string;
-          from?: string;
-          to?: string;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: components["schemas"]["AttendanceSummary"];
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/attendance/requests": {
-    /** List attendance requests */
-    get: {
-      parameters: {
-        query?: {
-          userId?: string;
-          orgId?: string;
-          status?: string;
-          from?: string;
-          to?: string;
-          page?: number;
-          pageSize?: number;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: {
-                items?: components["schemas"]["AttendanceRequest"][];
-                total?: number;
-                page?: number;
-                pageSize?: number;
-              };
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-    /** Create attendance adjustment request */
-    post: {
-      requestBody: {
-        content: {
-          "application/json": {
+        AttendanceRecord: {
+            id?: string;
+            user_id?: string;
+            org_id?: string;
             /** Format: date */
-            workDate: string;
+            work_date?: string;
+            timezone?: string;
+            /** Format: date-time */
+            first_in_at?: string | null;
+            /** Format: date-time */
+            last_out_at?: string | null;
+            work_minutes?: number;
+            late_minutes?: number;
+            early_leave_minutes?: number;
+            status?: string;
+            is_workday?: boolean;
+            meta?: Record<string, never>;
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            updated_at?: string;
+        };
+        AttendanceRequest: {
+            id?: string;
+            user_id?: string;
+            org_id?: string;
+            /** Format: date */
+            work_date?: string;
             /** @enum {string} */
-            requestType: "missed_check_in" | "missed_check_out" | "time_correction";
+            request_type?: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime";
             /** Format: date-time */
-            requestedInAt?: string;
+            requested_in_at?: string | null;
             /** Format: date-time */
-            requestedOutAt?: string;
-            reason?: string;
-            orgId?: string;
-          };
-        };
-      };
-      responses: {
-        /** @description Created */
-        201: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: {
-                request?: components["schemas"]["AttendanceRequest"];
-              };
-            };
-          };
-        };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/attendance/requests/{id}/approve": {
-    /** Approve attendance request */
-    post: {
-      parameters: {
-        path: {
-          id: string;
-        };
-      };
-      requestBody?: {
-        content: {
-          "application/json": {
-            comment?: string;
+            requested_out_at?: string | null;
+            reason?: string | null;
+            /** @enum {string} */
+            status?: "pending" | "approved" | "rejected" | "cancelled";
+            approval_instance_id?: string | null;
+            resolved_by?: string | null;
+            /** Format: date-time */
+            resolved_at?: string | null;
             metadata?: Record<string, never>;
-          };
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            updated_at?: string;
         };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: {
-                requestId?: string;
-                status?: string;
-                orgId?: string;
-                userId?: string;
-                record?: components["schemas"]["AttendanceRecord"];
-              };
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/attendance/requests/{id}/reject": {
-    /** Reject attendance request */
-    post: {
-      parameters: {
-        path: {
-          id: string;
-        };
-      };
-      requestBody?: {
-        content: {
-          "application/json": {
-            comment?: string;
-            metadata?: Record<string, never>;
-          };
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: {
-                requestId?: string;
-                status?: string;
-                orgId?: string;
-                userId?: string;
-                record?: components["schemas"]["AttendanceRecord"] | null;
-              };
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/attendance/rules/default": {
-    /** Get default attendance rule */
-    get: {
-      parameters: {
-        query?: {
-          orgId?: string;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: components["schemas"]["AttendanceRule"];
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-    /** Update default attendance rule */
-    put: {
-      requestBody: {
-        content: {
-          "application/json": {
-            name?: string;
-            timezone?: string;
-            workStartTime?: string;
-            workEndTime?: string;
-            lateGraceMinutes?: number;
-            earlyGraceMinutes?: number;
-            roundingMinutes?: number;
-            workingDays?: number[];
-            orgId?: string;
-          };
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: components["schemas"]["AttendanceRule"];
-            };
-          };
-        };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/attendance/shifts": {
-    /** List attendance shifts */
-    get: {
-      parameters: {
-        query?: {
-          orgId?: string;
-          page?: number;
-          pageSize?: number;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: {
-                items?: components["schemas"]["AttendanceShift"][];
-                total?: number;
-                page?: number;
-                pageSize?: number;
-              };
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-    /** Create attendance shift */
-    post: {
-      requestBody: {
-        content: {
-          "application/json": {
-            name: string;
-            timezone?: string;
-            workStartTime?: string;
-            workEndTime?: string;
-            lateGraceMinutes?: number;
-            earlyGraceMinutes?: number;
-            roundingMinutes?: number;
-            workingDays?: number[];
-            orgId?: string;
-          };
-        };
-      };
-      responses: {
-        /** @description Created */
-        201: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: components["schemas"]["AttendanceShift"];
-            };
-          };
-        };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/attendance/shifts/{id}": {
-    /** Update attendance shift */
-    put: {
-      parameters: {
-        path: {
-          id: string;
-        };
-      };
-      requestBody: {
-        content: {
-          "application/json": {
-            name?: string;
-            timezone?: string;
-            workStartTime?: string;
-            workEndTime?: string;
-            lateGraceMinutes?: number;
-            earlyGraceMinutes?: number;
-            roundingMinutes?: number;
-            workingDays?: number[];
-            orgId?: string;
-          };
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: components["schemas"]["AttendanceShift"];
-            };
-          };
-        };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-    /** Delete attendance shift */
-    delete: {
-      parameters: {
-        path: {
-          id: string;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: {
-                id?: string;
-              };
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/attendance/assignments": {
-    /** List attendance shift assignments */
-    get: {
-      parameters: {
-        query?: {
-          orgId?: string;
-          userId?: string;
-          page?: number;
-          pageSize?: number;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: {
-                items?: {
-                    assignment?: components["schemas"]["AttendanceShiftAssignment"];
-                    shift?: components["schemas"]["AttendanceShift"];
-                  }[];
-                total?: number;
-                page?: number;
-                pageSize?: number;
-              };
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-    /** Create attendance shift assignment */
-    post: {
-      requestBody: {
-        content: {
-          "application/json": {
-            userId: string;
-            shiftId: string;
+        AttendanceAnomaly: {
+            recordId?: string;
             /** Format: date */
-            startDate: string;
+            workDate?: string;
+            status?: string;
+            isWorkday?: boolean;
+            /** Format: date-time */
+            firstInAt?: string | null;
+            /** Format: date-time */
+            lastOutAt?: string | null;
+            workMinutes?: number;
+            lateMinutes?: number;
+            earlyLeaveMinutes?: number;
+            leaveMinutes?: number;
+            overtimeMinutes?: number;
+            warnings?: string[];
+            /** @enum {string} */
+            state?: "open" | "pending";
+            request?: {
+                id?: string;
+                status?: string;
+                requestType?: string;
+            } | null;
+            suggestedRequestType?: string | null;
+        };
+        AttendanceLeaveType: {
+            id?: string;
+            orgId?: string;
+            code?: string;
+            name?: string;
+            paid?: boolean;
+            requiresApproval?: boolean;
+            requiresAttachment?: boolean;
+            defaultMinutesPerDay?: number;
+            isActive?: boolean;
+        };
+        AttendanceOvertimeRule: {
+            id?: string;
+            orgId?: string;
+            name?: string;
+            minMinutes?: number;
+            roundingMinutes?: number;
+            maxMinutesPerDay?: number;
+            requiresApproval?: boolean;
+            isActive?: boolean;
+        };
+        AttendanceApprovalStep: {
+            name?: string;
+            approverUserIds?: string[];
+            /** @deprecated */
+            approver_user_ids?: string[];
+            approverRoleIds?: string[];
+            /** @deprecated */
+            approver_role_ids?: string[];
+        };
+        AttendanceApprovalFlow: {
+            id?: string;
+            orgId?: string;
+            name?: string;
+            requestType?: string;
+            steps?: components["schemas"]["AttendanceApprovalStep"][];
+            isActive?: boolean;
+        };
+        AttendanceRotationRule: {
+            id?: string;
+            orgId?: string;
+            name?: string;
+            timezone?: string;
+            shiftSequence?: string[];
+            isActive?: boolean;
+        };
+        AttendanceRotationAssignment: {
+            id?: string;
+            orgId?: string;
+            /** @deprecated */
+            org_id?: string;
+            userId?: string;
+            /** @deprecated */
+            user_id?: string;
+            rotationRuleId?: string;
+            /** @deprecated */
+            rotation_rule_id?: string;
+            /** Format: date */
+            startDate?: string;
+            /**
+             * Format: date
+             * @deprecated
+             */
+            start_date?: string;
             /** Format: date */
             endDate?: string | null;
+            /**
+             * Format: date
+             * @deprecated
+             */
+            end_date?: string | null;
             isActive?: boolean;
+            /** @deprecated */
+            is_active?: boolean;
+        };
+        AttendanceRotationAssignmentItem: {
+            assignment?: components["schemas"]["AttendanceRotationAssignment"];
+            rotation?: components["schemas"]["AttendanceRotationRule"];
+        };
+        AttendanceRequestReportItem: {
+            requestType?: string;
+            status?: string;
+            total?: number;
+            minutes?: number;
+        };
+        AttendanceSummary: {
+            total_days?: number;
+            total_minutes?: number;
+            total_late_minutes?: number;
+            total_early_leave_minutes?: number;
+            leave_minutes?: number;
+            overtime_minutes?: number;
+            normal_days?: number;
+            late_days?: number;
+            early_leave_days?: number;
+            late_early_days?: number;
+            partial_days?: number;
+            absent_days?: number;
+            adjusted_days?: number;
+            off_days?: number;
+        };
+        AttendanceRule: {
+            id?: string;
             orgId?: string;
-          };
+            name?: string;
+            timezone?: string;
+            workStartTime?: string;
+            workEndTime?: string;
+            lateGraceMinutes?: number;
+            earlyGraceMinutes?: number;
+            roundingMinutes?: number;
+            workingDays?: number[];
+            isDefault?: boolean;
         };
-      };
-      responses: {
-        /** @description Created */
-        201: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: {
-                assignment?: components["schemas"]["AttendanceShiftAssignment"];
-                shift?: components["schemas"]["AttendanceShift"];
-              };
-            };
-          };
+        AttendanceRuleSet: {
+            id?: string;
+            orgId?: string;
+            name?: string;
+            description?: string | null;
+            version?: number;
+            scope?: string;
+            config?: Record<string, never>;
+            isDefault?: boolean;
         };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/attendance/assignments/{id}": {
-    /** Update attendance shift assignment */
-    put: {
-      parameters: {
-        path: {
-          id: string;
+        AttendanceGroup: {
+            id?: string;
+            orgId?: string;
+            name?: string;
+            code?: string;
+            timezone?: string;
+            ruleSetId?: string | null;
+            description?: string | null;
+            /** Format: date-time */
+            createdAt?: string | null;
+            /** Format: date-time */
+            updatedAt?: string | null;
         };
-      };
-      requestBody: {
-        content: {
-          "application/json": {
+        AttendanceGroupMember: {
+            id?: string;
+            orgId?: string;
+            groupId?: string;
             userId?: string;
-            shiftId?: string;
+            /** Format: date-time */
+            createdAt?: string | null;
+        };
+        AttendancePayrollTemplate: {
+            id?: string;
+            orgId?: string;
+            name?: string;
+            timezone?: string;
+            startDay?: number;
+            endDay?: number;
+            endMonthOffset?: number;
+            autoGenerate?: boolean;
+            config?: Record<string, never>;
+            isDefault?: boolean;
+        };
+        AttendancePayrollCycle: {
+            id?: string;
+            orgId?: string;
+            templateId?: string | null;
+            name?: string | null;
             /** Format: date */
             startDate?: string;
             /** Format: date */
-            endDate?: string | null;
-            isActive?: boolean;
-            orgId?: string;
-          };
+            endDate?: string;
+            status?: string;
+            metadata?: Record<string, never>;
         };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: {
-                assignment?: components["schemas"]["AttendanceShiftAssignment"];
-                shift?: components["schemas"]["AttendanceShift"];
-              };
-            };
-          };
+        AttendanceImportTemplate: {
+            source?: string;
+            mapping?: Record<string, never>;
+            mappingProfiles?: components["schemas"]["AttendanceImportMappingProfile"][];
+            payloadExample?: Record<string, never>;
         };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-    /** Delete attendance shift assignment */
-    delete: {
-      parameters: {
-        path: {
-          id: string;
+        AttendanceImportMappingProfile: {
+            id?: string;
+            name?: string;
+            description?: string | null;
+            source?: string | null;
+            mapping?: Record<string, never> | null;
+            requiredFields?: string[];
+            userMapKeyField?: string | null;
+            userMapSourceFields?: string[];
         };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: {
-                id?: string;
-              };
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/attendance/holidays": {
-    /** List attendance holidays */
-    get: {
-      parameters: {
-        query?: {
-          orgId?: string;
-          from?: string;
-          to?: string;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: {
-                items?: components["schemas"]["AttendanceHoliday"][];
-                total?: number;
-              };
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-    /** Create attendance holiday */
-    post: {
-      requestBody: {
-        content: {
-          "application/json": {
+        AttendanceImportPreviewItem: {
+            userId?: string;
             /** Format: date */
-            date: string;
-            name?: string | null;
-            isWorkingDay?: boolean;
+            workDate?: string;
+            /** Format: date-time */
+            firstInAt?: string | null;
+            /** Format: date-time */
+            lastOutAt?: string | null;
+            workMinutes?: number;
+            lateMinutes?: number;
+            earlyLeaveMinutes?: number;
+            leaveMinutes?: number;
+            overtimeMinutes?: number;
+            status?: string;
+            isWorkday?: boolean;
+            warnings?: string[];
+            appliedPolicies?: string[];
+            userGroups?: string[];
+        };
+        AttendanceImportPreviewStats: {
+            invalid?: number;
+            duplicates?: number;
+        };
+        AttendanceImportPreviewData: {
+            items?: components["schemas"]["AttendanceImportPreviewItem"][];
+            total?: number;
+            rowCount?: number;
+            truncated?: boolean;
+            previewLimit?: number;
+            mappingUsed?: Record<string, never>[];
+            csvWarnings?: string[];
+            groupWarnings?: string[];
+            asyncSimplified?: boolean;
+            stats?: components["schemas"]["AttendanceImportPreviewStats"];
+        };
+        AttendanceImportRequest: {
+            source?: string;
             orgId?: string;
-          };
+            userId?: string;
+            timezone?: string;
+            ruleSetId?: string;
+            mappingProfileId?: string;
+            commitToken?: string;
+            idempotencyKey?: string;
+            engine?: Record<string, never>;
+            mapping?: Record<string, never>;
+            columns?: Record<string, never>[];
+            data?: Record<string, never>;
+            csvText?: string;
+            csvFileId?: string;
+            csvOptions?: Record<string, never>;
+            rows?: Record<string, never>[];
+            entries?: Record<string, never>[];
+            userMap?: Record<string, never>;
+            userMapKeyField?: string;
+            userMapSourceFields?: string[];
+            statusMap?: Record<string, never>;
+            mode?: string;
         };
-      };
-      responses: {
-        /** @description Created */
-        201: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: components["schemas"]["AttendanceHoliday"];
-            };
-          };
+        AttendanceImportJob: {
+            id?: string;
+            orgId?: string;
+            batchId?: string | null;
+            createdBy?: string | null;
+            idempotencyKey?: string | null;
+            kind?: string;
+            status?: string;
+            engine?: string | null;
+            chunkConfig?: Record<string, never> | null;
+            recordUpsertStrategy?: string | null;
+            progress?: number;
+            total?: number;
+            progressPercent?: number;
+            processedRows?: number;
+            failedRows?: number;
+            skippedCount?: number;
+            skippedRows?: {
+                [key: string]: unknown;
+            }[];
+            elapsedMs?: number;
+            /** Format: float */
+            throughputRowsPerSec?: number;
+            error?: string | null;
+            preview?: components["schemas"]["AttendanceImportPreviewData"];
+            /** Format: date-time */
+            startedAt?: string | null;
+            /** Format: date-time */
+            finishedAt?: string | null;
+            /** Format: date-time */
+            createdAt?: string | null;
+            /** Format: date-time */
+            updatedAt?: string | null;
         };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/attendance/holidays/{id}": {
-    /** Update attendance holiday */
-    put: {
-      parameters: {
-        path: {
-          id: string;
+        AttendanceImportResult: {
+            imported?: number;
+            processedRows?: number;
+            failedRows?: number;
+            elapsedMs?: number;
+            engine?: string | null;
+            recordUpsertStrategy?: string | null;
+            items?: {
+                id?: string;
+                userId?: string | null;
+                /** Format: date */
+                workDate?: string;
+                engine?: string | null;
+            }[];
+            skipped?: {
+                userId?: string | null;
+                /** Format: date */
+                workDate?: string | null;
+                warnings?: string[];
+            }[];
+            batchId?: string | null;
+            idempotent?: boolean;
+            itemsTruncated?: boolean;
+            csvWarnings?: string[];
+            groupWarnings?: string[];
+            meta?: Record<string, never>;
         };
-      };
-      requestBody: {
-        content: {
-          "application/json": {
+        AttendanceImportPrepareData: {
+            commitToken?: string;
+            /** Format: date-time */
+            expiresAt?: string;
+            ttlSeconds?: number;
+        };
+        AttendanceImportUploadData: {
+            fileId?: string;
+            rowCount?: number;
+            bytes?: number;
+            /** Format: date-time */
+            createdAt?: string;
+            /** Format: date-time */
+            expiresAt?: string;
+            maxBytes?: number;
+        };
+        AttendanceImportAsyncJobData: {
+            job?: components["schemas"]["AttendanceImportJob"];
+            idempotent?: boolean;
+        };
+        AttendanceIntegration: {
+            id?: string;
+            orgId?: string;
+            name?: string;
+            type?: string;
+            status?: string;
+            config?: Record<string, never>;
+            /** Format: date-time */
+            lastSyncAt?: string | null;
+            /** Format: date-time */
+            createdAt?: string;
+            /** Format: date-time */
+            updatedAt?: string;
+        };
+        AttendanceIntegrationRun: {
+            id?: string;
+            orgId?: string;
+            integrationId?: string;
+            status?: string;
+            message?: string | null;
+            meta?: Record<string, never>;
+            /** Format: date-time */
+            startedAt?: string;
+            /** Format: date-time */
+            finishedAt?: string | null;
+            /** Format: date-time */
+            createdAt?: string;
+            /** Format: date-time */
+            updatedAt?: string;
+        };
+        AttendanceShift: {
+            id?: string;
+            orgId?: string;
+            /** @deprecated */
+            org_id?: string;
+            name?: string;
+            timezone?: string;
+            workStartTime?: string;
+            /** @deprecated */
+            work_start_time?: string;
+            workEndTime?: string;
+            /** @deprecated */
+            work_end_time?: string;
+            isOvernight?: boolean;
+            /** @deprecated */
+            is_overnight?: boolean;
+            lateGraceMinutes?: number;
+            /** @deprecated */
+            late_grace_minutes?: number;
+            earlyGraceMinutes?: number;
+            /** @deprecated */
+            early_grace_minutes?: number;
+            roundingMinutes?: number;
+            /** @deprecated */
+            rounding_minutes?: number;
+            workingDays?: number[];
+            /** @deprecated */
+            working_days?: number[];
+        };
+        AttendanceShiftAssignment: {
+            id?: string;
+            orgId?: string;
+            /** @deprecated */
+            org_id?: string;
+            userId?: string;
+            /** @deprecated */
+            user_id?: string;
+            shiftId?: string;
+            /** @deprecated */
+            shift_id?: string;
+            /** Format: date */
+            startDate?: string;
+            /**
+             * Format: date
+             * @deprecated
+             */
+            start_date?: string;
+            /** Format: date */
+            endDate?: string | null;
+            /**
+             * Format: date
+             * @deprecated
+             */
+            end_date?: string | null;
+            isActive?: boolean;
+            /** @deprecated */
+            is_active?: boolean;
+        };
+        AttendanceHoliday: {
+            id?: string;
+            orgId?: string;
             /** Format: date */
             date?: string;
             name?: string | null;
             isWorkingDay?: boolean;
-            orgId?: string;
-          };
+            /** @enum {string} */
+            type?: "holiday" | "working_day_override";
+            /** @enum {string} */
+            holidayType?: "holiday" | "working_day_override";
         };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: components["schemas"]["AttendanceHoliday"];
+        AttendanceSettings: {
+            autoAbsence?: {
+                enabled?: boolean;
+                runAt?: string;
+                lookbackDays?: number;
             };
-          };
+            ipAllowlist?: string[];
+            geoFence?: {
+                lat?: number;
+                lng?: number;
+                radiusMeters?: number;
+            } | null;
+            minPunchIntervalMinutes?: number;
         };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-    /** Delete attendance holiday */
-    delete: {
-      parameters: {
-        path: {
-          id: string;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: {
-                id?: string;
-              };
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/attendance/settings": {
-    /** Get attendance settings */
-    get: {
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: components["schemas"]["AttendanceSettings"];
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-    /** Update attendance settings */
-    put: {
-      requestBody: {
-        content: {
-          "application/json": components["schemas"]["AttendanceSettings"];
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              ok?: boolean;
-              data?: components["schemas"]["AttendanceSettings"];
-            };
-          };
-        };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/attendance/export": {
-    /** Export attendance records as CSV */
-    get: {
-      parameters: {
-        query?: {
-          userId?: string;
-          orgId?: string;
-          from?: string;
-          to?: string;
-          limit?: number;
-        };
-      };
-      responses: {
-        /** @description CSV export */
-        200: {
-          content: {
-            "text/csv": string;
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/audit-logs": {
-    /** Admin-only audit log query */
-    get: {
-      parameters: {
-        query?: {
-          actorId?: string;
-          resourceType?: string;
-          resourceId?: string;
-          action?: string;
-          from?: string;
-          to?: string;
-          page?: number;
-          pageSize?: number;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: never;
-        };
-        /** @description Forbidden */
-        403: {
-          content: never;
-        };
-      };
-    };
-  };
-  "/api/spreadsheets/{id}/permissions": {
-    /** List spreadsheet permissions */
-    get: {
-      parameters: {
-        path: {
-          id: string;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              /** @example true */
-              ok?: boolean;
-              data?: {
-                items?: {
-                    userId?: string;
-                    permissions?: string[];
-                  }[];
-              };
-            };
-          };
-        };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-        404: components["responses"]["NotFound"];
-      };
-    };
-  };
-  "/api/spreadsheets/{id}/permissions/grant": {
-    /** Grant spreadsheet permission */
-    post: {
-      parameters: {
-        path: {
-          id: string;
-        };
-      };
-      requestBody: {
-        content: {
-          "application/json": {
-            userId: string;
-            permission: string;
-          };
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: never;
-        };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-        404: components["responses"]["NotFound"];
-      };
-    };
-  };
-  "/api/spreadsheets/{id}/permissions/revoke": {
-    /** Revoke spreadsheet permission */
-    post: {
-      parameters: {
-        path: {
-          id: string;
-        };
-      };
-      requestBody: {
-        content: {
-          "application/json": {
-            userId: string;
-            permission: string;
-          };
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: never;
-        };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-        404: components["responses"]["NotFound"];
-      };
-    };
-  };
-  "/api/spreadsheets": {
-    /** List spreadsheets */
-    get: {
-      parameters: {
-        query?: {
-          page?: number;
-          pageSize?: number;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              /** @example true */
-              ok?: boolean;
-              data?: {
-                items?: components["schemas"]["Spreadsheet"][];
-                page?: number;
-                pageSize?: number;
-                total?: number;
-              };
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-    /** Create spreadsheet */
-    post: {
-      requestBody: {
-        content: {
-          "application/json": {
+        Spreadsheet: {
             id?: string;
-            name: string;
-            owner_id?: string;
-            ownerId?: string;
-            workspace_id?: string;
-            initial_sheets?: {
-                id?: string;
-                name: string;
-              }[];
-          };
-        };
-      };
-      responses: {
-        /** @description Created */
-        201: {
-          content: {
-            "application/json": {
-              /** @example true */
-              ok?: boolean;
-              data?: {
-                spreadsheet?: components["schemas"]["Spreadsheet"];
-                sheets?: components["schemas"]["Sheet"][];
-              };
-            };
-          };
-        };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
-    };
-  };
-  "/api/spreadsheets/{id}": {
-    /** Get spreadsheet */
-    get: {
-      parameters: {
-        path: {
-          id: string;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              /** @example true */
-              ok?: boolean;
-              data?: components["schemas"]["Spreadsheet"] & {
-                sheets?: components["schemas"]["Sheet"][];
-              };
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-        404: components["responses"]["NotFound"];
-      };
-    };
-    /** Update spreadsheet */
-    put: {
-      parameters: {
-        path: {
-          id: string;
-        };
-      };
-      requestBody: {
-        content: {
-          "application/json": {
             name?: string;
-          };
+            owner_id?: string | null;
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            updated_at?: string;
+            /** Format: date-time */
+            deleted_at?: string | null;
         };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              /** @example true */
-              ok?: boolean;
-              data?: components["schemas"]["Spreadsheet"];
-            };
-          };
-        };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-        404: components["responses"]["NotFound"];
-      };
-    };
-    /** Delete spreadsheet */
-    delete: {
-      parameters: {
-        path: {
-          id: string;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              /** @example true */
-              ok?: boolean;
-              data?: {
-                id?: string;
-              };
-            };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-        404: components["responses"]["NotFound"];
-      };
-    };
-  };
-  "/api/spreadsheets/{id}/sheets/{sheetId}": {
-    /** Update sheet metadata */
-    put: {
-      parameters: {
-        path: {
-          id: string;
-          sheetId: string;
-        };
-      };
-      requestBody: {
-        content: {
-          "application/json": {
+        Sheet: {
+            id?: string;
+            spreadsheet_id?: string;
+            name?: string;
+            order_index?: number;
             row_count?: number;
-            rowCount?: number;
             column_count?: number;
-            columnCount?: number;
-          };
+            frozen_rows?: number | null;
+            frozen_columns?: number | null;
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            updated_at?: string;
         };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              /** @example true */
-              ok?: boolean;
-              data?: components["schemas"]["Sheet"];
+        Cell: {
+            id?: string;
+            sheet_id?: string;
+            row_index?: number;
+            column_index?: number;
+            value?: unknown;
+            data_type?: string | null;
+            formula?: string | null;
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            updated_at?: string;
+        };
+        MultitableBase: {
+            id?: string;
+            name?: string;
+            icon?: string | null;
+            color?: string | null;
+            ownerId?: string | null;
+            workspaceId?: string | null;
+        };
+        MultitableSheet: {
+            id?: string;
+            baseId?: string | null;
+            name?: string;
+            description?: string | null;
+        };
+        MultitableView: {
+            id?: string;
+            sheetId?: string;
+            name?: string;
+            type?: string;
+            filterInfo?: {
+                [key: string]: unknown;
             };
-          };
-        };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-        404: components["responses"]["NotFound"];
-      };
-    };
-  };
-  "/api/spreadsheets/{id}/sheets/{sheetId}/cells": {
-    /** Get spreadsheet cells */
-    get: {
-      parameters: {
-        path: {
-          id: string;
-          sheetId: string;
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              /** @example true */
-              ok?: boolean;
-              data?: {
-                sheet?: components["schemas"]["Sheet"];
-                cells?: components["schemas"]["Cell"][];
-              };
+            sortInfo?: {
+                [key: string]: unknown;
             };
-          };
-        };
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-        404: components["responses"]["NotFound"];
-      };
-    };
-    /** Update spreadsheet cells */
-    put: {
-      parameters: {
-        path: {
-          id: string;
-          sheetId: string;
-        };
-      };
-      requestBody: {
-        content: {
-          "application/json": {
-            cells: {
-                row: number;
-                col: number;
-                value?: unknown;
-                formula?: string;
-                dataType?: string;
-                data_type?: string;
-              }[];
-          };
-        };
-      };
-      responses: {
-        /** @description OK */
-        200: {
-          content: {
-            "application/json": {
-              /** @example true */
-              ok?: boolean;
-              data?: {
-                cells?: components["schemas"]["Cell"][];
-              };
+            groupInfo?: {
+                [key: string]: unknown;
             };
-          };
+            hiddenFieldIds?: string[];
+            config?: {
+                [key: string]: unknown;
+            };
         };
-        400: components["responses"]["ValidationError"];
-        401: components["responses"]["Unauthorized"];
-        403: components["responses"]["Forbidden"];
-      };
+        MultitableField: {
+            id?: string;
+            name?: string;
+            /** @enum {string} */
+            type?: "string" | "number" | "boolean" | "date" | "formula" | "select" | "link" | "lookup" | "rollup" | "attachment";
+            property?: {
+                [key: string]: unknown;
+            };
+            options?: {
+                value: string;
+                color?: string | null;
+            }[];
+            order?: number;
+        };
+        MultitableRecord: {
+            id?: string;
+            version?: number;
+            data?: {
+                [key: string]: unknown;
+            };
+        };
+        MultitableCommentsScope: {
+            targetType: string;
+            targetId: string;
+            targetFieldId?: string | null;
+            containerType: string;
+            containerId: string;
+        };
+        MultitableLinkedRecordSummary: {
+            id: string;
+            display: string;
+        };
+        MultitableAttachment: {
+            id: string;
+            filename: string;
+            mimeType: string;
+            size: number;
+            url: string;
+            thumbnailUrl?: string | null;
+            /** Format: date-time */
+            uploadedAt?: string | null;
+        };
+        MultitableRecordVersion: {
+            recordId: string;
+            version: number;
+        };
+        MultitableComputedRecord: {
+            recordId: string;
+            data: {
+                [key: string]: unknown;
+            };
+        };
+        MultitableRelatedRecord: {
+            sheetId: string;
+            recordId: string;
+            data: {
+                [key: string]: unknown;
+            };
+        };
+        MultitableLinkFieldRef: {
+            id: string;
+            name: string;
+            type: string;
+        };
+        MultitableLinkSummaryMap: {
+            [key: string]: components["schemas"]["MultitableLinkedRecordSummary"][];
+        };
+        MultitableViewLinkSummaries: {
+            [key: string]: components["schemas"]["MultitableLinkSummaryMap"];
+        };
+        MultitableAttachmentSummaryMap: {
+            [key: string]: components["schemas"]["MultitableAttachment"][];
+        };
+        MultitableViewAttachmentSummaries: {
+            [key: string]: components["schemas"]["MultitableAttachmentSummaryMap"];
+        };
+        MultitablePage: {
+            offset: number;
+            limit: number;
+            total: number;
+            hasMore: boolean;
+        };
+        MultitableViewMeta: {
+            warnings?: string[];
+            computedFilterSort?: boolean;
+            ignoredSortFieldIds?: string[];
+            ignoredFilterFieldIds?: string[];
+        };
+        MultitableCapabilities: {
+            canRead: boolean;
+            canCreateRecord: boolean;
+            canEditRecord: boolean;
+            canDeleteRecord: boolean;
+            canManageFields: boolean;
+            canManageViews: boolean;
+            canComment: boolean;
+            canManageAutomation: boolean;
+        };
+        MultitableContext: {
+            base?: components["schemas"]["MultitableBase"] | null;
+            sheet?: components["schemas"]["MultitableSheet"] | null;
+            sheets?: components["schemas"]["MultitableSheet"][];
+            views?: components["schemas"]["MultitableView"][];
+            capabilities?: components["schemas"]["MultitableCapabilities"];
+        };
+        MultitableViewData: {
+            id: string;
+            fields: components["schemas"]["MultitableField"][];
+            rows: components["schemas"]["MultitableRecord"][];
+            linkSummaries?: components["schemas"]["MultitableViewLinkSummaries"];
+            attachmentSummaries?: components["schemas"]["MultitableViewAttachmentSummaries"];
+            view?: components["schemas"]["MultitableView"] | null;
+            meta?: components["schemas"]["MultitableViewMeta"];
+            page?: components["schemas"]["MultitablePage"];
+        };
+        MultitableRecordContext: {
+            sheet: components["schemas"]["MultitableSheet"];
+            view?: components["schemas"]["MultitableView"] | null;
+            fields: components["schemas"]["MultitableField"][];
+            record: components["schemas"]["MultitableRecord"];
+            capabilities: components["schemas"]["MultitableCapabilities"];
+            commentsScope: components["schemas"]["MultitableCommentsScope"];
+            linkSummaries: components["schemas"]["MultitableLinkSummaryMap"];
+            attachmentSummaries?: components["schemas"]["MultitableAttachmentSummaryMap"];
+        };
+        MultitableFormContext: {
+            /** @enum {string} */
+            mode: "form";
+            readOnly: boolean;
+            submitPath: string;
+            sheet: components["schemas"]["MultitableSheet"];
+            view?: components["schemas"]["MultitableView"] | null;
+            fields: components["schemas"]["MultitableField"][];
+            capabilities: components["schemas"]["MultitableCapabilities"];
+            record?: components["schemas"]["MultitableRecord"] | null;
+            commentsScope?: components["schemas"]["MultitableCommentsScope"] | null;
+            attachmentSummaries?: components["schemas"]["MultitableAttachmentSummaryMap"];
+        };
+        MultitablePersonFieldPrepareResult: {
+            targetSheet: components["schemas"]["MultitableSheet"];
+            fieldProperty: {
+                [key: string]: unknown;
+            };
+        };
+        MultitableRecordMutationResult: {
+            record: components["schemas"]["MultitableRecord"];
+            commentsScope: components["schemas"]["MultitableCommentsScope"];
+            attachmentSummaries?: components["schemas"]["MultitableAttachmentSummaryMap"];
+        };
+        MultitableFormSubmitResult: {
+            /** @enum {string} */
+            mode: "create" | "update";
+            record: components["schemas"]["MultitableRecord"];
+            commentsScope: components["schemas"]["MultitableCommentsScope"];
+            attachmentSummaries?: components["schemas"]["MultitableAttachmentSummaryMap"];
+        };
+        MultitablePatchResult: {
+            updated: components["schemas"]["MultitableRecordVersion"][];
+            records?: components["schemas"]["MultitableComputedRecord"][];
+            linkSummaries?: components["schemas"]["MultitableViewLinkSummaries"];
+            attachmentSummaries?: components["schemas"]["MultitableViewAttachmentSummaries"];
+            relatedRecords?: components["schemas"]["MultitableRelatedRecord"][];
+        };
     };
-  };
+    responses: {
+        /** @description Unauthorized - Missing or invalid JWT token */
+        Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Forbidden - Insufficient permissions */
+        Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Validation error - Invalid request data */
+        ValidationError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Conflict - Request conflicts with current resource state */
+        Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Not found - Resource does not exist */
+        NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Service unavailable - Temporary server issues */
+        ServiceUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        Pagination: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content?: never;
+        };
+    };
+    parameters: never;
+    requestBodies: never;
+    headers: never;
+    pathItems: never;
 }
-
-export type webhooks = Record<string, never>;
-
-export interface components {
-  schemas: {
-    StandardResponse: {
-      ok?: boolean;
-      data?: unknown;
-    };
-    ErrorResponse: {
-      /** @default false */
-      ok?: boolean;
-      error?: {
-        code?: string;
-        message?: string;
-      };
-    };
-    AttendanceEvent: {
-      id?: string;
-      user_id?: string;
-      org_id?: string;
-      /** Format: date */
-      work_date?: string;
-      /** Format: date-time */
-      occurred_at?: string;
-      /** @enum {string} */
-      event_type?: "check_in" | "check_out" | "adjustment";
-      source?: string;
-      timezone?: string;
-      location?: Record<string, never>;
-      meta?: Record<string, never>;
-      /** Format: date-time */
-      created_at?: string;
-    };
-    AttendanceRecord: {
-      id?: string;
-      user_id?: string;
-      org_id?: string;
-      /** Format: date */
-      work_date?: string;
-      timezone?: string;
-      /** Format: date-time */
-      first_in_at?: string | null;
-      /** Format: date-time */
-      last_out_at?: string | null;
-      work_minutes?: number;
-      late_minutes?: number;
-      early_leave_minutes?: number;
-      status?: string;
-      is_workday?: boolean;
-      meta?: Record<string, never>;
-      /** Format: date-time */
-      created_at?: string;
-      /** Format: date-time */
-      updated_at?: string;
-    };
-    AttendanceRequest: {
-      id?: string;
-      user_id?: string;
-      org_id?: string;
-      /** Format: date */
-      work_date?: string;
-      /** @enum {string} */
-      request_type?: "missed_check_in" | "missed_check_out" | "time_correction";
-      /** Format: date-time */
-      requested_in_at?: string | null;
-      /** Format: date-time */
-      requested_out_at?: string | null;
-      reason?: string | null;
-      /** @enum {string} */
-      status?: "pending" | "approved" | "rejected" | "cancelled";
-      approval_instance_id?: string | null;
-      resolved_by?: string | null;
-      /** Format: date-time */
-      resolved_at?: string | null;
-      metadata?: Record<string, never>;
-      /** Format: date-time */
-      created_at?: string;
-      /** Format: date-time */
-      updated_at?: string;
-    };
-    AttendanceSummary: {
-      total_days?: number;
-      total_minutes?: number;
-      normal_days?: number;
-      late_days?: number;
-      early_leave_days?: number;
-      late_early_days?: number;
-      partial_days?: number;
-      absent_days?: number;
-      adjusted_days?: number;
-      off_days?: number;
-    };
-    AttendanceRule: {
-      id?: string;
-      orgId?: string;
-      name?: string;
-      timezone?: string;
-      workStartTime?: string;
-      workEndTime?: string;
-      lateGraceMinutes?: number;
-      earlyGraceMinutes?: number;
-      roundingMinutes?: number;
-      workingDays?: number[];
-      isDefault?: boolean;
-    };
-    AttendanceShift: {
-      id?: string;
-      orgId?: string;
-      name?: string;
-      timezone?: string;
-      workStartTime?: string;
-      workEndTime?: string;
-      lateGraceMinutes?: number;
-      earlyGraceMinutes?: number;
-      roundingMinutes?: number;
-      workingDays?: number[];
-    };
-    AttendanceShiftAssignment: {
-      id?: string;
-      orgId?: string;
-      userId?: string;
-      shiftId?: string;
-      /** Format: date */
-      startDate?: string;
-      /** Format: date */
-      endDate?: string | null;
-      isActive?: boolean;
-    };
-    AttendanceHoliday: {
-      id?: string;
-      orgId?: string;
-      /** Format: date */
-      date?: string;
-      name?: string | null;
-      isWorkingDay?: boolean;
-    };
-    AttendanceSettings: {
-      autoAbsence?: {
-        enabled?: boolean;
-        runAt?: string;
-        lookbackDays?: number;
-      };
-      ipAllowlist?: string[];
-      geoFence?: {
-        lat?: number;
-        lng?: number;
-        radiusMeters?: number;
-      } | null;
-      minPunchIntervalMinutes?: number;
-    };
-    Spreadsheet: {
-      id?: string;
-      name?: string;
-      owner_id?: string | null;
-      /** Format: date-time */
-      created_at?: string;
-      /** Format: date-time */
-      updated_at?: string;
-      /** Format: date-time */
-      deleted_at?: string | null;
-    };
-    Sheet: {
-      id?: string;
-      spreadsheet_id?: string;
-      name?: string;
-      order_index?: number;
-      row_count?: number;
-      column_count?: number;
-      frozen_rows?: number | null;
-      frozen_columns?: number | null;
-      /** Format: date-time */
-      created_at?: string;
-      /** Format: date-time */
-      updated_at?: string;
-    };
-    Cell: {
-      id?: string;
-      sheet_id?: string;
-      row_index?: number;
-      column_index?: number;
-      value?: unknown;
-      data_type?: string | null;
-      formula?: string | null;
-      /** Format: date-time */
-      created_at?: string;
-      /** Format: date-time */
-      updated_at?: string;
-    };
-  };
-  responses: {
-    /** @description Unauthorized - Missing or invalid JWT token */
-    Unauthorized: {
-      content: {
-        "application/json": components["schemas"]["ErrorResponse"];
-      };
-    };
-    /** @description Forbidden - Insufficient permissions */
-    Forbidden: {
-      content: {
-        "application/json": components["schemas"]["ErrorResponse"];
-      };
-    };
-    /** @description Validation error - Invalid request data */
-    ValidationError: {
-      content: {
-        "application/json": components["schemas"]["ErrorResponse"];
-      };
-    };
-    /** @description Not found - Resource does not exist */
-    NotFound: {
-      content: {
-        "application/json": components["schemas"]["ErrorResponse"];
-      };
-    };
-    /** @description Service unavailable - Temporary server issues */
-    ServiceUnavailable: {
-      content: {
-        "application/json": components["schemas"]["ErrorResponse"];
-      };
-    };
-    Pagination: {
-      content: never;
-    };
-  };
-  parameters: never;
-  requestBodies: never;
-  headers: never;
-  pathItems: never;
-}
-
 export type $defs = Record<string, never>;
-
-export type external = Record<string, never>;
-
 export type operations = Record<string, never>;

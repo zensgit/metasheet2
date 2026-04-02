@@ -33,6 +33,7 @@ function isPlmAuditRouteState(value: unknown): value is PlmAuditRouteState {
     && (
       record.resourceType === ''
       || record.resourceType === 'plm-team-preset-batch'
+      || record.resourceType === 'plm-team-preset-default'
       || record.resourceType === 'plm-team-view-batch'
       || record.resourceType === 'plm-team-view-default'
     )
@@ -43,6 +44,9 @@ function isPlmAuditRouteState(value: unknown): value is PlmAuditRouteState {
     && (record.sceneId === undefined || typeof record.sceneId === 'string')
     && (record.sceneName === undefined || typeof record.sceneName === 'string')
     && (record.sceneOwnerUserId === undefined || typeof record.sceneOwnerUserId === 'string')
+    && (record.sceneRecommendationReason === undefined || typeof record.sceneRecommendationReason === 'string')
+    && (record.sceneRecommendationSourceLabel === undefined || typeof record.sceneRecommendationSourceLabel === 'string')
+    && (record.returnToPlmPath === undefined || typeof record.returnToPlmPath === 'string')
 }
 
 function normalizePlmAuditRouteState(state: PlmAuditRouteState): PlmAuditRouteState {
@@ -52,6 +56,16 @@ function normalizePlmAuditRouteState(state: PlmAuditRouteState): PlmAuditRouteSt
     sceneId: state.sceneId || '',
     sceneName: state.sceneName || '',
     sceneOwnerUserId: state.sceneOwnerUserId || '',
+    sceneRecommendationReason: state.sceneRecommendationReason || '',
+    sceneRecommendationSourceLabel: state.sceneRecommendationSourceLabel || '',
+    returnToPlmPath: state.returnToPlmPath || '',
+  }
+}
+
+export function restorePlmAuditSavedViewState(state: PlmAuditRouteState): PlmAuditRouteState {
+  return {
+    ...normalizePlmAuditRouteState(state),
+    teamViewId: '',
   }
 }
 
@@ -66,6 +80,10 @@ function isPlmAuditSavedView(value: unknown): value is PlmAuditSavedView {
 
 function normalizeViewName(name: string) {
   return name.trim().toLocaleLowerCase()
+}
+
+export function canSavePlmAuditSavedViewName(name: string) {
+  return Boolean(name.trim())
 }
 
 function generateSavedViewId() {
@@ -95,7 +113,7 @@ export function readPlmAuditSavedViews(storage?: Storage | null): PlmAuditSavedV
         .filter(isPlmAuditSavedView)
         .map((item) => ({
           ...item,
-          state: normalizePlmAuditRouteState(item.state),
+          state: restorePlmAuditSavedViewState(item.state),
         }))
         .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
       : []
@@ -105,10 +123,10 @@ export function readPlmAuditSavedViews(storage?: Storage | null): PlmAuditSavedV
 }
 
 export function savePlmAuditSavedView(name: string, state: PlmAuditRouteState, storage?: Storage | null): PlmAuditSavedView[] {
-  const trimmedName = name.trim()
-  if (!trimmedName) {
+  if (!canSavePlmAuditSavedViewName(name)) {
     return readPlmAuditSavedViews(storage)
   }
+  const trimmedName = name.trim()
 
   const now = new Date().toISOString()
   const current = readPlmAuditSavedViews(storage)
@@ -117,7 +135,7 @@ export function savePlmAuditSavedView(name: string, state: PlmAuditRouteState, s
   const nextEntry: PlmAuditSavedView = {
     id: existing?.id ?? generateSavedViewId(),
     name: trimmedName,
-    state: normalizePlmAuditRouteState(state),
+    state: restorePlmAuditSavedViewState(state),
     updatedAt: now,
   }
 

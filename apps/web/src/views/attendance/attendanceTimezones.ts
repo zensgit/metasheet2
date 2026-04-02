@@ -13,6 +13,10 @@ const FALLBACK_TIMEZONES = [
 
 let cachedSupportedTimezones: string[] | null = null
 
+const intlWithSupportedValues = Intl as typeof Intl & {
+  supportedValuesOf?: (key: string) => string[]
+}
+
 export interface TimezoneOptionEntry {
   value: string
   label: string
@@ -63,8 +67,8 @@ function loadSupportedTimezones(): string[] {
 
   const resolved = (() => {
     try {
-      if (typeof Intl.supportedValuesOf === 'function') {
-        const values = Intl.supportedValuesOf('timeZone')
+      if (typeof intlWithSupportedValues.supportedValuesOf === 'function') {
+        const values = intlWithSupportedValues.supportedValuesOf('timeZone')
         if (Array.isArray(values) && values.length > 0) return values.filter((item) => typeof item === 'string')
       }
     } catch {

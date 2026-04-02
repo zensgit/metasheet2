@@ -138,6 +138,18 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Workflows', requiresAuth: true, requiredFeature: 'workflow' }
   },
   {
+    path: '/workflows/designer/:id?',
+    name: 'workflow-designer',
+    component: () => import('../views/WorkflowDesigner.vue'),
+    meta: { title: 'Workflow Designer', requiresAuth: true, requiredFeature: 'workflow' }
+  },
+  {
+    path: '/approvals',
+    name: 'approval-list',
+    component: () => import('../views/ApprovalInboxView.vue'),
+    meta: { title: 'Approvals', requiresAuth: true }
+  },
+  {
     path: '/admin/plugins',
     name: 'plugin-manager',
     component: PluginManagerView,

@@ -19,7 +19,7 @@
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { usePlugins } from '../composables/usePlugins'
-import { viewRegistry } from '../plugins/viewRegistry'
+import { resolvePluginViewComponent } from '../plugins/viewRegistry'
 
 const route = useRoute()
 const { plugins, views, loading, error, fetchPlugins } = usePlugins()
@@ -37,9 +37,7 @@ const activeView = computed(() => {
 })
 
 const activeComponent = computed(() => {
-  const componentName = activeView.value?.component
-  if (!componentName) return null
-  return viewRegistry[componentName] || null
+  return resolvePluginViewComponent(activeView.value?.component, activeView.value?.id)
 })
 
 onMounted(async () => {

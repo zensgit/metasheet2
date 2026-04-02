@@ -49,11 +49,19 @@ interface PlmWorkbenchTeamViewConflictBuilder {
 
 type PlmTeamPresetBatchAction = 'archive' | 'restore' | 'delete'
 type PlmTeamViewBatchAction = 'archive' | 'restore' | 'delete'
+type PlmTeamPresetDefaultAuditAction = 'set-default' | 'clear-default'
 type PlmTeamViewDefaultAuditAction = 'set-default' | 'clear-default'
-type PlmCollaborativeAuditResourceType = 'plm-team-preset-batch' | 'plm-team-view-batch' | 'plm-team-view-default'
+type PlmTeamViewLifecycleAuditAction = 'archive' | 'restore' | 'delete'
+type PlmTeamPresetLifecycleAuditAction = 'archive' | 'restore' | 'delete'
+type PlmCollaborativeAuditResourceType =
+  | 'plm-team-preset-batch'
+  | 'plm-team-preset-default'
+  | 'plm-team-view-batch'
+  | 'plm-team-view-default'
 const UUID_LIKE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const PLM_COLLABORATIVE_AUDIT_RESOURCE_TYPES: PlmCollaborativeAuditResourceType[] = [
   'plm-team-preset-batch',
+  'plm-team-preset-default',
   'plm-team-view-batch',
   'plm-team-view-default',
 ]
@@ -61,6 +69,7 @@ const PLM_COLLABORATIVE_AUDIT_RESOURCE_TYPES: PlmCollaborativeAuditResourceType[
 type PlmCollaborativeAuditAction =
   | PlmTeamPresetBatchAction
   | PlmTeamViewBatchAction
+  | PlmTeamPresetDefaultAuditAction
   | PlmTeamViewDefaultAuditAction
 
 interface PlmCollaborativeAuditEntry {
@@ -180,6 +189,7 @@ function normalizePlmAuditResourceType(value: unknown): PlmCollaborativeAuditRes
   const normalized = value.trim().toLowerCase()
   if (
     normalized === 'plm-team-preset-batch'
+    || normalized === 'plm-team-preset-default'
     || normalized === 'plm-team-view-batch'
     || normalized === 'plm-team-view-default'
   ) {
@@ -382,6 +392,89 @@ async function logPlmTeamPresetBatchAudit(params: {
   })
 }
 
+async function logPlmTeamPresetLifecycleAudit(params: {
+  action: PlmTeamPresetLifecycleAuditAction
+  tenantId: string
+  ownerUserId: string
+  presetId: string
+  kind: string
+  presetName: string
+}) {
+  logger.info('Processed PLM team preset lifecycle action', {
+    audit: 'plm-team-preset-batch',
+    action: params.action,
+    tenantId: params.tenantId,
+    ownerUserId: params.ownerUserId,
+    presetId: params.presetId,
+    kind: params.kind,
+    presetName: params.presetName,
+    processedKinds: [params.kind],
+    processedTotal: 1,
+  })
+
+  await persistPlmCollaborativeAuditEvent({
+    route: `/api/plm-workbench/filter-presets/team/:id/${params.action === 'delete' ? '' : params.action}`.replace(/\/$/, ''),
+    resourceType: 'plm-team-preset-batch',
+    action: params.action,
+    ownerUserId: params.ownerUserId,
+    resourceId: params.presetId,
+    meta: {
+      tenantId: params.tenantId,
+      ownerUserId: params.ownerUserId,
+      audit: 'plm-team-preset-batch',
+      kind: params.kind,
+      presetName: params.presetName,
+      processedKinds: [params.kind],
+      requestedIds: [params.presetId],
+      processedIds: [params.presetId],
+      skippedIds: [],
+      requestedTotal: 1,
+      processedTotal: 1,
+      skippedTotal: 0,
+    },
+  })
+}
+
+async function logPlmTeamPresetDefaultAudit(params: {
+  action: PlmTeamPresetDefaultAuditAction
+  tenantId: string
+  ownerUserId: string
+  presetId: string
+  kind: string
+  presetName: string
+}) {
+  logger.info('Processed PLM team preset default action', {
+    audit: 'plm-team-preset-default',
+    action: params.action,
+    tenantId: params.tenantId,
+    ownerUserId: params.ownerUserId,
+    presetId: params.presetId,
+    kind: params.kind,
+    presetName: params.presetName,
+    processedKinds: [params.kind],
+    processedTotal: 1,
+  })
+
+  await persistPlmCollaborativeAuditEvent({
+    route: '/api/plm-workbench/filter-presets/team/:id/default',
+    resourceType: 'plm-team-preset-default',
+    action: params.action,
+    ownerUserId: params.ownerUserId,
+    resourceId: params.presetId,
+    meta: {
+      tenantId: params.tenantId,
+      ownerUserId: params.ownerUserId,
+      audit: 'plm-team-preset-default',
+      kind: params.kind,
+      viewName: params.presetName,
+      processedKinds: [params.kind],
+      requestedTotal: 1,
+      processedTotal: 1,
+      skippedTotal: 0,
+    },
+  })
+}
+
 async function logPlmTeamViewBatchAudit(params: {
   action: PlmTeamViewBatchAction
   tenantId: string
@@ -454,6 +547,183 @@ async function logPlmTeamViewDefaultAudit(params: {
       skippedTotal: 0,
     },
   })
+}
+
+async function logPlmTeamViewLifecycleAudit(params: {
+  action: PlmTeamViewLifecycleAuditAction
+  tenantId: string
+  ownerUserId: string
+  viewId: string
+  kind: string
+  viewName: string
+}) {
+  logger.info('Processed PLM team view lifecycle action', {
+    audit: 'plm-team-view-batch',
+    action: params.action,
+    tenantId: params.tenantId,
+    ownerUserId: params.ownerUserId,
+    viewId: params.viewId,
+    kind: params.kind,
+    viewName: params.viewName,
+    processedKinds: [params.kind],
+    processedTotal: 1,
+  })
+
+  await persistPlmCollaborativeAuditEvent({
+    route: `/api/plm-workbench/views/team/:id/${params.action === 'delete' ? '' : params.action}`.replace(/\/$/, ''),
+    resourceType: 'plm-team-view-batch',
+    action: params.action,
+    ownerUserId: params.ownerUserId,
+    resourceId: params.viewId,
+    meta: {
+      tenantId: params.tenantId,
+      ownerUserId: params.ownerUserId,
+      audit: 'plm-team-view-batch',
+      kind: params.kind,
+      viewName: params.viewName,
+      processedKinds: [params.kind],
+      requestedIds: [params.viewId],
+      processedIds: [params.viewId],
+      skippedIds: [],
+      requestedTotal: 1,
+      processedTotal: 1,
+      skippedTotal: 0,
+    },
+  })
+}
+
+async function attachPlmTeamViewDefaultSignals<T extends PlmWorkbenchTeamViewRowLike>(
+  rows: T[],
+): Promise<T[]> {
+  const ids = Array.from(
+    new Set(
+      rows
+        .map((row) => String(row.id || '').trim())
+        .filter(Boolean),
+    ),
+  )
+
+  if (!ids.length) {
+    return rows
+  }
+
+  try {
+    const result = await pgQuery(
+      `SELECT resource_id, MAX(COALESCE(occurred_at, created_at)) AS last_default_set_at
+       FROM operation_audit_logs
+       WHERE resource_type = 'plm-team-view-default'
+         AND action = 'set-default'
+         AND resource_id = ANY($1::text[])
+       GROUP BY resource_id`,
+      [ids],
+    )
+
+    const lastDefaultById = new Map<string, string>()
+    for (const row of result.rows as Array<Record<string, unknown>>) {
+      const resourceId = typeof row.resource_id === 'string' ? row.resource_id.trim() : ''
+      if (!resourceId) continue
+      const occurredAt =
+        row.last_default_set_at instanceof Date
+          ? row.last_default_set_at.toISOString()
+          : typeof row.last_default_set_at === 'string' && row.last_default_set_at.trim()
+            ? new Date(row.last_default_set_at).toISOString()
+            : ''
+      if (occurredAt) {
+        lastDefaultById.set(resourceId, occurredAt)
+      }
+    }
+
+    return rows.map((row) => ({
+      ...row,
+      last_default_set_at: lastDefaultById.get(String(row.id || '').trim()),
+    })) as T[]
+  } catch (error: unknown) {
+    logger.warn('Failed to load PLM team view default signals', error as Error)
+    return rows
+  }
+}
+
+async function attachPlmTeamPresetDefaultSignals<T extends PlmTeamFilterPresetRowLike>(
+  rows: T[],
+): Promise<T[]> {
+  const ids = Array.from(
+    new Set(
+      rows
+        .map((row) => String(row.id || '').trim())
+        .filter(Boolean),
+    ),
+  )
+
+  if (!ids.length) {
+    return rows
+  }
+
+  try {
+    const result = await pgQuery(
+      `SELECT resource_id, MAX(COALESCE(occurred_at, created_at)) AS last_default_set_at
+       FROM operation_audit_logs
+       WHERE resource_type = 'plm-team-preset-default'
+         AND action = 'set-default'
+         AND resource_id = ANY($1::text[])
+       GROUP BY resource_id`,
+      [ids],
+    )
+
+    const lastDefaultById = new Map<string, string>()
+    for (const row of result.rows as Array<Record<string, unknown>>) {
+      const resourceId = typeof row.resource_id === 'string' ? row.resource_id.trim() : ''
+      if (!resourceId) continue
+      const occurredAt =
+        row.last_default_set_at instanceof Date
+          ? row.last_default_set_at.toISOString()
+          : typeof row.last_default_set_at === 'string' && row.last_default_set_at.trim()
+            ? new Date(row.last_default_set_at).toISOString()
+            : ''
+      if (occurredAt) {
+        lastDefaultById.set(resourceId, occurredAt)
+      }
+    }
+
+    return rows.map((row) => ({
+      ...row,
+      last_default_set_at: lastDefaultById.get(String(row.id || '').trim()),
+    })) as T[]
+  } catch (error: unknown) {
+    logger.warn('Failed to load PLM team preset default signals', error as Error)
+    return rows
+  }
+}
+
+async function mapHydratedPlmTeamViewRows(
+  rows: PlmWorkbenchTeamViewRowLike[],
+  currentUserId?: string | null,
+) {
+  const hydratedRows = await attachPlmTeamViewDefaultSignals(rows)
+  return hydratedRows.map((row: PlmWorkbenchTeamViewRowLike) => mapPlmWorkbenchTeamViewRow(row, currentUserId))
+}
+
+async function mapHydratedPlmTeamViewRow(
+  row: PlmWorkbenchTeamViewRowLike,
+  currentUserId?: string | null,
+) {
+  const [mapped] = await mapHydratedPlmTeamViewRows([row], currentUserId)
+  return mapped
+}
+
+async function mapHydratedPlmTeamPresetRows(
+  rows: PlmTeamFilterPresetRowLike[],
+  currentUserId?: string | null,
+) {
+  const hydratedRows = await attachPlmTeamPresetDefaultSignals(rows)
+  return hydratedRows.map((row: PlmTeamFilterPresetRowLike) => mapPlmTeamFilterPresetRow(row, currentUserId))
+}
+
+async function mapHydratedPlmTeamPresetRow(
+  row: PlmTeamFilterPresetRowLike,
+  currentUserId?: string | null,
+) {
+  const [mapped] = await mapHydratedPlmTeamPresetRows([row], currentUserId)
+  return mapped
 }
 
 router.get(
@@ -736,7 +1006,7 @@ router.get(
         .orderBy('is_default', 'desc')
         .orderBy('updated_at', 'desc')
         .execute()
-      const items = rows.map((row: PlmWorkbenchTeamViewRowLike) => mapPlmWorkbenchTeamViewRow(row, currentUserId))
+      const items = await mapHydratedPlmTeamViewRows(rows as PlmWorkbenchTeamViewRowLike[], currentUserId)
       const defaultView = items.find((item) => item.isDefault && !item.isArchived) || null
       const activeTotal = items.filter((item) => !item.isArchived).length
       const archivedTotal = items.length - activeTotal
@@ -876,7 +1146,7 @@ router.post(
           .where('id', 'in', processedIds)
           .returningAll()
           .execute()
-        items = savedRows.map((row: PlmWorkbenchTeamViewRowLike) => mapPlmWorkbenchTeamViewRow(row, currentUserId))
+        items = await mapHydratedPlmTeamViewRows(savedRows as PlmWorkbenchTeamViewRowLike[], currentUserId)
       } else {
         const savedRows = await dbAny
           .updateTable('plm_workbench_team_views')
@@ -889,7 +1159,7 @@ router.post(
           .where('id', 'in', processedIds)
           .returningAll()
           .execute()
-        items = savedRows.map((row: PlmWorkbenchTeamViewRowLike) => mapPlmWorkbenchTeamViewRow(row, currentUserId))
+        items = await mapHydratedPlmTeamViewRows(savedRows as PlmWorkbenchTeamViewRowLike[], currentUserId)
       }
 
       await logPlmTeamViewBatchAudit({
@@ -1010,7 +1280,7 @@ router.post(
 
       return res.json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to set default PLM team view:', error as Error)
@@ -1089,7 +1359,7 @@ router.delete(
 
       return res.json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to clear default PLM team view:', error as Error)
@@ -1223,7 +1493,7 @@ router.post(
 
       return res.status(201).json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to save PLM team view:', error as Error)
@@ -1284,10 +1554,17 @@ router.patch(
         })
       }
 
+      if (view.archived_at) {
+        return res.status(409).json({
+          success: false,
+          error: 'Archived PLM team views cannot be renamed',
+        })
+      }
+
       if (normalizePlmWorkbenchTeamViewName(view.name) === name) {
         return res.json({
           success: true,
-          data: mapPlmWorkbenchTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
+          data: await mapHydratedPlmTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
         })
       }
 
@@ -1322,7 +1599,7 @@ router.patch(
 
       return res.json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to rename PLM team view:', error as Error)
@@ -1434,7 +1711,7 @@ router.post(
 
       return res.status(201).json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to duplicate PLM team view:', error as Error)
@@ -1506,7 +1783,7 @@ router.post(
       if (targetOwnerUserId === currentUserId) {
         return res.json({
           success: true,
-          data: mapPlmWorkbenchTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
+          data: await mapHydratedPlmTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
         })
       }
 
@@ -1554,7 +1831,7 @@ router.post(
 
       return res.json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to transfer PLM team view:', error as Error)
@@ -1609,6 +1886,15 @@ router.delete(
         .deleteFrom('plm_workbench_team_views')
         .where('id', '=', viewId)
         .execute()
+
+      await logPlmTeamViewLifecycleAudit({
+        action: 'delete',
+        tenantId,
+        ownerUserId: currentUserId,
+        viewId,
+        kind: String(view.kind || ''),
+        viewName: String(view.name || ''),
+      })
 
       return res.json({
         success: true,
@@ -1669,7 +1955,7 @@ router.post(
       if (view.archived_at) {
         return res.json({
           success: true,
-          data: mapPlmWorkbenchTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
+          data: await mapHydratedPlmTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
         })
       }
 
@@ -1684,9 +1970,18 @@ router.post(
         .returningAll()
         .executeTakeFirstOrThrow()
 
+      await logPlmTeamViewLifecycleAudit({
+        action: 'archive',
+        tenantId,
+        ownerUserId: currentUserId,
+        viewId,
+        kind: String(view.kind || ''),
+        viewName: String(view.name || ''),
+      })
+
       return res.json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to archive PLM team view:', error as Error)
@@ -1740,7 +2035,7 @@ router.post(
       if (!view.archived_at) {
         return res.json({
           success: true,
-          data: mapPlmWorkbenchTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
+          data: await mapHydratedPlmTeamViewRow(view as PlmWorkbenchTeamViewRowLike, currentUserId),
         })
       }
 
@@ -1754,9 +2049,18 @@ router.post(
         .returningAll()
         .executeTakeFirstOrThrow()
 
+      await logPlmTeamViewLifecycleAudit({
+        action: 'restore',
+        tenantId,
+        ownerUserId: currentUserId,
+        viewId,
+        kind: String(view.kind || ''),
+        viewName: String(view.name || ''),
+      })
+
       return res.json({
         success: true,
-        data: mapPlmWorkbenchTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
+        data: await mapHydratedPlmTeamViewRow(saved as PlmWorkbenchTeamViewRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to restore PLM team view:', error as Error)
@@ -1793,7 +2097,7 @@ router.get(
         .orderBy('is_default', 'desc')
         .orderBy('updated_at', 'desc')
         .execute()
-      const items = rows.map((row: PlmTeamFilterPresetRowLike) => mapPlmTeamFilterPresetRow(row, currentUserId))
+      const items = await mapHydratedPlmTeamPresetRows(rows as PlmTeamFilterPresetRowLike[], currentUserId)
       const defaultPreset = items.find((item) => item.isDefault && !item.isArchived) || null
       const activeTotal = items.filter((item) => !item.isArchived).length
       const archivedTotal = items.length - activeTotal
@@ -1933,7 +2237,7 @@ router.post(
           .where('id', 'in', processedIds)
           .returningAll()
           .execute()
-        items = saved.map((row: PlmTeamFilterPresetRowLike) => mapPlmTeamFilterPresetRow(row, currentUserId))
+        items = await mapHydratedPlmTeamPresetRows(saved as PlmTeamFilterPresetRowLike[], currentUserId)
       } else {
         const saved = await dbAny
           .updateTable('plm_filter_team_presets')
@@ -1946,7 +2250,7 @@ router.post(
           .where('id', 'in', processedIds)
           .returningAll()
           .execute()
-        items = saved.map((row: PlmTeamFilterPresetRowLike) => mapPlmTeamFilterPresetRow(row, currentUserId))
+        items = await mapHydratedPlmTeamPresetRows(saved as PlmTeamFilterPresetRowLike[], currentUserId)
       }
 
       await logPlmTeamPresetBatchAudit({
@@ -1999,11 +2303,14 @@ router.post(
         })
       }
 
+      const tenantId = req.user?.tenantId?.toString() || 'default'
       const presetId = req.params.id
       const preset = await dbAny
         .selectFrom('plm_filter_team_presets')
         .selectAll()
         .where('id', '=', presetId)
+        .where('tenant_id', '=', tenantId)
+        .where('scope', '=', 'team')
         .executeTakeFirst()
 
       if (!preset) {
@@ -2053,9 +2360,18 @@ router.post(
           .executeTakeFirstOrThrow()
       })
 
+      await logPlmTeamPresetDefaultAudit({
+        action: 'set-default',
+        tenantId,
+        ownerUserId: currentUserId,
+        presetId,
+        kind: String(saved.kind || ''),
+        presetName: String(saved.name || ''),
+      })
+
       return res.json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to set default PLM team preset:', error as Error)
@@ -2082,11 +2398,14 @@ router.delete(
         })
       }
 
+      const tenantId = req.user?.tenantId?.toString() || 'default'
       const presetId = req.params.id
       const preset = await dbAny
         .selectFrom('plm_filter_team_presets')
         .selectAll()
         .where('id', '=', presetId)
+        .where('tenant_id', '=', tenantId)
+        .where('scope', '=', 'team')
         .executeTakeFirst()
 
       if (!preset) {
@@ -2103,6 +2422,13 @@ router.delete(
         })
       }
 
+      if (preset.archived_at) {
+        return res.status(409).json({
+          success: false,
+          error: 'Archived PLM team presets cannot clear the default PLM team preset',
+        })
+      }
+
       const saved = await dbAny
         .updateTable('plm_filter_team_presets')
         .set({
@@ -2113,9 +2439,18 @@ router.delete(
         .returningAll()
         .executeTakeFirstOrThrow()
 
+      await logPlmTeamPresetDefaultAudit({
+        action: 'clear-default',
+        tenantId,
+        ownerUserId: currentUserId,
+        presetId,
+        kind: String(saved.kind || ''),
+        presetName: String(saved.name || ''),
+      })
+
       return res.json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to clear default PLM team preset:', error as Error)
@@ -2192,7 +2527,7 @@ router.post(
 
       return res.status(201).json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to save PLM team preset:', error as Error)
@@ -2290,7 +2625,7 @@ router.patch(
 
       return res.json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to rename PLM team preset:', error as Error)
@@ -2395,7 +2730,7 @@ router.post(
 
       return res.status(201).json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to duplicate PLM team preset:', error as Error)
@@ -2457,10 +2792,17 @@ router.post(
         })
       }
 
+      if (preset.archived_at) {
+        return res.status(409).json({
+          success: false,
+          error: 'Archived PLM team presets cannot be transferred',
+        })
+      }
+
       if (targetOwnerUserId === currentUserId) {
         return res.json({
           success: true,
-          data: mapPlmTeamFilterPresetRow(preset as PlmTeamFilterPresetRowLike, currentUserId),
+          data: await mapHydratedPlmTeamPresetRow(preset as PlmTeamFilterPresetRowLike, currentUserId),
         })
       }
 
@@ -2508,7 +2850,7 @@ router.post(
 
       return res.json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to transfer PLM team preset:', error as Error)
@@ -2535,11 +2877,14 @@ router.delete(
         })
       }
 
+      const tenantId = req.user?.tenantId?.toString() || 'default'
       const presetId = req.params.id
       const preset = await dbAny
         .selectFrom('plm_filter_team_presets')
         .selectAll()
         .where('id', '=', presetId)
+        .where('tenant_id', '=', tenantId)
+        .where('scope', '=', 'team')
         .executeTakeFirst()
 
       if (!preset) {
@@ -2560,6 +2905,15 @@ router.delete(
         .deleteFrom('plm_filter_team_presets')
         .where('id', '=', presetId)
         .execute()
+
+      await logPlmTeamPresetLifecycleAudit({
+        action: 'delete',
+        tenantId,
+        ownerUserId: currentUserId,
+        presetId,
+        kind: String(preset.kind || ''),
+        presetName: String(preset.name || ''),
+      })
 
       return res.json({
         success: true,
@@ -2620,7 +2974,7 @@ router.post(
       if (preset.archived_at) {
         return res.json({
           success: true,
-          data: mapPlmTeamFilterPresetRow(preset as PlmTeamFilterPresetRowLike, currentUserId),
+          data: await mapHydratedPlmTeamPresetRow(preset as PlmTeamFilterPresetRowLike, currentUserId),
         })
       }
 
@@ -2635,9 +2989,18 @@ router.post(
         .returningAll()
         .executeTakeFirstOrThrow()
 
+      await logPlmTeamPresetLifecycleAudit({
+        action: 'archive',
+        tenantId,
+        ownerUserId: currentUserId,
+        presetId,
+        kind: String(preset.kind || ''),
+        presetName: String(preset.name || ''),
+      })
+
       return res.json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to archive PLM team preset:', error as Error)
@@ -2691,7 +3054,7 @@ router.post(
       if (!preset.archived_at) {
         return res.json({
           success: true,
-          data: mapPlmTeamFilterPresetRow(preset as PlmTeamFilterPresetRowLike, currentUserId),
+          data: await mapHydratedPlmTeamPresetRow(preset as PlmTeamFilterPresetRowLike, currentUserId),
         })
       }
 
@@ -2705,9 +3068,18 @@ router.post(
         .returningAll()
         .executeTakeFirstOrThrow()
 
+      await logPlmTeamPresetLifecycleAudit({
+        action: 'restore',
+        tenantId,
+        ownerUserId: currentUserId,
+        presetId,
+        kind: String(preset.kind || ''),
+        presetName: String(preset.name || ''),
+      })
+
       return res.json({
         success: true,
-        data: mapPlmTeamFilterPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
+        data: await mapHydratedPlmTeamPresetRow(saved as PlmTeamFilterPresetRowLike, currentUserId),
       })
     } catch (error: unknown) {
       logger.error('Failed to restore PLM team preset:', error as Error)

@@ -72,6 +72,7 @@ describe('plmWorkbenchTeamViews helpers', () => {
         name: 'CAD 审核',
         name_key: 'cad 审核',
         is_default: 'true',
+        last_default_set_at: '2026-03-09T00:15:00.000Z',
         state: JSON.stringify({
           panel: 'cad',
           compare: ['primary', 'other'],
@@ -103,6 +104,7 @@ describe('plmWorkbenchTeamViews helpers', () => {
         canClearDefault: true,
       },
       isDefault: true,
+      lastDefaultSetAt: '2026-03-09T00:15:00.000Z',
       state: {
         panel: 'cad',
         compare: ['primary', 'other'],

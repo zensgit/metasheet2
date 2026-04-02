@@ -3,6 +3,7 @@ import type { PlmAuditRouteState } from '../src/views/plmAuditQueryState'
 import {
   buildPlmAuditSavedViewContextBadge,
   buildPlmAuditSavedViewSummary,
+  resolvePlmAuditSavedViewContextActionFeedback,
 } from '../src/views/plmAuditSavedViewSummary'
 
 function tr(en: string, zh: string) {
@@ -40,8 +41,8 @@ describe('plmAuditSavedViewSummary', () => {
       value: 'owner-a',
       active: true,
       quickAction: {
-        kind: 'scene',
-        label: 'Restore scene query|恢复场景查询',
+        kind: 'reapply-scene',
+        label: 'Reapply scene filter|重新应用场景过滤',
         disabled: false,
         hint: 'Current audit is already using this scene query.|当前审计已使用这个场景查询。',
       },
@@ -62,10 +63,10 @@ describe('plmAuditSavedViewSummary', () => {
       value: 'scene-1',
       active: true,
       quickAction: {
-        kind: 'owner',
-        label: 'Filter by owner|按 owner 筛选',
+        kind: 'reapply-scene',
+        label: 'Reapply scene filter|重新应用场景过滤',
         disabled: false,
-        hint: 'Current audit is already filtered by this scene owner.|当前审计已按这个场景的 owner 过滤。',
+        hint: 'Current audit is already using this scene query.|当前审计已使用这个场景查询。',
       },
     })
   })
@@ -100,7 +101,7 @@ describe('plmAuditSavedViewSummary', () => {
       sceneName: '采购团队场景',
       sceneOwnerUserId: 'owner-a',
     }, tr, {
-      q: 'owner-a',
+      q: 'scene-1',
       sceneId: 'scene-1',
       sceneName: '采购团队场景',
       sceneOwnerUserId: 'owner-a',
@@ -111,10 +112,32 @@ describe('plmAuditSavedViewSummary', () => {
       value: 'scene-1',
       active: true,
       quickAction: {
-        kind: 'owner',
-        label: 'Filter by owner|按 owner 筛选',
+        kind: 'reapply-scene',
+        label: 'Reapply scene filter|重新应用场景过滤',
         disabled: true,
-        hint: 'Current audit is already filtered by this scene owner.|当前审计已按这个场景的 owner 过滤。',
+        hint: 'Current audit is already using this scene query.|当前审计已使用这个场景查询。',
+      },
+    })
+  })
+
+  it('offers scene reapply for scene-only saved views', () => {
+    expect(buildPlmAuditSavedViewContextBadge({
+      ...sampleState,
+      q: 'documents',
+      sceneId: 'scene-2',
+      sceneName: '最近更新场景',
+      sceneOwnerUserId: '',
+    }, tr)).toEqual({
+      kind: 'scene',
+      sourceLabel: 'Saved view context|保存视图上下文',
+      label: 'Scene query|场景查询',
+      value: 'scene-2',
+      active: false,
+      quickAction: {
+        kind: 'reapply-scene',
+        label: 'Reapply scene filter|重新应用场景过滤',
+        disabled: false,
+        hint: 'Current audit is already using this scene query.|当前审计已使用这个场景查询。',
       },
     })
   })
@@ -127,5 +150,38 @@ describe('plmAuditSavedViewSummary', () => {
       sceneName: '采购团队场景',
       sceneOwnerUserId: 'owner-a',
     }, tr, (value) => value, (value) => value)).toContain('Scene|场景: 采购团队场景')
+  })
+
+  it('returns explicit feedback when a saved-view context quick action is disabled', () => {
+    const badge = buildPlmAuditSavedViewContextBadge({
+      ...sampleState,
+      q: 'scene-1',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+    }, tr, {
+      q: 'scene-1',
+      sceneId: 'scene-1',
+      sceneName: '采购团队场景',
+      sceneOwnerUserId: 'owner-a',
+    })
+
+    expect(resolvePlmAuditSavedViewContextActionFeedback({
+      badge,
+      tr,
+    })).toEqual({
+      kind: 'error',
+      message: 'Current audit is already using this scene query.|当前审计已使用这个场景查询。',
+    })
+  })
+
+  it('returns unavailable feedback when a saved-view context badge has no quick action', () => {
+    expect(resolvePlmAuditSavedViewContextActionFeedback({
+      badge: null,
+      tr,
+    })).toEqual({
+      kind: 'error',
+      message: 'Current saved view context action is unavailable.|当前保存视图上下文动作不可用。',
+    })
   })
 })

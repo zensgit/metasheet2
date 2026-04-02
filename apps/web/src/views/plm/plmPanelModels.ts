@@ -378,6 +378,7 @@ export type ApprovalProductRef = UnknownRecord & {
 export type ApprovalEntry = UnknownRecord & {
   id?: string | number
   request_id?: string | number
+  version?: string | number
   title?: string
   name?: string
   status?: string
@@ -389,6 +390,8 @@ export type ApprovalEntry = UnknownRecord & {
   created_by_name?: string
   requester_id?: string | number
   created_by_id?: string | number
+  approver_name?: string
+  approver_id?: string | number
   created_at?: string
   createdAt?: string
   updated_at?: string
@@ -415,10 +418,17 @@ export type ApprovalHistoryEntry = UnknownRecord & {
   user_name?: string
   username?: string
   approver_name?: string
+  actor_name?: string | null
   user_id?: string | number
   approver_id?: string | number
+  actor_id?: string | number
   comment?: string
   note?: string
+  version?: string | number
+  from_version?: string | number
+  fromVersion?: string | number
+  to_version?: string | number
+  toVersion?: string | number
   approved_at?: string
   acted_at?: string
   created_at?: string
@@ -495,6 +505,7 @@ export type PlmTeamView<TState extends object = PlmTeamViewState> = {
   permissions?: PlmCollaborativePermissions
   isDefault: boolean
   isArchived?: boolean
+  lastDefaultSetAt?: string
   state: TState
   archivedAt?: string
   createdAt?: string
@@ -542,7 +553,6 @@ export type PlmCadTeamViewState = {
 export type PlmApprovalsTeamViewState = {
   status: 'all' | 'pending' | 'approved' | 'rejected'
   filter: string
-  comment: string
   sortKey: ApprovalSortKey
   sortDir: SortDir
   columns: ApprovalColumnState
@@ -565,6 +575,43 @@ export type PlmWorkbenchTeamViewStateByKind = {
 export type PlmWorkbenchTeamView<
   Kind extends PlmWorkbenchTeamViewKind = PlmWorkbenchTeamViewKind,
 > = PlmTeamView<PlmWorkbenchTeamViewStateByKind[Kind]> & { kind: Kind }
+
+export type PlmRecommendedWorkbenchScene = {
+  id: string
+  name: string
+  ownerUserId: string
+  isDefault: boolean
+  lastDefaultSetAt?: string
+  recommendationReason: 'default' | 'recent-default' | 'recent-update'
+  recommendationSourceLabel: string
+  recommendationSourceTimestamp?: string
+  primaryActionKind: 'apply-scene'
+  primaryActionLabel: string
+  primaryActionDisabled: boolean
+  secondaryActionKind: 'copy-link' | 'open-audit'
+  secondaryActionLabel: string
+  secondaryActionDisabled: boolean
+  actionNote: string
+  updatedAt?: string
+}
+
+export type PlmWorkbenchSceneRecommendationFilter =
+  | ''
+  | PlmRecommendedWorkbenchScene['recommendationReason']
+
+export type PlmWorkbenchSceneSummaryChip = {
+  value: PlmWorkbenchSceneRecommendationFilter
+  label: string
+  count: number
+  active: boolean
+}
+
+export type PlmWorkbenchSceneSummaryHint = {
+  value: PlmWorkbenchSceneRecommendationFilter
+  label: string
+  count: number
+  description: string
+}
 
 export type FilterFieldOption = {
   value: string
@@ -731,6 +778,7 @@ export type PlmProductPanelModel = {
   canArchiveWorkbenchTeamView: ComputedRef<boolean>
   canRestoreWorkbenchTeamView: ComputedRef<boolean>
   canRenameWorkbenchTeamView: ComputedRef<boolean>
+  canTransferWorkbenchTeamViewTarget: ComputedRef<boolean>
   canTransferWorkbenchTeamView: ComputedRef<boolean>
   canSetWorkbenchTeamViewDefault: ComputedRef<boolean>
   canClearWorkbenchTeamViewDefault: ComputedRef<boolean>
@@ -745,11 +793,25 @@ export type PlmProductPanelModel = {
   selectedBatchArchivableWorkbenchTeamViewIds: ComputedRef<string[]>
   selectedBatchRestorableWorkbenchTeamViewIds: ComputedRef<string[]>
   selectedBatchDeletableWorkbenchTeamViewIds: ComputedRef<string[]>
+  sceneCatalogOwnerFilter: Ref<string>
+  sceneCatalogOwnerOptions: ComputedRef<string[]>
+  sceneCatalogRecommendationFilter: Ref<PlmWorkbenchSceneRecommendationFilter>
+  sceneCatalogRecommendationOptions: FilterFieldOption[]
+  sceneCatalogSummaryChips: ComputedRef<PlmWorkbenchSceneSummaryChip[]>
+  sceneCatalogSummaryHint: ComputedRef<PlmWorkbenchSceneSummaryHint>
+  sceneCatalogAutoFocusSceneId: Ref<string>
+  clearSceneCatalogAutoFocusSceneId: () => void
+  setSceneCatalogRecommendationFilter: (value: PlmWorkbenchSceneRecommendationFilter) => void
+  recommendedWorkbenchScenes: ComputedRef<PlmRecommendedWorkbenchScene[]>
   selectAllWorkbenchTeamViews: () => void
   clearWorkbenchTeamViewSelection: () => void
   archiveWorkbenchTeamViewSelection: PanelAction
   restoreWorkbenchTeamViewSelection: PanelAction
   deleteWorkbenchTeamViewSelection: PanelAction
+  applyRecommendedWorkbenchScene: (viewId: string) => void
+  openRecommendedWorkbenchSceneAudit: (scene: PlmRecommendedWorkbenchScene) => Promise<void>
+  copyRecommendedWorkbenchSceneLink: (viewId: string) => Promise<void>
+  openWorkbenchSceneAudit: PanelAction
   productId: Ref<string>
   productItemNumber: Ref<string>
   itemType: Ref<string>
@@ -819,6 +881,7 @@ export type PlmDocumentsPanelModel = {
   canArchiveDocumentTeamView: ComputedRef<boolean>
   canRestoreDocumentTeamView: ComputedRef<boolean>
   canRenameDocumentTeamView: ComputedRef<boolean>
+  canTransferDocumentTeamViewTarget: ComputedRef<boolean>
   canTransferDocumentTeamView: ComputedRef<boolean>
   canSetDocumentTeamViewDefault: ComputedRef<boolean>
   canClearDocumentTeamViewDefault: ComputedRef<boolean>
@@ -881,6 +944,7 @@ export type PlmCadPanelModel = {
   canArchiveCadTeamView: ComputedRef<boolean>
   canRestoreCadTeamView: ComputedRef<boolean>
   canRenameCadTeamView: ComputedRef<boolean>
+  canTransferCadTeamViewTarget: ComputedRef<boolean>
   canTransferCadTeamView: ComputedRef<boolean>
   canSetCadTeamViewDefault: ComputedRef<boolean>
   canClearCadTeamViewDefault: ComputedRef<boolean>
@@ -956,6 +1020,7 @@ export type PlmApprovalsPanelModel = {
   canArchiveApprovalsTeamView: ComputedRef<boolean>
   canRestoreApprovalsTeamView: ComputedRef<boolean>
   canRenameApprovalsTeamView: ComputedRef<boolean>
+  canTransferApprovalsTeamViewTarget: ComputedRef<boolean>
   canTransferApprovalsTeamView: ComputedRef<boolean>
   canSetApprovalsTeamViewDefault: ComputedRef<boolean>
   canClearApprovalsTeamViewDefault: ComputedRef<boolean>
@@ -1007,6 +1072,7 @@ export type PlmApprovalsPanelModel = {
   getApprovalHistoryType: (entry: ApprovalHistoryEntry) => string
   getApprovalHistoryRole: (entry: ApprovalHistoryEntry) => string
   getApprovalHistoryUser: (entry: ApprovalHistoryEntry) => string
+  getApprovalHistoryVersion: (entry: ApprovalHistoryEntry) => string
   getApprovalHistoryComment: (entry: ApprovalHistoryEntry) => string
   getApprovalHistoryApprovedAt: (entry: ApprovalHistoryEntry) => string
   getApprovalHistoryCreatedAt: (entry: ApprovalHistoryEntry) => string
@@ -1015,6 +1081,7 @@ export type PlmApprovalsPanelModel = {
   loadApprovalHistory: (entry?: ApprovalEntry) => Promise<void>
   clearApprovalHistory: PanelAction
   isApprovalPending: (entry: ApprovalEntry) => boolean
+  canActOnApproval: (entry: ApprovalEntry) => boolean
   approveApproval: (entry: ApprovalEntry) => Promise<void>
   rejectApproval: (entry: ApprovalEntry) => Promise<void>
 }
@@ -1238,6 +1305,7 @@ export type PlmBomPanelModel = {
   canArchiveBomTeamPreset: ComputedRef<boolean>
   canRestoreBomTeamPreset: ComputedRef<boolean>
   canRenameBomTeamPreset: ComputedRef<boolean>
+  canTransferTargetBomTeamPreset: ComputedRef<boolean>
   canTransferBomTeamPreset: ComputedRef<boolean>
   canSetBomTeamPresetDefault: ComputedRef<boolean>
   canClearBomTeamPresetDefault: ComputedRef<boolean>
@@ -1374,6 +1442,7 @@ export type PlmWhereUsedPanelModel = {
   canArchiveWhereUsedTeamPreset: ComputedRef<boolean>
   canRestoreWhereUsedTeamPreset: ComputedRef<boolean>
   canRenameWhereUsedTeamPreset: ComputedRef<boolean>
+  canTransferTargetWhereUsedTeamPreset: ComputedRef<boolean>
   canTransferWhereUsedTeamPreset: ComputedRef<boolean>
   canSetWhereUsedTeamPresetDefault: ComputedRef<boolean>
   canClearWhereUsedTeamPresetDefault: ComputedRef<boolean>

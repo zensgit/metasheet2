@@ -1,0 +1,286 @@
+import type { PlmAuditSavedViewShareFollowup } from './plmAuditSavedViewShareFollowup'
+import type { PlmAuditSavedView } from './plmAuditSavedViews'
+
+export type PlmAuditSavedViewAttentionState = {
+  shareFollowup: PlmAuditSavedViewShareFollowup | null
+  focusedSavedViewId: string
+}
+
+export type PlmAuditSourceFocusState = {
+  focusedRecommendedAuditTeamViewId: string
+  focusedSavedViewId: string
+}
+
+export type PlmAuditAttentionFocusState = {
+  focusedAuditTeamViewId: string
+  focusedRecommendedAuditTeamViewId: string
+  focusedSavedViewId: string
+}
+
+export type PlmAuditTeamViewHandoffAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+  savedViewAttention: PlmAuditSavedViewAttentionState
+}
+
+export type PlmAuditSavedViewStoreAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+  savedViewAttention: PlmAuditSavedViewAttentionState
+}
+
+export type PlmAuditSourceLocalSaveAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+  savedViewAttention: PlmAuditSavedViewAttentionState
+}
+
+export type PlmAuditManagedTeamViewAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+  savedViewAttention: PlmAuditSavedViewAttentionState
+}
+
+export type PlmAuditAppliedTeamViewAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+  savedViewAttention: PlmAuditSavedViewAttentionState
+}
+
+export type PlmAuditPersistedTeamViewAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+  savedViewAttention: PlmAuditSavedViewAttentionState
+}
+
+export type PlmAuditSourceShareFollowupAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+  savedViewAttention: PlmAuditSavedViewAttentionState
+}
+
+export type PlmAuditClearedCollaborationFollowupAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+}
+
+export type PlmAuditDismissedCollaborationDraftAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+}
+
+export type PlmAuditRoutePivotAttentionState = {
+  attentionFocus: PlmAuditAttentionFocusState
+  savedViewAttention: PlmAuditSavedViewAttentionState
+}
+
+export type PlmAuditSavedViewAttentionAction =
+  | { kind: 'install-followup'; shareFollowup: PlmAuditSavedViewShareFollowup }
+  | { kind: 'apply' | 'context-action' | 'filter-navigation' | 'promotion-handoff' | 'reset-filters' | 'share-entry-takeover' }
+  | { kind: 'delete'; savedViewId: string }
+
+export type PlmAuditAttentionFocusAction =
+  | { kind: 'clear-source' }
+  | { kind: 'clear-management' }
+  | { kind: 'clear-all' }
+
+export function clearPlmAuditSourceFocusState(): PlmAuditSourceFocusState {
+  return {
+    focusedRecommendedAuditTeamViewId: '',
+    focusedSavedViewId: '',
+  }
+}
+
+export function applyPlmAuditSourceFocusState(
+  state: PlmAuditAttentionFocusState,
+  sourceFocus: PlmAuditSourceFocusState,
+): PlmAuditAttentionFocusState {
+  const clearedState = reducePlmAuditAttentionFocusState(state, { kind: 'clear-all' })
+  return {
+    ...clearedState,
+    focusedRecommendedAuditTeamViewId: sourceFocus.focusedRecommendedAuditTeamViewId,
+    focusedSavedViewId: sourceFocus.focusedSavedViewId,
+  }
+}
+
+export function reducePlmAuditAttentionFocusState(
+  state: PlmAuditAttentionFocusState,
+  action: PlmAuditAttentionFocusAction,
+): PlmAuditAttentionFocusState {
+  if (action.kind === 'clear-source') {
+    return {
+      ...state,
+      focusedRecommendedAuditTeamViewId: '',
+      focusedSavedViewId: '',
+    }
+  }
+
+  if (action.kind === 'clear-management') {
+    return {
+      ...state,
+      focusedAuditTeamViewId: '',
+    }
+  }
+
+  return {
+    focusedAuditTeamViewId: '',
+    focusedRecommendedAuditTeamViewId: '',
+    focusedSavedViewId: '',
+  }
+}
+
+export function buildPlmAuditTeamViewHandoffAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+  savedViewAttention: PlmAuditSavedViewAttentionState,
+): PlmAuditTeamViewHandoffAttentionState {
+  return {
+    attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-source' }),
+    savedViewAttention: reducePlmAuditSavedViewAttentionState(savedViewAttention, { kind: 'promotion-handoff' }),
+  }
+}
+
+export function buildPlmAuditSavedViewStoreAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+  savedViewAttention: PlmAuditSavedViewAttentionState,
+): PlmAuditSavedViewStoreAttentionState {
+  return {
+    attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-source' }),
+    savedViewAttention: reducePlmAuditSavedViewAttentionState(savedViewAttention, { kind: 'apply' }),
+  }
+}
+
+function buildPlmAuditSourceOwnedSavedViewAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+  savedViewAttention: PlmAuditSavedViewAttentionState,
+) {
+  return {
+    attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-all' }),
+    savedViewAttention: reducePlmAuditSavedViewAttentionState(savedViewAttention, { kind: 'apply' }),
+  }
+}
+
+export function buildPlmAuditSourceLocalSaveAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+  savedViewAttention: PlmAuditSavedViewAttentionState,
+): PlmAuditSourceLocalSaveAttentionState {
+  return buildPlmAuditSourceOwnedSavedViewAttentionState(attentionFocus, savedViewAttention)
+}
+
+export function buildPlmAuditManagedTeamViewAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+  savedViewAttention: PlmAuditSavedViewAttentionState,
+): PlmAuditManagedTeamViewAttentionState {
+  return {
+    attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-source' }),
+    savedViewAttention: reducePlmAuditSavedViewAttentionState(savedViewAttention, { kind: 'apply' }),
+  }
+}
+
+export function buildPlmAuditAppliedTeamViewAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+  savedViewAttention: PlmAuditSavedViewAttentionState,
+  appliedTeamViewId: string,
+): PlmAuditAppliedTeamViewAttentionState {
+  const nextState = buildPlmAuditManagedTeamViewAttentionState(
+    attentionFocus,
+    savedViewAttention,
+  )
+
+  return {
+    attentionFocus: {
+      ...nextState.attentionFocus,
+      focusedAuditTeamViewId: appliedTeamViewId.trim(),
+    },
+    savedViewAttention: nextState.savedViewAttention,
+  }
+}
+
+export function buildPlmAuditPersistedTeamViewAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+  savedViewAttention: PlmAuditSavedViewAttentionState,
+): PlmAuditPersistedTeamViewAttentionState {
+  return buildPlmAuditManagedTeamViewAttentionState(attentionFocus, savedViewAttention)
+}
+
+export function buildPlmAuditSourceShareFollowupAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+  savedViewAttention: PlmAuditSavedViewAttentionState,
+): PlmAuditSourceShareFollowupAttentionState {
+  return buildPlmAuditSourceOwnedSavedViewAttentionState(attentionFocus, savedViewAttention)
+}
+
+export function buildPlmAuditClearedCollaborationFollowupAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+): PlmAuditClearedCollaborationFollowupAttentionState {
+  return {
+    attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-all' }),
+  }
+}
+
+export function buildPlmAuditDismissedCollaborationDraftAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+): PlmAuditDismissedCollaborationDraftAttentionState {
+  return {
+    attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-management' }),
+  }
+}
+
+export function buildPlmAuditRoutePivotAttentionState(
+  attentionFocus: PlmAuditAttentionFocusState,
+  savedViewAttention: PlmAuditSavedViewAttentionState,
+): PlmAuditRoutePivotAttentionState {
+  return {
+    attentionFocus: reducePlmAuditAttentionFocusState(attentionFocus, { kind: 'clear-all' }),
+    savedViewAttention: reducePlmAuditSavedViewAttentionState(savedViewAttention, { kind: 'filter-navigation' }),
+  }
+}
+
+export function reducePlmAuditSavedViewAttentionState(
+  state: PlmAuditSavedViewAttentionState,
+  action: PlmAuditSavedViewAttentionAction,
+): PlmAuditSavedViewAttentionState {
+  if (action.kind === 'install-followup') {
+    return {
+      shareFollowup: action.shareFollowup,
+      focusedSavedViewId: '',
+    }
+  }
+
+  if (action.kind === 'delete') {
+    return {
+      shareFollowup: state.shareFollowup?.savedViewId === action.savedViewId
+        ? null
+        : state.shareFollowup,
+      focusedSavedViewId: state.focusedSavedViewId === action.savedViewId
+        ? ''
+        : state.focusedSavedViewId,
+    }
+  }
+
+  return {
+    shareFollowup: null,
+    focusedSavedViewId: '',
+  }
+}
+
+export function resolvePlmAuditSavedViewAttentionRuntimeState(
+  state: PlmAuditSavedViewAttentionState,
+  savedViews: readonly Pick<PlmAuditSavedView, 'id'>[],
+): {
+  state: PlmAuditSavedViewAttentionState
+  changed: boolean
+} {
+  if (!state.focusedSavedViewId.trim()) {
+    return {
+      state,
+      changed: false,
+    }
+  }
+
+  const focusedViewStillExists = savedViews.some((view) => view.id === state.focusedSavedViewId)
+  if (focusedViewStillExists) {
+    return {
+      state,
+      changed: false,
+    }
+  }
+
+  return {
+    state: {
+      ...state,
+      focusedSavedViewId: '',
+    },
+    changed: true,
+  }
+}

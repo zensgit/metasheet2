@@ -13,6 +13,7 @@ import {
   parseFilterPresetImport,
   persistFilterPresets,
   renameFilterPreset,
+  resolveFilterPresetCatalogDraftState,
   resolveFilterPresetShareMode,
   upsertFilterPreset,
 } from '../src/views/plm/plmFilterPresetUtils'
@@ -84,7 +85,118 @@ describe('plmFilterPresetUtils', () => {
     })
   })
 
-  it('builds explicit team preset share links that preserve collaborative identity', () => {
+  it('builds local preset share links with panel bootstrap context', () => {
+    const bomUrl = buildFilterPresetShareUrl(
+      'bom',
+      { key: 'bom:1', label: '关键件', field: 'path', value: 'root/a', group: '机械' },
+      'replace',
+      '/plm',
+      'http://example.test',
+      {
+        productId: 'product-42',
+        itemNumber: 'P-1001',
+        itemType: 'Assembly',
+      },
+    )
+    const whereUsedUrl = buildFilterPresetShareUrl(
+      'where-used',
+      { key: 'wu:1', label: '共享父件', field: 'all', value: 'assy-01', group: '' },
+      'merge',
+      '/plm',
+      'http://example.test',
+      {
+        productId: 'product-42',
+        itemNumber: 'P-1001',
+        itemType: 'Assembly',
+        whereUsedItemId: 'item-77',
+      },
+    )
+
+    const bomParams = new URL(bomUrl).searchParams
+    expect(bomParams.get('panel')).toBe('product')
+    expect(bomParams.get('productId')).toBe('product-42')
+    expect(bomParams.get('itemNumber')).toBe('P-1001')
+    expect(bomParams.get('itemType')).toBe('Assembly')
+    expect(bomParams.get('autoload')).toBe('true')
+    expect(bomParams.get('bomPresetShareMode')).toBe('replace')
+    expect(
+      decodeFilterPresetSharePayload(String(bomParams.get('bomPresetShare')), [{ value: 'all' }, { value: 'path' }]),
+    ).toMatchObject({
+      label: '关键件',
+      field: 'path',
+      value: 'root/a',
+    })
+
+    const whereUsedParams = new URL(whereUsedUrl).searchParams
+    expect(whereUsedParams.get('panel')).toBe('where-used')
+    expect(whereUsedParams.get('productId')).toBe('product-42')
+    expect(whereUsedParams.get('itemNumber')).toBe('P-1001')
+    expect(whereUsedParams.get('itemType')).toBe('Assembly')
+    expect(whereUsedParams.get('whereUsedItemId')).toBe('item-77')
+    expect(whereUsedParams.get('autoload')).toBe('true')
+    expect(whereUsedParams.get('whereUsedPresetShareMode')).toBeNull()
+    expect(
+      decodeFilterPresetSharePayload(String(whereUsedParams.get('whereUsedPresetShare')), [{ value: 'all' }, { value: 'path' }]),
+    ).toMatchObject({
+      label: '共享父件',
+      field: 'all',
+      value: 'assy-01',
+    })
+  })
+
+  it('bootstraps where-used preset shares from product context even before a root item is selected', () => {
+    const localUrl = buildFilterPresetShareUrl(
+      'where-used',
+      { key: 'wu:2', label: '共享父件', field: 'all', value: 'assy-01', group: '' },
+      'merge',
+      '/plm',
+      'http://example.test',
+      {
+        productId: 'product-42',
+        itemNumber: 'P-1001',
+        itemType: 'Assembly',
+      },
+    )
+    const teamUrl = buildTeamFilterPresetShareUrl(
+      'where-used',
+      {
+        id: 'wu-team-2',
+        kind: 'where-used',
+        scope: 'team',
+        name: '共享父件',
+        ownerUserId: 'dev-user',
+        canManage: true,
+        isDefault: false,
+        state: { field: 'all', value: 'assy-01', group: '' },
+      },
+      '/plm',
+      'where-used',
+      'http://example.test',
+      {
+        productId: 'product-42',
+        itemNumber: 'P-1001',
+        itemType: 'Assembly',
+      },
+    )
+
+    const localParams = new URL(localUrl).searchParams
+    expect(localParams.get('panel')).toBe('where-used')
+    expect(localParams.get('productId')).toBe('product-42')
+    expect(localParams.get('itemNumber')).toBe('P-1001')
+    expect(localParams.get('itemType')).toBe('Assembly')
+    expect(localParams.get('whereUsedItemId')).toBeNull()
+    expect(localParams.get('autoload')).toBe('true')
+
+    const teamParams = new URL(teamUrl).searchParams
+    expect(teamParams.get('panel')).toBe('where-used')
+    expect(teamParams.get('productId')).toBe('product-42')
+    expect(teamParams.get('itemNumber')).toBe('P-1001')
+    expect(teamParams.get('itemType')).toBe('Assembly')
+    expect(teamParams.get('whereUsedItemId')).toBeNull()
+    expect(teamParams.get('autoload')).toBe('true')
+  })
+
+  it('builds explicit team preset share links that preserve collaborative identity and cold-start context', () => {
     const bomUrl = buildTeamFilterPresetShareUrl(
       'bom',
       {
@@ -100,6 +212,11 @@ describe('plmFilterPresetUtils', () => {
       '/plm',
       'bom',
       'http://example.test',
+      {
+        productId: 'product-42',
+        itemNumber: 'P-1001',
+        itemType: 'Assembly',
+      },
     )
     const whereUsedUrl = buildTeamFilterPresetShareUrl(
       'where-used',
@@ -116,19 +233,97 @@ describe('plmFilterPresetUtils', () => {
       '/plm',
       'where-used',
       'http://example.test',
+      {
+        productId: 'product-42',
+        itemNumber: 'P-1001',
+        itemType: 'Assembly',
+        whereUsedItemId: 'item-77',
+      },
     )
 
     const bomParams = new URL(bomUrl).searchParams
-    expect(bomParams.get('panel')).toBe('bom')
+    expect(bomParams.get('panel')).toBe('product')
     expect(bomParams.get('bomTeamPreset')).toBe('bom-team-1')
     expect(bomParams.get('bomFilter')).toBe('root/a')
     expect(bomParams.get('bomFilterField')).toBe('path')
+    expect(bomParams.get('productId')).toBe('product-42')
+    expect(bomParams.get('itemNumber')).toBe('P-1001')
+    expect(bomParams.get('itemType')).toBe('Assembly')
+    expect(bomParams.get('autoload')).toBe('true')
 
     const whereUsedParams = new URL(whereUsedUrl).searchParams
     expect(whereUsedParams.get('panel')).toBe('where-used')
     expect(whereUsedParams.get('whereUsedTeamPreset')).toBe('wu-team-1')
     expect(whereUsedParams.get('whereUsedFilter')).toBe('assy-01')
     expect(whereUsedParams.get('whereUsedFilterField')).toBeNull()
+    expect(whereUsedParams.get('productId')).toBe('product-42')
+    expect(whereUsedParams.get('itemNumber')).toBe('P-1001')
+    expect(whereUsedParams.get('itemType')).toBe('Assembly')
+    expect(whereUsedParams.get('whereUsedItemId')).toBe('item-77')
+    expect(whereUsedParams.get('autoload')).toBe('true')
+  })
+
+  it('clears stale local preset drafts when the selected preset disappears from the catalog', () => {
+    expect(resolveFilterPresetCatalogDraftState({
+      availablePresets: [
+        { key: 'bom:2' },
+      ],
+      selectedPresetKey: ' bom:1 ',
+      routePresetKey: ' bom:1 ',
+      nameDraft: '旧 BOM 预设',
+      groupDraft: '机械',
+      selectionKeys: [' bom:1 ', ' bom:3 '],
+      batchGroupDraft: '批量分组',
+    })).toEqual({
+      nextSelectedPresetKey: '',
+      nextRoutePresetKey: '',
+      nextNameDraft: '',
+      nextGroupDraft: '',
+      nextSelectionKeys: [],
+      nextBatchGroupDraft: '',
+    })
+  })
+
+  it('preserves local preset drafts when the selected preset survives but the route owner goes stale', () => {
+    expect(resolveFilterPresetCatalogDraftState({
+      availablePresets: [
+        { key: 'bom:2' },
+      ],
+      selectedPresetKey: ' bom:2 ',
+      routePresetKey: ' bom:1 ',
+      nameDraft: '新的 BOM 预设',
+      groupDraft: '电机',
+      selectionKeys: [' bom:2 ', ' bom:stale '],
+      batchGroupDraft: '存活分组',
+    })).toEqual({
+      nextSelectedPresetKey: 'bom:2',
+      nextRoutePresetKey: '',
+      nextNameDraft: '新的 BOM 预设',
+      nextGroupDraft: '电机',
+      nextSelectionKeys: ['bom:2'],
+      nextBatchGroupDraft: '存活分组',
+    })
+  })
+
+  it('clears batch group drafts when no selected presets survive catalog reconciliation', () => {
+    expect(resolveFilterPresetCatalogDraftState({
+      availablePresets: [
+        { key: 'bom:2' },
+      ],
+      selectedPresetKey: ' bom:2 ',
+      routePresetKey: ' bom:2 ',
+      nameDraft: '新的 BOM 预设',
+      groupDraft: '电机',
+      selectionKeys: [' bom:1 '],
+      batchGroupDraft: '待清理分组',
+    })).toEqual({
+      nextSelectedPresetKey: 'bom:2',
+      nextRoutePresetKey: 'bom:2',
+      nextNameDraft: '新的 BOM 预设',
+      nextGroupDraft: '电机',
+      nextSelectionKeys: [],
+      nextBatchGroupDraft: '',
+    })
   })
 
   it('duplicates and renames presets while preserving explicit identity semantics', () => {

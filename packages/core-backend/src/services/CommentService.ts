@@ -1,4 +1,3 @@
-
 import { ICollabService, ILogger, type CommentQueryOptions } from '../di/identifiers';
 import type { CollabService } from './CollabService';
 import { db } from '../db/db';
@@ -17,7 +16,7 @@ export interface Comment {
   mentions: string[];
 }
 
-type CommentRow = {
+type MetaCommentRow = {
   id: string;
   spreadsheet_id: string;
   row_id: string;
@@ -99,7 +98,7 @@ export class CommentService {
       .offset(offset)
       .execute();
 
-    return { items: rows.map((row) => this.mapRowToComment(row)), total };
+    return { items: rows.map(this.mapRowToComment), total };
   }
 
   async resolveComment(commentId: string): Promise<void> {
@@ -119,11 +118,10 @@ export class CommentService {
     return row ? this.mapRowToComment(row) : undefined;
   }
 
-  private mapRowToComment(row: CommentRow): Comment {
+  private mapRowToComment(row: MetaCommentRow): Comment {
     const mentions = typeof row.mentions === 'string'
       ? JSON.parse(row.mentions) as unknown
-      : row.mentions
-
+      : row.mentions ?? [];
     return {
       id: row.id,
       spreadsheetId: row.spreadsheet_id,

@@ -339,8 +339,18 @@ PY
 }
 
 start_web() {
+  local web_port
+  web_port="$(
+    python3 - <<'PY' "$WEB_BASE"
+from urllib.parse import urlparse
+import sys
+
+u = urlparse(sys.argv[1])
+print(u.port or 8899)
+PY
+  )"
   echo "Starting web dev server..."
-  VITE_API_BASE="$API_BASE" pnpm --filter @metasheet/web dev > "$OUTPUT_DIR/plm-ui-regression-web.log" 2>&1 &
+  VITE_API_BASE="$API_BASE" VITE_PORT="$web_port" pnpm --filter @metasheet/web dev > "$OUTPUT_DIR/plm-ui-regression-web.log" 2>&1 &
   WEB_PID=$!
 
   for _ in {1..30}; do
@@ -769,9 +779,7 @@ function firstLineText(value) {
       }
       await bomPresetNameInput.fill(presetName);
       await bomPresetGroupInput.fill(presetGroup);
-      await bomSection
-        .locator('label:has(#plm-bom-filter-preset-name) button:has-text("保存")')
-        .click();
+      await bomSection.locator('#plm-bom-filter-preset-save').click();
       const presetSelect = bomSection.locator('#plm-bom-filter-preset');
       const presetOptions = presetSelect.locator('option');
       const optionCount = await presetOptions.count();
@@ -781,9 +789,7 @@ function firstLineText(value) {
       const lastValue = await presetOptions.nth(optionCount - 1).getAttribute('value');
       if (lastValue) {
         await presetSelect.selectOption(lastValue);
-        await bomSection
-          .locator('label:has(#plm-bom-filter-preset) button:has-text("应用")')
-          .click();
+        await bomSection.locator('#plm-bom-filter-preset-apply').click();
         const appliedValue = await bomSection.locator('#plm-bom-filter').inputValue();
         if (appliedValue.trim() !== currentFilterValue.trim()) {
           throw new Error('BOM filter preset did not apply the expected value.');
@@ -794,14 +800,14 @@ function firstLineText(value) {
         throw new Error('BOM filter preset group filter missing.');
       }
       await bomPresetGroupInput.fill('');
-      await bomSection.locator('label:has(#plm-bom-filter-preset) button:has-text("设为分组")').click();
+      await bomSection.locator('#plm-bom-filter-preset-assign-group').click();
       await bomGroupFilter.selectOption('ungrouped');
       const ungroupedOption = presetSelect.locator('option', { hasText: presetName });
       if ((await ungroupedOption.count()) === 0) {
         throw new Error('BOM preset assign group clear failed.');
       }
       await bomPresetGroupInput.fill(presetGroup);
-      await bomSection.locator('label:has(#plm-bom-filter-preset) button:has-text("设为分组")').click();
+      await bomSection.locator('#plm-bom-filter-preset-assign-group').click();
       await bomGroupFilter.selectOption(presetGroup);
       const groupOption = presetSelect.locator('option', { hasText: presetName });
       if ((await groupOption.count()) === 0) {
@@ -811,9 +817,7 @@ function firstLineText(value) {
       if (lastValue) {
         await presetSelect.selectOption(lastValue);
       }
-      const bomShareButton = bomSection.locator(
-        'label:has(#plm-bom-filter-preset) button:has-text("分享")'
-      );
+      const bomShareButton = bomSection.locator('#plm-bom-filter-preset-share');
       if ((await bomShareButton.count()) === 0) {
         throw new Error('BOM filter preset share button missing.');
       }
@@ -822,9 +826,7 @@ function firstLineText(value) {
         .locator('p.status', { hasText: '分享链接' })
         .first()
         .waitFor({ timeout: 10000 });
-      const bomExportButton = bomSection.locator(
-        'label:has(#plm-bom-filter-preset-import) button:has-text("导出")'
-      );
+      const bomExportButton = bomSection.locator('#plm-bom-filter-preset-export');
       if ((await bomExportButton.count()) === 0) {
         throw new Error('BOM filter preset export button missing.');
       }
@@ -840,16 +842,14 @@ function firstLineText(value) {
           { label: importLabel, field: 'all', value: currentFilterValue.trim() },
         ]);
         await bomImportInput.fill(importPayload);
-        await bomSection
-          .locator('label:has(#plm-bom-filter-preset-import) button:has-text("导入")')
-          .click();
+        await bomSection.locator('#plm-bom-filter-preset-import-apply').click();
         const importedOption = presetSelect.locator('option', { hasText: importLabel });
         if ((await importedOption.count()) === 0) {
           throw new Error('BOM filter preset import did not create a new preset.');
         }
         managerPresetLabel = importLabel;
       }
-      const bomManagerToggle = bomSection.locator('label:has(#plm-bom-filter-preset-import) button:has-text("管理")');
+      const bomManagerToggle = bomSection.locator('#plm-bom-filter-preset-manager-toggle');
       if ((await bomManagerToggle.count()) === 0) {
         throw new Error('BOM preset manager toggle missing.');
       }
@@ -1113,9 +1113,7 @@ function firstLineText(value) {
     }
     await whereUsedPresetNameInput.fill(presetName);
     await whereUsedPresetGroupInput.fill(presetGroup);
-    await whereUsedSection
-      .locator('label:has(#plm-where-used-filter-preset-name) button:has-text("保存")')
-      .click();
+    await whereUsedSection.locator('#plm-where-used-filter-preset-save').click();
     const presetSelect = whereUsedSection.locator('#plm-where-used-filter-preset');
     const presetOptions = presetSelect.locator('option');
     const optionCount = await presetOptions.count();
@@ -1125,9 +1123,7 @@ function firstLineText(value) {
     const lastValue = await presetOptions.nth(optionCount - 1).getAttribute('value');
     if (lastValue) {
       await presetSelect.selectOption(lastValue);
-      await whereUsedSection
-        .locator('label:has(#plm-where-used-filter-preset) button:has-text("应用")')
-        .click();
+      await whereUsedSection.locator('#plm-where-used-filter-preset-apply').click();
       const appliedValue = await whereUsedFilterInput.inputValue();
       const expectedValue = whereUsedExpect || whereUsedId;
       if (expectedValue && appliedValue.trim() !== String(expectedValue).trim()) {
@@ -1139,14 +1135,14 @@ function firstLineText(value) {
       throw new Error('Where-used filter preset group filter missing.');
     }
     await whereUsedPresetGroupInput.fill('');
-    await whereUsedSection.locator('label:has(#plm-where-used-filter-preset) button:has-text("设为分组")').click();
+    await whereUsedSection.locator('#plm-where-used-filter-preset-assign-group').click();
     await whereUsedGroupFilter.selectOption('ungrouped');
     const ungroupedOption = presetSelect.locator('option', { hasText: presetName });
     if ((await ungroupedOption.count()) === 0) {
       throw new Error('Where-used preset assign group clear failed.');
     }
     await whereUsedPresetGroupInput.fill(presetGroup);
-    await whereUsedSection.locator('label:has(#plm-where-used-filter-preset) button:has-text("设为分组")').click();
+    await whereUsedSection.locator('#plm-where-used-filter-preset-assign-group').click();
     await whereUsedGroupFilter.selectOption(presetGroup);
     const groupOption = presetSelect.locator('option', { hasText: presetName });
     if ((await groupOption.count()) === 0) {
@@ -1156,9 +1152,7 @@ function firstLineText(value) {
     if (lastValue) {
       await presetSelect.selectOption(lastValue);
     }
-    const whereUsedShareButton = whereUsedSection.locator(
-      'label:has(#plm-where-used-filter-preset) button:has-text("分享")'
-    );
+    const whereUsedShareButton = whereUsedSection.locator('#plm-where-used-filter-preset-share');
     if ((await whereUsedShareButton.count()) === 0) {
       throw new Error('Where-used filter preset share button missing.');
     }
@@ -1167,9 +1161,7 @@ function firstLineText(value) {
       .locator('p.status', { hasText: '分享链接' })
       .first()
       .waitFor({ timeout: 10000 });
-    const whereUsedExportButton = whereUsedSection.locator(
-      'label:has(#plm-where-used-filter-preset-import) button:has-text("导出")'
-    );
+    const whereUsedExportButton = whereUsedSection.locator('#plm-where-used-filter-preset-export');
     if ((await whereUsedExportButton.count()) === 0) {
       throw new Error('Where-used filter preset export button missing.');
     }
@@ -1186,18 +1178,14 @@ function firstLineText(value) {
         { label: importLabel, field: 'all', value: String(expectedValue) },
       ]);
       await whereUsedImportInput.fill(importPayload);
-      await whereUsedSection
-        .locator('label:has(#plm-where-used-filter-preset-import) button:has-text("导入")')
-        .click();
+      await whereUsedSection.locator('#plm-where-used-filter-preset-import-apply').click();
       const importedOption = presetSelect.locator('option', { hasText: importLabel });
       if ((await importedOption.count()) === 0) {
         throw new Error('Where-used filter preset import did not create a new preset.');
       }
       managerPresetLabel = importLabel;
     }
-    const whereUsedManagerToggle = whereUsedSection.locator(
-      'label:has(#plm-where-used-filter-preset-import) button:has-text("管理")'
-    );
+    const whereUsedManagerToggle = whereUsedSection.locator('#plm-where-used-filter-preset-manager-toggle');
     if ((await whereUsedManagerToggle.count()) === 0) {
       throw new Error('Where-used preset manager toggle missing.');
     }

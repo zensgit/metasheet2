@@ -244,6 +244,12 @@ export function buildFilterPresetShareUrl(
   mode: FilterPresetShareMode,
   basePath: string,
   origin?: string,
+  routeContext?: {
+    productId?: string | null
+    itemNumber?: string | null
+    itemType?: string | null
+    whereUsedItemId?: string | null
+  },
 ): string {
   const resolvedOrigin = origin ?? (typeof window !== 'undefined' ? window.location.origin : '')
   if (!resolvedOrigin) return ''
@@ -252,11 +258,40 @@ export function buildFilterPresetShareUrl(
   const base = `${resolvedOrigin}${basePath}`
   const params = new URLSearchParams()
   if (kind === 'bom') {
+    params.set('panel', 'product')
     params.set('bomPresetShare', encoded)
     if (mode === 'replace') params.set('bomPresetShareMode', mode)
+    if (routeContext?.productId) {
+      params.set('productId', routeContext.productId)
+    }
+    if (routeContext?.itemNumber) {
+      params.set('itemNumber', routeContext.itemNumber)
+    }
+    if (routeContext?.itemType) {
+      params.set('itemType', routeContext.itemType)
+    }
+    if (routeContext?.productId || routeContext?.itemNumber) {
+      params.set('autoload', 'true')
+    }
   } else {
+    params.set('panel', 'where-used')
     params.set('whereUsedPresetShare', encoded)
     if (mode === 'replace') params.set('whereUsedPresetShareMode', mode)
+    if (routeContext?.productId) {
+      params.set('productId', routeContext.productId)
+    }
+    if (routeContext?.itemNumber) {
+      params.set('itemNumber', routeContext.itemNumber)
+    }
+    if (routeContext?.itemType) {
+      params.set('itemType', routeContext.itemType)
+    }
+    if (routeContext?.whereUsedItemId) {
+      params.set('whereUsedItemId', routeContext.whereUsedItemId)
+    }
+    if (routeContext?.whereUsedItemId || routeContext?.productId || routeContext?.itemNumber) {
+      params.set('autoload', 'true')
+    }
   }
   const query = params.toString()
   return query ? `${base}?${query}` : base
@@ -268,14 +303,21 @@ export function buildTeamFilterPresetShareUrl(
   basePath: string,
   panel?: string,
   origin?: string,
+  routeContext?: {
+    productId?: string | null
+    itemNumber?: string | null
+    itemType?: string | null
+    whereUsedItemId?: string | null
+  },
 ): string {
   const resolvedOrigin = origin ?? (typeof window !== 'undefined' ? window.location.origin : '')
   if (!resolvedOrigin) return ''
   const base = `${resolvedOrigin}${basePath}`
   const params = new URLSearchParams()
+  const normalizedPanel = kind === 'bom' && panel === 'bom' ? 'product' : panel
 
-  if (panel) {
-    params.set('panel', panel)
+  if (normalizedPanel) {
+    params.set('panel', normalizedPanel)
   }
 
   if (kind === 'bom') {
@@ -284,16 +326,87 @@ export function buildTeamFilterPresetShareUrl(
     if (preset.state.field && preset.state.field !== 'all') {
       params.set('bomFilterField', preset.state.field)
     }
+    if (routeContext?.productId) {
+      params.set('productId', routeContext.productId)
+    }
+    if (routeContext?.itemNumber) {
+      params.set('itemNumber', routeContext.itemNumber)
+    }
+    if (routeContext?.itemType) {
+      params.set('itemType', routeContext.itemType)
+    }
+    if (routeContext?.productId || routeContext?.itemNumber) {
+      params.set('autoload', 'true')
+    }
   } else {
     params.set('whereUsedTeamPreset', preset.id)
     params.set('whereUsedFilter', preset.state.value)
     if (preset.state.field && preset.state.field !== 'all') {
       params.set('whereUsedFilterField', preset.state.field)
     }
+    if (routeContext?.productId) {
+      params.set('productId', routeContext.productId)
+    }
+    if (routeContext?.itemNumber) {
+      params.set('itemNumber', routeContext.itemNumber)
+    }
+    if (routeContext?.itemType) {
+      params.set('itemType', routeContext.itemType)
+    }
+    if (routeContext?.whereUsedItemId) {
+      params.set('whereUsedItemId', routeContext.whereUsedItemId)
+    }
+    if (routeContext?.whereUsedItemId || routeContext?.productId || routeContext?.itemNumber) {
+      params.set('autoload', 'true')
+    }
   }
 
   const query = params.toString()
   return query ? `${base}?${query}` : base
+}
+
+export function resolveFilterPresetCatalogDraftState(input: {
+  availablePresets: Array<Pick<FilterPreset, 'key'>>
+  selectedPresetKey: string
+  routePresetKey?: string
+  nameDraft?: string
+  groupDraft?: string
+  selectionKeys?: string[]
+  batchGroupDraft?: string
+}) {
+  const availablePresetKeys = new Set(
+    input.availablePresets
+      .map((preset) => preset.key.trim())
+      .filter(Boolean),
+  )
+  const selectedPresetKey = input.selectedPresetKey.trim()
+  const routePresetKey = String(input.routePresetKey || '').trim()
+  const nextSelectedPresetKey = (
+    selectedPresetKey && availablePresetKeys.has(selectedPresetKey)
+      ? selectedPresetKey
+      : ''
+  )
+  const nextRoutePresetKey = (
+    routePresetKey && availablePresetKeys.has(routePresetKey)
+      ? routePresetKey
+      : ''
+  )
+  const nextSelectionKeys = Array.from(new Set(
+    (input.selectionKeys || [])
+      .map((key) => key.trim())
+      .filter((key) => key && availablePresetKeys.has(key)),
+  ))
+  const shouldPreserveDrafts = Boolean(nextSelectedPresetKey)
+  const shouldPreserveBatchGroup = nextSelectionKeys.length > 0
+
+  return {
+    nextSelectedPresetKey,
+    nextRoutePresetKey,
+    nextNameDraft: shouldPreserveDrafts ? input.nameDraft || '' : '',
+    nextGroupDraft: shouldPreserveDrafts ? input.groupDraft || '' : '',
+    nextSelectionKeys,
+    nextBatchGroupDraft: shouldPreserveBatchGroup ? input.batchGroupDraft || '' : '',
+  }
 }
 
 export function confirmFilterPresetImport(

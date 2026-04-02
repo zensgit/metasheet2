@@ -9,6 +9,15 @@
         </p>
       </div>
       <div class="plm-audit__actions">
+        <button
+          v-if="showPersistentReturnToScene"
+          class="plm-audit__button plm-audit__button--primary"
+          type="button"
+          :disabled="logsLoading"
+          @click="returnToWorkbenchScene"
+        >
+          {{ tr('Return to scene', '返回原场景') }}
+        </button>
         <button class="plm-audit__button" type="button" :disabled="exporting" @click="exportCsv">
           {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
         </button>
@@ -21,7 +30,7 @@
       </div>
     </header>
 
-    <section v-if="auditSceneContext" class="plm-audit__context">
+    <section v-if="auditSceneContext" id="plm-audit-scene-context" class="plm-audit__context">
       <div>
         <small class="plm-audit__summary-source">{{ auditSceneContext.sourceLabel }}</small>
         <strong>{{ auditSceneContext.title }}</strong>
@@ -34,6 +43,15 @@
       </div>
       <div class="plm-audit__context-actions">
         <button
+          v-if="auditReturnToPlmPath"
+          class="plm-audit__button plm-audit__button--primary"
+          type="button"
+          :disabled="logsLoading"
+          @click="returnToWorkbenchScene"
+        >
+          {{ tr('Return to scene', '返回原场景') }}
+        </button>
+        <button
           v-for="actionItem in auditSceneToken?.actions || []"
           :key="`scene-context-${actionItem.kind}-${actionItem.emphasis}`"
           class="plm-audit__button"
@@ -43,6 +61,20 @@
         >
           {{ actionItem.label }}
         </button>
+      </div>
+      <div v-if="auditSceneSaveDraft" class="plm-audit__context-save">
+        <span class="plm-audit__muted">{{ auditSceneSaveDraft.description }}</span>
+        <div class="plm-audit__context-actions">
+          <button class="plm-audit__button" type="button" :disabled="logsLoading" @click="runAuditSceneSaveAction('saved-view')">
+            {{ tr('Save scene view', '保存场景视图') }}
+          </button>
+          <button class="plm-audit__button" type="button" :disabled="logsLoading || auditTeamViewsLoading" @click="runAuditSceneSaveAction('team-view')">
+            {{ tr('Save scene to team', '保存场景到团队') }}
+          </button>
+          <button class="plm-audit__button" type="button" :disabled="logsLoading || auditTeamViewsLoading" @click="runAuditSceneSaveAction('team-default')">
+            {{ tr('Save scene as default', '保存场景为默认') }}
+          </button>
+        </div>
       </div>
     </section>
 
@@ -170,13 +202,13 @@
       <label class="plm-audit__field">
         <span>{{ tr('Kind', '类型') }}</span>
         <select v-model="kind">
-          <option value="">{{ tr('All', '全部') }}</option>
-          <option value="bom">BOM</option>
-          <option value="where-used">Where-Used</option>
-          <option value="documents">Documents</option>
-          <option value="cad">CAD</option>
-          <option value="approvals">Approvals</option>
-          <option value="workbench">Workbench</option>
+          <option
+            v-for="option in PLM_AUDIT_KIND_OPTIONS"
+            :key="option.value || 'all'"
+            :value="option.value"
+          >
+            {{ tr(option.label, option.labelZh) }}
+          </option>
         </select>
       </label>
       <label class="plm-audit__field">
@@ -195,6 +227,7 @@
         <select v-model="resourceType">
           <option value="">{{ tr('All', '全部') }}</option>
           <option value="plm-team-preset-batch">{{ tr('Team preset batch', '团队预设批量') }}</option>
+          <option value="plm-team-preset-default">{{ tr('Team preset default', '团队预设默认') }}</option>
           <option value="plm-team-view-batch">{{ tr('Team view batch', '团队视图批量') }}</option>
           <option value="plm-team-view-default">{{ tr('Team default scene', '团队默认场景') }}</option>
         </select>
@@ -210,11 +243,11 @@
       </label>
       <label class="plm-audit__field">
         <span>{{ tr('From', '起始') }}</span>
-        <input v-model="from" type="datetime-local" />
+        <input v-model="fromInput" type="datetime-local" />
       </label>
       <label class="plm-audit__field">
         <span>{{ tr('To', '截止') }}</span>
-        <input v-model="to" type="datetime-local" />
+        <input v-model="toInput" type="datetime-local" />
       </label>
       <div class="plm-audit__filter-actions">
         <button class="plm-audit__button plm-audit__button--primary" type="submit" :disabled="logsLoading">
@@ -226,7 +259,7 @@
       </div>
     </form>
 
-    <section class="plm-audit__team-views">
+    <section id="plm-audit-team-view-controls" class="plm-audit__team-views">
       <div class="plm-audit__saved-views-header">
         <div>
           <h2>{{ tr('Team views', '团队视图') }}</h2>
@@ -249,18 +282,93 @@
         <button class="plm-audit__button" type="button" :disabled="!canApplyAuditTeamView || auditTeamViewsLoading" @click="applyAuditTeamView">
           {{ tr('Apply', '应用') }}
         </button>
-        <button class="plm-audit__button" type="button" :disabled="!canShareAuditTeamView || auditTeamViewsLoading" @click="shareAuditTeamView">
+        <button class="plm-audit__button" type="button" :disabled="auditTeamViewManagementTargetLocked || !canDuplicateAuditTeamView || auditTeamViewsLoading" @click="duplicateAuditTeamView">
+          {{ tr('Duplicate', '复制副本') }}
+        </button>
+        <button class="plm-audit__button" type="button" :disabled="auditTeamViewManagementTargetLocked || !canShareAuditTeamView || auditTeamViewsLoading" @click="shareAuditTeamView">
           {{ tr('Share', '分享') }}
         </button>
-        <button class="plm-audit__button" type="button" :disabled="!canSetAuditTeamViewDefault || auditTeamViewsLoading" @click="setAuditTeamViewDefault">
+        <button class="plm-audit__button" type="button" :disabled="auditTeamViewManagementTargetLocked || !canSetAuditTeamViewDefault || auditTeamViewsLoading" @click="setAuditTeamViewDefault">
           {{ tr('Set default', '设为默认') }}
         </button>
-        <button class="plm-audit__button" type="button" :disabled="!canClearAuditTeamViewDefault || auditTeamViewsLoading" @click="clearAuditTeamViewDefault">
+        <button class="plm-audit__button" type="button" :disabled="auditTeamViewManagementTargetLocked || !canClearAuditTeamViewDefault || auditTeamViewsLoading" @click="clearAuditTeamViewDefault">
           {{ tr('Clear default', '取消默认') }}
         </button>
-        <button class="plm-audit__button" type="button" :disabled="!canDeleteAuditTeamView || auditTeamViewsLoading" @click="deleteAuditTeamView">
+        <button class="plm-audit__button" type="button" :disabled="auditTeamViewManagementTargetLocked || !canDeleteAuditTeamView || auditTeamViewsLoading" @click="deleteAuditTeamView">
           {{ tr('Delete', '删除') }}
         </button>
+        <button class="plm-audit__button" type="button" :disabled="auditTeamViewManagementTargetLocked || !canArchiveAuditTeamView || auditTeamViewsLoading" @click="archiveAuditTeamView">
+          {{ tr('Archive', '归档') }}
+        </button>
+        <button class="plm-audit__button" type="button" :disabled="auditTeamViewManagementTargetLocked || !canRestoreAuditTeamView || auditTeamViewsLoading" @click="restoreAuditTeamView">
+          {{ tr('Restore', '恢复') }}
+        </button>
+      </div>
+      <p v-if="auditTeamViewManagementTargetLocked" class="plm-audit__muted">
+        {{ tr('Apply the selected team view before running management actions.', '请先应用所选团队视图，再执行管理动作。') }}
+      </p>
+
+      <div v-if="auditTeamViewCollaborationNotice" class="plm-audit__team-view-collaboration">
+        <div class="plm-audit__team-view-collaboration-meta">
+          <small class="plm-audit__summary-source">{{ auditTeamViewCollaborationNotice.sourceLabel }}</small>
+          <strong>{{ auditTeamViewCollaborationNotice.title }}</strong>
+          <span class="plm-audit__muted">{{ auditTeamViewCollaborationNotice.description }}</span>
+        </div>
+        <div class="plm-audit__team-view-collaboration-actions">
+          <button
+            v-for="actionItem in auditTeamViewCollaborationNotice.actions"
+            :key="`team-view-collaboration-${actionItem.kind}`"
+            class="plm-audit__button"
+            :class="{ 'plm-audit__button--primary': actionItem.emphasis === 'primary' }"
+            type="button"
+            :disabled="auditTeamViewsLoading"
+            @click="runAuditTeamViewCollaborationAction(actionItem.kind)"
+          >
+            {{ actionItem.label }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="auditTeamViewShareEntryNotice" class="plm-audit__team-view-share-entry">
+        <div class="plm-audit__team-view-collaboration-meta">
+          <small class="plm-audit__summary-source">{{ auditTeamViewShareEntryNotice.sourceLabel }}</small>
+          <strong>{{ auditTeamViewShareEntryNotice.title }}</strong>
+          <span class="plm-audit__muted">{{ auditTeamViewShareEntryNotice.description }}</span>
+        </div>
+        <div class="plm-audit__team-view-collaboration-actions">
+          <button
+            v-for="actionItem in auditTeamViewShareEntryNotice.actions"
+            :key="`team-view-share-entry-${actionItem.kind}`"
+            class="plm-audit__button"
+            :class="{ 'plm-audit__button--primary': actionItem.emphasis === 'primary' }"
+            type="button"
+            :disabled="auditTeamViewsLoading"
+            @click="runAuditTeamViewShareEntryAction(actionItem.kind)"
+          >
+            {{ actionItem.label }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="auditTeamViewCollaborationFollowupNotice" class="plm-audit__team-view-followup">
+        <div class="plm-audit__team-view-collaboration-meta">
+          <small class="plm-audit__summary-source">{{ auditTeamViewCollaborationFollowupNotice.sourceLabel }}</small>
+          <strong>{{ auditTeamViewCollaborationFollowupNotice.title }}</strong>
+          <span class="plm-audit__muted">{{ auditTeamViewCollaborationFollowupNotice.description }}</span>
+        </div>
+        <div class="plm-audit__team-view-collaboration-actions">
+          <button
+            v-for="actionItem in auditTeamViewCollaborationFollowupNotice.actions"
+            :key="`team-view-collaboration-followup-${actionItem.kind}`"
+            class="plm-audit__button"
+            :class="{ 'plm-audit__button--primary': actionItem.emphasis === 'primary' }"
+            type="button"
+            :disabled="auditTeamViewsLoading || logsLoading"
+            @click="runAuditTeamViewCollaborationFollowupAction(actionItem.kind)"
+          >
+            {{ actionItem.label }}
+          </button>
+        </div>
       </div>
 
       <div
@@ -295,17 +403,199 @@
         {{ tr('Current default', '当前默认') }}: {{ defaultAuditTeamViewLabel }}
       </p>
 
+      <div
+        id="plm-audit-recommended-team-views"
+        v-if="showAuditTeamViewRecommendations"
+        class="plm-audit__recommended-team-views"
+      >
+        <div class="plm-audit__recommended-header">
+          <div>
+            <h3>{{ tr('Recommended audit team views', '推荐审计团队视图') }}</h3>
+            <p class="plm-audit__muted">{{ auditTeamViewSummaryHint.description }}</p>
+          </div>
+          <div class="plm-audit__summary-chips">
+            <button
+              v-for="chip in auditTeamViewSummaryChips"
+              :key="`audit-team-view-chip-${chip.value || 'all'}`"
+              class="plm-audit__summary-chip"
+              :class="{ 'plm-audit__summary-chip--active': chip.active }"
+              type="button"
+              @click="setAuditTeamViewRecommendationFilter(chip.value)"
+            >
+              {{ chip.label }} · {{ chip.count }}
+            </button>
+          </div>
+        </div>
+
+        <div class="plm-audit__recommended-grid">
+          <p v-if="!recommendedAuditTeamViews.length" class="plm-audit__empty plm-audit__empty--card-grid">
+            {{ auditTeamViewRecommendationEmptyLabel }}
+          </p>
+          <article
+            v-for="view in recommendedAuditTeamViews"
+            :key="view.id"
+            class="plm-audit__recommended-card"
+            :class="{
+              'plm-audit__recommended-card--default': view.isDefault,
+              'plm-audit__recommended-card--focused': focusedRecommendedAuditTeamViewId === view.id,
+            }"
+          >
+            <div class="plm-audit__recommended-meta">
+              <strong>{{ view.name }}</strong>
+              <span class="plm-audit__saved-view-source">{{ view.recommendationSourceLabel }}</span>
+              <span class="plm-audit__muted">{{ tr('Owner', 'Owner') }}: {{ view.ownerUserId }}</span>
+              <span v-if="view.recommendationSourceTimestamp" class="plm-audit__muted">
+                {{ formatDate(view.recommendationSourceTimestamp) }}
+              </span>
+              <span class="plm-audit__muted">{{ view.actionNote }}</span>
+            </div>
+            <div class="plm-audit__recommended-actions">
+              <button
+                class="plm-audit__button plm-audit__button--primary"
+                type="button"
+                :disabled="auditTeamViewsLoading || view.primaryActionDisabled"
+                @click="applyRecommendedAuditTeamView(view)"
+              >
+                {{ view.primaryActionLabel }}
+              </button>
+              <button class="plm-audit__button" type="button" :disabled="auditTeamViewsLoading || view.secondaryActionDisabled" @click="runRecommendedAuditTeamViewSecondaryAction(view)">
+                {{ view.secondaryActionLabel }}
+              </button>
+              <button class="plm-audit__button" type="button" :disabled="auditTeamViewsLoading" @click="focusAuditTeamViewManagement(view)">
+                {{ view.managementActionLabel }}
+              </button>
+            </div>
+          </article>
+        </div>
+      </div>
+
       <div class="plm-audit__saved-view-create">
         <input
           v-model="auditTeamViewName"
           class="plm-audit__saved-view-input"
           type="text"
           :placeholder="tr('Team view name', '团队视图名称')"
+          @input="captureAuditTeamViewNameDraftOwner"
           @keydown.enter.prevent="saveAuditTeamView"
         />
         <button class="plm-audit__button plm-audit__button--primary" type="button" :disabled="!canSaveAuditTeamView || auditTeamViewsLoading" @click="saveAuditTeamView">
           {{ tr('Save to team', '保存到团队') }}
         </button>
+        <button class="plm-audit__button" type="button" :disabled="auditTeamViewManagementTargetLocked || !canSubmitAuditTeamViewRename || auditTeamViewsLoading" @click="renameAuditTeamView">
+          {{ tr('Rename', '重命名') }}
+        </button>
+      </div>
+
+      <div class="plm-audit__saved-view-create">
+        <input
+          v-model="auditTeamViewOwnerUserId"
+          class="plm-audit__saved-view-input"
+          type="text"
+          :placeholder="tr('Target owner user ID', '目标所有者用户 ID')"
+          :disabled="transferAuditTeamViewOwnerInputDisabled"
+          @keydown.enter.prevent="transferAuditTeamView"
+        />
+        <button class="plm-audit__button" type="button" :disabled="auditTeamViewManagementTargetLocked || !canTransferAuditTeamView || auditTeamViewsLoading" @click="transferAuditTeamView">
+          {{ tr('Transfer owner', '转移所有者') }}
+        </button>
+      </div>
+
+      <div v-if="auditTeamViewManagementItems.length" class="plm-audit__team-view-manager">
+        <div class="plm-audit__recommended-header">
+          <div>
+            <h3>{{ tr('Manage audit team views', '管理审计团队视图') }}</h3>
+            <p class="plm-audit__muted">
+              {{ tr('Batch archive, restore, or delete team views without leaving the audit workbench.', '在审计工作台内直接批量归档、恢复或删除团队视图。') }}
+            </p>
+          </div>
+          <div class="plm-audit__summary-chips">
+            <button
+              class="plm-audit__summary-chip"
+              type="button"
+              :class="{ 'plm-audit__summary-chip--active': allSelectableAuditTeamViewsSelected }"
+              :disabled="!selectableAuditTeamViewCount || auditTeamViewsLoading"
+              @click="setAllSelectableAuditTeamViewsSelected(!allSelectableAuditTeamViewsSelected)"
+            >
+              {{ allSelectableAuditTeamViewsSelected ? tr('Clear selection', '清空选择') : tr('Select all manageable', '全选可管理项') }}
+            </button>
+          </div>
+        </div>
+
+        <div class="plm-audit__team-view-batch-bar">
+          <span class="plm-audit__muted">
+            {{ tr('Selected', '已选') }} {{ selectedAuditTeamViewCount }} / {{ selectableAuditTeamViewCount }}
+          </span>
+          <button
+            v-for="batchAction in auditTeamViewBatchActions"
+            :key="`audit-team-batch-${batchAction.kind}`"
+            class="plm-audit__button"
+            type="button"
+            :disabled="batchAction.disabled || auditTeamViewsLoading"
+            @click="runAuditTeamViewBatchAction(batchAction.kind)"
+          >
+            {{ batchAction.label }} · {{ batchAction.eligibleCount }}
+          </button>
+        </div>
+
+        <div class="plm-audit__team-view-list">
+          <article
+            v-for="view in auditTeamViewManagementItems"
+            :key="view.id"
+            :id="`plm-audit-team-view-${view.id}`"
+            class="plm-audit__team-view-card"
+            :class="{
+              'plm-audit__team-view-card--selected': view.selected,
+              'plm-audit__team-view-card--archived': view.isArchived,
+              'plm-audit__team-view-card--default': view.isDefault,
+              'plm-audit__team-view-card--focused': focusedAuditTeamViewId === view.id,
+            }"
+          >
+            <label class="plm-audit__team-view-select">
+              <input
+                v-model="auditTeamViewSelection"
+                type="checkbox"
+                :value="view.id"
+                :disabled="!view.selectable || auditTeamViewsLoading"
+              />
+              <div class="plm-audit__team-view-card-meta">
+                <strong>{{ view.name }}</strong>
+                <div class="plm-audit__saved-view-badges">
+                  <span class="plm-audit__saved-view-source">
+                    {{ view.isArchived ? tr('Archived team view', '已归档团队视图') : tr('Active team view', '活跃团队视图') }}
+                  </span>
+                  <span v-if="view.isDefault" class="plm-audit__saved-view-badge">
+                    {{ tr('Default', '默认') }}
+                  </span>
+                  <span
+                    v-if="view.isArchived"
+                    class="plm-audit__saved-view-badge plm-audit__saved-view-badge--scene"
+                  >
+                    {{ tr('Archived', '已归档') }}
+                  </span>
+                </div>
+                <span class="plm-audit__muted">{{ tr('Owner', 'Owner') }}: {{ view.ownerUserId }}</span>
+                <span v-if="view.updatedAt" class="plm-audit__muted">
+                  {{ tr('Updated', '更新于') }}: {{ formatDate(view.updatedAt) }}
+                </span>
+                <span v-if="view.selectionHint" class="plm-audit__muted">
+                  {{ view.selectionHint }}
+                </span>
+              </div>
+            </label>
+            <div class="plm-audit__team-view-card-actions">
+              <button
+                v-for="actionItem in view.lifecycleActions"
+                :key="`${view.id}-${actionItem.kind}`"
+                class="plm-audit__button"
+                type="button"
+                :disabled="actionItem.disabled || auditTeamViewsLoading"
+                @click="runAuditTeamViewLifecycleAction(view.id, actionItem.kind)"
+              >
+                {{ actionItem.label }}
+              </button>
+            </div>
+          </article>
+        </div>
       </div>
 
       <p v-if="auditTeamViewsError" class="plm-audit__status plm-audit__status--error">
@@ -313,7 +603,7 @@
       </p>
     </section>
 
-    <section class="plm-audit__saved-views">
+    <section id="plm-audit-saved-views" class="plm-audit__saved-views">
       <div class="plm-audit__saved-views-header">
         <div>
           <h2>{{ tr('Saved views', '已保存视图') }}</h2>
@@ -327,10 +617,31 @@
             class="plm-audit__saved-view-input"
             type="text"
             :placeholder="tr('View name', '视图名称')"
-            @keydown.enter.prevent="saveCurrentView"
+            @keydown.enter.prevent="canSaveCurrentAuditView && saveCurrentView()"
           />
-          <button class="plm-audit__button plm-audit__button--primary" type="button" @click="saveCurrentView">
+          <button class="plm-audit__button plm-audit__button--primary" type="button" :disabled="!canSaveCurrentAuditView" @click="saveCurrentView">
             {{ tr('Save current view', '保存当前视图') }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="auditSavedViewShareFollowupNotice" class="plm-audit__team-view-followup">
+        <div class="plm-audit__team-view-collaboration-meta">
+          <small class="plm-audit__summary-source">{{ auditSavedViewShareFollowupNotice.sourceLabel }}</small>
+          <strong>{{ auditSavedViewShareFollowupNotice.title }}</strong>
+          <span class="plm-audit__muted">{{ auditSavedViewShareFollowupNotice.description }}</span>
+        </div>
+        <div class="plm-audit__team-view-collaboration-actions">
+          <button
+            v-for="actionItem in auditSavedViewShareFollowupNotice.actions"
+            :key="`saved-view-share-followup-${actionItem.kind}`"
+            class="plm-audit__button"
+            :class="{ 'plm-audit__button--primary': actionItem.emphasis === 'primary' }"
+            type="button"
+            :disabled="auditTeamViewsLoading"
+            @click="runAuditSavedViewShareFollowupAction(actionItem.kind)"
+          >
+            {{ actionItem.label }}
           </button>
         </div>
       </div>
@@ -340,7 +651,13 @@
           v-for="view in savedViews"
           :key="view.id"
           class="plm-audit__saved-view-card"
-          :class="{ 'plm-audit__saved-view-card--active': isSavedViewActive(view) }"
+          :class="{
+            'plm-audit__saved-view-card--active': isSavedViewActive(view),
+            'plm-audit__saved-view-card--focused': (
+              auditSavedViewShareFollowup?.savedViewId === view.id
+              || focusedSavedViewId === view.id
+            ),
+          }"
         >
           <div class="plm-audit__saved-view-meta">
             <strong>{{ view.name }}</strong>
@@ -372,12 +689,21 @@
             >
               {{ savedViewContextBadge(view)?.quickAction?.hint }}
             </span>
+            <span v-if="savedViewTeamPromotionNote(view)" class="plm-audit__muted">
+              {{ savedViewTeamPromotionNote(view) }}
+            </span>
             <span class="plm-audit__muted">{{ savedViewSummary(view.state) }}</span>
             <span class="plm-audit__muted">{{ tr('Updated', '更新于') }}: {{ formatDate(view.updatedAt) }}</span>
           </div>
           <div class="plm-audit__saved-view-actions">
             <button class="plm-audit__button" type="button" @click="applySavedView(view)">
               {{ tr('Apply', '应用') }}
+            </button>
+            <button class="plm-audit__button" type="button" :disabled="auditTeamViewsLoading" @click="promoteSavedViewToTeam(view)">
+              {{ tr('Save to team', '保存到团队') }}
+            </button>
+            <button class="plm-audit__button" type="button" :disabled="auditTeamViewsLoading" @click="promoteSavedViewToTeam(view, { isDefault: true })">
+              {{ tr('Save as default team view', '保存为团队默认视图') }}
             </button>
             <button class="plm-audit__button" type="button" @click="deleteSavedViewEntry(view.id)">
               {{ tr('Delete', '删除') }}
@@ -392,7 +718,7 @@
       {{ statusMessage }}
     </p>
 
-    <div class="plm-audit__table-wrapper">
+    <div id="plm-audit-log-results" class="plm-audit__table-wrapper">
       <table v-if="logs.length" class="plm-audit__table">
         <thead>
           <tr>
@@ -449,64 +775,236 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useLocale } from '../composables/useLocale'
 import {
+  archivePlmWorkbenchTeamView,
+  batchPlmWorkbenchTeamViews,
   clearPlmWorkbenchTeamViewDefault,
   deletePlmWorkbenchTeamView,
+  duplicatePlmWorkbenchTeamView,
   exportPlmCollaborativeAuditLogsCsv,
   getPlmCollaborativeAuditSummary,
   listPlmCollaborativeAuditLogs,
   listPlmWorkbenchTeamViews,
+  renamePlmWorkbenchTeamView,
+  restorePlmWorkbenchTeamView,
   savePlmWorkbenchTeamView,
   setPlmWorkbenchTeamViewDefault,
+  transferPlmWorkbenchTeamView,
   type PlmCollaborativeAuditAction,
   type PlmCollaborativeAuditLogItem,
   type PlmCollaborativeAuditResourceType,
   type PlmCollaborativeAuditSummaryRow,
 } from '../services/plm/plmWorkbenchClient'
 import {
-  buildPlmAuditRouteStateFromTeamView,
   buildPlmAuditTeamViewState,
   buildPlmAuditRouteQuery,
   DEFAULT_PLM_AUDIT_ROUTE_STATE,
   hasExplicitPlmAuditFilters,
   isPlmAuditRouteStateEqual,
   parsePlmAuditRouteState,
+  resetPlmAuditRouteFilters,
   type PlmAuditRouteState,
+  type PlmAuditTeamViewState,
 } from './plmAuditQueryState'
 import {
+  formatPlmAuditDateTimeInputValue,
+  normalizePlmAuditDateTimeTransport,
+} from './plmAuditDateTimeTransport'
+import { buildPlmAuditSceneContextTakeoverState } from './plmAuditSceneContextTakeover'
+import { buildPlmAuditTeamViewRouteTakeoverState } from './plmAuditTeamViewRouteTakeover'
+import {
+  applyPlmAuditSourceFocusState,
+  buildPlmAuditAppliedTeamViewAttentionState,
+  buildPlmAuditClearedCollaborationFollowupAttentionState,
+  buildPlmAuditDismissedCollaborationDraftAttentionState,
+  buildPlmAuditManagedTeamViewAttentionState,
+  buildPlmAuditRoutePivotAttentionState,
+  buildPlmAuditSavedViewStoreAttentionState,
+  buildPlmAuditSourceLocalSaveAttentionState,
+  buildPlmAuditSourceShareFollowupAttentionState,
+  buildPlmAuditTeamViewHandoffAttentionState,
+  resolvePlmAuditSavedViewAttentionRuntimeState,
+  reducePlmAuditAttentionFocusState,
+  reducePlmAuditSavedViewAttentionState,
+  type PlmAuditAttentionFocusAction,
+  type PlmAuditSavedViewAttentionAction,
+} from './plmAuditSavedViewAttention'
+import {
+  canSavePlmAuditSavedViewName,
   deletePlmAuditSavedView,
   readPlmAuditSavedViews,
+  restorePlmAuditSavedViewState,
   savePlmAuditSavedView,
   type PlmAuditSavedView,
 } from './plmAuditSavedViews'
 import {
+  buildPlmAuditSavedViewShareFollowupNotice,
+  resolvePlmAuditSavedViewShareFollowupActionFeedback,
+  resolvePlmAuditSavedViewLocalSaveFollowupSource,
+  resolvePlmAuditSavedViewLocalSaveState,
+  resolvePlmAuditSavedViewShareFollowupRuntimeState,
+  type PlmAuditSavedViewShareFollowup,
+  type PlmAuditSavedViewShareFollowupSource,
+  type PlmAuditSavedViewShareFollowupActionKind,
+} from './plmAuditSavedViewShareFollowup'
+import {
+  buildPlmAuditSavedViewTeamPromotionDraft,
+  resolvePlmAuditSavedViewPromotionBehavior,
+  shouldClearPlmAuditSavedViewPromotionFormDrafts,
+} from './plmAuditSavedViewPromotion'
+import {
   buildPlmAuditSavedViewContextBadge,
+  resolvePlmAuditSavedViewContextActionFeedback,
   buildPlmAuditSavedViewSummary,
 } from './plmAuditSavedViewSummary'
+import { shouldShowPlmAuditPersistentReturnToScene } from './plmAuditReturnToScene'
+import {
+  buildAuditTeamViewSummaryChips,
+  buildAuditTeamViewSummaryHint,
+  buildRecommendedAuditTeamViews,
+  consumeStaleRecommendedAuditTeamViewFocusId,
+  resolvePlmRecommendedAuditTeamViewActionFeedback,
+  resolveAuditTeamViewRecommendationFilter,
+  shouldShowAuditTeamViewRecommendations,
+  type PlmRecommendedAuditTeamView,
+  type PlmRecommendedAuditTeamViewFilter,
+} from './plmAuditTeamViewCatalog'
+import {
+  buildPlmAuditTeamViewCollaborationActionOutcome,
+  buildPlmAuditTeamViewCollaborationHandoff,
+  buildPlmAuditTeamViewCollaborationFollowupNotice,
+  buildPlmAuditTeamViewCollaborationNotice,
+  resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter,
+  buildPlmAuditTeamViewCollaborationSourceFocusIntent,
+  findPlmAuditTeamViewCollaborationDraftView,
+  findPlmAuditTeamViewCollaborationFollowupView,
+  prunePlmAuditTeamViewCollaborationDraftSavedViewSource,
+  prunePlmAuditTeamViewCollaborationFollowupSavedViewSource,
+  resolvePlmAuditTeamViewCollaborationActionFeedback,
+  resolvePlmAuditCompletedTeamViewBatchCollaborationDraft,
+  resolvePlmAuditCompletedTeamViewCollaborationDraft,
+  resolvePlmAuditTeamViewCollaborationRuntimeState,
+  resolvePlmAuditTeamViewCollaborationFollowupActionFeedback,
+  resolvePlmAuditTeamViewCollaborationAttentionMode,
+  resolvePlmAuditTeamViewCollaborationActionTarget,
+  resolvePlmAuditClearedTeamViewDraftSelection,
+  resolvePlmAuditSavedViewTakeoverCollaborationState,
+  shouldClearPlmAuditTeamViewCollaborationDraft,
+  shouldKeepPlmAuditTeamViewCollaborationDraft,
+  shouldKeepPlmAuditTeamViewCollaborationFollowup,
+  shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry,
+  type PlmAuditTeamViewCollaborationActionKind,
+  type PlmAuditTeamViewCollaborationDraft,
+  type PlmAuditTeamViewCollaborationFollowup,
+  type PlmAuditTeamViewCollaborationFollowupActionKind,
+  type PlmAuditTeamViewCollaborationHandoff,
+  type PlmAuditTeamViewCollaborationSource,
+} from './plmAuditTeamViewCollaboration'
+import {
+  buildPlmAuditSharedEntrySavedViewName,
+  buildPlmAuditTeamViewShareEntryNotice,
+  findPlmAuditTeamViewShareEntryView,
+  isPlmAuditSharedLinkEntry,
+  resolvePlmAuditTeamViewShareEntryRuntimeState,
+  resolvePlmAuditTeamViewShareEntryActionFeedback,
+  resolvePlmAuditSharedEntryTakeoverSelection,
+  resolvePlmAuditTeamViewShareEntryActionTarget,
+  resolvePlmAuditSharedEntryRouteSyncDecision,
+  shouldKeepPlmAuditTeamViewShareEntry,
+  shouldClearPlmAuditTeamViewShareEntryForActionFeedback,
+  shouldTakeOverPlmAuditSharedEntryOnManagementHandoff,
+  shouldTakeOverPlmAuditSharedEntryOnSavedViewTakeover,
+  shouldTakeOverPlmAuditSharedEntryOnSourceAction,
+  shouldResolvePlmAuditSharedEntryOnQueryChange,
+  reducePlmAuditTeamViewShareEntry,
+  type PlmAuditTeamViewShareEntry,
+  type PlmAuditTeamViewShareEntryActionKind,
+} from './plmAuditTeamViewShareEntry'
+import {
+  resolvePlmAuditCanonicalTeamViewFormDraftState,
+  resolvePlmAuditCompletedTeamViewFormDraftState,
+  resolvePlmAuditDefaultActionTeamViewFormDraftState,
+  resolvePlmAuditLifecycleLogActionFormDraftState,
+  resolvePlmAuditLogRouteTakeoverFormDraftState,
+  resolvePlmAuditTransferActionTeamViewFormDraftState,
+  resolvePlmAuditTakeoverTeamViewFormDraftState,
+  prunePlmAuditTransientOwnershipForRemovedViews,
+  resolvePlmAuditRemovedTeamViewIds,
+  trimPlmAuditExistingTeamViewUiState,
+} from './plmAuditTeamViewOwnership'
+import {
+  resolvePlmAuditTeamViewApplyTarget,
+  resolvePlmAuditCanonicalTeamViewManagementTarget,
+  resolvePlmAuditCanonicalTeamViewManagementTargetId,
+  resolvePlmAuditCanonicalTeamViewRouteState,
+  resolvePlmAuditTakeoverTeamViewSelectorId,
+  resolvePlmAuditTeamViewDuplicateName,
+  shouldDisablePlmAuditTeamViewTransferOwnerInput,
+  shouldEnablePlmAuditTeamViewRenameAction,
+  shouldLockPlmAuditTeamViewManagementTarget,
+} from './plmAuditTeamViewControlTarget'
+import {
+  buildPlmAuditTeamViewBatchLogState,
+  buildPlmAuditTeamViewLogState,
+  resolvePlmAuditProcessedBatchLogViews,
+  shouldClearPlmAuditTeamViewFormDraftsOnLogRoute,
+} from './plmAuditTeamViewAudit'
+import { PLM_AUDIT_KIND_OPTIONS } from './plmAuditFilterOptions'
+import {
+  buildPlmAuditTeamViewManagement,
+  canApplyPlmAuditTeamView,
+  canManagePlmAuditTeamView,
+  isSelectablePlmAuditTeamView,
+  resolvePlmAuditTeamViewBatchActionFeedback,
+  type PlmAuditTeamViewLifecycleActionKind,
+} from './plmAuditTeamViewManagement'
+import { resolvePlmAuditTeamViewManagementFeedback } from './plmAuditTeamViewManagementFeedback'
 import {
   buildPlmAuditSceneContextBanner,
   buildPlmAuditSceneFilterHighlight,
   resolvePlmAuditSceneSemantic,
 } from './plmAuditSceneCopy'
 import {
+  buildPlmAuditSceneSavedViewState,
+  buildPlmAuditSceneTeamViewState,
   buildPlmAuditSceneQueryValue,
+  shouldTakeOverPlmAuditSceneContextOnRouteChange,
   isPlmAuditSceneOwnerContextActive,
   isPlmAuditSceneQueryContextActive,
+  withoutPlmAuditSceneContext,
   withPlmAuditSceneOwnerContext,
   withPlmAuditSceneQueryContext,
 } from './plmAuditSceneContext'
 import { buildPlmAuditSceneInputToken } from './plmAuditSceneInputToken'
+import {
+  buildPlmAuditSceneSaveDraft,
+  resolvePlmAuditSceneSaveActionFeedback,
+} from './plmAuditSceneSaveDraft'
 import { buildPlmAuditSceneSummaryCard } from './plmAuditSceneSummary'
 import {
   buildPlmAuditSceneToken,
   type PlmAuditSceneTokenActionKind,
 } from './plmAuditSceneToken'
 import { buildPlmAuditTeamViewContextNote } from './plmAuditTeamViewContext'
+import {
+  buildPlmAuditClearedTeamViewSelectionState,
+  buildPlmAuditPersistedTeamViewRouteState,
+  buildPlmAuditSelectedTeamViewRouteState,
+  resolvePlmAuditRequestedTeamViewRouteState,
+  shouldApplyPlmAuditRequestedTeamViewTakeoverCleanup,
+} from './plmAuditTeamViewRouteState'
 import { copyTextToClipboard } from './plm/plmClipboard'
 import type { PlmWorkbenchTeamView } from './plm/plmPanelModels'
+import {
+  canDuplicatePlmCollaborativeEntry,
+  canRenamePlmCollaborativeEntry,
+  canSharePlmCollaborativeEntry,
+  canSetDefaultPlmCollaborativeEntry,
+  usePlmCollaborativePermissions,
+} from './plm/usePlmCollaborativePermissions'
 import { buildPlmWorkbenchTeamViewShareUrl } from './plm/plmWorkbenchViewState'
 
 const route = useRoute()
@@ -523,13 +1021,25 @@ const exporting = ref(false)
 const statusMessage = ref('')
 const statusKind = ref<'info' | 'error'>('info')
 const routeReady = ref(false)
+let pendingLocalRouteSync = false
 const savedViewName = ref('')
 const savedViews = ref<PlmAuditSavedView[]>(readPlmAuditSavedViews())
+const auditSavedViewShareFollowup = ref<PlmAuditSavedViewShareFollowup | null>(null)
+const focusedSavedViewId = ref('')
 const auditTeamViewKey = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.teamViewId)
 const auditTeamViewName = ref('')
+const auditTeamViewNameOwnerId = ref('')
+const auditTeamViewOwnerUserId = ref('')
+const auditTeamViewShareEntry = ref<PlmAuditTeamViewShareEntry | null>(null)
+const auditTeamViewCollaborationDraft = ref<PlmAuditTeamViewCollaborationDraft | null>(null)
+const auditTeamViewCollaborationFollowup = ref<PlmAuditTeamViewCollaborationFollowup | null>(null)
 const auditTeamViews = ref<PlmWorkbenchTeamView<'audit'>[]>([])
+const auditTeamViewSelection = ref<string[]>([])
+const focusedAuditTeamViewId = ref('')
+const focusedRecommendedAuditTeamViewId = ref('')
 const auditTeamViewsLoading = ref(false)
 const auditTeamViewsError = ref('')
+const auditTeamViewRecommendationFilter = ref<PlmRecommendedAuditTeamViewFilter>('')
 
 const query = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.q)
 const actorId = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.actorId)
@@ -538,10 +1048,15 @@ const action = ref<PlmCollaborativeAuditAction | ''>(DEFAULT_PLM_AUDIT_ROUTE_STA
 const resourceType = ref<PlmCollaborativeAuditResourceType | ''>(DEFAULT_PLM_AUDIT_ROUTE_STATE.resourceType)
 const from = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.from)
 const to = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.to)
+const fromInput = ref(formatPlmAuditDateTimeInputValue(DEFAULT_PLM_AUDIT_ROUTE_STATE.from))
+const toInput = ref(formatPlmAuditDateTimeInputValue(DEFAULT_PLM_AUDIT_ROUTE_STATE.to))
 const windowMinutes = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.windowMinutes)
 const auditSceneId = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.sceneId)
 const auditSceneName = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.sceneName)
 const auditSceneOwnerUserId = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.sceneOwnerUserId)
+const auditSceneRecommendationReason = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.sceneRecommendationReason)
+const auditSceneRecommendationSourceLabel = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.sceneRecommendationSourceLabel)
+const auditReturnToPlmPath = ref(DEFAULT_PLM_AUDIT_ROUTE_STATE.returnToPlmPath)
 
 const summary = ref<{
   windowMinutes: number
@@ -558,16 +1073,82 @@ const totalSummaryEvents = computed(() => summary.value.resourceTypes.reduce((su
 const selectedAuditTeamView = computed(
   () => auditTeamViews.value.find((view) => view.id === auditTeamViewKey.value) || null,
 )
+const canonicalAuditTeamViewId = computed(() => parsePlmAuditRouteState(route.query).teamViewId)
+const auditTeamViewApplyTarget = computed(() => resolvePlmAuditTeamViewApplyTarget(
+  auditTeamViews.value,
+  {
+    selectedTeamViewId: auditTeamViewKey.value,
+    routeTeamViewId: canonicalAuditTeamViewId.value,
+    followupTeamViewId: auditTeamViewCollaborationFollowup.value?.teamViewId || '',
+  },
+))
+const canonicalAuditTeamViewManagementTargetId = computed(() => resolvePlmAuditCanonicalTeamViewManagementTargetId({
+  routeTeamViewId: canonicalAuditTeamViewId.value,
+  followupTeamViewId: auditTeamViewCollaborationFollowup.value?.teamViewId || '',
+}))
+const canonicalAuditTeamViewManagementTarget = computed(() => resolvePlmAuditCanonicalTeamViewManagementTarget(
+  auditTeamViews.value,
+  {
+    routeTeamViewId: canonicalAuditTeamViewId.value,
+    followupTeamViewId: auditTeamViewCollaborationFollowup.value?.teamViewId || '',
+  },
+))
 const defaultAuditTeamView = computed(
   () => auditTeamViews.value.find((view) => view.isDefault && !view.isArchived) || null,
 )
 const defaultAuditTeamViewLabel = computed(() => defaultAuditTeamView.value?.name || '')
+const recommendedAuditTeamViews = computed(() => buildRecommendedAuditTeamViews(auditTeamViews.value, {
+  recommendationFilter: auditTeamViewRecommendationFilter.value,
+}))
+const auditTeamViewSummaryChips = computed(() => buildAuditTeamViewSummaryChips(auditTeamViews.value, {
+  recommendationFilter: auditTeamViewRecommendationFilter.value,
+}))
+const auditTeamViewSummaryHint = computed(() => buildAuditTeamViewSummaryHint(auditTeamViewSummaryChips.value))
+const showAuditTeamViewRecommendations = computed(() => shouldShowAuditTeamViewRecommendations(auditTeamViewSummaryChips.value))
+const auditTeamViewRecommendationEmptyLabel = computed(() => {
+  if (!auditTeamViewSummaryHint.value.value) {
+    return tr(
+      'No recommended audit team views are available yet.',
+      '当前暂无可推荐的审计团队视图。',
+    )
+  }
+
+  return tr(
+    `No recommended audit team views are available in ${auditTeamViewSummaryHint.value.label}. Switch back to all recommendations to keep exploring.`,
+    `当前筛选下暂无${auditTeamViewSummaryHint.value.label}审计团队视图，可切回“全部推荐”查看其它候选。`,
+  )
+})
+const auditTeamViewManagement = computed(() => buildPlmAuditTeamViewManagement(
+  auditTeamViews.value,
+  auditTeamViewSelection.value,
+  tr,
+))
+const auditTeamViewManagementItems = computed(() => auditTeamViewManagement.value.items)
+const auditTeamViewBatchActions = computed(() => auditTeamViewManagement.value.batchActions)
+const selectedAuditTeamViewCount = computed(() => auditTeamViewManagement.value.selectedCount)
+const selectableAuditTeamViewCount = computed(() => auditTeamViewManagement.value.selectableCount)
+const auditTeamViewManagementTargetLocked = computed(() => shouldLockPlmAuditTeamViewManagementTarget({
+  canonicalTeamViewId: canonicalAuditTeamViewManagementTargetId.value,
+  selectedTeamViewId: auditTeamViewKey.value,
+}))
+const transferAuditTeamViewOwnerInputDisabled = computed(() => shouldDisablePlmAuditTeamViewTransferOwnerInput({
+  managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+  canTransferTarget: canTransferAuditTeamViewTarget.value,
+  loading: auditTeamViewsLoading.value,
+}))
+const allSelectableAuditTeamViewsSelected = computed(() => (
+  selectableAuditTeamViewCount.value > 0
+  && selectedAuditTeamViewCount.value === selectableAuditTeamViewCount.value
+))
 const canSaveAuditTeamView = computed(() => Boolean(auditTeamViewName.value.trim()))
+const canSaveCurrentAuditView = computed(() => canSavePlmAuditSavedViewName(savedViewName.value))
 const auditSceneContext = computed(() => {
   return buildPlmAuditSceneContextBanner({
     sceneId: auditSceneId.value,
     sceneName: auditSceneName.value,
     sceneOwnerUserId: auditSceneOwnerUserId.value,
+    recommendationReason: auditSceneRecommendationReason.value,
+    recommendationSourceLabel: auditSceneRecommendationSourceLabel.value,
     action: action.value,
     resourceType: resourceType.value,
     semantic: resolvePlmAuditSceneSemantic({
@@ -595,31 +1176,165 @@ const auditSceneSummaryCard = computed(() => buildPlmAuditSceneSummaryCard({
   ownerContextActive: auditSceneOwnerContextActive.value,
   sceneQueryContextActive: auditSceneQueryContextActive.value,
 }, tr))
+const auditSceneSaveDraft = computed(() => buildPlmAuditSceneSaveDraft({
+  sceneId: auditSceneId.value,
+  sceneName: auditSceneName.value,
+  sceneOwnerUserId: auditSceneOwnerUserId.value,
+  recommendationReason: auditSceneRecommendationReason.value,
+}, tr))
+const showPersistentReturnToScene = computed(() => shouldShowPlmAuditPersistentReturnToScene({
+  returnToPlmPath: auditReturnToPlmPath.value,
+  sceneContextVisible: Boolean(auditSceneContext.value),
+}))
 const auditSceneFilterHighlight = computed(() => buildPlmAuditSceneFilterHighlight(auditSceneToken.value, tr))
-const canApplyAuditTeamView = computed(() => {
-  const view = selectedAuditTeamView.value
-  if (!view || view.isArchived) return false
-  return view.permissions?.canApply ?? !view.isArchived
+const {
+  canApply: canApplyAuditTeamView,
+} = usePlmCollaborativePermissions({
+  selectedEntry: auditTeamViewApplyTarget,
+  nameRef: auditTeamViewName,
 })
-const canShareAuditTeamView = computed(() => {
-  const view = selectedAuditTeamView.value
-  if (!view || view.isArchived) return false
-  return view.permissions?.canShare ?? view.canManage
+const {
+  canDuplicate: canDuplicateAuditTeamView,
+  canShare: canShareAuditTeamView,
+  canDelete: canDeleteAuditTeamView,
+  canArchive: canArchiveAuditTeamView,
+  canRestore: canRestoreAuditTeamView,
+  canRename: canRenameAuditTeamView,
+  canTransferTarget: canTransferAuditTeamViewTarget,
+  canTransfer: canTransferAuditTeamView,
+  canSetDefault: canSetAuditTeamViewDefault,
+  canClearDefault: canClearAuditTeamViewDefault,
+} = usePlmCollaborativePermissions({
+  selectedEntry: canonicalAuditTeamViewManagementTarget,
+  nameRef: auditTeamViewName,
+  ownerUserIdRef: auditTeamViewOwnerUserId,
 })
-const canDeleteAuditTeamView = computed(() => {
-  const view = selectedAuditTeamView.value
-  if (!view) return false
-  return view.permissions?.canDelete ?? view.canManage
+const canSubmitAuditTeamViewRename = computed(() => shouldEnablePlmAuditTeamViewRenameAction({
+  canRename: canRenameAuditTeamView.value,
+  canonicalTeamViewId: canonicalAuditTeamViewManagementTargetId.value,
+  draftOwnerTeamViewId: auditTeamViewNameOwnerId.value,
+}))
+const canRenameAuditTeamViewTarget = computed(() => canRenamePlmCollaborativeEntry(
+  canonicalAuditTeamViewManagementTarget.value,
+))
+const auditTeamViewCollaborationDraftTarget = computed(() => findPlmAuditTeamViewCollaborationDraftView(
+  auditTeamViews.value,
+  resolveAuditTeamViewCollaborationRuntimeState().draft,
+))
+const auditTeamViewCollaborationNotice = computed(() => {
+  const collaborationState = resolveAuditTeamViewCollaborationRuntimeState()
+  const view = auditTeamViewCollaborationDraftTarget.value
+  if (!view) return null
+  if (collaborationState.followup?.teamViewId === view.id) return null
+  if (auditTeamViewShareEntry.value?.teamViewId === view.id) return null
+  return buildPlmAuditTeamViewCollaborationNotice(
+    view,
+    collaborationState.draft,
+    {
+      canShare: canSharePlmCollaborativeEntry(view),
+      canSetDefault: canSetDefaultPlmCollaborativeEntry(view),
+    },
+    tr,
+  )
 })
-const canSetAuditTeamViewDefault = computed(() => {
-  const view = selectedAuditTeamView.value
-  if (!view || view.isArchived) return false
-  return view.permissions?.canSetDefault ?? (view.canManage && !view.isDefault)
+const auditTeamViewShareEntryNotice = computed(() => {
+  const entry = resolveAuditTeamViewShareRuntimeEntry()
+  const view = findPlmAuditTeamViewShareEntryView(
+    auditTeamViews.value,
+    entry,
+  )
+  if (!view) return null
+  return buildPlmAuditTeamViewShareEntryNotice(
+    view,
+    entry,
+    {
+      canDuplicate: canDuplicatePlmCollaborativeEntry(view),
+      canSetDefault: canSetDefaultPlmCollaborativeEntry(view),
+    },
+    tr,
+  )
 })
-const canClearAuditTeamViewDefault = computed(() => {
-  const view = selectedAuditTeamView.value
-  if (!view || view.isArchived) return false
-  return view.permissions?.canClearDefault ?? (view.canManage && view.isDefault)
+const auditTeamViewCollaborationFollowupNotice = computed(() => {
+  const followup = resolveAuditTeamViewCollaborationRuntimeFollowup()
+  const view = findPlmAuditTeamViewCollaborationFollowupView(
+    auditTeamViews.value,
+    followup,
+  )
+  return buildPlmAuditTeamViewCollaborationFollowupNotice(
+    view,
+    followup,
+    {
+      canSetDefault: canSetDefaultPlmCollaborativeEntry(view),
+    },
+    tr,
+  )
+})
+
+function resolveAuditTeamViewCollaborationRuntimeFollowup() {
+  return resolveAuditTeamViewCollaborationRuntimeState().followup
+}
+
+function resolveAuditTeamViewCollaborationRuntimeState() {
+  const outcome = resolvePlmAuditTeamViewCollaborationRuntimeState(
+    {
+      draft: auditTeamViewCollaborationDraft.value,
+      followup: auditTeamViewCollaborationFollowup.value,
+    },
+    {
+      sceneContextAvailable: Boolean(auditSceneContext.value),
+      savedViews: savedViews.value,
+    },
+  )
+  if (outcome.changed) {
+    auditTeamViewCollaborationDraft.value = outcome.state.draft
+    auditTeamViewCollaborationFollowup.value = outcome.state.followup
+  }
+  return outcome.state
+}
+
+function resolveAuditTeamViewShareRuntimeEntry() {
+  const outcome = resolvePlmAuditTeamViewShareEntryRuntimeState(
+    auditTeamViewShareEntry.value,
+    auditTeamViews.value,
+  )
+  if (outcome.changed) {
+    auditTeamViewShareEntry.value = outcome.entry
+  }
+  return outcome.entry
+}
+const auditSavedViewShareFollowupNotice = computed(() => {
+  const followup = resolveAuditSavedViewRuntimeAttention().shareFollowup
+  if (!followup) return null
+  const view = savedViews.value.find((entry) => entry.id === followup.savedViewId)
+  if (!view) return null
+  return buildPlmAuditSavedViewShareFollowupNotice(view, followup, tr)
+})
+
+function resolveAuditSavedViewRuntimeAttention() {
+  const followupOutcome = resolvePlmAuditSavedViewShareFollowupRuntimeState(
+    auditSavedViewShareFollowup.value,
+    savedViews.value,
+  )
+  const attentionOutcome = resolvePlmAuditSavedViewAttentionRuntimeState(
+    {
+      shareFollowup: followupOutcome.followup,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    savedViews.value,
+  )
+  if (followupOutcome.changed || attentionOutcome.changed) {
+    auditSavedViewShareFollowup.value = attentionOutcome.state.shareFollowup
+    focusedSavedViewId.value = attentionOutcome.state.focusedSavedViewId
+  }
+  return attentionOutcome.state
+}
+
+watch(fromInput, (value) => {
+  from.value = normalizePlmAuditDateTimeTransport(value)
+})
+
+watch(toInput, (value) => {
+  to.value = normalizePlmAuditDateTimeTransport(value)
 })
 
 function readCurrentRouteState(): PlmAuditRouteState {
@@ -637,7 +1352,17 @@ function readCurrentRouteState(): PlmAuditRouteState {
     sceneId: auditSceneId.value,
     sceneName: auditSceneName.value,
     sceneOwnerUserId: auditSceneOwnerUserId.value,
+    sceneRecommendationReason: auditSceneRecommendationReason.value,
+    sceneRecommendationSourceLabel: auditSceneRecommendationSourceLabel.value,
+    returnToPlmPath: auditReturnToPlmPath.value,
   }
+}
+
+function readCanonicalTeamViewRouteState(): PlmAuditRouteState {
+  return resolvePlmAuditCanonicalTeamViewRouteState({
+    currentState: readCurrentRouteState(),
+    routeTeamViewId: canonicalAuditTeamViewId.value,
+  })
 }
 
 function applyRouteState(state: PlmAuditRouteState) {
@@ -647,41 +1372,217 @@ function applyRouteState(state: PlmAuditRouteState) {
   kind.value = state.kind
   action.value = state.action
   resourceType.value = state.resourceType
-  from.value = state.from
-  to.value = state.to
+  from.value = normalizePlmAuditDateTimeTransport(state.from)
+  to.value = normalizePlmAuditDateTimeTransport(state.to)
+  fromInput.value = formatPlmAuditDateTimeInputValue(from.value)
+  toInput.value = formatPlmAuditDateTimeInputValue(to.value)
   windowMinutes.value = state.windowMinutes
   auditTeamViewKey.value = state.teamViewId
   auditSceneId.value = state.sceneId
   auditSceneName.value = state.sceneName
   auditSceneOwnerUserId.value = state.sceneOwnerUserId
+  auditSceneRecommendationReason.value = state.sceneRecommendationReason
+  auditSceneRecommendationSourceLabel.value = state.sceneRecommendationSourceLabel
+  auditReturnToPlmPath.value = state.returnToPlmPath
 }
 
-async function syncRouteState(nextState: PlmAuditRouteState, replace = false) {
+async function syncRouteState(
+  nextState: PlmAuditRouteState,
+  replace = false,
+  options?: {
+    consumeSharedEntry?: boolean
+  },
+) {
   const nextQuery = buildPlmAuditRouteQuery(nextState)
   const currentState = parsePlmAuditRouteState(route.query)
-  if (isPlmAuditRouteStateEqual(nextState, currentState)) return
-  const method = replace ? router.replace : router.push
+  const routeStateChanged = !isPlmAuditRouteStateEqual(nextState, currentState)
+  const routeSyncDecision = resolvePlmAuditSharedEntryRouteSyncDecision({
+    routeChanged: routeStateChanged,
+    replace,
+    consumeSharedEntry: options?.consumeSharedEntry,
+    auditEntry: route.query.auditEntry,
+  })
+  if (!routeSyncDecision.shouldSync) return
+  pendingLocalRouteSync = true
+  const method = routeSyncDecision.replace ? router.replace : router.push
   await method.call(router, {
     name: 'plm-audit',
     query: nextQuery,
   })
 }
 
+function applyCollaborationTakeoverCleanup() {
+  const nextCollaborationState = resolvePlmAuditSavedViewTakeoverCollaborationState({
+    selectedIds: auditTeamViewSelection.value,
+    draft: auditTeamViewCollaborationDraft.value,
+    followup: auditTeamViewCollaborationFollowup.value,
+  })
+  auditTeamViewSelection.value = nextCollaborationState.selectedIds
+  auditTeamViewCollaborationDraft.value = nextCollaborationState.draft
+  auditTeamViewCollaborationFollowup.value = nextCollaborationState.followup
+}
+
+function applyResolvedTeamViewTakeoverCleanup() {
+  const nextState = buildPlmAuditTeamViewRouteTakeoverState({
+    attentionFocus: {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    savedViewAttention: {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    formDraft: {
+      draftTeamViewName: auditTeamViewName.value,
+      draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+      draftOwnerUserId: auditTeamViewOwnerUserId.value,
+    },
+    collaboration: {
+      selectedIds: auditTeamViewSelection.value,
+      draft: auditTeamViewCollaborationDraft.value,
+      followup: auditTeamViewCollaborationFollowup.value,
+    },
+  })
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+  auditTeamViewShareEntry.value = nextState.shareEntry
+  auditTeamViewName.value = nextState.formDraft.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextState.formDraft.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextState.formDraft.draftOwnerUserId
+  auditTeamViewSelection.value = nextState.collaboration.selectedIds
+  auditTeamViewCollaborationDraft.value = nextState.collaboration.draft
+  auditTeamViewCollaborationFollowup.value = nextState.collaboration.followup
+}
+
+function applySceneContextTakeoverCleanup(targetTeamViewId = readCanonicalTeamViewRouteState().teamViewId) {
+  const nextState = buildPlmAuditSceneContextTakeoverState({
+    attentionFocus: {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    savedViewAttention: {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    shareEntry: auditTeamViewShareEntry.value,
+    formDraft: {
+      draftTeamViewName: auditTeamViewName.value,
+      draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+      draftOwnerUserId: auditTeamViewOwnerUserId.value,
+    },
+    collaboration: {
+      selectedIds: auditTeamViewSelection.value,
+      draft: auditTeamViewCollaborationDraft.value,
+      followup: auditTeamViewCollaborationFollowup.value,
+    },
+  })
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+  auditTeamViewShareEntry.value = nextState.shareEntry
+  auditTeamViewName.value = nextState.formDraft.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextState.formDraft.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextState.formDraft.draftOwnerUserId
+  auditTeamViewSelection.value = nextState.collaboration.selectedIds
+  auditTeamViewCollaborationDraft.value = nextState.collaboration.draft
+  auditTeamViewCollaborationFollowup.value = nextState.collaboration.followup
+  clearAuditTakeoverTeamViewFormDrafts()
+  alignAuditTakeoverTeamViewSelector(targetTeamViewId)
+  return nextState.consumeSharedEntry
+}
+
+function clearAuditTakeoverTeamViewFormDrafts() {
+  const nextDraftState = resolvePlmAuditTakeoverTeamViewFormDraftState({
+    draftTeamViewName: auditTeamViewName.value,
+    draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+  })
+  auditTeamViewName.value = nextDraftState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
+}
+
+function clearAuditLogRouteTakeoverTeamViewFormDrafts() {
+  const nextDraftState = resolvePlmAuditLogRouteTakeoverFormDraftState({
+    draftTeamViewName: auditTeamViewName.value,
+    draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+  })
+  auditTeamViewName.value = nextDraftState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
+}
+
+function clearAuditCompletedTeamViewFormDrafts() {
+  const nextDraftState = resolvePlmAuditCompletedTeamViewFormDraftState()
+  auditTeamViewName.value = nextDraftState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
+}
+
+function clearAuditDefaultActionTeamViewFormDrafts() {
+  const nextDraftState = resolvePlmAuditDefaultActionTeamViewFormDraftState({
+    draftTeamViewName: auditTeamViewName.value,
+    draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+  })
+  auditTeamViewName.value = nextDraftState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
+}
+
+function clearAuditLifecycleLogActionTeamViewFormDrafts() {
+  const nextDraftState = resolvePlmAuditLifecycleLogActionFormDraftState({
+    draftTeamViewName: auditTeamViewName.value,
+    draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+  })
+  auditTeamViewName.value = nextDraftState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
+}
+
+function clearAuditTransferActionTeamViewFormDrafts() {
+  const nextDraftState = resolvePlmAuditTransferActionTeamViewFormDraftState({
+    draftTeamViewName: auditTeamViewName.value,
+    draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+  })
+  auditTeamViewName.value = nextDraftState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
+}
+
+function alignAuditTakeoverTeamViewSelector(targetTeamViewId: string) {
+  auditTeamViewKey.value = resolvePlmAuditTakeoverTeamViewSelectorId({
+    targetTeamViewId,
+  })
+}
+
 async function clearAuditSceneContext() {
-  await syncRouteState({
-    ...readCurrentRouteState(),
-    sceneId: '',
-    sceneName: '',
-    sceneOwnerUserId: '',
+  const consumeSharedEntry = applySceneContextTakeoverCleanup()
+  await syncRouteState(withoutPlmAuditSceneContext(readCanonicalTeamViewRouteState()), false, {
+    consumeSharedEntry,
   })
 }
 
 async function applyAuditSceneOwnerContext() {
-  await syncRouteState(withPlmAuditSceneOwnerContext(readCurrentRouteState()))
+  const consumeSharedEntry = applySceneContextTakeoverCleanup()
+  await syncRouteState(withPlmAuditSceneOwnerContext(readCanonicalTeamViewRouteState()), false, {
+    consumeSharedEntry,
+  })
 }
 
 async function restoreAuditSceneQuery() {
-  await syncRouteState(withPlmAuditSceneQueryContext(readCurrentRouteState()))
+  const consumeSharedEntry = applySceneContextTakeoverCleanup()
+  await syncRouteState(withPlmAuditSceneQueryContext(readCanonicalTeamViewRouteState()), false, {
+    consumeSharedEntry,
+  })
 }
 
 async function runAuditSceneTokenAction(actionKind: PlmAuditSceneTokenActionKind | null) {
@@ -693,13 +1594,85 @@ async function runAuditSceneTokenAction(actionKind: PlmAuditSceneTokenActionKind
     await applyAuditSceneOwnerContext()
     return
   }
-  if (actionKind === 'scene') {
+  if (actionKind === 'scene' || actionKind === 'reapply-scene') {
     await restoreAuditSceneQuery()
   }
 }
 
-async function runAuditSceneSummaryAction(actionKind: 'owner' | 'scene' | null) {
+async function runAuditSceneSummaryAction(actionKind: 'owner' | 'scene' | 'reapply-scene' | null) {
+  if (actionKind === 'reapply-scene') {
+    await restoreAuditSceneQuery()
+    return
+  }
   await runAuditSceneTokenAction(actionKind)
+}
+
+async function returnToWorkbenchScene() {
+  if (!auditReturnToPlmPath.value) return
+  await router.push(auditReturnToPlmPath.value).catch(() => null)
+}
+
+async function runAuditSceneSaveAction(actionKind: 'saved-view' | 'team-view' | 'team-default') {
+  const draft = auditSceneSaveDraft.value
+  const feedback = resolvePlmAuditSceneSaveActionFeedback({
+    actionKind,
+    draft,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!draft) return
+
+  if (actionKind === 'saved-view') {
+    const saved = await saveCurrentLocalViewWithFollowup(
+      draft.savedViewName,
+      'scene-context',
+      tr('Scene audit saved view stored.', '场景审计已保存为本地视图。'),
+      buildPlmAuditSceneSavedViewState(readCanonicalTeamViewRouteState()),
+    )
+    if (!saved) return
+    return
+  }
+
+  const saved = await persistAuditTeamView(
+    draft.teamViewName,
+    {
+      isDefault: actionKind === 'team-default',
+    },
+    actionKind === 'team-default'
+      ? tr('Scene audit saved as the default team view.', '场景审计已保存为团队默认视图。')
+      : tr('Scene audit saved to team views.', '场景审计已保存到团队视图。'),
+    buildPlmAuditSceneTeamViewState(readCanonicalTeamViewRouteState()),
+  )
+  if (!saved) return
+  applyAuditTeamViewHandoffAttention()
+  const collaborationHandoff = buildPlmAuditTeamViewCollaborationHandoff(
+    saved,
+    {
+      source: 'scene-context',
+      mode: actionKind === 'team-default' ? 'set-default-followup' : 'draft',
+      selectable: Boolean(auditTeamViewManagementItems.value.find((item) => item.id === saved.id)?.selectable),
+      sceneContextAvailable: Boolean(auditSceneContext.value),
+    },
+    tr,
+  )
+  if (actionKind === 'team-default') {
+    applyAuditTeamViewCollaborationHandoff(collaborationHandoff)
+    await nextTick()
+    document.getElementById(collaborationHandoff.scrollTargetId)?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    })
+    return
+  }
+  applyAuditTeamViewCollaborationHandoff(collaborationHandoff)
+  await nextTick()
+  document.getElementById(collaborationHandoff.scrollTargetId)?.scrollIntoView({
+    behavior: 'smooth',
+    block: 'start',
+  })
 }
 
 function tr(en: string, zh: string): string {
@@ -709,6 +1682,346 @@ function tr(en: string, zh: string): string {
 function setStatus(message: string, kindValue: 'info' | 'error' = 'info') {
   statusMessage.value = message
   statusKind.value = kindValue
+}
+
+function storeAuditSavedView(name: string, successMessage?: string) {
+  return storeAuditSavedViewState(
+    name,
+    readCurrentRouteState(),
+    successMessage,
+  )
+}
+
+function storeAuditSavedViewState(
+  name: string,
+  state: PlmAuditRouteState,
+  successMessage?: string,
+) {
+  const trimmedName = name.trim()
+  if (!trimmedName) {
+    setStatus(tr('Enter a name for the saved view.', '请输入已保存视图名称。'), 'error')
+    return null
+  }
+
+  savedViews.value = savePlmAuditSavedView(trimmedName, state)
+  applyAuditSavedViewStoreAttention()
+  savedViewName.value = ''
+  setStatus(successMessage || tr('Audit saved view stored.', '审计已保存视图已保存。'))
+  return savedViews.value[0] || null
+}
+
+async function saveCurrentLocalViewWithFollowup(
+  name: string,
+  source: PlmAuditSavedViewShareFollowupSource,
+  successMessage: string,
+  stateOverride?: PlmAuditRouteState,
+) {
+  const saved = storeAuditSavedViewState(
+    name,
+    stateOverride || readCurrentRouteState(),
+    successMessage,
+  )
+  if (!saved) return null
+
+  const nextCollaborationState = resolvePlmAuditSavedViewTakeoverCollaborationState({
+    selectedIds: auditTeamViewSelection.value,
+    draft: auditTeamViewCollaborationDraft.value,
+    followup: auditTeamViewCollaborationFollowup.value,
+  })
+  auditTeamViewSelection.value = nextCollaborationState.selectedIds
+  auditTeamViewCollaborationDraft.value = nextCollaborationState.draft
+  auditTeamViewCollaborationFollowup.value = nextCollaborationState.followup
+  clearAuditTakeoverTeamViewFormDrafts()
+  alignAuditTakeoverTeamViewSelector(parsePlmAuditRouteState(route.query).teamViewId)
+  applyAuditSourceLocalSaveAttention()
+  applySavedViewAttentionAction({
+    kind: 'install-followup',
+    shareFollowup: { savedViewId: saved.id, source },
+  })
+  if (source === 'shared-entry') {
+    clearAuditTeamViewShareEntry()
+    await consumeAuditTeamViewShareEntryQuery()
+  }
+  await nextTick()
+  document.getElementById('plm-audit-saved-views')?.scrollIntoView({
+    behavior: 'smooth',
+    block: 'start',
+  })
+  return saved
+}
+
+async function persistAuditTeamView(
+  name: string,
+  options?: {
+    isDefault?: boolean
+  },
+  successMessage?: string,
+  stateOverride?: PlmAuditTeamViewState,
+) {
+  const trimmedName = name.trim()
+  if (!trimmedName) {
+    setStatus(tr('Enter a team view name.', '请输入团队视图名称。'), 'error')
+    return null
+  }
+
+  auditTeamViewsLoading.value = true
+  auditTeamViewsError.value = ''
+  try {
+    const saved = await savePlmWorkbenchTeamView('audit', trimmedName, stateOverride || buildCurrentAuditTeamViewState(), {
+      isDefault: options?.isDefault,
+    })
+    const savedState = buildPlmAuditPersistedTeamViewRouteState(
+      saved,
+      readCurrentRouteState(),
+      {
+        isDefault: options?.isDefault,
+      },
+    )
+    upsertAuditTeamView(saved)
+    applyAuditManagedTeamViewAttention()
+    applyAuditTeamViewState(saved)
+    clearAuditCompletedTeamViewFormDrafts()
+    focusedAuditTeamViewId.value = saved.id
+    await syncRouteState(savedState)
+    setStatus(successMessage || tr('Audit team view saved.', '审计团队视图已保存。'))
+    return saved
+  } catch (error: unknown) {
+    auditTeamViewsError.value = error instanceof Error
+      ? error.message
+      : tr('Failed to save audit team view', '保存审计团队视图失败')
+    setStatus(auditTeamViewsError.value, 'error')
+  } finally {
+    auditTeamViewsLoading.value = false
+  }
+  return null
+}
+
+function clearAuditTeamViewCollaborationDraft() {
+  const previousDraft = auditTeamViewCollaborationDraft.value
+  auditTeamViewSelection.value = resolvePlmAuditClearedTeamViewDraftSelection({
+    selectedIds: auditTeamViewSelection.value,
+    clearedDraft: previousDraft,
+  })
+  auditTeamViewCollaborationDraft.value = null
+}
+
+function dismissAuditTeamViewCollaborationDraft() {
+  clearAuditTeamViewCollaborationDraft()
+  const nextState = buildPlmAuditDismissedCollaborationDraftAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+}
+
+function clearAuditTeamViewShareEntry() {
+  auditTeamViewShareEntry.value = null
+}
+
+async function consumeAuditTeamViewShareEntryQuery() {
+  await syncRouteState(parsePlmAuditRouteState(route.query), true, {
+    consumeSharedEntry: true,
+  })
+}
+
+function applyAuditTeamViewShareEntryAction(
+  action:
+    | {
+      kind: 'filter-navigation'
+    }
+    | {
+      kind: 'route-query'
+      auditEntry: unknown
+    },
+) {
+  auditTeamViewShareEntry.value = reducePlmAuditTeamViewShareEntry(
+    auditTeamViewShareEntry.value,
+    action,
+  )
+}
+
+function clearAuditTeamViewCollaborationFollowup() {
+  auditTeamViewCollaborationFollowup.value = null
+  const nextState = buildPlmAuditClearedCollaborationFollowupAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+}
+
+function clearAuditSavedViewShareFollowup() {
+  auditSavedViewShareFollowup.value = null
+}
+
+function applyAuditAttentionFocusAction(action: PlmAuditAttentionFocusAction) {
+  const nextState = reducePlmAuditAttentionFocusState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    action,
+  )
+  focusedAuditTeamViewId.value = nextState.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.focusedSavedViewId
+}
+
+function clearAuditSourceFocus() {
+  applyAuditAttentionFocusAction({ kind: 'clear-source' })
+}
+
+function clearAuditAttentionFocus() {
+  applyAuditAttentionFocusAction({ kind: 'clear-all' })
+}
+
+function applyAuditRoutePivotAttention() {
+  const nextState = buildPlmAuditRoutePivotAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+}
+
+function applySavedViewAttentionAction(action: PlmAuditSavedViewAttentionAction) {
+  const nextState = reducePlmAuditSavedViewAttentionState(
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    action,
+  )
+  auditSavedViewShareFollowup.value = nextState.shareFollowup
+  focusedSavedViewId.value = nextState.focusedSavedViewId
+}
+
+function applyAuditTeamViewHandoffAttention() {
+  const nextState = buildPlmAuditTeamViewHandoffAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+}
+
+function applyAuditSavedViewStoreAttention() {
+  const nextState = buildPlmAuditSavedViewStoreAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+}
+
+function applyAuditSourceLocalSaveAttention() {
+  const nextState = buildPlmAuditSourceLocalSaveAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+}
+
+function applyAuditManagedTeamViewAttention() {
+  const nextState = buildPlmAuditManagedTeamViewAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+}
+
+function applyAuditAppliedTeamViewAttention(teamViewId: string) {
+  const nextState = buildPlmAuditAppliedTeamViewAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    teamViewId,
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
+}
+
+function applyAuditSourceShareFollowupAttention() {
+  const nextState = buildPlmAuditSourceShareFollowupAttentionState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      shareFollowup: auditSavedViewShareFollowup.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+  )
+  focusedAuditTeamViewId.value = nextState.attentionFocus.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.attentionFocus.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextState.attentionFocus.focusedSavedViewId
+  auditSavedViewShareFollowup.value = nextState.savedViewAttention.shareFollowup
 }
 
 function actionLabel(value: string): string {
@@ -722,6 +2035,7 @@ function actionLabel(value: string): string {
 
 function resourceTypeLabel(value: string): string {
   if (value === 'plm-team-preset-batch') return tr('Team preset batch', '团队预设批量')
+  if (value === 'plm-team-preset-default') return tr('Team preset default', '团队预设默认')
   if (value === 'plm-team-view-batch') return tr('Team view batch', '团队视图批量')
   if (value === 'plm-team-view-default') return tr('Team default scene', '团队默认场景')
   return value || '--'
@@ -772,10 +2086,28 @@ function sortAuditTeamViews(views: PlmWorkbenchTeamView<'audit'>[]) {
   })
 }
 
+function setAuditTeamViewRecommendationFilter(value: PlmRecommendedAuditTeamViewFilter) {
+  auditTeamViewRecommendationFilter.value = value
+}
+
+function findAuditTeamViewById(viewId: string) {
+  return auditTeamViews.value.find((entry) => entry.id === viewId) || null
+}
+
 function upsertAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
+  const nextItems = auditTeamViews.value
+    .filter((entry) => entry.id !== view.id)
+    .map((entry) => {
+      if (!view.isDefault || !entry.isDefault) return entry
+      return {
+        ...entry,
+        isDefault: false,
+      }
+    })
+
   auditTeamViews.value = sortAuditTeamViews([
     view,
-    ...auditTeamViews.value.filter((entry) => entry.id !== view.id),
+    ...nextItems,
   ])
 }
 
@@ -785,21 +2117,109 @@ function replaceAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
   )
 }
 
+function pruneRemovedAuditTeamViewTransientState(viewIds: string[]) {
+  const nextState = prunePlmAuditTransientOwnershipForRemovedViews(
+    {
+      collaborationDraft: auditTeamViewCollaborationDraft.value,
+      collaborationFollowup: auditTeamViewCollaborationFollowup.value,
+      shareEntry: auditTeamViewShareEntry.value,
+    },
+    viewIds,
+  )
+  auditTeamViewCollaborationDraft.value = nextState.collaborationDraft
+  auditTeamViewCollaborationFollowup.value = nextState.collaborationFollowup
+  auditTeamViewShareEntry.value = nextState.shareEntry
+}
+
+function removeAuditTeamViews(viewIds: string[]) {
+  const removed = new Set(viewIds)
+  auditTeamViews.value = auditTeamViews.value.filter((entry) => !removed.has(entry.id))
+  auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => !removed.has(id))
+  pruneRemovedAuditTeamViewTransientState(viewIds)
+}
+
+function trimAuditTeamViewSelection(managedTeamViewId = canonicalAuditTeamViewManagementTargetId.value) {
+  const nextState = trimPlmAuditExistingTeamViewUiState(
+    {
+      selectedTeamViewId: auditTeamViewKey.value,
+      managedTeamViewId,
+      selectedIds: auditTeamViewSelection.value,
+      focusedTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      draftTeamViewName: auditTeamViewName.value,
+      draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+      draftOwnerUserId: auditTeamViewOwnerUserId.value,
+    },
+    auditTeamViews.value,
+    {
+      isApplicableView: canApplyPlmAuditTeamView,
+      isManageableView: canManagePlmAuditTeamView,
+      isSelectableView: isSelectablePlmAuditTeamView,
+    },
+  )
+  auditTeamViewKey.value = nextState.selectedTeamViewId
+  auditTeamViewSelection.value = nextState.selectedIds
+  focusedAuditTeamViewId.value = nextState.focusedTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextState.focusedRecommendedTeamViewId
+  auditTeamViewName.value = nextState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextState.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextState.draftOwnerUserId
+}
+
+function setAllSelectableAuditTeamViewsSelected(nextSelected: boolean) {
+  if (!nextSelected) {
+    auditTeamViewSelection.value = []
+    return
+  }
+  auditTeamViewSelection.value = auditTeamViewManagementItems.value
+    .filter((item) => item.selectable)
+    .map((item) => item.id)
+}
+
+function clearCurrentAuditTeamViewSelectionIfNeeded(viewIds: string[]) {
+  const currentState = readCurrentRouteState()
+  const nextState = buildPlmAuditClearedTeamViewSelectionState(currentState, viewIds)
+  if (nextState.teamViewId === currentState.teamViewId) return
+  applyRouteState(nextState)
+}
+
 function buildCurrentAuditTeamViewState() {
   return buildPlmAuditTeamViewState(readCurrentRouteState())
 }
 
-function applyAuditTeamViewState(view: PlmWorkbenchTeamView<'audit'>) {
-  auditTeamViewKey.value = view.id
-  page.value = view.state.page
-  query.value = view.state.q
-  actorId.value = view.state.actorId
-  kind.value = view.state.kind
-  action.value = view.state.action
-  resourceType.value = view.state.resourceType
-  from.value = view.state.from
-  to.value = view.state.to
-  windowMinutes.value = view.state.windowMinutes
+function applyAuditTeamViewState(view: Pick<PlmWorkbenchTeamView<'audit'>, 'id' | 'state'>) {
+  applyRouteState(buildPlmAuditSelectedTeamViewRouteState(view, readCurrentRouteState()))
+}
+
+function setAuditTeamViewNameDraft(value: string, ownerId = canonicalAuditTeamViewManagementTargetId.value) {
+  auditTeamViewName.value = value
+  auditTeamViewNameOwnerId.value = ownerId.trim()
+}
+
+function captureAuditTeamViewNameDraftOwner() {
+  auditTeamViewNameOwnerId.value = canonicalAuditTeamViewManagementTargetId.value.trim()
+}
+
+function applyAuditManagedTeamViewSelection(viewId: string) {
+  auditTeamViewKey.value = viewId
+  focusedAuditTeamViewId.value = viewId
+}
+
+function applyAuditTeamViewCollaborationHandoff(handoff: PlmAuditTeamViewCollaborationHandoff) {
+  auditTeamViewCollaborationDraft.value = handoff.draft
+  auditTeamViewCollaborationFollowup.value = handoff.followup
+  auditTeamViewKey.value = handoff.selectedTeamViewId || ''
+  if (handoff.teamViewName !== null) {
+    setAuditTeamViewNameDraft(
+      handoff.teamViewName,
+      handoff.selectedTeamViewId || handoff.followup?.teamViewId || '',
+    )
+  }
+  if (handoff.teamViewOwnerUserId !== null) {
+    auditTeamViewOwnerUserId.value = handoff.teamViewOwnerUserId
+  }
+  auditTeamViewSelection.value = handoff.selectedIds
+  focusedAuditTeamViewId.value = handoff.focusedTeamViewId
 }
 
 function buildAuditTeamViewShareUrl(view: PlmWorkbenchTeamView<'audit'>) {
@@ -814,9 +2234,13 @@ function savedViewContextBadge(view: PlmAuditSavedView) {
   return buildPlmAuditSavedViewContextBadge(view.state, tr, readCurrentRouteState())
 }
 
+function savedViewTeamPromotionNote(view: PlmAuditSavedView) {
+  return buildPlmAuditSavedViewTeamPromotionDraft(view, tr).localContextNote
+}
+
 function buildSavedViewContextState(
   view: PlmAuditSavedView,
-  actionKind: 'owner' | 'scene',
+  actionKind: 'owner' | 'scene' | 'reapply-scene',
 ) {
   if (actionKind === 'owner') return withPlmAuditSceneOwnerContext(view.state)
   return withPlmAuditSceneQueryContext(view.state)
@@ -826,13 +2250,35 @@ function isSavedViewActive(view: PlmAuditSavedView) {
   return isPlmAuditRouteStateEqual(view.state, readCurrentRouteState())
 }
 
+function applySavedViewTakeover(actionKind: 'apply' | 'context-action', targetTeamViewId: string) {
+  clearAuditAttentionFocus()
+  applySavedViewAttentionAction({ kind: actionKind })
+  applyCollaborationTakeoverCleanup()
+  if (shouldTakeOverPlmAuditSharedEntryOnSavedViewTakeover(auditTeamViewShareEntry.value)) {
+    clearAuditTeamViewShareEntry()
+  }
+  clearAuditTakeoverTeamViewFormDrafts()
+  alignAuditTakeoverTeamViewSelector(targetTeamViewId)
+}
+
 function runSavedViewContextAction(
   view: PlmAuditSavedView,
-  actionKind: 'owner' | 'scene',
+  actionKind: 'owner' | 'scene' | 'reapply-scene',
 ) {
   const badge = savedViewContextBadge(view)
-  if (badge?.quickAction?.disabled) return
-  void syncRouteState(buildSavedViewContextState(view, actionKind))
+  const feedback = resolvePlmAuditSavedViewContextActionFeedback({
+    badge,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  const nextState = buildSavedViewContextState(view, actionKind)
+  applySavedViewTakeover('context-action', nextState.teamViewId)
+  void syncRouteState(nextState, false, {
+    consumeSharedEntry: true,
+  })
 }
 
 function downloadCsvText(filename: string, csvText: string) {
@@ -847,46 +2293,57 @@ function downloadCsvText(filename: string, csvText: string) {
 async function refreshAuditTeamViews() {
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
+  const requestedSharedEntry = isPlmAuditSharedLinkEntry(route.query.auditEntry)
   try {
     const result = await listPlmWorkbenchTeamViews('audit')
     auditTeamViews.value = sortAuditTeamViews(result.items)
 
     const requestedState = parsePlmAuditRouteState(route.query)
-    const requestedViewId = requestedState.teamViewId.trim()
-    const requestedView = requestedViewId
-      ? auditTeamViews.value.find((view) => view.id === requestedViewId && !view.isArchived) || null
-      : null
+    const resolution = resolvePlmAuditRequestedTeamViewRouteState(
+      requestedState,
+      auditTeamViews.value,
+      defaultAuditTeamView.value,
+    )
 
-    if (requestedView) {
-      const nextState = buildPlmAuditRouteStateFromTeamView(requestedView.id, requestedView.state)
-      applyAuditTeamViewState(requestedView)
-      if (!isPlmAuditRouteStateEqual(nextState, requestedState)) {
-        await syncRouteState(nextState, true)
-      }
-      return
-    }
-
-    if (requestedViewId) {
-      auditTeamViewKey.value = ''
-      const nextState = {
-        ...requestedState,
-        teamViewId: '',
-      }
-      if (!isPlmAuditRouteStateEqual(nextState, requestedState)) {
-        await syncRouteState(nextState, true)
-      }
-      return
-    }
-
-    if (!hasExplicitPlmAuditFilters(requestedState)) {
-      const defaultView = defaultAuditTeamView.value
-      if (defaultView) {
-        const nextState = buildPlmAuditRouteStateFromTeamView(defaultView.id, defaultView.state)
-        applyAuditTeamViewState(defaultView)
-        if (!isPlmAuditRouteStateEqual(nextState, requestedState)) {
-          await syncRouteState(nextState, true)
+    if (resolution.kind === 'apply-view') {
+      if (requestedSharedEntry && requestedState.teamViewId.trim()) {
+        clearAuditAttentionFocus()
+        applySavedViewAttentionAction({ kind: 'share-entry-takeover' })
+        auditTeamViewSelection.value = resolvePlmAuditSharedEntryTakeoverSelection(
+          auditTeamViewSelection.value,
+        )
+        clearAuditTakeoverTeamViewFormDrafts()
+        if (shouldReplacePlmAuditTeamViewCollaborationOwnershipWithSharedEntry(
+          auditTeamViewCollaborationDraft.value,
+          auditTeamViewCollaborationFollowup.value,
+        )) {
+          clearAuditTeamViewCollaborationDraft()
+          clearAuditTeamViewCollaborationFollowup()
         }
+        auditTeamViewShareEntry.value = {
+          teamViewId: resolution.viewId,
+        }
+      } else if (shouldApplyPlmAuditRequestedTeamViewTakeoverCleanup({
+        requestedSharedEntry,
+        requestedState,
+        nextState: resolution.nextState,
+      })) {
+        applyResolvedTeamViewTakeoverCleanup()
       }
+      applyRouteState(resolution.nextState)
+      if (!isPlmAuditRouteStateEqual(resolution.nextState, requestedState)) {
+        await syncRouteState(resolution.nextState, true)
+      }
+      return
+    }
+
+    if (resolution.kind === 'clear-selection') {
+      applyResolvedTeamViewTakeoverCleanup()
+      applyRouteState(resolution.nextState)
+      if (!isPlmAuditRouteStateEqual(resolution.nextState, requestedState)) {
+        await syncRouteState(resolution.nextState, true)
+      }
+      return
     }
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
@@ -898,59 +2355,357 @@ async function refreshAuditTeamViews() {
 }
 
 async function saveAuditTeamView() {
-  const name = auditTeamViewName.value.trim()
-  if (!name) {
-    setStatus(tr('Enter a team view name.', '请输入团队视图名称。'), 'error')
+  await persistAuditTeamView(
+    auditTeamViewName.value.trim(),
+    {},
+    tr('Audit team view saved.', '审计团队视图已保存。'),
+  )
+}
+
+async function applyAuditTeamView() {
+  const view = auditTeamViewApplyTarget.value
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'apply',
+    target: view,
+    managementTargetLocked: false,
+    canApply: canApplyAuditTeamView.value,
+    canDuplicate: false,
+    canShare: false,
+    canRenameTarget: false,
+    canRename: false,
+    canTransferTarget: false,
+    canTransfer: false,
+    canDelete: false,
+    canArchive: false,
+    canRestore: false,
+    canSetDefault: false,
+    canClearDefault: false,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
     return
   }
+  if (!view) return
+
+  await applyAuditTeamViewEntry(view)
+}
+
+async function shareAuditTeamView() {
+  const view = canonicalAuditTeamViewManagementTarget.value
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'share',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canApply: canApplyAuditTeamView.value,
+    canDuplicate: canDuplicatePlmCollaborativeEntry(view),
+    canShare: canShareAuditTeamView.value,
+    canRenameTarget: canRenameAuditTeamViewTarget.value,
+    canRename: canSubmitAuditTeamViewRename.value,
+    canTransferTarget: canTransferAuditTeamViewTarget.value,
+    canTransfer: canTransferAuditTeamView.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    draftName: auditTeamViewName.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
+
+  await shareAuditTeamViewEntry(view)
+}
+
+async function duplicateAuditTeamView() {
+  const view = canonicalAuditTeamViewManagementTarget.value
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'duplicate',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canApply: canApplyAuditTeamView.value,
+    canDuplicate: canDuplicatePlmCollaborativeEntry(view),
+    canShare: canShareAuditTeamView.value,
+    canRenameTarget: canRenameAuditTeamViewTarget.value,
+    canRename: canSubmitAuditTeamViewRename.value,
+    canTransferTarget: canTransferAuditTeamViewTarget.value,
+    canTransfer: canTransferAuditTeamView.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    draftName: auditTeamViewName.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
+
+  await duplicateAuditTeamViewEntry(view)
+}
+
+async function duplicateAuditTeamViewEntry(
+  targetView?: PlmWorkbenchTeamView<'audit'> | null,
+  options?: {
+    allowDraftName?: boolean
+  },
+) {
+  const view = targetView || null
+  if (!view || !canDuplicatePlmCollaborativeEntry(view)) return
 
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
   try {
-    const saved = await savePlmWorkbenchTeamView('audit', name, buildCurrentAuditTeamViewState())
-    upsertAuditTeamView(saved)
-    applyAuditTeamViewState(saved)
-    auditTeamViewName.value = ''
-    await syncRouteState(buildPlmAuditRouteStateFromTeamView(saved.id, saved.state))
-    setStatus(tr('Audit team view saved.', '审计团队视图已保存。'))
+    const duplicated = await duplicatePlmWorkbenchTeamView(
+      'audit',
+      view.id,
+      resolvePlmAuditTeamViewDuplicateName({
+        draftName: auditTeamViewName.value,
+        allowDraftName: options?.allowDraftName ?? true,
+      }),
+    )
+    const duplicatedState = buildPlmAuditSelectedTeamViewRouteState(duplicated, readCurrentRouteState())
+    upsertAuditTeamView(duplicated)
+    clearAuditSourceFocus()
+    applySavedViewAttentionAction({ kind: 'apply' })
+    applyRouteState(duplicatedState)
+    clearAuditTeamViewShareEntry()
+    clearAuditCompletedTeamViewFormDrafts()
+    focusedAuditTeamViewId.value = duplicated.id
+    await syncRouteState(duplicatedState)
+    setStatus(tr('Audit team view duplicated.', '审计团队视图已复制。'))
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
       ? error.message
-      : tr('Failed to save audit team view', '保存审计团队视图失败')
+      : tr('Failed to duplicate audit team view', '复制审计团队视图失败')
     setStatus(auditTeamViewsError.value, 'error')
   } finally {
     auditTeamViewsLoading.value = false
   }
 }
 
-async function applyAuditTeamView() {
-  const view = selectedAuditTeamView.value
-  if (!view || !canApplyAuditTeamView.value) return
-
-  applyAuditTeamViewState(view)
-  await syncRouteState(buildPlmAuditRouteStateFromTeamView(view.id, view.state))
-  setStatus(tr('Audit team view applied.', '审计团队视图已应用。'))
-}
-
-async function shareAuditTeamView() {
-  const view = selectedAuditTeamView.value
-  if (!view || !canShareAuditTeamView.value) return
-
-  const ok = await copyTextToClipboard(buildAuditTeamViewShareUrl(view))
-  if (!ok) {
-    setStatus(tr('Failed to copy team view link.', '复制团队视图链接失败。'), 'error')
+async function renameAuditTeamView() {
+  const view = canonicalAuditTeamViewManagementTarget.value
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'rename',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canApply: canApplyAuditTeamView.value,
+    canDuplicate: canDuplicatePlmCollaborativeEntry(view),
+    canShare: canShareAuditTeamView.value,
+    canRenameTarget: canRenameAuditTeamViewTarget.value,
+    canRename: canSubmitAuditTeamViewRename.value,
+    canTransferTarget: canTransferAuditTeamViewTarget.value,
+    canTransfer: canTransferAuditTeamView.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    draftName: auditTeamViewName.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
     return
   }
-  setStatus(tr('Audit team view link copied.', '审计团队视图链接已复制。'))
-}
-
-async function setAuditTeamViewDefault() {
-  const view = selectedAuditTeamView.value
-  if (!view || !canSetAuditTeamViewDefault.value) return
+  if (!view) return
 
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
   try {
+    const renamed = await renamePlmWorkbenchTeamView(
+      'audit',
+      view.id,
+      auditTeamViewName.value.trim(),
+    )
+    replaceAuditTeamView(renamed)
+    applyAuditManagedTeamViewAttention()
+    applyAuditManagedTeamViewSelection(renamed.id)
+    clearAuditCompletedTeamViewFormDrafts()
+    setStatus(tr('Audit team view renamed.', '审计团队视图已重命名。'))
+  } catch (error: unknown) {
+    auditTeamViewsError.value = error instanceof Error
+      ? error.message
+      : tr('Failed to rename audit team view', '重命名审计团队视图失败')
+    setStatus(auditTeamViewsError.value, 'error')
+  } finally {
+    auditTeamViewsLoading.value = false
+  }
+}
+
+async function setAuditTeamViewDefault() {
+  const view = canonicalAuditTeamViewManagementTarget.value
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'set-default',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
+
+  await setAuditTeamViewDefaultEntry(view)
+}
+
+async function transferAuditTeamView() {
+  const view = canonicalAuditTeamViewManagementTarget.value
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'transfer',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canApply: canApplyAuditTeamView.value,
+    canDuplicate: canDuplicatePlmCollaborativeEntry(view),
+    canShare: canShareAuditTeamView.value,
+    canRenameTarget: canRenameAuditTeamViewTarget.value,
+    canRename: canSubmitAuditTeamViewRename.value,
+    canTransferTarget: canTransferAuditTeamViewTarget.value,
+    canTransfer: canTransferAuditTeamView.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    draftName: auditTeamViewName.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
+
+  auditTeamViewsLoading.value = true
+  auditTeamViewsError.value = ''
+  try {
+    const saved = await transferPlmWorkbenchTeamView(
+      'audit',
+      view.id,
+      auditTeamViewOwnerUserId.value.trim(),
+    )
+    replaceAuditTeamView(saved)
+    applyAuditManagedTeamViewAttention()
+    applyAuditManagedTeamViewSelection(saved.id)
+    trimAuditTeamViewSelection(saved.id)
+    clearAuditTransferActionTeamViewFormDrafts()
+    setStatus(tr('Audit team view owner transferred.', '审计团队视图所有者已转移。'))
+  } catch (error: unknown) {
+    auditTeamViewsError.value = error instanceof Error
+      ? error.message
+      : tr('Failed to transfer audit team view owner', '转移审计团队视图所有者失败')
+    setStatus(auditTeamViewsError.value, 'error')
+  } finally {
+    auditTeamViewsLoading.value = false
+  }
+}
+
+async function applyAuditTeamViewEntry(view: PlmWorkbenchTeamView<'audit'>) {
+  if (!canApplyPlmAuditTeamView(view)) return
+  const nextState = buildPlmAuditSelectedTeamViewRouteState(view, readCurrentRouteState())
+  clearAuditSourceFocus()
+  applySavedViewAttentionAction({ kind: 'apply' })
+  applyRouteState(nextState)
+  clearAuditTeamViewCollaborationDraft()
+  clearAuditTeamViewShareEntry()
+  clearAuditTeamViewCollaborationFollowup()
+  applyAuditAppliedTeamViewAttention(view.id)
+  await syncRouteState(nextState, false, {
+    consumeSharedEntry: true,
+  })
+  setStatus(tr('Audit team view applied.', '审计团队视图已应用。'))
+}
+
+async function shareAuditTeamViewEntry(
+  view: PlmWorkbenchTeamView<'audit'>,
+  source?: PlmAuditTeamViewCollaborationSource,
+  sourceSavedViewId?: string | null,
+  sourceRecommendationFilter?: PlmRecommendedAuditTeamViewFilter,
+) {
+  const ok = await copyTextToClipboard(buildAuditTeamViewShareUrl(view))
+  if (!ok) {
+    setStatus(tr('Failed to copy team view link.', '复制团队视图链接失败。'), 'error')
+    return false
+  }
+  const outcome = buildPlmAuditTeamViewCollaborationActionOutcome(
+    view.id,
+    source,
+    'share',
+    tr,
+    {
+      sceneContextAvailable: Boolean(auditSceneContext.value),
+      sourceSavedViewId,
+      sourceRecommendationFilter: resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter(
+        source,
+        sourceRecommendationFilter,
+      ),
+    },
+  )
+  const previousDraft = auditTeamViewCollaborationDraft.value
+  const sharedEntryTakeover = shouldTakeOverPlmAuditSharedEntryOnSourceAction(
+    auditTeamViewShareEntry.value,
+    Boolean(source),
+    view.id,
+  )
+  if (sharedEntryTakeover) {
+    clearAuditTeamViewShareEntry()
+  }
+  if (resolvePlmAuditTeamViewCollaborationAttentionMode(source, 'share') === 'source-share-followup') {
+    applyAuditSourceShareFollowupAttention()
+  } else {
+    applyAuditTeamViewHandoffAttention()
+  }
+  const nextDraftState = resolvePlmAuditCompletedTeamViewCollaborationDraft({
+    selectedIds: auditTeamViewSelection.value,
+    draft: previousDraft,
+    nextFollowup: outcome.followup,
+    source,
+    targetTeamViewId: view.id,
+  })
+  auditTeamViewSelection.value = nextDraftState.selectedIds
+  if (nextDraftState.clearDraft) {
+    clearAuditTeamViewCollaborationDraft()
+  }
+  setStatus(outcome.statusMessage)
+  auditTeamViewCollaborationFollowup.value = outcome.followup
+  if (sharedEntryTakeover) {
+    await consumeAuditTeamViewShareEntryQuery()
+  }
+  return true
+}
+
+async function setAuditTeamViewDefaultEntry(
+  view: PlmWorkbenchTeamView<'audit'>,
+  source?: PlmAuditTeamViewCollaborationSource,
+  sourceSavedViewId?: string | null,
+  sourceRecommendationFilter?: PlmRecommendedAuditTeamViewFilter,
+) {
+  auditTeamViewsLoading.value = true
+  auditTeamViewsError.value = ''
+  try {
+    const sharedEntryTakeover = shouldTakeOverPlmAuditSharedEntryOnSourceAction(
+      auditTeamViewShareEntry.value,
+      Boolean(source),
+      view.id,
+    )
     const saved = await setPlmWorkbenchTeamViewDefault('audit', view.id)
     auditTeamViews.value = sortAuditTeamViews(
       auditTeamViews.value.map((entry) => {
@@ -959,8 +2714,50 @@ async function setAuditTeamViewDefault() {
       }),
     )
     applyAuditTeamViewState(saved)
-    await syncRouteState(buildPlmAuditRouteStateFromTeamView(saved.id, saved.state))
-    setStatus(tr('Audit team view set as default.', '审计团队视图已设为默认。'))
+    focusedAuditTeamViewId.value = saved.id
+    await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'set-default', readCurrentRouteState()))
+    const outcome = buildPlmAuditTeamViewCollaborationActionOutcome(
+      saved.id,
+      source,
+      'set-default',
+      tr,
+      {
+        sceneContextAvailable: Boolean(auditSceneContext.value),
+        sourceSavedViewId,
+        sourceRecommendationFilter: resolvePlmAuditTeamViewCollaborationSourceRecommendationFilter(
+          source,
+          sourceRecommendationFilter,
+        ),
+      },
+    )
+    if (sharedEntryTakeover) {
+      clearAuditTeamViewShareEntry()
+    }
+    if (resolvePlmAuditTeamViewCollaborationAttentionMode(source, 'set-default') === 'managed-team-view') {
+      applyAuditTeamViewHandoffAttention()
+    }
+    const nextDraftState = resolvePlmAuditCompletedTeamViewCollaborationDraft({
+      selectedIds: auditTeamViewSelection.value,
+      draft: auditTeamViewCollaborationDraft.value,
+      nextFollowup: outcome.followup,
+      source,
+      targetTeamViewId: saved.id,
+    })
+    auditTeamViewSelection.value = nextDraftState.selectedIds
+    if (nextDraftState.clearDraft) {
+      clearAuditTeamViewCollaborationDraft()
+    }
+    clearAuditDefaultActionTeamViewFormDrafts()
+    setStatus(outcome.statusMessage)
+    auditTeamViewCollaborationFollowup.value = outcome.followup
+    await nextTick()
+    if (outcome.scrollTargetId) {
+      document.getElementById(outcome.scrollTargetId)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      })
+    }
+    return true
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
       ? error.message
@@ -969,20 +2766,172 @@ async function setAuditTeamViewDefault() {
   } finally {
     auditTeamViewsLoading.value = false
   }
+  return false
+}
+
+async function applyRecommendedAuditTeamView(view: PlmRecommendedAuditTeamView) {
+  const target = findAuditTeamViewById(view.id)
+  const feedback = resolvePlmRecommendedAuditTeamViewActionFeedback({
+    actionKind: 'apply',
+    target,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!target) return
+  await applyAuditTeamViewEntry(target)
+}
+
+async function focusAuditTeamViewManagement(view: PlmRecommendedAuditTeamView) {
+  const target = findAuditTeamViewById(view.id)
+  const feedback = resolvePlmRecommendedAuditTeamViewActionFeedback({
+    actionKind: 'manage',
+    target,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!target) return
+
+  const sharedEntryTakeover = shouldTakeOverPlmAuditSharedEntryOnManagementHandoff(
+    auditTeamViewShareEntry.value,
+    target.id,
+  )
+  const collaborationHandoff = buildPlmAuditTeamViewCollaborationHandoff(
+    target,
+    {
+      source: 'recommendation',
+      mode: 'draft',
+      selectable: Boolean(auditTeamViewManagementItems.value.find((item) => item.id === target.id)?.selectable),
+      sourceRecommendationFilter: auditTeamViewRecommendationFilter.value,
+    },
+    tr,
+  )
+  if (sharedEntryTakeover) {
+    clearAuditTeamViewShareEntry()
+  }
+  applyAuditTeamViewHandoffAttention()
+  applyAuditTeamViewCollaborationHandoff(collaborationHandoff)
+  if (sharedEntryTakeover) {
+    await consumeAuditTeamViewShareEntryQuery()
+  }
+  await nextTick()
+  document.getElementById(collaborationHandoff.scrollTargetId)?.scrollIntoView({
+    behavior: 'smooth',
+    block: 'center',
+  })
+  setStatus(collaborationHandoff.statusMessage)
+}
+
+async function focusRecommendedAuditTeamView(view: PlmWorkbenchTeamView<'audit'>) {
+  auditTeamViewRecommendationFilter.value = resolveAuditTeamViewRecommendationFilter(view)
+  const nextFocusState = applyPlmAuditSourceFocusState(
+    {
+      focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+      focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+      focusedSavedViewId: focusedSavedViewId.value,
+    },
+    {
+      focusedRecommendedAuditTeamViewId: view.id,
+      focusedSavedViewId: '',
+    },
+  )
+  focusedAuditTeamViewId.value = nextFocusState.focusedAuditTeamViewId
+  focusedRecommendedAuditTeamViewId.value = nextFocusState.focusedRecommendedAuditTeamViewId
+  focusedSavedViewId.value = nextFocusState.focusedSavedViewId
+  await nextTick()
+  document.getElementById('plm-audit-recommended-team-views')?.scrollIntoView({
+    behavior: 'smooth',
+    block: 'start',
+  })
+}
+
+async function runRecommendedAuditTeamViewSecondaryAction(view: PlmRecommendedAuditTeamView) {
+  const target = findAuditTeamViewById(view.id)
+
+  if (view.secondaryActionKind === 'set-default') {
+    const feedback = resolvePlmRecommendedAuditTeamViewActionFeedback({
+      actionKind: 'set-default',
+      target,
+      tr,
+    })
+    if (feedback) {
+      setStatus(feedback.message, feedback.kind)
+      return
+    }
+    if (!target) return
+    await setAuditTeamViewDefaultEntry(
+      target,
+      'recommendation',
+      null,
+      auditTeamViewRecommendationFilter.value,
+    )
+    return
+  }
+
+  const feedback = resolvePlmRecommendedAuditTeamViewActionFeedback({
+    actionKind: 'share',
+    target,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!target) return
+  await shareAuditTeamViewEntry(
+    target,
+    'recommendation',
+    null,
+    auditTeamViewRecommendationFilter.value,
+  )
 }
 
 async function clearAuditTeamViewDefault() {
-  const view = selectedAuditTeamView.value
-  if (!view || !canClearAuditTeamViewDefault.value) return
+  const view = canonicalAuditTeamViewManagementTarget.value
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'clear-default',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
 
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
   try {
     const saved = await clearPlmWorkbenchTeamViewDefault('audit', view.id)
     replaceAuditTeamView(saved)
+    applyAuditManagedTeamViewAttention()
     applyAuditTeamViewState(saved)
-    await syncRouteState(buildPlmAuditRouteStateFromTeamView(saved.id, saved.state))
-    setStatus(tr('Audit team view default cleared.', '审计团队视图默认已取消。'))
+    const nextDraftState = resolvePlmAuditCompletedTeamViewCollaborationDraft({
+      selectedIds: auditTeamViewSelection.value,
+      draft: auditTeamViewCollaborationDraft.value,
+      nextFollowup: null,
+      source: null,
+      targetTeamViewId: saved.id,
+    })
+    auditTeamViewSelection.value = nextDraftState.selectedIds
+    if (nextDraftState.clearDraft) {
+      clearAuditTeamViewCollaborationDraft()
+    }
+    clearAuditLifecycleLogActionTeamViewFormDrafts()
+    focusedAuditTeamViewId.value = saved.id
+    await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'clear-default', readCurrentRouteState()))
+    setStatus(tr('Audit team view default cleared. Showing matching audit logs.', '审计团队视图默认已取消，已切换到对应审计日志。'))
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
       ? error.message
@@ -993,26 +2942,467 @@ async function clearAuditTeamViewDefault() {
   }
 }
 
+async function runAuditTeamViewCollaborationAction(actionKind: PlmAuditTeamViewCollaborationActionKind) {
+  const collaborationState = resolveAuditTeamViewCollaborationRuntimeState()
+  const draft = collaborationState.draft
+  const source = draft?.source
+  const sourceSavedViewId = draft?.sourceSavedViewId
+  const sourceRecommendationFilter = draft?.sourceRecommendationFilter
+
+  if (actionKind === 'dismiss') {
+    dismissAuditTeamViewCollaborationDraft()
+    return
+  }
+
+  const view = resolvePlmAuditTeamViewCollaborationActionTarget(
+    auditTeamViewCollaborationDraftTarget.value,
+    selectedAuditTeamView.value,
+  )
+  const feedback = resolvePlmAuditTeamViewCollaborationActionFeedback({
+    actionKind,
+    draft,
+    target: view,
+    tr,
+  })
+  if (feedback) {
+    if (draft && !view) {
+      clearAuditTeamViewCollaborationDraft()
+    }
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
+
+  if (actionKind === 'share') {
+    const ok = await shareAuditTeamViewEntry(
+      view,
+      source,
+      sourceSavedViewId,
+      sourceRecommendationFilter,
+    )
+    if (ok && shouldClearPlmAuditTeamViewCollaborationDraft(
+      auditTeamViewCollaborationDraft.value,
+      view.id,
+    )) {
+      clearAuditTeamViewCollaborationDraft()
+    }
+    return
+  }
+
+  const ok = await setAuditTeamViewDefaultEntry(
+    view,
+    source,
+    sourceSavedViewId,
+    sourceRecommendationFilter,
+  )
+  if (ok) clearAuditTeamViewCollaborationDraft()
+}
+
+async function runAuditTeamViewCollaborationFollowupAction(
+  actionKind: PlmAuditTeamViewCollaborationFollowupActionKind,
+) {
+  const followup = resolveAuditTeamViewCollaborationRuntimeFollowup()
+
+  if (actionKind === 'dismiss') {
+    clearAuditTeamViewCollaborationFollowup()
+    return
+  }
+
+  const view = followup ? findAuditTeamViewById(followup.teamViewId) : null
+  const feedback = resolvePlmAuditTeamViewCollaborationFollowupActionFeedback({
+    actionKind,
+    followup,
+    target: view,
+    tr,
+  })
+  if (feedback) {
+    if (followup && !view) {
+      clearAuditTeamViewCollaborationFollowup()
+    }
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!followup) return
+
+  if (actionKind === 'view-logs') {
+    document.getElementById(followup.logsAnchorId)?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    })
+    return
+  }
+
+  if (actionKind === 'focus-source') {
+    const sourceView = findAuditTeamViewById(followup.teamViewId)
+    const sourceFocusIntent = buildPlmAuditTeamViewCollaborationSourceFocusIntent(
+      followup,
+      sourceView,
+    )
+    const nextFocusState = applyPlmAuditSourceFocusState(
+      {
+        focusedAuditTeamViewId: focusedAuditTeamViewId.value,
+        focusedRecommendedAuditTeamViewId: focusedRecommendedAuditTeamViewId.value,
+        focusedSavedViewId: focusedSavedViewId.value,
+      },
+      {
+        focusedRecommendedAuditTeamViewId: sourceFocusIntent.focusedRecommendationTeamViewId || '',
+        focusedSavedViewId: sourceFocusIntent.focusedSavedViewId || '',
+      },
+    )
+    focusedAuditTeamViewId.value = nextFocusState.focusedAuditTeamViewId
+    focusedRecommendedAuditTeamViewId.value = nextFocusState.focusedRecommendedAuditTeamViewId
+    focusedSavedViewId.value = nextFocusState.focusedSavedViewId
+    auditTeamViewRecommendationFilter.value = sourceFocusIntent.recommendationFilter
+    await nextTick()
+    document.getElementById(sourceFocusIntent.anchorId)?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    })
+    return
+  }
+
+  if (!view) return
+  await setAuditTeamViewDefaultEntry(
+    view,
+    followup.source,
+    followup.sourceSavedViewId,
+    followup.sourceRecommendationFilter,
+  )
+}
+
+async function runAuditTeamViewShareEntryAction(actionKind: PlmAuditTeamViewShareEntryActionKind) {
+  const entry = resolveAuditTeamViewShareRuntimeEntry()
+  if (actionKind === 'dismiss') {
+    clearAuditTeamViewShareEntry()
+    await consumeAuditTeamViewShareEntryQuery()
+    return
+  }
+
+  const view = resolvePlmAuditTeamViewShareEntryActionTarget(
+    findPlmAuditTeamViewShareEntryView(auditTeamViews.value, entry),
+    selectedAuditTeamView.value,
+  )
+  const shouldClearStaleShareEntry = shouldClearPlmAuditTeamViewShareEntryForActionFeedback(
+    entry,
+    view,
+  )
+
+  async function clearStaleShareEntryIfNeeded() {
+    if (!shouldClearStaleShareEntry) return
+    clearAuditTeamViewShareEntry()
+    await consumeAuditTeamViewShareEntryQuery()
+  }
+
+  if (actionKind === 'save-local') {
+    const feedback = resolvePlmAuditTeamViewShareEntryActionFeedback({
+      actionKind,
+      target: view,
+      tr,
+    })
+    if (feedback) {
+      await clearStaleShareEntryIfNeeded()
+      setStatus(feedback.message, feedback.kind)
+      return
+    }
+    if (!view) return
+    const canonicalRouteState = parsePlmAuditRouteState(route.query)
+    await saveCurrentLocalViewWithFollowup(
+      buildPlmAuditSharedEntrySavedViewName(view, tr),
+      'shared-entry',
+      tr('Shared audit team view saved locally.', '已将分享的审计团队视图保存为本地视图。'),
+      resolvePlmAuditSavedViewLocalSaveState({
+        source: 'shared-entry',
+        currentState: readCurrentRouteState(),
+        canonicalRouteState,
+      }),
+    )
+    return
+  }
+
+  if (actionKind === 'duplicate') {
+    const feedback = resolvePlmAuditTeamViewShareEntryActionFeedback({
+      actionKind,
+      target: view,
+      tr,
+    })
+    if (feedback) {
+      await clearStaleShareEntryIfNeeded()
+      setStatus(feedback.message, feedback.kind)
+      return
+    }
+    if (!view) return
+    await duplicateAuditTeamViewEntry(view, {
+      allowDraftName: false,
+    })
+    return
+  }
+
+  const feedback = resolvePlmAuditTeamViewShareEntryActionFeedback({
+    actionKind,
+    target: view,
+    tr,
+  })
+  if (feedback) {
+    await clearStaleShareEntryIfNeeded()
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
+  const ok = await setAuditTeamViewDefaultEntry(view)
+  if (ok) clearAuditTeamViewShareEntry()
+}
+
+async function runAuditSavedViewShareFollowupAction(actionKind: PlmAuditSavedViewShareFollowupActionKind) {
+  if (actionKind === 'dismiss') {
+    clearAuditSavedViewShareFollowup()
+    return
+  }
+
+  const followup = resolveAuditSavedViewRuntimeAttention().shareFollowup
+  const view = followup
+    ? savedViews.value.find((entry) => entry.id === followup.savedViewId) ?? null
+    : null
+  const feedback = resolvePlmAuditSavedViewShareFollowupActionFeedback({
+    actionKind,
+    followup,
+    target: view,
+    tr,
+  })
+  if (feedback) {
+    if (followup && !view) {
+      clearAuditSavedViewShareFollowup()
+    }
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!followup || !view) {
+    clearAuditSavedViewShareFollowup()
+    return
+  }
+
+  await promoteSavedViewToTeam(view, actionKind === 'promote-default' ? { isDefault: true } : undefined)
+}
+
+async function archiveAuditTeamView() {
+  const view = canonicalAuditTeamViewManagementTarget.value
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'archive',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
+  await runAuditTeamViewLifecycleAction(view.id, 'archive')
+}
+
+async function restoreAuditTeamView() {
+  const view = canonicalAuditTeamViewManagementTarget.value
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'restore',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
+  await runAuditTeamViewLifecycleAction(view.id, 'restore')
+}
+
 async function deleteAuditTeamView() {
-  const view = selectedAuditTeamView.value
-  if (!view || !canDeleteAuditTeamView.value) return
+  const view = canonicalAuditTeamViewManagementTarget.value
+  const feedback = resolvePlmAuditTeamViewManagementFeedback({
+    actionKind: 'delete',
+    target: view,
+    managementTargetLocked: auditTeamViewManagementTargetLocked.value,
+    canDelete: canDeleteAuditTeamView.value,
+    canArchive: canArchiveAuditTeamView.value,
+    canRestore: canRestoreAuditTeamView.value,
+    canSetDefault: canSetAuditTeamViewDefault.value,
+    canClearDefault: canClearAuditTeamViewDefault.value,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!view) return
+  await runAuditTeamViewLifecycleAction(view.id, 'delete')
+}
+
+async function runAuditTeamViewLifecycleAction(
+  viewId: string,
+  actionKind: PlmAuditTeamViewLifecycleActionKind,
+) {
+  const view = findAuditTeamViewById(viewId)
+  if (!view) return
 
   auditTeamViewsLoading.value = true
   auditTeamViewsError.value = ''
   try {
-    await deletePlmWorkbenchTeamView(view.id)
-    auditTeamViews.value = auditTeamViews.value.filter((entry) => entry.id !== view.id)
-    auditTeamViewKey.value = ''
-    const nextState = {
-      ...readCurrentRouteState(),
-      teamViewId: '',
+    if (actionKind === 'delete') {
+      await deletePlmWorkbenchTeamView(view.id)
+      removeAuditTeamViews([view.id])
+      clearCurrentAuditTeamViewSelectionIfNeeded([view.id])
+      clearAuditLifecycleLogActionTeamViewFormDrafts()
+      applyAuditManagedTeamViewAttention()
+      focusedAuditTeamViewId.value = ''
+      await syncRouteState(buildPlmAuditTeamViewLogState(view, 'delete', readCurrentRouteState()))
+      setStatus(tr('Audit team view deleted. Showing matching audit logs.', '审计团队视图已删除，已切换到对应审计日志。'))
+      return
     }
-    await syncRouteState(nextState)
-    setStatus(tr('Audit team view deleted.', '审计团队视图已删除。'))
+
+    const saved = actionKind === 'archive'
+      ? await archivePlmWorkbenchTeamView('audit', view.id)
+      : await restorePlmWorkbenchTeamView('audit', view.id)
+
+    replaceAuditTeamView(saved)
+    applyAuditManagedTeamViewAttention()
+    focusedAuditTeamViewId.value = saved.id
+
+    if (actionKind === 'archive') {
+      const nextDraftState = resolvePlmAuditCompletedTeamViewCollaborationDraft({
+        selectedIds: auditTeamViewSelection.value,
+        draft: auditTeamViewCollaborationDraft.value,
+        nextFollowup: null,
+        source: null,
+        targetTeamViewId: saved.id,
+      })
+      auditTeamViewSelection.value = nextDraftState.selectedIds
+      if (nextDraftState.clearDraft) {
+        clearAuditTeamViewCollaborationDraft()
+      }
+      auditTeamViewSelection.value = auditTeamViewSelection.value.filter((id) => id !== view.id)
+      clearCurrentAuditTeamViewSelectionIfNeeded([view.id])
+      clearAuditLifecycleLogActionTeamViewFormDrafts()
+      await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'archive', readCurrentRouteState()))
+      setStatus(tr('Audit team view archived. Showing matching audit logs.', '审计团队视图已归档，已切换到对应审计日志。'))
+      return
+    }
+
+    const nextDraftState = resolvePlmAuditCompletedTeamViewCollaborationDraft({
+      selectedIds: auditTeamViewSelection.value,
+      draft: auditTeamViewCollaborationDraft.value,
+      nextFollowup: null,
+      source: null,
+      targetTeamViewId: saved.id,
+    })
+    auditTeamViewSelection.value = nextDraftState.selectedIds
+    if (nextDraftState.clearDraft) {
+      clearAuditTeamViewCollaborationDraft()
+    }
+    clearAuditLifecycleLogActionTeamViewFormDrafts()
+    await syncRouteState(buildPlmAuditTeamViewLogState(saved, 'restore', readCurrentRouteState()))
+    setStatus(tr('Audit team view restored. Showing matching audit logs.', '审计团队视图已恢复，已切换到对应审计日志。'))
   } catch (error: unknown) {
     auditTeamViewsError.value = error instanceof Error
       ? error.message
-      : tr('Failed to delete audit team view', '删除审计团队视图失败')
+      : actionKind === 'archive'
+        ? tr('Failed to archive audit team view', '归档审计团队视图失败')
+        : actionKind === 'restore'
+          ? tr('Failed to restore audit team view', '恢复审计团队视图失败')
+          : tr('Failed to delete audit team view', '删除审计团队视图失败')
+    setStatus(auditTeamViewsError.value, 'error')
+  } finally {
+    auditTeamViewsLoading.value = false
+  }
+}
+
+async function runAuditTeamViewBatchAction(actionKind: PlmAuditTeamViewLifecycleActionKind) {
+  const batchAction = auditTeamViewBatchActions.value.find((item) => item.kind === actionKind)
+  const feedback = resolvePlmAuditTeamViewBatchActionFeedback({
+    actionKind,
+    batchAction,
+    tr,
+  })
+  if (feedback) {
+    setStatus(feedback.message, feedback.kind)
+    return
+  }
+  if (!batchAction) {
+    return
+  }
+
+  auditTeamViewsLoading.value = true
+  auditTeamViewsError.value = ''
+  try {
+    const result = await batchPlmWorkbenchTeamViews('audit', actionKind, batchAction.eligibleIds)
+
+    if (actionKind === 'delete') {
+      removeAuditTeamViews(result.processedIds)
+      clearCurrentAuditTeamViewSelectionIfNeeded(result.processedIds)
+    } else {
+      const updatedViews = new Map(result.items.map((item) => [item.id, item]))
+      auditTeamViews.value = sortAuditTeamViews(
+        auditTeamViews.value.map((entry) => updatedViews.get(entry.id) || entry),
+      )
+      if (actionKind === 'archive') {
+        auditTeamViewSelection.value = result.skippedIds
+      } else {
+        auditTeamViewSelection.value = result.skippedIds.length ? result.skippedIds : batchAction.eligibleIds
+      }
+      if (actionKind === 'archive') {
+        clearCurrentAuditTeamViewSelectionIfNeeded(result.processedIds)
+      }
+    }
+
+    const nextDraftState = resolvePlmAuditCompletedTeamViewBatchCollaborationDraft({
+      selectedIds: auditTeamViewSelection.value,
+      draft: auditTeamViewCollaborationDraft.value,
+      processedTeamViewIds: result.processedIds,
+    })
+    auditTeamViewSelection.value = nextDraftState.selectedIds
+    if (nextDraftState.clearDraft) {
+      clearAuditTeamViewCollaborationDraft()
+    }
+    clearAuditLifecycleLogActionTeamViewFormDrafts()
+
+    const processedTotal = result.processedIds.length
+    const skippedTotal = result.skippedIds.length
+    const actionLabelText = actionKind === 'archive'
+      ? tr('archived', '已归档')
+      : actionKind === 'restore'
+        ? tr('restored', '已恢复')
+        : tr('deleted', '已删除')
+    const skippedSuffix = skippedTotal
+      ? tr(` (${skippedTotal} skipped)`, `（跳过 ${skippedTotal} 项）`)
+      : ''
+    const processedViews = resolvePlmAuditProcessedBatchLogViews({
+      processedIds: result.processedIds,
+      resolveView: (id) => findAuditTeamViewById(id),
+    })
+    applyAuditManagedTeamViewAttention()
+    await syncRouteState(buildPlmAuditTeamViewBatchLogState(
+      processedViews,
+      actionKind,
+      readCurrentRouteState(),
+    ))
+    focusedAuditTeamViewId.value = processedViews[0]?.id || ''
+    setStatus(tr(`${processedTotal} team views ${actionLabelText}${skippedSuffix}. Showing matching audit logs.`, `${processedTotal} 个团队视图${actionLabelText}${skippedSuffix}，已切换到对应审计日志。`))
+  } catch (error: unknown) {
+    auditTeamViewsError.value = error instanceof Error
+      ? error.message
+      : actionKind === 'archive'
+        ? tr('Failed to batch archive audit team views', '批量归档审计团队视图失败')
+        : actionKind === 'restore'
+          ? tr('Failed to batch restore audit team views', '批量恢复审计团队视图失败')
+          : tr('Failed to batch delete audit team views', '批量删除审计团队视图失败')
     setStatus(auditTeamViewsError.value, 'error')
   } finally {
     auditTeamViewsLoading.value = false
@@ -1047,8 +3437,8 @@ async function loadLogs(nextPage = page.value) {
       action: action.value,
       resourceType: resourceType.value,
       kind: kind.value,
-      from: from.value ? new Date(from.value).toISOString() : '',
-      to: to.value ? new Date(to.value).toISOString() : '',
+      from: from.value,
+      to: to.value,
     })
 
     logs.value = result.items
@@ -1074,8 +3464,8 @@ async function exportCsv() {
       action: action.value,
       resourceType: resourceType.value,
       kind: kind.value,
-      from: from.value ? new Date(from.value).toISOString() : '',
-      to: to.value ? new Date(to.value).toISOString() : '',
+      from: from.value,
+      to: to.value,
       limit: 5000,
     })
     downloadCsvText(result.filename, result.csvText)
@@ -1091,35 +3481,169 @@ async function exportCsv() {
 }
 
 function saveCurrentView() {
-  const trimmedName = savedViewName.value.trim()
-  if (!trimmedName) {
-    setStatus(tr('Enter a name for the saved view.', '请输入已保存视图名称。'), 'error')
+  if (!canSaveCurrentAuditView.value) return
+  void saveCurrentAuditView()
+}
+
+async function saveCurrentAuditView() {
+  if (!canSaveCurrentAuditView.value) return
+  const currentRouteState = readCurrentRouteState()
+  const canonicalRouteState = parsePlmAuditRouteState(route.query)
+  const sharedEntry = resolveAuditTeamViewShareRuntimeEntry()
+  const followupSource = resolvePlmAuditSavedViewLocalSaveFollowupSource({
+    sharedEntryTeamViewId: sharedEntry?.teamViewId || '',
+    routeTeamViewId: canonicalRouteState.teamViewId,
+    sceneContextActive: auditSceneOwnerContextActive.value || auditSceneQueryContextActive.value,
+  })
+
+  if (followupSource) {
+    await saveCurrentLocalViewWithFollowup(
+      savedViewName.value.trim(),
+      followupSource,
+      followupSource === 'shared-entry'
+        ? tr('Shared audit team view saved locally.', '已将分享的审计团队视图保存为本地视图。')
+        : tr('Scene audit saved view stored.', '场景审计已保存为本地视图。'),
+      resolvePlmAuditSavedViewLocalSaveState({
+        source: followupSource,
+        currentState: currentRouteState,
+        canonicalRouteState,
+      }),
+    )
     return
   }
 
-  savedViews.value = savePlmAuditSavedView(trimmedName, readCurrentRouteState())
-  savedViewName.value = ''
-  setStatus(tr('Audit saved view stored.', '审计已保存视图已保存。'))
+  const saved = storeAuditSavedView(savedViewName.value.trim())
+  if (!saved) return
+  applyCollaborationTakeoverCleanup()
 }
 
 function applySavedView(view: PlmAuditSavedView) {
-  void syncRouteState(view.state)
+  const nextState = restorePlmAuditSavedViewState(view.state)
+  applySavedViewTakeover('apply', nextState.teamViewId)
+  void syncRouteState(nextState, false, {
+    consumeSharedEntry: true,
+  })
 }
 
 function deleteSavedViewEntry(id: string) {
   savedViews.value = deletePlmAuditSavedView(id)
+  auditTeamViewCollaborationDraft.value = prunePlmAuditTeamViewCollaborationDraftSavedViewSource(
+    auditTeamViewCollaborationDraft.value,
+    id,
+  )
+  auditTeamViewCollaborationFollowup.value = prunePlmAuditTeamViewCollaborationFollowupSavedViewSource(
+    auditTeamViewCollaborationFollowup.value,
+    id,
+  )
+  applySavedViewAttentionAction({ kind: 'delete', savedViewId: id })
   setStatus(tr('Audit saved view deleted.', '审计已保存视图已删除。'))
 }
 
+async function promoteSavedViewToTeam(
+  view: PlmAuditSavedView,
+  options?: {
+    isDefault?: boolean
+  },
+) {
+  auditTeamViewsLoading.value = true
+  auditTeamViewsError.value = ''
+  try {
+    const followupSource = auditSavedViewShareFollowup.value?.savedViewId === view.id
+      ? auditSavedViewShareFollowup.value.source
+      : null
+    const promotionBehavior = resolvePlmAuditSavedViewPromotionBehavior(followupSource, options)
+    const draft = buildPlmAuditSavedViewTeamPromotionDraft(view, tr)
+    const saved = await savePlmWorkbenchTeamView('audit', draft.name, draft.state, {
+      isDefault: options?.isDefault,
+    })
+    const savedState = buildPlmAuditPersistedTeamViewRouteState(
+      saved,
+      readCurrentRouteState(),
+      {
+        isDefault: options?.isDefault,
+      },
+    )
+    upsertAuditTeamView(saved)
+    applyAuditTeamViewHandoffAttention()
+    applyAuditTeamViewState(saved)
+    if (shouldClearPlmAuditSavedViewPromotionFormDrafts(followupSource, options)) {
+      clearAuditCompletedTeamViewFormDrafts()
+    }
+    const collaborationHandoff = buildPlmAuditTeamViewCollaborationHandoff(
+      saved,
+      {
+        source: promotionBehavior.collaborationSource,
+        mode: promotionBehavior.shouldShowDefaultFollowup ? 'set-default-followup' : 'draft',
+        selectable: Boolean(auditTeamViewManagementItems.value.find((item) => item.id === saved.id)?.selectable),
+        sceneContextAvailable: Boolean(auditSceneContext.value),
+        statusSuffix: draft.localContextNote,
+        sourceSavedViewId: promotionBehavior.collaborationSource === 'saved-view-promotion' ? view.id : null,
+      },
+      tr,
+    )
+    applyAuditTeamViewCollaborationHandoff(collaborationHandoff)
+    // Let the canonical route settle before creating draft/follow-up UI so watcher cleanup
+    // does not discard freshly created promotion state.
+    await syncRouteState(savedState)
+    if (promotionBehavior.shouldShowDefaultFollowup) {
+      applyAuditTeamViewCollaborationHandoff(collaborationHandoff)
+      await nextTick()
+      document.getElementById(collaborationHandoff.scrollTargetId)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      })
+      setStatus(collaborationHandoff.statusMessage)
+      return
+    }
+    applyAuditTeamViewCollaborationHandoff(collaborationHandoff)
+    await nextTick()
+    if (promotionBehavior.shouldFocusRecommendation) {
+      await focusRecommendedAuditTeamView(saved)
+    } else {
+      document.getElementById(collaborationHandoff.scrollTargetId)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      })
+    }
+    setStatus(
+      [
+        options?.isDefault
+          ? tr('Saved view promoted as the default audit team view.', '已将保存视图提升为默认审计团队视图。')
+          : tr('Saved view promoted to the audit team views.', '已将保存视图提升到审计团队视图。'),
+        promotionBehavior.shouldFocusRecommendation
+          ? tr('The new team view is highlighted in recommendations.', '新的团队视图已在推荐区高亮显示。')
+          : '',
+        collaborationHandoff.statusMessage,
+      ].filter(Boolean).join(' '),
+    )
+  } catch (error: unknown) {
+    auditTeamViewsError.value = error instanceof Error
+      ? error.message
+      : tr('Failed to promote saved view to team', '提升保存视图到团队失败')
+    setStatus(auditTeamViewsError.value, 'error')
+  } finally {
+    auditTeamViewsLoading.value = false
+  }
+}
+
 function applyFilters() {
+  applyAuditRoutePivotAttention()
+  applyAuditTeamViewShareEntryAction({ kind: 'filter-navigation' })
   void syncRouteState({
-    ...readCurrentRouteState(),
+    ...readCanonicalTeamViewRouteState(),
     page: 1,
+  }, false, {
+    consumeSharedEntry: true,
   })
 }
 
 function resetFilters() {
-  void syncRouteState({ ...DEFAULT_PLM_AUDIT_ROUTE_STATE })
+  applyAuditRoutePivotAttention()
+  applyAuditTeamViewShareEntryAction({ kind: 'filter-navigation' })
+  clearAuditTeamViewCollaborationFollowup()
+  void syncRouteState(resetPlmAuditRouteFilters(readCanonicalTeamViewRouteState()), false, {
+    consumeSharedEntry: true,
+  })
 }
 
 function reloadLogs() {
@@ -1127,20 +3651,153 @@ function reloadLogs() {
 }
 
 function goToPage(nextPage: number) {
+  applyAuditRoutePivotAttention()
+  applyAuditTeamViewShareEntryAction({ kind: 'filter-navigation' })
   void syncRouteState({
-    ...readCurrentRouteState(),
+    ...readCanonicalTeamViewRouteState(),
     page: nextPage,
+  }, false, {
+    consumeSharedEntry: true,
   })
 }
 
+watch(auditTeamViews, (views, previousViews) => {
+  const removedViewIds = resolvePlmAuditRemovedTeamViewIds(previousViews || [], views)
+  const previousManagedTeamViewId = canonicalAuditTeamViewManagementTargetId.value
+  if (removedViewIds.length) {
+    pruneRemovedAuditTeamViewTransientState(removedViewIds)
+  }
+  trimAuditTeamViewSelection(previousManagedTeamViewId)
+})
+
+watch(
+  [savedViews, () => Boolean(auditSceneContext.value), () => auditTeamViewCollaborationDraft.value, () => auditTeamViewCollaborationFollowup.value],
+  () => {
+    resolveAuditTeamViewCollaborationRuntimeState()
+  },
+)
+
+watch(
+  [savedViews, () => auditSavedViewShareFollowup.value, () => focusedSavedViewId.value],
+  () => {
+    resolveAuditSavedViewRuntimeAttention()
+  },
+)
+
+watch(
+  [auditTeamViews, () => auditTeamViewShareEntry.value],
+  () => {
+    resolveAuditTeamViewShareRuntimeEntry()
+  },
+)
+
+watch(recommendedAuditTeamViews, (views) => {
+  focusedRecommendedAuditTeamViewId.value = consumeStaleRecommendedAuditTeamViewFocusId(
+    views,
+    focusedRecommendedAuditTeamViewId.value,
+  )
+})
+
+watch(canonicalAuditTeamViewManagementTargetId, (nextManagedTeamViewId, previousManagedTeamViewId) => {
+  const nextDraftState = resolvePlmAuditCanonicalTeamViewFormDraftState({
+    previousCanonicalTeamViewId: previousManagedTeamViewId || '',
+    nextCanonicalTeamViewId: nextManagedTeamViewId || '',
+    draftTeamViewName: auditTeamViewName.value,
+    draftTeamViewNameOwnerId: auditTeamViewNameOwnerId.value,
+    draftOwnerUserId: auditTeamViewOwnerUserId.value,
+  })
+  auditTeamViewName.value = nextDraftState.draftTeamViewName
+  auditTeamViewNameOwnerId.value = nextDraftState.draftTeamViewNameOwnerId
+  auditTeamViewOwnerUserId.value = nextDraftState.draftOwnerUserId
+})
+
 watch(
   () => route.query,
-  async (queryState) => {
+  async (queryState, previousQueryState) => {
+    const localRouteSync = pendingLocalRouteSync
+    pendingLocalRouteSync = false
+    applyAuditTeamViewShareEntryAction({
+      kind: 'route-query',
+      auditEntry: queryState.auditEntry,
+    })
     const nextState = parsePlmAuditRouteState(queryState)
+    const previousRouteState = parsePlmAuditRouteState(previousQueryState || {})
     const currentState = readCurrentRouteState()
-    if (routeReady.value && isPlmAuditRouteStateEqual(nextState, currentState)) return
+    const routeChanged = routeReady.value && !isPlmAuditRouteStateEqual(nextState, currentState)
+    const canonicalRouteChanged = routeReady.value
+      && !isPlmAuditRouteStateEqual(nextState, previousRouteState)
+    const canonicalTeamViewChanged = routeReady.value
+      && nextState.teamViewId !== previousRouteState.teamViewId
+    if (!routeChanged && !canonicalRouteChanged && routeReady.value) {
+      if (shouldResolvePlmAuditSharedEntryOnQueryChange({
+        routeReady: routeReady.value,
+        routeChanged,
+        teamViewId: nextState.teamViewId,
+        nextAuditEntry: queryState.auditEntry,
+        previousAuditEntry: previousQueryState?.auditEntry,
+      })) {
+        await refreshAuditTeamViews()
+      }
+      return
+    }
+    if (routeChanged) {
+      if (!localRouteSync) {
+        applyAuditRoutePivotAttention()
+      }
+    }
+    if (
+      canonicalTeamViewChanged
+      && auditTeamViewShareEntry.value
+      && !shouldKeepPlmAuditTeamViewShareEntry(auditTeamViewShareEntry.value, nextState.teamViewId)
+    ) {
+      clearAuditTeamViewShareEntry()
+    }
+    if (
+      canonicalTeamViewChanged
+      && auditTeamViewCollaborationDraft.value
+      && !shouldKeepPlmAuditTeamViewCollaborationDraft(
+        auditTeamViewCollaborationDraft.value,
+        nextState.teamViewId,
+      )
+    ) {
+      clearAuditTeamViewCollaborationDraft()
+    }
+    if (
+      canonicalRouteChanged
+      && auditTeamViewCollaborationFollowup.value
+      && !shouldKeepPlmAuditTeamViewCollaborationFollowup(
+        auditTeamViewCollaborationFollowup.value,
+        nextState,
+      )
+    ) {
+      clearAuditTeamViewCollaborationFollowup()
+    }
+    const externalSceneContextTakeover = canonicalRouteChanged
+      && !localRouteSync
+      && shouldTakeOverPlmAuditSceneContextOnRouteChange({
+        previousState: previousRouteState,
+        nextState,
+      })
+    let consumeExternalSceneSharedEntry = false
+    if (externalSceneContextTakeover) {
+      consumeExternalSceneSharedEntry = applySceneContextTakeoverCleanup(nextState.teamViewId)
+    }
+    if (canonicalRouteChanged && shouldClearPlmAuditTeamViewFormDraftsOnLogRoute({
+      state: nextState,
+      canonicalManagementTargetId: resolvePlmAuditCanonicalTeamViewManagementTargetId({
+        routeTeamViewId: nextState.teamViewId,
+        followupTeamViewId: auditTeamViewCollaborationFollowup.value?.teamViewId || '',
+      }),
+    })) {
+      clearAuditLogRouteTakeoverTeamViewFormDrafts()
+    }
     applyRouteState(nextState)
     routeReady.value = true
+    if (consumeExternalSceneSharedEntry) {
+      await syncRouteState(nextState, true, {
+        consumeSharedEntry: true,
+      })
+    }
     await Promise.all([loadSummary(nextState.windowMinutes), loadLogs(nextState.page)])
     if (
       nextState.teamViewId
@@ -1222,6 +3879,13 @@ watch(
   gap: 8px;
 }
 
+.plm-audit__context-save {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 260px;
+}
+
 .plm-audit__summary {
   flex-wrap: wrap;
 }
@@ -1285,6 +3949,146 @@ watch(
 
 .plm-audit__summary-grid {
   flex-wrap: wrap;
+}
+
+.plm-audit__recommended-team-views {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.plm-audit__team-view-manager {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.plm-audit__recommended-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.plm-audit__summary-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.plm-audit__summary-chip {
+  border: 1px solid #d0d5dd;
+  background: #fff;
+  color: #344054;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.plm-audit__summary-chip--active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.plm-audit__recommended-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.plm-audit__recommended-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid #dbe4f0;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fbff 0%, #ffffff 100%);
+}
+
+.plm-audit__recommended-card--default {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.12);
+}
+
+.plm-audit__recommended-card--focused {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+}
+
+.plm-audit__recommended-meta,
+.plm-audit__recommended-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plm-audit__team-view-batch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.plm-audit__team-view-list {
+  display: grid;
+  gap: 10px;
+}
+
+.plm-audit__team-view-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #dbe4f0;
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: #f8fafc;
+}
+
+.plm-audit__team-view-card--selected {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.12);
+}
+
+.plm-audit__team-view-card--focused {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+
+.plm-audit__team-view-card--default {
+  background: linear-gradient(180deg, #eff6ff 0%, #f8fafc 100%);
+}
+
+.plm-audit__team-view-card--archived {
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+}
+
+.plm-audit__team-view-select {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: 1 1 auto;
+}
+
+.plm-audit__team-view-select input {
+  margin-top: 4px;
+}
+
+.plm-audit__team-view-card-meta,
+.plm-audit__team-view-card-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plm-audit__team-view-card-actions {
+  align-items: flex-end;
 }
 
 .plm-audit__summary-panel {
@@ -1370,6 +4174,54 @@ watch(
   background: #f8fbff;
 }
 
+.plm-audit__team-view-collaboration {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #fde68a;
+  border-radius: 12px;
+  background: #fffbeb;
+}
+
+.plm-audit__team-view-share-entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #c7d2fe;
+  border-radius: 12px;
+  background: #eef2ff;
+}
+
+.plm-audit__team-view-followup {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: #eff6ff;
+}
+
+.plm-audit__team-view-collaboration-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plm-audit__team-view-collaboration-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .plm-audit__team-view-context--scene {
   border-color: #bbf7d0;
   background: #f0fdf4;
@@ -1422,6 +4274,11 @@ watch(
 .plm-audit__saved-view-card--active {
   border-color: #2563eb;
   box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.18);
+}
+
+.plm-audit__saved-view-card--focused {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.16);
 }
 
 .plm-audit__saved-view-meta {
@@ -1605,6 +4462,11 @@ watch(
   text-align: center;
 }
 
+.plm-audit__empty--card-grid {
+  grid-column: 1 / -1;
+  padding: 12px 0;
+}
+
 @media (max-width: 960px) {
   .plm-audit {
     padding: 16px;
@@ -1613,7 +4475,8 @@ watch(
   .plm-audit__header,
   .plm-audit__pagination,
   .plm-audit__saved-views-header,
-  .plm-audit__saved-view-card {
+  .plm-audit__saved-view-card,
+  .plm-audit__team-view-card {
     flex-direction: column;
     align-items: flex-start;
   }
@@ -1627,6 +4490,11 @@ watch(
   .plm-audit__team-view-row {
     width: 100%;
     flex-direction: column;
+    align-items: stretch;
+  }
+
+  .plm-audit__team-view-card-actions {
+    width: 100%;
     align-items: stretch;
   }
 

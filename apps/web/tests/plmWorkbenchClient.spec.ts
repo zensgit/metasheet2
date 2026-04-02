@@ -30,6 +30,15 @@ import {
 describe('plmWorkbenchClient', () => {
   const fetchMock = vi.fn()
 
+  function getRequestHeaders(callIndex: number): Headers {
+    const options = fetchMock.mock.calls[callIndex]?.[1] as RequestInit | undefined
+    return new Headers(options?.headers)
+  }
+
+  function expectAuthHeader(callIndex: number): void {
+    expect(getRequestHeaders(callIndex).get('authorization')).toBe('Bearer test-token')
+  }
+
   beforeEach(() => {
     fetchMock.mockReset()
     vi.stubGlobal('fetch', fetchMock)
@@ -63,9 +72,18 @@ describe('plmWorkbenchClient', () => {
               canClearDefault: true,
             },
             isDefault: true,
+            lastDefaultSetAt: '2026-03-28T09:00:00.000Z',
             state: { field: 'path', value: 'root/a', group: '机械' },
           },
         ],
+        metadata: {
+          total: 3,
+          activeTotal: 2,
+          archivedTotal: 1,
+          tenantId: 'tenant-a',
+          kind: 'bom',
+          defaultPresetId: 'preset-1',
+        },
       }),
     })
 
@@ -73,12 +91,9 @@ describe('plmWorkbenchClient', () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/filter-presets/team?kind=bom'),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer test-token',
-        }),
-      }),
+      expect.any(Object),
     )
+    expectAuthHeader(0)
     expect(result.items[0]).toMatchObject({
       id: 'preset-1',
       kind: 'bom',
@@ -89,7 +104,67 @@ describe('plmWorkbenchClient', () => {
         canClearDefault: true,
       },
       isDefault: true,
+      lastDefaultSetAt: '2026-03-28T09:00:00.000Z',
       state: { field: 'path', value: 'root/a', group: '机械' },
+    })
+    expect(result.metadata).toEqual({
+      total: 3,
+      activeTotal: 2,
+      archivedTotal: 1,
+      tenantId: 'tenant-a',
+      kind: 'bom',
+      defaultPresetId: 'preset-1',
+    })
+  })
+
+  it('preserves team-scope preset list metadata without a kind filter', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: [
+          {
+            id: 'preset-1',
+            kind: 'bom',
+            name: '关键 BOM',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            state: { field: 'path', value: 'root/a', group: '机械' },
+          },
+          {
+            id: 'preset-2',
+            kind: 'where-used',
+            name: '上游父件',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            state: { field: 'parent', value: 'assy', group: '装配' },
+          },
+        ],
+        metadata: {
+          total: 2,
+          activeTotal: 2,
+          archivedTotal: 0,
+          tenantId: 'tenant-a',
+          kind: 'all',
+          defaultPresetId: 'preset-1',
+        },
+      }),
+    })
+
+    const result = await listPlmTeamFilterPresets()
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/plm-workbench\/filter-presets\/team$/),
+      expect.any(Object),
+    )
+    expect(result.items.map((item) => item.kind)).toEqual(['bom', 'where-used'])
+    expect(result.metadata).toEqual({
+      total: 2,
+      activeTotal: 2,
+      archivedTotal: 0,
+      tenantId: 'tenant-a',
+      kind: 'all',
+      defaultPresetId: 'preset-1',
     })
   })
 
@@ -121,6 +196,7 @@ describe('plmWorkbenchClient', () => {
             ownerUserId: 'dev-user',
             canManage: true,
             isDefault: true,
+            lastDefaultSetAt: '2026-03-28T10:00:00.000Z',
             state: { field: 'parent', value: 'assy', group: '装配' },
           },
         }),
@@ -166,6 +242,7 @@ describe('plmWorkbenchClient', () => {
       name: '上游父件',
     })
     expect(defaulted.isDefault).toBe(true)
+    expect(defaulted.lastDefaultSetAt).toBe('2026-03-28T10:00:00.000Z')
     expect(cleared.isDefault).toBe(false)
     expect(deleted).toMatchObject({
       id: 'preset-2',
@@ -392,6 +469,12 @@ describe('plmWorkbenchClient', () => {
             },
           ],
         },
+        metadata: {
+          requestedTotal: 2,
+          processedTotal: 1,
+          skippedTotal: 1,
+          processedKinds: ['bom'],
+        },
       }),
     })
 
@@ -410,6 +493,12 @@ describe('plmWorkbenchClient', () => {
           }),
         }),
       ],
+      metadata: {
+        requestedTotal: 2,
+        processedTotal: 1,
+        skippedTotal: 1,
+        processedKinds: ['bom'],
+      },
     })
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/filter-presets/team/batch'),
@@ -437,6 +526,7 @@ describe('plmWorkbenchClient', () => {
               ownerUserId: 'dev-user',
               canManage: true,
               isDefault: true,
+              lastDefaultSetAt: '2026-03-19T10:00:00.000Z',
               state: {
                 role: 'primary',
                 filter: 'gear',
@@ -446,6 +536,14 @@ describe('plmWorkbenchClient', () => {
               },
             },
           ],
+          metadata: {
+            total: 4,
+            activeTotal: 3,
+            archivedTotal: 1,
+            tenantId: 'tenant-a',
+            kind: 'documents',
+            defaultViewId: 'view-1',
+          },
         }),
       })
       .mockResolvedValueOnce({
@@ -538,6 +636,15 @@ describe('plmWorkbenchClient', () => {
       id: 'view-1',
       kind: 'documents',
       isDefault: true,
+      lastDefaultSetAt: '2026-03-19T10:00:00.000Z',
+    })
+    expect(listed.metadata).toEqual({
+      total: 4,
+      activeTotal: 3,
+      archivedTotal: 1,
+      tenantId: 'tenant-a',
+      kind: 'documents',
+      defaultViewId: 'view-1',
     })
     expect(saved).toMatchObject({
       id: 'view-2',
@@ -553,12 +660,9 @@ describe('plmWorkbenchClient', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       expect.stringContaining('/api/plm-workbench/views/team?kind=documents'),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer test-token',
-        }),
-      }),
+      expect.any(Object),
     )
+    expectAuthHeader(0)
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
       expect.stringContaining('/api/plm-workbench/views/team/view-2/default'),
@@ -582,6 +686,97 @@ describe('plmWorkbenchClient', () => {
     )
   })
 
+  it('preserves mixed team-scope view lists without a kind filter', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: [
+          {
+            id: 'view-docs',
+            kind: 'documents',
+            name: '文档视角',
+            ownerUserId: 'dev-user',
+            canManage: true,
+            state: {
+              role: 'primary',
+              filter: 'gear',
+              sortKey: 'updated',
+              sortDir: 'desc',
+              columns: { mime: true },
+            },
+          },
+          {
+            id: 'view-audit',
+            kind: 'audit',
+            name: '审计视角',
+            ownerUserId: 'auditor',
+            canManage: true,
+            state: {
+              page: '2',
+              q: 'documents',
+              actorId: 'dev-user',
+              kind: 'documents',
+              action: 'ARCHIVE',
+              resourceType: 'PLM-TEAM-VIEW-BATCH',
+              from: '2026-03-11T15:00:00.000Z',
+              to: '2026-03-11T16:00:00.000Z',
+              windowMinutes: '180',
+            },
+          },
+        ],
+        metadata: {
+          total: 2,
+          activeTotal: 2,
+          archivedTotal: 0,
+          tenantId: 'tenant-a',
+          kind: 'all',
+          defaultViewId: 'view-docs',
+        },
+      }),
+    })
+
+    const listed = await listPlmWorkbenchTeamViews()
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/plm-workbench\/views\/team$/),
+      expect.any(Object),
+    )
+    expect(listed.items).toMatchObject([
+      {
+        id: 'view-docs',
+        kind: 'documents',
+        state: {
+          role: 'primary',
+          filter: 'gear',
+          sortKey: 'updated',
+          sortDir: 'desc',
+        },
+      },
+      {
+        id: 'view-audit',
+        kind: 'audit',
+        state: {
+          page: 2,
+          q: 'documents',
+          actorId: 'dev-user',
+          kind: 'documents',
+          action: 'archive',
+          resourceType: 'plm-team-view-batch',
+          windowMinutes: 180,
+        },
+      },
+    ])
+    expect(listed.metadata).toEqual({
+      total: 2,
+      activeTotal: 2,
+      archivedTotal: 0,
+      tenantId: 'tenant-a',
+      kind: 'all',
+      defaultViewId: 'view-docs',
+    })
+  })
+
   it('normalizes workbench team view query snapshots', async () => {
     fetchMock
       .mockResolvedValueOnce({
@@ -596,6 +791,7 @@ describe('plmWorkbenchClient', () => {
               ownerUserId: 'dev-user',
               canManage: true,
               isDefault: true,
+              lastDefaultSetAt: '2026-03-19T09:00:00.000Z',
               state: {
                 query: {
                   productId: 'prod-100',
@@ -644,6 +840,7 @@ describe('plmWorkbenchClient', () => {
     expect(listed.items[0]).toMatchObject({
       id: 'view-workbench',
       kind: 'workbench',
+      lastDefaultSetAt: '2026-03-19T09:00:00.000Z',
       state: {
         query: {
           productId: 'prod-100',
@@ -766,12 +963,203 @@ describe('plmWorkbenchClient', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       expect.stringContaining('/api/plm-workbench/views/team?kind=audit'),
+      expect.any(Object),
+    )
+    expectAuthHeader(0)
+  })
+
+  it('normalizes local audit datetime filters before saving team views', async () => {
+    const expectedFrom = new Date('2026-03-11T15:00').toISOString()
+    const expectedTo = new Date('2026-03-11T16:00').toISOString()
+
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          id: 'audit-view-local-time',
+          kind: 'audit',
+          name: '审计本地时间',
+          ownerUserId: 'auditor',
+          canManage: true,
+          isDefault: false,
+          state: {
+            page: 1,
+            q: 'documents',
+            actorId: 'owner-1',
+            kind: 'documents',
+            action: 'archive',
+            resourceType: 'plm-team-view-batch',
+            from: expectedFrom,
+            to: expectedTo,
+            windowMinutes: 180,
+          },
+        },
+      }),
+    })
+
+    const saved = await savePlmWorkbenchTeamView('audit', '审计本地时间', {
+      page: 1,
+      q: 'documents',
+      actorId: 'owner-1',
+      kind: 'documents',
+      action: 'archive',
+      resourceType: 'plm-team-view-batch',
+      from: '2026-03-11T15:00',
+      to: '2026-03-11T16:00',
+      windowMinutes: 180,
+    })
+
+    expect(saved.state).toMatchObject({
+      from: expectedFrom,
+      to: expectedTo,
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plm-workbench/views/team'),
       expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer test-token',
+        method: 'POST',
+        body: JSON.stringify({
+          kind: 'audit',
+          name: '审计本地时间',
+          state: {
+            page: 1,
+            q: 'documents',
+            actorId: 'owner-1',
+            kind: 'documents',
+            action: 'archive',
+            resourceType: 'plm-team-view-batch',
+            from: expectedFrom,
+            to: expectedTo,
+            windowMinutes: 180,
+          },
         }),
       }),
     )
+  })
+
+  it('passes the default flag when saving an audit team view as default', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          id: 'audit-view-default',
+          kind: 'audit',
+          name: '默认审计共享',
+          ownerUserId: 'auditor',
+          canManage: true,
+          isDefault: true,
+          state: {
+            page: 1,
+            q: 'scene-1',
+            actorId: '',
+            kind: 'workbench',
+            action: 'set-default',
+            resourceType: 'plm-team-view-default',
+            from: '',
+            to: '',
+            windowMinutes: 180,
+          },
+        },
+      }),
+    })
+
+    const saved = await savePlmWorkbenchTeamView('audit', '默认审计共享', {
+      page: 1,
+      q: 'scene-1',
+      actorId: '',
+      kind: 'workbench',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+      from: '',
+      to: '',
+      windowMinutes: 180,
+    }, {
+      isDefault: true,
+    })
+
+    expect(saved.isDefault).toBe(true)
+    expect(saved.state).toMatchObject({
+      page: 1,
+      q: 'scene-1',
+      actorId: '',
+      kind: 'workbench',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+      from: '',
+      to: '',
+      windowMinutes: 180,
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plm-workbench/views/team'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          kind: 'audit',
+          name: '默认审计共享',
+          state: {
+            page: 1,
+            q: 'scene-1',
+            actorId: '',
+            kind: 'workbench',
+            action: 'set-default',
+            resourceType: 'plm-team-view-default',
+            from: '',
+            to: '',
+            windowMinutes: 180,
+          },
+          isDefault: true,
+        }),
+      }),
+    )
+  })
+
+  it('preserves clear-default audit filters when listing audit team views', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: [
+          {
+            id: 'audit-view-clear-default',
+            kind: 'audit',
+            name: '取消默认日志',
+            ownerUserId: 'auditor',
+            canManage: true,
+            isDefault: false,
+            state: {
+              page: 1,
+              q: 'scene-2',
+              actorId: '',
+              kind: 'workbench',
+              action: 'clear-default',
+              resourceType: 'plm-team-view-default',
+              from: '',
+              to: '',
+              windowMinutes: 180,
+            },
+          },
+        ],
+      }),
+    })
+
+    const listed = await listPlmWorkbenchTeamViews('audit')
+
+    expect(listed.items[0]).toMatchObject({
+      id: 'audit-view-clear-default',
+      kind: 'audit',
+      state: {
+        page: 1,
+        q: 'scene-2',
+        actorId: '',
+        kind: 'workbench',
+        action: 'clear-default',
+        resourceType: 'plm-team-view-default',
+        from: '',
+        to: '',
+        windowMinutes: 180,
+      },
+    })
   })
 
   it('normalizes approvals and cad team view states by kind', async () => {
@@ -791,7 +1179,6 @@ describe('plmWorkbenchClient', () => {
               state: {
                 status: 'APPROVED',
                 filter: 'eco',
-                comment: 'ok',
                 sortKey: 'status',
                 sortDir: 'asc',
                 columns: { status: true, product: false },
@@ -832,7 +1219,6 @@ describe('plmWorkbenchClient', () => {
       state: {
         status: 'approved',
         filter: 'eco',
-        comment: 'ok',
         sortKey: 'status',
         sortDir: 'asc',
         columns: {
@@ -1096,6 +1482,12 @@ describe('plmWorkbenchClient', () => {
             },
           ],
         },
+        metadata: {
+          requestedTotal: 2,
+          processedTotal: 1,
+          skippedTotal: 1,
+          processedKinds: ['documents'],
+        },
       }),
     })
 
@@ -1115,6 +1507,12 @@ describe('plmWorkbenchClient', () => {
           }),
         }),
       ],
+      metadata: {
+        requestedTotal: 2,
+        processedTotal: 1,
+        skippedTotal: 1,
+        processedKinds: ['documents'],
+      },
     })
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/views/team/batch'),
@@ -1126,6 +1524,77 @@ describe('plmWorkbenchClient', () => {
         }),
       }),
     )
+  })
+
+  it('maps mixed-kind batch team view items using each runtime kind', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          action: 'delete',
+          processedIds: ['view-cad-a', 'view-approval-a'],
+          skippedIds: [],
+          items: [
+            {
+              id: 'view-cad-a',
+              kind: 'cad',
+              name: 'CAD 批量 A',
+              ownerUserId: 'owner-1',
+              canManage: true,
+              isDefault: false,
+              isArchived: false,
+              state: {
+                fileId: 'cad-a',
+                otherFileId: '',
+                reviewState: 'approved',
+                reviewNote: 'ok',
+              },
+            },
+            {
+              id: 'view-approval-a',
+              kind: 'approvals',
+              name: '审批批量 A',
+              ownerUserId: 'owner-1',
+              canManage: true,
+              isDefault: false,
+              isArchived: false,
+              state: {
+                status: 'pending',
+                filter: 'eco',
+                sortKey: 'created',
+                sortDir: 'desc',
+                columns: { id: true },
+              },
+            },
+          ],
+        },
+      }),
+    })
+
+    const result = await batchPlmWorkbenchTeamViews('documents', 'delete', ['view-cad-a', 'view-approval-a'])
+
+    expect(result.items).toMatchObject([
+      {
+        id: 'view-cad-a',
+        kind: 'cad',
+        state: {
+          fileId: 'cad-a',
+          reviewState: 'approved',
+        },
+      },
+      {
+        id: 'view-approval-a',
+        kind: 'approvals',
+        state: {
+          status: 'pending',
+          filter: 'eco',
+          sortKey: 'created',
+          sortDir: 'desc',
+          columns: { id: true },
+        },
+      },
+    ])
   })
 
   it('lists collaborative audit logs with normalized metadata', async () => {
@@ -1157,6 +1626,13 @@ describe('plmWorkbenchClient', () => {
           pageSize: 25,
           total: 40,
         },
+        metadata: {
+          resourceTypes: [
+            'plm-team-preset-batch',
+            'plm-team-view-default',
+            'invalid-type',
+          ],
+        },
       }),
     })
 
@@ -1172,6 +1648,10 @@ describe('plmWorkbenchClient', () => {
       page: 2,
       pageSize: 25,
       total: 40,
+      resourceTypes: [
+        'plm-team-preset-batch',
+        'plm-team-view-default',
+      ],
       items: [
         {
           id: 'audit-1',
@@ -1186,12 +1666,9 @@ describe('plmWorkbenchClient', () => {
     })
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/audit-logs?page=2&pageSize=25&q=bom&action=archive&resourceType=plm-team-preset-batch'),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer test-token',
-        }),
-      }),
+      expect.any(Object),
     )
+    expectAuthHeader(0)
   })
 
   it('loads collaborative audit summary buckets', async () => {
@@ -1204,10 +1681,13 @@ describe('plmWorkbenchClient', () => {
           actions: [
             { action: 'archive', total: 6 },
             { action: 'restore', total: 2 },
+            { action: 'set-default', total: 1 },
           ],
           resourceTypes: [
             { resourceType: 'plm-team-view-batch', total: 5 },
             { resourceType: 'plm-team-preset-batch', total: 3 },
+            { resourceType: 'plm-team-preset-default', total: 2 },
+            { resourceType: 'plm-team-view-default', total: 1 },
           ],
         },
       }),
@@ -1223,25 +1703,26 @@ describe('plmWorkbenchClient', () => {
       actions: [
         { action: 'archive', total: 6 },
         { action: 'restore', total: 2 },
+        { action: 'set-default', total: 1 },
       ],
       resourceTypes: [
         { resourceType: 'plm-team-view-batch', total: 5 },
         { resourceType: 'plm-team-preset-batch', total: 3 },
+        { resourceType: 'plm-team-preset-default', total: 2 },
+        { resourceType: 'plm-team-view-default', total: 1 },
       ],
     })
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/audit-logs/summary?windowMinutes=180&limit=6'),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer test-token',
-        }),
-      }),
+      expect.any(Object),
     )
+    expectAuthHeader(0)
   })
 
   it('exports collaborative audit logs as csv', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
+      status: 200,
       headers: {
         get: (name: string) => name.toLowerCase() === 'content-disposition'
           ? 'attachment; filename="plm-audit.csv"'
@@ -1265,12 +1746,125 @@ describe('plmWorkbenchClient', () => {
     })
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/plm-workbench/audit-logs/export.csv?q=documents&actorId=dev-user&action=archive&resourceType=plm-team-view-batch&kind=documents&limit=2000'),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Accept: 'text/csv',
-          Authorization: 'Bearer test-token',
-        }),
-      }),
+      expect.any(Object),
     )
+    expect(getRequestHeaders(0).get('accept')).toBe('text/csv')
+    expectAuthHeader(0)
+  })
+
+  it('maps default-scene audit logs', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          items: [
+            {
+              id: 'audit-default-1',
+              actorId: 'owner-1',
+              actorType: 'user',
+              action: 'set-default',
+              resourceType: 'plm-team-view-default',
+              resourceId: 'scene-1',
+              requestId: 'req-default-1',
+              ip: '127.0.0.1',
+              userAgent: 'Vitest',
+              occurredAt: '2026-03-13T07:00:00.000Z',
+              meta: {
+                kind: 'workbench',
+                viewName: '采购团队场景',
+                processedKinds: ['workbench'],
+                processedTotal: 1,
+              },
+            },
+          ],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+        },
+      }),
+    })
+
+    const result = await listPlmCollaborativeAuditLogs({
+      page: 1,
+      pageSize: 20,
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+      kind: 'workbench',
+    })
+
+    expect(result.items[0]).toMatchObject({
+      id: 'audit-default-1',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+      meta: {
+        kind: 'workbench',
+        viewName: '采购团队场景',
+        processedKinds: ['workbench'],
+      },
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plm-workbench/audit-logs?page=1&pageSize=20&action=set-default&resourceType=plm-team-view-default&kind=workbench'),
+      expect.any(Object),
+    )
+    expectAuthHeader(0)
+  })
+
+  it('maps team preset default audit logs', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          items: [
+            {
+              id: 'audit-preset-default-1',
+              actorId: 'owner-1',
+              actorType: 'user',
+              action: 'clear-default',
+              resourceType: 'plm-team-preset-default',
+              resourceId: 'preset-1',
+              requestId: 'req-preset-default-1',
+              ip: '127.0.0.1',
+              userAgent: 'Vitest',
+              occurredAt: '2026-03-13T08:00:00.000Z',
+              meta: {
+                kind: 'bom',
+                viewName: 'BOM 默认预设',
+                processedKinds: ['bom'],
+                processedTotal: 1,
+              },
+            },
+          ],
+          page: 1,
+          pageSize: 20,
+          total: 1,
+        },
+      }),
+    })
+
+    const result = await listPlmCollaborativeAuditLogs({
+      page: 1,
+      pageSize: 20,
+      action: 'clear-default',
+      resourceType: 'plm-team-preset-default',
+      kind: 'bom',
+    })
+
+    expect(result.items[0]).toMatchObject({
+      id: 'audit-preset-default-1',
+      action: 'clear-default',
+      resourceType: 'plm-team-preset-default',
+      meta: {
+        kind: 'bom',
+        viewName: 'BOM 默认预设',
+        processedKinds: ['bom'],
+      },
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/plm-workbench/audit-logs?page=1&pageSize=20&action=clear-default&resourceType=plm-team-preset-default&kind=bom'),
+      expect.any(Object),
+    )
+    expectAuthHeader(0)
   })
 })

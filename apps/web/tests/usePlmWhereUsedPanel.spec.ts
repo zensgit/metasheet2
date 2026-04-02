@@ -1,0 +1,98 @@
+import { computed, ref } from 'vue'
+import { describe, expect, it, vi } from 'vitest'
+import type { PlmWhereUsedPanelModel } from '../src/views/plm/plmPanelModels'
+import { usePlmWhereUsedPanel } from '../src/views/plm/usePlmWhereUsedPanel'
+
+describe('usePlmWhereUsedPanel', () => {
+  it('returns the typed where-used panel contract unchanged', () => {
+    const loadWhereUsed = vi.fn()
+    const options = {
+      copyDeepLink: vi.fn().mockResolvedValue(undefined),
+      expandAllWhereUsed: vi.fn(),
+      collapseAllWhereUsed: vi.fn(),
+      copyWhereUsedTablePathIdsBulk: vi.fn().mockResolvedValue(undefined),
+      copyWhereUsedTreePathIdsBulk: vi.fn().mockResolvedValue(undefined),
+      copyWhereUsedSelectedParents: vi.fn().mockResolvedValue(undefined),
+      clearWhereUsedSelection: vi.fn(),
+      exportWhereUsedCsv: vi.fn(),
+      loadWhereUsed,
+      applyWhereUsedQuickPick: vi.fn(),
+      applyWhereUsedFilterPreset: vi.fn(),
+      deleteWhereUsedFilterPreset: vi.fn(),
+      shareWhereUsedFilterPreset: vi.fn(),
+      assignWhereUsedPresetGroup: vi.fn(),
+      saveWhereUsedFilterPreset: vi.fn(),
+      exportWhereUsedFilterPresets: vi.fn(),
+      importWhereUsedFilterPresets: vi.fn(),
+      triggerWhereUsedFilterPresetFileImport: vi.fn(),
+      handleWhereUsedFilterPresetFileImport: vi.fn(),
+      clearWhereUsedFilterPresets: vi.fn(),
+      selectAllWhereUsedPresets: vi.fn(),
+      clearWhereUsedPresetSelection: vi.fn(),
+      applyWhereUsedPresetBatchGroup: vi.fn(),
+      deleteWhereUsedPresetSelection: vi.fn(),
+      toggleWhereUsedNode: vi.fn(),
+      isWhereUsedCollapsed: vi.fn().mockReturnValue(false),
+      isWhereUsedTreeSelected: vi.fn().mockReturnValue(false),
+      selectWhereUsedTreeRow: vi.fn(),
+      getWhereUsedTreeLineValue: vi.fn().mockReturnValue('-'),
+      getWhereUsedTreeRefdes: vi.fn().mockReturnValue('-'),
+      getWhereUsedTreeRelationship: vi.fn().mockReturnValue('-'),
+      formatWhereUsedPathIds: vi.fn().mockReturnValue('ROOT/PARENT'),
+      copyWhereUsedPathIds: vi.fn().mockResolvedValue(undefined),
+      applyProductFromWhereUsedRow: vi.fn(),
+      isWhereUsedEntrySelected: vi.fn().mockReturnValue(false),
+      selectWhereUsedTableRow: vi.fn(),
+      getItemNumber: vi.fn().mockReturnValue('PN-1'),
+      getItemName: vi.fn().mockReturnValue('Part'),
+      formatWhereUsedEntryPathIds: vi.fn().mockReturnValue('ROOT/PARENT'),
+      copyWhereUsedEntryPathIds: vi.fn().mockResolvedValue(undefined),
+      getWhereUsedLineValue: vi.fn().mockReturnValue('-'),
+      getWhereUsedRefdes: vi.fn().mockReturnValue('-'),
+      resolveWhereUsedParentId: vi.fn().mockReturnValue('PARENT-1'),
+      applyProductFromWhereUsed: vi.fn(),
+      formatJson: vi.fn().mockReturnValue('{}'),
+      whereUsedView: ref<'table' | 'tree'>('table'),
+      whereUsedHasTree: computed(() => false),
+      whereUsedPathIdsCount: computed(() => 0),
+      whereUsedTreePathIdsCount: computed(() => 0),
+      whereUsedSelectedCount: computed(() => 0),
+      whereUsedFilteredRows: computed(() => []),
+      whereUsedItemId: ref('CHILD-1'),
+      whereUsedLoading: ref(false),
+      whereUsedQuickPick: ref(''),
+      whereUsedQuickOptions: computed(() => []),
+      whereUsedRecursive: ref(true),
+      whereUsedMaxLevels: ref(5),
+      whereUsedFilterFieldOptions: [{ value: 'all', label: '全部', placeholder: '父件/路径/关系 ID' }],
+      whereUsedFilterField: ref('all'),
+      whereUsedFilter: ref(''),
+      whereUsedFilterPlaceholder: computed(() => '父件/路径/关系 ID'),
+      whereUsedFilterPresetGroupFilter: ref('all'),
+      whereUsedFilterPresetGroups: computed(() => []),
+      whereUsedFilterPresetKey: ref(''),
+      whereUsedFilteredPresets: computed(() => []),
+      whereUsedFilterPresetName: ref(''),
+      whereUsedFilterPresetGroup: ref(''),
+      canSaveWhereUsedFilterPreset: computed(() => false),
+      whereUsedFilterPresets: ref([]),
+      whereUsedFilterPresetImportText: ref(''),
+      whereUsedFilterPresetImportMode: ref<'merge' | 'replace'>('merge'),
+      whereUsedFilterPresetFileInput: ref<HTMLInputElement | null>(null),
+      showWhereUsedPresetManager: ref(false),
+      whereUsedPresetSelectionCount: computed(() => 0),
+      whereUsedPresetBatchGroup: ref(''),
+      whereUsedPresetSelection: ref([]),
+      whereUsedError: ref(''),
+      whereUsed: ref(null),
+      whereUsedTreeVisibleRows: computed(() => []),
+      productLoading: ref(false),
+    } as PlmWhereUsedPanelModel
+
+    const { whereUsedPanel } = usePlmWhereUsedPanel(options)
+
+    expect(whereUsedPanel).toBe(options)
+    expect(whereUsedPanel.loadWhereUsed).toBe(loadWhereUsed)
+    expect(whereUsedPanel.whereUsedItemId.value).toBe('CHILD-1')
+  })
+})

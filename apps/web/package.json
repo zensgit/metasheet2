@@ -6,9 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run --watch=false",
+    "type-check": "vue-tsc -b",
+    "lint": "eslint \"src/main.ts\" \"src/App.vue\" \"src/composables/useAuth.ts\" \"src/stores/featureFlags.ts\" \"src/utils/api.ts\" \"src/views/HomeRedirect.vue\" \"src/views/LoginView.vue\" \"src/views/PlmProductView.vue\" \"src/views/PlmAuditView.vue\" \"src/views/plmAuditQueryState.ts\" \"src/views/plmAuditSavedViews.ts\" \"src/views/WorkflowDesigner.vue\" \"src/views/WorkflowHubView.vue\" \"src/views/TestFormula.vue\" \"src/views/plm/*.ts\" \"src/views/workflowDesigner*.ts\" \"src/views/workflowHub*.ts\" \"src/services/PlmService.ts\" \"src/services/plm/*.ts\" \"src/components/plm/*.vue\" \"tests/featureFlags.spec.ts\" \"tests/useAuth.spec.ts\" \"tests/utils/api.test.ts\" \"tests/plm*.spec.ts\" \"tests/usePlm*.spec.ts\" \"tests/workflowDesigner*.spec.ts\" \"tests/workflowHub*.spec.ts\" --max-warnings=0"
   },
   "dependencies": {
+    "@metasheet/sdk": "workspace:*",
     "@element-plus/icons-vue": "^2.3.2",
     "axios": "^1.8.0",
     "bpmn-js": "^18.10.1",

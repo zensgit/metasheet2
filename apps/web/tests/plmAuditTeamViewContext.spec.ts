@@ -25,8 +25,8 @@ describe('plmAuditTeamViewContext', () => {
       active: true,
       actions: [
         {
-          kind: 'scene',
-          label: 'Restore scene query|恢复场景查询',
+          kind: 'reapply-scene',
+          label: 'Reapply scene filter|重新应用场景过滤',
           emphasis: 'primary',
         },
         {
@@ -55,6 +55,42 @@ describe('plmAuditTeamViewContext', () => {
       localOnly: true,
       active: false,
       actions: [
+        {
+          kind: 'reapply-scene',
+          label: 'Reapply scene filter|重新应用场景过滤',
+          emphasis: 'primary',
+        },
+        {
+          kind: 'clear',
+          label: 'Clear context|清除上下文',
+          emphasis: 'secondary',
+        },
+      ],
+    })
+  })
+
+  it('keeps owner pivot for inactive owner shortcut context', () => {
+    const token = buildPlmAuditSceneToken({
+      sceneValue: 'scene-1',
+      ownerValue: 'owner-a',
+      ownerContextActive: false,
+      sceneQueryContextActive: false,
+    }, tr)
+
+    expect(buildPlmAuditTeamViewContextNote(token, tr)).toEqual({
+      kind: 'owner',
+      sourceLabel: 'Local-only context|仅本地上下文',
+      label: 'Scene owner|场景 owner',
+      value: 'owner-a',
+      description: 'This local context can be pivoted before applying or saving a team view, but team views still store route filters only.|这个本地上下文可在应用或保存团队视图前切换，但团队视图仍只保存路由过滤条件。',
+      localOnly: true,
+      active: false,
+      actions: [
+        {
+          kind: 'owner',
+          label: 'Filter by owner|按 owner 筛选',
+          emphasis: 'primary',
+        },
         {
           kind: 'clear',
           label: 'Clear context|清除上下文',

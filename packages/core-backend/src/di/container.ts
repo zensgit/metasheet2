@@ -46,6 +46,44 @@ class AdapterStub {
   async getProducts() { return { data: [], metadata: { totalCount: 0 } } }
   async getProductBOM() { return { data: [], metadata: { totalCount: 0 } } }
   async getProductById() { return null }
+  async getProductDocuments() { return { data: [], metadata: { totalCount: 0 } } }
+  async getApprovals() { return { data: [], metadata: { totalCount: 0 } } }
+  async getApprovalHistory() { return { data: [], metadata: { totalCount: 0 } } }
+  async getWhereUsed(itemId = '') { return { data: [{ item_id: itemId, count: 0, parents: [] }], metadata: { totalCount: 0 } } }
+  async getBomCompareSchema() { return { data: [{ line_fields: [], compare_modes: [], line_key_options: [], defaults: {} }], metadata: { totalCount: 1 } } }
+  async getBomCompare() {
+    return {
+      data: [{
+        summary: { added: 0, removed: 0, changed: 0, changed_major: 0, changed_minor: 0, changed_info: 0 },
+        added: [],
+        removed: [],
+        changed: [],
+      }],
+      metadata: { totalCount: 1 },
+    }
+  }
+  async getBomSubstitutes(bomLineId = '') {
+    return { data: [{ bom_line_id: bomLineId, count: 0, substitutes: [] }], metadata: { totalCount: 0 } }
+  }
+  async addBomSubstitute(_bomLineId = '', _substituteItemId = '') {
+    return { data: [{ ok: true, substitute_id: '', bom_line_id: '', substitute_item_id: '' }], metadata: { totalCount: 1 } }
+  }
+  async removeBomSubstitute(_bomLineId = '', substituteId = '') {
+    return { data: [{ ok: true, substitute_id: substituteId }], metadata: { totalCount: 1 } }
+  }
+  async approveApproval(approvalId = '', version = 0) { return { data: [{ id: approvalId, version }], metadata: { totalCount: 1 } } }
+  async rejectApproval(approvalId = '', version = 0) { return { data: [{ id: approvalId, version }], metadata: { totalCount: 1 } } }
+  async getCadProperties(fileId = '') { return { data: [{ file_id: fileId, properties: {} }], metadata: { totalCount: 1 } } }
+  async getCadViewState(fileId = '') { return { data: [{ file_id: fileId, hidden_entity_ids: [], notes: [] }], metadata: { totalCount: 1 } } }
+  async getCadReview(fileId = '') { return { data: [{ file_id: fileId, state: null }], metadata: { totalCount: 1 } } }
+  async getCadHistory(fileId = '') { return { data: [{ file_id: fileId, entries: [] }], metadata: { totalCount: 1 } } }
+  async getCadDiff(fileId = '', otherFileId = '') {
+    return { data: [{ file_id: fileId, other_file_id: otherFileId, properties: {}, cad_document_schema_version: {} }], metadata: { totalCount: 1 } }
+  }
+  async getCadMeshStats(fileId = '') { return { data: [{ file_id: fileId, stats: {} }], metadata: { totalCount: 1 } } }
+  async updateCadProperties(fileId = '') { return { data: [{ file_id: fileId, properties: {} }], metadata: { totalCount: 1 } } }
+  async updateCadViewState(fileId = '') { return { data: [{ file_id: fileId, hidden_entity_ids: [], notes: [] }], metadata: { totalCount: 1 } } }
+  async updateCadReview(fileId = '') { return { data: [{ file_id: fileId, state: null }], metadata: { totalCount: 1 } } }
   async listFolders() { return [] }
   async searchDocuments() { return { data: [], metadata: { totalCount: 0 } } }
   async getDocument() { return null }

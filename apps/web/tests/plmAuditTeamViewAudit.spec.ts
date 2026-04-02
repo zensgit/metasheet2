@@ -1,0 +1,259 @@
+import { describe, expect, it } from 'vitest'
+import {
+  buildPlmAuditTeamViewBatchLogState,
+  buildPlmAuditTeamViewLogState,
+  isPlmAuditOwnerlessTeamViewLifecycleLogRoute,
+  resolvePlmAuditProcessedBatchLogViews,
+  shouldClearPlmAuditTeamViewFormDraftsOnLogRoute,
+} from '../src/views/plmAuditTeamViewAudit'
+import type { PlmWorkbenchTeamView } from '../src/views/plm/plmPanelModels'
+
+function createAuditTeamView(
+  overrides: Partial<PlmWorkbenchTeamView<'audit'>> = {},
+): PlmWorkbenchTeamView<'audit'> {
+  return {
+    id: 'audit-view-1',
+    kind: 'audit',
+    scope: 'team',
+    name: '默认审计视图',
+    ownerUserId: 'owner-a',
+    canManage: true,
+    permissions: {
+      canManage: true,
+      canApply: true,
+      canDuplicate: true,
+      canShare: true,
+      canDelete: true,
+      canArchive: true,
+      canRestore: false,
+      canRename: true,
+      canTransfer: true,
+      canSetDefault: true,
+      canClearDefault: false,
+    },
+    isDefault: false,
+    isArchived: false,
+    state: {
+      page: 1,
+      q: '',
+      actorId: '',
+      kind: '',
+      action: '',
+      resourceType: '',
+      from: '',
+      to: '',
+      windowMinutes: 180,
+    },
+    createdAt: '2026-03-19T09:00:00.000Z',
+    updatedAt: '2026-03-19T10:00:00.000Z',
+    ...overrides,
+  }
+}
+
+describe('plmAuditTeamViewAudit', () => {
+  it('builds explicit audit filters for default actions', () => {
+    expect(buildPlmAuditTeamViewLogState(
+      createAuditTeamView({ id: 'audit-view-default' }),
+      'set-default',
+      {
+        windowMinutes: 720,
+        returnToPlmPath: '/plm?sceneFocus=scene-1',
+      },
+    )).toEqual({
+      page: 1,
+      q: 'audit-view-default',
+      actorId: '',
+      kind: 'audit',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+      from: '',
+      to: '',
+      windowMinutes: 720,
+      teamViewId: '',
+      sceneId: '',
+      sceneName: '',
+      sceneOwnerUserId: '',
+      sceneRecommendationReason: '',
+      sceneRecommendationSourceLabel: '',
+      returnToPlmPath: '/plm?sceneFocus=scene-1',
+    })
+  })
+
+  it('builds explicit audit filters for clear-default actions', () => {
+    expect(buildPlmAuditTeamViewLogState(
+      createAuditTeamView({ id: 'audit-view-clear-default' }),
+      'clear-default',
+      {
+        windowMinutes: 180,
+        returnToPlmPath: '/plm?sceneFocus=scene-clear-default',
+      },
+    )).toEqual({
+      page: 1,
+      q: 'audit-view-clear-default',
+      actorId: '',
+      kind: 'audit',
+      action: 'clear-default',
+      resourceType: 'plm-team-view-default',
+      from: '',
+      to: '',
+      windowMinutes: 180,
+      teamViewId: '',
+      sceneId: '',
+      sceneName: '',
+      sceneOwnerUserId: '',
+      sceneRecommendationReason: '',
+      sceneRecommendationSourceLabel: '',
+      returnToPlmPath: '/plm?sceneFocus=scene-clear-default',
+    })
+  })
+
+  it('builds explicit audit filters for lifecycle actions', () => {
+    expect(buildPlmAuditTeamViewLogState(
+      createAuditTeamView({ id: 'audit-view-archive' }),
+      'archive',
+      {
+        windowMinutes: 60,
+        returnToPlmPath: '/plm?sceneFocus=scene-2',
+      },
+    )).toEqual({
+      page: 1,
+      q: 'audit-view-archive',
+      actorId: '',
+      kind: 'audit',
+      action: 'archive',
+      resourceType: 'plm-team-view-batch',
+      from: '',
+      to: '',
+      windowMinutes: 60,
+      teamViewId: '',
+      sceneId: '',
+      sceneName: '',
+      sceneOwnerUserId: '',
+      sceneRecommendationReason: '',
+      sceneRecommendationSourceLabel: '',
+      returnToPlmPath: '/plm?sceneFocus=scene-2',
+    })
+  })
+
+  it('builds delete log routes that clear the selected team view', () => {
+    expect(buildPlmAuditTeamViewLogState(
+      createAuditTeamView({ id: 'audit-view-delete' }),
+      'delete',
+      {
+        windowMinutes: 90,
+        returnToPlmPath: '/plm?sceneFocus=scene-delete',
+      },
+    )).toEqual({
+      page: 1,
+      q: 'audit-view-delete',
+      actorId: '',
+      kind: 'audit',
+      action: 'delete',
+      resourceType: 'plm-team-view-batch',
+      from: '',
+      to: '',
+      windowMinutes: 90,
+      teamViewId: '',
+      sceneId: '',
+      sceneName: '',
+      sceneOwnerUserId: '',
+      sceneRecommendationReason: '',
+      sceneRecommendationSourceLabel: '',
+      returnToPlmPath: '/plm?sceneFocus=scene-delete',
+    })
+  })
+
+  it('uses the first processed view to anchor batch audit filters', () => {
+    expect(buildPlmAuditTeamViewBatchLogState([
+      createAuditTeamView({ id: 'batch-view-a' }),
+      createAuditTeamView({ id: 'batch-view-b' }),
+    ], 'delete', {
+      windowMinutes: 180,
+      returnToPlmPath: '/plm?sceneFocus=batch-view-a',
+    })).toEqual({
+      page: 1,
+      q: 'batch-view-a',
+      actorId: '',
+      kind: 'audit',
+      action: 'delete',
+      resourceType: 'plm-team-view-batch',
+      from: '',
+      to: '',
+      windowMinutes: 180,
+      teamViewId: '',
+      sceneId: '',
+      sceneName: '',
+      sceneOwnerUserId: '',
+      sceneRecommendationReason: '',
+      sceneRecommendationSourceLabel: '',
+      returnToPlmPath: '/plm?sceneFocus=batch-view-a',
+    })
+  })
+
+  it('falls back to processed ids instead of eligible ids when deleted views are gone from memory', () => {
+    expect(resolvePlmAuditProcessedBatchLogViews({
+      processedIds: ['batch-view-b'],
+      resolveView: () => null,
+    })).toEqual([
+      {
+        id: 'batch-view-b',
+        kind: 'audit',
+      },
+    ])
+  })
+
+  it('detects ownerless lifecycle log routes while excluding active team-view and set-default routes', () => {
+    expect(isPlmAuditOwnerlessTeamViewLifecycleLogRoute({
+      teamViewId: '',
+      action: 'delete',
+      resourceType: 'plm-team-view-batch',
+    })).toBe(true)
+
+    expect(isPlmAuditOwnerlessTeamViewLifecycleLogRoute({
+      teamViewId: '',
+      action: 'clear-default',
+      resourceType: 'plm-team-view-default',
+    })).toBe(true)
+
+    expect(isPlmAuditOwnerlessTeamViewLifecycleLogRoute({
+      teamViewId: '',
+      action: 'set-default',
+      resourceType: 'plm-team-view-default',
+    })).toBe(false)
+
+    expect(isPlmAuditOwnerlessTeamViewLifecycleLogRoute({
+      teamViewId: 'audit-view-1',
+      action: 'delete',
+      resourceType: 'plm-team-view-batch',
+    })).toBe(false)
+  })
+
+  it('clears management-owned drafts only when log routes no longer have a canonical owner', () => {
+    expect(shouldClearPlmAuditTeamViewFormDraftsOnLogRoute({
+      state: {
+        teamViewId: '',
+        action: 'set-default',
+        resourceType: 'plm-team-view-default',
+      },
+      canonicalManagementTargetId: '',
+    })).toBe(true)
+
+    expect(shouldClearPlmAuditTeamViewFormDraftsOnLogRoute({
+      state: {
+        teamViewId: '',
+        action: 'set-default',
+        resourceType: 'plm-team-view-default',
+      },
+      canonicalManagementTargetId: 'audit-view-1',
+    })).toBe(false)
+
+    expect(shouldClearPlmAuditTeamViewFormDraftsOnLogRoute({
+      state: {
+        teamViewId: '',
+        action: 'clear-default',
+        resourceType: 'plm-team-view-default',
+      },
+      canonicalManagementTargetId: '',
+    })).toBe(true)
+  })
+})

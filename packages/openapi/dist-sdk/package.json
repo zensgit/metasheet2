@@ -5,11 +5,34 @@
   "type": "module",
   "main": "index.js",
   "types": "index.d.ts",
-  "files": ["index.js", "index.d.ts"],
-  "scripts": {
-    "build": "node ./scripts/build.mjs"
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./client": {
+      "types": "./client.d.ts",
+      "default": "./client.js"
+    }
   },
-  "keywords": ["metasheet","sdk","openapi"],
-  "license": "UNLICENSED"
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "client.js",
+    "client.d.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "test": "vitest run tests/client.test.ts --watch=false"
+  },
+  "keywords": [
+    "metasheet",
+    "sdk",
+    "openapi"
+  ],
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "openapi-typescript": "^7.13.0"
+  }
 }
-

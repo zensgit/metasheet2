@@ -1,5 +1,4 @@
-import type { Socket } from 'socket.io';
-import { Server as SocketServer } from 'socket.io'
+import { Server as SocketServer, type Socket } from 'socket.io'
 import type { Server as HttpServer } from 'http'
 import type { ILogger } from '../di/identifiers'
 import type { EventBus } from '../integration/events/event-bus'

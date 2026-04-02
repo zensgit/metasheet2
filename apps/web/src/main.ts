@@ -7,18 +7,16 @@ import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
 import App from './App.vue'
 import { useAuth } from './composables/useAuth'
-import { ROUTE_PATHS } from './router/types'
 import { appRoutes } from './router/appRoutes'
+import { ROUTE_PATHS } from './router/types'
 import { useFeatureFlags } from './stores/featureFlags'
 import { normalizePostLoginRedirect, normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './utils/authRedirect'
 
-// Create router
 const router = createRouter({
   history: createWebHistory(),
-  routes: appRoutes
+  routes: appRoutes,
 })
 
-// Navigation guard for page title
 router.beforeEach(async (to, _from, next) => {
   const auth = useAuth()
   const token = auth.getToken()
@@ -71,16 +69,15 @@ router.beforeEach(async (to, _from, next) => {
     }
   }
 
-  // Product capability guard + attendance focused mode restriction.
   try {
     await flags.loadProductFeatures()
 
     const required = to.meta?.requiredFeature
     const requiredFeature =
-      required === 'attendance' ||
-      required === 'workflow' ||
-      required === 'attendanceAdmin' ||
-      required === 'attendanceImport'
+      required === 'attendance'
+      || required === 'workflow'
+      || required === 'attendanceAdmin'
+      || required === 'attendanceImport'
         ? required
         : null
 
@@ -102,7 +99,7 @@ router.beforeEach(async (to, _from, next) => {
 
     if (typeof flags.isPlmWorkbenchFocused === 'function' && flags.isPlmWorkbenchFocused()) {
       const path = String(to.path || '')
-      const allowedPrefixes = ['/plm']
+      const allowedPrefixes = ['/plm', '/workflows', '/approvals']
       const allowed = allowedPrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
       if (!allowed) {
         return next('/plm')
@@ -111,13 +108,12 @@ router.beforeEach(async (to, _from, next) => {
   } catch {
     // If guard fails (network/offline), don't block navigation.
   }
+
   next()
 })
 
-// Create and mount app
 async function bootstrap(): Promise<void> {
   const app = createApp(App)
-
   app.use(ElementPlus)
   app.use(router)
 
