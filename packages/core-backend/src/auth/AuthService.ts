@@ -5,10 +5,10 @@
 
 import * as jwt from 'jsonwebtoken'
 import * as bcrypt from 'bcryptjs'
-import * as crypto from 'crypto'
 import { poolManager } from '../integration/db/connection-pool'
 import { Logger } from '../core/logger'
 import { secretManager } from '../security/SecretManager'
+import { getBcryptSaltRounds, getProductionAuthSecurityIssues, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
 import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { isUserSessionRevoked } from './session-revocation'
 import { createUserSession, isUserSessionActive } from './session-registry'
@@ -52,50 +52,20 @@ export class AuthService {
 
   constructor() {
     this.logger = new Logger('AuthService')
-    const secret = secretManager.get('JWT_SECRET', { required: process.env.NODE_ENV === 'production' })
+    const secret = secretManager.get('JWT_SECRET', { required: false })
     this.config = {
-      jwtSecret: secret || this.generateSecretWarning(),
+      jwtSecret: resolveRuntimeJwtSecret(secret),
       jwtExpiry: process.env.JWT_EXPIRY || '24h',
-      saltRounds: parseInt(process.env.BCRYPT_SALT_ROUNDS || '10')
+      saltRounds: getBcryptSaltRounds()
     }
 
     // Production security validation
-    this.validateProductionSecurity()
+    this.validateProductionSecurity(secret)
   }
 
-  private generateSecretWarning(): string {
-    this.logger.warn('JWT_SECRET not set! Using fallback (NOT FOR PRODUCTION)')
-
-    // In production, generate a more secure temporary secret but still warn
+  private validateProductionSecurity(secretValue?: string): void {
     if (process.env.NODE_ENV === 'production') {
-      this.logger.error('CRITICAL: JWT_SECRET missing in production! Generating temporary secret.')
-      // Generate a cryptographically secure random secret for this session
-      return crypto.randomBytes(64).toString('hex')
-    }
-
-    return 'fallback-development-secret-change-in-production'
-  }
-
-  private validateProductionSecurity(): void {
-    if (process.env.NODE_ENV === 'production') {
-      const issues: string[] = []
-
-      // Check JWT secret strength
-      if (!process.env.JWT_SECRET) {
-        issues.push('JWT_SECRET environment variable not set')
-      } else if (process.env.JWT_SECRET.length < 32) {
-        issues.push('JWT_SECRET is too short (minimum 32 characters recommended)')
-      }
-
-      // Check bcrypt rounds
-      if (this.config.saltRounds < 12) {
-        issues.push(`BCRYPT_SALT_ROUNDS too low for production (${this.config.saltRounds}, recommended: ≥12)`)
-      }
-
-      // Trusted token claims are a local performance escape hatch only.
-      if (process.env.RBAC_TOKEN_TRUST === 'true' || process.env.RBAC_TOKEN_TRUST === '1') {
-        issues.push('RBAC_TOKEN_TRUST is ignored in production and must remain disabled')
-      }
+      const issues = getProductionAuthSecurityIssues(process.env, secretValue)
 
       // Check JWT expiry
       if (this.config.jwtExpiry === '24h') {
@@ -106,9 +76,6 @@ export class AuthService {
         this.logger.error('PRODUCTION SECURITY ISSUES:')
         issues.forEach(issue => this.logger.error(`  - ${issue}`))
         this.logger.error('Please fix these issues before deploying to production!')
-
-        // In strict production mode, could throw an error here
-        // throw new Error('Critical security configuration issues detected')
       }
     }
   }

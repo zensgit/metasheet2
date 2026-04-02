@@ -14,6 +14,30 @@ function info() {
   echo "[attendance-onprem-env-check] $*" >&2
 }
 
+function require_strong_jwt_secret() {
+  local secret="$1"
+  [[ -n "$secret" ]] || die "JWT_SECRET is missing in ${ENV_FILE}"
+  case "$secret" in
+    change-me|change-me-in-production|test|dev-secret|dev-secret-key|fallback-development-secret-change-in-production|your-secret-key-here|your-dev-secret-key-here)
+      die "JWT_SECRET uses an insecure placeholder/default value in ${ENV_FILE}"
+      ;;
+  esac
+  if (( ${#secret} < 32 )); then
+    die "JWT_SECRET must be at least 32 characters in ${ENV_FILE}"
+  fi
+}
+
+function require_bcrypt_salt_rounds() {
+  local rounds="$1"
+  [[ -n "$rounds" ]] || die "BCRYPT_SALT_ROUNDS is missing in ${ENV_FILE}"
+  if [[ ! "$rounds" =~ ^[0-9]+$ ]]; then
+    die "BCRYPT_SALT_ROUNDS must be an integer (got: '${rounds}')"
+  fi
+  if (( rounds < 12 )); then
+    die "BCRYPT_SALT_ROUNDS must be >= 12 in ${ENV_FILE} (got: ${rounds})"
+  fi
+}
+
 function get_env_value() {
   local key="$1"
   if [[ ! -f "$ENV_FILE" ]]; then
@@ -38,9 +62,10 @@ REQUIRE_TOKEN="$(get_env_value ATTENDANCE_IMPORT_REQUIRE_TOKEN)"
 UPLOAD_DIR="$(get_env_value ATTENDANCE_IMPORT_UPLOAD_DIR)"
 CSV_MAX_ROWS="$(get_env_value ATTENDANCE_IMPORT_CSV_MAX_ROWS)"
 DEPLOYMENT_MODEL="$(get_env_value DEPLOYMENT_MODEL)"
+BCRYPT_SALT_ROUNDS="$(get_env_value BCRYPT_SALT_ROUNDS)"
 
-[[ -n "$JWT_SECRET" ]] || die "JWT_SECRET is missing in ${ENV_FILE}"
-[[ "$JWT_SECRET" != "change-me" ]] || die "JWT_SECRET is still 'change-me' in ${ENV_FILE}"
+require_strong_jwt_secret "$JWT_SECRET"
+require_bcrypt_salt_rounds "$BCRYPT_SALT_ROUNDS"
 
 [[ -n "$POSTGRES_PASSWORD" ]] || die "POSTGRES_PASSWORD is missing in ${ENV_FILE}"
 [[ "$POSTGRES_PASSWORD" != "change-me" ]] || die "POSTGRES_PASSWORD is still 'change-me' in ${ENV_FILE}"

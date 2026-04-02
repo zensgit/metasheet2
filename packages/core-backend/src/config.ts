@@ -2,6 +2,9 @@
  * 配置管理
  */
 
+import { secretManager } from './security/SecretManager'
+import { resolveRuntimeJwtSecret } from './security/auth-runtime-config'
+
 export interface AppConfig {
   db: {
     url: string
@@ -63,7 +66,7 @@ export function getConfig(): AppConfig {
       host: process.env.HOST || '127.0.0.1'
     },
     auth: {
-      jwtSecret: process.env.JWT_SECRET || 'dev-secret',
+      jwtSecret: resolveRuntimeJwtSecret(secretManager.get('JWT_SECRET', { required: false })),
       jwtPublicKey: process.env.JWT_PUBLIC_KEY,
       kanbanAuthRequired: process.env.KANBAN_AUTH_REQUIRED === 'true'
     },

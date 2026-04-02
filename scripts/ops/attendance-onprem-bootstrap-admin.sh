@@ -8,7 +8,7 @@ ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
 ADMIN_NAME="${ADMIN_NAME:-Administrator}"
 API_BASE="${API_BASE:-}" # optional, for login self-check
 VERIFY_LOGIN="${VERIFY_LOGIN:-1}"
-BCRYPT_SALT_ROUNDS="${BCRYPT_SALT_ROUNDS:-12}"
+ENV_OVERRIDE_BCRYPT_SALT_ROUNDS="${BCRYPT_SALT_ROUNDS:-}"
 
 function die() {
   echo "[attendance-onprem-bootstrap-admin] ERROR: $*" >&2
@@ -17,6 +17,30 @@ function die() {
 
 function info() {
   echo "[attendance-onprem-bootstrap-admin] $*" >&2
+}
+
+function require_strong_jwt_secret() {
+  local secret="$1"
+  [[ -n "$secret" ]] || die "JWT_SECRET is missing in ${ENV_FILE}"
+  case "$secret" in
+    change-me|change-me-in-production|test|dev-secret|dev-secret-key|fallback-development-secret-change-in-production|your-secret-key-here|your-dev-secret-key-here)
+      die "JWT_SECRET uses an insecure placeholder/default value in ${ENV_FILE}"
+      ;;
+  esac
+  if (( ${#secret} < 32 )); then
+    die "JWT_SECRET must be at least 32 characters in ${ENV_FILE}"
+  fi
+}
+
+function require_bcrypt_salt_rounds() {
+  local rounds="$1"
+  [[ -n "$rounds" ]] || die "BCRYPT_SALT_ROUNDS must be set in ${ENV_FILE} or environment"
+  if [[ ! "$rounds" =~ ^[0-9]+$ ]]; then
+    die "BCRYPT_SALT_ROUNDS must be numeric (got: ${rounds})"
+  fi
+  if (( rounds < 12 )); then
+    die "BCRYPT_SALT_ROUNDS must be >= 12 for production (got: ${rounds})"
+  fi
 }
 
 function require_cmd() {
@@ -41,23 +65,21 @@ if [[ "${#ADMIN_PASSWORD}" -lt 12 ]]; then
   die "ADMIN_PASSWORD must be at least 12 characters for production"
 fi
 
-if [[ ! "$BCRYPT_SALT_ROUNDS" =~ ^[0-9]+$ ]]; then
-  die "BCRYPT_SALT_ROUNDS must be numeric (got: ${BCRYPT_SALT_ROUNDS})"
-fi
-if (( BCRYPT_SALT_ROUNDS < 10 )); then
-  die "BCRYPT_SALT_ROUNDS should be >= 10 (got: ${BCRYPT_SALT_ROUNDS})"
-fi
-
 require_cmd node
 require_cmd psql
 
 load_env_file
 
+if [[ -n "${ENV_OVERRIDE_BCRYPT_SALT_ROUNDS}" ]]; then
+  BCRYPT_SALT_ROUNDS="${ENV_OVERRIDE_BCRYPT_SALT_ROUNDS}"
+else
+  BCRYPT_SALT_ROUNDS="${BCRYPT_SALT_ROUNDS:-12}"
+fi
+
 [[ -n "${DATABASE_URL:-}" ]] || die "DATABASE_URL missing in ${ENV_FILE}"
 
-if [[ -z "${JWT_SECRET:-}" || "$JWT_SECRET" == "change-me" ]]; then
-  die "JWT_SECRET missing/invalid in ${ENV_FILE}"
-fi
+require_strong_jwt_secret "${JWT_SECRET:-}"
+require_bcrypt_salt_rounds "$BCRYPT_SALT_ROUNDS"
 
 if [[ -z "${ATTENDANCE_IMPORT_REQUIRE_TOKEN:-}" || "${ATTENDANCE_IMPORT_REQUIRE_TOKEN}" != "1" ]]; then
   die "ATTENDANCE_IMPORT_REQUIRE_TOKEN must be 1 in ${ENV_FILE}"

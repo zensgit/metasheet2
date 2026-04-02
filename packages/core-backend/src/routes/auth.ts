@@ -19,6 +19,7 @@ import { FEATURE_FLAGS } from '../config/flags'
 import { Logger } from '../core/logger'
 import { query } from '../db/pg'
 import { secretManager } from '../security/SecretManager'
+import { getBcryptSaltRounds, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
 
 const logger = new Logger('AuthRouter')
 
@@ -27,8 +28,6 @@ export const authRouter = Router()
 // ============================================
 // Dev Token (non-production only)
 // ============================================
-
-const DEV_FALLBACK_JWT_SECRET = 'fallback-development-secret-change-in-production'
 
 authRouter.get('/dev-token', async (req: Request, res: Response) => {
   if (process.env.NODE_ENV === 'production') {
@@ -47,10 +46,7 @@ authRouter.get('/dev-token', async (req: Request, res: Response) => {
   const roles = rolesParam.split(',').map((v) => v.trim()).filter(Boolean)
   const perms = permsParam.split(',').map((v) => v.trim()).filter(Boolean)
 
-  const secret = secretManager.get('JWT_SECRET', {
-    required: process.env.NODE_ENV === 'production',
-    fallback: DEV_FALLBACK_JWT_SECRET,
-  }) || DEV_FALLBACK_JWT_SECRET
+  const secret = resolveRuntimeJwtSecret(secretManager.get('JWT_SECRET', { required: false }))
 
   const payload = {
     id: userId,
@@ -475,7 +471,7 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
       })
     }
 
-    const passwordHash = await bcrypt.hash(password, Number(process.env.BCRYPT_SALT_ROUNDS || 10))
+    const passwordHash = await bcrypt.hash(password, getBcryptSaltRounds())
     await query(
       `UPDATE users
        SET password_hash = $1,
@@ -881,7 +877,7 @@ authRouter.get('/users', async (req: Request, res: Response) => {
       })
     }
 
-    const payload = jwt.verify(token, process.env.JWT_SECRET || DEV_FALLBACK_JWT_SECRET)
+    const payload = jwt.verify(token, resolveRuntimeJwtSecret(process.env.JWT_SECRET))
     if (!payload || typeof payload !== 'object') {
       return res.status(401).json({
         success: false,

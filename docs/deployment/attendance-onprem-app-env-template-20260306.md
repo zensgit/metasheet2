@@ -33,6 +33,10 @@ cp docker/app.env.attendance-onprem.ready.env docker/app.env
 2. `POSTGRES_PASSWORD`
 3. `DATABASE_URL` 里的数据库密码
 
+注意：
+- `JWT_SECRET` 现在要求至少 32 字符，且不能继续使用任何开发默认值。
+- `BCRYPT_SALT_ROUNDS` 需要保持 `12` 或更高，on-prem 校验脚本会直接拦截更低配置。
+
 ## 2) 推荐模板（考勤专注模式）
 
 ```env
@@ -47,6 +51,7 @@ DEPLOYMENT_MODEL=onprem
 
 # Security
 JWT_SECRET=<replace-with-64+chars-random-secret>
+BCRYPT_SALT_ROUNDS=12
 
 # Database
 POSTGRES_USER=metasheet
@@ -74,6 +79,12 @@ ATTENDANCE_IMPORT_HEAVY_QUERY_TIMEOUT_MS=180000
 openssl rand -hex 48
 ```
 
+如果你确实要调整 bcrypt 代价系数，生产环境只允许 `>= 12`：
+
+```env
+BCRYPT_SALT_ROUNDS=12
+```
+
 生成数据库强密码（示例）：
 
 ```bash
@@ -95,11 +106,15 @@ scripts/ops/attendance-onprem-env-check.sh
 
 1. `JWT_SECRET is still 'change-me'`
    - 原因：未替换默认值。
-2. `ATTENDANCE_IMPORT_REQUIRE_TOKEN must be 1`
+2. `JWT_SECRET uses an insecure placeholder/default value`
+   - 原因：仍在使用 `test`、`dev-secret`、`dev-secret-key` 等弱默认值，或长度不足 32 字符。
+3. `BCRYPT_SALT_ROUNDS must be >= 12`
+   - 原因：生产配置过低，部署校验会拒绝继续。
+4. `ATTENDANCE_IMPORT_REQUIRE_TOKEN must be 1`
    - 原因：生产门禁要求强制开启 token。
-3. `ATTENDANCE_IMPORT_UPLOAD_DIR must be an absolute path`
+5. `ATTENDANCE_IMPORT_UPLOAD_DIR must be an absolute path`
    - 原因：使用了相对路径。
-4. `PRODUCT_MODE ... expected attendance`
+6. `PRODUCT_MODE ... expected attendance`
    - 原因：目标是考勤专注部署，但模式配置错误。
 
 ## 6) 配套文档
