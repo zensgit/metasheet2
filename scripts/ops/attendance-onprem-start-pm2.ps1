@@ -22,7 +22,7 @@ function Resolve-AppEnvFile {
     }
   }
 
-  throw "Could not find app.env or docker\\app.env under $BaseDir"
+  throw "Could not find app.env or docker\app.env under $BaseDir"
 }
 
 function Import-AppEnvFile {

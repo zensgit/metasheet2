@@ -115,7 +115,7 @@ esac
 
 pkg_name="$(head -n 1 "$list_file" | cut -d/ -f1)"
 pkg_root="${EXTRACT_ROOT}/${pkg_name}"
-run_label="$(printf '%s' "$pkg_name" | sed -E 's/^.*-(run[0-9]+)(-.+)?$/\1/')"
+run_label="$(printf '%s' "$pkg_name" | sed -nE 's/^.*-(run[0-9]+)(-.+)?$/\1/p')"
 
 required=(
   "start-pm2.bat"

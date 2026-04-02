@@ -3,6 +3,221 @@ import { sql } from 'kysely'
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'event_subscriptions'
+          AND column_name = 'id'
+          AND udt_name = 'uuid'
+      ) THEN
+        EXECUTE 'ALTER TABLE event_subscriptions ALTER COLUMN id DROP DEFAULT';
+        EXECUTE 'ALTER TABLE event_subscriptions ALTER COLUMN id TYPE text USING id::text';
+        EXECUTE $cmd$ALTER TABLE event_subscriptions ALTER COLUMN id SET DEFAULT gen_random_uuid()::text$cmd$;
+      END IF;
+    END
+    $$;
+  `.execute(db)
+
+  await sql`
+    ALTER TABLE event_subscriptions
+    ADD COLUMN IF NOT EXISTS subscriber_type text,
+    ADD COLUMN IF NOT EXISTS event_types text[],
+    ADD COLUMN IF NOT EXISTS handler_type text,
+    ADD COLUMN IF NOT EXISTS is_sequential boolean,
+    ADD COLUMN IF NOT EXISTS timeout_ms integer,
+    ADD COLUMN IF NOT EXISTS transform_enabled boolean,
+    ADD COLUMN IF NOT EXISTS transform_template text,
+    ADD COLUMN IF NOT EXISTS total_events_received bigint,
+    ADD COLUMN IF NOT EXISTS total_events_processed bigint,
+    ADD COLUMN IF NOT EXISTS total_events_failed bigint,
+    ADD COLUMN IF NOT EXISTS last_event_at timestamptz
+  `.execute(db)
+
+  await sql`
+    UPDATE event_subscriptions
+    SET
+      subscriber_type = COALESCE(subscriber_type, 'service'),
+      handler_type = COALESCE(handler_type, 'function'),
+      is_sequential = COALESCE(is_sequential, false),
+      timeout_ms = COALESCE(timeout_ms, 30000),
+      transform_enabled = COALESCE(transform_enabled, false),
+      total_events_received = COALESCE(total_events_received, 0),
+      total_events_processed = COALESCE(total_events_processed, 0),
+      total_events_failed = COALESCE(total_events_failed, 0)
+    WHERE
+      subscriber_type IS NULL
+      OR handler_type IS NULL
+      OR is_sequential IS NULL
+      OR timeout_ms IS NULL
+      OR transform_enabled IS NULL
+      OR total_events_received IS NULL
+      OR total_events_processed IS NULL
+      OR total_events_failed IS NULL
+  `.execute(db)
+
+  await sql`
+    ALTER TABLE event_subscriptions
+    ALTER COLUMN subscriber_type SET DEFAULT 'service',
+    ALTER COLUMN subscriber_type SET NOT NULL,
+    ALTER COLUMN handler_type SET DEFAULT 'function',
+    ALTER COLUMN handler_type SET NOT NULL,
+    ALTER COLUMN is_sequential SET DEFAULT false,
+    ALTER COLUMN is_sequential SET NOT NULL,
+    ALTER COLUMN timeout_ms SET DEFAULT 30000,
+    ALTER COLUMN timeout_ms SET NOT NULL,
+    ALTER COLUMN transform_enabled SET DEFAULT false,
+    ALTER COLUMN transform_enabled SET NOT NULL,
+    ALTER COLUMN total_events_received SET DEFAULT 0,
+    ALTER COLUMN total_events_received SET NOT NULL,
+    ALTER COLUMN total_events_processed SET DEFAULT 0,
+    ALTER COLUMN total_events_processed SET NOT NULL,
+    ALTER COLUMN total_events_failed SET DEFAULT 0,
+    ALTER COLUMN total_events_failed SET NOT NULL
+  `.execute(db)
+
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_subscriptions_subscriber ON event_subscriptions(subscriber_id, subscriber_type)
+  `.execute(db)
+
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_subscriptions_priority_desc ON event_subscriptions(priority DESC)
+  `.execute(db)
+
+  await sql`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'event_replays'
+          AND column_name = 'id'
+          AND udt_name = 'uuid'
+      ) THEN
+        EXECUTE 'ALTER TABLE event_replays ALTER COLUMN id DROP DEFAULT';
+        EXECUTE 'ALTER TABLE event_replays ALTER COLUMN id TYPE text USING id::text';
+        EXECUTE $cmd$ALTER TABLE event_replays ALTER COLUMN id SET DEFAULT gen_random_uuid()::text$cmd$;
+      END IF;
+    END
+    $$;
+  `.execute(db)
+
+  await sql`
+    ALTER TABLE event_replays
+    ADD COLUMN IF NOT EXISTS replay_type text,
+    ADD COLUMN IF NOT EXISTS event_ids text[],
+    ADD COLUMN IF NOT EXISTS time_range_start timestamptz,
+    ADD COLUMN IF NOT EXISTS time_range_end timestamptz,
+    ADD COLUMN IF NOT EXISTS subscription_ids text[],
+    ADD COLUMN IF NOT EXISTS initiated_by text,
+    ADD COLUMN IF NOT EXISTS reason text,
+    ADD COLUMN IF NOT EXISTS started_at timestamptz
+  `.execute(db)
+
+  await sql`
+    DO $$
+    DECLARE
+      has_replay_name boolean;
+      has_event_pattern boolean;
+      has_start_time boolean;
+      has_end_time boolean;
+      has_created_by boolean;
+    BEGIN
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'event_replays'
+          AND column_name = 'replay_name'
+      ) INTO has_replay_name;
+
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'event_replays'
+          AND column_name = 'event_pattern'
+      ) INTO has_event_pattern;
+
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'event_replays'
+          AND column_name = 'start_time'
+      ) INTO has_start_time;
+
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'event_replays'
+          AND column_name = 'end_time'
+      ) INTO has_end_time;
+
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'event_replays'
+          AND column_name = 'created_by'
+      ) INTO has_created_by;
+
+      EXECUTE format(
+        'UPDATE event_replays
+         SET replay_type = COALESCE(replay_type, CASE
+           WHEN %1$L AND %2$L THEN ''time_range''
+           WHEN %1$L THEN ''pattern''
+           WHEN event_ids IS NOT NULL THEN ''single_event''
+           ELSE ''time_range''
+         END),
+         time_range_start = COALESCE(time_range_start, %3$s),
+         time_range_end = COALESCE(time_range_end, %4$s),
+         initiated_by = COALESCE(initiated_by, %5$s, ''system''),
+         reason = COALESCE(reason, %6$s, ''Legacy replay'')
+         WHERE replay_type IS NULL
+           OR initiated_by IS NULL
+           OR reason IS NULL
+           OR time_range_start IS NULL
+           OR time_range_end IS NULL',
+        has_event_pattern,
+        has_start_time OR has_end_time,
+        CASE WHEN has_start_time THEN 'start_time' ELSE 'NULL' END,
+        CASE WHEN has_end_time THEN 'end_time' ELSE 'NULL' END,
+        CASE WHEN has_created_by THEN 'created_by' ELSE 'NULL' END,
+        CASE WHEN has_replay_name THEN 'replay_name' ELSE 'NULL' END
+      );
+
+      IF has_replay_name THEN
+        EXECUTE $cmd$ALTER TABLE event_replays ALTER COLUMN replay_name SET DEFAULT 'Legacy replay'$cmd$;
+      END IF;
+
+      IF has_created_by THEN
+        EXECUTE $cmd$ALTER TABLE event_replays ALTER COLUMN created_by SET DEFAULT 'system'$cmd$;
+      END IF;
+
+      IF has_event_pattern THEN
+        EXECUTE 'ALTER TABLE event_replays ALTER COLUMN event_pattern DROP NOT NULL';
+      END IF;
+
+      IF has_start_time THEN
+        EXECUTE 'ALTER TABLE event_replays ALTER COLUMN start_time DROP NOT NULL';
+      END IF;
+
+      IF has_end_time THEN
+        EXECUTE 'ALTER TABLE event_replays ALTER COLUMN end_time DROP NOT NULL';
+      END IF;
+    END
+    $$;
+  `.execute(db)
+
+  await sql`
+    ALTER TABLE event_replays
+    ALTER COLUMN replay_type SET DEFAULT 'time_range',
+    ALTER COLUMN replay_type SET NOT NULL,
+    ALTER COLUMN initiated_by SET DEFAULT 'system',
+    ALTER COLUMN initiated_by SET NOT NULL,
+    ALTER COLUMN reason SET DEFAULT 'Legacy replay',
+    ALTER COLUMN reason SET NOT NULL
+  `.execute(db)
+
+  await sql`
     ALTER TABLE event_store
     ADD COLUMN IF NOT EXISTS occurred_at timestamptz,
     ADD COLUMN IF NOT EXISTS received_at timestamptz,

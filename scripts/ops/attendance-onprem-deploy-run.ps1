@@ -16,7 +16,6 @@ function Require-Command {
 }
 
 Require-Command -Name 'node'
-Require-Command -Name 'powershell'
 Require-Command -Name 'pnpm'
 
 if (-not (Test-Path (Join-Path $resolvedRoot 'node_modules'))) {
@@ -37,7 +36,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $startScript = Join-Path $resolvedRoot 'scripts\ops\attendance-onprem-start-pm2.ps1'
-& powershell -NoProfile -ExecutionPolicy Bypass -File $startScript -RootDir $resolvedRoot
+& $startScript -RootDir $resolvedRoot
 if ($LASTEXITCODE -ne 0) {
   throw 'pm2 startup failed'
 }
