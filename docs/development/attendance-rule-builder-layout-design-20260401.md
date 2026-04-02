@@ -15,7 +15,7 @@ The rule-set admin page still rendered the structured rule builder like a squeez
 
 ## Change
 
-Restructure the rule-set section in `/Users/huazhou/Downloads/Github/metasheet2/.worktrees/attendance-rule-builder-layout-20260401/apps/web/src/views/AttendanceView.vue` into three explicit panels:
+Restructure the rule-set section in `apps/web/src/views/AttendanceView.vue` into three explicit panels:
 
 1. `attendance__rule-set-basics`
    - name, scope, version, default flag, description

@@ -12896,7 +12896,6 @@ const holidaySectionBindings = {
   gap: 10px;
 }
 
-.attendance__rule-builder-shell > .attendance__admin-section-header,
 .attendance__rule-builder-preview > .attendance__admin-section-header,
 .attendance__preview-builder > .attendance__admin-section-header {
   align-items: flex-start;
@@ -13386,7 +13385,6 @@ const holidaySectionBindings = {
     padding: 14px;
   }
 
-  .attendance__rule-builder-shell > .attendance__admin-section-header,
   .attendance__rule-builder-preview > .attendance__admin-section-header,
   .attendance__preview-builder > .attendance__admin-section-header {
     flex-direction: column;
