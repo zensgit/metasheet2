@@ -3,7 +3,7 @@ import {
   type ClientResponse,
   type RequestClient,
 } from '@metasheet/sdk/client'
-import { apiGet, apiPost } from '../../utils/api'
+import { apiFetch } from '../../utils/api'
 
 type LocalizedFallback = {
   english: string
@@ -65,20 +65,36 @@ const request = async <T = unknown>(
   method: string,
   path: string,
   body?: unknown,
+  ifMatch?: string,
 ): Promise<ClientResponse<T>> => {
-  if (method === 'GET') {
-    return {
-      status: 200,
-      json: await apiGet<T>(path),
-    }
+  const headers = ifMatch ? { 'If-Match': ifMatch } : undefined
+  const response = await apiFetch(path, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+
+  return {
+    status: response.status,
+    etag: response.headers.get('etag') || undefined,
+    json: await response.json().catch(() => ({} as T)),
   }
-  if (method === 'POST') {
-    return {
-      status: 200,
-      json: await apiPost<T>(path, body),
-    }
+}
+
+const requestWithRetry = async <T = unknown>(
+  method: string,
+  path: string,
+  body?: unknown,
+  etag?: string,
+  retries = 1,
+): Promise<ClientResponse<T>> => {
+  const response = await request<T>(method, path, body, etag)
+  if (response.status === 409 && retries > 0) {
+    const getPath = path.replace(/\/(approve|reject|return|revoke)$/, '')
+    const latest = await request('GET', getPath)
+    return request<T>(method, path, body, latest.etag)
   }
-  throw new Error(`Unsupported PLM request method: ${method}`)
+  return response
 }
 
 async function withLocalizedFallback<T>(
@@ -99,7 +115,7 @@ async function withLocalizedFallback<T>(
 
 export const plmRequestClient = {
   request,
-  requestWithRetry: request,
+  requestWithRetry,
 } satisfies RequestClient
 
 export function createLocalizedPlmFederationClient(client: RequestClient = plmRequestClient) {

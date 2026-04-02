@@ -1,29 +1,41 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../src/utils/api', () => ({
-  apiGet: vi.fn(),
-  apiPost: vi.fn(),
+  apiFetch: vi.fn(),
 }))
 
-import { apiGet, apiPost } from '../src/utils/api'
+import { apiFetch } from '../src/utils/api'
 import { plmService } from '../src/services/PlmService'
 
-const apiGetMock = vi.mocked(apiGet)
-const apiPostMock = vi.mocked(apiPost)
+const apiFetchMock = vi.mocked(apiFetch)
 
 describe('plmService', () => {
+  function mockJsonResponse(status: number, json: unknown, headers?: Record<string, string>) {
+    return {
+      status,
+      headers: new Headers(headers),
+      json: async () => json,
+    }
+  }
+
+  function getRequestBody(callIndex: number): unknown {
+    const options = apiFetchMock.mock.calls[callIndex]?.[1] as RequestInit | undefined
+    const body = options?.body
+    return typeof body === 'string' ? JSON.parse(body) : body
+  }
+
   beforeEach(() => {
     vi.clearAllMocks()
   })
 
   it('uses federation query endpoint for product search', async () => {
-    apiPostMock.mockResolvedValueOnce({
+    apiFetchMock.mockResolvedValueOnce(mockJsonResponse(200, {
       ok: true,
       data: {
         items: [{ id: 'P-1001' }],
         total: 1,
       },
-    })
+    }))
 
     const result = await plmService.searchProducts({
       query: 'motor',
@@ -33,7 +45,8 @@ describe('plmService', () => {
     })
 
     expect(result.items).toHaveLength(1)
-    expect(apiPostMock).toHaveBeenCalledWith('/api/federation/plm/query', {
+    expect(apiFetchMock.mock.calls[0]?.[0]).toBe('/api/federation/plm/query')
+    expect(getRequestBody(0)).toEqual({
       operation: 'products',
       pagination: {
         limit: 20,
@@ -47,13 +60,13 @@ describe('plmService', () => {
   })
 
   it('loads product detail through encoded federation GET route', async () => {
-    apiGetMock.mockResolvedValueOnce({
+    apiFetchMock.mockResolvedValueOnce(mockJsonResponse(200, {
       ok: true,
       data: {
         id: 'Part/001',
         item_number: 'PN-001',
       },
-    })
+    }))
 
     const result = await plmService.getProduct('Part/001', {
       itemType: 'Part',
@@ -61,18 +74,19 @@ describe('plmService', () => {
     })
 
     expect(result.id).toBe('Part/001')
-    expect(apiGetMock).toHaveBeenCalledWith(
+    expect(apiFetchMock).toHaveBeenCalledWith(
       '/api/federation/plm/products/Part%2F001?itemType=Part&itemNumber=PN-001',
+      expect.objectContaining({ method: 'GET' }),
     )
   })
 
   it('loads bom with normalized query parameters', async () => {
-    apiGetMock.mockResolvedValueOnce({
+    apiFetchMock.mockResolvedValueOnce(mockJsonResponse(200, {
       ok: true,
       data: {
         items: [{ id: 'line-1' }],
       },
-    })
+    }))
 
     const result = await plmService.getBom('P-1001', {
       depth: 3,
@@ -80,26 +94,27 @@ describe('plmService', () => {
     })
 
     expect(result.items).toHaveLength(1)
-    expect(apiGetMock).toHaveBeenCalledWith(
+    expect(apiFetchMock).toHaveBeenCalledWith(
       '/api/federation/plm/products/P-1001/bom?depth=3&effective_at=2026-03-07T10%3A00%3A00Z',
+      expect.objectContaining({ method: 'GET' }),
     )
   })
 
   it('omits all-status filter and defaults compare sides to item mode', async () => {
-    apiPostMock
-      .mockResolvedValueOnce({
+    apiFetchMock
+      .mockResolvedValueOnce(mockJsonResponse(200, {
         ok: true,
         data: {
           items: [],
           total: 0,
         },
-      })
-      .mockResolvedValueOnce({
+      }))
+      .mockResolvedValueOnce(mockJsonResponse(200, {
         ok: true,
         data: {
           summary: { changed: 1 },
         },
-      })
+      }))
 
     await plmService.listApprovals({
       productId: 'P-1001',
@@ -112,7 +127,8 @@ describe('plmService', () => {
       maxLevels: 2,
     })
 
-    expect(apiPostMock).toHaveBeenNthCalledWith(1, '/api/federation/plm/query', {
+    expect(apiFetchMock.mock.calls[0]?.[0]).toBe('/api/federation/plm/query')
+    expect(getRequestBody(0)).toEqual({
       operation: 'approvals',
       productId: 'P-1001',
       pagination: {
@@ -122,7 +138,8 @@ describe('plmService', () => {
       filters: undefined,
     })
 
-    expect(apiPostMock).toHaveBeenNthCalledWith(2, '/api/federation/plm/query', {
+    expect(apiFetchMock.mock.calls[1]?.[0]).toBe('/api/federation/plm/query')
+    expect(getRequestBody(1)).toEqual({
       operation: 'bom_compare',
       leftId: 'P-1001',
       rightId: 'P-1002',
@@ -140,13 +157,13 @@ describe('plmService', () => {
   })
 
   it('uses upstream error message when federation query rejects logically', async () => {
-    apiPostMock.mockResolvedValueOnce({
+    apiFetchMock.mockResolvedValueOnce(mockJsonResponse(200, {
       ok: false,
       data: null,
       error: {
         message: 'upstream denied',
       },
-    })
+    }))
 
     await expect(
       plmService.listDocuments({
@@ -156,10 +173,10 @@ describe('plmService', () => {
   })
 
   it('falls back to local message when federation mutate omits error text', async () => {
-    apiPostMock.mockResolvedValueOnce({
+    apiFetchMock.mockResolvedValueOnce(mockJsonResponse(200, {
       ok: false,
       data: null,
-    })
+    }))
 
     await expect(
       plmService.approveApproval({
@@ -170,23 +187,23 @@ describe('plmService', () => {
   })
 
   it('forwards approval action versions and reject reasons through the federation client', async () => {
-    apiPostMock
-      .mockResolvedValueOnce({
+    apiFetchMock
+      .mockResolvedValueOnce(mockJsonResponse(200, {
         ok: true,
         data: {
           id: 'APP-1',
           status: 'approved',
           version: 2,
         },
-      })
-      .mockResolvedValueOnce({
+      }))
+      .mockResolvedValueOnce(mockJsonResponse(200, {
         ok: true,
         data: {
           id: 'APP-2',
           status: 'rejected',
           version: 5,
         },
-      })
+      }))
 
     await plmService.approveApproval({
       approvalId: 'APP-1',
@@ -201,13 +218,15 @@ describe('plmService', () => {
       comment: 'needs revision',
     })
 
-    expect(apiPostMock).toHaveBeenNthCalledWith(1, '/api/federation/plm/mutate', {
+    expect(apiFetchMock.mock.calls[0]?.[0]).toBe('/api/federation/plm/mutate')
+    expect(getRequestBody(0)).toEqual({
       operation: 'approval_approve',
       approvalId: 'APP-1',
       version: 1,
       comment: 'looks good',
     })
-    expect(apiPostMock).toHaveBeenNthCalledWith(2, '/api/federation/plm/mutate', {
+    expect(apiFetchMock.mock.calls[1]?.[0]).toBe('/api/federation/plm/mutate')
+    expect(getRequestBody(1)).toEqual({
       operation: 'approval_reject',
       approvalId: 'APP-2',
       version: 4,
@@ -217,7 +236,7 @@ describe('plmService', () => {
   })
 
   it('preserves structured approval conflict metadata through the localized federation client', async () => {
-    apiPostMock.mockResolvedValueOnce({
+    apiFetchMock.mockResolvedValueOnce(mockJsonResponse(200, {
       ok: false,
       data: null,
       error: {
@@ -225,7 +244,7 @@ describe('plmService', () => {
         message: 'Approval instance version mismatch',
         currentVersion: 9,
       },
-    })
+    }))
 
     await expect(
       plmService.approveApproval({
@@ -240,14 +259,14 @@ describe('plmService', () => {
   })
 
   it('preserves approval history envelope fields from the federation client', async () => {
-    apiPostMock.mockResolvedValueOnce({
+    apiFetchMock.mockResolvedValueOnce(mockJsonResponse(200, {
       ok: true,
       data: {
         approvalId: 'ECO-42',
         items: [{ id: 'record-1' }],
         total: 1,
       },
-    })
+    }))
 
     const result = await plmService.getApprovalHistory('ECO-42')
 
@@ -256,7 +275,8 @@ describe('plmService', () => {
       items: [{ id: 'record-1' }],
       total: 1,
     })
-    expect(apiPostMock).toHaveBeenCalledWith('/api/federation/plm/query', {
+    expect(apiFetchMock.mock.calls[0]?.[0]).toBe('/api/federation/plm/query')
+    expect(getRequestBody(0)).toEqual({
       operation: 'approval_history',
       approvalId: 'ECO-42',
     })
