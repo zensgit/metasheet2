@@ -122,7 +122,9 @@ jobs:
             'if docker compose version >/dev/null 2>&1; then'
             '  COMPOSE_CMD="docker compose"'
             'elif command -v docker-compose >/dev/null 2>&1; then'
-            '  COMPOSE_CMD="docker-compose"'
+            '  echo "[deploy][error] legacy '\''docker-compose'\'' detected: $(docker-compose --version | head -n 1)" >&2'
+            '  echo "[deploy][error] install Docker Compose v2 plugin so '\''docker compose'\'' is available" >&2'
+            '  exit 125'
             'else'
             '  echo "[deploy][error] neither '\''docker compose'\'' nor '\''docker-compose'\'' is available" >&2'
             '  exit 125'
@@ -151,6 +153,15 @@ jobs:
             '    docker rm -f "${CONTAINER_NAME}"'
             '  fi'
             'done'
+            'orphan_names="$(docker ps -a --format "{{.Names}}" | grep -E "^[a-f0-9]+_metasheet-(postgres|redis|backend|web)$" || true)"'
+            'if [[ -n "${orphan_names}" ]]; then'
+            '  echo "[deploy][warn] removing hashed legacy metasheet containers before recreate"'
+            '  while IFS= read -r orphan_name; do'
+            '    [[ -n "${orphan_name}" ]] || continue'
+            '    echo "[deploy][warn] removing orphan container ${orphan_name}"'
+            '    docker rm -f "${orphan_name}"'
+            '  done <<< "${orphan_names}"'
+            'fi'
             "# Preflight: validate production env/compose/nginx before (re)deploying containers."
             "echo \"=== ATTENDANCE PREFLIGHT START ===\""
             "preflight_rc=0"
