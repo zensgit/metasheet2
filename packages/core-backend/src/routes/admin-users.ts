@@ -12,6 +12,7 @@ import { auditLog } from '../audit/audit'
 import { authenticate } from '../middleware/auth'
 import { query } from '../db/pg'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { jsonError, jsonOk, parsePagination } from '../util/response'
 
@@ -597,7 +598,7 @@ export function adminUsersRouter(): Router {
       }
 
       const userId = crypto.randomUUID()
-      const passwordHash = await bcrypt.hash(password, Number(process.env.BCRYPT_SALT_ROUNDS || 10))
+      const passwordHash = await bcrypt.hash(password, getBcryptSaltRounds())
 
       await query(
         `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
@@ -863,7 +864,7 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 400, 'PASSWORD_TOO_SHORT', 'Password must be at least 8 characters long')
       }
 
-      const passwordHash = await bcrypt.hash(temporaryPassword, Number(process.env.BCRYPT_SALT_ROUNDS || 10))
+      const passwordHash = await bcrypt.hash(temporaryPassword, getBcryptSaltRounds())
       await query(
         `UPDATE users
          SET password_hash = $1, updated_at = NOW()

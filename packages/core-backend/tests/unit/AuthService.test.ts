@@ -26,6 +26,10 @@ const sessionMocks = vi.hoisted(() => ({
   isUserSessionActive: vi.fn(),
 }))
 
+const secretManagerMocks = vi.hoisted(() => ({
+  get: vi.fn(() => 'unit-test-secret-abcdefghijklmnopqrstuvwxyz123456'),
+}))
+
 vi.mock('jsonwebtoken', () => jwtMocks)
 vi.mock('../../src/integration/db/connection-pool', () => ({ poolManager: poolMocks.poolManager }))
 vi.mock('../../src/rbac/service', () => ({
@@ -40,7 +44,7 @@ vi.mock('../../src/auth/session-registry', () => ({
   isUserSessionActive: sessionMocks.isUserSessionActive,
 }))
 vi.mock('../../src/security/SecretManager', () => ({
-  secretManager: { get: () => 'test-secret' }
+  secretManager: { get: secretManagerMocks.get }
 }))
 
 import { AuthService } from '../../src/auth/AuthService'
@@ -55,6 +59,8 @@ describe('AuthService.verifyToken', () => {
     poolMocks.query.mockResolvedValue({ rows: [] })
     rbacMocks.isAdmin.mockReset()
     rbacMocks.listUserPermissions.mockReset()
+    secretManagerMocks.get.mockReset()
+    secretManagerMocks.get.mockReturnValue('unit-test-secret-abcdefghijklmnopqrstuvwxyz123456')
     sessionMocks.isUserSessionRevoked.mockReset()
     sessionMocks.isUserSessionRevoked.mockResolvedValue(false)
     sessionMocks.createUserSession.mockReset()
@@ -199,6 +205,13 @@ describe('AuthService.verifyToken', () => {
     expect(poolMocks.query).toHaveBeenCalled()
     expect(sessionMocks.isUserSessionRevoked).toHaveBeenCalledWith('prod-admin', 123)
     expect(sessionMocks.isUserSessionActive).toHaveBeenCalledWith('prod-admin', 'prod-session')
+  })
+
+  it('fails fast in production when JWT_SECRET is weak', () => {
+    process.env.NODE_ENV = 'production'
+    secretManagerMocks.get.mockReturnValueOnce('test')
+
+    expect(() => new AuthService()).toThrow(/Invalid JWT_SECRET for production/)
   })
 })
 

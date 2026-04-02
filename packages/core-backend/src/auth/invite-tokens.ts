@@ -1,7 +1,6 @@
 import jwt, { type SignOptions } from 'jsonwebtoken'
 import { secretManager } from '../security/SecretManager'
-
-const INVITE_TOKEN_FALLBACK_SECRET = 'fallback-invite-secret-change-in-production'
+import { resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
 
 export interface InviteTokenPayload {
   type: 'invite'
@@ -17,10 +16,12 @@ type DecodedInvitePayload = InviteTokenPayload & {
 }
 
 function getInviteSecret(): string {
-  return secretManager.get('INVITE_TOKEN_SECRET', {
-    required: process.env.NODE_ENV === 'production',
-    fallback: process.env.JWT_SECRET || INVITE_TOKEN_FALLBACK_SECRET,
-  }) || process.env.JWT_SECRET || INVITE_TOKEN_FALLBACK_SECRET
+  const inviteSecret = secretManager.get('INVITE_TOKEN_SECRET', { required: false })
+  if (inviteSecret) {
+    return resolveRuntimeJwtSecret(inviteSecret)
+  }
+
+  return resolveRuntimeJwtSecret(process.env.JWT_SECRET)
 }
 
 export function issueInviteToken(options: {

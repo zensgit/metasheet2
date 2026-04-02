@@ -17,6 +17,19 @@ function info() {
   echo "[attendance-onprem-package-verify] $*" >&2
 }
 
+function verify_onprem_env_templates() {
+  local root="$1"
+  local rel
+  for rel in \
+    "docker/app.env.attendance-onprem.template" \
+    "docker/app.env.attendance-onprem.ready.env"
+  do
+    local abs="${root}/${rel}"
+    grep -q '^JWT_SECRET=change-me$' "$abs" || die "${rel} must retain JWT_SECRET=change-me placeholder"
+    grep -q '^BCRYPT_SALT_ROUNDS=12$' "$abs" || die "${rel} must pin BCRYPT_SALT_ROUNDS=12"
+  done
+}
+
 function verify_no_github_links() {
   local root="$1"
   local patterns='github\.com|githubusercontent\.com|github\.io'
@@ -167,6 +180,8 @@ fi
 if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
   verify_no_github_links "$pkg_root"
 fi
+
+verify_onprem_env_templates "$pkg_root"
 
 if rg -n 'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' "${pkg_root}/apps/web/dist" >/dev/null 2>&1; then
   die "Frontend bundle embeds loopback VITE_API_* config; rebuild package with isolated web env"
