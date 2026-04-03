@@ -27,7 +27,7 @@ cron_schedule = os.environ['GC_SCHEDULE_CRON']
 cron_line = f\"{cron_schedule} REMOTE_SELF=true {script_path} >> {log_dir}/cron.log 2>&1\"
 current = subprocess.run(['crontab', '-l'], capture_output=True, text=True)
 entries = current.stdout.splitlines() if current.returncode == 0 else []
-present = cron_line in entries
+present = any(str(script_path) in line for line in entries)
 
 print(f'script_exists={str(script_path.exists()).lower()}')
 print(f'log_dir_exists={str(log_dir.exists()).lower()}')
@@ -57,7 +57,10 @@ marker = '# metasheet-onprem-docker-gc'
 
 current = subprocess.run(['crontab', '-l'], capture_output=True, text=True)
 entries = current.stdout.splitlines() if current.returncode == 0 else []
-filtered = [line for line in entries if line.strip() not in {marker, cron_line}]
+filtered = [
+    line for line in entries
+    if line.strip() != marker and script_path not in line
+]
 filtered.extend([marker, cron_line])
 payload = '\\n'.join(filtered).rstrip() + '\\n'
 subprocess.run(['crontab', '-'], input=payload, text=True, check=True)
@@ -78,7 +81,10 @@ marker = '# metasheet-onprem-docker-gc'
 
 current = subprocess.run(['crontab', '-l'], capture_output=True, text=True)
 entries = current.stdout.splitlines() if current.returncode == 0 else []
-filtered = [line for line in entries if line.strip() not in {marker, cron_line}]
+filtered = [
+    line for line in entries
+    if line.strip() != marker and script_path not in line
+]
 if filtered:
     payload = '\\n'.join(filtered).rstrip() + '\\n'
     subprocess.run(['crontab', '-'], input=payload, text=True, check=True)

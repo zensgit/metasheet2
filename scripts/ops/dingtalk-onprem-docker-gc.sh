@@ -72,13 +72,29 @@ from pathlib import Path
 
 
 def parse_df(text: str) -> dict:
-    total, used, avail, percent = text.split()
-    return {
-        "totalKBlocks": int(total),
-        "usedKBlocks": int(used),
-        "availableKBlocks": int(avail),
-        "usePercent": int(percent.rstrip("%")),
-    }
+    parts = text.split()
+    if len(parts) != 4:
+        return {
+            "totalKBlocks": 0,
+            "usedKBlocks": 0,
+            "availableKBlocks": 0,
+            "usePercent": 100,
+        }
+    total, used, avail, percent = parts
+    try:
+        return {
+            "totalKBlocks": int(total),
+            "usedKBlocks": int(used),
+            "availableKBlocks": int(avail),
+            "usePercent": int(percent.rstrip("%")),
+        }
+    except ValueError:
+        return {
+            "totalKBlocks": 0,
+            "usedKBlocks": 0,
+            "availableKBlocks": 0,
+            "usePercent": 100,
+        }
 
 
 def parse_prune_output(text: str) -> dict:
@@ -91,13 +107,13 @@ def parse_prune_output(text: str) -> dict:
         if line.startswith("Deleted Images:") or line.startswith("Deleted Containers:") or line.startswith("Deleted Networks:") or line.startswith("Deleted build cache objects:"):
             continue
         if line.startswith("deleted:"):
-            deleted.append(line.removeprefix("deleted:").strip())
+            deleted.append(line[len("deleted:"):].strip())
             continue
         if line.startswith("untagged:"):
-            deleted.append(line.removeprefix("untagged:").strip())
+            deleted.append(line[len("untagged:"):].strip())
             continue
         if line.startswith("deleted build cache object:"):
-            deleted.append(line.removeprefix("deleted build cache object:").strip())
+            deleted.append(line[len("deleted build cache object:"):].strip())
             continue
         if line.startswith("Total reclaimed space:"):
             reclaimed = line.split(":", 1)[1].strip()

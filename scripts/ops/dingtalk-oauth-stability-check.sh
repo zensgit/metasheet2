@@ -52,7 +52,11 @@ health = json.loads(os.environ['HEALTH_JSON_INPUT'])
 metrics_lines = os.environ['METRICS_TEXT_INPUT'].splitlines()
 alertmanager_status = json.loads(os.environ['ALERTMANAGER_STATUS_JSON_INPUT'])
 alerts = json.loads(os.environ['ALERTS_JSON_INPUT'])
-root_total, root_used, root_avail, root_percent = os.environ['ROOT_DF_LINE_INPUT'].split()
+root_df_parts = os.environ.get('ROOT_DF_LINE_INPUT', '').split()
+if len(root_df_parts) == 4:
+    root_total, root_used, root_avail, root_percent = root_df_parts
+else:
+    root_total, root_used, root_avail, root_percent = ('0', '0', '0', '100%')
 
 def matching(prefixes):
     out = []
