@@ -4,8 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const authState = vi.hoisted(() => ({
   user: {
-    sub: 'user-1',
-    userId: 'user-1',
+    id: 'user-1',
     tenantId: 'tenant-a',
     name: 'Owner One',
   } as Record<string, unknown> | null,
@@ -46,8 +45,7 @@ describe('approvals routes', () => {
 
   beforeEach(() => {
     authState.user = {
-      sub: 'user-1',
-      userId: 'user-1',
+      id: 'user-1',
       tenantId: 'tenant-a',
       name: 'Owner One',
     }
@@ -109,6 +107,45 @@ describe('approvals routes', () => {
         code: 'APPROVAL_USER_REQUIRED',
         message: 'User ID not found in token',
       },
+    })
+  })
+
+  it('accepts req.user.id when loading pending approvals', async () => {
+    authState.user = {
+      id: 'user-1',
+      tenantId: 'tenant-a',
+      name: 'Owner One',
+    }
+    pgState.pool.query
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'apr-1',
+            status: 'pending',
+            version: 0,
+            created_at: new Date('2026-03-26T10:00:00.000Z'),
+            updated_at: new Date('2026-03-26T10:05:00.000Z'),
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ count: '1' }],
+      })
+
+    const response = await request(app).get('/api/approvals/pending')
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      data: [
+        expect.objectContaining({
+          id: 'apr-1',
+          status: 'pending',
+          version: 0,
+        }),
+      ],
+      total: 1,
+      limit: 50,
+      offset: 0,
     })
   })
 

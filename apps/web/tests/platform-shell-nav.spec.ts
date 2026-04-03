@@ -114,5 +114,7 @@ describe('platform shell navigation', () => {
     expect(source).toContain("path: '/approvals'")
     expect(source).toContain("import('../views/ApprovalInboxView.vue')")
     expect(source).toContain("titleZh: '审批中心'")
+    expect(source).toContain("path: '/p/plugin-attendance/attendance'")
+    expect(source).toContain("redirect: '/attendance'")
   })
 })
