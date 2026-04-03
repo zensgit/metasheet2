@@ -94,8 +94,12 @@ report = {
         'resolvedEventsLastWindow': int(os.environ['BRIDGE_RESOLVED_COUNT_INPUT'] or '0'),
     },
 }
-report['healthy'] = (
+health_ok = (
     report['health']['ok'] is True
+    or report['health']['status'] == 'ok'
+)
+report['healthy'] = (
+    health_ok
     and report['webhookConfig']['configured'] is True
     and report['webhookConfig']['host'] == 'hooks.slack.com'
     and report['alertmanager']['notifyErrorsLastWindow'] == 0

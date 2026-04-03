@@ -81,7 +81,7 @@ pnpm ops:onprem-alert-second-operator-drill
 |-----|------|---------------|-------|-------------|----------|---------------|-------|
 | 0 | 2026-04-01 | PASS | PASS | PASS | 0 | 0 | Baseline established |
 | 1 | 2026-04-02 | PASS | PASS | PASS | 0 | 0 | Backend/web containers were missing at start of day; investigation later classified this as a manual-stop / unsupported-rollout lifecycle event, then recovery + re-check passed |
-| 2 | 2026-04-03 |  |  |  |  |  |  |
+| 2 | 2026-04-03 | PASS | PASS | PASS* | 0 | 0 | No container-loss recurrence. Checker initially false-negative because `/health` exposed `status=ok` without `ok=true`; fixed the checker the same day. `PASS*` = bridge/log-based Slack confirmation because this browser context had no Slack login session. |
 | 3 | 2026-04-04 |  |  |  |  |  |  |
 | 4 | 2026-04-05 |  |  |  |  |  |  |
 | 5 | 2026-04-06 |  |  |  |  |  |  |

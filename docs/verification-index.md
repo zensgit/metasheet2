@@ -140,7 +140,10 @@ Entry points:
   - 7-day stabilization checklist: `docs/deployment/dingtalk-oauth-7day-stabilization-checklist-20260401.md`
   - 7-day stabilization Day 0: `docs/deployment/dingtalk-oauth-7day-stabilization-day0-20260401.md`
   - 7-day stabilization Day 1: `docs/deployment/dingtalk-oauth-7day-stabilization-day1-20260402.md`
+  - 7-day stabilization Day 2: `docs/deployment/dingtalk-oauth-7day-stabilization-day2-20260403.md`
   - Stability check command: `pnpm ops:dingtalk-oauth-stability-check`
+  - Stability check contract fix design: `docs/development/dingtalk-oauth-stability-check-contract-fix-design-20260403.md`
+  - Stability check contract fix verification: `docs/development/dingtalk-oauth-stability-check-contract-fix-verification-20260403.md`
   - Second-operator handoff command: `pnpm ops:onprem-alert-second-operator-drill`
   - Second-operator handoff design: `docs/development/onprem-second-operator-handoff-design-20260401.md`
   - Second-operator handoff verification: `docs/development/onprem-second-operator-handoff-verification-20260401.md`
