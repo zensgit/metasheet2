@@ -53,7 +53,7 @@ describe('featureFlags plm gating', () => {
 
     expect(features.plm).toBe(false)
     expect(features.mode).toBe('platform')
-    expect(flags.resolveHomePath()).toBe('/grid')
+    expect(flags.resolveHomePath()).toBe('/attendance')
     expect(flags.isPlmWorkbenchFocused()).toBe(false)
   })
 })
