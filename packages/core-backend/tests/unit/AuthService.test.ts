@@ -260,3 +260,57 @@ describe('AuthService.refreshToken', () => {
     expect(jwtMocks.sign.mock.calls[0]?.[0]).toMatchObject({ userId: 'u4' })
   })
 })
+
+describe('AuthService.register', () => {
+  beforeEach(() => {
+    process.env.NODE_ENV = 'test'
+    process.env.PRODUCT_MODE = 'platform'
+    jwtMocks.verify.mockReset()
+    jwtMocks.sign.mockReset()
+    poolMocks.query.mockReset()
+    poolMocks.query.mockResolvedValue({ rows: [] })
+    rbacMocks.isAdmin.mockReset()
+    rbacMocks.listUserPermissions.mockReset()
+    secretManagerMocks.get.mockReset()
+    secretManagerMocks.get.mockReturnValue('unit-test-secret-abcdefghijklmnopqrstuvwxyz123456')
+    sessionMocks.isUserSessionRevoked.mockReset()
+    sessionMocks.createUserSession.mockReset()
+    sessionMocks.isUserSessionActive.mockReset()
+  })
+
+  it('assigns attendance self-service permissions and role on attendance-mode registration', async () => {
+    process.env.PRODUCT_MODE = 'attendance'
+    poolMocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'employee@example.com',
+          name: 'Employee',
+          role: 'user',
+          permissions: [
+            'spreadsheet:read',
+            'spreadsheet:write',
+            'spreadsheets:read',
+            'spreadsheets:write',
+            'attendance:read',
+            'attendance:write',
+          ],
+          created_at: new Date('2026-04-03T00:00:00.000Z'),
+          updated_at: new Date('2026-04-03T00:00:00.000Z'),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+    const auth = new AuthService()
+    const user = await auth.register('employee@example.com', 'WelcomePass9A', 'Employee')
+
+    expect(user).toBeTruthy()
+    expect(user?.permissions).toEqual(expect.arrayContaining(['attendance:read', 'attendance:write']))
+    expect(poolMocks.query).toHaveBeenNthCalledWith(
+      4,
+      expect.stringContaining('INSERT INTO user_roles'),
+      [expect.any(String), 'attendance_employee'],
+    )
+  })
+})

@@ -10,7 +10,7 @@ import { poolManager } from '../integration/db/connection-pool'
 import { Logger } from '../core/logger'
 import { secretManager } from '../security/SecretManager'
 import { getBcryptSaltRounds, getProductionAuthSecurityIssues, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
-import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { isUserSessionRevoked } from './session-revocation'
 import { createUserSession, isUserSessionActive } from './session-registry'
 
@@ -285,6 +285,15 @@ export class AuthService {
 
       // 加密密码
       const passwordHash = await bcrypt.hash(password, this.config.saltRounds)
+      const registrationPermissions = [
+        'spreadsheet:read',
+        'spreadsheet:write',
+        'spreadsheets:read',
+        'spreadsheets:write',
+        ...(isAttendanceProductMode(process.env.PRODUCT_MODE)
+          ? ['attendance:read', 'attendance:write']
+          : []),
+      ]
 
       // 创建用户
       const userId = crypto.randomUUID()
@@ -294,13 +303,12 @@ export class AuthService {
         name,
         password_hash: passwordHash,
         role: 'user',
-        permissions: [
-          'spreadsheet:read',
-          'spreadsheet:write',
-          'spreadsheets:read',
-          'spreadsheets:write'
-        ]
+        permissions: registrationPermissions
       })
+
+      if (newUser && isAttendanceProductMode(process.env.PRODUCT_MODE)) {
+        await this.assignUserRoles(userId, ['attendance_employee'])
+      }
 
       return newUser
     } catch (error) {
@@ -482,6 +490,24 @@ export class AuthService {
     }
   }
 
+  private async assignUserRoles(userId: string, roleIds: string[]): Promise<void> {
+    if (roleIds.length === 0) return
+    try {
+      const pool = poolManager.get()
+      for (const roleId of roleIds) {
+        await pool.query(
+          `INSERT INTO user_roles (user_id, role_id)
+           VALUES ($1, $2)
+           ON CONFLICT DO NOTHING`,
+          [userId, roleId]
+        )
+      }
+      invalidateUserPerms(userId)
+    } catch (error) {
+      this.logger.warn('User role assignment failed during registration', error instanceof Error ? error : undefined)
+    }
+  }
+
   /**
    * 更新最后登录时间
    */
@@ -569,6 +595,10 @@ export class AuthService {
     const trimmed = value.trim()
     return trimmed.length > 0 ? trimmed : null
   }
+}
+
+function isAttendanceProductMode(value: unknown): boolean {
+  return value === 'attendance' || value === 'attendance-focused'
 }
 
 // 导出单例实例

@@ -9,6 +9,8 @@ import { eventBus } from '../core/EventBusService'
 import { z } from 'zod'
 import { db } from '../db/db'
 import { Logger } from '../core/logger'
+import { authenticate } from '../middleware/auth'
+import { isAdmin as isRbacAdmin } from '../rbac/service'
 
 const logger = new Logger('EventsRouter')
 
@@ -69,6 +71,49 @@ const MetricsQuerySchema = z.object({
 
 export function eventsRouter(): Router {
   const router = Router()
+
+  router.use('/api/events', authenticate, async (req: Request, res: Response, next) => {
+    const user = req.user as Record<string, unknown> | undefined
+    const userId = typeof (user?.id ?? user?.userId ?? user?.sub) === 'string'
+      ? String(user?.id ?? user?.userId ?? user?.sub).trim()
+      : ''
+
+    if (!userId) {
+      res.status(401).json({
+        ok: false,
+        error: { code: 'UNAUTHENTICATED', message: 'Authentication required' }
+      })
+      return
+    }
+
+    const hasLegacyAdminClaim =
+      user?.role === 'admin' ||
+      (Array.isArray(user?.roles) && user.roles.includes('admin')) ||
+      (Array.isArray(user?.perms) && (user.perms.includes('*:*') || user.perms.includes('admin:all') || user.perms.includes('admin')))
+
+    if (hasLegacyAdminClaim) {
+      next()
+      return
+    }
+
+    try {
+      const allowed = await isRbacAdmin(userId)
+      if (!allowed) {
+        res.status(403).json({
+          ok: false,
+          error: { code: 'FORBIDDEN', message: 'Admin access required' }
+        })
+        return
+      }
+      next()
+    } catch (error) {
+      logger.error('Failed to authorize event bus route', error instanceof Error ? error : undefined)
+      res.status(500).json({
+        ok: false,
+        error: { code: 'AUTHORIZATION_FAILED', message: 'Failed to authorize request' }
+      })
+    }
+  })
 
   // POST /api/events/emit - Emit an event
   router.post('/api/events/emit', async (req: Request, res: Response) => {
