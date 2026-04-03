@@ -17,6 +17,23 @@ function info() {
   echo "[attendance-onprem-package-verify] $*" >&2
 }
 
+function verify_workspace_manifest() {
+  local root="$1"
+  local workspace_file="${root}/pnpm-workspace.yaml"
+  [[ -f "$workspace_file" ]] || die "pnpm-workspace.yaml missing from package root"
+
+  grep -q "^  - 'packages/\\*'\$" "$workspace_file" || die "on-prem workspace must include packages/*"
+  grep -q "^  - 'plugins/\\*'\$" "$workspace_file" || die "on-prem workspace must include plugins/*"
+
+  if grep -q "^  - 'apps/\\*'\$" "$workspace_file"; then
+    die "on-prem workspace must exclude apps/* to avoid reinstalling prebuilt web sources"
+  fi
+
+  if grep -q "^  - 'packages/openapi/dist-sdk'\$" "$workspace_file"; then
+    die "on-prem workspace must exclude packages/openapi/dist-sdk"
+  fi
+}
+
 function verify_onprem_env_templates() {
   local root="$1"
   local rel
@@ -182,6 +199,7 @@ if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
 fi
 
 verify_onprem_env_templates "$pkg_root"
+verify_workspace_manifest "$pkg_root"
 
 if rg -n 'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' "${pkg_root}/apps/web/dist" >/dev/null 2>&1; then
   die "Frontend bundle embeds loopback VITE_API_* config; rebuild package with isolated web env"
