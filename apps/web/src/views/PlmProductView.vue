@@ -4317,6 +4317,24 @@ function applyWhereUsedLocalFilterPresetIdentity(preset: FilterPreset) {
 const bomTeamPresetQuery = ref('')
 const whereUsedTeamPresetQuery = ref('')
 
+const activeBomLocalRoutePreset = computed(() => {
+  const presetKey = bomFilterPresetQuery.value.trim()
+  if (!presetKey) return null
+  return bomFilterPresets.value.find((entry) => entry.key === presetKey) || null
+})
+
+const hasActiveBomLocalPresetOwner = computed(() => {
+  const preset = activeBomLocalRoutePreset.value
+  if (!preset) return false
+  return matchPlmTeamFilterPresetStateSnapshot(
+    pickPlmTeamFilterPresetRouteOwnerState(preset),
+    {
+      field: bomFilterField.value,
+      value: bomFilter.value,
+    },
+  )
+})
+
 const {
   teamPresetKey: bomTeamPresetKey,
   teamPresetName: bomTeamPresetName,
@@ -4422,20 +4440,20 @@ const activeBomRoutePreset = computed(() => {
   return bomTeamPresets.value.find((entry) => entry.id === presetId) || null
 })
 
-const activeBomLocalRoutePreset = computed(() => {
-  const presetKey = bomFilterPresetQuery.value.trim()
+const activeWhereUsedLocalRoutePreset = computed(() => {
+  const presetKey = whereUsedFilterPresetQuery.value.trim()
   if (!presetKey) return null
-  return bomFilterPresets.value.find((entry) => entry.key === presetKey) || null
+  return whereUsedFilterPresets.value.find((entry) => entry.key === presetKey) || null
 })
 
-const hasActiveBomLocalPresetOwner = computed(() => {
-  const preset = activeBomLocalRoutePreset.value
+const hasActiveWhereUsedLocalPresetOwner = computed(() => {
+  const preset = activeWhereUsedLocalRoutePreset.value
   if (!preset) return false
   return matchPlmTeamFilterPresetStateSnapshot(
     pickPlmTeamFilterPresetRouteOwnerState(preset),
     {
-      field: bomFilterField.value,
-      value: bomFilter.value,
+      field: whereUsedFilterField.value,
+      value: whereUsedFilter.value,
     },
   )
 })
@@ -4544,24 +4562,6 @@ const activeWhereUsedRoutePreset = computed(() => {
   const presetId = whereUsedTeamPresetQuery.value.trim()
   if (!presetId) return null
   return whereUsedTeamPresets.value.find((entry) => entry.id === presetId) || null
-})
-
-const activeWhereUsedLocalRoutePreset = computed(() => {
-  const presetKey = whereUsedFilterPresetQuery.value.trim()
-  if (!presetKey) return null
-  return whereUsedFilterPresets.value.find((entry) => entry.key === presetKey) || null
-})
-
-const hasActiveWhereUsedLocalPresetOwner = computed(() => {
-  const preset = activeWhereUsedLocalRoutePreset.value
-  if (!preset) return false
-  return matchPlmTeamFilterPresetStateSnapshot(
-    pickPlmTeamFilterPresetRouteOwnerState(preset),
-    {
-      field: whereUsedFilterField.value,
-      value: whereUsedFilter.value,
-    },
-  )
 })
 
 async function applyBomTeamPreset() {
@@ -4900,6 +4900,10 @@ async function deleteWhereUsedTeamPresetSelection() {
   )
 }
 
+const documentTeamViewQuery = ref('')
+const cadTeamViewQuery = ref('')
+const approvalsTeamViewQuery = ref('')
+
 function buildWorkbenchTeamViewState(): PlmWorkbenchViewQueryState {
   const query = normalizePlmWorkbenchCollaborativeQuerySnapshot(buildDeepLinkParams(true))
   return {
@@ -5097,13 +5101,9 @@ async function openWorkbenchSceneAudit() {
   )
   await router.push({
     name: 'plm-audit',
-    query: buildWorkbenchAuditQuery(returnToPlmPath),
+  query: buildWorkbenchAuditQuery(returnToPlmPath),
   })
 }
-
-const documentTeamViewQuery = ref('')
-const cadTeamViewQuery = ref('')
-const approvalsTeamViewQuery = ref('')
 
 const {
   teamViewKey: documentTeamViewKey,

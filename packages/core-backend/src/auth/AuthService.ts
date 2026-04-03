@@ -5,6 +5,7 @@
 
 import * as jwt from 'jsonwebtoken'
 import * as bcrypt from 'bcryptjs'
+import * as crypto from 'node:crypto'
 import { poolManager } from '../integration/db/connection-pool'
 import { Logger } from '../core/logger'
 import { secretManager } from '../security/SecretManager'
@@ -86,6 +87,13 @@ export class AuthService {
     }
 
     return process.env.NODE_ENV !== 'production'
+  }
+
+  private createSessionId(): string {
+    if (typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID()
+    }
+    return crypto.randomBytes(16).toString('hex')
   }
 
   private normalizeClaimStringArray(value: unknown): string[] {
@@ -519,7 +527,7 @@ export class AuthService {
 
       const sessionId = typeof payload.sid === 'string' && payload.sid.trim().length > 0
         ? payload.sid.trim()
-        : crypto.randomUUID()
+        : this.createSessionId()
       if (typeof payload.sid === 'string' && payload.sid.trim().length > 0) {
         const active = await isUserSessionActive(user.id, sessionId)
         if (!active) {

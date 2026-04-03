@@ -649,7 +649,6 @@ function firstLineText(value) {
     const selectRequestPromise = waitForProductResponse(page, productId);
     await targetRow.locator('button:has-text("使用")').click();
     await selectRequestPromise;
-    await waitOptional(searchSection, searchQuery);
 
     const detailSection = page.locator('section:has-text("PLM 产品详情")');
     const partNumberCell = detailSection.locator('.detail-grid > div').filter({ hasText: '料号' }).locator('strong');
@@ -1022,19 +1021,19 @@ function firstLineText(value) {
       }, resolvedChildNumber, { timeout: 60000 });
     }
     await detailSection.getByText('已切换到子件产品', { exact: false }).waitFor({ timeout: 60000 });
-    if (targetRow) {
-      await targetRow.locator('button:has-text("使用")').click();
-      await page.waitForFunction((expected) => {
-        const el = document.querySelector('#plm-item-number');
-        return el && el.value && el.value.trim() === expected;
-      }, itemNumberValue, { timeout: 60000 });
-      await page.waitForFunction(() => {
-        const el = document.querySelector('#plm-product-id');
-        return el && el.value && el.value.trim().length > 0;
-      }, null, { timeout: 60000 });
-    } else {
-      console.warn('Missing search row; unable to restore original product.');
-    }
+    await detailSection.locator('#plm-product-id').fill('');
+    await detailSection.locator('#plm-item-number').fill(itemNumberValue);
+    const restoreRequestPromise = waitForProductResponse(page);
+    await detailSection.locator('button:has-text("加载产品")').click();
+    await restoreRequestPromise;
+    await page.waitForFunction((expected) => {
+      const el = document.querySelector('#plm-item-number');
+      return el && el.value && el.value.trim() === expected;
+    }, itemNumberValue, { timeout: 60000 });
+    await page.waitForFunction(() => {
+      const el = document.querySelector('#plm-product-id');
+      return el && el.value && el.value.trim().length > 0;
+    }, null, { timeout: 60000 });
   } else {
     console.warn('Skipping BOM child actions; missing child identifier.');
   }
