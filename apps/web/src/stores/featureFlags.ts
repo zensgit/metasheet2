@@ -9,6 +9,7 @@ export interface ProductFeatures {
   workflow: boolean
   attendanceAdmin: boolean
   attendanceImport: boolean
+  plm: boolean
   mode: ProductMode
 }
 
@@ -38,6 +39,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
   workflow: false,
   attendanceAdmin: false,
   attendanceImport: false,
+  plm: false,
   mode: 'platform',
 }
 
@@ -147,6 +149,14 @@ function extractFeaturesFromPayload(payload: any): Partial<ProductFeatures> {
         : typeof featuresNode.attendance_import === 'boolean'
           ? featuresNode.attendance_import
           : undefined,
+    plm:
+      typeof featuresNode.plm === 'boolean'
+        ? featuresNode.plm
+        : typeof featuresNode.plmWorkbench === 'boolean'
+          ? featuresNode.plmWorkbench
+          : typeof featuresNode.plm_workbench === 'boolean'
+            ? featuresNode.plm_workbench
+            : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
       featuresNode.productMode ??
@@ -227,15 +237,26 @@ function resolveFeatures(
     attendanceAdmin,
   )
 
-  const mode = normalizeMode(override.mode)
+  let mode = normalizeMode(override.mode)
     || normalizeMode(backend.mode)
     || 'platform'
+  const inferredPlm = boolOrDefault(
+    override.plm,
+    backend.plm,
+    mode === 'plm-workbench',
+    mode === 'platform',
+  )
+  const plm = mode === 'attendance' ? false : inferredPlm
+  if (mode === 'plm-workbench' && !plm) {
+    mode = 'platform'
+  }
 
   return {
     attendance,
     workflow,
     attendanceAdmin,
     attendanceImport,
+    plm,
     mode,
   }
 }
@@ -310,7 +331,7 @@ function isAttendanceFocused(): boolean {
 }
 
 function isPlmWorkbenchFocused(): boolean {
-  return state.features.mode === 'plm-workbench'
+  return state.features.mode === 'plm-workbench' && state.features.plm
 }
 
 function resolveHomePath(): string {

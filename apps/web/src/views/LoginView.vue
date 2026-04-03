@@ -73,6 +73,7 @@ interface AuthFeaturePayload {
   workflow?: unknown
   attendanceAdmin?: unknown
   attendanceImport?: unknown
+  plm?: unknown
 }
 
 const router = useRouter()

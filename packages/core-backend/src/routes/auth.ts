@@ -19,6 +19,7 @@ import { FEATURE_FLAGS } from '../config/flags'
 import { Logger } from '../core/logger'
 import { query } from '../db/pg'
 import { secretManager } from '../security/SecretManager'
+import { isPlmEnabled, resolveEffectiveProductMode } from '../config/product-mode'
 import { getBcryptSaltRounds, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
 
 const logger = new Logger('AuthRouter')
@@ -181,27 +182,22 @@ function sanitizeName(name: string): string {
   return name.trim().replace(/[<>'"&;]/g, '').slice(0, 100)
 }
 
-type ProductMode = 'platform' | 'attendance' | 'plm-workbench'
-
-function normalizeProductMode(value: unknown): ProductMode {
-  if (value === 'attendance' || value === 'attendance-focused') return 'attendance'
-  if (value === 'plm-workbench' || value === 'plmWorkbench' || value === 'plm-focused') return 'plm-workbench'
-  return 'platform'
-}
-
 function buildFeaturePayload(authUser: User) {
   const permissions = Array.isArray(authUser.permissions) ? authUser.permissions : []
   const attendance = authUser.role === 'admin' || permissions.some((permission) => permission.startsWith('attendance:'))
   const attendanceAdmin = authUser.role === 'admin' || permissions.includes('attendance:admin')
   const attendanceImport = attendanceAdmin || permissions.includes('attendance:write')
   const workflow = FEATURE_FLAGS.workflowEnabled
+  const plm = isPlmEnabled(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
+  const mode = resolveEffectiveProductMode(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
 
   return {
     attendance,
     workflow,
     attendanceAdmin,
     attendanceImport,
-    mode: normalizeProductMode(process.env.PRODUCT_MODE),
+    plm,
+    mode,
   }
 }
 

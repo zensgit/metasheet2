@@ -93,13 +93,13 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/plm',
     name: 'plm',
     component: PlmProductView,
-    meta: { title: 'PLM', requiresAuth: true }
+    meta: { title: 'PLM', requiresAuth: true, requiredFeature: 'plm' }
   },
   {
     path: '/plm/audit',
     name: 'plm-audit',
     component: () => import('../views/PlmAuditView.vue'),
-    meta: { title: 'PLM Audit', requiresAuth: true }
+    meta: { title: 'PLM Audit', requiresAuth: true, requiredFeature: 'plm' }
   },
   {
     path: '/settings',

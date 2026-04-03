@@ -35,8 +35,8 @@
             <router-link v-if="canManageUsers" to="/admin/roles" class="nav-link">{{ navLabels.roles }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/permissions" class="nav-link">{{ navLabels.permissions }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
-            <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
-            <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
+          <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
+          <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
           </template>
         </template>
@@ -102,6 +102,7 @@ const isLoggedIn = computed(() => {
   void route.fullPath
   return Boolean(getToken())
 })
+const canUsePlm = computed(() => hasFeature('plm'))
 const navLabels = computed(() => {
   if (isZh.value) {
     return {

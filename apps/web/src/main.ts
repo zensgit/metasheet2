@@ -78,6 +78,7 @@ router.beforeEach(async (to, _from, next) => {
       || required === 'workflow'
       || required === 'attendanceAdmin'
       || required === 'attendanceImport'
+      || required === 'plm'
         ? required
         : null
 
