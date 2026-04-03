@@ -45,6 +45,20 @@ function normalizeApprovalText(value: unknown): string | null {
   return normalized.length > 0 ? normalized : null
 }
 
+function resolveApprovalActorId(req: Request): string | null {
+  const candidate = req.user?.id ?? req.user?.userId ?? req.user?.sub
+  if (typeof candidate !== 'string') return null
+  const normalized = candidate.trim()
+  return normalized.length > 0 ? normalized : null
+}
+
+function resolveApprovalActorName(req: Request, fallbackId: string): string {
+  const candidate = req.user?.name ?? req.user?.email ?? fallbackId
+  if (typeof candidate !== 'string') return fallbackId
+  const normalized = candidate.trim()
+  return normalized.length > 0 ? normalized : fallbackId
+}
+
 function approvalVersionConflictResponse(currentVersion: number) {
   return {
     ok: false,
@@ -78,7 +92,7 @@ export function approvalsRouter(): Router {
         )
       }
 
-      const userId = req.user?.sub || req.user?.userId
+      const userId = resolveApprovalActorId(req)
       if (!userId) {
         return res.status(401).json(
           approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
@@ -138,14 +152,14 @@ export function approvalsRouter(): Router {
       const comment = normalizeApprovalText(req.body?.comment)
       const metadata =
         req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {}
-      const userId = req.user?.sub || req.user?.userId
-      const userName = req.user?.name || req.user?.email || userId
+      const userId = resolveApprovalActorId(req)
 
       if (!userId) {
         return res.status(401).json(
           approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
         )
       }
+      const userName = resolveApprovalActorName(req, userId)
 
       if (requestedVersion === null) {
         return res.status(400).json({
@@ -268,14 +282,14 @@ export function approvalsRouter(): Router {
       const reason = normalizeApprovalText(req.body?.reason) ?? comment
       const metadata =
         req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {}
-      const userId = req.user?.sub || req.user?.userId
-      const userName = req.user?.name || req.user?.email || userId
+      const userId = resolveApprovalActorId(req)
 
       if (!userId) {
         return res.status(401).json(
           approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
         )
       }
+      const userName = resolveApprovalActorName(req, userId)
 
       if (requestedVersion === null) {
         return res.status(400).json({

@@ -30,6 +30,20 @@ describe('usePlugins', () => {
           ],
         },
       },
+      {
+        name: 'plugin-demo',
+        status: 'active',
+        contributes: {
+          views: [
+            {
+              id: 'timeline',
+              name: 'Timeline',
+              location: 'main-nav',
+              order: 20,
+            },
+          ],
+        },
+      },
     ]))
 
     vi.stubGlobal('fetch', fetchMock)
@@ -41,14 +55,14 @@ describe('usePlugins', () => {
     await Promise.all([first.fetchPlugins(), second.fetchPlugins()])
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(first.plugins.value).toHaveLength(1)
-    expect(second.plugins.value).toHaveLength(1)
+    expect(first.plugins.value).toHaveLength(2)
+    expect(second.plugins.value).toHaveLength(2)
     expect(first.navItems.value).toEqual([
       {
-        id: 'plugin-attendance:attendance',
-        label: 'Attendance',
-        order: undefined,
-        path: '/p/plugin-attendance/attendance',
+        id: 'plugin-demo:timeline',
+        label: 'Timeline',
+        order: 20,
+        path: '/p/plugin-demo/timeline',
       },
     ])
   })

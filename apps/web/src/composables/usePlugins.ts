@@ -43,6 +43,18 @@ const error = ref<string | null>(null)
 const loaded = ref(false)
 let inflightFetch: Promise<void> | null = null
 
+function shouldExposePluginNavItem(view: PluginViewEntry): boolean {
+  if (view.location !== 'main-nav') return false
+
+  // The platform shell owns the canonical /attendance route. Hide the raw
+  // plugin-contributed copy so the nav never shows a duplicate Attendance item.
+  if (view.plugin === 'plugin-attendance' && view.id === 'attendance') {
+    return false
+  }
+
+  return true
+}
+
 async function runFetchPlugins (): Promise<void> {
   loading.value = true
   error.value = null
@@ -67,7 +79,7 @@ async function runFetchPlugins (): Promise<void> {
       .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name))
 
     navItems.value = views.value
-      .filter(v => v.location === 'main-nav')
+      .filter(shouldExposePluginNavItem)
       .map(v => ({
         id: `${v.plugin}:${v.id}`,
         label: v.name,

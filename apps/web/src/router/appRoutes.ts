@@ -70,6 +70,12 @@ export const appRoutes: RouteRecordRaw[] = [
     component: AttendanceExperienceView,
     meta: { title: 'Attendance', titleZh: '考勤', requiresAuth: true, requiredFeature: 'attendance' }
   },
+  {
+    path: '/p/plugin-attendance/attendance',
+    name: 'plugin-attendance-legacy-view',
+    redirect: '/attendance',
+    meta: { title: 'Attendance', titleZh: '考勤', requiresAuth: true, requiredFeature: 'attendance' },
+  },
   buildMultitableRoute(() => import('../multitable/views/MultitableEmbedHost.vue')),
   {
     path: '/p/:plugin/:viewId',
