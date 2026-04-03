@@ -11,6 +11,7 @@ import { Logger } from '../core/logger'
 import { secretManager } from '../security/SecretManager'
 import { getBcryptSaltRounds, getProductionAuthSecurityIssues, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
+import { supportsAttendanceSelfService } from '../config/product-mode'
 import { isUserSessionRevoked } from './session-revocation'
 import { createUserSession, isUserSessionActive } from './session-registry'
 
@@ -46,6 +47,9 @@ export interface AuthConfig {
   jwtExpiry: string
   saltRounds: number
 }
+
+const ATTENDANCE_SELF_SERVICE_ROLE_ID = 'attendance_employee'
+const ATTENDANCE_SELF_SERVICE_PERMISSIONS = ['attendance:read', 'attendance:write'] as const
 
 export class AuthService {
   private config: AuthConfig
@@ -285,13 +289,14 @@ export class AuthService {
 
       // 加密密码
       const passwordHash = await bcrypt.hash(password, this.config.saltRounds)
+      const enableAttendanceSelfService = supportsAttendanceSelfService(process.env.PRODUCT_MODE)
       const registrationPermissions = [
         'spreadsheet:read',
         'spreadsheet:write',
         'spreadsheets:read',
         'spreadsheets:write',
-        ...(isAttendanceProductMode(process.env.PRODUCT_MODE)
-          ? ['attendance:read', 'attendance:write']
+        ...(enableAttendanceSelfService
+          ? ATTENDANCE_SELF_SERVICE_PERMISSIONS
           : []),
       ]
 
@@ -306,8 +311,8 @@ export class AuthService {
         permissions: registrationPermissions
       })
 
-      if (newUser && isAttendanceProductMode(process.env.PRODUCT_MODE)) {
-        await this.assignUserRoles(userId, ['attendance_employee'])
+      if (newUser && enableAttendanceSelfService) {
+        await this.assignUserRoles(userId, [ATTENDANCE_SELF_SERVICE_ROLE_ID])
       }
 
       return newUser
@@ -434,7 +439,18 @@ export class AuthService {
       this.logger.warn('RBAC permission lookup failed', error instanceof Error ? error : undefined)
     }
 
+    if (this.shouldBackfillAttendanceSelfService(role, permissions)) {
+      await this.assignUserRoles(userId, [ATTENDANCE_SELF_SERVICE_ROLE_ID])
+      permissions = Array.from(new Set([...permissions, ...ATTENDANCE_SELF_SERVICE_PERMISSIONS]))
+    }
+
     return { role, permissions }
+  }
+
+  private shouldBackfillAttendanceSelfService(role: string, permissions: string[]): boolean {
+    if (!supportsAttendanceSelfService(process.env.PRODUCT_MODE)) return false
+    if (role === 'admin') return false
+    return !permissions.some((permission) => permission.startsWith('attendance:'))
   }
 
   /**
@@ -595,10 +611,6 @@ export class AuthService {
     const trimmed = value.trim()
     return trimmed.length > 0 ? trimmed : null
   }
-}
-
-function isAttendanceProductMode(value: unknown): boolean {
-  return value === 'attendance' || value === 'attendance-focused'
 }
 
 // 导出单例实例
