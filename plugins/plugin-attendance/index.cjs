@@ -17755,6 +17755,46 @@ module.exports = {
         }
 
         try {
+          const usageRows = await db.query(
+            `SELECT
+               EXISTS (
+                 SELECT 1
+                 FROM attendance_shift_assignments a
+                 WHERE a.org_id = $1
+                   AND a.shift_id = $2
+                   AND a.is_active = true
+                   AND (a.end_date IS NULL OR a.end_date >= CURRENT_DATE)
+               ) AS has_active_assignment,
+               EXISTS (
+                 SELECT 1
+                 FROM attendance_rotation_assignments a
+                 JOIN attendance_rotation_rules r
+                   ON r.id = a.rotation_rule_id
+                  AND r.org_id = a.org_id
+                 WHERE a.org_id = $1
+                   AND a.is_active = true
+                   AND r.is_active = true
+                   AND (a.end_date IS NULL OR a.end_date >= CURRENT_DATE)
+                   AND EXISTS (
+                     SELECT 1
+                     FROM jsonb_array_elements_text(COALESCE(r.shift_sequence, '[]'::jsonb)) AS seq(shift_id)
+                     WHERE seq.shift_id = $2::text
+                   )
+               ) AS has_active_rotation_usage`,
+            [orgId, shiftId]
+          )
+          const usage = usageRows[0] ?? {}
+          if (usage.has_active_assignment || usage.has_active_rotation_usage) {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: 'CONFLICT',
+                message: 'Shift is still referenced by active assignments or rotation schedules',
+              },
+            })
+            return
+          }
+
           const rows = await db.query(
             'DELETE FROM attendance_shifts WHERE id = $1 AND org_id = $2 RETURNING id',
             [shiftId, orgId]

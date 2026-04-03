@@ -1637,6 +1637,154 @@ describe('Attendance Plugin Integration', () => {
     expect(String(longNameUpdateError?.message || '')).toContain('200')
   })
 
+  it('returns 409 when deleting a shift that is still referenced by an active assignment', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-shift-delete-assignment-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Protected Shift ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        workingDays: [1, 2, 3, 4, 5],
+      }),
+    })
+    expect(shiftRes.status).toBe(201)
+    const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(shiftId).toBeTruthy()
+    if (!shiftId) return
+
+    const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: testUserId,
+        shiftId,
+        startDate: '2026-03-20',
+        isActive: true,
+      }),
+    })
+    expect(assignmentRes.status).toBe(201)
+
+    const deleteRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(deleteRes.status).toBe(409)
+    const deleteBody = deleteRes.body as { error?: { code?: string; message?: string } } | undefined
+    expect(deleteBody?.error?.code).toBe('CONFLICT')
+    expect(String(deleteBody?.error?.message || '')).toMatch(/active assignments|rotation schedules/i)
+
+    const lookupRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(lookupRes.status).toBe(200)
+  })
+
+  it('returns 409 when deleting a shift that is still referenced by an active rotation assignment', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-shift-delete-rotation-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Rotation Protected Shift ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        workStartTime: '07:00',
+        workEndTime: '15:00',
+        workingDays: [1, 2, 3, 4, 5],
+      }),
+    })
+    expect(shiftRes.status).toBe(201)
+    const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(shiftId).toBeTruthy()
+    if (!shiftId) return
+
+    const rotationRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Delete Guard Rotation ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        shiftSequence: [shiftId],
+        isActive: true,
+      }),
+    })
+    expect(rotationRuleRes.status).toBe(201)
+    const rotationRuleId = (rotationRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(rotationRuleId).toBeTruthy()
+    if (!rotationRuleId) return
+
+    const rotationAssignmentRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: testUserId,
+        rotationRuleId,
+        startDate: '2026-03-20',
+        isActive: true,
+      }),
+    })
+    expect(rotationAssignmentRes.status).toBe(201)
+
+    const deleteRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(deleteRes.status).toBe(409)
+    const deleteBody = deleteRes.body as { error?: { code?: string; message?: string } } | undefined
+    expect(deleteBody?.error?.code).toBe('CONFLICT')
+    expect(String(deleteBody?.error?.message || '')).toMatch(/active assignments|rotation schedules/i)
+
+    const lookupRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(lookupRes.status).toBe(200)
+  })
+
   it('accepts payroll cycle generate year/month aliases and reports missing anchors clearly', async () => {
     if (!baseUrl) return
 
