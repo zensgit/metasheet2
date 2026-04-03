@@ -650,10 +650,36 @@ async function fetchDingTalkColumnValues({ baseUrl, accessToken, userId, columnI
 }
 
 class HttpError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, details = null) {
     super(message)
     this.status = status
     this.code = code
+    if (Array.isArray(details) && details.length > 0) {
+      this.details = details
+    }
+  }
+}
+
+function formatZodValidationDetails(error) {
+  const issues = Array.isArray(error?.issues) ? error.issues : []
+  return issues.map((issue) => ({
+    field: Array.isArray(issue?.path) && issue.path.length > 0 ? issue.path.join('.') : 'body',
+    message: issue?.message || 'Invalid value',
+  }))
+}
+
+function singleValidationDetail(field, message) {
+  return [{ field, message }]
+}
+
+function validationErrorBody(message, details = null) {
+  return {
+    ok: false,
+    error: {
+      code: 'VALIDATION_ERROR',
+      message,
+      ...(Array.isArray(details) && details.length > 0 ? { details } : {}),
+    },
   }
 }
 
@@ -9265,7 +9291,14 @@ module.exports = {
           res.json({ ok: true, data: result })
         } catch (error) {
           if (error instanceof HttpError) {
-            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            res.status(error.status).json({
+              ok: false,
+              error: {
+                code: error.code,
+                message: error.message,
+                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+              },
+            })
             return
           }
           if (isDatabaseSchemaError(error)) {
@@ -9834,8 +9867,10 @@ module.exports = {
 
     const requestWriteSchema = z.object({
       workDate: z.string().optional(),
+      work_date: z.string().optional(),
       date: z.string().optional(),
       requestType: z.string().optional(),
+      request_type: z.string().optional(),
       type: z.string().optional(),
       requestedInAt: z.string().optional(),
       requested_in_at: z.string().optional(),
@@ -9845,13 +9880,20 @@ module.exports = {
       clockOut: z.string().optional(),
       reason: z.string().optional(),
       leaveTypeId: z.string().optional(),
+      leave_type_id: z.string().optional(),
       leaveTypeCode: z.string().optional(),
+      leave_type_code: z.string().optional(),
       overtimeRuleId: z.string().optional(),
+      overtime_rule_id: z.string().optional(),
       overtimeRuleName: z.string().optional(),
+      overtime_rule_name: z.string().optional(),
       minutes: z.coerce.number().int().min(0).optional(),
       attachmentUrl: z.string().optional(),
+      attachment_url: z.string().optional(),
       approvalFlowId: z.string().optional(),
+      approval_flow_id: z.string().optional(),
       orgId: z.string().optional(),
+      org_id: z.string().optional(),
     })
 
     function normalizeRequestReferenceInput(value, fallback = null) {
@@ -9875,15 +9917,30 @@ module.exports = {
       const existingApprovalFlow = normalizeMetadata(existingMetadata.approvalFlow)
 
       const workDate = normalizeDateOnlyValue(
-        firstDefinedValue(parsedData.workDate, parsedData.date, existingRequest?.work_date)
+        firstDefinedValue(parsedData.workDate, parsedData.work_date, parsedData.date, existingRequest?.work_date)
       )
       if (!workDate) {
-        throw new HttpError(400, 'VALIDATION_ERROR', 'workDate must use YYYY-MM-DD format')
+        throw new HttpError(
+          400,
+          'VALIDATION_ERROR',
+          'workDate must use YYYY-MM-DD format',
+          singleValidationDetail('workDate', 'Must use YYYY-MM-DD format')
+        )
       }
 
-      const requestType = firstDefinedValue(parsedData.requestType, parsedData.type, existingRequest?.request_type)
+      const requestType = firstDefinedValue(
+        parsedData.requestType,
+        parsedData.request_type,
+        parsedData.type,
+        existingRequest?.request_type
+      )
       if (!REQUEST_TYPES.includes(requestType)) {
-        throw new HttpError(400, 'VALIDATION_ERROR', `requestType must be one of: ${REQUEST_TYPES.join(', ')}`)
+        throw new HttpError(
+          400,
+          'VALIDATION_ERROR',
+          `requestType must be one of: ${REQUEST_TYPES.join(', ')}`,
+          singleValidationDetail('requestType', `Must be one of: ${REQUEST_TYPES.join(', ')}`)
+        )
       }
 
       const requestedInSource = firstDefinedValue(
@@ -9902,16 +9959,39 @@ module.exports = {
       const requestedOutAt = parseDateInput(requestedOutSource)
 
       if (requestedInAt && requestedOutAt && requestedOutAt <= requestedInAt) {
-        throw new HttpError(400, 'VALIDATION_ERROR', 'requestedOutAt must be after requestedInAt')
+        throw new HttpError(
+          400,
+          'VALIDATION_ERROR',
+          'requestedOutAt must be after requestedInAt',
+          singleValidationDetail('requestedOutAt', 'Must be after requestedInAt')
+        )
       }
       if (requestType === 'missed_check_in' && !requestedInAt) {
-        throw new HttpError(400, 'VALIDATION_ERROR', 'requestedInAt required')
+        throw new HttpError(
+          400,
+          'VALIDATION_ERROR',
+          'requestedInAt required',
+          singleValidationDetail('requestedInAt', 'Required for missed_check_in')
+        )
       }
       if (requestType === 'missed_check_out' && !requestedOutAt) {
-        throw new HttpError(400, 'VALIDATION_ERROR', 'requestedOutAt required')
+        throw new HttpError(
+          400,
+          'VALIDATION_ERROR',
+          'requestedOutAt required',
+          singleValidationDetail('requestedOutAt', 'Required for missed_check_out')
+        )
       }
       if (requestType === 'time_correction' && !requestedInAt && !requestedOutAt) {
-        throw new HttpError(400, 'VALIDATION_ERROR', 'requestedInAt or requestedOutAt required')
+        throw new HttpError(
+          400,
+          'VALIDATION_ERROR',
+          'requestedInAt or requestedOutAt required',
+          [
+            { field: 'requestedInAt', message: 'Provide requestedInAt or requestedOutAt for time_correction' },
+            { field: 'requestedOutAt', message: 'Provide requestedInAt or requestedOutAt for time_correction' },
+          ]
+        )
       }
 
       let durationMinutes = parsedData.minutes !== undefined
@@ -9925,11 +10005,16 @@ module.exports = {
       let overtimeRule = null
       if (requestType === 'leave') {
         leaveType = await loadLeaveType(db, orgId, {
-          id: normalizeRequestReferenceInput(parsedData.leaveTypeId, existingLeaveType.id),
-          code: normalizeRequestReferenceInput(parsedData.leaveTypeCode, existingLeaveType.code),
+          id: normalizeRequestReferenceInput(firstDefinedValue(parsedData.leaveTypeId, parsedData.leave_type_id), existingLeaveType.id),
+          code: normalizeRequestReferenceInput(firstDefinedValue(parsedData.leaveTypeCode, parsedData.leave_type_code), existingLeaveType.code),
         })
         if (!leaveType) {
-          throw new HttpError(404, 'NOT_FOUND', 'Leave type not found')
+          throw new HttpError(
+            404,
+            'NOT_FOUND',
+            'Leave type not found',
+            singleValidationDetail('leaveTypeId', 'Provide a valid leaveTypeId or leaveTypeCode')
+          )
         }
         if (!leaveType.isActive) {
           throw new HttpError(400, 'INVALID_STATE', 'Leave type inactive')
@@ -9939,28 +10024,43 @@ module.exports = {
         }
       } else if (requestType === 'overtime') {
         overtimeRule = await loadOvertimeRule(db, orgId, {
-          id: normalizeRequestReferenceInput(parsedData.overtimeRuleId, existingOvertimeRule.id),
-          name: normalizeRequestReferenceInput(parsedData.overtimeRuleName, existingOvertimeRule.name),
+          id: normalizeRequestReferenceInput(firstDefinedValue(parsedData.overtimeRuleId, parsedData.overtime_rule_id), existingOvertimeRule.id),
+          name: normalizeRequestReferenceInput(firstDefinedValue(parsedData.overtimeRuleName, parsedData.overtime_rule_name), existingOvertimeRule.name),
         })
         if (!overtimeRule) {
-          throw new HttpError(404, 'NOT_FOUND', 'Overtime rule not found')
+          throw new HttpError(
+            404,
+            'NOT_FOUND',
+            'Overtime rule not found',
+            singleValidationDetail('overtimeRuleId', 'Provide a valid overtimeRuleId or overtimeRuleName')
+          )
         }
         if (!overtimeRule.isActive) {
           throw new HttpError(400, 'INVALID_STATE', 'Overtime rule inactive')
         }
         if (!durationMinutes) {
-          throw new HttpError(400, 'VALIDATION_ERROR', 'Duration required for overtime')
+          throw new HttpError(
+            400,
+            'VALIDATION_ERROR',
+            'Duration required for overtime',
+            singleValidationDetail('minutes', 'Provide minutes or requestedInAt/requestedOutAt for overtime')
+          )
         }
         durationMinutes = applyOvertimeRule(durationMinutes, overtimeRule)
       }
 
       if ((requestType === 'leave' || requestType === 'overtime') && (!durationMinutes || durationMinutes <= 0)) {
-        throw new HttpError(400, 'VALIDATION_ERROR', 'Duration required')
+        throw new HttpError(
+          400,
+          'VALIDATION_ERROR',
+          'Duration required',
+          singleValidationDetail('minutes', 'Duration must be greater than 0')
+        )
       }
 
       const approvalFlow = await loadApprovalFlow(db, orgId, {
         requestType,
-        flowId: normalizeRequestReferenceInput(parsedData.approvalFlowId, existingApprovalFlow.id),
+        flowId: normalizeRequestReferenceInput(firstDefinedValue(parsedData.approvalFlowId, parsedData.approval_flow_id), existingApprovalFlow.id),
       })
 
       const reason = parsedData.reason === undefined
@@ -9968,7 +10068,7 @@ module.exports = {
         : normalizeOptionalText(parsedData.reason)
       const attachmentUrl = parsedData.attachmentUrl === undefined
         ? normalizeOptionalText(existingMetadata.attachmentUrl)
-        : normalizeOptionalText(parsedData.attachmentUrl)
+        : normalizeOptionalText(firstDefinedValue(parsedData.attachmentUrl, parsedData.attachment_url))
 
       const metadata = {}
       if (durationMinutes) metadata.minutes = durationMinutes
@@ -10020,7 +10120,12 @@ module.exports = {
       withPermission('attendance:write', async (req, res) => {
         const parsed = requestWriteSchema.safeParse(req.body)
         if (!parsed.success) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          res.status(400).json(
+            validationErrorBody(
+              'Invalid attendance request payload',
+              formatZodValidationDetails(parsed.error)
+            )
+          )
           return
         }
 
@@ -10036,7 +10141,14 @@ module.exports = {
           draft = await resolveAttendanceRequestDraft(parsed.data, { org_id: orgId })
         } catch (error) {
           if (error instanceof HttpError) {
-            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            res.status(error.status).json({
+              ok: false,
+              error: {
+                code: error.code,
+                message: error.message,
+                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+              },
+            })
             return
           }
           throw error
@@ -10234,7 +10346,12 @@ module.exports = {
       withPermission('attendance:write', async (req, res) => {
         const parsed = requestWriteSchema.safeParse(req.body ?? {})
         if (!parsed.success) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+          res.status(400).json(
+            validationErrorBody(
+              'Invalid attendance request payload',
+              formatZodValidationDetails(parsed.error)
+            )
+          )
           return
         }
 
@@ -10310,7 +10427,14 @@ module.exports = {
           res.json({ ok: true, data: { request: mapAttendanceRequestRow(request) } })
         } catch (error) {
           if (error instanceof HttpError) {
-            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            res.status(error.status).json({
+              ok: false,
+              error: {
+                code: error.code,
+                message: error.message,
+                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+              },
+            })
             return
           }
           if (isDatabaseSchemaError(error)) {

@@ -2702,7 +2702,7 @@ describe('Attendance Plugin Integration', () => {
     expect(body.error?.message).toContain('YYYY-MM-DD')
   })
 
-  it('accepts legacy attendance request aliases and rejects duplicate attendance requests for the same day and request payload', async () => {
+  it('accepts snake_case attendance request aliases and returns validation details for malformed request payloads', async () => {
     if (!baseUrl) return
 
     const testUserId = `attendance-request-dedupe-${Date.now().toString(36)}`
@@ -2716,9 +2716,9 @@ describe('Attendance Plugin Integration', () => {
     const workDate = new Date().toISOString().slice(0, 10)
     const requestedInAt = new Date().toISOString()
     const payload = {
-      date: workDate,
-      type: 'missed_check_in',
-      clockIn: requestedInAt,
+      work_date: workDate,
+      request_type: 'missed_check_in',
+      requested_in_at: requestedInAt,
       reason: 'dedupe test',
     }
 
@@ -2731,6 +2731,28 @@ describe('Attendance Plugin Integration', () => {
       body: JSON.stringify(payload),
     })
     expect(firstRes.status).toBe(201)
+
+    const invalidRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        work_date: workDate,
+        request_type: 'missed_check_in',
+        reason: 'missing requested_in_at',
+      }),
+    })
+    expect(invalidRes.status).toBe(400)
+    const invalidBody = (invalidRes.body as {
+      ok?: boolean
+      error?: { code?: string; details?: Array<{ field?: string; message?: string }> }
+    } | undefined) ?? {}
+    expect(invalidBody.ok).toBe(false)
+    expect(invalidBody.error?.code).toBe('VALIDATION_ERROR')
+    expect(Array.isArray(invalidBody.error?.details)).toBe(true)
+    expect(invalidBody.error?.details?.[0]?.field).toBe('requestedInAt')
 
     const secondRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
       method: 'POST',
