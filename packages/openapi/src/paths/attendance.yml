@@ -913,6 +913,7 @@ paths:
                     type: object
                     properties:
                       id: { type: string }
+        '409': { $ref: '#/components/responses/Conflict' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/attendance/assignments:
