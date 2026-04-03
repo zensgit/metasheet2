@@ -34,6 +34,12 @@ pnpm ops:install-dingtalk-oauth-schedule
 - stability: 每 `7200` 秒
 - drill: 每天 `20:00`
 
+实际结果：
+
+- 生成 `~/Library/LaunchAgents/com.zensgit.metasheet.dingtalk-oauth-stability.plist`
+- 生成 `~/Library/LaunchAgents/com.zensgit.metasheet.dingtalk-oauth-drill.plist`
+- 日志根目录为 `~/Library/Logs/metasheet2/dingtalk-oauth`
+
 ### 4. 状态检查
 
 执行：
@@ -48,6 +54,24 @@ pnpm ops:print-dingtalk-oauth-schedule-status
 - 两个 launchd label 已加载
 - `~/Library/Logs/metasheet2/dingtalk-oauth/index.jsonl` 出现新记录
 
+实际结果：
+
+- `stability_plist=present`
+- `drill_plist=present`
+- `launchctl print gui/$(id -u)/com.zensgit.metasheet.dingtalk-oauth-stability`
+  - `state = not running`
+  - `runs = 1`
+  - `last exit code = 0`
+- `launchctl print gui/$(id -u)/com.zensgit.metasheet.dingtalk-oauth-drill`
+  - `state = not running`
+  - `runs = 0`
+  - 已注册 `Hour=20 / Minute=0`
+
+说明：
+
+- `stability` agent 安装时因 `RunAtLoad=true` 自动执行了一次，成功退出
+- `drill` agent 处于等待今晚 `20:00` 触发状态
+
 ### 5. 手工触发一次 stability 包装器
 
 执行：
@@ -61,6 +85,21 @@ bash scripts/ops/dingtalk-oauth-schedule-run.sh stability
 - 生成一条 `stability-*.log`
 - `index.jsonl` 追加一条 `kind=stability`
 
+实际结果：
+
+- 手工执行生成：
+  - `~/Library/Logs/metasheet2/dingtalk-oauth/runs/stability-20260403T010601Z.log`
+- 安装器加载后再次自动执行生成：
+  - `~/Library/Logs/metasheet2/dingtalk-oauth/runs/stability-20260403T010749Z.log`
+- `index.jsonl` 中两条记录都为：
+  - `exitCode=0`
+  - `healthy=true`
+
 ## 验证结论
 
-只要 launchd label 已加载且日志落盘，这条本机定时观察链路就算生效。后续我不能“主动在未来回复”，但脚本会按计划自己执行并记录，之后可以回来读取这些日志做汇总。
+这条本机定时观察链路已经生效：
+
+- `stability` 已成功自动运行并落日志
+- `drill` 已挂到今晚 `20:00`
+
+后续我不能“主动在未来回复”，但脚本会按计划自己执行并记录，之后可以回来读取这些日志做汇总。
