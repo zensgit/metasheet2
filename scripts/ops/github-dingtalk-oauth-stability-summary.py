@@ -44,6 +44,7 @@ def main() -> int:
         webhook = payload.get('webhookConfig', {})
         alertmanager = payload.get('alertmanager', {})
         bridge = payload.get('bridge', {})
+        storage = (payload.get('storage') or {}).get('root', {})
         lines.append(
             f'- Health: `status={health.get("status")} plugins={health.get("plugins")} ok={health.get("ok")}`'
         )
@@ -53,6 +54,10 @@ def main() -> int:
         lines.append(
             f'- Alertmanager: `activeAlerts={alertmanager.get("activeAlertsCount")} notifyErrors={alertmanager.get("notifyErrorsLastWindow")}`'
         )
+        if storage:
+            lines.append(
+                f'- Storage: `rootUse={storage.get("usePercent")}% availKBlocks={storage.get("availableKBlocks")} maxUse={storage.get("maxUsePercent")}%`'
+            )
         lines.append(
             f'- Bridge: `notifyEvents={bridge.get("notifyEventsLastWindow")} resolvedEvents={bridge.get("resolvedEventsLastWindow")}`'
         )

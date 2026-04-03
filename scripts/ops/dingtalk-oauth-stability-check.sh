@@ -7,6 +7,7 @@ SSH_USER_HOST="${SSH_USER_HOST:-mainuser@142.171.239.56}"
 SSH_KEY="${SSH_KEY:-${HOME}/.ssh/metasheet2_deploy}"
 JSON_OUTPUT="${JSON_OUTPUT:-false}"
 LOG_WINDOW="${LOG_WINDOW:-24h}"
+MAX_ROOT_USE_PERCENT="${MAX_ROOT_USE_PERCENT:-95}"
 
 ssh_cmd() {
   ssh -i "${SSH_KEY}" -o BatchMode=yes -o StrictHostKeyChecking=no "${SSH_USER_HOST}" "$@"
@@ -20,6 +21,7 @@ ALERTS_JSON="$(ssh_cmd "curl -fsS http://127.0.0.1:9093/api/v2/alerts")"
 ALERTMANAGER_ERROR_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alertmanager 2>&1 | grep -E 'Notify for alerts failed|no_text' | wc -l | tr -d ' '")"
 BRIDGE_NOTIFY_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alert-webhook 2>&1 | grep '\"path\": \"/notify\"' | wc -l | tr -d ' '")"
 BRIDGE_RESOLVED_COUNT="$(ssh_cmd "docker logs --since ${LOG_WINDOW} metasheet-alert-webhook 2>&1 | grep '\"path\": \"/notify\"' | grep '\"status\": \"resolved\"' | wc -l | tr -d ' '")"
+ROOT_DF_LINE="$(ssh_cmd "df -P / | awk 'NR==2 {print \$2\" \"\$3\" \"\$4\" \"\$5}'")"
 
 WEBHOOK_STATUS_INPUT="${WEBHOOK_STATUS}" \
 HEALTH_JSON_INPUT="${HEALTH_JSON}" \
@@ -29,8 +31,10 @@ ALERTS_JSON_INPUT="${ALERTS_JSON}" \
 ALERTMANAGER_ERROR_COUNT_INPUT="${ALERTMANAGER_ERROR_COUNT}" \
 BRIDGE_NOTIFY_COUNT_INPUT="${BRIDGE_NOTIFY_COUNT}" \
 BRIDGE_RESOLVED_COUNT_INPUT="${BRIDGE_RESOLVED_COUNT}" \
+ROOT_DF_LINE_INPUT="${ROOT_DF_LINE}" \
 SSH_USER_HOST_INPUT="${SSH_USER_HOST}" \
 LOG_WINDOW_INPUT="${LOG_WINDOW}" \
+MAX_ROOT_USE_PERCENT_INPUT="${MAX_ROOT_USE_PERCENT}" \
 JSON_OUTPUT_INPUT="${JSON_OUTPUT}" \
 python3 - <<'EOF'
 import json
@@ -48,6 +52,11 @@ health = json.loads(os.environ['HEALTH_JSON_INPUT'])
 metrics_lines = os.environ['METRICS_TEXT_INPUT'].splitlines()
 alertmanager_status = json.loads(os.environ['ALERTMANAGER_STATUS_JSON_INPUT'])
 alerts = json.loads(os.environ['ALERTS_JSON_INPUT'])
+root_df_parts = os.environ.get('ROOT_DF_LINE_INPUT', '').split()
+if len(root_df_parts) == 4:
+    root_total, root_used, root_avail, root_percent = root_df_parts
+else:
+    root_total, root_used, root_avail, root_percent = ('0', '0', '0', '100%')
 
 def matching(prefixes):
     out = []
@@ -89,6 +98,15 @@ report = {
         'activeAlertsCount': len(alerts),
         'notifyErrorsLastWindow': int(os.environ['ALERTMANAGER_ERROR_COUNT_INPUT'] or '0'),
     },
+    'storage': {
+        'root': {
+            'totalKBlocks': int(root_total),
+            'usedKBlocks': int(root_used),
+            'availableKBlocks': int(root_avail),
+            'usePercent': int(root_percent.rstrip('%')),
+            'maxUsePercent': int(os.environ['MAX_ROOT_USE_PERCENT_INPUT']),
+        },
+    },
     'bridge': {
         'notifyEventsLastWindow': int(os.environ['BRIDGE_NOTIFY_COUNT_INPUT'] or '0'),
         'resolvedEventsLastWindow': int(os.environ['BRIDGE_RESOLVED_COUNT_INPUT'] or '0'),
@@ -103,6 +121,7 @@ report['healthy'] = (
     and report['webhookConfig']['configured'] is True
     and report['webhookConfig']['host'] == 'hooks.slack.com'
     and report['alertmanager']['notifyErrorsLastWindow'] == 0
+    and report['storage']['root']['usePercent'] < report['storage']['root']['maxUsePercent']
 )
 
 if os.environ['JSON_OUTPUT_INPUT'] == 'true':
@@ -113,6 +132,7 @@ else:
     print(f"[oauth-stability] health.status={report['health']['status']} plugins={report['health']['plugins']} ok={report['health']['ok']}")
     print(f"[oauth-stability] webhook.configured={report['webhookConfig']['configured']} host={report['webhookConfig']['host']}")
     print(f"[oauth-stability] alertmanager.activeAlerts={report['alertmanager']['activeAlertsCount']} notifyErrors={report['alertmanager']['notifyErrorsLastWindow']}")
+    print(f"[oauth-stability] storage.rootUse={report['storage']['root']['usePercent']}% availKBlocks={report['storage']['root']['availableKBlocks']} maxUse={report['storage']['root']['maxUsePercent']}%")
     print(f"[oauth-stability] bridge.notifyEvents={report['bridge']['notifyEventsLastWindow']} resolvedEvents={report['bridge']['resolvedEventsLastWindow']}")
     print(f"[oauth-stability] metrics.operations={len(report['metrics']['operationsSamples'])} fallback={len(report['metrics']['fallbackSamples'])} redis={len(report['metrics']['redisSamples'])}")
     print(f"[oauth-stability] healthy={str(report['healthy']).lower()}")
