@@ -1,0 +1,169 @@
+name: DingTalk OAuth Stability Recording (Lite)
+
+on:
+  schedule:
+    - cron: '15 */2 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: dingtalk-oauth-stability-recording-lite
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  stability-record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare SSH key
+        env:
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Run remote stability check
+        id: stability
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          mkdir -p output/github/dingtalk-oauth-stability
+          JSON_PATH="output/github/dingtalk-oauth-stability/stability.json"
+          LOG_PATH="output/github/dingtalk-oauth-stability/stability.log"
+
+          set +e
+          JSON_OUTPUT=true \
+          SSH_USER_HOST="${DEPLOY_USER}@${DEPLOY_HOST}" \
+          SSH_KEY="${HOME}/.ssh/deploy_key" \
+          bash scripts/ops/dingtalk-oauth-stability-check.sh >"${JSON_PATH}" 2>"${LOG_PATH}"
+          rc=$?
+          set -e
+
+          echo "json_path=${JSON_PATH}" >> "$GITHUB_OUTPUT"
+          echo "log_path=${LOG_PATH}" >> "$GITHUB_OUTPUT"
+          echo "stability_rc=${rc}" >> "$GITHUB_OUTPUT"
+
+          if [[ "${rc}" == "0" && -s "${JSON_PATH}" ]]; then
+            healthy="$(python3 - "${JSON_PATH}" <<'PY'
+            import json
+            import pathlib
+            import sys
+
+            payload = json.loads(pathlib.Path(sys.argv[1]).read_text())
+            print('true' if payload.get('healthy') else 'false')
+            PY
+            )"
+            echo "healthy=${healthy}" >> "$GITHUB_OUTPUT"
+          else
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          exit 0
+
+      - name: Build step summary and markdown artifact
+        if: always()
+        env:
+          STABILITY_RC: ${{ steps.stability.outputs.stability_rc }}
+          HEALTHY: ${{ steps.stability.outputs.healthy }}
+          JSON_PATH: ${{ steps.stability.outputs.json_path }}
+          LOG_PATH: ${{ steps.stability.outputs.log_path }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          json_path = pathlib.Path(os.environ.get('JSON_PATH') or '')
+          log_path = pathlib.Path(os.environ.get('LOG_PATH') or '')
+          stability_rc = os.environ.get('STABILITY_RC', '')
+          healthy = os.environ.get('HEALTHY', 'false')
+          summary_path = pathlib.Path('output/github/dingtalk-oauth-stability/summary.md')
+
+          payload = None
+          if json_path.is_file():
+              try:
+                  payload = json.loads(json_path.read_text())
+              except Exception:
+                  payload = None
+
+          lines = ['# DingTalk OAuth Stability Recording (Lite)', '']
+          status = 'PASS' if stability_rc == '0' and healthy == 'true' else 'FAIL'
+          lines.append(f'- Overall: **{status}**')
+          lines.append(f'- Stability rc: `{stability_rc or "missing"}`')
+          lines.append(f'- Healthy: `{healthy}`')
+          lines.append('')
+
+          if payload:
+              lines.append('## Snapshot')
+              lines.append('')
+              lines.append(f'- Checked at: `{payload.get("checkedAt", "missing")}`')
+              lines.append(f'- Host: `{payload.get("host", "missing")}`')
+              health = payload.get('health', {})
+              webhook = payload.get('webhookConfig', {})
+              alertmanager = payload.get('alertmanager', {})
+              bridge = payload.get('bridge', {})
+              lines.append(f'- Health: `status={health.get("status")} plugins={health.get("plugins")} ok={health.get("ok")}`')
+              lines.append(f'- Webhook: `configured={webhook.get("configured")} host={webhook.get("host")}`')
+              lines.append(f'- Alertmanager: `activeAlerts={alertmanager.get("activeAlertsCount")} notifyErrors={alertmanager.get("notifyErrorsLastWindow")}`')
+              lines.append(f'- Bridge: `notifyEvents={bridge.get("notifyEventsLastWindow")} resolvedEvents={bridge.get("resolvedEventsLastWindow")}`')
+              lines.append('')
+          else:
+              lines.append('## Snapshot')
+              lines.append('')
+              lines.append('- Stability JSON missing or unreadable.')
+              lines.append('')
+
+          lines.append('## Artifacts')
+          lines.append('')
+          lines.append(f'- JSON: `{json_path}`')
+          lines.append(f'- Log: `{log_path}`')
+          lines.append(f'- Summary: `{summary_path}`')
+
+          summary_text = '\n'.join(lines) + '\n'
+          summary_path.write_text(summary_text)
+
+          github_step_summary = pathlib.Path(os.environ['GITHUB_STEP_SUMMARY'])
+          with github_step_summary.open('a', encoding='utf-8') as fh:
+              fh.write(summary_text)
+              if log_path.is_file():
+                  log_tail = log_path.read_text(errors='replace').splitlines()[-40:]
+                  if log_tail:
+                      fh.write('\n## Log Tail\n\n```\n')
+                      fh.write('\n'.join(log_tail))
+                      fh.write('\n```\n')
+          PY
+
+      - name: Upload stability artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dingtalk-oauth-stability-recording-lite-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/github/dingtalk-oauth-stability/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail if stability check is unhealthy
+        if: always()
+        env:
+          STABILITY_RC: ${{ steps.stability.outputs.stability_rc }}
+          HEALTHY: ${{ steps.stability.outputs.healthy }}
+        run: |
+          set -euo pipefail
+          if [[ "${STABILITY_RC:-1}" != "0" ]]; then
+            echo "stability check command failed: rc=${STABILITY_RC:-missing}" >&2
+            exit 1
+          fi
+          if [[ "${HEALTHY:-false}" != "true" ]]; then
+            echo "stability check completed but reported healthy=false" >&2
+            exit 1
+          fi

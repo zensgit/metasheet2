@@ -154,6 +154,9 @@ Entry points:
   - Launchd schedule design: `docs/development/dingtalk-oauth-launchd-schedule-design-20260403.md`
   - Launchd schedule verification: `docs/development/dingtalk-oauth-launchd-schedule-verification-20260403.md`
   - Launchd schedule deployment: `docs/deployment/dingtalk-oauth-launchd-schedule-20260403.md`
+  - GitHub stability recording lite workflow: `.github/workflows/dingtalk-oauth-stability-recording-lite.yml`
+  - GitHub stability recording lite design: `docs/development/github-stability-recording-lite-design-20260403.md`
+  - GitHub stability recording lite verification: `docs/development/github-stability-recording-lite-verification-20260403.md`
   - On-prem rollout: `docs/deployment/oauth-state-observability-onprem-rollout-verification-20260401.md`
   - Notes: adds dedicated DingTalk OAuth state metrics, fallback counters, callback rejection logs, Prometheus alert rules, a Grafana overview dashboard, an Alertmanager bridge that translates Slack notifications, and an on-prem firing/resolved drill runbook.
 

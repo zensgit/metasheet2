@@ -35,6 +35,11 @@ This folder contains GitHub Actions that validate Phase 5 SLOs against a Prometh
   - Gated by metrics endpoint reachability; skips gracefully if `METRICS_URL` not set or unreachable.
   - Fails PR if `overall_status != pass`.
 
+- `dingtalk-oauth-stability-recording-lite.yml`
+  - Triggers every 2 hours (`15 */2 * * *`) and via manual dispatch.
+  - Restores the deploy SSH key, runs `scripts/ops/dingtalk-oauth-stability-check.sh` against `142.171.239.56`, and uploads JSON/log/summary artifacts.
+  - Does not run the Slack drill; it is recording-only and fails the workflow when `healthy != true`.
+
 ## Required Secrets
 
  - `METRICS_URL`: e.g., `https://staging.example.com/metrics/prom`.
@@ -43,6 +48,7 @@ This folder contains GitHub Actions that validate Phase 5 SLOs against a Prometh
  - `SLACK_CHANNEL` (optional): e.g., `alerts`.
  - `GRAFANA_API_TOKEN` (ops deploy only, for dashboard upload).
  - `REDIS_URL` (optional: enables Redis-backed cache validation).
+ - `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY_B64` (required for `dingtalk-oauth-stability-recording-lite.yml`).
 
 ## Manual Dispatch (Nightly)
 
