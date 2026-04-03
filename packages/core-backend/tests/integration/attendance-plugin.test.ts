@@ -3202,6 +3202,142 @@ describe('Attendance Plugin Integration', () => {
     expect((requestGetAfterDeleteRes.body as { data?: { request?: { status?: string } } } | undefined)?.data?.request?.status).toBe('cancelled')
   })
 
+  it('writes an adjusted attendance record after final approval for a missed check-in request', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-request-record-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const pickFutureWeekday = (): string => {
+      const cursor = new Date('2029-03-01T00:00:00.000Z')
+      for (let index = 0; index < 14; index += 1) {
+        const candidate = new Date(cursor)
+        candidate.setUTCDate(cursor.getUTCDate() + index)
+        const weekday = candidate.getUTCDay()
+        if (weekday >= 1 && weekday <= 5) {
+          return candidate.toISOString().slice(0, 10)
+        }
+      }
+      throw new Error('Failed to resolve future weekday for request record settlement test')
+    }
+
+    const workDate = pickFutureWeekday()
+    const requestedInAt = `${workDate}T09:05:00.000Z`
+
+    const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Approval Shift ${runSuffix}`,
+        timezone: 'UTC',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        workingDays: [1, 2, 3, 4, 5],
+      }),
+    })
+    expect(shiftRes.status).toBe(201)
+    const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(shiftId).toBeTruthy()
+    if (!shiftId) return
+
+    const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: testUserId,
+        shiftId,
+        startDate: workDate,
+        isActive: true,
+      }),
+    })
+    expect(assignmentRes.status).toBe(201)
+
+    const approvalFlowRes = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Approval Flow ${runSuffix}`,
+        requestType: 'missed_check_in',
+        steps: [
+          {
+            name: 'Direct Manager',
+            approverUserIds: [testUserId],
+          },
+        ],
+        isActive: true,
+      }),
+    })
+    expect(approvalFlowRes.status).toBe(201)
+    const approvalFlowId = (approvalFlowRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(approvalFlowId).toBeTruthy()
+    if (!approvalFlowId) return
+
+    const requestCreateRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        workDate,
+        requestType: 'missed_check_in',
+        requestedInAt,
+        reason: 'Integration approval follow-up',
+        approvalFlowId,
+      }),
+    })
+    expect(requestCreateRes.status).toBe(201)
+    const requestId = (requestCreateRes.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id
+    expect(requestId).toBeTruthy()
+    if (!requestId) return
+
+    const approveRes = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}/approve`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ comment: 'approve request for record settlement test' }),
+    })
+    expect(approveRes.status).toBe(200)
+    const approvedRecord = (approveRes.body as { data?: { record?: { status?: string } } } | undefined)?.data?.record
+    expect(approvedRecord?.status).toBe('adjusted')
+
+    const recordsRes = await requestJson(
+      `${baseUrl}/api/attendance/records?from=${encodeURIComponent(workDate)}&to=${encodeURIComponent(workDate)}&userId=${encodeURIComponent(testUserId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    )
+    expect(recordsRes.status).toBe(200)
+    const items = (recordsRes.body as { data?: { items?: Array<Record<string, unknown>> } } | undefined)?.data?.items ?? []
+    const record = items.find((row) => {
+      const rowDate = String(row?.work_date ?? row?.workDate ?? '').slice(0, 10)
+      const rowUser = String(row?.user_id ?? row?.userId ?? '')
+      return rowDate === workDate && rowUser === testUserId
+    })
+    expect(record).toBeTruthy()
+    expect(String(record?.status ?? '')).toBe('adjusted')
+    expect(String(record?.first_in_at ?? record?.firstInAt ?? '')).toContain(`${workDate}T09:05:00`)
+  })
+
   it('supports holiday item lookup and rejects invalid holiday date/type payloads before write', async () => {
     if (!baseUrl) return
 
