@@ -19,7 +19,7 @@
           <p class="attendance__subtitle">
             {{
               showReports
-                ? tr('Review request totals by type and status.', '按类型与状态查看申请汇总。')
+                ? tr('Review records, exports, and request totals in one place.', '集中查看记录、导出与申请汇总。')
                 : tr('Track punches, summaries, and adjustments.', '跟踪打卡、汇总和补卡调整。')
             }}
           </p>
@@ -31,6 +31,17 @@
           <button class="attendance__btn" :disabled="punching" @click="punch('check_out')">
             {{ punching ? tr('Working...', '处理中...') : tr('Check Out', '下班打卡') }}
           </button>
+        </div>
+        <div v-else class="attendance__chip-list attendance__chip-list--header">
+          <span class="attendance__status-chip">
+            {{ tr('Records', '记录') }} {{ recordsTotal }}
+          </span>
+          <span class="attendance__status-chip">
+            {{ tr('Requests', '申请') }} {{ requestReportTotal }}
+          </span>
+          <span class="attendance__status-chip">
+            {{ tr('Minutes', '分钟') }} {{ requestReportMinutesTotal }}
+          </span>
         </div>
       </header>
 
@@ -381,7 +392,12 @@
           </div>
         </div>
 
-        <div class="attendance__card" :data-reports-surface="showReports ? 'reports' : 'overview'">
+        <div
+          v-if="showReports"
+          class="attendance__card"
+          v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)"
+          data-reports-surface="reports"
+        >
           <div class="attendance__requests-header">
             <h3>{{ tr('Request Report', '申请报表') }}</h3>
             <button class="attendance__btn" :disabled="reportLoading" @click="reloadRequestReportWithStatus">
@@ -413,7 +429,11 @@
         </div>
       </section>
 
-      <section class="attendance__card" v-if="showOverview" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.records)">
+      <section
+        class="attendance__card"
+        v-if="showReports"
+        v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.records)"
+      >
         <div class="attendance__records-header">
           <h3>{{ tr('Records', '记录') }}</h3>
           <div class="attendance__records-actions">
@@ -4923,6 +4943,12 @@ const shifts = ref<AttendanceShift[]>([])
 const assignments = ref<AttendanceAssignmentItem[]>([])
 const holidays = ref<AttendanceHoliday[]>([])
 const requestReport = ref<AttendanceRequestReportItem[]>([])
+const requestReportTotal = computed(() =>
+  requestReport.value.reduce((sum, row) => sum + (Number(row.total) || 0), 0)
+)
+const requestReportMinutesTotal = computed(() =>
+  requestReport.value.reduce((sum, row) => sum + (Number(row.minutes) || 0), 0)
+)
 const leaveTypes = ref<AttendanceLeaveType[]>([])
 const overtimeRules = ref<AttendanceOvertimeRule[]>([])
 const approvalFlows = ref<AttendanceApprovalFlow[]>([])
@@ -5229,7 +5255,7 @@ async function focusInitialAttendanceSection(): Promise<void> {
     return
   }
 
-  if (!showOverview.value || !isKnownOverviewSectionId(targetId) || typeof document === 'undefined') return
+  if ((!showOverview.value && !showReports.value) || !isKnownOverviewSectionId(targetId) || typeof document === 'undefined') return
   await nextTick()
   const target = overviewSectionElements.get(targetId) ?? document.getElementById(targetId)
   if (target instanceof HTMLElement) {
@@ -9570,9 +9596,35 @@ async function refreshOverviewWithStatus() {
   )
 }
 
+async function reloadReportsWithStatus() {
+  loading.value = true
+  recordsPage.value = 1
+  try {
+    await Promise.all([loadRequestReport(), loadRecords()])
+    setStatus(
+      appendStatusContext(
+        tr(
+          `Reports refreshed (${requestReportTotal.value} requests / ${recordsTotal.value} records).`,
+          `报表已刷新（${requestReportTotal.value} 条申请 / ${recordsTotal.value} 条记录）。`,
+        ),
+        requestReportTimezoneContextHint.value,
+      ),
+    )
+  } catch (error: any) {
+    setStatusFromErrorWithContext(
+      error,
+      tr('Failed to refresh reports', '刷新报表失败'),
+      requestReportTimezoneContextHint.value,
+      'refresh',
+    )
+  } finally {
+    loading.value = false
+  }
+}
+
 async function refreshVisibleSurfaceWithStatus() {
   if (showReports.value) {
-    await reloadRequestReportWithStatus()
+    await reloadReportsWithStatus()
     return
   }
   await refreshOverviewWithStatus()
@@ -12017,7 +12069,7 @@ watch(orgId, () => {
 })
 
 watch(
-  () => [props.initialSectionId, showAdmin.value, showOverview.value, adminForbidden.value, attendancePluginActive.value] as const,
+  () => [props.initialSectionId, showAdmin.value, showOverview.value, showReports.value, adminForbidden.value, attendancePluginActive.value] as const,
   () => {
     void focusInitialAttendanceSection()
   },
@@ -12450,6 +12502,12 @@ const holidaySectionBindings = {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.attendance__chip-list--header {
+  margin-top: 0;
+  justify-content: flex-end;
+  align-items: center;
 }
 
 .attendance__chip-list .attendance__status-chip {

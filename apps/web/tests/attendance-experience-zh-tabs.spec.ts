@@ -108,10 +108,12 @@ describe('AttendanceExperienceView zh desktop tabs', () => {
       .filter(Boolean)
 
     expect(tabText).toContain('总览')
+    expect(tabText).toContain('报表')
     expect(tabText).toContain('管理中心')
     expect(tabText).toContain('流程设计')
 
     expect(tabText).not.toContain('Overview')
+    expect(tabText).not.toContain('Reports')
     expect(tabText).not.toContain('Admin Center')
     expect(tabText).not.toContain('Workflow Designer')
   })
