@@ -74,7 +74,7 @@ python3 -m py_compile scripts/ops/github-dingtalk-oauth-stability-summary.py
 
 - 通过
 
-### 6. 真实 GitHub `workflow_dispatch` 探测
+### 6. 合入前 GitHub `workflow_dispatch` 探测
 
 执行：
 
@@ -92,26 +92,85 @@ gh workflow run dingtalk-oauth-stability-recording-lite.yml --ref codex/dingtalk
 - 这不是 YAML/脚本错误
 - 是 GitHub Actions 的默认分支限制：当前 workflow 还只存在于 `codex/dingtalk-onprem-rollout-20260330`，尚未进入默认分支，因此还不能由 GitHub 侧真正触发
 
+### 7. 默认分支首条真实 run
+
+前置：
+
+- PR `#608` 已 merged 到 `main`
+- merge commit: `6de9330fd042c4f9d6beb32f68cd5e7cc348f0b9`
+
+执行：
+
+```bash
+gh workflow run dingtalk-oauth-stability-recording-lite.yml --repo zensgit/metasheet2 --ref main
+gh run view 23930809987 --repo zensgit/metasheet2
+gh api repos/zensgit/metasheet2/actions/runs/23930809987/artifacts
+```
+
+实际结果：
+
+- GitHub 已成功接受 `workflow_dispatch`
+- 首条默认分支 run:
+  - run id: `23930809987`
+  - URL: `https://github.com/zensgit/metasheet2/actions/runs/23930809987`
+  - job: `stability-record`
+  - 结果: `success`
+- 首条 artifact:
+  - 名称: `dingtalk-oauth-stability-recording-lite-23930809987-1`
+  - id: `6253838739`
+- artifact 内容已复核：
+  - `stability.json`
+  - `stability.log`
+  - `summary.md`
+- `stability.json` 关键字段：
+  - `healthy=true`
+  - `health.status=ok`
+  - `webhookConfig.configured=true`
+  - `webhookConfig.host=hooks.slack.com`
+  - `alertmanager.activeAlertsCount=0`
+  - `alertmanager.notifyErrorsLastWindow=0`
+
+结论：
+
+- 这条 workflow 现在已经在默认分支真实可用
+- GitHub 侧的“被动留档”门禁已打通
+
+### 8. 本机 launchd 主执行面快照
+
+执行：
+
+```bash
+bash ~/.codex/memories/metasheet2-onprem-schedule/scripts/ops/print-dingtalk-oauth-launchd-schedule-status.sh
+```
+
+实际结果：
+
+- `stability_plist=present`
+- `drill_plist=present`
+- `summary_plist=present`
+- 最近 stability 记录持续为：
+  - `health.status=ok`
+  - `webhook.configured=True host=hooks.slack.com`
+  - `alertmanager.activeAlerts=0 notifyErrors=0`
+  - `healthy=true`
+- 当前语义保持不变：
+  - 本机 `launchd` 仍是主执行面
+  - GitHub Actions lite workflow 负责补一份远端稳定性留档，不重复发送 Slack drill
+
 ## 验证结论
 
-这条 GitHub Actions workflow 已满足“被动留档，不重复 drill”的目标：
+这条 GitHub Actions workflow 现在已经满足“默认分支真实可运行的被动留档，不重复 drill”的目标：
 
 - 会定时执行 stability check
 - 会把 JSON / log / markdown summary 作为 artifact 留档
 - 不会额外向 Slack 发送 drill 告警
 - 失败时会在 GitHub 上直接表现为红色 run
+- 默认分支首条真实 run 已成功产出 artifact
 
 ## 备注
 
-本轮结论是：
+本轮最终结论是：
 
 - workflow 结构、artifact 约定和失败门禁都已完成
-- GitHub 侧真实执行仍待该 workflow 合入默认分支
-
-后续拿到第一条真实 GitHub run 后，再把：
-
-- run URL
-- artifact 名称
-- 首次 schedule 时间
-
-回填到后续 deployment/ops 文档。
+- `main` 上首条真实 GitHub run 已完成
+- 观察期现在进入“本机 launchd 主执行 + GitHub lite 留档补充”的混合模式
