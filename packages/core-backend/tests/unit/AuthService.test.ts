@@ -225,6 +225,13 @@ describe('AuthService.refreshToken', () => {
     poolMocks.query.mockResolvedValue({ rows: [] })
     rbacMocks.isAdmin.mockReset()
     rbacMocks.listUserPermissions.mockReset()
+    secretManagerMocks.get.mockReset()
+    secretManagerMocks.get.mockReturnValue('unit-test-secret-abcdefghijklmnopqrstuvwxyz123456')
+    sessionMocks.isUserSessionRevoked.mockReset()
+    sessionMocks.isUserSessionRevoked.mockResolvedValue(false)
+    sessionMocks.createUserSession.mockReset()
+    sessionMocks.isUserSessionActive.mockReset()
+    sessionMocks.isUserSessionActive.mockResolvedValue(true)
   })
 
   it('refreshes token when legacy id claim is present', async () => {
