@@ -24,6 +24,13 @@ export function isPlmEnabled(
   return parseBooleanEnv(enablePlmValue) ?? true
 }
 
+export function supportsAttendanceSelfService(
+  productModeValue: unknown = process.env.PRODUCT_MODE,
+): boolean {
+  const productMode = normalizeProductMode(productModeValue)
+  return productMode === 'attendance' || productMode === 'platform'
+}
+
 export function resolveEffectiveProductMode(
   productModeValue: unknown = process.env.PRODUCT_MODE,
   enablePlmValue: unknown = process.env.ENABLE_PLM,

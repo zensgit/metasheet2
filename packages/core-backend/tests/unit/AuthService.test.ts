@@ -18,6 +18,7 @@ const poolMocks = vi.hoisted(() => {
 const rbacMocks = vi.hoisted(() => ({
   isAdmin: vi.fn(),
   listUserPermissions: vi.fn(),
+  invalidateUserPerms: vi.fn(),
 }))
 
 const sessionMocks = vi.hoisted(() => ({
@@ -35,6 +36,7 @@ vi.mock('../../src/integration/db/connection-pool', () => ({ poolManager: poolMo
 vi.mock('../../src/rbac/service', () => ({
   isAdmin: rbacMocks.isAdmin,
   listUserPermissions: rbacMocks.listUserPermissions,
+  invalidateUserPerms: rbacMocks.invalidateUserPerms,
 }))
 vi.mock('../../src/auth/session-revocation', () => ({
   isUserSessionRevoked: sessionMocks.isUserSessionRevoked,
@@ -59,6 +61,7 @@ describe('AuthService.verifyToken', () => {
     poolMocks.query.mockResolvedValue({ rows: [] })
     rbacMocks.isAdmin.mockReset()
     rbacMocks.listUserPermissions.mockReset()
+    rbacMocks.invalidateUserPerms.mockReset()
     secretManagerMocks.get.mockReset()
     secretManagerMocks.get.mockReturnValue('unit-test-secret-abcdefghijklmnopqrstuvwxyz123456')
     sessionMocks.isUserSessionRevoked.mockReset()
@@ -95,6 +98,7 @@ describe('AuthService.verifyToken', () => {
   })
 
   it('falls back to stored role/permissions when RBAC lookup fails', async () => {
+    process.env.PRODUCT_MODE = 'plm-workbench'
     jwtMocks.verify.mockReturnValue({ userId: 'u2', email: 'user@x', role: 'user', iat: 0, exp: 0 })
     poolMocks.query.mockResolvedValueOnce({
       rows: [{
@@ -145,6 +149,40 @@ describe('AuthService.verifyToken', () => {
     expect(user?.permissions).toContain('attendance:read')
   })
 
+  it('backfills attendance self-service permissions for platform users without attendance roles', async () => {
+    process.env.PRODUCT_MODE = 'platform'
+    jwtMocks.verify.mockReturnValue({ userId: 'u5', email: 'worker@x', role: 'user', iat: 0, exp: 0 })
+    poolMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'u5',
+          email: 'worker@x',
+          name: 'Worker',
+          role: 'user',
+          permissions: ['spreadsheet:read', 'spreadsheet:write'],
+          password_hash: 'hash',
+          is_active: true,
+          created_at: new Date(),
+          updated_at: new Date(),
+        }]
+      })
+      .mockResolvedValueOnce({ rows: [] })
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+
+    const auth = new AuthService()
+    const user = await auth.verifyToken('platform-user-token')
+
+    expect(user).toBeTruthy()
+    expect(user?.permissions).toEqual(expect.arrayContaining(['attendance:read', 'attendance:write']))
+    expect(poolMocks.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('INSERT INTO user_roles'),
+      ['u5', 'attendance_employee'],
+    )
+    expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('u5')
+  })
+
   it('trusts token claims and skips DB lookup when RBAC_TOKEN_TRUST is enabled', async () => {
     process.env.RBAC_TOKEN_TRUST = 'true'
     jwtMocks.verify.mockReturnValue({
@@ -170,6 +208,7 @@ describe('AuthService.verifyToken', () => {
 
   it('disables trusted token fast path in production even when RBAC_TOKEN_TRUST is enabled', async () => {
     process.env.NODE_ENV = 'production'
+    process.env.PRODUCT_MODE = 'plm-workbench'
     process.env.RBAC_TOKEN_TRUST = 'true'
     jwtMocks.verify.mockReturnValue({
       id: 'prod-admin',
@@ -225,6 +264,7 @@ describe('AuthService.refreshToken', () => {
     poolMocks.query.mockResolvedValue({ rows: [] })
     rbacMocks.isAdmin.mockReset()
     rbacMocks.listUserPermissions.mockReset()
+    rbacMocks.invalidateUserPerms.mockReset()
     secretManagerMocks.get.mockReset()
     secretManagerMocks.get.mockReturnValue('unit-test-secret-abcdefghijklmnopqrstuvwxyz123456')
     sessionMocks.isUserSessionRevoked.mockReset()
@@ -304,6 +344,43 @@ describe('AuthService.register', () => {
       .mockResolvedValueOnce({ rows: [] })
     const auth = new AuthService()
     const user = await auth.register('employee@example.com', 'WelcomePass9A', 'Employee')
+
+    expect(user).toBeTruthy()
+    expect(user?.permissions).toEqual(expect.arrayContaining(['attendance:read', 'attendance:write']))
+    expect(poolMocks.query).toHaveBeenNthCalledWith(
+      4,
+      expect.stringContaining('INSERT INTO user_roles'),
+      [expect.any(String), 'attendance_employee'],
+    )
+  })
+
+  it('assigns attendance self-service permissions and role on platform registration', async () => {
+    process.env.PRODUCT_MODE = 'platform'
+    poolMocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-2',
+          email: 'platform@example.com',
+          name: 'Platform User',
+          role: 'user',
+          permissions: [
+            'spreadsheet:read',
+            'spreadsheet:write',
+            'spreadsheets:read',
+            'spreadsheets:write',
+            'attendance:read',
+            'attendance:write',
+          ],
+          created_at: new Date('2026-04-03T00:00:00.000Z'),
+          updated_at: new Date('2026-04-03T00:00:00.000Z'),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const auth = new AuthService()
+    const user = await auth.register('platform@example.com', 'WelcomePass9A', 'Platform User')
 
     expect(user).toBeTruthy()
     expect(user?.permissions).toEqual(expect.arrayContaining(['attendance:read', 'attendance:write']))
