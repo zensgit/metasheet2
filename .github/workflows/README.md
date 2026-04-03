@@ -39,6 +39,7 @@ This folder contains GitHub Actions that validate Phase 5 SLOs against a Prometh
   - Triggers every 2 hours (`15 */2 * * *`) and via manual dispatch.
   - Restores the deploy SSH key, runs `scripts/ops/dingtalk-oauth-stability-check.sh` against `142.171.239.56`, and uploads JSON/log/summary artifacts.
   - Does not run the Slack drill; it is recording-only and fails the workflow when `healthy != true`.
+  - Like other scheduled/manual workflows, it only becomes live after the workflow file exists on the default branch.
 
 ## Required Secrets
 

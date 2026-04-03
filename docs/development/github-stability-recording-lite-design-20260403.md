@@ -80,6 +80,11 @@ artifact retention 设为 `14` 天。
 - 与本机 `launchd` 的高频 stability 节奏一致
 - 但不把 GitHub 当作主执行面
 
+注意：
+
+- GitHub 的 `schedule` 和 `workflow_dispatch` 都要求 workflow 文件存在于默认分支
+- 所以这条 workflow 在 feature branch 上提交后，结构已经就绪，但真正开始自动执行仍依赖后续合入默认分支
+
 ## Secrets
 
 复用现有远端 deploy secrets：

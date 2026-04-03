@@ -73,6 +73,24 @@ bash -n scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh
 
 - 通过
 
+### 6. 真实 GitHub `workflow_dispatch` 探测
+
+执行：
+
+```bash
+gh workflow run dingtalk-oauth-stability-recording-lite.yml --ref codex/dingtalk-onprem-rollout-20260330
+```
+
+实际结果：
+
+- GitHub 返回：
+  - `HTTP 404: workflow dingtalk-oauth-stability-recording-lite.yml not found on the default branch`
+
+结论：
+
+- 这不是 YAML/脚本错误
+- 是 GitHub Actions 的默认分支限制：当前 workflow 还只存在于 `codex/dingtalk-onprem-rollout-20260330`，尚未进入默认分支，因此还不能由 GitHub 侧真正触发
+
 ## 验证结论
 
 这条 GitHub Actions workflow 已满足“被动留档，不重复 drill”的目标：
@@ -84,9 +102,15 @@ bash -n scripts/ops/set-dingtalk-onprem-alertmanager-webhook-config.sh
 
 ## 备注
 
-本轮验证是本地静态验证，不包含真实 GitHub Actions 运行回执。首次真实回执应在：
+本轮结论是：
 
-- 手动 `workflow_dispatch`
-- 或首次 schedule 触发后
+- workflow 结构、artifact 约定和失败门禁都已完成
+- GitHub 侧真实执行仍待该 workflow 合入默认分支
 
-再把 run URL / artifact 名称回填到后续 deployment/ops 文档。
+后续拿到第一条真实 GitHub run 后，再把：
+
+- run URL
+- artifact 名称
+- 首次 schedule 时间
+
+回填到后续 deployment/ops 文档。
