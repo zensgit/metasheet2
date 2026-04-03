@@ -17796,6 +17796,16 @@ module.exports = {
         }
 
         try {
+          const shiftRows = await db.query(
+            'SELECT id, name FROM attendance_shifts WHERE id = $1 AND org_id = $2',
+            [shiftId, orgId]
+          )
+          if (!shiftRows.length) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
+            return
+          }
+
+          const shift = shiftRows[0]
           const usageRows = await db.query(
             `SELECT
                EXISTS (
@@ -17818,11 +17828,12 @@ module.exports = {
                    AND (a.end_date IS NULL OR a.end_date >= CURRENT_DATE)
                    AND EXISTS (
                      SELECT 1
-                     FROM jsonb_array_elements_text(COALESCE(r.shift_sequence, '[]'::jsonb)) AS seq(shift_id)
-                     WHERE seq.shift_id = $2::text
+                     FROM jsonb_array_elements_text(COALESCE(r.shift_sequence, '[]'::jsonb)) AS seq(shift_ref)
+                     WHERE seq.shift_ref = $2::text
+                        OR seq.shift_ref = $3::text
                    )
                ) AS has_active_rotation_usage`,
-            [orgId, shiftId]
+            [orgId, shiftId, shift.name]
           )
           const usage = usageRows[0] ?? {}
           if (usage.has_active_assignment || usage.has_active_rotation_usage) {
@@ -17840,10 +17851,6 @@ module.exports = {
             'DELETE FROM attendance_shifts WHERE id = $1 AND org_id = $2 RETURNING id',
             [shiftId, orgId]
           )
-          if (!rows.length) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Shift not found' } })
-            return
-          }
           emitEvent('attendance.shift.deleted', { orgId, shiftId })
           res.json({ ok: true, data: { id: shiftId } })
         } catch (error) {

@@ -1730,8 +1730,10 @@ describe('Attendance Plugin Integration', () => {
     })
     expect(shiftRes.status).toBe(201)
     const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    const shiftName = (shiftRes.body as { data?: { name?: string } } | undefined)?.data?.name
     expect(shiftId).toBeTruthy()
-    if (!shiftId) return
+    expect(shiftName).toBeTruthy()
+    if (!shiftId || !shiftName) return
 
     const rotationRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
       method: 'POST',
@@ -1742,7 +1744,7 @@ describe('Attendance Plugin Integration', () => {
       body: JSON.stringify({
         name: `Delete Guard Rotation ${runSuffix}`,
         timezone: 'Asia/Shanghai',
-        shiftSequence: [shiftId],
+        shiftSequence: [shiftName],
         isActive: true,
       }),
     })
