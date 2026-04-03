@@ -31,6 +31,15 @@ components:
               type: string
             message:
               type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
     DirectErrorResponse:
       type: object
       properties:
@@ -1890,6 +1899,9 @@ components:
                 error:
                   code: "VALIDATION_ERROR"
                   message: "Required field 'name' is missing"
+                  details:
+                    - field: "name"
+                      message: "Required"
             invalid_field_type:
               summary: Invalid Field Type
               value:

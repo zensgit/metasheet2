@@ -44,6 +44,20 @@
               },
               "message": {
                 "type": "string"
+              },
+              "details": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "field": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
               }
             }
           }
@@ -2812,7 +2826,13 @@
                   "ok": false,
                   "error": {
                     "code": "VALIDATION_ERROR",
-                    "message": "Required field 'name' is missing"
+                    "message": "Required field 'name' is missing",
+                    "details": [
+                      {
+                        "field": "name",
+                        "message": "Required"
+                      }
+                    ]
                   }
                 }
               },
@@ -4657,6 +4677,11 @@
                     "format": "date",
                     "description": "Work date in YYYY-MM-DD format."
                   },
+                  "work_date": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "Compatibility snake_case alias for workDate."
+                  },
                   "date": {
                     "type": "string",
                     "format": "date",
@@ -4672,6 +4697,17 @@
                       "overtime"
                     ],
                     "description": "Request type."
+                  },
+                  "request_type": {
+                    "type": "string",
+                    "enum": [
+                      "missed_check_in",
+                      "missed_check_out",
+                      "time_correction",
+                      "leave",
+                      "overtime"
+                    ],
+                    "description": "Compatibility snake_case alias for requestType."
                   },
                   "type": {
                     "type": "string",
@@ -4721,17 +4757,33 @@
                     "type": "string",
                     "description": "Required for leave requests unless leaveTypeCode is provided."
                   },
+                  "leave_type_id": {
+                    "type": "string",
+                    "description": "Compatibility snake_case alias for leaveTypeId."
+                  },
                   "leaveTypeCode": {
                     "type": "string",
                     "description": "Required for leave requests unless leaveTypeId is provided."
+                  },
+                  "leave_type_code": {
+                    "type": "string",
+                    "description": "Compatibility snake_case alias for leaveTypeCode."
                   },
                   "overtimeRuleId": {
                     "type": "string",
                     "description": "Required for overtime requests unless overtimeRuleName is provided."
                   },
+                  "overtime_rule_id": {
+                    "type": "string",
+                    "description": "Compatibility snake_case alias for overtimeRuleId."
+                  },
                   "overtimeRuleName": {
                     "type": "string",
                     "description": "Required for overtime requests unless overtimeRuleId is provided."
+                  },
+                  "overtime_rule_name": {
+                    "type": "string",
+                    "description": "Compatibility snake_case alias for overtimeRuleName."
                   },
                   "minutes": {
                     "type": "integer",
@@ -4740,11 +4792,23 @@
                   "attachmentUrl": {
                     "type": "string"
                   },
+                  "attachment_url": {
+                    "type": "string",
+                    "description": "Compatibility snake_case alias for attachmentUrl."
+                  },
                   "approvalFlowId": {
                     "type": "string"
                   },
+                  "approval_flow_id": {
+                    "type": "string",
+                    "description": "Compatibility snake_case alias for approvalFlowId."
+                  },
                   "orgId": {
                     "type": "string"
+                  },
+                  "org_id": {
+                    "type": "string",
+                    "description": "Compatibility snake_case alias for orgId."
                   }
                 },
                 "required": [
@@ -4810,6 +4874,15 @@
                     "overtimeRuleId": "22222222-2222-4222-8222-222222222222",
                     "minutes": 90,
                     "reason": "End-of-month release support"
+                  }
+                },
+                "snakeCaseMissedCheckIn": {
+                  "summary": "Request using snake_case aliases",
+                  "value": {
+                    "work_date": "2026-03-20",
+                    "request_type": "missed_check_in",
+                    "requested_in_at": "2026-03-20T09:05:00+08:00",
+                    "reason": "Badge reader was offline."
                   }
                 }
               }
@@ -11838,6 +11911,7 @@
       "x-plugin": "plugin-attendance",
       "post": {
         "summary": "Batch generate payroll cycles from a template",
+        "description": "Requires a `templateId`/`payrollTemplateId` or an existing default payroll template for the org.",
         "security": [
           {
             "bearerAuth": []
