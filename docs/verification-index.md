@@ -6,6 +6,14 @@ Entry points:
 - README: `README.md` (Documentation Quick Links)
 - Docs Index: `docs/INDEX.md` (测试和验证)
 
+## 2026-04-03 DingTalk OAuth GitHub Recording
+
+- GitHub stability recording lite workflow:
+  - Workflow: `.github/workflows/dingtalk-oauth-stability-recording-lite.yml`
+  - Design: `docs/development/github-stability-recording-lite-design-20260403.md`
+  - Verification: `docs/development/github-stability-recording-lite-verification-20260403.md`
+  - Notes: records on-prem stability snapshots into GitHub Actions artifacts without triggering the Slack drill; becomes live once merged to the default branch.
+
 ## Daily / Pre-PR
 
 - Verification summary (latest):

@@ -1,0 +1,115 @@
+name: DingTalk OAuth Stability Recording (Lite)
+
+on:
+  schedule:
+    - cron: '15 */2 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: dingtalk-oauth-stability-recording-lite
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  stability-record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare SSH key
+        env:
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Run remote stability check
+        id: stability
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          mkdir -p output/github/dingtalk-oauth-stability
+          JSON_PATH="output/github/dingtalk-oauth-stability/stability.json"
+          LOG_PATH="output/github/dingtalk-oauth-stability/stability.log"
+
+          set +e
+          JSON_OUTPUT=true \
+          SSH_USER_HOST="${DEPLOY_USER}@${DEPLOY_HOST}" \
+          SSH_KEY="${HOME}/.ssh/deploy_key" \
+          bash scripts/ops/dingtalk-oauth-stability-check.sh >"${JSON_PATH}" 2>"${LOG_PATH}"
+          rc=$?
+          set -e
+
+          echo "json_path=${JSON_PATH}" >> "$GITHUB_OUTPUT"
+          echo "log_path=${LOG_PATH}" >> "$GITHUB_OUTPUT"
+          echo "stability_rc=${rc}" >> "$GITHUB_OUTPUT"
+
+          if [[ "${rc}" == "0" && -s "${JSON_PATH}" ]]; then
+            healthy="$(python3 -c 'import json, pathlib, sys; payload = json.loads(pathlib.Path(sys.argv[1]).read_text()); print("true" if payload.get("healthy") else "false")' "${JSON_PATH}")"
+            echo "healthy=${healthy}" >> "$GITHUB_OUTPUT"
+          else
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          exit 0
+
+      - name: Build step summary and markdown artifact
+        if: always()
+        env:
+          STABILITY_RC: ${{ steps.stability.outputs.stability_rc }}
+          HEALTHY: ${{ steps.stability.outputs.healthy }}
+          JSON_PATH: ${{ steps.stability.outputs.json_path }}
+          LOG_PATH: ${{ steps.stability.outputs.log_path }}
+        run: |
+          set -euo pipefail
+          SUMMARY_PATH="output/github/dingtalk-oauth-stability/summary.md"
+          python3 scripts/ops/github-dingtalk-oauth-stability-summary.py "${JSON_PATH}" "${LOG_PATH}" "${SUMMARY_PATH}" > "${SUMMARY_PATH}.stdout"
+          cat "${SUMMARY_PATH}.stdout" >> "$GITHUB_STEP_SUMMARY"
+          rm -f "${SUMMARY_PATH}.stdout"
+
+          if [[ -f "${LOG_PATH}" ]]; then
+            log_tail="$(tail -n 40 "${LOG_PATH}" || true)"
+            if [[ -n "${log_tail}" ]]; then
+              {
+                echo
+                echo "## Log Tail"
+                echo
+                echo '```'
+                printf '%s\n' "${log_tail}"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+      - name: Upload stability artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dingtalk-oauth-stability-recording-lite-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/github/dingtalk-oauth-stability/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail if stability check is unhealthy
+        if: always()
+        env:
+          STABILITY_RC: ${{ steps.stability.outputs.stability_rc }}
+          HEALTHY: ${{ steps.stability.outputs.healthy }}
+        run: |
+          set -euo pipefail
+          if [[ "${STABILITY_RC:-1}" != "0" ]]; then
+            echo "stability check command failed: rc=${STABILITY_RC:-missing}" >&2
+            exit 1
+          fi
+          if [[ "${HEALTHY:-false}" != "true" ]]; then
+            echo "stability check completed but reported healthy=false" >&2
+            exit 1
+          fi
