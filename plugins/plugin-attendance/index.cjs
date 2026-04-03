@@ -2997,6 +2997,23 @@ function normalizeStringArray(value) {
   return normalizeJsonArray(value, []).map(item => String(item)).filter(Boolean)
 }
 
+function normalizeStringCsvOrJsonArrayPayload(value) {
+  if (Array.isArray(value)) {
+    return value.map(item => String(item).trim()).filter(Boolean)
+  }
+  if (typeof value === 'string') {
+    const parsed = tryParseJsonPayload(value)
+    if (Array.isArray(parsed)) {
+      return parsed.map(item => String(item).trim()).filter(Boolean)
+    }
+    return value
+      .split(/[,\n]/)
+      .map(item => item.trim())
+      .filter(Boolean)
+  }
+  return []
+}
+
 function normalizeMetadata(value) {
   if (!value) return {}
   if (typeof value === 'string') {
@@ -3107,10 +3124,34 @@ function normalizeApprovalFlowPayload(value) {
 
 function normalizeRotationRulePayload(value) {
   const payload = normalizeObjectPayload(value)
+  const shiftSequence = firstDefinedValue(
+    payload.shiftSequence,
+    payload.shift_sequence,
+    payload.shiftIds,
+    payload.shift_ids
+  )
   return {
     ...payload,
-    shiftSequence: firstDefinedValue(payload.shiftSequence, payload.shift_sequence),
+    shiftSequence: shiftSequence === undefined ? undefined : normalizeStringCsvOrJsonArrayPayload(shiftSequence),
     isActive: firstDefinedValue(payload.isActive, payload.is_active),
+  }
+}
+
+function normalizePayrollCyclePayload(value) {
+  const payload = normalizeObjectPayload(value)
+  return {
+    ...payload,
+    templateId: firstDefinedValue(
+      payload.templateId,
+      payload.template_id,
+      payload.payrollTemplateId,
+      payload.payroll_template_id
+    ),
+    anchorDate: firstDefinedValue(payload.anchorDate, payload.anchor_date),
+    startDate: firstDefinedValue(payload.startDate, payload.start_date),
+    endDate: firstDefinedValue(payload.endDate, payload.end_date),
+    namePrefix: firstDefinedValue(payload.namePrefix, payload.name_prefix),
+    metadata: tryParseJsonPayload(payload.metadata),
   }
 }
 
@@ -16592,7 +16633,7 @@ module.exports = {
       'POST',
       '/api/attendance/payroll-cycles',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = payrollCycleCreateSchema.safeParse(req.body ?? {})
+        const parsed = payrollCycleCreateSchema.safeParse(normalizePayrollCyclePayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -16700,7 +16741,7 @@ module.exports = {
       'POST',
       '/api/attendance/payroll-cycles/generate',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = payrollCycleGenerateSchema.safeParse(req.body ?? {})
+        const parsed = payrollCycleGenerateSchema.safeParse(normalizePayrollCyclePayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
@@ -16810,7 +16851,7 @@ module.exports = {
       'PUT',
       '/api/attendance/payroll-cycles/:id',
       withPermission('attendance:admin', async (req, res) => {
-        const parsed = payrollCycleUpdateSchema.safeParse(req.body ?? {})
+        const parsed = payrollCycleUpdateSchema.safeParse(normalizePayrollCyclePayload(req.body ?? {}))
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return

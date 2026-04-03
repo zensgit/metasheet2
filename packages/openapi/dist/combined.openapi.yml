@@ -3195,6 +3195,14 @@ paths:
                   leaveTypeCode: annual_leave
                   minutes: 480
                   reason: Family event
+              leaveById:
+                summary: Leave request using a leaveTypeId from the leave-types list
+                value:
+                  workDate: '2026-03-21'
+                  requestType: leave
+                  leaveTypeId: 11111111-1111-4111-8111-111111111111
+                  minutes: 480
+                  reason: Family event
               overtimeByRuleName:
                 summary: Overtime request using overtimeRuleName
                 value:
@@ -3203,6 +3211,16 @@ paths:
                   requestedInAt: '2026-03-22T18:30:00+08:00'
                   requestedOutAt: '2026-03-22T21:00:00+08:00'
                   overtimeRuleName: Weekday OT
+                  reason: End-of-month release support
+              overtimeByRuleId:
+                summary: >-
+                  Overtime request using an overtimeRuleId from the
+                  overtime-rules list
+                value:
+                  workDate: '2026-03-22'
+                  requestType: overtime
+                  overtimeRuleId: 22222222-2222-4222-8222-222222222222
+                  minutes: 90
                   reason: End-of-month release support
       responses:
         '201':
@@ -5636,6 +5654,9 @@ paths:
                   type: string
                 requestType:
                   type: string
+                type:
+                  type: string
+                  description: Legacy alias for requestType.
                 steps:
                   type: array
                   items:
@@ -5679,6 +5700,13 @@ paths:
                     - name: 人事复核
                       approver_role_ids:
                         - attendance-admin
+                  is_active: true
+              leaveCompat:
+                summary: Manual-test friendly payload using type plus stringified steps
+                value:
+                  name: 请假审批
+                  type: leave
+                  steps: '[{"name":"直属主管","approver_user_ids":["manager-user-001"]}]'
                   is_active: true
       responses:
         '201':
@@ -5875,6 +5903,11 @@ paths:
                   type: array
                   items:
                     type: string
+                shiftIds:
+                  type: array
+                  items:
+                    type: string
+                  description: Compatibility alias for shiftSequence.
                 isActive:
                   type: boolean
                 orgId:
@@ -5884,6 +5917,11 @@ paths:
                   items:
                     type: string
                   description: Legacy snake_case alias for shiftSequence.
+                shift_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: Compatibility alias for shiftSequence.
                 is_active:
                   type: boolean
                   description: Legacy snake_case alias for isActive.
@@ -5911,6 +5949,17 @@ paths:
                     - 22222222-2222-4222-8222-222222222222
                     - 33333333-3333-4333-8333-333333333333
                   is_active: true
+              standardCycleCsv:
+                summary: >-
+                  Manual-test friendly payload using shiftIds as CSV-compatible
+                  input
+                value:
+                  name: 四班两倒
+                  timezone: Asia/Shanghai
+                  shiftIds:
+                    - 11111111-1111-4111-8111-111111111111
+                    - 22222222-2222-4222-8222-222222222222
+                  isActive: true
       responses:
         '201':
           description: Created
@@ -7463,23 +7512,53 @@ paths:
               properties:
                 templateId:
                   type: string
+                payrollTemplateId:
+                  type: string
+                  description: Compatibility alias for templateId.
                 name:
                   type: string
                 anchorDate:
                   type: string
                   format: date
+                anchor_date:
+                  type: string
+                  format: date
+                  description: Compatibility alias for anchorDate.
                 startDate:
                   type: string
                   format: date
+                start_date:
+                  type: string
+                  format: date
+                  description: Compatibility alias for startDate.
                 endDate:
                   type: string
                   format: date
+                end_date:
+                  type: string
+                  format: date
+                  description: Compatibility alias for endDate.
                 status:
                   type: string
                 metadata:
                   type: object
                 orgId:
                   type: string
+            examples:
+              manualRange:
+                summary: Create a payroll cycle with explicit dates
+                value:
+                  name: 2026-04 Payroll
+                  startDate: '2026-04-01'
+                  endDate: '2026-04-30'
+                  status: open
+              templateAlias:
+                summary: Create using the payrollTemplateId compatibility alias
+                value:
+                  payrollTemplateId: 11111111-1111-4111-8111-111111111111
+                  anchorDate: '2026-04-01'
+                  name: 2026-04 Payroll
+                  status: open
       responses:
         '201':
           description: Created
@@ -7513,6 +7592,9 @@ paths:
               properties:
                 templateId:
                   type: string
+                payrollTemplateId:
+                  type: string
+                  description: Compatibility alias for templateId.
                 anchorDate:
                   type: string
                   format: date
@@ -7544,6 +7626,22 @@ paths:
                 - required:
                     - year
                     - month
+            examples:
+              anchorDateGenerate:
+                summary: Generate from a template and anchorDate
+                value:
+                  payrollTemplateId: 11111111-1111-4111-8111-111111111111
+                  anchorDate: '2026-04-01'
+                  count: 1
+                  status: open
+              yearMonthGenerate:
+                summary: Generate using year and month aliases
+                value:
+                  payrollTemplateId: 11111111-1111-4111-8111-111111111111
+                  year: 2026
+                  month: 4
+                  count: 1
+                  status: open
       responses:
         '200':
           description: OK
