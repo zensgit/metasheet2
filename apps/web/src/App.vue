@@ -15,6 +15,7 @@
             <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
           </template>
           <template v-else>
+            <router-link v-if="hasFeature('attendance')" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
             <router-link to="/grid" class="nav-link">{{ navLabels.grid }}</router-link>
             <router-link to="/spreadsheets" class="nav-link">{{ navLabels.spreadsheets }}</router-link>
             <router-link to="/kanban" class="nav-link">{{ navLabels.kanban }}</router-link>
@@ -35,8 +36,8 @@
             <router-link v-if="canManageUsers" to="/admin/roles" class="nav-link">{{ navLabels.roles }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/permissions" class="nav-link">{{ navLabels.permissions }}</router-link>
             <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
-          <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
-          <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
+            <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
+            <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
             <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
           </template>
         </template>
