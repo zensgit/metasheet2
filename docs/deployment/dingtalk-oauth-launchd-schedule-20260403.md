@@ -18,6 +18,10 @@
 pnpm ops:install-dingtalk-oauth-schedule
 ```
 
+推荐使用持久 worktree：
+
+- `~/.codex/memories/metasheet2-onprem-schedule`
+
 默认安装后会生成：
 
 - `~/Library/LaunchAgents/com.zensgit.metasheet.dingtalk-oauth-stability.plist`

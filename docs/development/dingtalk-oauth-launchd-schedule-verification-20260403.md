@@ -6,6 +6,10 @@
 
 验证本机 launchd 定时调度已正确安装，并确认它能把 DingTalk OAuth stability / drill 结果落到本地日志。
 
+推荐安装路径：
+
+- `~/.codex/memories/metasheet2-onprem-schedule`
+
 ## 实际执行
 
 ### 1. 依赖检查
@@ -41,6 +45,8 @@ pnpm ops:install-dingtalk-oauth-schedule
 - 生成 `~/Library/LaunchAgents/com.zensgit.metasheet.dingtalk-oauth-drill.plist`
 - 生成 `~/Library/LaunchAgents/com.zensgit.metasheet.dingtalk-oauth-summary.plist`
 - 日志根目录为 `~/Library/Logs/metasheet2/dingtalk-oauth`
+- 本轮实际安装使用的持久 worktree：
+  - `~/.codex/memories/metasheet2-onprem-schedule`
 
 ### 4. 状态检查
 
@@ -73,6 +79,10 @@ pnpm ops:print-dingtalk-oauth-schedule-status
   - `state = not running`
   - `runs = 0`
   - 已注册 `Hour=20 / Minute=5`
+- `launchctl print gui/$(id -u)/com.zensgit.metasheet.dingtalk-oauth-stability`
+  - 本轮实际安装后为 `state = running`
+  - `runs = 1`
+  - `last exit code = (never exited)`
 
 说明：
 
@@ -102,6 +112,7 @@ bash scripts/ops/dingtalk-oauth-schedule-run.sh stability
 - `index.jsonl` 中两条记录都为：
   - `exitCode=0`
   - `healthy=true`
+- 后续从持久 worktree 重装 launchd 后，最新状态仍保持 `healthy=true`
 
 ### 6. 手工触发一次 summary 包装器
 
@@ -123,6 +134,10 @@ pnpm ops:dingtalk-oauth-schedule-summary
 - 生成 `~/Library/Logs/metasheet2/dingtalk-oauth/summaries/summary-*.json`
 - 生成 `~/Library/Logs/metasheet2/dingtalk-oauth/summaries/summary-*.md`
 - `index.jsonl` 追加了 `kind=summary`
+- 本轮实际验证的最新文件为：
+  - `~/Library/Logs/metasheet2/dingtalk-oauth/runs/summary-20260403T011644Z.log`
+  - `~/Library/Logs/metasheet2/dingtalk-oauth/summaries/summary-20260403T011644Z.json`
+  - `~/Library/Logs/metasheet2/dingtalk-oauth/summaries/summary-20260403T011644Z.md`
 - 记录里包含：
   - `latestStabilityCheckedAt`
   - `latestDrillCheckedAt`
@@ -130,6 +145,13 @@ pnpm ops:dingtalk-oauth-schedule-summary
   - `healthy`
   - `firingObserved`
   - `resolvedObserved`
+- 最新 summary 记录的实际值：
+  - `latestStabilityCheckedAt=2026-04-03T01:07:49Z`
+  - `latestDrillCheckedAt=2026-04-03T01:14:38Z`
+  - `latestDrillId=drill-1775178878`
+  - `healthy=true`
+  - `firingObserved=true`
+  - `resolvedObserved=true`
 
 ## 验证结论
 
