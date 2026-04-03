@@ -17,6 +17,22 @@ function info() {
   echo "[attendance-onprem-package-verify] $*" >&2
 }
 
+function verify_windows_entrypoints() {
+  local root="$1"
+  local start_script="${root}/start-pm2.bat"
+  local deploy_script="${root}/deploy-${run_label}.bat"
+
+  if ! rg -n --fixed-strings -- '-RootDir "%~dp0."' "$start_script" >/dev/null 2>&1; then
+    die "start-pm2.bat must pass -RootDir \"%~dp0.\" to avoid Windows path quoting bugs"
+  fi
+
+  if [[ -n "$run_label" ]] && [[ -f "$deploy_script" ]]; then
+    if ! rg -n --fixed-strings -- '-RootDir "%~dp0."' "$deploy_script" >/dev/null 2>&1; then
+      die "deploy-${run_label}.bat must pass -RootDir \"%~dp0.\" to avoid Windows path quoting bugs"
+    fi
+  fi
+}
+
 function verify_workspace_manifest() {
   local root="$1"
   local workspace_file="${root}/pnpm-workspace.yaml"
@@ -182,12 +198,12 @@ if [[ -n "$run_label" ]]; then
   [[ -e "${pkg_root}/deploy-${run_label}.bat" ]] || die "Required package content missing: deploy-${run_label}.bat"
 fi
 
+verify_windows_entrypoints "$pkg_root"
+
 if [[ -d "${pkg_root}/plugins" ]]; then
-  extra_plugins="$(
-    find "${pkg_root}/plugins" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; \
-      | grep -v '^plugin-attendance$' \
-      || true
-  )"
+  extra_plugins="$({
+    find "${pkg_root}/plugins" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;
+  } | grep -v '^plugin-attendance$' || true)"
   if [[ -n "$extra_plugins" ]]; then
     echo "$extra_plugins" >&2
     die "Attendance on-prem package must only include plugin-attendance under plugins/"
