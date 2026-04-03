@@ -2237,6 +2237,115 @@ describe('Attendance Plugin Integration', () => {
     expect(createdRuleSet?.config?.rule?.timezone).toBe('Asia/Shanghai')
   })
 
+  it('accepts compatibility payload aliases for rotation rule and payroll cycle routes', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-compat-rot-pay-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Compat Shift ${runSuffix}`,
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        workingDays: [1, 2, 3, 4, 5],
+      }),
+    })
+    expect(shiftRes.status).toBe(201)
+    const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(shiftId).toBeTruthy()
+    if (!shiftId) return
+
+    const rotationRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Compat Rotation ${runSuffix}`,
+        timezone: 'Asia/Shanghai',
+        shift_ids: [shiftId],
+        is_active: true,
+      }),
+    })
+    expect(rotationRuleRes.status).toBe(201)
+    expect(((rotationRuleRes.body as { data?: { shiftSequence?: string[] } } | undefined)?.data?.shiftSequence)).toEqual([shiftId])
+
+    const payrollTemplateRes = await requestJson(`${baseUrl}/api/attendance/payroll-templates`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `Compat Payroll ${runSuffix}`,
+        timezone: 'UTC',
+        startDay: 1,
+        endDay: 30,
+      }),
+    })
+    expect(payrollTemplateRes.status).toBe(201)
+    const payrollTemplateId = (payrollTemplateRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(payrollTemplateId).toBeTruthy()
+    if (!payrollTemplateId) return
+
+    const cycleSeed = Number.parseInt(runSuffix, 36)
+    const safeCycleSeed = Number.isFinite(cycleSeed) ? Math.max(0, cycleSeed) : Date.now()
+    const cycleYear = 2040 + (safeCycleSeed % 20)
+    const cycleMonthNumber = (Math.floor(safeCycleSeed / 7) % 12) + 1
+    const cycleMonth = String(cycleMonthNumber).padStart(2, '0')
+    const cycleAnchorDate = `${cycleYear}-${cycleMonth}-01`
+    const generateMonthNumber = cycleMonthNumber === 12 ? 1 : cycleMonthNumber + 1
+    const generateYear = cycleMonthNumber === 12 ? cycleYear + 1 : cycleYear
+
+    const payrollCycleCreateRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        payrollTemplateId,
+        anchor_date: cycleAnchorDate,
+        name: `Compat Payroll Cycle ${runSuffix}`,
+        metadata: JSON.stringify({ source: 'compat-create' }),
+      }),
+    })
+    expect(payrollCycleCreateRes.status).toBe(201)
+    expect(((payrollCycleCreateRes.body as { data?: { templateId?: string; metadata?: { source?: string } } } | undefined)?.data?.templateId)).toBe(payrollTemplateId)
+    expect(((payrollCycleCreateRes.body as { data?: { templateId?: string; metadata?: { source?: string } } } | undefined)?.data?.metadata?.source)).toBe('compat-create')
+
+    const payrollCycleGenerateRes = await requestJson(`${baseUrl}/api/attendance/payroll-cycles/generate`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        payrollTemplateId,
+        year: generateYear,
+        month: generateMonthNumber,
+        count: 1,
+        name_prefix: `Compat Batch ${runSuffix}`,
+      }),
+    })
+    expect(payrollCycleGenerateRes.status).toBe(200)
+    expect(((payrollCycleGenerateRes.body as { data?: { templateId?: string; created?: Array<{ name?: string }> } } | undefined)?.data?.templateId)).toBe(payrollTemplateId)
+    expect(((payrollCycleGenerateRes.body as { data?: { templateId?: string; created?: Array<{ name?: string }> } } | undefined)?.data?.created?.[0]?.name)).toContain(`Compat Batch ${runSuffix}`)
+  })
+
   it('supports approval flow, rule set, and payroll cycle item lookup while keeping missing item semantics stable', async () => {
     if (!baseUrl) return
 
