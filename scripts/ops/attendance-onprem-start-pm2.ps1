@@ -5,7 +5,23 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$resolvedRoot = (Resolve-Path $RootDir).Path
+
+function Resolve-RootDirPath {
+  param([string]$Candidate)
+
+  $trimmed = $Candidate.Trim().Trim('"')
+  if ([string]::IsNullOrWhiteSpace($trimmed)) {
+    throw 'RootDir is empty after normalization'
+  }
+
+  if (-not (Test-Path -LiteralPath $trimmed)) {
+    throw "RootDir does not exist: $trimmed"
+  }
+
+  return [System.IO.Path]::GetFullPath($trimmed)
+}
+
+$resolvedRoot = Resolve-RootDirPath -Candidate $RootDir
 Set-Location $resolvedRoot
 
 function Resolve-AppEnvFile {
