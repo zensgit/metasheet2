@@ -812,6 +812,26 @@ async function run() {
   if (!found) die('approved request not found in list')
   log('requests list ok')
 
+  const recordsRes = await apiFetch(
+    `/attendance/records?from=${encodeURIComponent(workDate)}&to=${encodeURIComponent(workDate)}&userId=${encodeURIComponent(userId)}&pageSize=50`,
+    { method: 'GET' }
+  )
+  assertOk(recordsRes, 'GET /attendance/records (post-approval)')
+  const recordItems = recordsRes.body?.data?.items || []
+  const settledRecord = Array.isArray(recordItems)
+    ? recordItems.find((item) => {
+        const recordDate = String(item?.workDate || item?.work_date || '').slice(0, 10)
+        const recordUserId = String(item?.userId || item?.user_id || '')
+        return recordDate === workDate && recordUserId === userId
+      })
+    : null
+  if (!settledRecord) die('approved request did not produce a readable attendance record for the same work date')
+  const settledStatus = String(settledRecord?.status || '')
+  if (settledStatus !== 'adjusted') {
+    die(`post-approval attendance record expected status=adjusted, got status=${settledStatus || 'n/a'}`)
+  }
+  log('request settlement record ok')
+
   log('SMOKE PASS')
 }
 
