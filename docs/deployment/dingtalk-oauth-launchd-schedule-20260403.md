@@ -8,6 +8,7 @@
 
 - 每 2 小时跑一次 stability check
 - 每天 20:00 跑一次正式 drill
+- 每天 20:05 生成一条 summary 快照
 
 ## 安装
 
@@ -21,6 +22,7 @@ pnpm ops:install-dingtalk-oauth-schedule
 
 - `~/Library/LaunchAgents/com.zensgit.metasheet.dingtalk-oauth-stability.plist`
 - `~/Library/LaunchAgents/com.zensgit.metasheet.dingtalk-oauth-drill.plist`
+- `~/Library/LaunchAgents/com.zensgit.metasheet.dingtalk-oauth-summary.plist`
 
 日志目录：
 
@@ -38,10 +40,16 @@ pnpm ops:print-dingtalk-oauth-schedule-status
 
 - `~/Library/Logs/metasheet2/dingtalk-oauth/runs/stability-*.log`
 - `~/Library/Logs/metasheet2/dingtalk-oauth/runs/drill-*.log`
+- `~/Library/Logs/metasheet2/dingtalk-oauth/runs/summary-*.log`
 
 索引：
 
 - `~/Library/Logs/metasheet2/dingtalk-oauth/index.jsonl`
+
+汇总快照：
+
+- `~/Library/Logs/metasheet2/dingtalk-oauth/summaries/summary-*.json`
+- `~/Library/Logs/metasheet2/dingtalk-oauth/summaries/summary-*.md`
 
 ## 调整时间
 
@@ -51,6 +59,8 @@ pnpm ops:print-dingtalk-oauth-schedule-status
 STABILITY_INTERVAL_SECONDS=3600 \
 DRILL_HOUR=22 \
 DRILL_MINUTE=30 \
+SUMMARY_HOUR=22 \
+SUMMARY_MINUTE=35 \
 pnpm ops:install-dingtalk-oauth-schedule
 ```
 

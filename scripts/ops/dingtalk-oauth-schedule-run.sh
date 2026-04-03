@@ -26,8 +26,12 @@ function run_drill() {
   JSON_OUTPUT=true bash "${ROOT_DIR}/scripts/ops/dingtalk-onprem-alert-drill.sh"
 }
 
-[[ -n "${RUN_KIND}" ]] || die "Usage: $0 <stability|drill>"
-[[ "${RUN_KIND}" == "stability" || "${RUN_KIND}" == "drill" ]] || die "Unknown run kind: ${RUN_KIND}"
+function run_summary() {
+  bash "${ROOT_DIR}/scripts/ops/dingtalk-oauth-schedule-summary.sh"
+}
+
+[[ -n "${RUN_KIND}" ]] || die "Usage: $0 <stability|drill|summary>"
+[[ "${RUN_KIND}" == "stability" || "${RUN_KIND}" == "drill" || "${RUN_KIND}" == "summary" ]] || die "Unknown run kind: ${RUN_KIND}"
 
 ensure_dir "${RUN_LOG_DIR}"
 
@@ -37,8 +41,10 @@ TMP_STDOUT="${LOG_FILE}.tmp"
 set +e
 if [[ "${RUN_KIND}" == "stability" ]]; then
   run_stability >"${TMP_STDOUT}" 2>&1
-else
+elif [[ "${RUN_KIND}" == "drill" ]]; then
   run_drill >"${TMP_STDOUT}" 2>&1
+else
+  run_summary >"${TMP_STDOUT}" 2>&1
 fi
 EXIT_CODE=$?
 set -e
@@ -90,6 +96,25 @@ elif run_kind == 'drill':
     if last_json:
         record['alertName'] = last_json.get('alertName')
         record['drillId'] = last_json.get('drillId')
+        record['firingObserved'] = last_json.get('firingObserved')
+        record['resolvedObserved'] = last_json.get('resolvedObserved')
+elif run_kind == 'summary':
+    last_json = None
+    for line in text.splitlines()[::-1]:
+        stripped = line.strip()
+        if stripped.startswith('{') and stripped.endswith('}'):
+            try:
+                last_json = json.loads(stripped)
+                break
+            except Exception:
+                continue
+    if last_json:
+        record['summaryJsonFile'] = last_json.get('summaryJsonFile')
+        record['summaryMarkdownFile'] = last_json.get('summaryMarkdownFile')
+        record['latestStabilityCheckedAt'] = last_json.get('latestStabilityCheckedAt')
+        record['latestDrillCheckedAt'] = last_json.get('latestDrillCheckedAt')
+        record['latestDrillId'] = last_json.get('latestDrillId')
+        record['healthy'] = last_json.get('healthy')
         record['firingObserved'] = last_json.get('firingObserved')
         record['resolvedObserved'] = last_json.get('resolvedObserved')
 

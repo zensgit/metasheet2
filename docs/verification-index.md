@@ -149,6 +149,7 @@ Entry points:
   - Second-operator handoff verification: `docs/development/onprem-second-operator-handoff-verification-20260401.md`
   - Second-operator handoff runbook: `docs/deployment/onprem-second-operator-handoff-20260401.md`
   - Launchd schedule install: `pnpm ops:install-dingtalk-oauth-schedule`
+  - Launchd summary snapshot: `pnpm ops:dingtalk-oauth-schedule-summary`
   - Launchd schedule status: `pnpm ops:print-dingtalk-oauth-schedule-status`
   - Launchd schedule design: `docs/development/dingtalk-oauth-launchd-schedule-design-20260403.md`
   - Launchd schedule verification: `docs/development/dingtalk-oauth-launchd-schedule-verification-20260403.md`

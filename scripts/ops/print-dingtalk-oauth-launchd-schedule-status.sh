@@ -7,6 +7,7 @@ USER_ID="$(id -u)"
 
 STABILITY_LABEL="com.zensgit.metasheet.dingtalk-oauth-stability"
 DRILL_LABEL="com.zensgit.metasheet.dingtalk-oauth-drill"
+SUMMARY_LABEL="com.zensgit.metasheet.dingtalk-oauth-summary"
 INDEX_FILE="${LOG_ROOT}/index.jsonl"
 
 function print_agent() {
@@ -24,10 +25,13 @@ echo "agent_dir=${AGENT_DIR}"
 echo "log_root=${LOG_ROOT}"
 echo "stability_plist=$([[ -f "${AGENT_DIR}/${STABILITY_LABEL}.plist" ]] && echo present || echo missing)"
 echo "drill_plist=$([[ -f "${AGENT_DIR}/${DRILL_LABEL}.plist" ]] && echo present || echo missing)"
+echo "summary_plist=$([[ -f "${AGENT_DIR}/${SUMMARY_LABEL}.plist" ]] && echo present || echo missing)"
 echo "---"
 print_agent "${STABILITY_LABEL}"
 echo "---"
 print_agent "${DRILL_LABEL}"
+echo "---"
+print_agent "${SUMMARY_LABEL}"
 echo "---"
 echo "recent_runs:"
 if [[ -f "${INDEX_FILE}" ]]; then

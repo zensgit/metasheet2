@@ -11,6 +11,7 @@
 新增三类资产：
 
 - 定时运行包装器：`scripts/ops/dingtalk-oauth-schedule-run.sh`
+- 汇总生成器：`scripts/ops/dingtalk-oauth-schedule-summary.sh`
 - launchd 安装器：`scripts/ops/install-dingtalk-oauth-launchd-schedule.sh`
 - launchd 状态查看：`scripts/ops/print-dingtalk-oauth-launchd-schedule-status.sh`
 
@@ -41,6 +42,18 @@
 - 保持告警链真实演练
 - 避免把频道刷成高噪声
 
+### 汇总快照
+
+- 任务：`summary`
+- 命令：`scripts/ops/dingtalk-oauth-schedule-summary.sh`
+- 默认时间：每天 `20:05`
+
+理由：
+
+- drill 跑完后自动生成一条可读快照
+- 不依赖再次人工翻 `index.jsonl`
+- 让晚间结果在日志目录里有稳定 JSON/Markdown 产物
+
 ## 记录策略
 
 不自动改仓库文档，不自动提交。
@@ -49,6 +62,7 @@
 
 - `~/Library/Logs/metasheet2/dingtalk-oauth/runs/*.log`
 - `~/Library/Logs/metasheet2/dingtalk-oauth/index.jsonl`
+- `~/Library/Logs/metasheet2/dingtalk-oauth/summaries/*`
 
 这样做的原因：
 

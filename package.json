@@ -37,6 +37,7 @@
     "ops:onprem-alert-second-operator-drill": "bash scripts/ops/dingtalk-onprem-second-operator-drill.sh",
     "ops:dingtalk-oauth-stability-check": "bash scripts/ops/dingtalk-oauth-stability-check.sh",
     "ops:install-dingtalk-oauth-schedule": "bash scripts/ops/install-dingtalk-oauth-launchd-schedule.sh",
+    "ops:dingtalk-oauth-schedule-summary": "bash scripts/ops/dingtalk-oauth-schedule-run.sh summary",
     "ops:print-dingtalk-oauth-schedule-status": "bash scripts/ops/print-dingtalk-oauth-launchd-schedule-status.sh",
     "verify:attendance-locale-zh": "node scripts/verify-attendance-locale-zh-smoke.mjs",
     "verify:attendance-zh-copy-contract": "node scripts/ops/attendance-verify-zh-copy-contract.mjs",

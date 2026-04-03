@@ -33,11 +33,13 @@ pnpm ops:install-dingtalk-oauth-schedule
 
 - stability: 每 `7200` 秒
 - drill: 每天 `20:00`
+- summary: 每天 `20:05`
 
 实际结果：
 
 - 生成 `~/Library/LaunchAgents/com.zensgit.metasheet.dingtalk-oauth-stability.plist`
 - 生成 `~/Library/LaunchAgents/com.zensgit.metasheet.dingtalk-oauth-drill.plist`
+- 生成 `~/Library/LaunchAgents/com.zensgit.metasheet.dingtalk-oauth-summary.plist`
 - 日志根目录为 `~/Library/Logs/metasheet2/dingtalk-oauth`
 
 ### 4. 状态检查
@@ -58,6 +60,7 @@ pnpm ops:print-dingtalk-oauth-schedule-status
 
 - `stability_plist=present`
 - `drill_plist=present`
+- `summary_plist=present`
 - `launchctl print gui/$(id -u)/com.zensgit.metasheet.dingtalk-oauth-stability`
   - `state = not running`
   - `runs = 1`
@@ -66,11 +69,16 @@ pnpm ops:print-dingtalk-oauth-schedule-status
   - `state = not running`
   - `runs = 0`
   - 已注册 `Hour=20 / Minute=0`
+- `launchctl print gui/$(id -u)/com.zensgit.metasheet.dingtalk-oauth-summary`
+  - `state = not running`
+  - `runs = 0`
+  - 已注册 `Hour=20 / Minute=5`
 
 说明：
 
 - `stability` agent 安装时因 `RunAtLoad=true` 自动执行了一次，成功退出
 - `drill` agent 处于等待今晚 `20:00` 触发状态
+- `summary` agent 处于等待今晚 `20:05` 触发状态
 
 ### 5. 手工触发一次 stability 包装器
 
@@ -95,11 +103,40 @@ bash scripts/ops/dingtalk-oauth-schedule-run.sh stability
   - `exitCode=0`
   - `healthy=true`
 
+### 6. 手工触发一次 summary 包装器
+
+执行：
+
+```bash
+pnpm ops:dingtalk-oauth-schedule-summary
+```
+
+预期：
+
+- 生成一条 `summary-*.log`
+- 生成一组 `summaries/summary-*.json` 与 `summaries/summary-*.md`
+- `index.jsonl` 追加一条 `kind=summary`
+
+实际结果：
+
+- 生成 `~/Library/Logs/metasheet2/dingtalk-oauth/runs/summary-*.log`
+- 生成 `~/Library/Logs/metasheet2/dingtalk-oauth/summaries/summary-*.json`
+- 生成 `~/Library/Logs/metasheet2/dingtalk-oauth/summaries/summary-*.md`
+- `index.jsonl` 追加了 `kind=summary`
+- 记录里包含：
+  - `latestStabilityCheckedAt`
+  - `latestDrillCheckedAt`
+  - `latestDrillId`
+  - `healthy`
+  - `firingObserved`
+  - `resolvedObserved`
+
 ## 验证结论
 
 这条本机定时观察链路已经生效：
 
 - `stability` 已成功自动运行并落日志
 - `drill` 已挂到今晚 `20:00`
+- `summary` 已挂到今晚 `20:05`
 
 后续我不能“主动在未来回复”，但脚本会按计划自己执行并记录，之后可以回来读取这些日志做汇总。
