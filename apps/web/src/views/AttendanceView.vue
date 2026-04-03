@@ -93,6 +93,37 @@
         </div>
       </section>
 
+      <section v-if="showReports" class="attendance__report-summary-grid">
+        <article class="attendance__report-summary-card">
+          <span class="attendance__report-summary-label">{{ tr('Pending requests', '待处理申请') }}</span>
+          <strong>{{ reportSurfaceSummary.pendingRequests }}</strong>
+          <small class="attendance__field-hint">
+            {{ tr('Awaiting action in the loaded request report.', '基于当前已加载申请报表中的待处理项。') }}
+          </small>
+        </article>
+        <article class="attendance__report-summary-card">
+          <span class="attendance__report-summary-label">{{ tr('Approved requests', '已批准申请') }}</span>
+          <strong>{{ reportSurfaceSummary.approvedRequests }}</strong>
+          <small class="attendance__field-hint">
+            {{ tr('Approved rows already reflected in the current report data.', '已体现在当前报表数据中的批准申请。') }}
+          </small>
+        </article>
+        <article class="attendance__report-summary-card">
+          <span class="attendance__report-summary-label">{{ tr('Approved minutes', '已批准分钟数') }}</span>
+          <strong>{{ reportSurfaceSummary.approvedMinutes }}</strong>
+          <small class="attendance__field-hint">
+            {{ tr('Minutes aggregated from approved request rows.', '按已批准申请行聚合的分钟数。') }}
+          </small>
+        </article>
+        <article class="attendance__report-summary-card">
+          <span class="attendance__report-summary-label">{{ tr('Follow-up records', '待跟进记录') }}</span>
+          <strong>{{ reportSurfaceSummary.followUpRecords }}</strong>
+          <small class="attendance__field-hint">
+            {{ tr('Calculated from the current records page only.', '仅基于当前记录页计算。') }}
+          </small>
+        </article>
+      </section>
+
       <section class="attendance__grid" v-if="showOverview || showReports">
         <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requests)">
           <h3>{{ tr('Summary', '汇总') }}</h3>
@@ -405,7 +436,49 @@
             </button>
           </div>
           <small class="attendance__field-hint">{{ requestReportTimezoneContextHint }}</small>
-          <div v-if="requestReport.length === 0" class="attendance__empty">{{ tr('No report data.', '暂无报表数据。') }}</div>
+          <div class="attendance__report-toolbar">
+            <label class="attendance__field" for="attendance-report-request-type">
+              <span>{{ tr('Request type', '申请类型') }}</span>
+              <select id="attendance-report-request-type" v-model="requestReportTypeFilter">
+                <option :value="ATTENDANCE_REPORT_ALL_FILTER">{{ tr('All types', '全部类型') }}</option>
+                <option
+                  v-for="option in requestReportTypeOptions"
+                  :key="`request-type-${option.value}`"
+                  :value="option.value"
+                >
+                  {{ formatRequestType(option.value) }} ({{ option.count }})
+                </option>
+              </select>
+            </label>
+            <label class="attendance__field" for="attendance-report-request-status">
+              <span>{{ tr('Request status', '申请状态') }}</span>
+              <select id="attendance-report-request-status" v-model="requestReportStatusFilter">
+                <option :value="ATTENDANCE_REPORT_ALL_FILTER">{{ tr('All statuses', '全部状态') }}</option>
+                <option
+                  v-for="option in requestReportStatusOptions"
+                  :key="`request-status-${option.value}`"
+                  :value="option.value"
+                >
+                  {{ formatStatus(option.value) }} ({{ option.count }})
+                </option>
+              </select>
+            </label>
+          </div>
+          <small class="attendance__field-hint attendance__field-hint--reports">
+            {{
+              tr(
+                `Showing ${filteredRequestReportTotal} requests across ${filteredRequestReport.length} report rows.`,
+                `当前展示 ${filteredRequestReportTotal} 条申请，覆盖 ${filteredRequestReport.length} 个报表行。`,
+              )
+            }}
+          </small>
+          <div v-if="filteredRequestReport.length === 0" class="attendance__empty">
+            {{
+              requestReport.length === 0
+                ? tr('No report data.', '暂无报表数据。')
+                : tr('No report rows match the current filters.', '当前筛选条件下没有匹配的报表行。')
+            }}
+          </div>
           <div v-else class="attendance__table-wrapper">
             <table class="attendance__table">
               <thead>
@@ -417,7 +490,7 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="row in requestReport" :key="`${row.requestType}-${row.status}`">
+                <tr v-for="row in filteredRequestReport" :key="`${row.requestType}-${row.status}`">
                   <td>{{ formatRequestType(row.requestType) }}</td>
                   <td>{{ formatStatus(row.status) }}</td>
                   <td>{{ row.total }}</td>
@@ -444,7 +517,36 @@
           </div>
         </div>
         <small class="attendance__field-hint">{{ recordsTimezoneContextHint }}</small>
-        <div v-if="records.length === 0" class="attendance__empty">{{ tr('No records.', '暂无记录。') }}</div>
+        <div class="attendance__report-toolbar">
+          <label class="attendance__field" for="attendance-report-record-status">
+            <span>{{ tr('Record status', '记录状态') }}</span>
+            <select id="attendance-report-record-status" v-model="recordsStatusFilter">
+              <option :value="ATTENDANCE_REPORT_ALL_FILTER">{{ tr('All statuses', '全部状态') }}</option>
+              <option
+                v-for="option in recordStatusOptions"
+                :key="`record-status-${option.value}`"
+                :value="option.value"
+              >
+                {{ formatStatus(option.value) }} ({{ option.count }})
+              </option>
+            </select>
+          </label>
+        </div>
+        <small class="attendance__field-hint attendance__field-hint--reports">
+          {{
+            tr(
+              `Filtering the current records page (${filteredRecords.length}/${records.length}).`,
+              `当前仅筛选本页记录（${filteredRecords.length}/${records.length}）。`,
+            )
+          }}
+        </small>
+        <div v-if="filteredRecords.length === 0" class="attendance__empty">
+          {{
+            records.length === 0
+              ? tr('No records.', '暂无记录。')
+              : tr('No records match the current filters.', '当前筛选条件下没有匹配的记录。')
+          }}
+        </div>
         <div v-else class="attendance__table-wrapper">
           <table class="attendance__table attendance__table--records">
             <thead>
@@ -462,7 +564,7 @@
               </tr>
             </thead>
             <tbody>
-              <template v-for="record in records" :key="record.id">
+              <template v-for="record in filteredRecords" :key="record.id">
                 <tr>
                   <td>{{ record.work_date }}</td>
                   <td>{{ formatDateTime(record.first_in_at) }}</td>
@@ -4060,6 +4162,16 @@ import AttendanceHolidayDataSection from './attendance/AttendanceHolidayDataSect
 import AttendanceUserPickerField from './attendance/AttendanceUserPickerField.vue'
 import { useAttendanceAdminImportBatches } from './attendance/useAttendanceAdminImportBatches'
 import {
+  ATTENDANCE_REPORT_ALL_FILTER,
+  buildAttendanceRecordStatusOptions,
+  buildAttendanceRequestStatusOptions,
+  buildAttendanceRequestTypeOptions,
+  filterAttendanceRecords,
+  filterAttendanceRequestReport,
+  resolveAttendanceReportFilter,
+  summarizeAttendanceReportSurface,
+} from './attendance/useAttendanceReportSurface'
+import {
   buildRuleSetPreviewRecommendations,
   summarizeRuleSetPreviewResult,
   type AttendanceRuleBuilderState,
@@ -4949,6 +5061,9 @@ const requestReportTotal = computed(() =>
 const requestReportMinutesTotal = computed(() =>
   requestReport.value.reduce((sum, row) => sum + (Number(row.minutes) || 0), 0)
 )
+const requestReportTypeFilter = ref(ATTENDANCE_REPORT_ALL_FILTER)
+const requestReportStatusFilter = ref(ATTENDANCE_REPORT_ALL_FILTER)
+const recordsStatusFilter = ref(ATTENDANCE_REPORT_ALL_FILTER)
 const leaveTypes = ref<AttendanceLeaveType[]>([])
 const overtimeRules = ref<AttendanceOvertimeRule[]>([])
 const approvalFlows = ref<AttendanceApprovalFlow[]>([])
@@ -5323,6 +5438,34 @@ const recordsPage = ref(1)
 const recordsPageSize = 20
 const recordsTotal = ref(0)
 const recordsTotalPages = computed(() => Math.max(1, Math.ceil(recordsTotal.value / recordsPageSize)))
+const requestReportTypeOptions = computed(() => buildAttendanceRequestTypeOptions(requestReport.value))
+const requestReportStatusOptions = computed(() => buildAttendanceRequestStatusOptions(requestReport.value))
+const recordStatusOptions = computed(() => buildAttendanceRecordStatusOptions(records.value))
+const activeRequestReportTypeFilter = computed(() => (
+  resolveAttendanceReportFilter(requestReportTypeFilter.value, requestReportTypeOptions.value)
+))
+const activeRequestReportStatusFilter = computed(() => (
+  resolveAttendanceReportFilter(requestReportStatusFilter.value, requestReportStatusOptions.value)
+))
+const activeRecordsStatusFilter = computed(() => (
+  resolveAttendanceReportFilter(recordsStatusFilter.value, recordStatusOptions.value)
+))
+const filteredRequestReport = computed(() => (
+  filterAttendanceRequestReport(
+    requestReport.value,
+    activeRequestReportTypeFilter.value,
+    activeRequestReportStatusFilter.value,
+  )
+))
+const filteredRequestReportTotal = computed(() => (
+  filteredRequestReport.value.reduce((sum, row) => sum + (Number(row.total) || 0), 0)
+))
+const filteredRecords = computed(() => (
+  filterAttendanceRecords(records.value, activeRecordsStatusFilter.value)
+))
+const reportSurfaceSummary = computed(() => (
+  summarizeAttendanceReportSurface(requestReport.value, records.value)
+))
 const calendarDisplayPrefs = loadCalendarDisplayPrefs()
 const showLunarLabel = ref(calendarDisplayPrefs.showLunar)
 const showHolidayBadge = ref(calendarDisplayPrefs.showHoliday)
@@ -12199,6 +12342,11 @@ const holidaySectionBindings = {
   font-size: 11px;
 }
 
+.attendance__field-hint--reports {
+  display: inline-block;
+  margin-top: 8px;
+}
+
 .attendance__field-hint--error {
   color: #c0392b;
 }
@@ -12256,6 +12404,36 @@ const holidaySectionBindings = {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 20px;
+}
+
+.attendance__report-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+}
+
+.attendance__report-summary-card {
+  background: #fff;
+  border: 1px solid #e0e7ff;
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-shadow: 0 2px 4px rgba(37, 99, 235, 0.06);
+}
+
+.attendance__report-summary-card strong {
+  font-size: 24px;
+  line-height: 1.1;
+  color: #1d4ed8;
+}
+
+.attendance__report-summary-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: #475569;
 }
 
 .attendance__card {
@@ -12465,6 +12643,13 @@ const holidaySectionBindings = {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.attendance__report-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
 }
 
 .attendance__request-list {
