@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import http from 'http'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 
@@ -18,11 +19,42 @@ describe('MetaSheetServer lifecycle', () => {
     const server = new MetaSheetServer({ port: 0, host: '127.0.0.1' })
     await server.start()
 
-    const addr = server.getAddress()
-    expect(addr).toBeTruthy()
-    expect(typeof addr.port).toBe('number')
+    try {
+      const addr = server.getAddress()
+      expect(addr).toBeTruthy()
+      expect(typeof addr).toBe('object')
+      if (!addr || typeof addr === 'string') {
+        throw new Error('Expected server.address() to return AddressInfo')
+      }
+      expect(typeof addr.port).toBe('number')
 
-    await server.stop()
+      const pluginsRes = await request(`http://${addr.address}:${addr.port}/api/plugins`)
+      expect(pluginsRes.status).toBe(200)
+      expect(pluginsRes.headers['x-content-type-options']).toBe('nosniff')
+    } finally {
+      await server.stop()
+    }
+
     expect(true).toBe(true)
   })
 })
+
+function request(url: string): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, (res) => {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (chunk) => {
+        body += chunk
+      })
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode || 0,
+          headers: res.headers,
+          body,
+        })
+      })
+    })
+    req.on('error', reject)
+  })
+}

@@ -143,6 +143,14 @@ exit /b %ERRORLEVEL%
 EOF
 }
 
+function write_onprem_workspace_manifest() {
+  cat > "${PACKAGE_ROOT}/pnpm-workspace.yaml" <<'EOF'
+packages:
+  - 'packages/*'
+  - 'plugins/*'
+EOF
+}
+
 if [[ "$INSTALL_DEPS" == "1" ]]; then
   run pnpm install --frozen-lockfile
 fi
@@ -168,6 +176,7 @@ for rel in "${REQUIRED_PATHS[@]}"; do
   copy_path "$rel"
 done
 
+write_onprem_workspace_manifest
 write_windows_entrypoints
 
 cat > "${PACKAGE_ROOT}/INSTALL.txt" <<EOF
