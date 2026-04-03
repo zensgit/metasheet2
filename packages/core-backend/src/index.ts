@@ -416,6 +416,12 @@ export class MetaSheetServer {
     // CORS
     this.app.use(cors())
 
+    // API responses should always opt out of MIME sniffing, including early 4xx replies.
+    this.app.use('/api', (_req: Request, res: Response, next: NextFunction) => {
+      res.setHeader('X-Content-Type-Options', 'nosniff')
+      next()
+    })
+
     // 请求上下文（requestId + trace bridge）
     this.app.use((req, _res, next) => {
       const requestId = (req.headers['x-request-id'] as string) || crypto.randomUUID()
