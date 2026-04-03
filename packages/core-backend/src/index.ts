@@ -73,11 +73,24 @@ import { SnapshotService } from './services/SnapshotService'
 import { cacheRegistry } from '../core/cache/CacheRegistry'
 import { loadObservabilityConfig } from './config/observability'
 import { initObservability } from './observability/otel'
+import { isPlmEnabled } from './config/product-mode'
 
 type PluginRuntimeState = {
   status: 'active' | 'inactive' | 'failed'
   error?: string
   lastAttempt?: string
+}
+
+function disabledFeatureHandler(message: string): RequestHandler {
+  return (_req, res) => {
+    res.status(404).json({
+      ok: false,
+      error: {
+        code: 'FEATURE_DISABLED',
+        message,
+      },
+    })
+  }
 }
 
 export class MetaSheetServer {
@@ -533,8 +546,13 @@ export class MetaSheetServer {
     this.app.use('/api/workflow', workflowRouter)
     // 路由：工作流设计器 (V2 Visual Designer)
     this.app.use('/api/workflow-designer', workflowDesignerRouter)
-    // 路由：PLM 工作台（共享预设、工作台状态）
-    this.app.use(plmWorkbenchRouter)
+    const plmEnabled = isPlmEnabled(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
+    if (plmEnabled) {
+      this.app.use(plmWorkbenchRouter)
+    } else {
+      this.app.use('/api/plm-workbench', disabledFeatureHandler('PLM workbench is disabled in this deployment'))
+      this.app.use('/api/federation/plm', disabledFeatureHandler('PLM federation APIs are disabled in this deployment'))
+    }
 
     // 路由：工作流 Echo/Mock API（用于前端并行开发）
     // 当后端引擎未完全就绪时，返回 echo 响应

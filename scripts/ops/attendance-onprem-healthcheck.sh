@@ -14,6 +14,7 @@ CHECK_METRICS="${CHECK_METRICS:-0}"
 METRICS_URL="${METRICS_URL:-http://127.0.0.1:8900/metrics/prom}"
 AUTH_TOKEN="${AUTH_TOKEN:-}"
 EXPECT_PRODUCT_MODE="${EXPECT_PRODUCT_MODE:-attendance}"
+EXPECT_PLM_ENABLED="${EXPECT_PLM_ENABLED:-}"
 
 function die() {
   echo "[attendance-onprem-healthcheck] ERROR: $*" >&2
@@ -89,14 +90,23 @@ if [[ -n "$AUTH_TOKEN" ]]; then
   info "Checking /api/auth/me feature mode"
   payload="$(curl -fsS --max-time "$MAX_TIME" -H "Authorization: Bearer ${AUTH_TOKEN}" "${API_BASE%/}/auth/me")" || die "GET /api/auth/me failed"
   if command -v node >/dev/null 2>&1; then
-    actual_mode="$(
+    actual_checks="$(
       node -e '
         const raw = process.argv[1] || "{}";
         let parsed = {};
         try { parsed = JSON.parse(raw); } catch {}
         const mode = parsed?.data?.features?.mode || "";
-        process.stdout.write(String(mode));
+        const plm = parsed?.data?.features?.plm;
+        process.stdout.write(JSON.stringify({ mode, plm }));
       ' "$payload"
+    )"
+    actual_mode="$(
+      node -e '
+        const raw = process.argv[1] || "{}";
+        let parsed = {};
+        try { parsed = JSON.parse(raw); } catch {}
+        process.stdout.write(String(parsed.mode || ""));
+      ' "$actual_checks"
     )"
     if [[ -z "$actual_mode" ]]; then
       die "features.mode missing in /api/auth/me"
@@ -105,6 +115,21 @@ if [[ -n "$AUTH_TOKEN" ]]; then
       die "features.mode mismatch: expected=${EXPECT_PRODUCT_MODE}, actual=${actual_mode}"
     fi
     info "features.mode OK: ${actual_mode}"
+
+    if [[ -n "$EXPECT_PLM_ENABLED" ]]; then
+      actual_plm="$(
+        node -e '
+          const raw = process.argv[1] || "{}";
+          let parsed = {};
+          try { parsed = JSON.parse(raw); } catch {}
+          process.stdout.write(String(parsed.plm));
+        ' "$actual_checks"
+      )"
+      if [[ "$actual_plm" != "$EXPECT_PLM_ENABLED" ]]; then
+        die "features.plm mismatch: expected=${EXPECT_PLM_ENABLED}, actual=${actual_plm:-<empty>}"
+      fi
+      info "features.plm OK: ${actual_plm}"
+    fi
   else
     info "node not found; skip strict JSON parse for /api/auth/me"
   fi

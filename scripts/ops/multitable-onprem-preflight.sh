@@ -22,6 +22,7 @@ IMPORT_REQUIRE_TOKEN=""
 IMPORT_UPLOAD_DIR=""
 ATTACHMENT_PATH=""
 ATTACHMENT_STORAGE_BASE_URL=""
+ENABLE_PLM=""
 
 function die() {
   write_report "FAIL" "$*"
@@ -196,6 +197,9 @@ function build_suggested_actions() {
     PRODUCT_MODE\ must\ be*)
       actions+=("Set PRODUCT_MODE=platform in app.env for the multitable on-prem package.")
       ;;
+    ENABLE_PLM\ must\ be*)
+      actions+=("Set ENABLE_PLM to 0 or 1 in app.env. Use 0 to disable PLM while keeping the platform shell.")
+      ;;
     DEPLOYMENT_MODEL\ must\ be*)
       actions+=("Set DEPLOYMENT_MODEL=onprem in app.env for the on-prem package.")
       ;;
@@ -274,6 +278,9 @@ EOF
     PRODUCT_MODE\ must\ be*)
       printf '%s\0' "$(build_env_set_snippet "PRODUCT_MODE" "${EXPECT_PRODUCT_MODE}" "Align PRODUCT_MODE with the multitable on-prem package")"
       ;;
+    ENABLE_PLM\ must\ be*)
+      printf '%s\0' "$(build_env_set_snippet "ENABLE_PLM" "1" "Enable PLM in the default platform shell, or set 0 if the deployment must hide PLM")"
+      ;;
     DEPLOYMENT_MODEL\ must\ be*)
       printf '%s\0' "$(build_env_set_snippet "DEPLOYMENT_MODEL" "${REQUIRE_DEPLOYMENT_MODEL}" "Align DEPLOYMENT_MODEL with the on-prem package")"
       ;;
@@ -338,6 +345,9 @@ function build_suggested_quick_fix_commands() {
       ;;
     PRODUCT_MODE\ must\ be*)
       printf '%s\n' "$(build_set_env_quick_command "PRODUCT_MODE" "${EXPECT_PRODUCT_MODE}")"
+      ;;
+    ENABLE_PLM\ must\ be*)
+      printf '%s\n' "$(build_set_env_quick_command "ENABLE_PLM" "1")"
       ;;
     DEPLOYMENT_MODEL\ must\ be*)
       printf '%s\n' "$(build_set_env_quick_command "DEPLOYMENT_MODEL" "${REQUIRE_DEPLOYMENT_MODEL}")"
@@ -447,6 +457,7 @@ function write_report() {
   "error": $(json_escape "$error_message"),
   "envFile": $(json_escape "$ENV_FILE"),
   "expectedProductMode": $(json_escape "$EXPECT_PRODUCT_MODE"),
+  "enablePlm": $(json_escape "$ENABLE_PLM"),
   "deploymentModel": $(json_escape "$DEPLOYMENT_MODEL"),
   "requireStorageDirs": $(json_escape "$REQUIRE_STORAGE_DIRS"),
   "importUploadDir": $(json_escape "$IMPORT_UPLOAD_DIR"),
@@ -472,6 +483,7 @@ EOF
 - Overall: **${status}**
 - Env file: \`${ENV_FILE}\`
 - Expected product mode: \`${EXPECT_PRODUCT_MODE}\`
+- ENABLE_PLM: \`${ENABLE_PLM:-<empty>}\`
 - Deployment model: \`${DEPLOYMENT_MODEL:-<empty>}\`
 - Storage dirs required: \`${REQUIRE_STORAGE_DIRS}\`
 - Import upload dir: \`${IMPORT_UPLOAD_DIR:-<empty>}\`
@@ -545,6 +557,7 @@ IMPORT_REQUIRE_TOKEN="$(strip_quotes "$(get_env_value ATTENDANCE_IMPORT_REQUIRE_
 IMPORT_UPLOAD_DIR="$(strip_quotes "$(get_env_value ATTENDANCE_IMPORT_UPLOAD_DIR)")"
 ATTACHMENT_PATH="$(strip_quotes "$(get_env_value ATTACHMENT_PATH)")"
 ATTACHMENT_STORAGE_BASE_URL="$(strip_quotes "$(get_env_value ATTACHMENT_STORAGE_BASE_URL)")"
+ENABLE_PLM="$(strip_quotes "$(get_env_value ENABLE_PLM)")"
 
 require_nonempty_env "JWT_SECRET" "$JWT_SECRET"
 require_nonempty_env "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
@@ -556,6 +569,10 @@ fi
 
 if [[ -n "$EXPECT_PRODUCT_MODE" && "$PRODUCT_MODE" != "$EXPECT_PRODUCT_MODE" ]]; then
   die "PRODUCT_MODE must be '${EXPECT_PRODUCT_MODE}' for multitable on-prem (got: '${PRODUCT_MODE:-<empty>}')"
+fi
+
+if [[ -n "$ENABLE_PLM" && "$ENABLE_PLM" != "0" && "$ENABLE_PLM" != "1" ]]; then
+  die "ENABLE_PLM must be 0 or 1 in ${ENV_FILE} (got: '${ENABLE_PLM}')"
 fi
 
 if [[ -n "$REQUIRE_DEPLOYMENT_MODEL" && "$DEPLOYMENT_MODEL" != "$REQUIRE_DEPLOYMENT_MODEL" ]]; then
@@ -580,6 +597,7 @@ if [[ "$REQUIRE_STORAGE_DIRS" == "1" ]]; then
 fi
 
 info "Env file: ${ENV_FILE}"
+info "ENABLE_PLM: ${ENABLE_PLM:-<empty>}"
 info "Import upload dir: ${IMPORT_UPLOAD_DIR}"
 info "Attachment path: ${ATTACHMENT_PATH}"
 info "Attachment base URL: ${ATTACHMENT_STORAGE_BASE_URL}"

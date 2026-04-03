@@ -226,7 +226,7 @@ export interface RouteMeta {
   transition?: string
 
   // Product capability guard
-  requiredFeature?: 'attendance' | 'workflow' | 'attendanceAdmin' | 'attendanceImport'
+  requiredFeature?: 'attendance' | 'workflow' | 'attendanceAdmin' | 'attendanceImport' | 'plm'
 }
 
 /**

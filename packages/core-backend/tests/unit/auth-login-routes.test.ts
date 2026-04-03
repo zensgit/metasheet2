@@ -132,6 +132,7 @@ async function invokeRoute(
 
 describe('auth login routes', () => {
   beforeEach(() => {
+    vi.unstubAllEnvs()
     authServiceMocks.login.mockReset()
     authServiceMocks.register.mockReset()
     authServiceMocks.refreshToken.mockReset()
@@ -199,6 +200,33 @@ describe('auth login routes', () => {
     expect(response.statusCode).toBe(200)
     expect(authServiceMocks.verifyToken).toHaveBeenCalledWith('live-token')
     expect((response.body as Record<string, any>).data.features.attendance).toBe(true)
+  })
+
+  it('disables plm in feature payload when ENABLE_PLM=0', async () => {
+    vi.stubEnv('PRODUCT_MODE', 'plm-workbench')
+    vi.stubEnv('ENABLE_PLM', '0')
+
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'manager@example.com',
+      name: 'Manager',
+      role: 'admin',
+      permissions: ['attendance:admin'],
+      created_at: new Date('2026-03-13T00:00:00.000Z'),
+      updated_at: new Date('2026-03-13T00:00:00.000Z'),
+    })
+
+    const response = await invokeRoute('get', '/me', {
+      headers: {
+        authorization: 'Bearer live-token',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.features).toMatchObject({
+      plm: false,
+      mode: 'platform',
+    })
   })
 
   it('lists current user sessions and exposes currentSessionId', async () => {
