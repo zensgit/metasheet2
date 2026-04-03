@@ -68,7 +68,7 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/attendance',
     name: 'attendance',
     component: AttendanceExperienceView,
-    meta: { title: 'Attendance', requiresAuth: true, requiredFeature: 'attendance' }
+    meta: { title: 'Attendance', titleZh: '考勤', requiresAuth: true, requiredFeature: 'attendance' }
   },
   buildMultitableRoute(() => import('../multitable/views/MultitableEmbedHost.vue')),
   {
@@ -93,19 +93,19 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/plm',
     name: 'plm',
     component: PlmProductView,
-    meta: { title: 'PLM', requiresAuth: true, requiredFeature: 'plm' }
+    meta: { title: 'PLM', titleZh: 'PLM', requiresAuth: true, requiredFeature: 'plm' }
   },
   {
     path: '/plm/audit',
     name: 'plm-audit',
     component: () => import('../views/PlmAuditView.vue'),
-    meta: { title: 'PLM Audit', requiresAuth: true, requiredFeature: 'plm' }
+    meta: { title: 'PLM Audit', titleZh: 'PLM 审计', requiresAuth: true, requiredFeature: 'plm' }
   },
   {
     path: '/settings',
     name: 'user-settings',
     component: () => import('../views/SessionCenterView.vue'),
-    meta: { title: 'My Sessions', requiresAuth: true }
+    meta: { title: 'My Sessions', titleZh: '我的会话', requiresAuth: true }
   },
   {
     path: '/admin/users',
@@ -135,19 +135,19 @@ export const appRoutes: RouteRecordRaw[] = [
     path: '/workflows',
     name: 'workflow-list',
     component: () => import('../views/WorkflowHubView.vue'),
-    meta: { title: 'Workflows', requiresAuth: true, requiredFeature: 'workflow' }
+    meta: { title: 'Workflows', titleZh: '流程', requiresAuth: true, requiredFeature: 'workflow' }
   },
   {
     path: '/workflows/designer/:id?',
     name: 'workflow-designer',
     component: () => import('../views/WorkflowDesigner.vue'),
-    meta: { title: 'Workflow Designer', requiresAuth: true, requiredFeature: 'workflow' }
+    meta: { title: 'Workflow Designer', titleZh: '流程设计', requiresAuth: true, requiredFeature: 'workflow' }
   },
   {
     path: '/approvals',
     name: 'approval-list',
     component: () => import('../views/ApprovalInboxView.vue'),
-    meta: { title: 'Approvals', requiresAuth: true }
+    meta: { title: 'Approvals', titleZh: '审批中心', requiresAuth: true }
   },
   {
     path: '/admin/plugins',

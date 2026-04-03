@@ -10,7 +10,7 @@
         <template v-else>
           <template v-if="plmWorkbenchFocused">
             <router-link to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
-            <router-link to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
+            <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
             <router-link v-if="hasFeature('workflow')" to="/workflows" class="nav-link">{{ navLabels.workflows }}</router-link>
             <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
           </template>
@@ -37,7 +37,7 @@
             <router-link v-if="canManageUsers" to="/admin/audit" class="nav-link">{{ navLabels.adminAudit }}</router-link>
           <router-link v-if="isAdmin" to="/admin/plugins" class="nav-link">{{ navLabels.plugins }}</router-link>
           <router-link v-if="canUsePlm" to="/plm" class="nav-link">{{ navLabels.plm }}</router-link>
-            <router-link to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
+            <router-link v-if="canUsePlm" to="/plm/audit" class="nav-link">{{ navLabels.audit }}</router-link>
           </template>
         </template>
       </div>
@@ -70,11 +70,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuth } from './composables/useAuth'
 import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
+import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { useFeatureFlags } from './stores/featureFlags'
 import { getApiBase } from './utils/api'
 
@@ -158,6 +159,8 @@ const brandText = computed(() => {
   return 'MetaSheet'
 })
 
+const documentTitle = computed(() => resolveRouteDocumentTitle(route.meta, isZh.value))
+
 const accountEmail = computed(() => {
   void route.fullPath
   return getAccessSnapshot().email
@@ -204,6 +207,11 @@ onMounted(async () => {
   }
   await fetchPlugins()
 })
+
+watch(documentTitle, (nextTitle) => {
+  if (typeof document === 'undefined') return
+  document.title = nextTitle
+}, { immediate: true })
 </script>
 
 <style>

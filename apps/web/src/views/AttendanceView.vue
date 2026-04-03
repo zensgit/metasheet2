@@ -11,12 +11,20 @@
       <p class="attendance__empty" v-else>{{ tr('Enable the attendance plugin to use this page.', '启用考勤插件后可使用此页面。') }}</p>
     </div>
     <template v-else>
-      <header class="attendance__header" v-if="showOverview">
+      <header class="attendance__header" v-if="showOverview || showReports">
         <div>
-          <h2 class="attendance__title">{{ tr('Attendance', '考勤') }}</h2>
-          <p class="attendance__subtitle">{{ tr('Track punches, summaries, and adjustments.', '跟踪打卡、汇总和补卡调整。') }}</p>
+          <h2 class="attendance__title">
+            {{ showReports ? tr('Attendance Reports', '考勤报表') : tr('Attendance', '考勤') }}
+          </h2>
+          <p class="attendance__subtitle">
+            {{
+              showReports
+                ? tr('Review request totals by type and status.', '按类型与状态查看申请汇总。')
+                : tr('Track punches, summaries, and adjustments.', '跟踪打卡、汇总和补卡调整。')
+            }}
+          </p>
         </div>
-        <div class="attendance__actions">
+        <div v-if="showOverview" class="attendance__actions">
           <button class="attendance__btn attendance__btn--primary" :disabled="punching" @click="punch('check_in')">
             {{ punching ? tr('Working...', '处理中...') : tr('Check In', '上班打卡') }}
           </button>
@@ -26,7 +34,7 @@
         </div>
       </header>
 
-      <section class="attendance__filters" v-if="showOverview">
+      <section class="attendance__filters" v-if="showOverview || showReports">
         <label class="attendance__field" for="attendance-from-date">
           <span>{{ tr('From', '开始') }}</span>
           <input id="attendance-from-date" name="fromDate" v-model="fromDate" type="date" />
@@ -49,7 +57,9 @@
             :placeholder="tr('Current user', '当前用户')"
           />
         </label>
-        <button class="attendance__btn" :disabled="loading" @click="refreshOverviewWithStatus">{{ tr('Refresh', '刷新') }}</button>
+        <button class="attendance__btn" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
+          {{ showReports ? tr('Reload report', '重载报表') : tr('Refresh', '刷新') }}
+        </button>
         <div v-if="statusMessage" class="attendance__status-block">
           <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
             {{ statusMessage }}
@@ -72,8 +82,8 @@
         </div>
       </section>
 
-      <section class="attendance__grid" v-if="showOverview">
-        <div class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requests)">
+      <section class="attendance__grid" v-if="showOverview || showReports">
+        <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requests)">
           <h3>{{ tr('Summary', '汇总') }}</h3>
           <small class="attendance__field-hint">{{ summaryTimezoneContextHint }}</small>
           <div v-if="summary" class="attendance__summary">
@@ -137,7 +147,7 @@
           <div v-else class="attendance__empty">{{ tr('No summary yet.', '暂无汇总数据。') }}</div>
         </div>
 
-        <div class="attendance__card attendance__card--calendar">
+        <div v-if="showOverview" class="attendance__card attendance__card--calendar">
           <div class="attendance__calendar-header">
             <h3>{{ tr('Calendar', '日历') }}</h3>
             <div class="attendance__calendar-nav">
@@ -181,7 +191,7 @@
           </div>
         </div>
 
-        <div class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies)">
+        <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies)">
           <h3>{{ tr('Adjustment Request', '补卡申请') }}</h3>
           <small class="attendance__field-hint">{{ requestTimezoneContextHint }}</small>
           <div class="attendance__request-form">
@@ -318,7 +328,7 @@
           </div>
         </div>
 
-        <div class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)">
+        <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)">
           <div class="attendance__requests-header">
             <h3>{{ tr('Anomalies', '异常') }}</h3>
             <button class="attendance__btn" :disabled="anomaliesLoading || loading" @click="reloadAnomaliesWithStatus">
@@ -371,7 +381,7 @@
           </div>
         </div>
 
-        <div class="attendance__card">
+        <div class="attendance__card" :data-reports-surface="showReports ? 'reports' : 'overview'">
           <div class="attendance__requests-header">
             <h3>{{ tr('Request Report', '申请报表') }}</h3>
             <button class="attendance__btn" :disabled="reportLoading" @click="reloadRequestReportWithStatus">
@@ -4050,7 +4060,7 @@ import { apiFetch } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
 import { buildTimezoneOptions, formatTimezoneLabel } from '../utils/timezones'
 
-type AttendancePageMode = 'overview' | 'admin'
+type AttendancePageMode = 'overview' | 'reports' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
 const ATTENDANCE_OVERVIEW_SECTION_IDS = {
   requests: 'attendance-overview-requests',
@@ -5100,6 +5110,7 @@ const pluginErrorMessage = computed(() => pluginsError.value)
 
 const showAdmin = computed(() => props.mode === 'admin')
 const showOverview = computed(() => props.mode === 'overview')
+const showReports = computed(() => props.mode === 'reports')
 const overviewSectionElements = new Map<string, HTMLElement>()
 
 function isKnownOverviewSectionId(id: string | null | undefined): id is AttendanceOverviewSectionId {
@@ -9557,6 +9568,14 @@ async function refreshOverviewWithStatus() {
   setStatus(
     appendStatusContext(tr('Overview refreshed.', '总览已刷新。'), overviewRefreshTimezoneContextHint.value),
   )
+}
+
+async function refreshVisibleSurfaceWithStatus() {
+  if (showReports.value) {
+    await reloadRequestReportWithStatus()
+    return
+  }
+  await refreshOverviewWithStatus()
 }
 
 async function reloadAnomaliesWithStatus() {

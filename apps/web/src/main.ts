@@ -9,6 +9,7 @@ import App from './App.vue'
 import { useAuth } from './composables/useAuth'
 import { appRoutes } from './router/appRoutes'
 import { ROUTE_PATHS } from './router/types'
+import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { useFeatureFlags } from './stores/featureFlags'
 import { normalizePostLoginRedirect, normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './utils/authRedirect'
 
@@ -23,13 +24,12 @@ router.beforeEach(async (to, _from, next) => {
   const isLoginRoute = to.path === ROUTE_PATHS.LOGIN
   const requiresAuth = to.meta?.requiresAuth !== false
   const flags = useFeatureFlags()
-  const title = to.meta?.title
-
-  if (title) {
-    document.title = `${title} - MetaSheet`
-  } else {
-    document.title = 'MetaSheet'
-  }
+  const localeRaw =
+    typeof window !== 'undefined'
+      ? window.localStorage.getItem('metasheet_locale') || window.navigator?.language || ''
+      : ''
+  const isZh = /^zh/i.test(localeRaw)
+  document.title = resolveRouteDocumentTitle(to.meta, isZh)
 
   if (isLoginRoute) {
     if (token) {

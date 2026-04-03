@@ -44,6 +44,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import AttendanceOverview from './AttendanceOverview.vue'
+import AttendanceReportsView from './AttendanceReportsView.vue'
 import AttendanceAdminCenter from './AttendanceAdminCenter.vue'
 import AttendanceWorkflowDesigner from './AttendanceWorkflowDesigner.vue'
 
@@ -130,9 +131,9 @@ const activeView = computed(() => {
       }
     case 'reports':
       return {
-        component: AttendanceOverview,
+        component: AttendanceReportsView,
         key: 'attendance-reports',
-        props: { initialSectionId: 'attendance-overview-request-report' },
+        props: {},
       }
     case 'admin':
       if (!canAccessAdmin.value) return null

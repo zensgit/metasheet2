@@ -202,6 +202,7 @@ export interface AppRouteQuery {
 export interface RouteMeta {
   // Page title
   title?: string
+  titleZh?: string
 
   // Auth requirements
   requiresAuth?: boolean
