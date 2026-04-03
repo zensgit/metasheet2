@@ -93,6 +93,144 @@
         </div>
       </section>
 
+      <section v-if="showReports" class="attendance__grid attendance__grid--reports-insights">
+        <div class="attendance__card" data-reports-insight="snapshot">
+          <div class="attendance__requests-header">
+            <h3>{{ tr('Report Snapshot', '报表快照') }}</h3>
+            <button
+              v-if="reportsFiltersActive"
+              class="attendance__btn attendance__btn--inline"
+              type="button"
+              @click="clearReportsFilters"
+            >
+              {{ tr('Clear filters', '清除筛选') }}
+            </button>
+          </div>
+          <small class="attendance__field-hint">
+            {{ tr('Snapshot combines filtered request totals with the current records page.', '快照结合了筛选后的申请汇总与当前记录页。') }}
+          </small>
+          <div class="attendance__summary attendance__summary--reports">
+            <div class="attendance__summary-item">
+              <span>{{ tr('Visible requests', '筛选后申请') }}</span>
+              <strong>{{ filteredRequestReportTotal }}</strong>
+            </div>
+            <div class="attendance__summary-item">
+              <span>{{ tr('Visible minutes', '筛选后分钟') }}</span>
+              <strong>{{ filteredRequestReportMinutesTotal }}</strong>
+            </div>
+            <div class="attendance__summary-item">
+              <span>{{ tr('Visible groups', '筛选后分组') }}</span>
+              <strong>{{ filteredRequestReport.length }}</strong>
+            </div>
+            <div class="attendance__summary-item">
+              <span>{{ tr('Visible records', '筛选后记录') }}</span>
+              <strong>{{ filteredRecords.length }}</strong>
+            </div>
+            <div class="attendance__summary-item">
+              <span>{{ tr('Flagged records', '异常记录') }}</span>
+              <strong>{{ filteredFlaggedRecordsCount }}</strong>
+            </div>
+            <div class="attendance__summary-item">
+              <span>{{ tr('Work minutes', '工时分钟') }}</span>
+              <strong>{{ filteredRecordsWorkMinutes }}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div class="attendance__card" data-reports-insight="request-status">
+          <div class="attendance__requests-header">
+            <h3>{{ tr('Request Status Mix', '申请状态分布') }}</h3>
+            <small class="attendance__field-hint">
+              {{ tr('Filter the request report table locally.', '本地筛选申请报表表格。') }}
+            </small>
+          </div>
+          <div class="attendance__filter-pills" data-report-filter-group="request-status">
+            <button
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportStatusFilter === 'all' }"
+              type="button"
+              data-report-filter-value="all"
+              @click="requestReportStatusFilter = 'all'"
+            >
+              {{ tr('All', '全部') }} · {{ requestReportTotal }}
+            </button>
+            <button
+              v-for="item in requestReportStatusBreakdown"
+              :key="item.key"
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportStatusFilter === item.key }"
+              type="button"
+              :data-report-filter-value="item.key"
+              @click="requestReportStatusFilter = item.key"
+            >
+              {{ item.label }} · {{ item.count }}
+            </button>
+          </div>
+        </div>
+
+        <div class="attendance__card" data-reports-insight="request-type">
+          <div class="attendance__requests-header">
+            <h3>{{ tr('Request Type Mix', '申请类型分布') }}</h3>
+            <small class="attendance__field-hint">
+              {{ tr('Use this to focus on leave, overtime, or corrections.', '用它聚焦请假、加班或补卡类型。') }}
+            </small>
+          </div>
+          <div class="attendance__filter-pills" data-report-filter-group="request-type">
+            <button
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportTypeFilter === 'all' }"
+              type="button"
+              data-report-filter-value="all"
+              @click="requestReportTypeFilter = 'all'"
+            >
+              {{ tr('All', '全部') }} · {{ requestReportTotal }}
+            </button>
+            <button
+              v-for="item in requestReportTypeBreakdown"
+              :key="item.key"
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportTypeFilter === item.key }"
+              type="button"
+              :data-report-filter-value="item.key"
+              @click="requestReportTypeFilter = item.key"
+            >
+              {{ item.label }} · {{ item.count }}
+            </button>
+          </div>
+        </div>
+
+        <div class="attendance__card" data-reports-insight="record-status">
+          <div class="attendance__requests-header">
+            <h3>{{ tr('Record Status Mix', '记录状态分布') }}</h3>
+            <small class="attendance__field-hint">
+              {{ tr('Current page only, so filters stay lightweight.', '仅针对当前页，保持筛选轻量。') }}
+            </small>
+          </div>
+          <div class="attendance__filter-pills" data-report-filter-group="record-status">
+            <button
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': recordStatusFilter === 'all' }"
+              type="button"
+              data-report-filter-value="all"
+              @click="recordStatusFilter = 'all'"
+            >
+              {{ tr('All', '全部') }} · {{ records.length }}
+            </button>
+            <button
+              v-for="item in recordStatusBreakdown"
+              :key="item.key"
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': recordStatusFilter === item.key }"
+              type="button"
+              :data-report-filter-value="item.key"
+              @click="recordStatusFilter = item.key"
+            >
+              {{ item.label }} · {{ item.count }}
+            </button>
+          </div>
+        </div>
+      </section>
+
       <section class="attendance__grid" v-if="showOverview || showReports">
         <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requests)">
           <h3>{{ tr('Summary', '汇总') }}</h3>
@@ -397,6 +535,7 @@
           class="attendance__card"
           v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)"
           data-reports-surface="reports"
+          data-report-card="request-report"
         >
           <div class="attendance__requests-header">
             <h3>{{ tr('Request Report', '申请报表') }}</h3>
@@ -405,7 +544,18 @@
             </button>
           </div>
           <small class="attendance__field-hint">{{ requestReportTimezoneContextHint }}</small>
+          <p class="attendance__field-hint attendance__field-hint--strong">
+            {{
+              tr(
+                `Showing ${filteredRequestReport.length} groups / ${filteredRequestReportTotal} requests / ${filteredRequestReportMinutesTotal} minutes.`,
+                `当前显示 ${filteredRequestReport.length} 个分组 / ${filteredRequestReportTotal} 条申请 / ${filteredRequestReportMinutesTotal} 分钟。`,
+              )
+            }}
+          </p>
           <div v-if="requestReport.length === 0" class="attendance__empty">{{ tr('No report data.', '暂无报表数据。') }}</div>
+          <div v-else-if="filteredRequestReport.length === 0" class="attendance__empty">
+            {{ tr('No report rows match the current filters.', '当前筛选条件下没有匹配的报表行。') }}
+          </div>
           <div v-else class="attendance__table-wrapper">
             <table class="attendance__table">
               <thead>
@@ -417,7 +567,7 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="row in requestReport" :key="`${row.requestType}-${row.status}`">
+                <tr v-for="row in filteredRequestReport" :key="`${row.requestType}-${row.status}`">
                   <td>{{ formatRequestType(row.requestType) }}</td>
                   <td>{{ formatStatus(row.status) }}</td>
                   <td>{{ row.total }}</td>
@@ -433,6 +583,7 @@
         class="attendance__card"
         v-if="showReports"
         v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.records)"
+        data-report-card="records"
       >
         <div class="attendance__records-header">
           <h3>{{ tr('Records', '记录') }}</h3>
@@ -444,7 +595,18 @@
           </div>
         </div>
         <small class="attendance__field-hint">{{ recordsTimezoneContextHint }}</small>
+        <p class="attendance__field-hint attendance__field-hint--strong">
+          {{
+            tr(
+              `Showing ${filteredRecords.length} of ${records.length} loaded records on this page.`,
+              `当前页已加载 ${records.length} 条记录，当前显示 ${filteredRecords.length} 条。`,
+            )
+          }}
+        </p>
         <div v-if="records.length === 0" class="attendance__empty">{{ tr('No records.', '暂无记录。') }}</div>
+        <div v-else-if="filteredRecords.length === 0" class="attendance__empty">
+          {{ tr('No records match the current filters on this page.', '当前页筛选条件下没有匹配的记录。') }}
+        </div>
         <div v-else class="attendance__table-wrapper">
           <table class="attendance__table attendance__table--records">
             <thead>
@@ -462,7 +624,7 @@
               </tr>
             </thead>
             <tbody>
-              <template v-for="record in records" :key="record.id">
+              <template v-for="record in filteredRecords" :key="record.id">
                 <tr>
                   <td>{{ record.work_date }}</td>
                   <td>{{ formatDateTime(record.first_in_at) }}</td>
@@ -4246,6 +4408,13 @@ interface AttendanceRequestReportItem {
   minutes: number
 }
 
+interface AttendanceReportBreakdownItem {
+  key: string
+  label: string
+  count: number
+  minutes: number
+}
+
 interface PermissionUserResponse {
   userId: string
   permissions: string[]
@@ -4949,6 +5118,115 @@ const requestReportTotal = computed(() =>
 const requestReportMinutesTotal = computed(() =>
   requestReport.value.reduce((sum, row) => sum + (Number(row.minutes) || 0), 0)
 )
+const requestReportStatusFilter = ref('all')
+const requestReportTypeFilter = ref('all')
+const recordStatusFilter = ref('all')
+
+function summarizeReportBreakdown<T>(
+  items: T[],
+  keyOf: (item: T) => string,
+  labelOf: (key: string) => string,
+  countOf: (item: T) => number,
+  minutesOf: (item: T) => number,
+): AttendanceReportBreakdownItem[] {
+  const summary = new Map<string, AttendanceReportBreakdownItem>()
+  items.forEach((item) => {
+    const key = keyOf(item)
+    if (!key) return
+    const existing = summary.get(key) ?? {
+      key,
+      label: labelOf(key),
+      count: 0,
+      minutes: 0,
+    }
+    existing.count += countOf(item)
+    existing.minutes += minutesOf(item)
+    summary.set(key, existing)
+  })
+  return Array.from(summary.values()).sort((left, right) => {
+    if (right.count !== left.count) return right.count - left.count
+    return left.label.localeCompare(right.label)
+  })
+}
+
+const requestReportStatusBreakdown = computed(() =>
+  summarizeReportBreakdown(
+    requestReport.value,
+    row => row.status,
+    status => formatStatus(status),
+    row => Number(row.total) || 0,
+    row => Number(row.minutes) || 0,
+  )
+)
+
+const requestReportTypeBreakdown = computed(() =>
+  summarizeReportBreakdown(
+    requestReport.value,
+    row => row.requestType,
+    requestType => formatRequestType(requestType),
+    row => Number(row.total) || 0,
+    row => Number(row.minutes) || 0,
+  )
+)
+
+const recordStatusBreakdown = computed(() =>
+  summarizeReportBreakdown(
+    records.value,
+    record => record.status,
+    status => formatStatus(status),
+    () => 1,
+    record => Number(record.work_minutes) || 0,
+  )
+)
+
+const filteredRequestReport = computed(() =>
+  requestReport.value.filter((row) => {
+    if (requestReportStatusFilter.value !== 'all' && row.status !== requestReportStatusFilter.value) {
+      return false
+    }
+    if (requestReportTypeFilter.value !== 'all' && row.requestType !== requestReportTypeFilter.value) {
+      return false
+    }
+    return true
+  })
+)
+
+const filteredRequestReportTotal = computed(() =>
+  filteredRequestReport.value.reduce((sum, row) => sum + (Number(row.total) || 0), 0)
+)
+
+const filteredRequestReportMinutesTotal = computed(() =>
+  filteredRequestReport.value.reduce((sum, row) => sum + (Number(row.minutes) || 0), 0)
+)
+
+const filteredRecords = computed(() =>
+  records.value.filter((record) => {
+    if (recordStatusFilter.value !== 'all' && record.status !== recordStatusFilter.value) {
+      return false
+    }
+    return true
+  })
+)
+
+const filteredFlaggedRecordsCount = computed(() =>
+  filteredRecords.value.filter(record => !['normal', 'off'].includes(record.status)).length
+)
+
+const filteredRecordsWorkMinutes = computed(() =>
+  filteredRecords.value.reduce((sum, record) => sum + (Number(record.work_minutes) || 0), 0)
+)
+
+const reportsFiltersActive = computed(() =>
+  requestReportStatusFilter.value !== 'all'
+  || requestReportTypeFilter.value !== 'all'
+  || recordStatusFilter.value !== 'all'
+)
+
+function clearReportsFilters(): void {
+  requestReportStatusFilter.value = 'all'
+  requestReportTypeFilter.value = 'all'
+  recordStatusFilter.value = 'all'
+}
 const leaveTypes = ref<AttendanceLeaveType[]>([])
 const overtimeRules = ref<AttendanceOvertimeRule[]>([])
 const approvalFlows = ref<AttendanceApprovalFlow[]>([])
@@ -12068,6 +12346,27 @@ watch(orgId, () => {
   }
 })
 
+watch(requestReportStatusBreakdown, (items) => {
+  if (requestReportStatusFilter.value === 'all') return
+  if (!items.some(item => item.key === requestReportStatusFilter.value)) {
+    requestReportStatusFilter.value = 'all'
+  }
+}, { immediate: true })
+
+watch(requestReportTypeBreakdown, (items) => {
+  if (requestReportTypeFilter.value === 'all') return
+  if (!items.some(item => item.key === requestReportTypeFilter.value)) {
+    requestReportTypeFilter.value = 'all'
+  }
+}, { immediate: true })
+
+watch(recordStatusBreakdown, (items) => {
+  if (recordStatusFilter.value === 'all') return
+  if (!items.some(item => item.key === recordStatusFilter.value)) {
+    recordStatusFilter.value = 'all'
+  }
+}, { immediate: true })
+
 watch(
   () => [props.initialSectionId, showAdmin.value, showOverview.value, showReports.value, adminForbidden.value, attendancePluginActive.value] as const,
   () => {
@@ -12291,6 +12590,38 @@ const holidaySectionBindings = {
 .attendance__summary-item span {
   font-size: 12px;
   color: #666;
+}
+
+.attendance__grid--reports-insights {
+  margin-bottom: 20px;
+}
+
+.attendance__summary--reports {
+  margin-top: 14px;
+}
+
+.attendance__filter-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.attendance__filter-pill {
+  border: 1px solid #d6dbe3;
+  background: #f8fafc;
+  color: #334155;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.attendance__filter-pill--active {
+  border-color: #1976d2;
+  background: #e3f2fd;
+  color: #0f4c81;
 }
 
 .attendance__card--calendar {
