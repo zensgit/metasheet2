@@ -174,6 +174,24 @@ describeWithDb('Event bus API integration', () => {
     }
   })
 
+  it('rejects non-admin users from querying event bus routes', async () => {
+    if (!baseUrl) return
+
+    const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=events-user&roles=user&perms=attendance:read`)
+    expect(tokenRes.status).toBe(200)
+    const authToken = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(authToken).toBeTruthy()
+
+    const listRes = await requestJson(`${baseUrl}/api/events?limit=10`, {
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+      },
+    })
+
+    expect(listRes.status).toBe(403)
+    expect((listRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('FORBIDDEN')
+  })
+
   it('keeps /api/events query and delivery logging operational after schema alignment', async () => {
     if (!baseUrl) return
 
