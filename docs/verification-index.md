@@ -14,6 +14,17 @@ Entry points:
   - Verification: `docs/development/github-stability-recording-lite-verification-20260403.md`
   - Notes: records on-prem stability snapshots into GitHub Actions artifacts without triggering the Slack drill; becomes live once merged to the default branch.
 
+## 2026-04-03 On-Prem Docker GC
+
+- Remote Docker garbage collection:
+  - Script: `scripts/ops/dingtalk-onprem-docker-gc.sh`
+  - Installer: `scripts/ops/install-dingtalk-onprem-docker-gc.sh`
+  - Verification: `scripts/ops/verify-dingtalk-onprem-docker-gc.sh`
+  - Design: `docs/development/onprem-docker-gc-design-20260403.md`
+  - Verification report: `docs/development/onprem-docker-gc-verification-20260403.md`
+  - Deployment: `docs/deployment/onprem-docker-gc-20260403.md`
+  - Notes: installs a remote cron on `142.171.239.56` and adds a root filesystem utilization gate to `dingtalk-oauth-stability-check.sh`.
+
 ## Daily / Pre-PR
 
 - Verification summary (latest):
