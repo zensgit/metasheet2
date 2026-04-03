@@ -49,6 +49,12 @@ vi.mock('../src/views/attendance/AttendanceOverview.vue', () => ({
   }),
 }))
 
+vi.mock('../src/views/attendance/AttendanceReportsView.vue', () => ({
+  default: defineComponent({
+    template: '<div data-view="reports"></div>',
+  }),
+}))
+
 vi.mock('../src/views/attendance/AttendanceAdminCenter.vue', () => ({
   default: defineComponent({
     props: {
@@ -121,16 +127,16 @@ describe('Attendance experience entrypoints', () => {
     expect(adminView?.dataset.section).toBe('attendance-admin-import')
   })
 
-  it('routes the reports entrypoint into the request report section', async () => {
+  it('routes the reports entrypoint into a dedicated reports view', async () => {
     routeState.query = { tab: 'reports' }
 
     app = createApp(AttendanceExperienceView)
     app.mount(container!)
     await flushUi()
 
-    const overviewView = container!.querySelector<HTMLElement>('[data-view="overview"]')
-    expect(overviewView).toBeTruthy()
-    expect(overviewView?.dataset.section).toBe('attendance-overview-request-report')
+    const reportsView = container!.querySelector<HTMLElement>('[data-view="reports"]')
+    expect(reportsView).toBeTruthy()
+    expect(container!.querySelector('[data-view="overview"]')).toBeNull()
   })
 
   it('updates the route query when selecting the explicit reports tab', async () => {

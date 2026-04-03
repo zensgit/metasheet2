@@ -18,6 +18,13 @@ vi.mock('../src/views/attendance/AttendanceOverview.vue', () => ({
   },
 }))
 
+vi.mock('../src/views/attendance/AttendanceReportsView.vue', () => ({
+  default: {
+    name: 'AttendanceReportsStub',
+    template: '<div data-testid="attendance-reports">reports</div>',
+  },
+}))
+
 vi.mock('../src/views/attendance/AttendanceAdminCenter.vue', () => ({
   default: {
     name: 'AttendanceAdminCenterStub',
