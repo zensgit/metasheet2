@@ -189,6 +189,16 @@ function makeCsv(workDate, userId, groupName) {
   ].join('\n')
 }
 
+function buildImportPayloadFromTemplateExample(payloadExample) {
+  const example = payloadExample && typeof payloadExample === 'object' ? { ...payloadExample } : {}
+  // The template example returns CSV header hints as string[] for human guidance.
+  // Preview/commit payloads must not echo them back as `columns`, because the
+  // import API reserves that field for structured import-column objects.
+  delete example.columns
+  delete example.requiredFields
+  return example
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -443,8 +453,10 @@ async function run() {
   // 4) template
   const template = await apiFetch('/attendance/import/template', { method: 'GET' })
   assertOk(template, 'GET /attendance/import/template')
-  const payloadExample = template.body?.data?.payloadExample
+  const templateData = template.body?.data ?? {}
+  const payloadExample = templateData?.payloadExample
   if (!payloadExample || typeof payloadExample !== 'object') die('template payloadExample missing')
+  const defaultProfileId = String(templateData?.defaultProfileId || 'dingtalk_csv_daily_summary')
   log('template ok')
 
   // 5) preview
@@ -476,11 +488,11 @@ async function run() {
   }
 
   const previewPayload = {
-    ...payloadExample,
+    ...buildImportPayloadFromTemplateExample(payloadExample),
     orgId,
     userId,
     timezone: payloadExample.timezone || defaultTimezone,
-    mappingProfileId: 'dingtalk_csv_daily_summary',
+    mappingProfileId: defaultProfileId,
     ...(requireImportUpload ? { csvFileId } : { csvText }),
     idempotencyKey,
     groupSync: {
@@ -696,11 +708,11 @@ async function run() {
     }
 
     const asyncPayload = {
-      ...payloadExample,
+      ...buildImportPayloadFromTemplateExample(payloadExample),
       orgId,
       userId,
       timezone: payloadExample.timezone || defaultTimezone,
-      mappingProfileId: 'dingtalk_csv_daily_summary',
+      mappingProfileId: defaultProfileId,
       ...(requireImportUploadAsync ? { csvFileId: csvFileIdAsync } : { csvText: csvTextAsync }),
       idempotencyKey: idempotencyKeyAsync,
       groupSync: {
