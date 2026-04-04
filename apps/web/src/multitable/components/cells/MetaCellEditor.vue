@@ -102,7 +102,7 @@
             class="meta-cell-editor__file-trigger-label"
             @dragover.prevent
             @drop.prevent="onFileDrop"
-          >Drop files or click to browse</span>
+          >{{ attachmentActionHint }}</span>
         </label>
         <button
           type="button"
@@ -128,7 +128,7 @@
 import { ref, computed, onMounted } from 'vue'
 import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaField } from '../../types'
 import MetaAttachmentList from '../MetaAttachmentList.vue'
-import { attachmentAcceptAttr, resolveAttachmentFieldProperty, validateAttachmentSelection } from '../../utils/field-config'
+import { attachmentAcceptAttr, resolveAttachmentFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../../utils/field-config'
 import { linkActionLabel as formatLinkActionLabel } from '../../utils/link-fields'
 
 const props = defineProps<{
@@ -178,6 +178,10 @@ const attachmentAllowsMultiple = computed(() => {
   if (props.field.type !== 'attachment') return true
   return resolveAttachmentFieldProperty(props.field.property).maxFiles !== 1
 })
+const attachmentActionHint = computed(() => {
+  if (attachmentAllowsMultiple.value) return 'Drop files or click to browse'
+  return attachmentIds.value.length ? 'Upload a new file to replace the current one' : 'Upload a file'
+})
 
 const attachmentItems = computed<MetaAttachment[]>(() => {
   const summaryById = new Map((props.attachmentSummaries ?? []).map((attachment) => [attachment.id, attachment]))
@@ -225,12 +229,13 @@ async function uploadFiles(files: FileList) {
   uploading.value = true
   try {
     const existingIds = [...attachmentIds.value]
+    const replaceExisting = shouldReplaceAttachmentSelection(props.field, files, existingIds.length)
     const newIds: string[] = []
     for (const file of Array.from(files)) {
       const attachment = await props.uploadFn(file, attachmentContext())
       newIds.push(attachment.id)
     }
-    setAttachmentValue([...existingIds, ...newIds])
+    setAttachmentValue(replaceExisting ? newIds : [...existingIds, ...newIds])
   } catch (error: any) {
     attachmentError.value = error?.message ?? 'Failed to upload attachment'
   } finally {

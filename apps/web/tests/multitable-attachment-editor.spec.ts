@@ -156,4 +156,66 @@ describe('MetaCellEditor attachment flow', () => {
     app.unmount()
     container.remove()
   })
+
+  it('replaces an existing single attachment after uploading the new file', async () => {
+    const uploadFn = vi.fn().mockResolvedValue({
+      id: 'att_new',
+      filename: 'replacement.pdf',
+      mimeType: 'application/pdf',
+      size: 512,
+      url: 'https://files.example.com/replacement.pdf',
+      thumbnailUrl: null,
+      uploadedAt: '2026-03-25T00:00:00.000Z',
+    })
+    const updateSpy = vi.fn()
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const Harness = defineComponent({
+      setup() {
+        const modelValue = ref<unknown>(['att_old'])
+        return { modelValue }
+      },
+      render() {
+        return h(MetaCellEditor, {
+          field: { id: 'fld_files', name: 'Files', type: 'attachment', property: { maxFiles: 1 } },
+          modelValue: this.modelValue,
+          uploadFn,
+          uploadContext: { recordId: 'rec_1' },
+          'onUpdate:modelValue': (value: unknown) => {
+            this.modelValue = value
+            updateSpy(value)
+          },
+          onConfirm: vi.fn(),
+          onCancel: vi.fn(),
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+
+    const app = createApp(Harness)
+    app.mount(container)
+
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement | null
+    const file = new File(['pdf'], 'replacement.pdf', { type: 'application/pdf' })
+    Object.defineProperty(input, 'files', {
+      value: {
+        0: file,
+        length: 1,
+        item: (index: number) => (index === 0 ? file : null),
+        [Symbol.iterator]: function* iterator() {
+          yield file
+        },
+      },
+      configurable: true,
+    })
+    input?.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(updateSpy).toHaveBeenCalledWith(['att_new'])
+
+    app.unmount()
+    container.remove()
+  })
 })

@@ -3,6 +3,17 @@ import { computed, createApp, defineComponent, h, nextTick, reactive, ref, type 
 
 const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
+const pushSpy = vi.fn().mockResolvedValue(undefined)
+
+vi.mock('vue-router', async () => {
+  const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
+  return {
+    ...actual,
+    useRouter: () => ({
+      push: pushSpy,
+    }),
+  }
+})
 
 function stubComponent(name: string) {
   return defineComponent({
@@ -25,6 +36,9 @@ function createDeferred<T = void>() {
 
 let workbenchMock: any
 let gridMock: any
+let loadCommentsSpy: ReturnType<typeof vi.fn>
+let addCommentSpy: ReturnType<typeof vi.fn>
+let resolveCommentSpy: ReturnType<typeof vi.fn>
 
 vi.mock('../src/multitable/composables/useMultitableWorkbench', () => ({
   useMultitableWorkbench: () => workbenchMock,
@@ -35,15 +49,15 @@ vi.mock('../src/multitable/composables/useMultitableGrid', () => ({
 }))
 
 vi.mock('../src/multitable/composables/useMultitableCapabilities', () => ({
-  useMultitableCapabilities: () => ({
-    canRead: ref(true),
-    canCreateRecord: ref(true),
-    canEditRecord: ref(true),
-    canDeleteRecord: ref(true),
-    canManageFields: ref(true),
-    canManageViews: ref(true),
-    canComment: ref(true),
-    canManageAutomation: ref(false),
+  useMultitableCapabilities: (source: { value?: Record<string, boolean> } | undefined) => ({
+    canRead: computed(() => source?.value?.canRead ?? true),
+    canCreateRecord: computed(() => source?.value?.canCreateRecord ?? true),
+    canEditRecord: computed(() => source?.value?.canEditRecord ?? true),
+    canDeleteRecord: computed(() => source?.value?.canDeleteRecord ?? true),
+    canManageFields: computed(() => source?.value?.canManageFields ?? true),
+    canManageViews: computed(() => source?.value?.canManageViews ?? true),
+    canComment: computed(() => source?.value?.canComment ?? true),
+    canManageAutomation: computed(() => source?.value?.canManageAutomation ?? false),
   }),
 }))
 
@@ -54,10 +68,21 @@ vi.mock('../src/multitable/composables/useMultitableComments', () => ({
     submitting: ref(false),
     resolvingIds: ref<string[]>([]),
     error: ref<string | null>(null),
-    loadComments: vi.fn(),
-    addComment: vi.fn(),
-    resolveComment: vi.fn(),
+    loadComments: loadCommentsSpy,
+    addComment: addCommentSpy,
+    resolveComment: resolveCommentSpy,
   }),
+}))
+
+vi.mock('../src/multitable/composables/useMultitableCommentInbox', () => ({
+  useMultitableCommentInbox: () => ({
+    unreadCount: ref(0),
+    refreshUnreadCount: vi.fn().mockResolvedValue(0),
+  }),
+}))
+
+vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({
+  useMultitableCommentRealtime: vi.fn(),
 }))
 
 vi.mock('../src/multitable/import/bulk-import', () => ({
@@ -212,7 +237,7 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
     props: {
       visible: { type: Boolean, default: false },
     },
-    emits: ['close', 'update:draft'],
+    emits: ['close', 'submit', 'update:draft'],
     render() {
       if (!this.$props.visible) return null
       return h('div', [
@@ -223,6 +248,14 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
             onClick: () => this.$emit('update:draft', 'Need review'),
           },
           'set-comment-draft',
+        ),
+        h(
+          'button',
+          {
+            'data-submit-comment': 'true',
+            onClick: () => this.$emit('submit', { content: 'Need review', mentions: [] }),
+          },
+          'submit-comment',
         ),
         h(
           'button',
@@ -502,6 +535,8 @@ function createWorkbenchMock() {
       canComment: true,
       canManageAutomation: false,
     }),
+    fieldPermissions: ref({}),
+    viewPermissions: ref({}),
     activeView: computed(() => views.value.find((view) => view.id === activeViewId.value) ?? null),
     loading: ref(false),
     error: ref<string | null>(null),
@@ -539,6 +574,9 @@ function createGridMock() {
     columnWidths: ref<Record<string, number>>({}),
     linkSummaries: ref<Record<string, Record<string, unknown[]>>>({}),
     attachmentSummaries: ref<Record<string, Record<string, unknown[]>>>({}),
+    fieldPermissions: ref({}),
+    viewPermission: ref(null),
+    rowActions: ref(null),
     conflict: ref(null),
     error: ref<string | null>(null),
     sortFilterDirty: ref(false),
@@ -571,6 +609,9 @@ describe('MultitableWorkbench view wiring', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    loadCommentsSpy = vi.fn()
+    addCommentSpy = vi.fn()
+    resolveCommentSpy = vi.fn()
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
     container = document.createElement('div')
@@ -585,11 +626,12 @@ describe('MultitableWorkbench view wiring', () => {
     vi.useRealTimers()
     showErrorSpy.mockReset()
     showSuccessSpy.mockReset()
+    pushSpy.mockReset()
     vi.clearAllMocks()
   })
 
-  function mountWorkbench(initialProps?: { baseId?: string; sheetId?: string; viewId?: string }) {
-    let hostState!: { baseId?: string; sheetId?: string; viewId?: string }
+  function mountWorkbench(initialProps?: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string }) {
+    let hostState!: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string }
     const externalContextResults: Array<{
       status: 'applied' | 'failed' | 'superseded'
       context: { baseId: string; sheetId: string; viewId: string }
@@ -606,6 +648,7 @@ describe('MultitableWorkbench view wiring', () => {
           baseId: initialProps?.baseId ?? 'base_ops',
           sheetId: initialProps?.sheetId ?? 'sheet_orders',
           viewId: initialProps?.viewId ?? 'view_grid',
+          recordId: initialProps?.recordId,
         })
         return () => h(MultitableWorkbench as Component, {
           ...hostState,
@@ -635,6 +678,28 @@ describe('MultitableWorkbench view wiring', () => {
       baseId: 'base_sales',
       sheetId: 'sheet_deals',
       viewId: 'view_board',
+    })
+  })
+
+  it('opens workflow designer with multitable context when automation is enabled', async () => {
+    workbenchMock.capabilities.value.canManageAutomation = true
+    mountWorkbench()
+    await flushUi()
+
+    const workflowButton = Array.from(container!.querySelectorAll('.mt-workbench__mgr-btn')).find((button) =>
+      button.textContent?.includes('Workflow'),
+    ) as HTMLButtonElement | undefined
+    workflowButton?.click()
+    await flushUi()
+
+    expect(pushSpy).toHaveBeenCalledWith({
+      name: 'workflow-designer',
+      query: {
+        baseId: 'base_ops',
+        sheetId: 'sheet_orders',
+        viewId: 'view_grid',
+        recordId: undefined,
+      },
     })
   })
 
@@ -933,6 +998,58 @@ describe('MultitableWorkbench view wiring', () => {
     expect(confirmSpy).toHaveBeenCalledWith('Discard unsaved record changes?')
     expect(container!.querySelector('[data-record-drawer="rec_1"]')).toBeTruthy()
     expect(container!.querySelector('[data-record-drawer="rec_2"]')).toBeNull()
+  })
+
+  it('prefers server-provided commentsScope when a deep-linked record is loaded', async () => {
+    workbenchMock.client.getRecord.mockResolvedValue({
+      sheet: { id: 'sheet_orders', baseId: 'base_ops', name: 'Orders', fieldOrder: [] },
+      fields: [],
+      record: { id: 'rec_remote', version: 4, data: { fld_title: 'Remote' } },
+      capabilities: {
+        canRead: true,
+        canCreateRecord: true,
+        canEditRecord: true,
+        canDeleteRecord: true,
+        canManageFields: true,
+        canManageViews: true,
+        canComment: true,
+        canManageAutomation: false,
+      },
+      commentsScope: {
+        containerType: 'meta_sheet',
+        containerId: 'sheet_orders',
+        targetType: 'meta_record',
+        targetId: 'rec_remote',
+        targetFieldId: 'fld_notes',
+      },
+      linkSummaries: {},
+      attachmentSummaries: {},
+    })
+    mountWorkbench({ recordId: 'rec_remote' })
+    await flushUi(8)
+
+    expect(loadCommentsSpy).toHaveBeenCalledWith({
+      containerType: 'meta_sheet',
+      containerId: 'sheet_orders',
+      targetType: 'meta_record',
+      targetId: 'rec_remote',
+      targetFieldId: 'fld_notes',
+    })
+
+    container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-submit-comment="true"]')!.click()
+    await flushUi()
+
+    expect(addCommentSpy).toHaveBeenCalledWith({
+      containerType: 'meta_sheet',
+      containerId: 'sheet_orders',
+      targetType: 'meta_record',
+      targetId: 'rec_remote',
+      targetFieldId: 'fld_notes',
+      content: 'Need review',
+      mentions: [],
+    })
   })
 
   it('prompts before closing the comments drawer when a comment draft exists', async () => {

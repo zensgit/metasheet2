@@ -37,6 +37,7 @@ type UniverMetaView = {
     computedFilterSort?: boolean
     ignoredSortFieldIds?: string[]
     ignoredFilterFieldIds?: string[]
+    permissions?: MultitableScopedPermissions
   }
   page?: {
     offset: number
@@ -92,6 +93,29 @@ type MultitableCapabilities = {
   canManageViews: boolean
   canComment: boolean
   canManageAutomation: boolean
+}
+
+type MultitableFieldPermission = {
+  visible: boolean
+  readOnly: boolean
+}
+
+type MultitableViewPermission = {
+  canAccess: boolean
+  canConfigure: boolean
+  canDelete: boolean
+}
+
+type MultitableRowActions = {
+  canEdit: boolean
+  canDelete: boolean
+  canComment: boolean
+}
+
+type MultitableScopedPermissions = {
+  fieldPermissions?: Record<string, MultitableFieldPermission>
+  viewPermissions?: Record<string, MultitableViewPermission>
+  rowActions?: MultitableRowActions
 }
 
 type LinkedRecordSummary = {
@@ -1166,6 +1190,48 @@ function deriveCapabilities(permissions: string[], isAdminRole: boolean): Multit
   }
 }
 
+function deriveFieldPermissions(
+  fields: UniverMetaField[],
+  capabilities: MultitableCapabilities,
+  opts?: { hiddenFieldIds?: string[]; allowCreateOnly?: boolean },
+): Record<string, MultitableFieldPermission> {
+  const hiddenFieldIds = new Set(opts?.hiddenFieldIds ?? [])
+  const readOnly = opts?.allowCreateOnly ? !capabilities.canCreateRecord : !capabilities.canEditRecord
+  return Object.fromEntries(
+    fields.map((field) => [
+      field.id,
+      {
+        visible: !hiddenFieldIds.has(field.id),
+        readOnly,
+      },
+    ]),
+  )
+}
+
+function deriveViewPermissions(
+  views: Array<Pick<UniverMetaViewConfig, 'id'>>,
+  capabilities: MultitableCapabilities,
+): Record<string, MultitableViewPermission> {
+  return Object.fromEntries(
+    views.map((view) => [
+      view.id,
+      {
+        canAccess: capabilities.canRead,
+        canConfigure: capabilities.canManageViews,
+        canDelete: capabilities.canManageViews,
+      },
+    ]),
+  )
+}
+
+function deriveRowActions(capabilities: MultitableCapabilities): MultitableRowActions {
+  return {
+    canEdit: capabilities.canEditRecord,
+    canDelete: capabilities.canDeleteRecord,
+    canComment: capabilities.canComment,
+  }
+}
+
 function toSummaryDisplay(value: unknown): string {
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
@@ -1985,6 +2051,28 @@ export function univerMetaRouter(): Router {
         )
         : { rows: [] }
 
+      const activeFields = effectiveSheetId
+        ? await loadFieldsForSheet(pool.query.bind(pool), effectiveSheetId)
+        : []
+      const serializedViews = (viewsResult as any).rows.map((row: any) => ({
+        id: String(row.id),
+        sheetId: String(row.sheet_id),
+        name: String(row.name),
+        type: String(row.type ?? 'grid'),
+        filterInfo: normalizeJson(row.filter_info),
+        sortInfo: normalizeJson(row.sort_info),
+        groupInfo: normalizeJson(row.group_info),
+        hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
+        config: normalizeJson(row.config),
+      }))
+      const selectedView = viewId
+        ? serializedViews.find((view: UniverMetaViewConfig) => view.id === viewId) ?? null
+        : serializedViews[0] ?? null
+      const fieldPermissions = deriveFieldPermissions(activeFields, capabilities, {
+        hiddenFieldIds: selectedView?.hiddenFieldIds ?? [],
+      })
+      const viewPermissions = deriveViewPermissions(serializedViews, capabilities)
+
       return res.json({
         ok: true,
         data: {
@@ -2003,18 +2091,10 @@ export function univerMetaRouter(): Router {
             name: String(row.name),
             description: typeof row.description === 'string' ? row.description : null,
           })).filter((row: any) => !isSystemPeopleSheetDescription(row.description)),
-          views: (viewsResult as any).rows.map((row: any) => ({
-            id: String(row.id),
-            sheetId: String(row.sheet_id),
-            name: String(row.name),
-            type: String(row.type ?? 'grid'),
-            filterInfo: normalizeJson(row.filter_info),
-            sortInfo: normalizeJson(row.sort_info),
-            groupInfo: normalizeJson(row.group_info),
-            hiddenFieldIds: normalizeJsonArray(row.hidden_field_ids),
-            config: normalizeJson(row.config),
-          })),
+          views: serializedViews,
           capabilities,
+          fieldPermissions,
+          viewPermissions,
         },
       })
     } catch (err) {
@@ -2975,6 +3055,15 @@ export function univerMetaRouter(): Router {
             ),
           )
         : undefined
+      const access = await resolveRequestAccess(req)
+      const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      const permissions: MultitableScopedPermissions = {
+        fieldPermissions: deriveFieldPermissions(fields, capabilities, {
+          hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
+        }),
+        rowActions: deriveRowActions(capabilities),
+        ...(viewConfig ? { viewPermissions: deriveViewPermissions([viewConfig], capabilities) } : {}),
+      }
 
       const meta = warnings.length > 0 || hasFilterOrSort
         ? {
@@ -2982,8 +3071,9 @@ export function univerMetaRouter(): Router {
             ...(hasFilterOrSort ? { computedFilterSort } : {}),
             ...(ignoredSortFieldIds.length > 0 ? { ignoredSortFieldIds } : {}),
             ...(ignoredFilterFieldIds.length > 0 ? { ignoredFilterFieldIds } : {}),
+            permissions,
           }
-        : undefined
+        : { permissions }
 
       const view: UniverMetaView = {
         id: sheetId,
@@ -3050,6 +3140,16 @@ export function univerMetaRouter(): Router {
 
       const hiddenFieldIds = new Set(resolved.view?.hiddenFieldIds ?? [])
       const visibleFields = fields.filter((field) => !hiddenFieldIds.has(field.id))
+      const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
+        hiddenFieldIds: resolved.view?.hiddenFieldIds ?? [],
+        allowCreateOnly: !record,
+      })
+      const viewPermissions = resolved.view ? deriveViewPermissions([resolved.view], capabilities) : {}
+      const rowActions = deriveRowActions(record ? capabilities : {
+        ...capabilities,
+        canEditRecord: capabilities.canCreateRecord,
+        canDeleteRecord: false,
+      })
       const attachmentFields = visibleFields.filter((field) => field.type === 'attachment')
       const attachmentSummaries = record && attachmentFields.length > 0
         ? serializeAttachmentSummaryMap(
@@ -3073,6 +3173,9 @@ export function univerMetaRouter(): Router {
           ...(resolved.view ? { view: resolved.view } : {}),
           fields: visibleFields,
           capabilities,
+          fieldPermissions,
+          ...(resolved.view ? { viewPermissions } : {}),
+          ...(record ? { rowActions } : {}),
           ...(record ? { record } : {}),
           ...(attachmentSummaries ? { attachmentSummaries } : {}),
           ...(record
@@ -3080,6 +3183,10 @@ export function univerMetaRouter(): Router {
               commentsScope: {
                 targetType: 'meta_record',
                 targetId: record.id,
+                baseId: sheet.baseId ?? null,
+                sheetId: sheet.id,
+                viewId: resolved.view?.id ?? null,
+                recordId: record.id,
                 containerType: 'meta_sheet',
                 containerId: sheet.id,
               },
@@ -3385,6 +3492,10 @@ export function univerMetaRouter(): Router {
           commentsScope: {
             targetType: 'meta_record',
             targetId: record.id,
+            baseId: sheet.baseId ?? null,
+            sheetId: sheet.id,
+            viewId: view.id,
+            recordId: record.id,
             containerType: 'meta_sheet',
             containerId: sheet.id,
           },
@@ -3678,6 +3789,10 @@ export function univerMetaRouter(): Router {
           commentsScope: {
             targetType: 'meta_record',
             targetId: record.id,
+            baseId: sheet.baseId ?? null,
+            sheetId: sheet.id,
+            viewId: parsed.data.viewId ?? null,
+            recordId: record.id,
             containerType: 'meta_sheet',
             containerId: sheet.id,
           },
@@ -3779,6 +3894,11 @@ export function univerMetaRouter(): Router {
 
       const access = await resolveRequestAccess(req)
       const capabilities = deriveCapabilities(access.permissions, access.isAdminRole)
+      const fieldPermissions = deriveFieldPermissions(fields, capabilities, {
+        hiddenFieldIds: viewConfig?.hiddenFieldIds ?? [],
+      })
+      const viewPermissions = viewConfig ? deriveViewPermissions([viewConfig], capabilities) : {}
+      const rowActions = deriveRowActions(capabilities)
 
       return res.json({
         ok: true,
@@ -3788,9 +3908,16 @@ export function univerMetaRouter(): Router {
           fields,
           record,
           capabilities,
+          fieldPermissions,
+          ...(viewConfig ? { viewPermissions } : {}),
+          rowActions,
           commentsScope: {
             targetType: 'meta_record',
             targetId: record.id,
+            baseId: sheet.baseId ?? null,
+            sheetId: sheet.id,
+            viewId: viewConfig?.id ?? null,
+            recordId: record.id,
             containerType: 'meta_sheet',
             containerId: sheet.id,
           },

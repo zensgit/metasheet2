@@ -90,6 +90,30 @@ export interface MetaViewMeta {
   computedFilterSort?: boolean
   ignoredSortFieldIds?: string[]
   ignoredFilterFieldIds?: string[]
+  permissions?: MetaScopedPermissions
+}
+
+export interface MetaFieldPermission {
+  visible: boolean
+  readOnly: boolean
+}
+
+export interface MetaViewPermission {
+  canAccess: boolean
+  canConfigure: boolean
+  canDelete: boolean
+}
+
+export interface MetaRowActions {
+  canEdit: boolean
+  canDelete: boolean
+  canComment: boolean
+}
+
+export interface MetaScopedPermissions {
+  fieldPermissions?: Record<string, MetaFieldPermission>
+  viewPermissions?: Record<string, MetaViewPermission>
+  rowActions?: MetaRowActions
 }
 
 // --- Context (GET /api/multitable/context) ---
@@ -99,6 +123,8 @@ export interface MetaContext {
   sheets: MetaSheet[]
   views: MetaView[]
   capabilities: MetaCapabilities
+  fieldPermissions?: Record<string, MetaFieldPermission>
+  viewPermissions?: Record<string, MetaViewPermission>
 }
 
 // --- Record context (GET /api/multitable/records/:recordId) ---
@@ -108,6 +134,9 @@ export interface MetaRecordContext {
   fields: MetaField[]
   record: MetaRecord
   capabilities: MetaCapabilities
+  fieldPermissions?: Record<string, MetaFieldPermission>
+  viewPermissions?: Record<string, MetaViewPermission>
+  rowActions?: MetaRowActions
   commentsScope: MetaCommentsScope
   linkSummaries?: Record<string, LinkedRecordSummary[]>
   attachmentSummaries?: Record<string, MetaAttachment[]>
@@ -122,6 +151,9 @@ export interface MetaFormContext {
   view?: MetaView | null
   fields: MetaField[]
   capabilities: MetaCapabilities
+  fieldPermissions?: Record<string, MetaFieldPermission>
+  viewPermissions?: Record<string, MetaViewPermission>
+  rowActions?: MetaRowActions
   record?: MetaRecord | null
   commentsScope?: MetaCommentsScope | null
   attachmentSummaries?: Record<string, MetaAttachment[]>
@@ -143,22 +175,51 @@ export interface MetaCapabilities {
 export interface MetaCommentsScope {
   targetType: string
   targetId: string
+  baseId?: string | null
+  sheetId?: string | null
+  viewId?: string | null
+  recordId?: string | null
   targetFieldId?: string | null
   containerType: string
   containerId: string
+}
+
+export interface MetaCommentMentionSuggestion {
+  id: string
+  label: string
+  subtitle?: string
 }
 
 export interface MultitableComment {
   id: string
   containerId: string
   targetId: string
-  targetFieldId?: string | null
+  fieldId?: string | null
+  parentId?: string
+  mentions: string[]
   authorId: string
   authorName?: string
   content: string
   resolved: boolean
   createdAt: string
   updatedAt?: string
+}
+
+export interface MultitableCommentInboxItem extends MultitableComment {
+  unread: boolean
+  baseId?: string | null
+  sheetId?: string | null
+  viewId?: string | null
+  recordId?: string | null
+}
+
+export type MetaCommentInboxItem = MultitableCommentInboxItem
+
+export interface MultitableCommentInboxPage {
+  items: MultitableCommentInboxItem[]
+  total: number
+  limit: number
+  offset: number
 }
 
 // --- Link records ---

@@ -2,7 +2,70 @@ import { describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
 
+async function flushUi(cycles = 4) {
+  for (let i = 0; i < cycles; i += 1) {
+    await Promise.resolve()
+    await nextTick()
+  }
+}
+
 describe('MetaRecordDrawer', () => {
+  it('honors scoped row actions and exposes the workflow entry', async () => {
+    const toggleCommentsSpy = vi.fn()
+    const openAutomationSpy = vi.fn()
+    const patchSpy = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaRecordDrawer, {
+          visible: true,
+          record: {
+            id: 'rec_scoped_1',
+            version: 1,
+            data: {
+              fld_title: 'Scoped title',
+            },
+          },
+          fields: [
+            { id: 'fld_title', name: 'Title', type: 'string' },
+          ],
+          canEdit: true,
+          canComment: true,
+          canDelete: true,
+          canManageAutomation: true,
+          rowActions: {
+            canEdit: false,
+            canDelete: false,
+            canComment: true,
+          },
+          onPatch: patchSpy,
+          onToggleComments: toggleCommentsSpy,
+          onOpenAutomation: openAutomationSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    expect(container.querySelector('.meta-record-drawer__input')).toBeNull()
+    expect(container.textContent).not.toContain('Delete')
+    expect(container.textContent).toContain('Workflow')
+
+    ;(container.querySelector('button[title="Comments"]') as HTMLButtonElement | null)?.click()
+    ;(container.querySelector('button[title="Open workflow designer"]') as HTMLButtonElement | null)?.click()
+    await flushUi()
+
+    expect(toggleCommentsSpy).toHaveBeenCalledTimes(1)
+    expect(openAutomationSpy).toHaveBeenCalledTimes(1)
+    expect(patchSpy).not.toHaveBeenCalled()
+
+    app.unmount()
+    container.remove()
+  })
+
   it('shows multiple selected link summaries for link fields', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
@@ -183,6 +246,83 @@ describe('MetaRecordDrawer', () => {
       fieldId: 'fld_files',
     })
     expect(patchSpy).not.toHaveBeenCalled()
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('replaces an existing single attachment by patching the new uploaded id', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const uploadFn = vi.fn().mockResolvedValue({
+      id: 'att_replace',
+      filename: 'replace.pdf',
+      mimeType: 'application/pdf',
+      size: 1024,
+      url: '/api/multitable/attachments/att_replace',
+      thumbnailUrl: null,
+      uploadedAt: '2026-03-21T12:30:00.000Z',
+    })
+    const patchSpy = vi.fn()
+
+    const app = createApp({
+      render() {
+        return h(MetaRecordDrawer, {
+          visible: true,
+          record: {
+            id: 'rec_replace_1',
+            version: 1,
+            data: {
+              fld_files: ['att_old'],
+            },
+          },
+          fields: [
+            { id: 'fld_files', name: 'Files', type: 'attachment', property: { maxFiles: 1 } },
+          ],
+          canEdit: true,
+          canComment: false,
+          canDelete: false,
+          uploadFn,
+          attachmentSummariesByField: {
+            fld_files: [{
+              id: 'att_old',
+              filename: 'old.pdf',
+              mimeType: 'application/pdf',
+              size: 1024,
+              url: '/api/multitable/attachments/att_old',
+              thumbnailUrl: null,
+              uploadedAt: '2026-03-21T12:30:00.000Z',
+            }],
+          },
+          onPatch: patchSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const input = container.querySelector('.meta-record-drawer__file-input') as HTMLInputElement | null
+    const file = new File(['replace'], 'replace.pdf', { type: 'application/pdf' })
+    Object.defineProperty(input, 'files', {
+      value: {
+        0: file,
+        length: 1,
+        item: (index: number) => (index === 0 ? file : null),
+        [Symbol.iterator]: function* iterator() {
+          yield file
+        },
+      },
+      configurable: true,
+    })
+    input?.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(uploadFn).toHaveBeenCalledWith(file, {
+      recordId: 'rec_replace_1',
+      fieldId: 'fld_files',
+    })
+    expect(patchSpy).toHaveBeenCalledWith('fld_files', ['att_replace'])
 
     app.unmount()
     container.remove()

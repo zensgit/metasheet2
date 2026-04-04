@@ -16,6 +16,15 @@ export type BulkImportResult = {
   failures: BulkImportFailure[]
 }
 
+export type BulkImportSkippedRow = {
+  index: number
+  rowIndex: number
+  fieldId: string
+  key: string
+  message: string
+  skipped: true
+}
+
 type BulkImportError = {
   message?: string
   status?: number
@@ -62,6 +71,17 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 function applyRetryJitter(delayMs: number) {
   const ratio = 0.5 + Math.random()
   return Math.max(0, Math.round(delayMs * ratio))
+}
+
+function normalizeDuplicateKey(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    return normalized || null
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value).trim().toLowerCase()
+  }
+  return null
 }
 
 function isRetryableError(error: unknown) {
@@ -120,6 +140,63 @@ async function createRecordWithRetry(params: {
       ensureNotAborted(signal)
       attempt += 1
     }
+  }
+}
+
+export function skipDuplicateImportRows(params: {
+  records: Array<Record<string, unknown>>
+  rowIndexes: number[]
+  primaryFieldId: string
+  primaryFieldName?: string
+  existingKeys?: Iterable<string>
+}) {
+  const {
+    records,
+    rowIndexes,
+    primaryFieldId,
+    primaryFieldName = primaryFieldId,
+    existingKeys = [],
+  } = params
+
+  const keptRecords: Array<Record<string, unknown>> = []
+  const keptRowIndexes: number[] = []
+  const skippedRows: BulkImportSkippedRow[] = []
+  const seenKeys = new Set<string>()
+
+  for (const existingKey of existingKeys) {
+    const normalized = normalizeDuplicateKey(existingKey)
+    if (normalized) seenKeys.add(normalized)
+  }
+
+  records.forEach((record, index) => {
+    const rowIndex = rowIndexes[index] ?? index
+    const rawKey = record[primaryFieldId]
+    const normalizedKey = normalizeDuplicateKey(rawKey)
+    if (!normalizedKey) {
+      keptRecords.push(record)
+      keptRowIndexes.push(rowIndex)
+      return
+    }
+    if (seenKeys.has(normalizedKey)) {
+      skippedRows.push({
+        index,
+        rowIndex,
+        fieldId: primaryFieldId,
+        key: normalizedKey,
+        skipped: true,
+        message: `Skipped duplicate row because ${primaryFieldName} already exists: ${String(rawKey).trim()}`,
+      })
+      return
+    }
+    seenKeys.add(normalizedKey)
+    keptRecords.push(record)
+    keptRowIndexes.push(rowIndex)
+  })
+
+  return {
+    records: keptRecords,
+    rowIndexes: keptRowIndexes,
+    skippedRows,
   }
 }
 

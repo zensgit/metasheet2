@@ -3,9 +3,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 
-const repoRoot = '/Users/huazhou/Downloads/Github/metasheet2-multitable-next'
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const embedHostProtocolChecks = [
   'ui.embed-host.ready',
   'ui.embed-host.state-query.initial',

@@ -10,6 +10,52 @@ async function flushUi(cycles = 4) {
 }
 
 describe('MetaFormView attachment flow', () => {
+  it('hides non-visible fields and disables read-only scoped fields', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaFormView, {
+          fields: [
+            { id: 'fld_title', name: 'Title', type: 'string' },
+            { id: 'fld_secret', name: 'Secret', type: 'string' },
+          ],
+          record: {
+            id: 'rec_1',
+            version: 1,
+            data: {
+              fld_title: 'Draft',
+              fld_secret: 'Hidden',
+            },
+          },
+          loading: false,
+          readOnly: false,
+          fieldPermissions: {
+            fld_title: { visible: true, readOnly: true },
+            fld_secret: { visible: false, readOnly: false },
+          },
+          onSubmit: vi.fn(),
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    const titleInput = container.querySelector('#field_fld_title') as HTMLInputElement | null
+    const secretInput = container.querySelector('#field_fld_secret') as HTMLInputElement | null
+
+    expect(titleInput).not.toBeNull()
+    expect(titleInput?.disabled).toBe(true)
+    expect(secretInput).toBeNull()
+    expect(container.textContent).not.toContain('Secret')
+
+    app.unmount()
+    container.remove()
+  })
+
   it('emits dirty state while the form has unsaved edits', async () => {
     const dirtySpy = vi.fn()
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
@@ -138,6 +184,79 @@ describe('MetaFormView attachment flow', () => {
     expect(submitSpy).toHaveBeenCalledWith({
       fld_title: 'Draft',
       fld_files: ['att_brief'],
+    })
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('replaces an existing single attachment locally after upload succeeds', async () => {
+    const uploadFn = vi.fn().mockResolvedValue({
+      id: 'att_new',
+      filename: 'replacement.pdf',
+      mimeType: 'application/pdf',
+      size: 2048,
+      url: 'https://files.example.com/replacement.pdf',
+      thumbnailUrl: null,
+      uploadedAt: '2026-03-25T01:00:00.000Z',
+    })
+    const submitSpy = vi.fn()
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const Harness = defineComponent({
+      setup() {
+        const record = ref({
+          id: 'rec_1',
+          version: 1,
+          data: {
+            fld_files: ['att_old'],
+          },
+        })
+        return { record }
+      },
+      render() {
+        return h(MetaFormView, {
+          fields: [
+            { id: 'fld_files', name: 'Files', type: 'attachment', property: { maxFiles: 1 } },
+          ],
+          record: this.record,
+          loading: false,
+          readOnly: false,
+          uploadFn,
+          onSubmit: submitSpy,
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+
+    const app = createApp(Harness)
+    app.mount(container)
+
+    const input = container.querySelector('.meta-form-view__file-input') as HTMLInputElement | null
+    const file = new File(['replacement'], 'replacement.pdf', { type: 'application/pdf' })
+    Object.defineProperty(input, 'files', {
+      value: {
+        0: file,
+        length: 1,
+        item: (index: number) => (index === 0 ? file : null),
+        [Symbol.iterator]: function* iterator() {
+          yield file
+        },
+      },
+      configurable: true,
+    })
+    input?.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    expect(container.textContent).toContain('replacement.pdf')
+
+    container.querySelector('form')?.dispatchEvent(new Event('submit'))
+    await flushUi()
+
+    expect(submitSpy).toHaveBeenCalledWith({
+      fld_files: ['att_new'],
     })
 
     app.unmount()

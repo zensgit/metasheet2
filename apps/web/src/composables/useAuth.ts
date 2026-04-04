@@ -10,6 +10,8 @@ type AuthAccessSnapshot = {
   isAdmin: boolean
 }
 
+type SessionUserRecord = Record<string, unknown>
+
 type SessionBootstrapPayload = Record<string, unknown>
 
 type SessionBootstrapResult = {
@@ -71,6 +73,15 @@ function extractSessionUser(payload: SessionBootstrapPayload | null): unknown {
     return (data as Record<string, unknown>).user ?? null
   }
   return payload.user ?? null
+}
+
+function extractUserId(user: unknown): string | null {
+  if (!user || typeof user !== 'object') return null
+  const record = user as Record<string, unknown>
+  const raw = record.id ?? record.userId ?? record.sub
+  if (typeof raw === 'string' && raw.trim().length > 0) return raw
+  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
+  return null
 }
 
 export function useAuth() {
@@ -320,6 +331,17 @@ export function useAuth() {
     return getAccessSnapshot().isAdmin
   }
 
+  function getCurrentUser(): SessionUserRecord | null {
+    return (extractSessionUser(sessionCache?.payload ?? null) as SessionUserRecord | null) ?? null
+  }
+
+  async function getCurrentUserId(force = false): Promise<string | null> {
+    const cached = extractUserId(getCurrentUser())
+    if (cached && !force) return cached
+    const session = await bootstrapSession(force)
+    return extractUserId(extractSessionUser(session.payload))
+  }
+
   return {
     getToken,
     setToken,
@@ -333,5 +355,7 @@ export function useAuth() {
     buildAuthHeaders,
     getAccessSnapshot,
     hasAdminAccess,
+    getCurrentUser,
+    getCurrentUserId,
   }
 }

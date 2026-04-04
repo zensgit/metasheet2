@@ -105,6 +105,7 @@ export function commentsRouter(injector?: Injector): Router {
       fieldId: z.string().min(1).optional(),
       content: z.string().min(1),
       parentId: z.string().min(1).optional(),
+      mentions: z.array(z.string().min(1)).optional(),
     })
     const parsed = schema.safeParse(req.body)
     if (!parsed.success) {
@@ -118,6 +119,7 @@ export function commentsRouter(injector?: Injector): Router {
         fieldId: parsed.data.fieldId,
         content: parsed.data.content,
         parentId: parsed.data.parentId,
+        mentions: parsed.data.mentions,
         authorId: getUserId(req),
       })
       return res.status(201).json({ ok: true, data: { comment } })
@@ -139,6 +141,55 @@ export function commentsRouter(injector?: Injector): Router {
     } catch (error) {
       logger.error('Failed to resolve comment', error as Error)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to resolve comment' } })
+    }
+  })
+
+  router.get('/api/comments/inbox', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+    const schema = z.object({
+      limit: z.number().int().nonnegative().optional(),
+      offset: z.number().int().nonnegative().optional(),
+    })
+    const parsed = schema.safeParse({
+      limit: parseNumberParam(readQueryValue(req.query.limit)),
+      offset: parseNumberParam(readQueryValue(req.query.offset)),
+    })
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const limit = clampLimit(parsed.data.limit)
+      const offset = clampOffset(parsed.data.offset)
+      const result = await commentService.getInbox(getUserId(req), { limit, offset })
+      return res.json({ ok: true, data: { items: result.items, total: result.total, limit, offset } })
+    } catch (error) {
+      logger.error('Failed to load comment inbox', error as Error)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load comment inbox' } })
+    }
+  })
+
+  router.get('/api/comments/unread-count', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+    try {
+      const count = await commentService.getUnreadCount(getUserId(req))
+      return res.json({ ok: true, data: { count } })
+    } catch (error) {
+      logger.error('Failed to load unread comment count', error as Error)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load unread comment count' } })
+    }
+  })
+
+  router.post('/api/comments/:commentId/read', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+    const commentId = req.params.commentId
+    if (!commentId || commentId.trim().length === 0) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'commentId required' } })
+    }
+
+    try {
+      await commentService.markCommentRead(commentId, getUserId(req))
+      return res.status(204).end()
+    } catch (error) {
+      logger.error('Failed to mark comment as read', error as Error)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to mark comment as read' } })
     }
   })
 

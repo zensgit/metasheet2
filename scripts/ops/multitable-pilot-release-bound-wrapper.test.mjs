@@ -3,9 +3,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 
-const repoRoot = '/Users/huazhou/Downloads/Github/metasheet2-multitable-next'
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 
 function writeExecutable(filePath, content) {
   fs.writeFileSync(filePath, content, { mode: 0o755 })
@@ -104,4 +105,3 @@ test('multitable pilot handoff release-bound forwards staging run mode to handof
   assert.match(log, /REQUIRE_EXPLICIT_ONPREM_GATE=true/)
   assert.match(log, new RegExp(`ONPREM_GATE_REPORT_JSON=${gateReportPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
 })
-

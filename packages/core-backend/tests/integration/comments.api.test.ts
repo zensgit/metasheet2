@@ -13,9 +13,47 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
 
 async function ensureCommentsTable() {
   const pool = poolManager.get()
-  await pool.query('DROP TABLE IF EXISTS meta_comments')
   await pool.query(`
-    CREATE TABLE meta_comments (
+    CREATE TABLE IF NOT EXISTS meta_bases (
+      id varchar(50) PRIMARY KEY,
+      name text NOT NULL,
+      icon text,
+      color text,
+      owner_id text,
+      workspace_id text,
+      created_at timestamp DEFAULT now(),
+      updated_at timestamp DEFAULT now(),
+      deleted_at timestamp
+    );
+  `)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meta_sheets (
+      id varchar(50) PRIMARY KEY,
+      base_id varchar(50),
+      name text NOT NULL,
+      description text,
+      created_at timestamp DEFAULT now(),
+      updated_at timestamp DEFAULT now(),
+      deleted_at timestamp
+    );
+  `)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meta_views (
+      id varchar(50) PRIMARY KEY,
+      sheet_id varchar(50) NOT NULL,
+      name text NOT NULL,
+      type text NOT NULL,
+      filter_info jsonb DEFAULT '{}'::jsonb,
+      sort_info jsonb DEFAULT '{}'::jsonb,
+      group_info jsonb DEFAULT '{}'::jsonb,
+      hidden_field_ids jsonb DEFAULT '[]'::jsonb,
+      config jsonb DEFAULT '{}'::jsonb,
+      created_at timestamp DEFAULT now(),
+      updated_at timestamp DEFAULT now()
+    );
+  `)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meta_comments (
       id varchar(50) PRIMARY KEY,
       spreadsheet_id varchar(50) NOT NULL,
       row_id varchar(50) NOT NULL,
@@ -29,14 +67,27 @@ async function ensureCommentsTable() {
       mentions jsonb
     );
   `)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meta_comment_reads (
+      comment_id varchar(50) NOT NULL,
+      user_id varchar(50) NOT NULL,
+      read_at timestamp DEFAULT now(),
+      created_at timestamp DEFAULT now(),
+      PRIMARY KEY (comment_id, user_id)
+    );
+  `)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_comments_sheet ON meta_comments(spreadsheet_id);')
   await pool.query('CREATE INDEX IF NOT EXISTS idx_comments_row ON meta_comments(row_id);')
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_comment_reads_user ON meta_comment_reads(user_id, read_at DESC);')
 }
 
 describe('Comments API', () => {
   let server: MetaSheetServer
   let baseUrl: string
   let createdCommentIds: string[] = []
+  let createdViewIds: string[] = []
+  let createdSheetIds: string[] = []
+  let createdBaseIds: string[] = []
 
   beforeAll(async () => {
     process.env.RBAC_BYPASS = 'true'
@@ -61,7 +112,17 @@ describe('Comments API', () => {
     try {
       const pool = poolManager.get()
       if (createdCommentIds.length > 0) {
+        await pool.query('DELETE FROM meta_comment_reads WHERE comment_id = ANY($1::text[])', [createdCommentIds])
         await pool.query('DELETE FROM meta_comments WHERE id = ANY($1::text[])', [createdCommentIds])
+      }
+      if (createdViewIds.length > 0) {
+        await pool.query('DELETE FROM meta_views WHERE id = ANY($1::text[])', [createdViewIds])
+      }
+      if (createdSheetIds.length > 0) {
+        await pool.query('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [createdSheetIds])
+      }
+      if (createdBaseIds.length > 0) {
+        await pool.query('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [createdBaseIds])
       }
     } catch {
       // ignore cleanup failures
@@ -76,9 +137,28 @@ describe('Comments API', () => {
     if (!baseUrl) return
 
     const ts = Date.now()
+    const baseId = `base_comments_${ts}`.slice(0, 50)
     const spreadsheetId = `sheet_comments_${ts}`.slice(0, 50)
+    const viewId = `view_comments_${ts}`.slice(0, 50)
     const rowId = `rec_comments_${ts}`.slice(0, 50)
-    const content = 'Hello @[user_1](u1)'
+    const content = 'Hello from user_1'
+
+    const pool = poolManager.get()
+    await pool.query(
+      'INSERT INTO meta_bases (id, name) VALUES ($1, $2)',
+      [baseId, 'Comments Base'],
+    )
+    createdBaseIds.push(baseId)
+    await pool.query(
+      'INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3)',
+      [spreadsheetId, baseId, 'Comments Sheet'],
+    )
+    createdSheetIds.push(spreadsheetId)
+    await pool.query(
+      'INSERT INTO meta_views (id, sheet_id, name, type) VALUES ($1, $2, $3, $4)',
+      [viewId, spreadsheetId, 'All Comments', 'grid'],
+    )
+    createdViewIds.push(viewId)
 
     const tokenRes = await fetch(`${baseUrl}/api/auth/dev-token?userId=user_1`)
     expect(tokenRes.status).toBe(200)
@@ -92,7 +172,7 @@ describe('Comments API', () => {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ spreadsheetId, rowId, content }),
+      body: JSON.stringify({ spreadsheetId, rowId, content, mentions: ['user_2'] }),
     })
     expect(createRes.status).toBe(201)
     const created = await createRes.json()
@@ -104,7 +184,7 @@ describe('Comments API', () => {
     expect(comment?.rowId).toBe(rowId)
     expect(comment?.authorId).toBe('user_1')
     expect(Array.isArray(comment?.mentions)).toBe(true)
-    expect(comment?.mentions?.includes('user_1')).toBe(true)
+    expect(comment?.mentions?.includes('user_2')).toBe(true)
 
     const listRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -165,5 +245,65 @@ describe('Comments API', () => {
     const listResolvedJson = await listResolvedRes.json()
     expect(listResolvedJson.ok).toBe(true)
     expect(listResolvedJson.data?.items?.some((item: any) => item.id === comment.id)).toBe(true)
+
+    const mentionTokenRes = await fetch(`${baseUrl}/api/auth/dev-token?userId=user_2`)
+    expect(mentionTokenRes.status).toBe(200)
+    const mentionTokenJson = await mentionTokenRes.json()
+    const mentionToken = mentionTokenJson.token as string
+
+    const unreadCountRes = await fetch(`${baseUrl}/api/comments/unread-count`, {
+      headers: { Authorization: `Bearer ${mentionToken}` },
+    })
+    expect(unreadCountRes.status).toBe(200)
+    const unreadCountJson = await unreadCountRes.json()
+    expect(unreadCountJson.ok).toBe(true)
+    expect(unreadCountJson.data?.count).toBeGreaterThanOrEqual(1)
+
+    const inboxRes = await fetch(`${baseUrl}/api/comments/inbox`, {
+      headers: { Authorization: `Bearer ${mentionToken}` },
+    })
+    expect(inboxRes.status).toBe(200)
+    const inboxJson = await inboxRes.json()
+    expect(inboxJson.ok).toBe(true)
+    const inboxItem = inboxJson.data?.items?.find((item: any) => item.id === comment.id)
+    expect(inboxItem).toBeTruthy()
+    expect(inboxItem.unread).toBe(true)
+    expect(inboxItem.baseId).toBe(baseId)
+    expect(inboxItem.sheetId).toBe(spreadsheetId)
+    expect(inboxItem.viewId).toBe(viewId)
+    expect(inboxItem.recordId).toBe(rowId)
+
+    const markReadRes = await fetch(`${baseUrl}/api/comments/${comment.id}/read`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${mentionToken}` },
+    })
+    expect(markReadRes.status).toBe(204)
+
+    const unreadAfterRes = await fetch(`${baseUrl}/api/comments/unread-count`, {
+      headers: { Authorization: `Bearer ${mentionToken}` },
+    })
+    expect(unreadAfterRes.status).toBe(200)
+    const unreadAfterJson = await unreadAfterRes.json()
+    expect(unreadAfterJson.ok).toBe(true)
+    expect(unreadAfterJson.data?.count).toBe(0)
+
+    const tokenFallbackRes = await fetch(`${baseUrl}/api/comments`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        spreadsheetId,
+        rowId,
+        content: 'Fallback @[Jamie](user_2)',
+      }),
+    })
+    expect(tokenFallbackRes.status).toBe(201)
+    const fallbackJson = await tokenFallbackRes.json()
+    if (fallbackJson.data?.comment?.id) {
+      createdCommentIds.push(fallbackJson.data.comment.id)
+    }
+    expect(fallbackJson.data?.comment?.mentions).toEqual(['user_2'])
   })
 })
