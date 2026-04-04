@@ -54,11 +54,6 @@
           <div class="meta-comments-drawer__meta">
             <span class="meta-comments-drawer__author">{{ reply.authorName ?? reply.authorId }}</span>
             <span class="meta-comments-drawer__time">{{ formatTime(reply.createdAt) }}</span>
-            <button
-              v-if="canComment && !reply.resolved"
-              class="meta-comments-drawer__reply"
-              @click="emit('reply', reply.id)"
-            >Reply</button>
           </div>
           <p class="meta-comments-drawer__content">{{ formatContent(reply.content) }}</p>
         </div>
@@ -145,9 +140,44 @@ const draftModel = computed({
 
 const visibleComments = computed(() => {
   if (!props.targetFieldId) return props.comments
-  return props.comments.filter((comment) => {
+
+  const commentsById = new Map(props.comments.map((comment) => [comment.id, comment]))
+  const childIdsByParent = new Map<string, string[]>()
+  for (const comment of props.comments) {
+    if (!comment.parentId) continue
+    const siblings = childIdsByParent.get(comment.parentId) ?? []
+    siblings.push(comment.id)
+    childIdsByParent.set(comment.parentId, siblings)
+  }
+
+  const visibleIds = new Set<string>()
+  const queue: string[] = []
+  for (const comment of props.comments) {
     const fieldId = comment.fieldId ?? comment.targetFieldId ?? null
-    return fieldId === props.targetFieldId
+    if (fieldId !== props.targetFieldId || visibleIds.has(comment.id)) continue
+    visibleIds.add(comment.id)
+    queue.push(comment.id)
+  }
+
+  while (queue.length) {
+    const commentId = queue.shift()!
+    const comment = commentsById.get(commentId)
+    if (!comment) continue
+
+    if (comment.parentId && commentsById.has(comment.parentId) && !visibleIds.has(comment.parentId)) {
+      visibleIds.add(comment.parentId)
+      queue.push(comment.parentId)
+    }
+
+    for (const childId of childIdsByParent.get(commentId) ?? []) {
+      if (visibleIds.has(childId)) continue
+      visibleIds.add(childId)
+      queue.push(childId)
+    }
+  }
+
+  return props.comments.filter((comment) => {
+    return visibleIds.has(comment.id)
   })
 })
 

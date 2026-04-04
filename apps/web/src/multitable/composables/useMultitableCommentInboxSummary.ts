@@ -61,11 +61,19 @@ export function useMultitableCommentInboxSummary(opts?: {
     lastMarkedReadAt = null
   }
 
+  function resolveEventCreatedAt(event: MultitableCommentCreatedEvent): number | null {
+    const createdAt = event.comment?.createdAt
+    if (typeof createdAt !== 'string' || !createdAt.trim()) return null
+    const timestamp = Date.parse(createdAt)
+    return Number.isNaN(timestamp) ? null : timestamp
+  }
+
   function onRealtimeCommentCreated(event: MultitableCommentCreatedEvent) {
     if (!summary.value) return
     const eventSpreadsheetId = event.spreadsheetId ?? event.comment?.containerId ?? ''
     if (eventSpreadsheetId !== summary.value.spreadsheetId) return
-    if (lastMarkedReadAt !== null) return
+    const createdAt = resolveEventCreatedAt(event)
+    if (lastMarkedReadAt !== null && createdAt !== null && createdAt <= lastMarkedReadAt) return
 
     const rowId = event.comment?.targetId ?? event.comment?.rowId ?? ''
     if (!rowId) return
