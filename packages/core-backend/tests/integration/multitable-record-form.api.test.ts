@@ -264,6 +264,123 @@ describe('Multitable record and form context API', () => {
     })
   })
 
+  test('marks computed and explicitly readonly fields as readOnly across form and record contexts', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write', 'comments:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_ops_permissions'])
+          return {
+            rows: [{
+              id: 'view_ops_permissions',
+              sheet_id: 'sheet_ops',
+              name: 'Ops Grid',
+              type: 'grid',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: ['fld_hidden_lookup'],
+              config: {},
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          expect(params).toEqual(['rec_perm_1', 'sheet_ops'])
+          return {
+            rows: [{
+              id: 'rec_perm_1',
+              sheet_id: 'sheet_ops',
+              version: 7,
+              data: {
+                fld_title: 'Editable title',
+                fld_formula_total: '42',
+                fld_hidden_lookup: 'Derived',
+                fld_locked: 'Locked value',
+              },
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, version, data FROM meta_records WHERE id = $1 AND sheet_id = $2')) {
+          expect(params).toEqual(['rec_perm_1', 'sheet_ops'])
+          return {
+            rows: [{
+              id: 'rec_perm_1',
+              version: 7,
+              data: {
+                fld_title: 'Editable title',
+                fld_formula_total: '42',
+                fld_hidden_lookup: 'Derived',
+                fld_locked: 'Locked value',
+              },
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, sheet_id, version, data FROM meta_records WHERE id = $1')) {
+          expect(params).toEqual(['rec_perm_1'])
+          return {
+            rows: [{
+              id: 'rec_perm_1',
+              sheet_id: 'sheet_ops',
+              version: 7,
+              data: {
+                fld_title: 'Editable title',
+                fld_formula_total: '42',
+                fld_hidden_lookup: 'Derived',
+                fld_locked: 'Locked value',
+              },
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: 'Ops intake' }] }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 },
+              { id: 'fld_formula_total', name: 'Total', type: 'formula', property: { expression: '{fld_amount} * 2' }, order: 2 },
+              { id: 'fld_hidden_lookup', name: 'Lookup', type: 'lookup', property: { linkFieldId: 'fld_vendor', targetFieldId: 'fld_name' }, order: 3 },
+              { id: 'fld_locked', name: 'Locked', type: 'string', property: { readOnly: true }, order: 4 },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const formResponse = await request(app)
+      .get('/api/multitable/form-context')
+      .query({ viewId: 'view_ops_permissions', recordId: 'rec_perm_1' })
+      .expect(200)
+
+    expect(formResponse.body.data.readOnly).toBe(false)
+    expect(formResponse.body.data.fieldPermissions).toEqual({
+      fld_title: { visible: true, readOnly: false },
+      fld_formula_total: { visible: true, readOnly: true },
+      fld_hidden_lookup: { visible: false, readOnly: true },
+      fld_locked: { visible: true, readOnly: true },
+    })
+
+    const recordResponse = await request(app)
+      .get('/api/multitable/records/rec_perm_1')
+      .query({ viewId: 'view_ops_permissions' })
+      .expect(200)
+
+    expect(recordResponse.body.data.fieldPermissions).toEqual({
+      fld_title: { visible: true, readOnly: false },
+      fld_formula_total: { visible: true, readOnly: true },
+      fld_hidden_lookup: { visible: false, readOnly: true },
+      fld_locked: { visible: true, readOnly: true },
+    })
+    expect(recordResponse.body.data.rowActions).toEqual({
+      canEdit: true,
+      canDelete: true,
+      canComment: true,
+    })
+  })
+
   test('returns grid view data with optional link summaries', async () => {
     const { app } = await createApp({
       tokenPerms: ['multitable:read'],

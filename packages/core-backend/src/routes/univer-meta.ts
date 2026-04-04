@@ -1202,10 +1202,16 @@ function deriveFieldPermissions(
       field.id,
       {
         visible: !hiddenFieldIds.has(field.id),
-        readOnly,
+        readOnly: readOnly || isFieldAlwaysReadOnly(field),
       },
     ]),
   )
+}
+
+function isFieldAlwaysReadOnly(field: Pick<UniverMetaField, 'type' | 'property'>): boolean {
+  if (field.type === 'formula' || field.type === 'lookup' || field.type === 'rollup') return true
+  const property = field.property ?? {}
+  return property.readonly === true || property.readOnly === true
 }
 
 function deriveViewPermissions(
