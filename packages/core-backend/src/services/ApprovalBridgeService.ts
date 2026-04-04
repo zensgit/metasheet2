@@ -43,6 +43,16 @@ function toIsoString(value: Date | string | null | undefined): string | null {
   return value instanceof Date ? value.toISOString() : String(value)
 }
 
+const PLM_TIMESTAMP_UNKNOWN = '1970-01-01T00:00:00.000Z'
+
+function toOccurredAt(...values: Array<Date | string | null | undefined>): string {
+  for (const value of values) {
+    const iso = toIsoString(value)
+    if (iso) return iso
+  }
+  return PLM_TIMESTAMP_UNKNOWN
+}
+
 function isPlmId(id: string): boolean {
   return id.startsWith('plm:')
 }
@@ -138,17 +148,24 @@ export class ApprovalBridgeService {
     let synced = 0
     const errors: Array<{ externalId: string; error: string }> = []
 
-    for (const approval of result.data) {
-      try {
+    const syncResults = await Promise.allSettled(
+      result.data.map(async (approval) => {
         await this.upsertPlmMirror(toBridgeSource(approval))
+        return approval.id
+      }),
+    )
+
+    syncResults.forEach((settledResult, index) => {
+      if (settledResult.status === 'fulfilled') {
         synced += 1
-      } catch (error) {
+      } else {
+        const approval = result.data[index]
         errors.push({
           externalId: String(approval.id),
-          error: error instanceof Error ? error.message : String(error),
+          error: settledResult.reason instanceof Error ? settledResult.reason.message : String(settledResult.reason),
         })
       }
-    }
+    })
 
     return { synced, errors }
   }
@@ -178,6 +195,17 @@ export class ApprovalBridgeService {
     if (options?.businessKey) {
       conditions.push(`business_key = $${paramIndex++}`)
       params.push(options.businessKey)
+    }
+    if (options?.assignee) {
+      conditions.push(
+        `id IN (
+          SELECT instance_id
+          FROM approval_assignments
+          WHERE assignee_id = $${paramIndex++}
+            AND is_active = TRUE
+        )`,
+      )
+      params.push(options.assignee)
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
@@ -249,7 +277,7 @@ export class ApprovalBridgeService {
       comment: row.comment,
       fromStatus: row.from_status,
       toStatus: row.to_status,
-      occurredAt: toIsoString(row.occurred_at) || new Date().toISOString(),
+      occurredAt: toOccurredAt(row.occurred_at),
       metadata: row.metadata || {},
     }))
   }
@@ -511,7 +539,7 @@ export class ApprovalBridgeService {
       comment: entry.comment || null,
       fromStatus: null,
       toStatus: entry.status || 'unknown',
-      occurredAt: entry.approved_at || entry.created_at || new Date().toISOString(),
+      occurredAt: toOccurredAt(entry.approved_at, entry.created_at),
       metadata: {
         ecoId: entry.eco_id,
         stageId: entry.stage_id,

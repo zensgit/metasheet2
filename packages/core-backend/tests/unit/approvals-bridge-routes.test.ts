@@ -176,6 +176,15 @@ const routeState = vi.hoisted(() => {
     if (sql.includes('business_key = $')) {
       rows = rows.filter((row) => row.business_key === String(params[index++]))
     }
+    if (sql.includes('SELECT instance_id FROM approval_assignments')) {
+      const assigneeId = String(params[index++])
+      const assignedInstanceIds = new Set(
+        Array.from(state.assignments.values())
+          .filter((row) => row.assignee_id === assigneeId && row.is_active)
+          .map((row) => row.instance_id),
+      )
+      rows = rows.filter((row) => assignedInstanceIds.has(row.id))
+    }
 
     return { rows, index }
   }
@@ -436,6 +445,8 @@ const routeState = vi.hoisted(() => {
     state.records = []
     state.recordId = 1
     plmApprovals[0].status = 'pending'
+    plmHistory[0].approved_at = '2026-04-04T00:10:00.000Z'
+    plmHistory[0].created_at = '2026-04-04T00:09:00.000Z'
     state.instances.set('local-1', baseInstance())
     query.mockClear()
     pool.connect.mockClear()
@@ -567,6 +578,58 @@ describe('approval bridge routes', () => {
     expect(response.body.error.code).toBe('ASSIGNEE_FILTER_UNSUPPORTED')
   })
 
+  it('filters non-PLM approvals by active assignee assignments', async () => {
+    const local = routeState.state.instances.get('local-1')!
+    routeState.state.instances.set('local-2', {
+      ...local,
+      id: 'local-2',
+      title: 'Assigned approval',
+      updated_at: new Date('2026-04-04T09:00:00.000Z'),
+    })
+
+    routeState.state.assignments.set('local-1:user-1', {
+      id: 'assign-1',
+      instance_id: 'local-1',
+      assignment_type: 'user',
+      assignee_id: 'user-1',
+      source_step: 0,
+      is_active: true,
+      metadata: {},
+      created_at: new Date('2026-04-04T08:00:00.000Z'),
+      updated_at: new Date('2026-04-04T08:00:00.000Z'),
+    })
+    routeState.state.assignments.set('local-2:user-2', {
+      id: 'assign-2',
+      instance_id: 'local-2',
+      assignment_type: 'user',
+      assignee_id: 'user-2',
+      source_step: 0,
+      is_active: true,
+      metadata: {},
+      created_at: new Date('2026-04-04T09:00:00.000Z'),
+      updated_at: new Date('2026-04-04T09:00:00.000Z'),
+    })
+
+    const app = createApp(createPlmAdapterMock())
+    const response = await request(app)
+      .get('/api/approvals?assignee=user-2')
+      .expect(200)
+
+    expect(response.body.total).toBe(1)
+    expect(response.body.data).toHaveLength(1)
+    expect(response.body.data[0]).toMatchObject({
+      id: 'local-2',
+      title: 'Assigned approval',
+      assignments: [
+        {
+          type: 'user',
+          assigneeId: 'user-2',
+          isActive: true,
+        },
+      ],
+    })
+  })
+
   it('refreshes PLM details on demand', async () => {
     const plmAdapter = createPlmAdapterMock()
     const app = createApp(plmAdapter)
@@ -599,6 +662,18 @@ describe('approval bridge routes', () => {
       toStatus: 'approved',
       comment: 'LGTM',
     })
+  })
+
+  it('uses an empty occurredAt when PLM history has no timestamps', async () => {
+    routeState.plmHistory[0].approved_at = null
+    routeState.plmHistory[0].created_at = null
+    const app = createApp(createPlmAdapterMock())
+
+    const response = await request(app)
+      .get('/api/approvals/plm:eco-1/history')
+      .expect(200)
+
+    expect(response.body.data[0].occurredAt).toBe('')
   })
 
   it('requires a reject comment on unified actions', async () => {
@@ -636,6 +711,37 @@ describe('approval bridge routes', () => {
       to_status: 'approved',
     })
     expect(Array.from(routeState.state.assignments.values())[0]?.is_active).toBe(false)
+  })
+
+  it('filters non-PLM approvals by active assignee from approval_assignments', async () => {
+    const now = new Date('2026-04-04T08:00:00.000Z')
+    // Add a second platform instance that should NOT be returned
+    routeState.state.instances.set('local-2', {
+      ...routeState.state.instances.get('local-1')!,
+      id: 'local-2',
+      title: 'Local approval 2',
+    })
+
+    // Assign local-1 to user-assignee (active)
+    routeState.state.assignments.set('local-1:source_queue:user-assignee:0', {
+      id: 'assign-a1',
+      instance_id: 'local-1',
+      assignment_type: 'source_queue',
+      assignee_id: 'user-assignee',
+      source_step: 0,
+      is_active: true,
+      metadata: {},
+      created_at: now,
+      updated_at: now,
+    })
+
+    const app = createApp(createPlmAdapterMock())
+    const response = await request(app)
+      .get('/api/approvals?assignee=user-assignee')
+      .expect(200)
+
+    expect(response.body.total).toBe(1)
+    expect(response.body.data[0].id).toBe('local-1')
   })
 
   it('keeps legacy pending approvals scoped to platform-owned rows', async () => {
