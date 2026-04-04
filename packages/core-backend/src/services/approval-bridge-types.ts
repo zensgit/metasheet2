@@ -102,8 +102,8 @@ export interface ApprovalBridgePlmAdapter {
   getApprovals(options?: PlmSyncOptions): Promise<QueryResult<ApprovalRequest>>
   getApprovalById(approvalId: string): Promise<QueryResult<ApprovalRequest>>
   getApprovalHistory(approvalId: string): Promise<QueryResult<ApprovalHistoryEntry>>
-  approveApproval(approvalId: string, comment?: string): Promise<QueryResult<Record<string, unknown>>>
-  rejectApproval(approvalId: string, comment: string): Promise<QueryResult<Record<string, unknown>>>
+  approveApproval(approvalId: string, version: number, comment?: string): Promise<QueryResult<Record<string, unknown>>>
+  rejectApproval(approvalId: string, version: number, comment: string): Promise<QueryResult<Record<string, unknown>>>
 }
 
 // ── Error Codes ──

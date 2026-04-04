@@ -38,6 +38,10 @@ interface ApprovalRouterOptions {
   plmAdapter?: ApprovalBridgePlmAdapter | null
 }
 
+function isPlmApprovalId(id: string): boolean {
+  return id.startsWith('plm:')
+}
+
 function parsePaging(value: unknown, fallback: number): number {
   const parsed = Number.parseInt(String(value || ''), 10)
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
@@ -308,32 +312,6 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
           'APPROVAL_PENDING_LIST_FAILED',
           'Failed to get pending approvals',
         ),
-      )
-    }
-  })
-
-  r.get('/api/approvals/:instanceId/history', authenticate, async (req: Request, res: Response) => {
-    try {
-      const bridgeService = getBridgeService(options)
-      if (!bridgeService) {
-        return res.status(503).json(
-          approvalErrorResponse('PLM_APPROVAL_BRIDGE_UNAVAILABLE', 'PLM approval bridge is not configured'),
-        )
-      }
-
-      const history = await bridgeService.getApprovalHistory(req.params.instanceId)
-
-      res.json({
-        data: history,
-        total: history.length,
-      })
-    } catch (error) {
-      handleApprovalsError(
-        res,
-        error,
-        'APPROVAL_HISTORY_FETCH_FAILED',
-        'Failed to get approval history',
-        () => res.json({ data: [], total: 0, degraded: true }),
       )
     }
   })
@@ -655,9 +633,30 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     try {
       const bridgeService = getBridgeService(options)
       if (!bridgeService) {
-        return res.status(503).json(
-          approvalErrorResponse('PLM_APPROVAL_BRIDGE_UNAVAILABLE', 'PLM approval bridge is not configured'),
+        if (isPlmApprovalId(req.params.id)) {
+          return res.status(503).json(
+            approvalErrorResponse('PLM_APPROVAL_BRIDGE_UNAVAILABLE', 'PLM approval bridge is not configured'),
+          )
+        }
+
+        if (!pool) {
+          return res.status(503).json(
+            approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+          )
+        }
+
+        const result = await pool.query<ApprovalInstance>(
+          'SELECT * FROM approval_instances WHERE id = $1',
+          [req.params.id],
         )
+
+        if (result.rows.length === 0) {
+          return res.status(404).json(
+            approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),
+          )
+        }
+
+        return res.json(result.rows[0])
       }
 
       const approval = await bridgeService.getApproval(req.params.id)

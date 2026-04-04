@@ -324,7 +324,7 @@ export class ApprovalBridgeService {
     }
 
     if (instance.source_system === 'plm') {
-      await this.dispatchPlmAction(id, request)
+      await this.dispatchPlmAction(id, instance.version, request)
     }
 
     const nextStatus = request.action === 'approve' ? 'approved' : 'rejected'
@@ -549,11 +549,11 @@ export class ApprovalBridgeService {
     }))
   }
 
-  private async dispatchPlmAction(id: string, request: ApprovalActionRequest): Promise<void> {
+  private async dispatchPlmAction(id: string, version: number, request: ApprovalActionRequest): Promise<void> {
     const externalApprovalId = extractExternalId(id)
     const result = request.action === 'approve'
-      ? await this.plmAdapter.approveApproval(externalApprovalId, request.comment)
-      : await this.plmAdapter.rejectApproval(externalApprovalId, request.comment || '')
+      ? await this.plmAdapter.approveApproval(externalApprovalId, version, request.comment)
+      : await this.plmAdapter.rejectApproval(externalApprovalId, version, request.comment || '')
 
     if (result.error) {
       throw new ServiceError(
