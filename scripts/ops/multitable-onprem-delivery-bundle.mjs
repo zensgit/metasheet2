@@ -23,6 +23,7 @@ const docsToCopy = [
   'docs/deployment/multitable-pilot-expansion-decision-template-20260323.md',
   'docs/deployment/multitable-uat-signoff-template-20260323.md',
   'docs/deployment/multitable-customer-delivery-signoff-template-20260323.md',
+  'docs/deployment/multitable-platform-rc-notes-20260404.md',
 ]
 
 async function exists(filePath) {

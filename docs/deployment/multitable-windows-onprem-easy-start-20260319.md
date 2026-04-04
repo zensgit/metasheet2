@@ -149,6 +149,26 @@ BASE_URL="http://127.0.0.1" \
 scripts/ops/multitable-onprem-package-upgrade.sh
 ```
 
+## 10.1) One-command server-side package apply
+
+If the field team keeps losing the SSH session during a long upgrade, keep a fixed deploy entrypoint on the server and feed it the next archive:
+
+```bash
+cd /opt/metasheet
+chmod +x scripts/ops/multitable-onprem-apply-package.sh
+
+ENV_FILE=/opt/metasheet/docker/app.env \
+API_BASE="http://127.0.0.1/api" \
+BASE_URL="http://127.0.0.1" \
+scripts/ops/multitable-onprem-apply-package.sh /opt/releases/metasheet-multitable-onprem-<version>.zip
+```
+
+The packaged root now also includes Windows-friendly wrappers:
+
+- `deploy.bat <package.zip|package.tgz>`: synchronous apply + upgrade
+- `deploy-runXX.bat <package.zip|package.tgz>`: same helper with the packaged run label baked in
+- `deploy-remote.bat <package.zip|package.tgz>`: detached background run that writes `output/logs/deploy-remote.log`
+
 ## 11) Delivery checklist
 
 Before handing this package to a customer or field team, also review:

@@ -69,10 +69,14 @@ pnpm verify:multitable-onprem:release-gate
 
 ```text
 metasheet/
+  deploy.bat
+  deploy-runXX.bat
+  deploy-remote.bat
   apps/web/dist/
   packages/core-backend/dist/
   plugins/plugin-attendance/
   scripts/ops/
+    multitable-onprem-apply-package.sh
     multitable-onprem-package-install.sh
     multitable-onprem-package-upgrade.sh
     multitable-onprem-deploy-easy.sh
@@ -100,3 +104,18 @@ Current plugin policy:
 Before sending a package to a customer or field team, use:
 
 - `/Users/huazhou/Downloads/Github/metasheet2-multitable/docs/deployment/multitable-onprem-customer-delivery-checklist-20260319.md`
+
+## Server-side apply helpers
+
+The packaged root now includes a fixed deploy entrypoint for corrective rerolls:
+
+- `deploy.bat <package.zip|package.tgz>`
+- `deploy-runXX.bat <package.zip|package.tgz>`
+- `deploy-remote.bat <package.zip|package.tgz>`
+
+These wrappers delegate to `scripts/ops/multitable-onprem-apply-package.sh`, which:
+
+1. extracts the archive into a temporary directory,
+2. copies the package contents into the current deploy root,
+3. runs `multitable-onprem-package-upgrade.sh`,
+4. preserves the existing `docker/app.env`.
