@@ -17,17 +17,41 @@ function info() {
   echo "[attendance-onprem-package-verify] $*" >&2
 }
 
+function search_fixed_string() {
+  local needle="$1"
+  shift
+
+  if command -v rg >/dev/null 2>&1; then
+    rg -n --fixed-strings -- "$needle" "$@" >/dev/null 2>&1
+    return
+  fi
+
+  grep -nF -- "$needle" "$@" >/dev/null 2>&1
+}
+
+function search_extended_regex() {
+  local pattern="$1"
+  shift
+
+  if command -v rg >/dev/null 2>&1; then
+    rg -n -- "$pattern" "$@" >/dev/null 2>&1
+    return
+  fi
+
+  grep -RInE -- "$pattern" "$@" >/dev/null 2>&1
+}
+
 function verify_windows_entrypoints() {
   local root="$1"
   local start_script="${root}/start-pm2.bat"
   local deploy_script="${root}/deploy-${run_label}.bat"
 
-  if ! rg -n --fixed-strings -- '-RootDir "%~dp0."' "$start_script" >/dev/null 2>&1; then
+  if ! search_fixed_string '-RootDir "%~dp0."' "$start_script"; then
     die "start-pm2.bat must pass -RootDir \"%~dp0.\" to avoid Windows path quoting bugs"
   fi
 
   if [[ -n "$run_label" ]] && [[ -f "$deploy_script" ]]; then
-    if ! rg -n --fixed-strings -- '-RootDir "%~dp0."' "$deploy_script" >/dev/null 2>&1; then
+    if ! search_fixed_string '-RootDir "%~dp0."' "$deploy_script"; then
       die "deploy-${run_label}.bat must pass -RootDir \"%~dp0.\" to avoid Windows path quoting bugs"
     fi
   fi
@@ -217,7 +241,7 @@ fi
 verify_onprem_env_templates "$pkg_root"
 verify_workspace_manifest "$pkg_root"
 
-if rg -n 'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' "${pkg_root}/apps/web/dist" >/dev/null 2>&1; then
+if search_extended_regex 'VITE_API_(URL|BASE):"http://(127\.0\.0\.1|localhost)' "${pkg_root}/apps/web/dist"; then
   die "Frontend bundle embeds loopback VITE_API_* config; rebuild package with isolated web env"
 fi
 
