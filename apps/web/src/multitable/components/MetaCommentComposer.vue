@@ -94,8 +94,31 @@ const showSuggestions = computed(() => {
   return Boolean(mentionMatch.value) && filteredSuggestions.value.length > 0
 })
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function hasMentionText(content: string, mention: MetaCommentMentionSuggestion): boolean {
+  const plainMentionRegex = new RegExp(`(^|\\s)@${escapeRegex(mention.label)}(?=\\s|$)`)
+  const tokenMentionRegex = new RegExp(`@\\[${escapeRegex(mention.label)}\\]\\(${escapeRegex(mention.id)}\\)`)
+  return plainMentionRegex.test(content) || tokenMentionRegex.test(content)
+}
+
+function serializeContent(content: string): string {
+  let next = content
+  for (const mention of selectedMentions.value) {
+    const token = `@[${mention.label}](${mention.id})`
+    const tokenRegex = new RegExp(`@\\[${escapeRegex(mention.label)}\\]\\(${escapeRegex(mention.id)}\\)`)
+    if (tokenRegex.test(next)) continue
+    const plainMentionRegex = new RegExp(`(^|\\s)@${escapeRegex(mention.label)}(?=\\s|$)`, 'g')
+    next = next.replace(plainMentionRegex, (_match, prefix: string) => `${prefix}${token}`)
+  }
+  return next
+}
+
 function onInput(event: Event) {
   const value = (event.target as HTMLTextAreaElement).value
+  selectedMentions.value = selectedMentions.value.filter((mention) => hasMentionText(value, mention))
   emit('update:modelValue', value)
 }
 
@@ -121,7 +144,7 @@ function submit() {
   const content = props.modelValue.trim()
   if (!content || props.disabled || props.submitting) return
   emit('submit', {
-    content,
+    content: serializeContent(content),
     mentions: selectedMentions.value.map((item) => item.id),
   })
 }

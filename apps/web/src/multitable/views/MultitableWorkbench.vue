@@ -178,6 +178,7 @@
         :reply-to-comment-id="selectedReplyCommentId"
         :draft="commentDraft" :submitting="commentsState.submitting.value" :error="commentsState.error.value"
         :resolving-ids="commentsState.resolvingIds.value"
+        :mention-suggestions="commentMentionSuggestions"
         @close="onCloseComments" @submit="onSubmitComment" @resolve="onResolveComment" @reply="onReplyToComment" @cancel-reply="onCancelCommentReply" @update:draft="commentDraft = $event"
       />
     </div>
@@ -238,6 +239,7 @@ import type {
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadContext,
   MetaAttachmentUploadFn,
+  MetaCommentMentionSuggestion,
   MetaCommentsScope,
   MetaFieldPermission,
   MetaField,
@@ -319,6 +321,8 @@ const bases = ref<MetaBase[]>([])
 const activeBaseId = computed(() => workbench.activeBaseId.value)
 const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
 const commentDraft = ref('')
+const commentMentionSuggestions = ref<MetaCommentMentionSuggestion[]>([])
+const commentMentionSuggestionsLoadedForSheetId = ref<string | null>(null)
 const searchText = ref('')
 const showShortcuts = ref(false)
 const showImportModal = ref(false)
@@ -767,11 +771,38 @@ async function loadCommentsForRecord(recordId: string, options?: { highlightComm
       containerType: 'meta_sheet',
       containerId: workbench.activeSheetId.value,
     }
-  await commentsState.loadComments(scope)
+  await Promise.all([
+    commentsState.loadComments(scope),
+    ensureCommentMentionSuggestions(),
+  ])
   highlightedCommentId.value = options?.highlightCommentId ?? null
   if (options?.markReadCommentId) {
     await workbench.client.markCommentRead(options.markReadCommentId).catch(() => undefined)
     await commentInboxState.refreshUnreadCount().catch(() => undefined)
+  }
+}
+
+async function ensureCommentMentionSuggestions(force = false) {
+  const sheetId = workbench.activeSheetId.value
+  if (!sheetId) {
+    commentMentionSuggestions.value = []
+    commentMentionSuggestionsLoadedForSheetId.value = null
+    return
+  }
+  if (!force && commentMentionSuggestionsLoadedForSheetId.value === sheetId) return
+
+  try {
+    const result = await workbench.client.listCommentMentionSuggestions({
+      spreadsheetId: sheetId,
+      limit: 100,
+    })
+    if (workbench.activeSheetId.value !== sheetId) return
+    commentMentionSuggestions.value = result.items
+    commentMentionSuggestionsLoadedForSheetId.value = sheetId
+  } catch {
+    if (workbench.activeSheetId.value !== sheetId) return
+    commentMentionSuggestions.value = []
+    commentMentionSuggestionsLoadedForSheetId.value = null
   }
 }
 
@@ -1837,6 +1868,8 @@ watch(
     showMentionPopover.value = false
     unsubscribeMentionRealtime?.()
     unsubscribeMentionRealtime = null
+    commentMentionSuggestions.value = []
+    commentMentionSuggestionsLoadedForSheetId.value = null
 
     if (!sheetId) {
       mentionInboxState.clearSummary()
@@ -1844,6 +1877,7 @@ watch(
     }
 
     void mentionInboxState.loadSummary({ spreadsheetId: sheetId })
+    void ensureCommentMentionSuggestions(true)
     unsubscribeMentionRealtime = subscribeToMultitableCommentSheetRealtime(sheetId, {
       onCommentCreated: mentionInboxState.onRealtimeCommentCreated,
       onCommentResolved: mentionInboxState.onRealtimeCommentResolved,

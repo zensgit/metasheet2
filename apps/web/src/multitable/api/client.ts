@@ -34,6 +34,7 @@ import type {
   MultitableCommentInboxPage,
   MetaCommentsScope,
   MetaAttachment,
+  MetaCommentMentionSuggestion,
 } from '../types'
 import { apiFetch } from '../../utils/api'
 
@@ -249,6 +250,24 @@ function normalizeCommentMentionSummary(
     mentionedRecordCount: typeof payload?.mentionedRecordCount === 'number' ? payload.mentionedRecordCount : 0,
     unreadRecordCount: typeof payload?.unreadRecordCount === 'number' ? payload.unreadRecordCount : 0,
     items,
+  }
+}
+
+function normalizeCommentMentionSuggestions(
+  payload: { items?: Array<Partial<MetaCommentMentionSuggestion>>; total?: number; limit?: number } | null | undefined,
+): { items: MetaCommentMentionSuggestion[]; total: number; limit: number } {
+  return {
+    items: Array.isArray(payload?.items)
+      ? payload.items
+        .map((item) => ({
+          id: typeof item?.id === 'string' ? item.id : '',
+          label: typeof item?.label === 'string' ? item.label : '',
+          subtitle: typeof item?.subtitle === 'string' ? item.subtitle : undefined,
+        }))
+        .filter((item) => item.id.length > 0 && item.label.length > 0)
+      : [],
+    total: typeof payload?.total === 'number' ? payload.total : 0,
+    limit: typeof payload?.limit === 'number' ? payload.limit : 0,
   }
 }
 
@@ -513,6 +532,16 @@ export class MultitableApiClient {
     return {
       comment: normalizeMultitableComment(data.comment),
     }
+  }
+
+  async listCommentMentionSuggestions(params: {
+    spreadsheetId: string
+    q?: string
+    limit?: number
+  }): Promise<{ items: MetaCommentMentionSuggestion[]; total: number; limit: number }> {
+    const res = await this.fetch(`/api/comments/mention-candidates${qs(params)}`)
+    const data = await parseJson<{ items?: Array<Partial<MetaCommentMentionSuggestion>>; total?: number; limit?: number }>(res)
+    return normalizeCommentMentionSuggestions(data)
   }
 
   async resolveComment(commentId: string): Promise<void> {

@@ -15,6 +15,22 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
 async function ensureCommentsTables() {
   const pool = poolManager.get()
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id varchar(50) PRIMARY KEY,
+      email text NOT NULL,
+      name text,
+      password_hash text NOT NULL DEFAULT '',
+      role text NOT NULL DEFAULT 'editor',
+      permissions jsonb NOT NULL DEFAULT '[]'::jsonb,
+      avatar_url text,
+      is_active boolean NOT NULL DEFAULT true,
+      is_admin boolean NOT NULL DEFAULT false,
+      last_login_at timestamp,
+      created_at timestamp DEFAULT now(),
+      updated_at timestamp DEFAULT now()
+    );
+  `)
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS meta_bases (
       id varchar(50) PRIMARY KEY,
       name text NOT NULL,
@@ -335,6 +351,51 @@ describe('Comments API', () => {
         fieldCounts: { [fieldId]: 1 },
         mentionedCount: 1,
         mentionedFieldCounts: { [fieldId]: 1 },
+      },
+    ])
+  })
+
+  it('lists active mention candidates for comment authoring', async () => {
+    if (!baseUrl) return
+
+    const pool = poolManager.get()
+    await pool.query(
+      `INSERT INTO users (id, email, name, password_hash, role, permissions, avatar_url, is_active, is_admin)
+       VALUES
+         ($1, $2, $3, '', 'editor', '[]'::jsonb, NULL, true, false),
+         ($4, $5, $6, '', 'editor', '[]'::jsonb, NULL, true, false),
+         ($7, $8, $9, '', 'editor', '[]'::jsonb, NULL, false, false)
+       ON CONFLICT (id) DO UPDATE SET
+         email = EXCLUDED.email,
+         name = EXCLUDED.name,
+         is_active = EXCLUDED.is_active`,
+      [
+        'user_jamie',
+        'jamie@example.com',
+        'Jamie Example',
+        'user_jordan',
+        'jordan@example.com',
+        'Jordan Example',
+        'user_inactive',
+        'inactive@example.com',
+        'Inactive Example',
+      ],
+    )
+
+    const token = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_1`)).json()).token as string
+    const response = await fetch(`${baseUrl}/api/comments/mention-candidates?spreadsheetId=sheet_orders&q=jam&limit=10`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    expect(response.status).toBe(200)
+
+    const json = await response.json()
+    expect(json.data.total).toBe(1)
+    expect(json.data.limit).toBe(10)
+    expect(json.data.items).toEqual([
+      {
+        id: 'user_jamie',
+        label: 'Jamie Example',
+        subtitle: 'jamie@example.com',
       },
     ])
   })

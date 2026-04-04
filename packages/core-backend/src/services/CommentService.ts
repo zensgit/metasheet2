@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { sql } from 'kysely'
-import { ICollabService, ILogger, type CommentInboxItem, type CommentQueryOptions } from '../di/identifiers'
+import {
+  ICollabService,
+  ILogger,
+  type CommentInboxItem,
+  type CommentMentionCandidate,
+  type CommentQueryOptions,
+} from '../di/identifiers'
 import type { CollabService } from './CollabService'
 import { db } from '../db/db'
 import { nowTimestamp } from '../db/type-helpers'
@@ -207,6 +213,72 @@ export class CommentService {
     const rows = await query.selectAll().orderBy('created_at', 'asc').limit(limit).offset(offset).execute()
 
     return { items: rows.map((row) => this.mapRowToComment(row)), total }
+  }
+
+  async listMentionCandidates(
+    spreadsheetId: string,
+    options?: { q?: string; limit?: number },
+  ): Promise<{ items: CommentMentionCandidate[]; total: number }> {
+    const normalizedSheetId = spreadsheetId.trim()
+    if (!normalizedSheetId) return { items: [], total: 0 }
+
+    const limit = Math.min(100, Math.max(1, Number(options?.limit ?? 50)))
+    const normalizedQuery = options?.q?.trim().toLowerCase() ?? ''
+    const likeQuery = `%${normalizedQuery}%`
+    const startsWithQuery = `${normalizedQuery}%`
+
+    let baseQuery = db
+      .selectFrom('users')
+      .where('is_active', '=', true)
+
+    if (normalizedQuery) {
+      baseQuery = baseQuery.where((eb) => eb.or([
+        sql<boolean>`lower(coalesce(name, '')) like ${likeQuery}`,
+        sql<boolean>`lower(email) like ${likeQuery}`,
+        sql<boolean>`lower(id) like ${likeQuery}`,
+      ]))
+    }
+
+    const totalRow = await baseQuery
+      .select(({ fn }) => fn.countAll<number>().as('c'))
+      .executeTakeFirst()
+    const total = totalRow ? Number((totalRow as { c: string | number }).c) : 0
+
+    let rowsQuery = baseQuery
+      .select(['id', 'name', 'email'])
+
+    if (normalizedQuery) {
+      rowsQuery = rowsQuery
+        .orderBy(
+          sql<number>`case
+            when lower(coalesce(name, '')) like ${startsWithQuery} then 0
+            when lower(email) like ${startsWithQuery} then 1
+            when lower(id) like ${startsWithQuery} then 2
+            else 3
+          end`,
+        )
+    }
+
+    const rows = await rowsQuery
+      .orderBy('created_at', 'asc')
+      .orderBy('id', 'asc')
+      .limit(limit)
+      .execute()
+
+    return {
+      items: rows.map((row) => {
+        const label = row.name?.trim() || row.email.trim() || row.id
+        const subtitle = row.name?.trim() && row.email.trim() && row.name.trim() !== row.email.trim()
+          ? row.email.trim()
+          : undefined
+        return {
+          id: row.id,
+          label,
+          subtitle,
+        }
+      }),
+      total,
+    }
   }
 
   async getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }> {

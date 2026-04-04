@@ -237,7 +237,16 @@ const defaultMentionSuggestions = computed<MetaCommentMentionSuggestion[]>(() =>
     .slice(0, 8)
 })
 
-const mentionSuggestions = computed(() => props.mentionSuggestions.length ? props.mentionSuggestions : defaultMentionSuggestions.value)
+const mentionSuggestions = computed(() => {
+  const seen = new Set<string>()
+  return [...props.mentionSuggestions, ...defaultMentionSuggestions.value]
+    .filter((item) => {
+      if (!item.id || seen.has(item.id)) return false
+      seen.add(item.id)
+      return true
+    })
+    .slice(0, 12)
+})
 
 function submitComment(payload: { content: string; mentions: string[] }) {
   if (!payload.content.trim() || props.submitting) return

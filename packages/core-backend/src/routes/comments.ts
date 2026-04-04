@@ -115,6 +115,34 @@ export function commentsRouter(injector?: Injector): Router {
     }
   })
 
+  router.get('/api/comments/mention-candidates', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+    const schema = z.object({
+      spreadsheetId: z.string().min(1),
+      q: z.string().optional(),
+      limit: z.number().int().nonnegative().optional(),
+    })
+    const parsed = schema.safeParse({
+      spreadsheetId: readQueryValue(req.query.spreadsheetId),
+      q: readQueryValue(req.query.q),
+      limit: parseNumberParam(readQueryValue(req.query.limit)),
+    })
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const limit = clampLimit(parsed.data.limit)
+      const result = await commentService.listMentionCandidates(parsed.data.spreadsheetId, {
+        q: parsed.data.q,
+        limit,
+      })
+      return res.json({ ok: true, data: { items: result.items, total: result.total, limit } })
+    } catch (error) {
+      logger.error('Failed to load comment mention candidates', error as Error)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load comment mention candidates' } })
+    }
+  })
+
   router.get('/api/comments/inbox', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
     const schema = z.object({
       limit: z.number().int().nonnegative().optional(),
