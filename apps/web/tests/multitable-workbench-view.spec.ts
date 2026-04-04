@@ -39,6 +39,8 @@ let gridMock: any
 let loadCommentsSpy: ReturnType<typeof vi.fn>
 let addCommentSpy: ReturnType<typeof vi.fn>
 let resolveCommentSpy: ReturnType<typeof vi.fn>
+let mentionInboxSummaryMock: any
+const subscribeToMultitableCommentSheetRealtimeMock = vi.fn(() => vi.fn())
 
 vi.mock('../src/multitable/composables/useMultitableWorkbench', () => ({
   useMultitableWorkbench: () => workbenchMock,
@@ -81,8 +83,34 @@ vi.mock('../src/multitable/composables/useMultitableCommentInbox', () => ({
   }),
 }))
 
+vi.mock('../src/multitable/composables/useMultitableCommentInboxSummary', () => ({
+  useMultitableCommentInboxSummary: () => (mentionInboxSummaryMock = {
+    summary: ref(null as null | {
+      spreadsheetId: string
+      unresolvedMentionCount: number
+      unreadMentionCount: number
+      mentionedRecordCount: number
+      unreadRecordCount: number
+      items: Array<{ rowId: string; mentionedCount: number; unreadCount: number; mentionedFieldIds: string[] }>
+    }),
+    loading: ref(false),
+    error: ref<string | null>(null),
+    unreadMentionCount: computed(() => mentionInboxSummaryMock?.summary?.value?.unreadMentionCount ?? 0),
+    unreadRecordCount: computed(() => mentionInboxSummaryMock?.summary?.value?.unreadRecordCount ?? 0),
+    loadSummary: vi.fn().mockResolvedValue(undefined),
+    markRead: vi.fn().mockResolvedValue(undefined),
+    clearSummary: vi.fn(),
+    onRealtimeCommentCreated: vi.fn(),
+    onRealtimeCommentResolved: vi.fn(),
+  }),
+}))
+
 vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({
   useMultitableCommentRealtime: vi.fn(),
+}))
+
+vi.mock('../src/multitable/realtime/comments-realtime', () => ({
+  subscribeToMultitableCommentSheetRealtime: (...args: unknown[]) => subscribeToMultitableCommentSheetRealtimeMock(...args),
 }))
 
 vi.mock('../src/multitable/import/bulk-import', () => ({
@@ -264,6 +292,42 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
             onClick: () => this.$emit('close'),
           },
           'close-comments',
+        ),
+      ])
+    },
+  }),
+}))
+vi.mock('../src/multitable/components/MetaMentionPopover.vue', () => ({
+  default: defineComponent({
+    name: 'MetaMentionPopover',
+    props: {
+      visible: { type: Boolean, default: false },
+      items: { type: Array, default: () => [] },
+    },
+    emits: ['close', 'select-record'],
+    render() {
+      if (!this.$props.visible) return null
+      const firstItem = (this.$props.items as Array<{ rowId: string; mentionedFieldIds: string[] }>)[0] ?? null
+      return h('div', { 'data-mention-popover': 'true' }, [
+        h(
+          'button',
+          {
+            'data-mention-popover-select': firstItem?.rowId ?? '',
+            onClick: () => this.$emit('select-record', {
+              rowId: firstItem?.rowId ?? '',
+              fieldId: firstItem?.mentionedFieldIds?.[0] ?? null,
+              mentionedFieldIds: firstItem?.mentionedFieldIds ?? [],
+            }),
+          },
+          'mention-select',
+        ),
+        h(
+          'button',
+          {
+            'data-mention-popover-close': 'true',
+            onClick: () => this.$emit('close'),
+          },
+          'mention-close',
         ),
       ])
     },
@@ -612,6 +676,8 @@ describe('MultitableWorkbench view wiring', () => {
     loadCommentsSpy = vi.fn()
     addCommentSpy = vi.fn()
     resolveCommentSpy = vi.fn()
+    mentionInboxSummaryMock = null
+    subscribeToMultitableCommentSheetRealtimeMock.mockReset()
     workbenchMock = createWorkbenchMock()
     gridMock = createGridMock()
     container = document.createElement('div')
@@ -1190,5 +1256,57 @@ describe('MultitableWorkbench view wiring', () => {
 
     expect(event.defaultPrevented).toBe(true)
     expect(event.returnValue).toBe('')
+  })
+
+  it('shows a mention chip only when unresolved mentions exist', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    expect(mentionInboxSummaryMock.loadSummary).toHaveBeenCalledWith({ spreadsheetId: 'sheet_orders' })
+    expect(container!.querySelector('.mt-workbench__mention-chip')).toBeNull()
+
+    mentionInboxSummaryMock.summary.value = {
+      spreadsheetId: 'sheet_orders',
+      unresolvedMentionCount: 3,
+      unreadMentionCount: 2,
+      mentionedRecordCount: 2,
+      unreadRecordCount: 1,
+      items: [{ rowId: 'rec_1', mentionedCount: 3, unreadCount: 2, mentionedFieldIds: ['fld_title'] }],
+    }
+    await flushUi()
+
+    const chip = container!.querySelector('.mt-workbench__mention-chip')
+    expect(chip).not.toBeNull()
+    expect(chip!.textContent).toContain('Mentions')
+    expect(chip!.textContent).toContain('2')
+  })
+
+  it('opens the mention popover and selects a mentioned record', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    mentionInboxSummaryMock.summary.value = {
+      spreadsheetId: 'sheet_orders',
+      unresolvedMentionCount: 1,
+      unreadMentionCount: 1,
+      mentionedRecordCount: 1,
+      unreadRecordCount: 1,
+      items: [{ rowId: 'rec_2', mentionedCount: 1, unreadCount: 1, mentionedFieldIds: ['fld_title'] }],
+    }
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('.mt-workbench__mention-chip')!.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-mention-popover="true"]')).not.toBeNull()
+
+    container!.querySelector<HTMLButtonElement>('[data-mention-popover-select="rec_2"]')!.click()
+    await flushUi()
+
+    expect(loadCommentsSpy).toHaveBeenLastCalledWith(expect.objectContaining({
+      containerId: 'sheet_orders',
+      targetId: 'rec_2',
+    }))
+    expect(mentionInboxSummaryMock.markRead).toHaveBeenCalledWith({ spreadsheetId: 'sheet_orders' })
   })
 })

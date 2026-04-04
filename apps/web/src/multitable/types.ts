@@ -194,7 +194,10 @@ export interface MultitableComment {
   id: string
   containerId: string
   targetId: string
+  spreadsheetId?: string
+  rowId?: string
   fieldId?: string | null
+  targetFieldId?: string | null
   parentId?: string
   mentions: string[]
   authorId: string
@@ -203,6 +206,33 @@ export interface MultitableComment {
   resolved: boolean
   createdAt: string
   updatedAt?: string
+}
+
+export interface MultitableCommentPresenceSummary {
+  containerId: string
+  targetId: string
+  spreadsheetId?: string
+  rowId?: string
+  unresolvedCount: number
+  fieldCounts: Record<string, number>
+  mentionedCount: number
+  mentionedFieldCounts: Record<string, number>
+}
+
+export interface CommentMentionSummaryItem {
+  rowId: string
+  mentionedCount: number
+  unreadCount: number
+  mentionedFieldIds: string[]
+}
+
+export interface CommentMentionSummary {
+  spreadsheetId: string
+  unresolvedMentionCount: number
+  unreadMentionCount: number
+  mentionedRecordCount: number
+  unreadRecordCount: number
+  items: CommentMentionSummaryItem[]
 }
 
 export interface MultitableCommentInboxItem extends MultitableComment {
