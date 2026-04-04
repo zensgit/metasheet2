@@ -93,6 +93,245 @@
         </div>
       </section>
 
+      <section v-if="showOverview" class="attendance__grid attendance__grid--selfservice">
+        <div class="attendance__card attendance__card--selfservice" data-selfservice-card="status">
+          <div class="attendance__requests-header">
+            <div>
+              <h3>{{ tr('My status', '我的状态') }}</h3>
+              <small class="attendance__field-hint">
+                {{
+                  activeWorkbenchRecord
+                    ? tr(
+                      `Focus date: ${formatDate(activeWorkbenchRecord.work_date)}`,
+                      `关注日期：${formatDate(activeWorkbenchRecord.work_date)}`,
+                    )
+                    : tr('Focus date: current range', '关注日期：当前区间')
+                }}
+              </small>
+            </div>
+            <span
+              v-if="activeWorkbenchRecord"
+              class="attendance__status-chip"
+              :class="`attendance__status-chip--${activeWorkbenchRecord.status}`"
+            >
+              {{ formatStatus(activeWorkbenchRecord.status) }}
+            </span>
+          </div>
+          <p class="attendance__selfservice-lead">
+            {{ activeWorkbenchStatusDescription }}
+          </p>
+          <div class="attendance__summary attendance__summary--workbench">
+            <div class="attendance__summary-item">
+              <span>{{ tr('Latest punch', '最近一次打卡') }}</span>
+              <strong>{{ activeWorkbenchLatestPunchLabel }}</strong>
+            </div>
+            <div class="attendance__summary-item">
+              <span>{{ tr('Work minutes', '工时分钟') }}</span>
+              <strong>{{ activeWorkbenchRecord?.work_minutes ?? 0 }}</strong>
+            </div>
+            <div class="attendance__summary-item">
+              <span>{{ tr('Late / Early', '迟到 / 早退') }}</span>
+              <strong>{{ activeWorkbenchLateEarlyLabel }}</strong>
+            </div>
+            <div class="attendance__summary-item">
+              <span>{{ tr('Attention items', '需处理事项') }}</span>
+              <strong>{{ activeWorkbenchAttentionCount }}</strong>
+            </div>
+          </div>
+          <p class="attendance__field-hint attendance__field-hint--strong">
+            {{
+              activeWorkbenchAttentionCount > 0
+                ? tr(
+                  `You have ${activeWorkbenchAttentionCount} anomaly reminders in this range.`,
+                  `当前区间内有 ${activeWorkbenchAttentionCount} 条异常提醒。`,
+                )
+                : tr('No anomaly reminders in the current range.', '当前区间内没有异常提醒。')
+            }}
+          </p>
+          <ul class="attendance__selfservice-focus-list" data-selfservice-focus-list>
+            <li v-for="item in selfServiceFocusItems" :key="item.key" class="attendance__selfservice-focus-item">
+              <div class="attendance__selfservice-focus-copy">
+                <strong>{{ item.title }}</strong>
+                <span>{{ item.detail }}</span>
+              </div>
+              <button
+                v-if="item.action && item.actionLabel"
+                class="attendance__btn attendance__btn--inline"
+                type="button"
+                :data-selfservice-focus-action="item.action"
+                @click="runSelfServiceAction(item.action)"
+              >
+                {{ item.actionLabel }}
+              </button>
+            </li>
+          </ul>
+        </div>
+
+        <div class="attendance__card attendance__card--selfservice" data-selfservice-card="requests">
+          <div class="attendance__requests-header">
+            <div>
+              <h3>{{ tr('My request status', '我的申请状态') }}</h3>
+              <small class="attendance__field-hint">
+                {{
+                  tr(
+                    'Summarizes the current request backlog from the visible date range.',
+                    '汇总当前可见日期区间内的申请处理状态。',
+                  )
+                }}
+              </small>
+            </div>
+            <strong>{{ requests.length }}</strong>
+          </div>
+          <div class="attendance__chip-list">
+            <span
+              v-for="item in selfServiceRequestStatusItems"
+              :key="item.key"
+              class="attendance__status-chip"
+              :class="`attendance__status-chip--${item.key}`"
+              :data-selfservice-request-stat="item.key"
+            >
+              {{ item.label }} · {{ item.count }}
+            </span>
+          </div>
+          <div class="attendance__selfservice-callout" data-selfservice-request-followup>
+            <div class="attendance__selfservice-callout-copy">
+              <div class="attendance__selfservice-callout-header">
+                <strong>{{ selfServiceRequestFollowup.title }}</strong>
+                <span
+                  v-if="selfServiceRequestFollowup.status"
+                  class="attendance__status-chip"
+                  :class="`attendance__status-chip--${selfServiceRequestFollowup.status}`"
+                >
+                  {{ formatStatus(selfServiceRequestFollowup.status) }}
+                </span>
+              </div>
+              <p>{{ selfServiceRequestFollowup.detail }}</p>
+            </div>
+            <button
+              class="attendance__btn attendance__btn--inline"
+              type="button"
+              data-selfservice-action="request-followup"
+              @click="runSelfServiceAction(selfServiceRequestFollowup.action)"
+            >
+              {{ selfServiceRequestFollowup.actionLabel }}
+            </button>
+          </div>
+          <ul v-if="selfServiceRecentRequests.length > 0" class="attendance__request-list attendance__request-list--compact">
+            <li v-for="item in selfServiceRecentRequests" :key="item.id" class="attendance__request-item">
+              <div>
+                <strong>{{ formatRequestType(item.request_type) }}</strong>
+                <span class="attendance__status-chip" :class="`attendance__status-chip--${item.status}`">
+                  {{ formatStatus(item.status) }}
+                </span>
+              </div>
+              <div class="attendance__request-meta">
+                <span>{{ formatDate(item.work_date) }}</span>
+                <span>{{ selfServiceRequestSubtitle(item) }}</span>
+              </div>
+              <p class="attendance__request-note">
+                {{ describeRequestStatus(item.status, item) }}
+              </p>
+            </li>
+          </ul>
+          <div v-else class="attendance__empty">{{ tr('No recent requests in this range.', '当前区间内暂无申请。') }}</div>
+        </div>
+
+        <div class="attendance__card attendance__card--selfservice" data-selfservice-card="actions">
+          <div class="attendance__requests-header">
+            <div>
+              <h3>{{ tr('Quick actions', '快捷操作') }}</h3>
+              <small class="attendance__field-hint">
+                {{
+                  tr(
+                    'Jump straight into the most common employee actions without leaving overview.',
+                    '无需离开总览，直接进入最常用的员工操作。',
+                  )
+                }}
+              </small>
+            </div>
+          </div>
+          <div class="attendance__selfservice-callout" data-selfservice-primary-action>
+            <div class="attendance__selfservice-callout-copy">
+              <div class="attendance__selfservice-callout-header">
+                <strong>{{ selfServicePrimaryAction.title }}</strong>
+              </div>
+              <p>{{ selfServicePrimaryAction.detail }}</p>
+            </div>
+            <button
+              v-if="selfServicePrimaryAction.action && selfServicePrimaryAction.actionLabel"
+              class="attendance__btn attendance__btn--primary"
+              type="button"
+              data-selfservice-action="recommended"
+              @click="runSelfServiceAction(selfServicePrimaryAction.action)"
+            >
+              {{ selfServicePrimaryAction.actionLabel }}
+            </button>
+          </div>
+          <div class="attendance__quick-actions">
+            <button
+              class="attendance__btn attendance__btn--primary"
+              type="button"
+              data-selfservice-action="missing-punch"
+              @click="openMissingPunchQuickAction"
+            >
+              {{ tr('Fix missing punch', '处理缺卡') }}
+            </button>
+            <button
+              class="attendance__btn"
+              type="button"
+              data-selfservice-action="leave"
+              @click="openQuickRequestDraft('leave')"
+            >
+              {{ tr('Leave request', '请假申请') }}
+            </button>
+            <button
+              class="attendance__btn"
+              type="button"
+              data-selfservice-action="overtime"
+              @click="openQuickRequestDraft('overtime')"
+            >
+              {{ tr('Overtime request', '加班申请') }}
+            </button>
+            <button
+              class="attendance__btn"
+              type="button"
+              data-selfservice-action="records"
+              @click="scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.records)"
+            >
+              {{ tr('Review records', '查看记录') }}
+            </button>
+          </div>
+          <p class="attendance__field-hint attendance__field-hint--strong">
+            {{ selfServiceQuickActionHint }}
+          </p>
+        </div>
+
+        <div class="attendance__card attendance__card--selfservice" data-selfservice-card="guide">
+          <div class="attendance__requests-header">
+            <div>
+              <h3>{{ tr('Status guide', '状态说明') }}</h3>
+              <small class="attendance__field-hint">
+                {{
+                  tr(
+                    'Turns attendance status codes into plain-language reminders for employees.',
+                    '把考勤状态码转换成员工能直接理解的说明。',
+                  )
+                }}
+              </small>
+            </div>
+          </div>
+          <ul class="attendance__status-guide">
+            <li v-for="item in attendanceStatusGuideItems" :key="item.key" class="attendance__status-guide-item">
+              <div class="attendance__status-guide-header">
+                <strong>{{ item.label }}</strong>
+                <span class="attendance__field-hint">{{ item.code }}</span>
+              </div>
+              <p>{{ item.description }}</p>
+            </li>
+          </ul>
+        </div>
+      </section>
+
       <section v-if="showReports" class="attendance__card attendance__card--report-toolbar">
         <div class="attendance__requests-header">
           <h3>{{ tr('Report Period', '报表区间') }}</h3>
@@ -4479,6 +4718,42 @@ interface AttendanceReportBreakdownItem {
   minutes: number
 }
 
+interface AttendanceSelfServiceStatusGuideItem {
+  key: string
+  code: string
+  label: string
+  description: string
+}
+
+interface AttendanceSelfServiceRequestStatusItem {
+  key: string
+  label: string
+  count: number
+}
+
+type AttendanceSelfServiceActionKey =
+  | 'missing-punch'
+  | 'leave'
+  | 'overtime'
+  | 'records'
+  | 'request-report'
+
+interface AttendanceSelfServiceFocusItem {
+  key: string
+  title: string
+  detail: string
+  action: AttendanceSelfServiceActionKey | null
+  actionLabel: string | null
+}
+
+interface AttendanceSelfServiceRequestFollowup {
+  title: string
+  detail: string
+  status: string | null
+  action: AttendanceSelfServiceActionKey
+  actionLabel: string
+}
+
 interface PermissionUserResponse {
   userId: string
   permissions: string[]
@@ -5394,6 +5669,266 @@ const reportMetricItems = computed(() => {
   ]
 })
 
+const todayWorkDateKey = computed(() => toDateInput(new Date()))
+
+const latestAttendanceRecord = computed<AttendanceRecord | null>(() => {
+  if (records.value.length === 0) return null
+  return [...records.value].sort((left, right) => right.work_date.localeCompare(left.work_date))[0] ?? null
+})
+
+const activeWorkbenchRecord = computed<AttendanceRecord | null>(() =>
+  records.value.find(record => record.work_date === todayWorkDateKey.value) ?? latestAttendanceRecord.value
+)
+
+const activeWorkbenchLatestPunchLabel = computed(() => {
+  const record = activeWorkbenchRecord.value
+  if (!record) return '--'
+  return formatDateTime(record.last_out_at || record.first_in_at)
+})
+
+const activeWorkbenchStatusDescription = computed(() =>
+  describeAttendanceStatus(activeWorkbenchRecord.value?.status)
+)
+
+const activeWorkbenchLateEarlyLabel = computed(() => {
+  const record = activeWorkbenchRecord.value
+  if (!record) return '--'
+  return `${record.late_minutes ?? 0} / ${record.early_leave_minutes ?? 0}`
+})
+
+const activeWorkbenchAttentionCount = computed(() => {
+  if (anomalies.value.length === 0) return 0
+  const focusDate = activeWorkbenchRecord.value?.work_date
+  if (!focusDate) return anomalies.value.length
+  return anomalies.value.filter(item => item.workDate === focusDate).length
+})
+
+function countRequestsByStatus(status: string): number {
+  return requests.value.filter(item => item.status === status).length
+}
+
+function sortAttendanceRequestsDesc(items: AttendanceRequest[]): AttendanceRequest[] {
+  return [...items].sort((left, right) => {
+    const leftKey = left.requested_in_at || left.requested_out_at || left.work_date
+    const rightKey = right.requested_in_at || right.requested_out_at || right.work_date
+    return rightKey.localeCompare(leftKey)
+  })
+}
+
+function describeRequestStatus(value: string | null | undefined, item?: AttendanceRequest | null): string {
+  const normalized = String(value || '').trim().toLowerCase()
+  const requestLabel = item ? formatRequestType(item.request_type) : tr('request', '申请')
+  const workDateLabel = item?.work_date ? formatDate(item.work_date) : tr('this request', '该申请')
+
+  const map: Record<string, string> = {
+    pending: tr(
+      `${requestLabel} for ${workDateLabel} is still waiting for approval.`,
+      `${workDateLabel} 的${requestLabel}仍在等待审批。`,
+    ),
+    approved: tr(
+      `${requestLabel} for ${workDateLabel} has already been approved.`,
+      `${workDateLabel} 的${requestLabel}已经审批通过。`,
+    ),
+    rejected: tr(
+      `${requestLabel} for ${workDateLabel} was rejected and may need a new submission.`,
+      `${workDateLabel} 的${requestLabel}已被驳回，可能需要重新提交。`,
+    ),
+    cancelled: tr(
+      `${requestLabel} for ${workDateLabel} was cancelled before completion.`,
+      `${workDateLabel} 的${requestLabel}已在完成前取消。`,
+    ),
+    canceled: tr(
+      `${requestLabel} for ${workDateLabel} was cancelled before completion.`,
+      `${workDateLabel} 的${requestLabel}已在完成前取消。`,
+    ),
+  }
+
+  return map[normalized]
+    ?? tr('Review this request in the request report for the latest status.', '请在申请报表里查看这条申请的最新状态。')
+}
+
+const selfServiceSortedRequests = computed(() => sortAttendanceRequestsDesc(requests.value))
+
+const selfServiceRequestStatusItems = computed<AttendanceSelfServiceRequestStatusItem[]>(() => [
+  { key: 'pending', label: formatStatus('pending'), count: countRequestsByStatus('pending') },
+  { key: 'approved', label: formatStatus('approved'), count: countRequestsByStatus('approved') },
+  { key: 'rejected', label: formatStatus('rejected'), count: countRequestsByStatus('rejected') },
+])
+
+const selfServiceRecentRequests = computed(() => selfServiceSortedRequests.value.slice(0, 3))
+
+const selfServiceRequestFollowup = computed<AttendanceSelfServiceRequestFollowup>(() => {
+  const pending = selfServiceSortedRequests.value.find(item => item.status === 'pending')
+  if (pending) {
+    return {
+      title: tr('Pending follow-up', '待跟进申请'),
+      detail: describeRequestStatus('pending', pending),
+      status: 'pending',
+      action: 'request-report',
+      actionLabel: tr('Open request report', '打开申请报表'),
+    }
+  }
+
+  const rejected = selfServiceSortedRequests.value.find(item => item.status === 'rejected')
+  if (rejected) {
+    return {
+      title: tr('Needs attention', '需要关注'),
+      detail: describeRequestStatus('rejected', rejected),
+      status: 'rejected',
+      action: 'request-report',
+      actionLabel: tr('Review request history', '查看申请历史'),
+    }
+  }
+
+  const approved = selfServiceSortedRequests.value.find(item => item.status === 'approved')
+  if (approved) {
+    return {
+      title: tr('Latest approval', '最近已批准'),
+      detail: describeRequestStatus('approved', approved),
+      status: 'approved',
+      action: 'request-report',
+      actionLabel: tr('Open request report', '打开申请报表'),
+    }
+  }
+
+  return {
+    title: tr('No requests yet', '暂无申请'),
+    detail: tr(
+      'Start a leave, overtime, or missing-punch request from the quick actions when needed.',
+      '需要时可从快捷操作发起请假、加班或补卡申请。',
+    ),
+    status: null,
+    action: 'leave',
+    actionLabel: tr('Start leave request', '发起请假申请'),
+  }
+})
+
+const attendanceStatusGuideItems = computed<AttendanceSelfServiceStatusGuideItem[]>(() => [
+  {
+    key: 'late_early',
+    code: 'late_early',
+    label: formatStatus('late_early'),
+    description: tr(
+      'Both a late arrival and an early departure were recorded for this workday.',
+      '这个工作日同时出现了迟到和早退。',
+    ),
+  },
+  {
+    key: 'adjusted',
+    code: 'adjusted',
+    label: formatStatus('adjusted'),
+    description: tr(
+      'An approved request or manual correction already adjusted this workday.',
+      '该工作日已经被审批结果或人工更正调整过。',
+    ),
+  },
+  {
+    key: 'partial',
+    code: 'partial',
+    label: formatStatus('partial'),
+    description: tr(
+      'Only part of the expected punch data is available, so the workday is incomplete.',
+      '当前只拿到了部分应有打卡数据，因此该工作日还不完整。',
+    ),
+  },
+  {
+    key: 'off',
+    code: 'off',
+    label: formatStatus('off'),
+    description: tr(
+      'This day is treated as a rest day or holiday and does not require a normal work record.',
+      '这一天被视为休息日或节假日，不要求正常出勤记录。',
+    ),
+  },
+])
+
+const selfServiceFocusItems = computed<AttendanceSelfServiceFocusItem[]>(() => {
+  const items: AttendanceSelfServiceFocusItem[] = []
+  const focusRecord = activeWorkbenchRecord.value
+  const attentionCount = activeWorkbenchAttentionCount.value
+  const pendingCount = countRequestsByStatus('pending')
+
+  if (attentionCount > 0) {
+    items.push({
+      key: 'anomalies',
+      title: tr('Resolve anomaly reminders', '优先处理异常提醒'),
+      detail: tr(
+        `The focus date still has ${attentionCount} anomaly reminder${attentionCount === 1 ? '' : 's'}.`,
+        `关注日期仍有 ${attentionCount} 条异常提醒待处理。`,
+      ),
+      action: 'missing-punch',
+      actionLabel: tr('Fix missing punch', '处理缺卡'),
+    })
+  }
+
+  if (pendingCount > 0) {
+    items.push({
+      key: 'pending-requests',
+      title: tr('Track pending approvals', '跟进待审批申请'),
+      detail: tr(
+        `${pendingCount} request${pendingCount === 1 ? '' : 's'} in this range still need approval.`,
+        `当前区间内还有 ${pendingCount} 条申请待审批。`,
+      ),
+      action: 'request-report',
+      actionLabel: tr('Open request report', '打开申请报表'),
+    })
+  }
+
+  if (focusRecord && !['normal', 'off'].includes(focusRecord.status)) {
+    items.push({
+      key: 'record-review',
+      title: tr('Review the focus workday', '查看关注工作日'),
+      detail: tr(
+        `${formatStatus(focusRecord.status)} was recorded for ${formatDate(focusRecord.work_date)}.`,
+        `${formatDate(focusRecord.work_date)} 记录为${formatStatus(focusRecord.status)}。`,
+      ),
+      action: 'records',
+      actionLabel: tr('Review records', '查看记录'),
+    })
+  }
+
+  if (items.length === 0) {
+    items.push({
+      key: 'all-clear',
+      title: tr('You are caught up', '当前已处理完毕'),
+      detail: tr(
+        'No anomaly reminders or pending approvals are blocking your attendance follow-up in this range.',
+        '当前区间内没有异常提醒或待审批事项阻塞你的考勤跟进。',
+      ),
+      action: 'records',
+      actionLabel: tr('Open records', '打开记录'),
+    })
+  }
+
+  return items
+})
+
+const selfServicePrimaryAction = computed<AttendanceSelfServiceFocusItem>(() => {
+  return selfServiceFocusItems.value.find(item => item.action && item.actionLabel) ?? {
+    key: 'default-leave',
+    title: tr('Start a new attendance request', '发起新的考勤申请'),
+    detail: tr(
+      'Use the quick actions to create a leave, overtime, or missing-punch request without leaving overview.',
+      '无需离开总览，即可用快捷操作发起请假、加班或补卡申请。',
+    ),
+    action: 'leave',
+    actionLabel: tr('Leave request', '请假申请'),
+  }
+})
+
+const selfServiceQuickActionHint = computed(() => {
+  if (activeWorkbenchAttentionCount.value > 0) {
+    return tr(
+      'Start with missing-punch handling to resolve the current anomaly reminder.',
+      '建议先处理缺卡，优先消化当前异常提醒。',
+    )
+  }
+  return tr(
+    'Jump into the request form or records table without leaving overview.',
+    '无需离开总览，直接跳到申请表单或记录表格。',
+  )
+})
+
 const reportsFiltersActive = computed(() =>
   requestReportStatusFilter.value !== 'all'
   || requestReportTypeFilter.value !== 'all'
@@ -5621,6 +6156,21 @@ function overviewSectionBinding(id: AttendanceOverviewSectionId): Record<string,
     id,
     'data-overview-section': id,
     ref: (element: Element | null) => setOverviewSectionRef(id, element),
+  }
+}
+
+async function scrollToOverviewSection(id: AttendanceOverviewSectionId, focusTargetId?: string): Promise<void> {
+  if (typeof document === 'undefined') return
+  await nextTick()
+  const target = overviewSectionElements.get(id) ?? document.getElementById(id)
+  if (target instanceof HTMLElement) {
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  if (focusTargetId) {
+    const field = document.getElementById(focusTargetId)
+    if (field instanceof HTMLElement && typeof field.focus === 'function') {
+      field.focus()
+    }
   }
 }
 
@@ -6181,6 +6731,29 @@ function formatStatus(value: string): string {
   return map[normalized] ?? raw
 }
 
+function describeAttendanceStatus(value: string | null | undefined): string {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) {
+    return tr(
+      'No attendance record is available for the current selection yet.',
+      '当前选定区间内还没有可用的考勤记录。',
+    )
+  }
+
+  const map: Record<string, string> = {
+    normal: tr('Punches and working time look normal for this workday.', '这个工作日的打卡和工时看起来正常。'),
+    late: tr('A late arrival was recorded for this workday.', '这个工作日记录到了迟到。'),
+    early_leave: tr('An early departure was recorded for this workday.', '这个工作日记录到了早退。'),
+    late_early: tr('Both a late arrival and an early departure were recorded for this workday.', '这个工作日同时记录到了迟到和早退。'),
+    partial: tr('Only part of the expected punch data is available for this workday.', '这个工作日只拿到了部分应有打卡数据。'),
+    absent: tr('No valid attendance record was found for a required workday.', '应出勤的工作日没有找到有效考勤记录。'),
+    adjusted: tr('An approved request or manual correction already adjusted this workday.', '该工作日已经被审批结果或人工更正调整过。'),
+    off: tr('This day is treated as a rest day or holiday.', '这一天被视为休息日或节假日。'),
+  }
+
+  return map[normalized] ?? tr('Review the detailed records for this workday.', '请查看该工作日的详细记录。')
+}
+
 function formatList(items?: Array<string> | null): string {
   if (!items || items.length === 0) return '--'
   return items.map(item => String(item)).filter(Boolean).join(', ')
@@ -6219,6 +6792,15 @@ function formatRequestType(value: string): string {
         overtime: 'Overtime request',
       }
   return map[value] ?? value
+}
+
+function selfServiceRequestSubtitle(item: AttendanceRequest): string {
+  const pieces = [
+    item.requested_in_at ? `${tr('In', '入')}: ${formatDateTime(item.requested_in_at)}` : '',
+    item.requested_out_at ? `${tr('Out', '出')}: ${formatDateTime(item.requested_out_at)}` : '',
+  ].filter(Boolean)
+  if (pieces.length > 0) return pieces.join(' · ')
+  return tr('No explicit time range', '没有显式时间段')
 }
 
 function requestTypeCtaLabel(value: string): string {
@@ -6365,8 +6947,7 @@ async function prefillRequestFromRecordTimeline(record: AttendanceRecord): Promi
       requestTimezoneContextHint.value,
     ),
   )
-  await nextTick()
-  document.getElementById('attendance-request-work-date')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies, 'attendance-request-work-date')
 }
 
 async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void> {
@@ -6388,8 +6969,48 @@ async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void>
       requestTimezoneContextHint.value,
     ),
   )
-  await nextTick()
-  document.getElementById('attendance-request-work-date')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies, 'attendance-request-work-date')
+}
+
+async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Promise<void> {
+  if (action === 'missing-punch') {
+    await openMissingPunchQuickAction()
+    return
+  }
+  if (action === 'leave') {
+    await openQuickRequestDraft('leave')
+    return
+  }
+  if (action === 'overtime') {
+    await openQuickRequestDraft('overtime')
+    return
+  }
+  if (action === 'records') {
+    await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.records)
+    return
+  }
+  await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)
+}
+
+async function openQuickRequestDraft(requestType: AttendanceRequest['request_type']): Promise<void> {
+  requestForm.workDate = activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value
+  requestForm.requestType = requestType
+  setStatus(
+    appendStatusContext(
+      tr(`Request form ready for ${formatRequestType(requestType)}.`, `已为${formatRequestType(requestType)}准备申请表单。`),
+      requestTimezoneContextHint.value,
+    ),
+  )
+  await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies, 'attendance-request-work-date')
+}
+
+async function openMissingPunchQuickAction(): Promise<void> {
+  const anomaly = anomalies.value.find(item => item.state !== 'pending')
+  if (anomaly) {
+    await prefillRequestFromAnomaly(anomaly)
+    return
+  }
+  await openQuickRequestDraft('missed_check_in')
 }
 
 function buildQuery(params: Record<string, string | undefined>): URLSearchParams {
@@ -12764,6 +13385,132 @@ const holidaySectionBindings = {
   margin-bottom: 20px;
 }
 
+.attendance__grid--selfservice {
+  margin-bottom: 20px;
+}
+
+.attendance__card--selfservice {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.attendance__summary--workbench {
+  margin-top: 0;
+}
+
+.attendance__selfservice-lead {
+  margin: 0;
+  color: #334155;
+  line-height: 1.5;
+}
+
+.attendance__selfservice-focus-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.attendance__selfservice-focus-item {
+  border: 1px solid #dbe4f0;
+  border-radius: 10px;
+  background: #f8fbff;
+  padding: 10px 12px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.attendance__selfservice-focus-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.attendance__selfservice-focus-copy span {
+  color: #475569;
+  line-height: 1.5;
+}
+
+.attendance__selfservice-callout {
+  border: 1px solid #dbe4f0;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #f8fbff, #eef6ff);
+  padding: 12px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.attendance__selfservice-callout-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attendance__selfservice-callout-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.attendance__selfservice-callout-copy p {
+  margin: 0;
+  color: #475569;
+  line-height: 1.5;
+}
+
+.attendance__quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.attendance__request-list--compact {
+  gap: 8px;
+}
+
+.attendance__request-note {
+  margin: 0;
+  color: #475569;
+  line-height: 1.5;
+}
+
+.attendance__status-guide {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.attendance__status-guide-item {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #f8fafc;
+}
+
+.attendance__status-guide-item p {
+  margin: 6px 0 0;
+  color: #475569;
+  line-height: 1.5;
+}
+
+.attendance__status-guide-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
 .attendance__summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
@@ -13058,6 +13805,46 @@ const holidaySectionBindings = {
 .attendance__status-chip--approved {
   background: #e8f5e9;
   color: #2e7d32;
+}
+
+.attendance__status-chip--normal {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.attendance__status-chip--late {
+  background: #fff3e0;
+  color: #ef6c00;
+}
+
+.attendance__status-chip--early_leave {
+  background: #ede7f6;
+  color: #6a1b9a;
+}
+
+.attendance__status-chip--late_early {
+  background: #ffebee;
+  color: #c62828;
+}
+
+.attendance__status-chip--partial {
+  background: #e3f2fd;
+  color: #1565c0;
+}
+
+.attendance__status-chip--adjusted {
+  background: #e0f7fa;
+  color: #006064;
+}
+
+.attendance__status-chip--off {
+  background: #eceff1;
+  color: #546e7a;
+}
+
+.attendance__status-chip--absent {
+  background: #f5f5f5;
+  color: #616161;
 }
 
 .attendance__status-chip--rejected {
@@ -13909,6 +14696,12 @@ const holidaySectionBindings = {
 }
 
 @media (max-width: 768px) {
+  .attendance__selfservice-focus-item,
+  .attendance__selfservice-callout {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
   .attendance {
     padding: 16px;
   }
