@@ -92,6 +92,9 @@ useMultitableCommentInboxRealtime({
   refreshInbox: async () => {
     await refreshInbox()
   },
+  sheetIds: () => inbox.value
+    .map((item) => item.sheetId ?? item.containerId ?? '')
+    .filter((sheetId) => sheetId.length > 0),
 })
 
 async function onMarkRead(commentId: string) {
