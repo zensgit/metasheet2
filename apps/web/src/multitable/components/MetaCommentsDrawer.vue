@@ -54,11 +54,6 @@
           <div class="meta-comments-drawer__meta">
             <span class="meta-comments-drawer__author">{{ reply.authorName ?? reply.authorId }}</span>
             <span class="meta-comments-drawer__time">{{ formatTime(reply.createdAt) }}</span>
-            <button
-              v-if="canComment && !reply.resolved"
-              class="meta-comments-drawer__reply"
-              @click="emit('reply', reply.id)"
-            >Reply</button>
           </div>
           <p class="meta-comments-drawer__content">{{ formatContent(reply.content) }}</p>
         </div>

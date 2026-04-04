@@ -299,11 +299,14 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
     name: 'MetaCommentsDrawer',
     props: {
       visible: { type: Boolean, default: false },
+      targetFieldId: { type: String, default: null },
     },
     emits: ['close', 'submit', 'reply', 'cancel-reply', 'update:draft'],
     render() {
       if (!this.$props.visible) return null
-      return h('div', [
+      return h('div', {
+        'data-current-comment-field': this.$props.targetFieldId ?? '',
+      }, [
         h(
           'button',
           {
@@ -1155,6 +1158,7 @@ describe('MultitableWorkbench view wiring', () => {
 
     container!.querySelector<HTMLButtonElement>('[data-toggle-comments="true"]')!.click()
     await flushUi()
+    expect(container!.querySelector('[data-current-comment-field="fld_notes"]')).toBeTruthy()
     container!.querySelector<HTMLButtonElement>('[data-submit-comment="true"]')!.click()
     await flushUi()
 

@@ -250,6 +250,7 @@ describe('MetaCommentsDrawer', () => {
 
     expect(container.textContent).toContain('field root')
     expect(container.textContent).toContain('reply without field')
+    expect(container.querySelectorAll('.meta-comments-drawer__reply')).toHaveLength(1)
 
     app.unmount()
     container.remove()

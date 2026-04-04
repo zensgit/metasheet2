@@ -173,7 +173,7 @@
         :loading="commentsState.loading.value" :can-comment="effectiveRowActions.canComment" :can-resolve="effectiveRowActions.canComment"
         :highlighted-comment-id="highlightedCommentId"
         :unread-count="commentInboxState.unreadCount.value"
-        :target-field-id="selectedCommentFieldId"
+        :target-field-id="activeCommentFieldId"
         :scope-label="commentsScopeLabel"
         :reply-to-comment-id="selectedReplyCommentId"
         :draft="commentDraft" :submitting="commentsState.submitting.value" :error="commentsState.error.value"
@@ -492,8 +492,9 @@ const selectedRecordCommentsScope = computed<MetaCommentsScope | null>(() => {
     containerId: workbench.activeSheetId.value,
   }
 })
+const activeCommentFieldId = computed(() => selectedCommentFieldId.value ?? selectedRecordCommentsScope.value?.targetFieldId ?? null)
 const selectedCommentField = computed<MetaField | null>(() => {
-  const fieldId = selectedCommentFieldId.value ?? selectedRecordCommentsScope.value?.targetFieldId ?? null
+  const fieldId = activeCommentFieldId.value
   if (!fieldId) return null
   return grid.fields.value.find((field) => field.id === fieldId) ?? null
 })
@@ -958,7 +959,7 @@ async function onSubmitComment(payload: { content: string; mentions: string[] })
       ...selectedRecordCommentsScope.value,
       content: payload.content,
       mentions: payload.mentions,
-      targetFieldId: selectedCommentFieldId.value ?? selectedRecordCommentsScope.value.targetFieldId ?? undefined,
+      targetFieldId: activeCommentFieldId.value ?? undefined,
       parentId: selectedReplyCommentId.value ?? undefined,
     })
     commentDraft.value = ''
