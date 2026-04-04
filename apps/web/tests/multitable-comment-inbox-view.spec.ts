@@ -4,6 +4,12 @@ import MultitableCommentInboxView from '../src/views/MultitableCommentInboxView.
 
 const apiFetchMock = vi.fn()
 const pushSpy = vi.fn().mockResolvedValue(undefined)
+const socketOnMock = vi.fn()
+const socketDisconnectMock = vi.fn()
+const ioMock = vi.fn(() => ({
+  on: socketOnMock,
+  disconnect: socketDisconnectMock,
+}))
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -21,8 +27,19 @@ vi.mock('../src/composables/useLocale', () => ({
   }),
 }))
 
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({
+    getCurrentUserId: vi.fn().mockResolvedValue('user_1'),
+  }),
+}))
+
 vi.mock('../src/utils/api', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
+  getApiBase: () => '',
+}))
+
+vi.mock('socket.io-client', () => ({
+  io: (...args: unknown[]) => ioMock(...args),
 }))
 
 async function flushUi(cycles = 4): Promise<void> {
@@ -39,6 +56,9 @@ describe('MultitableCommentInboxView', () => {
   beforeEach(() => {
     apiFetchMock.mockReset()
     pushSpy.mockReset()
+    socketOnMock.mockReset()
+    socketDisconnectMock.mockReset()
+    ioMock.mockClear()
     apiFetchMock
       .mockResolvedValueOnce(new Response(JSON.stringify({
         ok: true,
@@ -142,5 +162,6 @@ describe('MultitableCommentInboxView', () => {
     })
 
     expect(apiFetchMock).toHaveBeenCalledWith('/api/comments/c1/read', { method: 'POST' })
+    expect(ioMock).toHaveBeenCalledTimes(1)
   })
 })

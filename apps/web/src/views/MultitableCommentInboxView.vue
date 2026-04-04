@@ -68,6 +68,7 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMultitableCommentInbox } from '../multitable/composables/useMultitableCommentInbox'
+import { useMultitableCommentInboxRealtime } from '../multitable/composables/useMultitableCommentInboxRealtime'
 import { multitableClient } from '../multitable/api/client'
 import { AppRouteNames } from '../router/types'
 
@@ -85,6 +86,12 @@ const {
   refreshInbox,
   markCommentRead,
 } = inboxState
+
+useMultitableCommentInboxRealtime({
+  refreshInbox: async () => {
+    await refreshInbox()
+  },
+})
 
 async function onMarkRead(commentId: string) {
   if (busyIds.value.includes(commentId)) return
