@@ -4935,6 +4935,180 @@ async function loadShiftById(db, orgId, shiftId) {
   }
 }
 
+function buildShiftReferenceLookup(rows) {
+  const byId = new Map()
+  const byName = new Map()
+  for (const row of rows || []) {
+    const shift = mapShiftRow(row)
+    if (!shift?.id) continue
+    byId.set(shift.id, shift)
+    const normalizedName = typeof shift.name === 'string' ? shift.name.trim() : ''
+    if (!normalizedName) continue
+    if (!byName.has(normalizedName)) byName.set(normalizedName, [])
+    byName.get(normalizedName).push(shift)
+  }
+  return { byId, byName }
+}
+
+function resolveShiftReference(shiftRef, lookup) {
+  const normalizedRef = typeof shiftRef === 'string' ? shiftRef.trim() : ''
+  if (!normalizedRef) {
+    return { status: 'missing', shift: null, normalizedRef }
+  }
+  const uuid = normalizeUuidString(normalizedRef)
+  if (uuid) {
+    const shift = lookup.byId.get(uuid) ?? null
+    if (shift) {
+      return { status: 'resolved', shift, normalizedRef }
+    }
+  }
+  const matching = lookup.byName.get(normalizedRef) ?? []
+  if (matching.length === 1) {
+    return { status: 'resolved', shift: matching[0], normalizedRef }
+  }
+  if (matching.length > 1) {
+    return { status: 'ambiguous', shift: null, normalizedRef }
+  }
+  return { status: 'missing', shift: null, normalizedRef }
+}
+
+async function loadShiftReferenceLookup(db, orgId, options = {}) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  const ids = Array.isArray(options.ids)
+    ? options.ids.map((value) => normalizeUuidString(value)).filter(Boolean)
+    : []
+  const names = Array.isArray(options.names)
+    ? options.names.map((value) => typeof value === 'string' ? value.trim() : '').filter(Boolean)
+    : []
+
+  let rows
+  if (!ids.length && !names.length) {
+    rows = await db.query(
+      'SELECT * FROM attendance_shifts WHERE org_id = $1',
+      [targetOrg]
+    )
+  } else {
+    const params = [targetOrg]
+    const predicates = []
+    if (ids.length) {
+      params.push(ids)
+      predicates.push(`id = ANY($${params.length}::uuid[])`)
+    }
+    if (names.length) {
+      params.push(names)
+      predicates.push(`name = ANY($${params.length}::text[])`)
+    }
+    rows = await db.query(
+      `SELECT * FROM attendance_shifts
+       WHERE org_id = $1
+         AND (${predicates.join(' OR ')})`,
+      params
+    )
+  }
+  return buildShiftReferenceLookup(rows)
+}
+
+async function normalizeRotationShiftSequence(db, orgId, shiftSequence, options = {}) {
+  const lookup = options.lookup ?? await loadShiftReferenceLookup(db, orgId)
+  const preserveUnknown = options.preserveUnknown === true
+  const nextSequence = []
+  const missingReferences = []
+  const ambiguousReferences = []
+  let changed = false
+
+  for (const shiftRef of normalizeStringArray(shiftSequence)) {
+    const resolution = resolveShiftReference(shiftRef, lookup)
+    if (resolution.status === 'resolved' && resolution.shift?.id) {
+      nextSequence.push(resolution.shift.id)
+      if (resolution.shift.id !== resolution.normalizedRef) changed = true
+      continue
+    }
+    if (resolution.status === 'ambiguous') {
+      ambiguousReferences.push(resolution.normalizedRef)
+    } else {
+      missingReferences.push(resolution.normalizedRef)
+    }
+    if (preserveUnknown && resolution.normalizedRef) {
+      nextSequence.push(resolution.normalizedRef)
+    }
+  }
+
+  return {
+    shiftSequence: nextSequence,
+    missingReferences,
+    ambiguousReferences,
+    changed,
+  }
+}
+
+async function loadShiftByReference(db, orgId, shiftRef) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  const normalizedRef = typeof shiftRef === 'string' ? shiftRef.trim() : ''
+  if (!normalizedRef) return null
+  const uuid = normalizeUuidString(normalizedRef)
+  if (uuid) {
+    const shift = await loadShiftById(db, targetOrg, uuid)
+    if (shift) return shift
+  }
+  const lookup = await loadShiftReferenceLookup(db, targetOrg, { names: [normalizedRef] })
+  const resolution = resolveShiftReference(normalizedRef, lookup)
+  return resolution.status === 'resolved' ? resolution.shift : null
+}
+
+async function normalizeLegacyRotationRulesForShiftName(db, orgId, shiftId, legacyShiftName) {
+  const targetOrg = orgId || DEFAULT_ORG_ID
+  const normalizedName = typeof legacyShiftName === 'string' ? legacyShiftName.trim() : ''
+  if (!shiftId || !normalizedName) {
+    return { updated: 0, ambiguous: false, referenced: false }
+  }
+  const rows = await db.query(
+    `SELECT id, shift_sequence
+     FROM attendance_rotation_rules
+     WHERE org_id = $1
+       AND EXISTS (
+         SELECT 1
+         FROM jsonb_array_elements_text(COALESCE(shift_sequence, '[]'::jsonb)) AS seq(shift_ref)
+         WHERE seq.shift_ref = $2::text
+       )`,
+    [targetOrg, normalizedName]
+  )
+  if (!rows.length) {
+    return { updated: 0, ambiguous: false, referenced: false }
+  }
+
+  const shiftRows = await db.query(
+    `SELECT id
+     FROM attendance_shifts
+     WHERE org_id = $1
+       AND name = $2`,
+    [targetOrg, normalizedName]
+  )
+  const matchingShiftIds = new Set(
+    shiftRows
+      .map((row) => normalizeUuidString(row?.id))
+      .filter(Boolean)
+  )
+  if (matchingShiftIds.size > 1) {
+    return { updated: 0, ambiguous: true, referenced: true }
+  }
+
+  let updated = 0
+  for (const row of rows) {
+    const currentSequence = normalizeStringArray(row.shift_sequence)
+    const nextSequence = currentSequence.map((shiftRef) => shiftRef === normalizedName ? shiftId : shiftRef)
+    if (JSON.stringify(nextSequence) === JSON.stringify(currentSequence)) continue
+    await db.query(
+      `UPDATE attendance_rotation_rules
+       SET shift_sequence = $3::jsonb,
+           updated_at = now()
+       WHERE id = $1 AND org_id = $2`,
+      [row.id, targetOrg, JSON.stringify(nextSequence)]
+    )
+    updated += 1
+  }
+  return { updated, ambiguous: false, referenced: true }
+}
+
 async function loadLeaveType(db, orgId, { id, code }) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   if (!id && !code) return null
@@ -5026,9 +5200,9 @@ async function loadRotationAssignment(db, orgId, userId, workDate) {
     const offset = diffDays(row.start_date, workDate)
     if (offset < 0) return null
     const index = offset % rotation.shiftSequence.length
-    const shiftId = rotation.shiftSequence[index]
-    if (!shiftId) return null
-    const shift = await loadShiftById(db, targetOrg, shiftId)
+    const shiftRef = rotation.shiftSequence[index]
+    if (!shiftRef) return null
+    const shift = await loadShiftByReference(db, targetOrg, shiftRef)
     if (!shift) return null
     return {
       assignment: mapRotationAssignmentRow(row),
@@ -5161,17 +5335,23 @@ async function loadRotationAssignmentMapForUsersRange(db, orgId, userIds, fromDa
     }
 
     const shiftsById = new Map()
-    const uuidLike = (value) =>
-      typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
-    const shiftIds = Array.from(shiftIdSet).filter(uuidLike)
-    if (shiftIds.length) {
-      const shiftRows = await db.query(
-        'SELECT * FROM attendance_shifts WHERE id = ANY($1::uuid[]) AND org_id = $2',
-        [shiftIds, targetOrg]
-      )
-      for (const row of shiftRows) {
-        const shift = mapShiftRow(row)
-        if (shift?.id) shiftsById.set(shift.id, shift)
+    if (shiftIdSet.size > 0) {
+      const ids = []
+      const names = []
+      for (const shiftRef of shiftIdSet) {
+        const uuid = normalizeUuidString(shiftRef)
+        if (uuid) {
+          ids.push(uuid)
+        } else if (typeof shiftRef === 'string' && shiftRef.trim()) {
+          names.push(shiftRef.trim())
+        }
+      }
+      const lookup = await loadShiftReferenceLookup(db, targetOrg, { ids, names })
+      for (const shiftRef of shiftIdSet) {
+        const resolution = resolveShiftReference(shiftRef, lookup)
+        if (resolution.status !== 'resolved' || !resolution.shift?.id) continue
+        shiftsById.set(shiftRef, resolution.shift)
+        shiftsById.set(resolution.shift.id, resolution.shift)
       }
     }
 
@@ -5208,9 +5388,9 @@ function resolveRotationInfoFromPrefetch(entries, workDate, shiftsById) {
     const offset = diffDays(startDate, workDate)
     if (offset < 0) return null
     const index = offset % rotation.shiftSequence.length
-    const shiftId = rotation.shiftSequence[index]
-    if (!shiftId) return null
-    const shift = shiftsById?.get(shiftId) ?? null
+    const shiftRef = rotation.shiftSequence[index]
+    if (!shiftRef) return null
+    const shift = shiftsById?.get(shiftRef) ?? null
     if (!shift) return null
     return { assignment, rotation, shift }
   }
@@ -11718,19 +11898,40 @@ module.exports = {
         }
 
         const orgId = getOrgId(req)
-        const shiftSequence = normalizeStringArray(parsed.data.shiftSequence)
-        if (shiftSequence.length === 0) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Shift sequence required' } })
-          return
-        }
-        const payload = {
-          name: parsed.data.name,
-          timezone: parsed.data.timezone ?? 'UTC',
-          shiftSequence,
-          isActive: parsed.data.isActive ?? true,
-        }
 
         try {
+          const normalizedSequence = await normalizeRotationShiftSequence(db, orgId, parsed.data.shiftSequence)
+          if (normalizedSequence.shiftSequence.length === 0) {
+            res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Shift sequence required' } })
+            return
+          }
+          if (normalizedSequence.ambiguousReferences.length > 0) {
+            res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: `Shift sequence contains ambiguous shift names: ${normalizedSequence.ambiguousReferences.join(', ')}`,
+              },
+            })
+            return
+          }
+          if (normalizedSequence.missingReferences.length > 0) {
+            res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: `Shift sequence contains unknown shift references: ${normalizedSequence.missingReferences.join(', ')}`,
+              },
+            })
+            return
+          }
+          const payload = {
+            name: parsed.data.name,
+            timezone: parsed.data.timezone ?? 'UTC',
+            shiftSequence: normalizedSequence.shiftSequence,
+            isActive: parsed.data.isActive ?? true,
+          }
+
           const rows = await db.query(
             `INSERT INTO attendance_rotation_rules
              (id, org_id, name, timezone, shift_sequence, is_active)
@@ -11788,17 +11989,39 @@ module.exports = {
           }
 
           const existing = existingRows[0]
-          const shiftSequence = parsed.data.shiftSequence
-            ? normalizeStringArray(parsed.data.shiftSequence)
-            : normalizeStringArray(existing.shift_sequence)
-          if (shiftSequence.length === 0) {
+          const normalizedSequence = await normalizeRotationShiftSequence(
+            db,
+            orgId,
+            parsed.data.shiftSequence ?? existing.shift_sequence
+          )
+          if (normalizedSequence.shiftSequence.length === 0) {
             res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Shift sequence required' } })
+            return
+          }
+          if (normalizedSequence.ambiguousReferences.length > 0) {
+            res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: `Shift sequence contains ambiguous shift names: ${normalizedSequence.ambiguousReferences.join(', ')}`,
+              },
+            })
+            return
+          }
+          if (normalizedSequence.missingReferences.length > 0) {
+            res.status(400).json({
+              ok: false,
+              error: {
+                code: 'VALIDATION_ERROR',
+                message: `Shift sequence contains unknown shift references: ${normalizedSequence.missingReferences.join(', ')}`,
+              },
+            })
             return
           }
           const payload = {
             name: parsed.data.name ?? existing.name,
             timezone: parsed.data.timezone ?? existing.timezone,
-            shiftSequence,
+            shiftSequence: normalizedSequence.shiftSequence,
             isActive: parsed.data.isActive ?? existing.is_active,
           }
 
@@ -17869,6 +18092,20 @@ module.exports = {
             workingDays,
           }
 
+          if (payload.name !== existing.name) {
+            const normalizationResult = await normalizeLegacyRotationRulesForShiftName(db, orgId, shiftId, existing.name)
+            if (normalizationResult.ambiguous) {
+              res.status(409).json({
+                ok: false,
+                error: {
+                  code: 'CONFLICT',
+                  message: 'Cannot rename shift while legacy rotation rules still reference a duplicate shift name',
+                },
+              })
+              return
+            }
+          }
+
           const rows = await db.query(
             `UPDATE attendance_shifts
              SET name = $3,
@@ -17946,30 +18183,24 @@ module.exports = {
                ) AS has_active_assignment,
                EXISTS (
                  SELECT 1
-                 FROM attendance_rotation_assignments a
-                 JOIN attendance_rotation_rules r
-                   ON r.id = a.rotation_rule_id
-                  AND r.org_id = a.org_id
-                 WHERE a.org_id = $1
-                   AND a.is_active = true
-                   AND r.is_active = true
-                   AND (a.end_date IS NULL OR a.end_date >= CURRENT_DATE)
+                 FROM attendance_rotation_rules r
+                 WHERE r.org_id = $1
                    AND EXISTS (
                      SELECT 1
                      FROM jsonb_array_elements_text(COALESCE(r.shift_sequence, '[]'::jsonb)) AS seq(shift_ref)
                      WHERE seq.shift_ref = $2::text
                         OR seq.shift_ref = $3::text
                    )
-               ) AS has_active_rotation_usage`,
+               ) AS has_rotation_rule_reference`,
             [orgId, shiftId, shift.name]
           )
           const usage = usageRows[0] ?? {}
-          if (usage.has_active_assignment || usage.has_active_rotation_usage) {
+          if (usage.has_active_assignment || usage.has_rotation_rule_reference) {
             res.status(409).json({
               ok: false,
               error: {
                 code: 'CONFLICT',
-                message: 'Shift is still referenced by active assignments or rotation schedules',
+                message: 'Shift is still referenced by active assignments or rotation rules',
               },
             })
             return
