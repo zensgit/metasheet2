@@ -10,6 +10,52 @@ async function flushUi(cycles = 4) {
 }
 
 describe('MetaRecordDrawer', () => {
+  it('uses scoped field permissions to render readonly fields as display-only values', async () => {
+    const patchSpy = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaRecordDrawer, {
+          visible: true,
+          record: {
+            id: 'rec_readonly_1',
+            version: 1,
+            data: {
+              fld_title: 'Locked title',
+            },
+          },
+          fields: [
+            { id: 'fld_title', name: 'Title', type: 'string' },
+          ],
+          canEdit: true,
+          canComment: false,
+          canDelete: false,
+          rowActions: {
+            canEdit: true,
+            canDelete: false,
+            canComment: false,
+          },
+          fieldPermissions: {
+            fld_title: { visible: true, readOnly: true },
+          },
+          onPatch: patchSpy,
+        })
+      },
+    })
+
+    app.mount(container)
+    await flushUi()
+
+    expect(container.querySelector('.meta-record-drawer__input')).toBeNull()
+    expect(container.querySelector('.meta-record-drawer__text')?.textContent).toContain('Locked title')
+    expect(patchSpy).not.toHaveBeenCalled()
+
+    app.unmount()
+    container.remove()
+  })
+
   it('honors scoped row actions and exposes the workflow entry', async () => {
     const toggleCommentsSpy = vi.fn()
     const openAutomationSpy = vi.fn()

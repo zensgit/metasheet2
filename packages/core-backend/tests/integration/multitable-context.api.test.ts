@@ -159,6 +159,94 @@ describe('Multitable context API', () => {
     })
   })
 
+  test('marks computed and explicitly readonly fields as readOnly in scoped field permissions', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:read', 'multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_grid'])
+          return {
+            rows: [{
+              id: 'view_grid',
+              sheet_id: 'sheet_ops',
+              name: 'Grid',
+              type: 'grid',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: ['fld_lookup'],
+              config: {},
+            }],
+          }
+        }
+        if (sql.includes('FROM meta_sheets s') && sql.includes('LEFT JOIN meta_bases')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [{
+              id: 'sheet_ops',
+              base_id: 'base_ops',
+              name: 'Orders',
+              description: 'Ops records',
+            }],
+          }
+        }
+        if (sql.includes('FROM meta_bases') && sql.includes('WHERE id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [{
+              id: 'base_ops',
+              name: 'Ops Base',
+              icon: 'table',
+              color: '#1677ff',
+              owner_id: 'owner_1',
+              workspace_id: 'workspace_1',
+            }],
+          }
+        }
+        if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
+          expect(params).toEqual(['base_ops'])
+          return {
+            rows: [
+              { id: 'sheet_ops', base_id: 'base_ops', name: 'Orders', description: 'Ops records' },
+            ],
+          }
+        }
+        if (sql.includes('FROM meta_views') && sql.includes('WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              { id: 'view_grid', sheet_id: 'sheet_ops', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: ['fld_lookup'], config: {} },
+            ],
+          }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 },
+              { id: 'fld_formula', name: 'Total', type: 'formula', property: { expression: '{fld_amount} * 2' }, order: 2 },
+              { id: 'fld_lookup', name: 'Vendor Name', type: 'lookup', property: { linkFieldId: 'fld_vendor', targetFieldId: 'fld_name' }, order: 3 },
+              { id: 'fld_locked', name: 'Locked', type: 'string', property: { readonly: true }, order: 4 },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .get('/api/multitable/context')
+      .query({ sheetId: 'sheet_ops', viewId: 'view_grid' })
+      .expect(200)
+
+    expect(response.body.data.fieldPermissions).toEqual({
+      fld_title: { visible: true, readOnly: false },
+      fld_formula: { visible: true, readOnly: true },
+      fld_lookup: { visible: false, readOnly: true },
+      fld_locked: { visible: true, readOnly: true },
+    })
+  })
+
   test('derives multitable capabilities from req.user role and permissions when token roles/perms are absent', async () => {
     const { app } = await createApp({
       requestRole: 'admin',
