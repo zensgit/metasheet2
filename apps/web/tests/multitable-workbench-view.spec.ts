@@ -750,8 +750,8 @@ describe('MultitableWorkbench view wiring', () => {
     vi.clearAllMocks()
   })
 
-  function mountWorkbench(initialProps?: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string }) {
-    let hostState!: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string }
+  function mountWorkbench(initialProps?: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean }) {
+    let hostState!: { baseId?: string; sheetId?: string; viewId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean }
     const externalContextResults: Array<{
       status: 'applied' | 'failed' | 'superseded'
       context: { baseId: string; sheetId: string; viewId: string }
@@ -769,6 +769,9 @@ describe('MultitableWorkbench view wiring', () => {
           sheetId: initialProps?.sheetId ?? 'sheet_orders',
           viewId: initialProps?.viewId ?? 'view_grid',
           recordId: initialProps?.recordId,
+          commentId: initialProps?.commentId,
+          fieldId: initialProps?.fieldId,
+          openComments: initialProps?.openComments,
         })
         return () => h(MultitableWorkbench as Component, {
           ...hostState,
@@ -1171,6 +1174,36 @@ describe('MultitableWorkbench view wiring', () => {
       content: 'Need review',
       mentions: [],
     })
+  })
+
+  it('applies route-provided fieldId when opening a deep-linked comment thread', async () => {
+    gridMock.fields.value = [{ id: 'fld_notes', name: 'Notes', type: 'text' }]
+    workbenchMock.client.getRecord.mockResolvedValueOnce({
+      record: { id: 'rec_remote', version: 3, data: { fld_notes: 'Existing note' } },
+      commentsScope: {
+        containerType: 'meta_sheet',
+        containerId: 'sheet_orders',
+        targetType: 'meta_record',
+        targetId: 'rec_remote',
+      },
+      linkSummaries: {},
+      attachmentSummaries: {},
+    })
+
+    mountWorkbench({ recordId: 'rec_remote', commentId: 'c_route', fieldId: 'fld_notes', openComments: true })
+    await flushUi(8)
+
+    expect(container!.querySelector('[data-current-comment-field="fld_notes"]')).not.toBeNull()
+
+    container!.querySelector<HTMLButtonElement>('[data-submit-comment="true"]')!.click()
+    await flushUi()
+
+    expect(addCommentSpy).toHaveBeenCalledWith(expect.objectContaining({
+      targetId: 'rec_remote',
+      targetFieldId: 'fld_notes',
+      content: 'Need review',
+      mentions: [],
+    }))
   })
 
   it('submits field-scoped replies with targetFieldId and parentId', async () => {

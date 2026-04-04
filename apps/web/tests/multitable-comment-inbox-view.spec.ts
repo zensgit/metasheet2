@@ -51,6 +51,7 @@ describe('MultitableCommentInboxView', () => {
             sheetId: 'sheet_ops',
             viewId: 'view_grid',
             recordId: 'rec_1',
+            fieldId: 'fld_notes',
             authorId: 'user_2',
             authorName: 'Jamie',
             content: 'Need review',
@@ -80,6 +81,7 @@ describe('MultitableCommentInboxView', () => {
             sheetId: 'sheet_ops',
             viewId: 'view_grid',
             recordId: 'rec_1',
+            fieldId: 'fld_notes',
             authorId: 'user_2',
             authorName: 'Jamie',
             content: 'Need review',
@@ -134,6 +136,7 @@ describe('MultitableCommentInboxView', () => {
         baseId: 'base_ops',
         recordId: 'rec_1',
         commentId: 'c1',
+        fieldId: 'fld_notes',
         openComments: 'true',
       },
     })
