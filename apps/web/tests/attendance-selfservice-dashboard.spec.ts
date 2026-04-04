@@ -40,6 +40,14 @@ async function flushUi(cycles = 8): Promise<void> {
   }
 }
 
+function findButton(container: HTMLElement, label: string): HTMLButtonElement {
+  const button = Array.from(container.querySelectorAll('button')).find(
+    candidate => candidate.textContent?.trim() === label
+  )
+  expect(button, `expected button "${label}"`).toBeTruthy()
+  return button as HTMLButtonElement
+}
+
 function installOverviewMock(): void {
   vi.mocked(apiFetch).mockImplementation(async (input) => {
     const url = typeof input === 'string' ? input : input.url
@@ -280,5 +288,37 @@ describe('Attendance self-service dashboard', () => {
     await flushUi(3)
     expect(requestType?.value).toBe('missed_check_in')
     expect(workDate?.value).toBe('2026-04-15')
+  })
+
+  it('surfaces punch-too-soon failures with status code, hint, and retry affordance', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch')) {
+        expect((init as RequestInit | undefined)?.method).toBe('POST')
+        return jsonResponse(400, {
+          ok: false,
+          error: {
+            code: 'PUNCH_TOO_SOON',
+            message: 'PUNCH_TOO_SOON',
+          },
+        })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Check Out').click()
+    await flushUi(4)
+
+    const pageText = container!.textContent ?? ''
+    expect(pageText).toContain('Punch interval is too short. Try again shortly.')
+    expect(pageText).toContain('Code: PUNCH_TOO_SOON')
+    expect(pageText).toContain('Minimum punch interval is enforced by policy. Retry after the interval.')
+    expect(pageText).toContain('Retry refresh')
   })
 })

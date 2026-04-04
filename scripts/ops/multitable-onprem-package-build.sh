@@ -43,6 +43,7 @@ REQUIRED_PATHS=(
   "scripts/ops/attendance-wsl-portproxy-task.ps1"
   "scripts/ops/multitable-onprem-deploy-easy.sh"
   "scripts/ops/multitable-onprem-apply-package.sh"
+  "scripts/ops/multitable-onprem-apply-package.ps1"
   "scripts/ops/multitable-onprem-package-install.sh"
   "scripts/ops/multitable-onprem-package-upgrade.sh"
   "scripts/ops/multitable-onprem-healthcheck.sh"
@@ -123,7 +124,7 @@ if "%~1"=="" (
   echo Usage: deploy.bat ^<package.zip^|package.tgz^>
   exit /b 64
 )
-bash "%~dp0scripts\ops\multitable-onprem-apply-package.sh" "%~1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ops\multitable-onprem-apply-package.ps1" -RootDir "%~dp0." -PackageArchive "%~1"
 exit /b %ERRORLEVEL%
 EOF
 
