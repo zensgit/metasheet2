@@ -206,8 +206,11 @@ required=(
   "packages/core-backend/dist/src/index.js"
   "packages/core-backend/dist/src/db/migrate.js"
   "packages/core-backend/package.json"
+  "deploy.bat"
+  "deploy-remote.bat"
   "plugins/plugin-attendance/plugin.json"
   "plugins/plugin-attendance/index.cjs"
+  "scripts/ops/multitable-onprem-apply-package.sh"
   "scripts/ops/multitable-onprem-package-install.sh"
   "scripts/ops/multitable-onprem-package-upgrade.sh"
   "scripts/ops/multitable-onprem-deploy-easy.sh"
@@ -217,6 +220,7 @@ required=(
   "docker/app.env.example"
   "docker/app.env.multitable-onprem.template"
   "ops/nginx/multitable-onprem.conf.example"
+  "docs/deployment/multitable-platform-rc-notes-20260404.md"
   "docs/deployment/multitable-windows-onprem-easy-start-20260319.md"
   "docs/deployment/multitable-onprem-package-layout-20260319.md"
 )
@@ -224,6 +228,9 @@ required=(
 for rel in "${required[@]}"; do
   [[ -e "${pkg_root}/${rel}" ]] || die "Required package content missing: ${rel}"
 done
+
+deploy_run_wrapper="$(find "$pkg_root" -maxdepth 1 -type f -name 'deploy-*.bat' ! -name 'deploy.bat' ! -name 'deploy-remote.bat' | head -n 1)"
+[[ -n "$deploy_run_wrapper" ]] || die "Required package content missing: deploy-<run>.bat"
 
 if [[ "$VERIFY_NO_GITHUB_LINKS" == "1" ]]; then
   verify_no_github_links "$pkg_root"

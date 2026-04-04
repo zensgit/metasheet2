@@ -23,6 +23,7 @@ METADATA_JSON_PATH="${OUTPUT_DIR}/${PACKAGE_NAME}.json"
 METADATA_JSON_TMP_PATH="${TMP_OUTPUT_DIR}/${PACKAGE_NAME}.json"
 CHECKSUM_FILE="${OUTPUT_DIR}/SHA256SUMS"
 checksum_tmp=""
+PACKAGE_RUN_LABEL="${PACKAGE_TAG%%-*}"
 
 REQUIRED_PATHS=(
   "apps/web/dist"
@@ -41,6 +42,7 @@ REQUIRED_PATHS=(
   "scripts/ops/attendance-wsl-portproxy-refresh.ps1"
   "scripts/ops/attendance-wsl-portproxy-task.ps1"
   "scripts/ops/multitable-onprem-deploy-easy.sh"
+  "scripts/ops/multitable-onprem-apply-package.sh"
   "scripts/ops/multitable-onprem-package-install.sh"
   "scripts/ops/multitable-onprem-package-upgrade.sh"
   "scripts/ops/multitable-onprem-healthcheck.sh"
@@ -56,6 +58,7 @@ REQUIRED_PATHS=(
   "pnpm-workspace.yaml"
   "docs/deployment/multitable-windows-onprem-easy-start-20260319.md"
   "docs/deployment/multitable-onprem-package-layout-20260319.md"
+  "docs/deployment/multitable-platform-rc-notes-20260404.md"
 )
 
 function info() {
@@ -112,6 +115,39 @@ function copy_path() {
   fi
 }
 
+function write_windows_entrypoints() {
+  cat > "${PACKAGE_ROOT}/deploy.bat" <<'EOF'
+@echo off
+setlocal
+if "%~1"=="" (
+  echo Usage: deploy.bat ^<package.zip^|package.tgz^>
+  exit /b 64
+)
+bash "%~dp0scripts\ops\multitable-onprem-apply-package.sh" "%~1"
+exit /b %ERRORLEVEL%
+EOF
+
+  cat > "${PACKAGE_ROOT}/deploy-remote.bat" <<'EOF'
+@echo off
+setlocal
+if "%~1"=="" (
+  echo Usage: deploy-remote.bat ^<package.zip^|package.tgz^>
+  exit /b 64
+)
+if not exist "%~dp0output\logs" mkdir "%~dp0output\logs"
+start "" /min cmd /c "call \"%~dp0deploy.bat\" \"%~1\" >> \"%~dp0output\logs\deploy-remote.log\" 2>&1"
+echo [multitable-onprem-deploy-remote] started. See output\logs\deploy-remote.log
+exit /b 0
+EOF
+
+  cat > "${PACKAGE_ROOT}/deploy-${PACKAGE_RUN_LABEL}.bat" <<'EOF'
+@echo off
+setlocal
+call "%~dp0deploy.bat" "%~1"
+exit /b %ERRORLEVEL%
+EOF
+}
+
 function cleanup() {
   [[ -n "$checksum_tmp" ]] && rm -f "$checksum_tmp" || true
   rm -rf "$TMP_OUTPUT_DIR" || true
@@ -162,6 +198,7 @@ done
 
 stamp_packaged_version "package.json"
 stamp_packaged_version "packages/core-backend/package.json"
+write_windows_entrypoints
 
 cat > "${PACKAGE_ROOT}/INSTALL.txt" <<EOF
 MetaSheet Multitable On-Prem Package
@@ -173,6 +210,11 @@ Install quickstart:
 
 Package layout guide:
   docs/deployment/multitable-onprem-package-layout-20260319.md
+
+Server-side apply helpers:
+  deploy.bat <package.zip|package.tgz>
+  deploy-remote.bat <package.zip|package.tgz>
+  deploy-${PACKAGE_RUN_LABEL}.bat <package.zip|package.tgz>
 EOF
 
 run rm -f "$ARCHIVE_TGZ_TMP_PATH" "$ARCHIVE_ZIP_TMP_PATH" "$ARCHIVE_TGZ_SHA_TMP_PATH" "$ARCHIVE_ZIP_SHA_TMP_PATH" "$METADATA_JSON_TMP_PATH"
