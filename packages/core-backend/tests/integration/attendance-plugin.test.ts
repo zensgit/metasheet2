@@ -1692,7 +1692,7 @@ describe('Attendance Plugin Integration', () => {
     expect(deleteRes.status).toBe(409)
     const deleteBody = deleteRes.body as { error?: { code?: string; message?: string } } | undefined
     expect(deleteBody?.error?.code).toBe('CONFLICT')
-    expect(String(deleteBody?.error?.message || '')).toMatch(/active assignments|rotation schedules/i)
+    expect(String(deleteBody?.error?.message || '')).toMatch(/active assignments|rotation rules/i)
 
     const lookupRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
       headers: {
@@ -1779,7 +1779,7 @@ describe('Attendance Plugin Integration', () => {
     expect(deleteRes.status).toBe(409)
     const deleteBody = deleteRes.body as { error?: { code?: string; message?: string } } | undefined
     expect(deleteBody?.error?.code).toBe('CONFLICT')
-    expect(String(deleteBody?.error?.message || '')).toMatch(/active assignments|rotation schedules/i)
+    expect(String(deleteBody?.error?.message || '')).toMatch(/active assignments|rotation rules/i)
 
     const lookupRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
       headers: {

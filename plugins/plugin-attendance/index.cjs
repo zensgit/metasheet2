@@ -18144,16 +18144,16 @@ module.exports = {
                      WHERE seq.shift_ref = $2::text
                         OR seq.shift_ref = $3::text
                    )
-               ) AS has_active_rotation_usage`,
+               ) AS has_rotation_rule_reference`,
             [orgId, shiftId, shift.name]
           )
           const usage = usageRows[0] ?? {}
-          if (usage.has_active_assignment || usage.has_active_rotation_usage) {
+          if (usage.has_active_assignment || usage.has_rotation_rule_reference) {
             res.status(409).json({
               ok: false,
               error: {
                 code: 'CONFLICT',
-                message: 'Shift is still referenced by active assignments or rotation schedules',
+                message: 'Shift is still referenced by active assignments or rotation rules',
               },
             })
             return
