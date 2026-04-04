@@ -52,6 +52,7 @@ type CommentRow = {
 
 type CommentInboxRow = CommentRow & {
   unread: boolean
+  mentioned: boolean
   base_id: string | null
   sheet_id: string | null
   view_id: string | null
@@ -191,12 +192,14 @@ export class CommentService {
     const limit = Math.min(200, Math.max(1, Number(options?.limit ?? 50)))
     const offset = Math.max(0, Number(options?.offset ?? 0))
     const mentionPredicate = sql<boolean>`c.mentions @> ${JSON.stringify([userId])}::jsonb`
+    const inboxPredicate = sql<boolean>`(${mentionPredicate}) or r.comment_id is null`
 
     const totalRow = await db
       .selectFrom('meta_comments as c')
+      .leftJoin('meta_comment_reads as r', (join) => join.onRef('r.comment_id', '=', 'c.id').on('r.user_id', '=', userId))
       .select(({ fn }) => fn.countAll<number>().as('c'))
       .where('c.author_id', '!=', userId)
-      .where(mentionPredicate)
+      .where(inboxPredicate)
       .executeTakeFirst()
     const total = totalRow ? Number((totalRow as { c: string | number }).c) : 0
 
@@ -227,9 +230,10 @@ export class CommentService {
           limit 1
         )`.as('view_id'),
         sql<boolean>`case when r.comment_id is null then true else false end`.as('unread'),
+        sql<boolean>`case when ${mentionPredicate} then true else false end`.as('mentioned'),
       ])
       .where('c.author_id', '!=', userId)
-      .where(mentionPredicate)
+      .where(inboxPredicate)
       .orderBy('c.created_at', 'desc')
       .limit(limit)
       .offset(offset)
@@ -242,13 +246,11 @@ export class CommentService {
   }
 
   async getUnreadCount(userId: string): Promise<number> {
-    const mentionPredicate = sql<boolean>`c.mentions @> ${JSON.stringify([userId])}::jsonb`
     const row = await db
       .selectFrom('meta_comments as c')
       .leftJoin('meta_comment_reads as r', (join) => join.onRef('r.comment_id', '=', 'c.id').on('r.user_id', '=', userId))
       .select(({ fn }) => fn.countAll<number>().as('c'))
       .where('c.author_id', '!=', userId)
-      .where(mentionPredicate)
       .where(sql<boolean>`r.comment_id is null`)
       .executeTakeFirst()
 
@@ -510,6 +512,7 @@ export class CommentService {
     return {
       ...this.mapRowToComment(row),
       unread: row.unread,
+      mentioned: row.mentioned,
       baseId: row.base_id,
       sheetId: row.sheet_id ?? row.spreadsheet_id,
       viewId: row.view_id,

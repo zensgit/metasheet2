@@ -237,6 +237,7 @@ export interface CommentMentionSummary {
 
 export interface MultitableCommentInboxItem extends MultitableComment {
   unread: boolean
+  mentioned: boolean
   baseId?: string | null
   sheetId?: string | null
   viewId?: string | null

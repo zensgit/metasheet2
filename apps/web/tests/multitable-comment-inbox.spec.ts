@@ -30,6 +30,7 @@ describe('useMultitableCommentInbox', () => {
             mentions: ['user_1'],
             createdAt: '2026-04-04T00:00:00.000Z',
             unread: true,
+            mentioned: true,
           }],
           total: 1,
           limit: 50,
@@ -70,6 +71,7 @@ describe('useMultitableCommentInbox', () => {
       createdAt: '2026-04-04T00:00:00.000Z',
       updatedAt: undefined,
       unread: true,
+      mentioned: true,
     }]
     state.unreadCount.value = 1
 
@@ -99,6 +101,7 @@ describe('useMultitableCommentInbox', () => {
       createdAt: '2026-04-04T00:00:00.000Z',
       updatedAt: undefined,
       unread: true,
+      mentioned: false,
     }]
     state.unreadCount.value = 3
 
