@@ -3183,10 +3183,35 @@
                   {{ importLoading ? tr('Importing...', '导入中...') : tr('Import', '导入') }}
                 </button>
               </div>
-              <small class="attendance__field-hint">
+              <div v-if="importPlanVisible" class="attendance__template-version-panel attendance__template-version-panel--full">
+                <div class="attendance__subheading-row">
+                  <div>
+                    <div class="attendance__field-label">{{ tr('Current import plan', '当前导入计划') }}</div>
+                    <small class="attendance__field-hint">
+                      {{ tr('Review lane, row estimate, mapping, and token readiness before preview/import.', '在预览或导入前，先检查路径、行数估算、映射和令牌准备度。') }}
+                    </small>
+                  </div>
+                  <span class="attendance__field-hint">{{ importPreviewTimezoneHint }}</span>
+                </div>
+                <div class="attendance__preview-scorecards">
+                  <div v-for="item in importPlanSummaryCards" :key="item.key" class="attendance__preview-scorecard">
+                    <span>{{ item.label }}</span>
+                    <strong>{{ item.value }}</strong>
+                    <small>{{ item.hint }}</small>
+                  </div>
+                </div>
+                <div class="attendance__preview-summary">
+                  <span>{{ tr('Mapping profile', '映射配置') }}: <strong>{{ importProfileSummary }}</strong></span>
+                  <span>{{ tr('User map', '用户映射') }}: <strong>{{ importUserMapSummary }}</strong></span>
+                  <span>{{ tr('Group sync', '分组同步') }}: <strong>{{ importGroupSyncSummary }}</strong></span>
+                  <span>{{ tr('Commit token', '提交令牌') }}: <strong>{{ importCommitTokenSummary }}</strong></span>
+                </div>
+                <div class="attendance__field-hint">{{ importScalabilityHint }}</div>
+              </div>
+              <small v-if="!importPlanVisible" class="attendance__field-hint">
                 {{ importScalabilityHint }}
               </small>
-              <small class="attendance__field-hint">
+              <small v-if="!importPlanVisible" class="attendance__field-hint">
                 {{ importPreviewTimezoneHint }}
               </small>
               <div
@@ -3263,6 +3288,29 @@
               <div v-if="importCsvWarnings.length" class="attendance__status attendance__status--error">
                 <div>{{ tr('CSV warnings', 'CSV 警告') }}: {{ importCsvWarnings.join('; ') }}</div>
                 <div class="attendance__field-hint">{{ importPreviewTimezoneHint }}</div>
+              </div>
+              <div v-if="importPreviewSummaryVisible" class="attendance__template-version-panel attendance__template-version-panel--full">
+                <div class="attendance__subheading-row">
+                  <div>
+                    <div class="attendance__field-label">{{ tr('Preview outcome', '预览结果摘要') }}</div>
+                    <small class="attendance__field-hint">
+                      {{ tr('Use this snapshot to decide whether the current payload is ready for commit.', '用这组摘要判断当前 payload 是否已适合正式导入。') }}
+                    </small>
+                  </div>
+                  <span class="attendance__field-hint">{{ importPreviewExecutionSummary }}</span>
+                </div>
+                <div class="attendance__preview-scorecards">
+                  <div v-for="item in importPreviewSummaryCards" :key="item.key" class="attendance__preview-scorecard">
+                    <span>{{ item.label }}</span>
+                    <strong>{{ item.value }}</strong>
+                    <small>{{ item.hint }}</small>
+                  </div>
+                </div>
+                <div class="attendance__preview-summary">
+                  <span>{{ tr('Preview lane', '预览路径') }}: <strong>{{ formatImportLane(importPreviewLane) }}</strong></span>
+                  <span>{{ tr('Import lane', '导入路径') }}: <strong>{{ formatImportLane(importCommitLane) }}</strong></span>
+                  <span>{{ tr('Commit token', '提交令牌') }}: <strong>{{ importCommitTokenSummary }}</strong></span>
+                </div>
               </div>
               <div v-if="importPreview.length === 0" class="attendance__empty-state">
                 <div class="attendance__empty">{{ tr('No preview data.', '暂无预览数据。') }}</div>
@@ -4581,6 +4629,7 @@ interface AttendanceStatusMeta {
   code?: string
   hint?: string
   action?: AttendanceStatusAction
+  context?: AttendanceStatusContext
 }
 
 const props = withDefaults(
@@ -6071,6 +6120,320 @@ const importUserMapCount = computed(() => {
   return Object.keys(importUserMap.value).length
 })
 
+const importPayloadDraft = computed(() => buildImportPayload())
+const importPayloadRowCountHint = computed(() => {
+  const payload = importPayloadDraft.value
+  return payload ? estimateImportRowCount(payload) : null
+})
+const importPreviewLane = computed<'sync' | 'chunked' | 'async'>(() => {
+  const payload = importPayloadDraft.value
+  if (!payload) return 'sync'
+  const rowCountHint = importPayloadRowCountHint.value
+  if (rowCountHint && rowCountHint >= importThresholds.previewAsyncThreshold) {
+    return 'async'
+  }
+  return buildChunkedImportPreviewPlan(payload) ? 'chunked' : 'sync'
+})
+const importCommitLane = computed<'sync' | 'async'>(() => {
+  const rowCountHint = importPayloadRowCountHint.value
+  return rowCountHint && rowCountHint >= importThresholds.commitAsyncThreshold ? 'async' : 'sync'
+})
+const importPreviewLaneHint = computed(() => {
+  const rowCountHint = importPayloadRowCountHint.value
+  if (rowCountHint === null) {
+    return tr(
+      'Preview lane will update after row count can be estimated from the current payload or uploaded CSV.',
+      '预览路径会在当前 payload 或已上传 CSV 可以估算行数后更新。',
+    )
+  }
+  if (importPreviewLane.value === 'async') {
+    return tr(
+      `Preview will queue asynchronously because the estimated volume (${rowCountHint.toLocaleString()} rows) exceeds the async threshold.`,
+      `预览会进入异步队列，因为预计数据量（${rowCountHint.toLocaleString()} 行）超过了异步阈值。`,
+    )
+  }
+  if (importPreviewLane.value === 'chunked') {
+    return tr(
+      `Preview will split into server-safe chunks because the estimated volume (${rowCountHint.toLocaleString()} rows) exceeds the chunk threshold.`,
+      `预览会按服务端安全分片执行，因为预计数据量（${rowCountHint.toLocaleString()} 行）超过了分块阈值。`,
+    )
+  }
+  return tr(
+    'Preview will stay in one request for the current payload size.',
+    '当前 payload 大小会走单次同步预览。',
+  )
+})
+const importCommitLaneHint = computed(() => {
+  const rowCountHint = importPayloadRowCountHint.value
+  if (rowCountHint === null) {
+    return tr(
+      'Import lane will update after row count can be estimated from the current payload or uploaded CSV.',
+      '导入路径会在当前 payload 或已上传 CSV 可以估算行数后更新。',
+    )
+  }
+  if (importCommitLane.value === 'async') {
+    return tr(
+      `Import will queue asynchronously because the estimated volume (${rowCountHint.toLocaleString()} rows) exceeds the async threshold.`,
+      `导入会进入异步队列，因为预计数据量（${rowCountHint.toLocaleString()} 行）超过了异步阈值。`,
+    )
+  }
+  return tr(
+    'Import will stay synchronous for the current payload size.',
+    '当前 payload 大小会走同步导入。',
+  )
+})
+const importInputChannelLabel = computed(() => {
+  if (importCsvFileId.value) return tr('uploaded CSV', '已上传 CSV')
+  if (importCsvFileName.value) return tr('local CSV file', '本地 CSV 文件')
+  return tr('JSON payload', 'JSON 负载')
+})
+const importInputChannelHint = computed(() => {
+  if (importCsvFileId.value) {
+    const parts = [importCsvFileName.value || importCsvFileId.value]
+    if (importCsvFileRowCountHint.value !== null) {
+      parts.push(tr(`${importCsvFileRowCountHint.value.toLocaleString()} rows`, `${importCsvFileRowCountHint.value.toLocaleString()} 行`))
+    }
+    return parts.join(' · ')
+  }
+  if (importCsvFileName.value) {
+    return importCsvFileName.value
+  }
+  return tr('Using the inline payload editor as the import source.', '当前使用内联 payload 编辑器作为导入源。')
+})
+const selectedGroupRuleSetName = computed(() => {
+  const ruleSetId = importGroupRuleSetId.value.trim()
+  if (!ruleSetId) return ''
+  return ruleSets.value.find(item => item.id === ruleSetId)?.name ?? ruleSetId
+})
+const importProfileSummary = computed(() => {
+  if (!selectedImportProfile.value) {
+    return tr('manual payload only', '仅使用手工 payload')
+  }
+  const requiredCount = selectedImportProfile.value.requiredFields?.length ?? 0
+  if (requiredCount > 0) {
+    return tr(
+      `${selectedImportProfile.value.name} (${requiredCount} required fields)`,
+      `${selectedImportProfile.value.name}（${requiredCount} 个必填字段）`,
+    )
+  }
+  return selectedImportProfile.value.name
+})
+const importUserMapSummary = computed(() => {
+  if (importUserMapError.value) {
+    return tr('file parse error', '文件解析错误')
+  }
+
+  const segments: string[] = []
+  if (importUserMapCount.value > 0) {
+    segments.push(tr(
+      `${importUserMapCount.value} entries ready`,
+      `已准备 ${importUserMapCount.value} 条映射`,
+    ))
+  }
+
+  const keyField = importUserMapKeyField.value.trim()
+  if (keyField) {
+    segments.push(tr(`key ${keyField}`, `键 ${keyField}`))
+  }
+
+  const sourceFields = importUserMapSourceFields.value.trim()
+  if (sourceFields) {
+    segments.push(tr(`source ${sourceFields}`, `来源 ${sourceFields}`))
+  }
+
+  return segments.length > 0
+    ? segments.join(' · ')
+    : tr('not configured', '未配置')
+})
+const importGroupSyncSummary = computed(() => {
+  const segments: string[] = []
+  if (importGroupAutoCreate.value) {
+    segments.push(tr('auto-create groups', '自动创建分组'))
+  }
+  if (importGroupAutoAssign.value) {
+    segments.push(tr('auto-assign members', '自动分配成员'))
+  }
+  if (selectedGroupRuleSetName.value) {
+    segments.push(tr(`rule set ${selectedGroupRuleSetName.value}`, `规则集 ${selectedGroupRuleSetName.value}`))
+  }
+  const timezone = importGroupTimezone.value.trim()
+  if (timezone) {
+    segments.push(tr(`timezone ${displayTimezone(timezone)}`, `时区 ${displayTimezone(timezone)}`))
+  }
+  return segments.length > 0
+    ? segments.join(' · ')
+    : tr('disabled', '未启用')
+})
+const importHasCsvInput = computed(() => Boolean(importCsvFileName.value || importCsvFileId.value))
+const importHasUserMapConfig = computed(() =>
+  Boolean(
+    importUserMapCount.value > 0
+    || importUserMapError.value
+    || importUserMapKeyField.value.trim()
+    || importUserMapSourceFields.value.trim(),
+  )
+)
+const importHasGroupSyncConfig = computed(() =>
+  Boolean(
+    importGroupAutoCreate.value
+    || importGroupAutoAssign.value
+    || importGroupRuleSetId.value.trim()
+    || importGroupTimezone.value.trim(),
+  )
+)
+const importPlanVisible = computed(() =>
+  Boolean(
+    importTemplateGuide.value
+    || importHasCsvInput.value
+    || importPayloadRowCountHint.value !== null
+    || selectedImportProfile.value
+    || importHasUserMapConfig.value
+    || importHasGroupSyncConfig.value,
+  )
+)
+const importCommitTokenSummary = computed(() => {
+  if (isImportCommitTokenValid()) {
+    if (importCommitTokenExpiresAt.value) {
+      return tr(
+        `prepared until ${formatDateTime(importCommitTokenExpiresAt.value)}`,
+        `已准备，至 ${formatDateTime(importCommitTokenExpiresAt.value)}`,
+      )
+    }
+    return tr('prepared', '已准备')
+  }
+  if (importPreview.value.length > 0 || importPreviewTask.value || importAsyncJob.value) {
+    return tr('refreshes automatically on the next preview/import', '下次预览或导入时会自动刷新')
+  }
+  return tr('not prepared yet', '尚未准备')
+})
+const importPlanSummaryCards = computed(() => [
+  {
+    key: 'channel',
+    label: tr('Input channel', '输入通道'),
+    value: importInputChannelLabel.value,
+    hint: importInputChannelHint.value,
+  },
+  {
+    key: 'rows',
+    label: tr('Estimated rows', '预计行数'),
+    value: importPayloadRowCountHint.value !== null ? importPayloadRowCountHint.value.toLocaleString() : '--',
+    hint: importPayloadRowCountHint.value !== null
+      ? tr('Derived from the current payload or uploaded CSV.', '根据当前 payload 或已上传 CSV 推断。')
+      : tr('Waiting for row count estimation.', '等待行数估算。'),
+  },
+  {
+    key: 'preview-lane',
+    label: tr('Preview lane', '预览路径'),
+    value: formatImportLane(importPreviewLane.value),
+    hint: importPreviewLaneHint.value,
+  },
+  {
+    key: 'import-lane',
+    label: tr('Import lane', '导入路径'),
+    value: formatImportLane(importCommitLane.value),
+    hint: importCommitLaneHint.value,
+  },
+])
+const importPreviewShownRows = computed(() => importPreview.value.length)
+const importPreviewTotalRows = computed(() => {
+  const asyncPreviewRows = Number(
+    importAsyncJob.value?.kind === 'preview'
+      ? (importAsyncJob.value.preview?.rowCount ?? 0)
+      : 0,
+  )
+  if (asyncPreviewRows > 0) return asyncPreviewRows
+  const taskRows = Number(importPreviewTask.value?.totalRows ?? 0)
+  if (taskRows > 0) return taskRows
+  return importPreviewShownRows.value
+})
+const importPreviewUserCount = computed(() =>
+  new Set(importPreview.value.map(item => item.userId).filter(Boolean)).size
+)
+const importPreviewWarningCount = computed(() =>
+  new Set(
+    [
+      ...importCsvWarnings.value,
+      ...importPreview.value.flatMap(item => Array.isArray(item.warnings) ? item.warnings : []),
+    ]
+      .map(warning => String(warning || '').trim())
+      .filter(Boolean),
+  ).size
+)
+const importPreviewPolicyCount = computed(() =>
+  new Set(
+    importPreview.value
+      .flatMap(row => [
+        ...(Array.isArray(row.appliedPolicies) ? row.appliedPolicies : []),
+        ...(Array.isArray(row.userGroups) ? row.userGroups : []),
+      ])
+      .map(item => String(item || '').trim())
+      .filter(Boolean),
+  ).size
+)
+const importPreviewExecutionSummary = computed(() => {
+  if (importAsyncJob.value) {
+    const progress = importAsyncJob.value.total
+      ? ` · ${importAsyncJob.value.progress}/${importAsyncJob.value.total}`
+      : ''
+    return tr(
+      `Async ${importAsyncJob.value.kind ?? 'import'} job is ${formatStatus(importAsyncJob.value.status)}${progress}`,
+      `异步${importAsyncJob.value.kind === 'preview' ? '预览' : '导入'}任务状态为 ${formatStatus(importAsyncJob.value.status)}${progress}`,
+    )
+  }
+  if (importPreviewTask.value) {
+    const progress = importPreviewTask.value.totalRows
+      ? ` · ${importPreviewTask.value.processedRows}/${importPreviewTask.value.totalRows}`
+      : ''
+    return tr(
+      `Preview task is ${formatStatus(importPreviewTask.value.status)}${progress}`,
+      `预览任务状态为 ${formatStatus(importPreviewTask.value.status)}${progress}`,
+    )
+  }
+  if (importPreviewShownRows.value > 0) {
+    return tr('Preview results are ready for review.', '预览结果已准备好，可继续检查。')
+  }
+  if (importCsvWarnings.value.length > 0) {
+    return tr('Warnings are available even though no preview rows were returned.', '虽然没有预览行，但已经产生了警告。')
+  }
+  return tr('Run a preview to inspect row-level impact before importing.', '先执行预览，再检查逐行影响。')
+})
+const importPreviewSummaryVisible = computed(() =>
+  Boolean(
+    importPreview.value.length
+    || importCsvWarnings.value.length
+    || importPreviewTask.value
+    || importAsyncJob.value,
+  )
+)
+const importPreviewSummaryCards = computed(() => [
+  {
+    key: 'rows',
+    label: tr('Preview rows', '预览行数'),
+    value: importPreviewTotalRows.value > importPreviewShownRows.value
+      ? `${importPreviewShownRows.value}/${importPreviewTotalRows.value}`
+      : `${importPreviewShownRows.value}`,
+    hint: tr('Shown rows / total rows returned by the latest preview task.', '显示行数 / 最近一次预览任务返回的总行数。'),
+  },
+  {
+    key: 'users',
+    label: tr('Users in preview', '涉及用户'),
+    value: `${importPreviewUserCount.value}`,
+    hint: tr('Distinct user IDs present in the preview sample.', '预览样本中的去重用户数。'),
+  },
+  {
+    key: 'warnings',
+    label: tr('Warning signals', '警告信号'),
+    value: `${importPreviewWarningCount.value}`,
+    hint: tr('Combined CSV and row-level warnings to review before import.', '合并后的 CSV 与行级警告，导入前应先处理。'),
+  },
+  {
+    key: 'policies',
+    label: tr('Policies / groups', '规则 / 分组'),
+    value: `${importPreviewPolicyCount.value}`,
+    hint: tr('Distinct policies or group tags matched inside the preview sample.', '预览样本里命中的去重规则或分组标签。'),
+  },
+])
+
 const orgId = ref('')
 const targetUserId = ref('')
 
@@ -6773,6 +7136,12 @@ function formatPolicyList(item: AttendanceImportPreviewItem): string {
   const groups = Array.isArray(item.userGroups) ? item.userGroups : []
   const combined = Array.from(new Set([...applied, ...groups])).filter(Boolean)
   return formatList(combined)
+}
+
+function formatImportLane(value: 'sync' | 'chunked' | 'async'): string {
+  if (value === 'async') return tr('async queue', '异步队列')
+  if (value === 'chunked') return tr('chunked preview', '分块预览')
+  return tr('sync request', '同步请求')
 }
 
 function formatRequestType(value: string): string {
@@ -8230,8 +8599,10 @@ function estimateImportRowCount(payload: Record<string, any>): number | null {
     for (let i = 0; i < payload.csvText.length; i++) {
       if (payload.csvText[i] === '\n') lines += 1
     }
-    // header + last line (if no trailing newline)
-    return Math.max(0, lines)
+    const normalizedRows = payload.csvText.endsWith('\n')
+      ? lines - 1
+      : lines
+    return Math.max(0, normalizedRows)
   }
   return null
 }
@@ -8471,6 +8842,7 @@ function setStatusFromErrorWithContext(
     'error',
     {
       ...meta,
+      context,
       hint: appendStatusHintContext(meta.hint, statusContext),
     },
   )
@@ -8965,6 +9337,8 @@ async function runPreviewImportAsync(payload: Record<string, any>, rowCountHint:
 async function previewImport() {
   clearImportPreviewTask()
   clearImportAsyncJob()
+  importPreview.value = []
+  importCsvWarnings.value = []
   const payload = buildImportPayload()
   if (!payload) {
     setStatus(appendStatusContext(

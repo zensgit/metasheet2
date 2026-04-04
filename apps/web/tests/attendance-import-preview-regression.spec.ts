@@ -158,9 +158,9 @@ describe('Attendance import preview regression', () => {
     await flushUi(6)
 
     const setupState = (vm as any).$?.setupState as Record<string, unknown>
-    expect(container!.textContent).toContain('No preview data.')
-    expect(container!.textContent).not.toContain('user-old')
-    expect(container!.textContent).not.toContain('stale-csv-warning')
+    expect(importSection.textContent).toContain('No preview data.')
+    expect(importSection.textContent).not.toContain('user-old')
+    expect(importSection.textContent).not.toContain('stale-csv-warning')
     expect(container!.textContent).toContain('Import preview request hit a temporary gateway error.')
     expect(container!.textContent).toContain('Code: BAD_GATEWAY')
     expect(container!.textContent).toContain('Retry preview')
@@ -174,9 +174,9 @@ describe('Attendance import preview regression', () => {
     await flushUi(6)
 
     expect(previewRequestCount).toBe(3)
-    expect(container!.textContent).toContain('No preview data.')
-    expect(container!.textContent).not.toContain('user-old')
-    expect(container!.textContent).not.toContain('stale-csv-warning')
+    expect(importSection.textContent).toContain('No preview data.')
+    expect(importSection.textContent).not.toContain('user-old')
+    expect(importSection.textContent).not.toContain('stale-csv-warning')
     expect(unwrapRef<any[]>(setupState.importPreview)).toHaveLength(0)
     expect(unwrapRef<string[]>(setupState.importCsvWarnings)).toEqual([])
     expect(unwrapRef<Record<string, unknown> | null>(setupState.statusMeta)?.action).toBe('retry-preview-import')
