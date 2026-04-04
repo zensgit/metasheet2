@@ -26,6 +26,8 @@ import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
 
 const logger = new Logger('ApprovalBridgeService')
 const PLM_SYNC_CONCURRENCY = 5
+const PLM_SYNC_UPSTREAM_PAGE_SIZE = 50
+const PLM_SYNC_MAX_WINDOW = 500
 
 type ApprovalRecordRow = {
   id: string | number
@@ -94,8 +96,10 @@ function compareHistoryDescending(
   left: Pick<UnifiedApprovalHistoryDTO, 'occurredAt' | 'id'>,
   right: Pick<UnifiedApprovalHistoryDTO, 'occurredAt' | 'id'>,
 ): number {
-  const leftTime = left.occurredAt ? new Date(left.occurredAt).getTime() : Number.NEGATIVE_INFINITY
-  const rightTime = right.occurredAt ? new Date(right.occurredAt).getTime() : Number.NEGATIVE_INFINITY
+  const leftRawTime = left.occurredAt ? new Date(left.occurredAt).getTime() : Number.NEGATIVE_INFINITY
+  const rightRawTime = right.occurredAt ? new Date(right.occurredAt).getTime() : Number.NEGATIVE_INFINITY
+  const leftTime = Number.isNaN(leftRawTime) ? Number.NEGATIVE_INFINITY : leftRawTime
+  const rightTime = Number.isNaN(rightRawTime) ? Number.NEGATIVE_INFINITY : rightRawTime
 
   if (leftTime !== rightTime) {
     return rightTime - leftTime
@@ -427,16 +431,24 @@ export class ApprovalBridgeService {
 
   private async fetchPlmApprovalWindow(options?: PlmSyncOptions): Promise<PlmApprovalFetch[]> {
     const plmAdapter = this.requirePlmAdapter()
-    const pageSize = Math.max(1, options?.limit ?? 50)
-    const requestedWindow = Math.max(0, options?.offset ?? 0) + pageSize
-    const approvals: PlmApprovalFetch[] = []
+    const requestedCount = Math.max(0, options?.limit ?? 50)
+    if (requestedCount === 0) {
+      return []
+    }
 
-    for (let pageOffset = 0; pageOffset < requestedWindow; pageOffset += pageSize) {
+    const requestedWindow = Math.min(
+      PLM_SYNC_MAX_WINDOW,
+      Math.max(0, options?.offset ?? 0) + requestedCount,
+    )
+    const approvals: PlmApprovalFetch[] = []
+    let totalCount: number | null = null
+
+    for (let pageOffset = 0; pageOffset < requestedWindow; pageOffset += PLM_SYNC_UPSTREAM_PAGE_SIZE) {
       const result = await plmAdapter.getApprovals({
         status: options?.status,
         productId: options?.productId,
         requesterId: options?.requesterId,
-        limit: pageSize,
+        limit: PLM_SYNC_UPSTREAM_PAGE_SIZE,
         offset: pageOffset,
       })
 
@@ -449,14 +461,21 @@ export class ApprovalBridgeService {
         )
       }
 
+      if (typeof result.metadata?.totalCount === 'number') {
+        totalCount = result.metadata.totalCount
+      }
       approvals.push(...result.data)
 
-      if (result.data.length < pageSize) {
+      if (result.data.length < PLM_SYNC_UPSTREAM_PAGE_SIZE) {
+        break
+      }
+
+      if (totalCount !== null && pageOffset + result.data.length >= totalCount) {
         break
       }
     }
 
-    return approvals
+    return approvals.slice(0, requestedWindow)
   }
 
   private requirePlmAdapter(): ApprovalBridgePlmAdapter {
@@ -551,7 +570,16 @@ export class ApprovalBridgeService {
       normalizeSourceVersion(instance.metadata?.source_version) ??
       normalizeSourceVersion(instance.metadata?.sourceVersion)
 
-    return sourceVersion ?? 0
+    if (sourceVersion !== null) {
+      return sourceVersion
+    }
+
+    throw new ServiceError(
+      'PLM source version is unavailable',
+      502,
+      APPROVAL_ERROR_CODES.SOURCE_ACTION_FAILED,
+      { approvalId: instance.id },
+    )
   }
 
   private async upsertPlmMirror(source: PlmApprovalBridgeSource): Promise<void> {

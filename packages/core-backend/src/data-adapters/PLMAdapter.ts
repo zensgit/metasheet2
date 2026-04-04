@@ -1139,7 +1139,10 @@ export class PLMAdapter extends HTTPAdapter {
     const productId = eco.product_id ? String(eco.product_id) : undefined
     const productNumber = eco.product_number || product?.partNumber || product?.code
     const productName = eco.product_name || product?.name
-    const parsedVersion = eco.version == null ? Number.NaN : Number(eco.version)
+    const normalizedVersion =
+      typeof eco.version === 'string' ? eco.version.trim() : eco.version
+    const parsedVersion =
+      normalizedVersion == null || normalizedVersion === '' ? Number.NaN : Number(normalizedVersion)
     return {
       id: eco.id,
       request_type: eco.eco_type || 'eco',

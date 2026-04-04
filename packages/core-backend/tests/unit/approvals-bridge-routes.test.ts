@@ -656,15 +656,8 @@ describe('approval bridge routes', () => {
       status: undefined,
       productId: undefined,
       requesterId: undefined,
-      limit: 1,
+      limit: 50,
       offset: 0,
-    })
-    expect(plmAdapter.getApprovals).toHaveBeenNthCalledWith(2, {
-      status: undefined,
-      productId: undefined,
-      requesterId: undefined,
-      limit: 1,
-      offset: 1,
     })
     expect(response.body.total).toBe(2)
     expect(response.body.data).toHaveLength(1)
@@ -707,9 +700,20 @@ describe('approval bridge routes', () => {
       status: undefined,
       productId: undefined,
       requesterId: undefined,
-      limit: 200,
+      limit: 50,
       offset: 0,
     })
+  })
+
+  it('skips PLM sync work when the requested unified list limit is zero', async () => {
+    const plmAdapter = createPlmAdapterMock()
+    const response = await request(createApp(plmAdapter))
+      .get('/api/approvals?sourceSystem=plm&limit=0')
+      .expect(200)
+
+    expect(plmAdapter.getApprovals).not.toHaveBeenCalled()
+    expect(response.body.total).toBe(0)
+    expect(response.body.data).toEqual([])
   })
 
   it('rejects PLM assignee filtering in phase 1', async () => {
@@ -906,6 +910,60 @@ describe('approval bridge routes', () => {
     })
     expect(mirrored?.version).toBe(1)
     expect(Array.from(routeState.state.assignments.values())[0]?.is_active).toBe(false)
+  })
+
+  it('fails PLM actions when the source version remains unavailable', async () => {
+    routeState.state.instances.set('plm:legacy', {
+      ...routeState.state.instances.get('local-1')!,
+      id: 'plm:legacy',
+      source_system: 'plm',
+      external_approval_id: 'legacy',
+      workflow_key: 'plm-eco-review',
+      business_key: 'plm:approval:legacy',
+      title: 'Legacy PLM approval',
+      metadata: {},
+    })
+
+    const plmAdapter = createPlmAdapterMock()
+    plmAdapter.getApprovalById.mockResolvedValueOnce({
+      data: [],
+      error: new Error('refresh failed'),
+    })
+
+    const response = await request(createApp(plmAdapter))
+      .post('/api/approvals/plm:legacy/actions')
+      .send({ action: 'approve', comment: 'Ship it' })
+      .expect(502)
+
+    expect(plmAdapter.approveApproval).not.toHaveBeenCalled()
+    expect(response.body).toMatchObject({
+      error: {
+        code: 'SOURCE_ACTION_FAILED',
+        message: 'PLM source version is unavailable',
+      },
+    })
+  })
+
+  it('keeps merged PLM history sorting deterministic when upstream timestamps are invalid', async () => {
+    routeState.plmHistory[0].approved_at = 'not-a-date'
+    routeState.plmHistory[0].created_at = 'still-not-a-date'
+
+    const app = createApp(createPlmAdapterMock())
+    await request(app)
+      .post('/api/approvals/plm:eco-1/actions')
+      .send({ action: 'approve', comment: 'Ship it' })
+      .expect(200)
+
+    const response = await request(app)
+      .get('/api/approvals/plm:eco-1/history')
+      .expect(200)
+
+    expect(response.body.data.items[0]).toMatchObject({
+      action: 'approve',
+      actorId: 'test-user',
+      comment: 'Ship it',
+    })
+    expect(response.body.data.items[1].id).toBe('hist-1')
   })
 
   it('merges local audit records into PLM history responses', async () => {
