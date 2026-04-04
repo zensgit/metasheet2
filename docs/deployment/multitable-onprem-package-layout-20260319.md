@@ -77,6 +77,7 @@ metasheet/
   plugins/plugin-attendance/
   scripts/ops/
     multitable-onprem-apply-package.sh
+    multitable-onprem-apply-package.ps1
     multitable-onprem-package-install.sh
     multitable-onprem-package-upgrade.sh
     multitable-onprem-deploy-easy.sh
@@ -113,9 +114,9 @@ The packaged root now includes a fixed deploy entrypoint for corrective rerolls:
 - `deploy-runXX.bat <package.zip|package.tgz>`
 - `deploy-remote.bat <package.zip|package.tgz>`
 
-These wrappers delegate to `scripts/ops/multitable-onprem-apply-package.sh`, which:
+For Windows Server, these wrappers delegate to `scripts/ops/multitable-onprem-apply-package.ps1`; the `.sh` helper remains available for Linux/WSL flows. The apply helper:
 
 1. extracts the archive into a temporary directory,
 2. copies the package contents into the current deploy root,
-3. runs `multitable-onprem-package-upgrade.sh`,
+3. installs dependencies if needed, runs migrations, and restarts PM2,
 4. preserves the existing `docker/app.env`.

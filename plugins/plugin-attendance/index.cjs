@@ -141,10 +141,13 @@ function getCachedIntlDateTimeFormat(cache, timeZone, locale, options) {
 const SYSTEM_TEMPLATE_NAMES = new Set(DEFAULT_TEMPLATES.map((tpl) => tpl.name))
 
 const IMPORT_MAPPING_COLUMNS = [
+  { sourceField: 'user_id', targetField: 'userId', dataType: 'string' },
   { sourceField: '1_on_duty_user_check_time', targetField: 'firstInAt', dataType: 'time' },
   { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
+  { sourceField: 'check_in', targetField: 'firstInAt', dataType: 'time' },
   { sourceField: '1_off_duty_user_check_time', targetField: 'lastOutAt', dataType: 'time' },
   { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
+  { sourceField: 'check_out', targetField: 'lastOutAt', dataType: 'time' },
   { sourceField: '2_on_duty_user_check_time', targetField: 'clockIn2', dataType: 'time' },
   { sourceField: '上班2打卡时间', targetField: 'clockIn2', dataType: 'time' },
   { sourceField: '2_off_duty_user_check_time', targetField: 'clockOut2', dataType: 'time' },
@@ -185,6 +188,7 @@ const IMPORT_MAPPING_COLUMNS = [
   { sourceField: '职位', targetField: 'roleTags', dataType: 'string' },
   { sourceField: 'UserId', targetField: 'userId', dataType: 'string' },
   { sourceField: 'userId', targetField: 'userId', dataType: 'string' },
+  { sourceField: 'work_date', targetField: 'workDate', dataType: 'date' },
   { sourceField: 'workDate', targetField: 'workDate', dataType: 'date' },
   { sourceField: '入职时间', targetField: 'entryTime', dataType: 'date' },
   { sourceField: 'entry_time', targetField: 'entryTime', dataType: 'date' },
@@ -235,10 +239,10 @@ const IMPORT_MAPPING_PROFILES = [
 ]
 
 const IMPORT_REQUIRED_FIELD_ALIASES = {
-  '日期': ['workDate', 'date'],
-  workDate: ['日期', 'date'],
-  '上班1打卡时间': ['1_on_duty_user_check_time', 'firstInAt', 'clockIn1'],
-  '下班1打卡时间': ['1_off_duty_user_check_time', 'lastOutAt', 'clockOut1'],
+  '日期': ['workDate', 'work_date', 'date'],
+  workDate: ['日期', 'work_date', 'date'],
+  '上班1打卡时间': ['1_on_duty_user_check_time', 'firstInAt', 'clockIn1', 'check_in'],
+  '下班1打卡时间': ['1_off_duty_user_check_time', 'lastOutAt', 'clockOut1', 'check_out'],
   '上班2打卡时间': ['2_on_duty_user_check_time', 'clockIn2'],
   '下班2打卡时间': ['2_off_duty_user_check_time', 'clockOut2'],
 }
@@ -1771,8 +1775,8 @@ function buildImportRowFromCsvRawRow(header, rawRow) {
   })
   if (!hasValue) return null
 
-  const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.date)
-  const userId = fields.UserId ?? fields.userId ?? fields['用户ID']
+  const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.work_date ?? fields.date)
+  const userId = fields.UserId ?? fields.userId ?? fields.user_id ?? fields['用户ID']
   return {
     workDate: workDate ?? '',
     fields,
