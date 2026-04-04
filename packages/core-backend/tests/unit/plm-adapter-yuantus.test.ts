@@ -170,9 +170,9 @@ describe('PLMAdapter Yuantus approvals mapping', () => {
     const adapter = createAdapter()
     const queryMock = vi.fn().mockResolvedValue({
       data: [
-        { id: 'eco-1', name: 'ECO One', state: 'done', created_by_id: 7, created_at: '2026-01-01T00:00:00.000Z', product_id: 'prod-1' },
-        { id: 'eco-2', name: 'ECO Two', state: 'rejected', created_by_id: '8', created_at: '2026-01-02T00:00:00.000Z' },
-        { id: 'eco-3', name: 'ECO Three', state: 'in_review', created_by_id: '9', created_at: '2026-01-03T00:00:00.000Z' },
+        { id: 'eco-1', name: 'ECO One', state: 'done', version: 12, created_by_id: 7, created_at: '2026-01-01T00:00:00.000Z', product_id: 'prod-1' },
+        { id: 'eco-2', name: 'ECO Two', state: 'rejected', version: '   ', created_by_id: '8', created_at: '2026-01-02T00:00:00.000Z' },
+        { id: 'eco-3', name: 'ECO Three', state: 'in_review', version: '3', created_by_id: '9', created_at: '2026-01-03T00:00:00.000Z' },
       ],
     })
 
@@ -182,9 +182,11 @@ describe('PLMAdapter Yuantus approvals mapping', () => {
     expect(approved.data).toHaveLength(1)
     expect(approved.data[0].status).toBe('approved')
     expect(approved.data[0].requester_id).toBe('7')
+    expect(approved.data[0].version).toBe(12)
 
     const all = await adapter.getApprovals()
     expect(all.data).toHaveLength(3)
     expect(all.data.map((entry) => entry.status)).toEqual(['approved', 'rejected', 'pending'])
+    expect(all.data.map((entry) => entry.version)).toEqual([12, undefined, 3])
   })
 })

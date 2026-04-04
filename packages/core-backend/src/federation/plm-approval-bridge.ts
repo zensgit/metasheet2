@@ -4,6 +4,7 @@ export interface PlmApprovalBridgeSource {
   status?: string
   type?: string
   stage?: string
+  version?: number | string
   product_id?: string
   product_number?: string
   product_name?: string
@@ -51,6 +52,19 @@ function normalizeStatus(value: string | undefined): string {
   return normalized
 }
 
+function normalizeSourceVersion(value: number | string | undefined): number | undefined {
+  if (value == null || value === '') {
+    return undefined
+  }
+
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    return undefined
+  }
+
+  return parsed
+}
+
 export function toPlatformApprovalBridgeRecord(
   source: PlmApprovalBridgeSource,
 ): PlatformApprovalBridgeRecord {
@@ -62,6 +76,7 @@ export function toPlatformApprovalBridgeRecord(
   const productId = source.product_id ? String(source.product_id) : undefined
   const productNumber = source.product_number ? String(source.product_number) : undefined
   const productName = source.product_name ? String(source.product_name) : undefined
+  const sourceVersion = normalizeSourceVersion(source.version)
 
   return {
     externalSystem: 'plm',
@@ -86,6 +101,7 @@ export function toPlatformApprovalBridgeRecord(
     metadata: {
       source_type: source.type || 'eco',
       source_stage: source.stage || 'review',
+      ...(sourceVersion !== undefined ? { source_version: sourceVersion } : {}),
       created_at: source.created_at,
       updated_at: source.updated_at,
     },
