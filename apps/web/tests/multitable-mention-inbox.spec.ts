@@ -16,7 +16,7 @@ const MOCK_SUMMARY: CommentMentionSummary = {
   ],
 }
 
-function makeMockClient(summary: CommentMentionSummary | null = MOCK_SUMMARY) {
+function makeMockClient(summary: unknown = MOCK_SUMMARY) {
   return new MultitableApiClient({
     fetchFn: vi.fn(async (input: string) => {
       if (input.includes('/api/comments/mention-summary')) {
@@ -37,6 +37,29 @@ describe('MultitableApiClient.loadMentionSummary', () => {
     expect(result.mentionedRecordCount).toBe(3)
     expect(result.items).toHaveLength(3)
     expect(result.items[0].mentionedFieldIds).toEqual(['f1', 'f2'])
+  })
+
+  it('normalizes malformed summary payloads', async () => {
+    const client = makeMockClient({
+      spreadsheetId: 'sheet_1',
+      unreadMentionCount: 1,
+      items: [
+        null,
+        { rowId: 'r1', mentionedCount: 2, unreadCount: 1, mentionedFieldIds: ['f1', 7, null] },
+        { mentionedCount: 3, unreadCount: 2, mentionedFieldIds: ['f2'] },
+      ],
+    })
+
+    const result = await client.loadMentionSummary({ spreadsheetId: 'sheet_1' })
+
+    expect(result).toEqual({
+      spreadsheetId: 'sheet_1',
+      unresolvedMentionCount: 0,
+      unreadMentionCount: 1,
+      mentionedRecordCount: 0,
+      unreadRecordCount: 0,
+      items: [{ rowId: 'r1', mentionedCount: 2, unreadCount: 1, mentionedFieldIds: ['f1'] }],
+    })
   })
 })
 

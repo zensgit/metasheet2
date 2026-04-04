@@ -8,7 +8,7 @@ const MOCK_SUMMARY: CommentMentionSummary = {
   unresolvedMentionCount: 3,
   unreadMentionCount: 2,
   mentionedRecordCount: 2,
-  unreadRecordCount: 1,
+  unreadRecordCount: 2,
   items: [
     { rowId: 'r1', mentionedCount: 2, unreadCount: 1, mentionedFieldIds: ['f1'] },
     { rowId: 'r2', mentionedCount: 1, unreadCount: 1, mentionedFieldIds: [] },
@@ -56,16 +56,59 @@ describe('mention inbox realtime reconciliation', () => {
     expect(inbox.summary.value!.mentionedRecordCount).toBe(1)
   })
 
-  it('markRead suppresses stale create events', async () => {
+  it('resolved event decrements counts without removing rows that still have mentions', async () => {
     const inbox = useMultitableCommentInboxSummary({ client: makeMockClient() })
     await inbox.loadSummary({ spreadsheetId: 'sheet_1' })
-    await inbox.markRead({ spreadsheetId: 'sheet_1' })
 
-    inbox.onRealtimeCommentCreated({
+    inbox.onRealtimeCommentResolved({
       spreadsheetId: 'sheet_1',
-      comment: { containerId: 'sheet_1', targetId: 'r1' },
+      rowId: 'r1',
+      commentId: 'c1',
     })
 
-    expect(inbox.unreadMentionCount.value).toBe(0)
+    expect(inbox.summary.value!.items.find((item) => item.rowId === 'r1')).toEqual({
+      rowId: 'r1',
+      mentionedCount: 1,
+      unreadCount: 0,
+      mentionedFieldIds: ['f1'],
+    })
+    expect(inbox.summary.value!.unresolvedMentionCount).toBe(2)
+    expect(inbox.summary.value!.unreadMentionCount).toBe(1)
+    expect(inbox.summary.value!.unreadRecordCount).toBe(1)
+  })
+
+  it('markRead only suppresses stale create events that predate the read marker', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(new Date('2026-04-04T10:00:00.000Z'))
+      const inbox = useMultitableCommentInboxSummary({ client: makeMockClient() })
+      await inbox.loadSummary({ spreadsheetId: 'sheet_1' })
+      await inbox.markRead({ spreadsheetId: 'sheet_1' })
+
+      inbox.onRealtimeCommentCreated({
+        spreadsheetId: 'sheet_1',
+        comment: {
+          containerId: 'sheet_1',
+          targetId: 'r1',
+          createdAt: '2026-04-04T09:59:59.000Z',
+        },
+      })
+
+      expect(inbox.unreadMentionCount.value).toBe(0)
+
+      inbox.onRealtimeCommentCreated({
+        spreadsheetId: 'sheet_1',
+        comment: {
+          containerId: 'sheet_1',
+          targetId: 'r1',
+          createdAt: '2026-04-04T10:00:01.000Z',
+        },
+      })
+
+      expect(inbox.unreadMentionCount.value).toBe(1)
+      expect(inbox.summary.value!.items.find((item) => item.rowId === 'r1')!.unreadCount).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

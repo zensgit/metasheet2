@@ -173,4 +173,85 @@ describe('MetaCommentsDrawer', () => {
     app.unmount()
     container.remove()
   })
+
+  it('keeps replies visible in field-scoped threads even when the reply itself has no field id', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        {
+          path: '/',
+          name: 'home',
+          component: defineComponent({ render: () => h('div') }),
+        },
+        {
+          path: '/multitable/comments/inbox',
+          name: 'multitable-comment-inbox',
+          component: defineComponent({ render: () => h('div') }),
+        },
+      ],
+    })
+
+    const app = createApp(defineComponent({
+      render() {
+        return h(MetaCommentsDrawer, {
+          visible: true,
+          comments: [
+            {
+              id: 'c1',
+              containerId: 'sheet_1',
+              targetId: 'row_1',
+              fieldId: 'fld_notes',
+              targetFieldId: 'fld_notes',
+              mentions: [],
+              authorId: 'user_1',
+              authorName: 'Amy Wong',
+              content: 'field root',
+              resolved: false,
+              createdAt: '2026-04-01T09:00:00.000Z',
+            },
+            {
+              id: 'c2',
+              containerId: 'sheet_1',
+              targetId: 'row_1',
+              fieldId: null,
+              targetFieldId: null,
+              parentId: 'c1',
+              mentions: [],
+              authorId: 'user_2',
+              authorName: 'Ben',
+              content: 'reply without field',
+              resolved: false,
+              createdAt: '2026-04-01T10:00:00.000Z',
+            },
+          ],
+          loading: false,
+          canComment: true,
+          canResolve: true,
+          targetFieldId: 'fld_notes',
+          scopeLabel: 'Notes',
+          draft: '',
+          onResolve: vi.fn(),
+          onClose: vi.fn(),
+          onRetry: vi.fn(),
+          'onUpdate:draft': vi.fn(),
+          onSubmit: vi.fn(),
+        })
+      },
+    }))
+
+    app.use(router)
+    await router.push('/')
+    await router.isReady()
+    app.mount(container)
+    await flushUi()
+
+    expect(container.textContent).toContain('field root')
+    expect(container.textContent).toContain('reply without field')
+
+    app.unmount()
+    container.remove()
+  })
 })

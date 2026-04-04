@@ -29,6 +29,7 @@ import type {
   MultitableComment,
   MultitableCommentPresenceSummary,
   CommentMentionSummary,
+  CommentMentionSummaryItem,
   MultitableCommentInboxItem,
   MultitableCommentInboxPage,
   MetaCommentsScope,
@@ -214,6 +215,38 @@ function normalizeCommentInbox(payload: { items?: RawInboxItem[]; total?: number
     total: typeof payload.total === 'number' ? payload.total : 0,
     limit: typeof payload.limit === 'number' ? payload.limit : 0,
     offset: typeof payload.offset === 'number' ? payload.offset : 0,
+  }
+}
+
+function normalizeCommentMentionSummaryItem(
+  item: Partial<CommentMentionSummaryItem> | null | undefined,
+): CommentMentionSummaryItem {
+  return {
+    rowId: typeof item?.rowId === 'string' ? item.rowId : '',
+    mentionedCount: typeof item?.mentionedCount === 'number' ? item.mentionedCount : 0,
+    unreadCount: typeof item?.unreadCount === 'number' ? item.unreadCount : 0,
+    mentionedFieldIds: Array.isArray(item?.mentionedFieldIds)
+      ? item.mentionedFieldIds.filter((value): value is string => typeof value === 'string')
+      : [],
+  }
+}
+
+function normalizeCommentMentionSummary(
+  payload: Partial<CommentMentionSummary> | null | undefined,
+): CommentMentionSummary {
+  const items = Array.isArray(payload?.items)
+    ? payload.items
+      .map((item) => normalizeCommentMentionSummaryItem(item))
+      .filter((item) => item.rowId.length > 0)
+    : []
+
+  return {
+    spreadsheetId: typeof payload?.spreadsheetId === 'string' ? payload.spreadsheetId : '',
+    unresolvedMentionCount: typeof payload?.unresolvedMentionCount === 'number' ? payload.unresolvedMentionCount : 0,
+    unreadMentionCount: typeof payload?.unreadMentionCount === 'number' ? payload.unreadMentionCount : 0,
+    mentionedRecordCount: typeof payload?.mentionedRecordCount === 'number' ? payload.mentionedRecordCount : 0,
+    unreadRecordCount: typeof payload?.unreadRecordCount === 'number' ? payload.unreadRecordCount : 0,
+    items,
   }
 }
 
@@ -497,7 +530,8 @@ export class MultitableApiClient {
 
   async loadMentionSummary(params: { spreadsheetId: string }): Promise<CommentMentionSummary> {
     const res = await this.fetch(`/api/comments/mention-summary${qs(params)}`)
-    return parseJson(res)
+    const data = await parseJson<Partial<CommentMentionSummary> | null>(res)
+    return normalizeCommentMentionSummary(data)
   }
 
   async markMentionsRead(params: { spreadsheetId: string }): Promise<void> {
