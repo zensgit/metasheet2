@@ -45,7 +45,25 @@ function installReportsMock(): void {
     const url = typeof input === 'string' ? input : input.url
 
     if (url.includes('/api/attendance/summary?')) {
-      return jsonResponse(200, { ok: true, data: null })
+      return jsonResponse(200, {
+        ok: true,
+        data: {
+          total_days: 13,
+          total_minutes: 5820,
+          total_late_minutes: 24,
+          total_early_leave_minutes: 12,
+          normal_days: 6,
+          late_days: 2,
+          early_leave_days: 1,
+          late_early_days: 3,
+          partial_days: 1,
+          absent_days: 0,
+          adjusted_days: 1,
+          off_days: 4,
+          leave_minutes: 960,
+          overtime_minutes: 180,
+        },
+      })
     }
     if (url.includes('/api/attendance/records?')) {
       return jsonResponse(200, {
@@ -154,6 +172,8 @@ describe('Attendance reports analytics', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-04-15T08:00:00Z'))
     window.localStorage.clear()
     window.localStorage.setItem('metasheet_locale', 'en')
     window.history.replaceState({}, '', '/attendance?tab=reports')
@@ -165,6 +185,7 @@ describe('Attendance reports analytics', () => {
   afterEach(() => {
     if (app) app.unmount()
     if (container) container.remove()
+    vi.useRealTimers()
     app = null
     container = null
   })
@@ -176,6 +197,9 @@ describe('Attendance reports analytics', () => {
 
     expect(container?.querySelector('[data-reports-insight="snapshot"]')?.textContent).toContain('Visible requests')
     expect(container?.querySelector('[data-reports-insight="snapshot"]')?.textContent).toContain('4')
+    expect(container?.querySelector('[data-reports-insight="trend"]')?.textContent).toContain('Normal')
+    expect(container?.querySelector('[data-reports-insight="trend"]')?.textContent).toContain('Late + Early')
+    expect(container?.querySelector('[data-reports-insight="metrics"]')?.textContent).toContain('Overtime minutes')
     expect(findFilterButton(container!, 'request-status', 'pending').textContent).toContain('2')
     expect(findFilterButton(container!, 'request-type', 'overtime').textContent).toContain('1')
     expect(findFilterButton(container!, 'record-status', 'adjusted').textContent).toContain('1')
@@ -211,5 +235,26 @@ describe('Attendance reports analytics', () => {
     expect(recordRows[0]).toContain('2026-04-03')
     expect(recordRows[0]).toContain('Adjusted')
     expect(vi.mocked(apiFetch).mock.calls.length).toBe(initialCallCount)
+  })
+
+  it('applies report period presets and refreshes the reports with the new range', async () => {
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi()
+
+    const initialCallCount = vi.mocked(apiFetch).mock.calls.length
+
+    findFilterButton(container!, 'range-preset', 'this-week').click()
+    await flushUi(4)
+
+    const fromInput = container!.querySelector<HTMLInputElement>('#attendance-from-date')
+    const toInput = container!.querySelector<HTMLInputElement>('#attendance-to-date')
+    const periodLabel = container!.querySelector<HTMLElement>('[data-report-period-label]')
+
+    expect(fromInput?.value).toBe('2026-04-13')
+    expect(toInput?.value).toBe('2026-04-19')
+    expect(periodLabel?.textContent).toContain('Apr')
+    expect(vi.mocked(apiFetch).mock.calls.length).toBeGreaterThan(initialCallCount)
+    expect(vi.mocked(apiFetch).mock.calls.some((call) => String(call[0]).includes('/api/attendance/summary?'))).toBe(true)
   })
 })
