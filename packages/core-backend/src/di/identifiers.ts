@@ -3,7 +3,7 @@ import type { Server as HttpServer } from 'http';
 import type { Socket } from 'socket.io';
 import type { AthenaDocument, DocumentVersion } from '../data-adapters/AthenaAdapter';
 import type { QueryResult } from '../data-adapters/BaseAdapter';
-import type { BOMItem, PLMProduct } from '../data-adapters/PLMAdapter';
+import type { ApprovalHistoryEntry, ApprovalRequest, BOMItem, PLMProduct } from '../data-adapters/PLMAdapter';
 import type { ConfigValue } from '../services/ConfigService';
 import type { CollectionDefinition } from '../types/collection';
 import type { Repository } from '../core/database/Repository';
@@ -78,6 +78,11 @@ export interface IPLMAdapterService extends IAdapterLifecycle {
   getProducts(options?: Record<string, unknown>): Promise<QueryResult<PLMProduct>>;
   getProductBOM(productId: string, options?: { depth?: number; effectiveAt?: string }): Promise<QueryResult<BOMItem>>;
   getProductById(productId: string, options?: Record<string, unknown>): Promise<PLMProduct | null>;
+  getApprovals(options?: Record<string, unknown>): Promise<QueryResult<ApprovalRequest>>;
+  getApprovalById(approvalId: string): Promise<QueryResult<ApprovalRequest>>;
+  getApprovalHistory(approvalId: string): Promise<QueryResult<ApprovalHistoryEntry>>;
+  approveApproval(approvalId: string, comment?: string): Promise<QueryResult<Record<string, unknown>>>;
+  rejectApproval(approvalId: string, comment: string): Promise<QueryResult<Record<string, unknown>>>;
 }
 
 export interface IAthenaAdapterService extends IAdapterLifecycle {
@@ -133,6 +138,7 @@ export interface CommentCreateInput {
     content: string;
     authorId: string;
     parentId?: string;
+    mentions?: string[];
 }
 
 export interface CommentRecord {
@@ -149,9 +155,16 @@ export interface CommentRecord {
     mentions: string[];
 }
 
+export interface CommentInboxItem extends CommentRecord {
+    unread: boolean;
+}
+
 export interface ICommentService {
     createComment(data: CommentCreateInput): Promise<CommentRecord>;
     getComments(spreadsheetId: string, options?: CommentQueryOptions): Promise<{ items: CommentRecord[]; total: number }>;
+    getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }>;
+    getUnreadCount(userId: string): Promise<number>;
+    markCommentRead(commentId: string, userId: string): Promise<void>;
     resolveComment(commentId: string): Promise<void>;
 }
 

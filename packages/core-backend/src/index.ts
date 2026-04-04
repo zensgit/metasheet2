@@ -521,7 +521,7 @@ export class MetaSheetServer {
     this.app.use('/api/auth', authRouter)
 
     // 路由：审批（示例）
-    this.app.use(approvalsRouter())
+    this.app.use(approvalsRouter({ injector: this.injector }))
     // 路由：审计日志（管理员）
     this.app.use(auditLogsRouter())
     // 路由：审批历史（从审计表衍生）
