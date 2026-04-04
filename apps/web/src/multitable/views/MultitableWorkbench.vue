@@ -17,10 +17,29 @@
     </div>
     <MetaViewTabBar :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="caps.canManageFields.value" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" />
     <div class="mt-workbench__actions">
+      <button
+        v-if="mentionInboxState.summary.value && mentionInboxState.summary.value.unresolvedMentionCount > 0"
+        class="mt-workbench__mention-chip"
+        :class="{ 'mt-workbench__mention-chip--unread': mentionInboxState.unreadMentionCount.value > 0 }"
+        @click="onMentionChipClick"
+      >
+        &#x1F4EC; Mentions <strong>{{ mentionInboxState.unreadMentionCount.value || mentionInboxState.summary.value.unresolvedMentionCount }}</strong>
+        <span v-if="mentionInboxState.unreadMentionCount.value > 0" class="mt-workbench__mention-chip-unread">{{ mentionInboxState.unreadMentionCount.value }} unread</span>
+        <span class="mt-workbench__mention-chip-records">{{ mentionInboxState.summary.value.mentionedRecordCount }} records</span>
+      </button>
       <button v-if="caps.canManageFields.value" class="mt-workbench__mgr-btn" @click="showFieldManager = true">&#x2699; Fields</button>
       <button v-if="caps.canManageViews.value && canConfigureCurrentView" class="mt-workbench__mgr-btn" @click="showViewManager = true">&#x2630; Views</button>
       <button v-if="caps.canManageAutomation.value" class="mt-workbench__mgr-btn" @click="openWorkflowDesigner()">&#x2699; Workflow</button>
     </div>
+    <MetaMentionPopover
+      :visible="showMentionPopover"
+      :items="mentionInboxState.summary.value?.items ?? []"
+      :rows="grid.rows.value"
+      :fields="grid.fields.value"
+      :display-field-id="mentionDisplayFieldId"
+      @close="showMentionPopover = false"
+      @select-record="onMentionPopoverSelect"
+    />
     <MetaToolbar
       :fields="grid.fields.value" :hidden-field-ids="grid.hiddenFieldIds.value"
       :sort-rules="grid.sortRules.value" :filter-rules="grid.filterRules.value"
@@ -209,7 +228,9 @@ import { useMultitableGrid } from '../composables/useMultitableGrid'
 import { useMultitableCapabilities } from '../composables/useMultitableCapabilities'
 import { useMultitableComments } from '../composables/useMultitableComments'
 import { useMultitableCommentInbox } from '../composables/useMultitableCommentInbox'
+import { useMultitableCommentInboxSummary } from '../composables/useMultitableCommentInboxSummary'
 import { useMultitableCommentRealtime } from '../composables/useMultitableCommentRealtime'
+import { subscribeToMultitableCommentSheetRealtime } from '../realtime/comments-realtime'
 import MetaViewTabBar from '../components/MetaViewTabBar.vue'
 import MetaToolbar from '../components/MetaToolbar.vue'
 import MetaGridTable from '../components/MetaGridTable.vue'
@@ -226,6 +247,7 @@ import MetaCalendarView from '../components/MetaCalendarView.vue'
 import MetaTimelineView from '../components/MetaTimelineView.vue'
 import MetaToast from '../components/MetaToast.vue'
 import MetaImportModal from '../components/MetaImportModal.vue'
+import MetaMentionPopover from '../components/MetaMentionPopover.vue'
 import type { MetaBase } from '../types'
 import { bulkImportRecords, skipDuplicateImportRows } from '../import/bulk-import'
 import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
@@ -251,9 +273,11 @@ const caps = useMultitableCapabilities(capabilitySource)
 const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workbench.activeViewId })
 const commentsState = useMultitableComments()
 const commentInboxState = useMultitableCommentInbox()
+const mentionInboxState = useMultitableCommentInboxSummary()
 
 const selectedRecordId = ref<string | null>(null)
 const showComments = ref(false)
+const showMentionPopover = ref(false)
 const linkPickerVisible = ref(false)
 const linkPickerField = ref<MetaField | null>(null)
 const linkPickerRecordId = ref<string | null>(null)
@@ -316,6 +340,7 @@ let dialogMetaRefreshTimer: number | null = null
 let dialogMetaRefreshInFlight = false
 let dialogMetaRefreshQueued = false
 let standaloneFormLoadVersion = 0
+let unsubscribeMentionRealtime: (() => void) | null = null
 
 function showError(msg: string) {
   workbench.error.value = null
@@ -344,6 +369,11 @@ const currentViewPermission = computed<MetaViewPermission | null>(() => {
   const activeViewId = workbench.activeViewId.value
   return activeViewId ? effectiveViewPermissions.value[activeViewId] ?? null : null
 })
+const mentionDisplayFieldId = computed(() =>
+  grid.visibleFields.value.find((field) => field.type === 'string')?.id
+  ?? grid.fields.value.find((field) => field.type === 'string')?.id
+  ?? null,
+)
 const canConfigureCurrentView = computed(() => currentViewPermission.value?.canConfigure ?? true)
 const visibleWorkbenchViews = computed(() =>
   workbench.views.value.filter((view) => effectiveViewPermissions.value[view.id]?.canAccess !== false),
@@ -710,6 +740,18 @@ async function selectRecord(recordId: string, opts?: { openComments?: boolean; h
 
 function onSelectRecord(recordId: string) {
   void selectRecord(recordId)
+}
+
+function onMentionChipClick() {
+  showMentionPopover.value = !showMentionPopover.value
+}
+
+async function onMentionPopoverSelect(payload: { rowId: string; fieldId: string | null; mentionedFieldIds: string[] }) {
+  showMentionPopover.value = false
+  await selectRecord(payload.rowId, { openComments: true })
+  if (workbench.activeSheetId.value) {
+    await mentionInboxState.markRead({ spreadsheetId: workbench.activeSheetId.value })
+  }
 }
 
 function onToggleSort(fieldId: string) {
@@ -1665,6 +1707,27 @@ watch(
 )
 
 watch(
+  () => workbench.activeSheetId.value,
+  (sheetId) => {
+    showMentionPopover.value = false
+    unsubscribeMentionRealtime?.()
+    unsubscribeMentionRealtime = null
+
+    if (!sheetId) {
+      mentionInboxState.clearSummary()
+      return
+    }
+
+    void mentionInboxState.loadSummary({ spreadsheetId: sheetId })
+    unsubscribeMentionRealtime = subscribeToMultitableCommentSheetRealtime(sheetId, {
+      onCommentCreated: mentionInboxState.onRealtimeCommentCreated,
+      onCommentResolved: mentionInboxState.onRealtimeCommentResolved,
+    })
+  },
+  { immediate: true },
+)
+
+watch(
   [() => workbench.activeSheetId.value, () => workbench.activeViewId.value],
   () => {
     standaloneFormFieldPermissions.value = {}
@@ -1748,6 +1811,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
   stopDialogMetaRefresh()
+  unsubscribeMentionRealtime?.()
 })
 
 useMultitableCommentRealtime({
@@ -1801,6 +1865,12 @@ defineExpose({
 }
 .mt-workbench__conflict-btn--primary { background: #f59e0b; border-color: #f59e0b; color: #fff; }
 .mt-workbench__actions { display: flex; gap: 6px; padding: 4px 16px 0; }
+.mt-workbench__mention-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid #e6a23c; border-radius: 12px; background: #fdf6ec; font-size: 12px; cursor: pointer; color: #e6a23c; }
+.mt-workbench__mention-chip:hover { background: #faecd8; border-color: #d48806; }
+.mt-workbench__mention-chip strong { font-weight: 600; color: #d48806; }
+.mt-workbench__mention-chip--unread { border-color: #d48806; background: #faecd8; }
+.mt-workbench__mention-chip-unread { color: #d48806; font-size: 11px; font-weight: 600; }
+.mt-workbench__mention-chip-records { color: #999; font-size: 11px; }
 .mt-workbench__mgr-btn { padding: 3px 10px; border: 1px solid #ddd; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #666; }
 .mt-workbench__mgr-btn:hover { background: #f5f7fa; color: #409eff; border-color: #c0d8f0; }
 .mt-workbench__base-bar { padding: 8px 16px 0; border-bottom: 1px solid #f0f0f0; }

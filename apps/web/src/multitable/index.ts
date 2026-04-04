@@ -9,6 +9,13 @@ export type { SortRule, FilterRule, FilterOperator, FilterConjunction, CellEdit 
 export { useMultitableCapabilities } from './composables/useMultitableCapabilities'
 export type { MultitableCapabilities, MultitableRole } from './composables/useMultitableCapabilities'
 export { useMultitableComments } from './composables/useMultitableComments'
+export { useMultitableCommentInboxSummary } from './composables/useMultitableCommentInboxSummary'
+export { useMultitableCommentPresence } from './composables/useMultitableCommentPresence'
+export {
+  resolveMultitableCommentsRealtimeBaseUrl,
+  subscribeToMultitableCommentSheetRealtime,
+  subscribeToMultitableCommentsRealtime,
+} from './realtime/comments-realtime'
 
 // Cell components
 export { default as MetaCellRenderer } from './components/cells/MetaCellRenderer.vue'
@@ -34,6 +41,7 @@ export { default as MetaBasePicker } from './components/MetaBasePicker.vue'
 // Drawers & pickers
 export { default as MetaRecordDrawer } from './components/MetaRecordDrawer.vue'
 export { default as MetaCommentsDrawer } from './components/MetaCommentsDrawer.vue'
+export { default as MetaMentionPopover } from './components/MetaMentionPopover.vue'
 export { default as MetaLinkPicker } from './components/MetaLinkPicker.vue'
 export { default as MetaToast } from './components/MetaToast.vue'
 export { default as MetaImportModal } from './components/MetaImportModal.vue'

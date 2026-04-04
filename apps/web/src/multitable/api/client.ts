@@ -27,6 +27,8 @@ import type {
   PatchRecordsInput,
   FormSubmitInput,
   MultitableComment,
+  MultitableCommentPresenceSummary,
+  CommentMentionSummary,
   MultitableCommentInboxItem,
   MultitableCommentInboxPage,
   MetaCommentsScope,
@@ -116,7 +118,14 @@ type RawInboxItem = RawComment & {
   recordId?: string | null
 }
 
-function normalizeComment(payload: RawComment | null | undefined): MultitableComment {
+function normalizeCommentPresenceList(payload: { items?: MultitableCommentPresenceSummary[] } | null | undefined): {
+  items: MultitableCommentPresenceSummary[]
+} {
+  if (!payload?.items) return { items: [] }
+  return { items: payload.items.map(normalizeMultitableCommentPresenceSummary) }
+}
+
+export function normalizeMultitableComment(payload: RawComment | null | undefined): MultitableComment {
   return {
     id: typeof payload?.id === 'string' ? payload.id : '',
     containerId: typeof payload?.containerId === 'string'
@@ -129,7 +138,10 @@ function normalizeComment(payload: RawComment | null | undefined): MultitableCom
       : typeof payload?.rowId === 'string'
         ? payload.rowId
         : '',
+    spreadsheetId: typeof payload?.spreadsheetId === 'string' ? payload.spreadsheetId : undefined,
+    rowId: typeof payload?.rowId === 'string' ? payload.rowId : undefined,
     fieldId: typeof payload?.fieldId === 'string' ? payload.fieldId : null,
+    targetFieldId: typeof payload?.targetFieldId === 'string' ? payload.targetFieldId : null,
     parentId: typeof payload?.parentId === 'string' ? payload.parentId : undefined,
     mentions: Array.isArray(payload?.mentions) ? payload.mentions.filter((value): value is string => typeof value === 'string') : [],
     authorId: typeof payload?.authorId === 'string' ? payload.authorId : '',
@@ -145,9 +157,35 @@ function normalizeCommentsList(payload: { comments?: RawComment[]; items?: RawCo
   comments: MultitableComment[]
 } {
   if (!payload) return { comments: [] }
-  if (Array.isArray(payload.comments)) return { comments: payload.comments.map((item) => normalizeComment(item)) }
-  if (Array.isArray(payload.items)) return { comments: payload.items.map((item) => normalizeComment(item)) }
+  if (Array.isArray(payload.comments)) return { comments: payload.comments.map((item) => normalizeMultitableComment(item)) }
+  if (Array.isArray(payload.items)) return { comments: payload.items.map((item) => normalizeMultitableComment(item)) }
   return { comments: [] }
+}
+
+export function normalizeMultitableCommentPresenceSummary(summary: Partial<MultitableCommentPresenceSummary> & {
+  spreadsheetId?: string
+  rowId?: string
+}): MultitableCommentPresenceSummary {
+  const containerId = typeof summary.containerId === 'string'
+    ? summary.containerId
+    : typeof summary.spreadsheetId === 'string'
+      ? summary.spreadsheetId
+      : ''
+  const targetId = typeof summary.targetId === 'string'
+    ? summary.targetId
+    : typeof summary.rowId === 'string'
+      ? summary.rowId
+      : ''
+  return {
+    containerId,
+    targetId,
+    spreadsheetId: typeof summary.spreadsheetId === 'string' ? summary.spreadsheetId : containerId || undefined,
+    rowId: typeof summary.rowId === 'string' ? summary.rowId : targetId || undefined,
+    unresolvedCount: typeof summary.unresolvedCount === 'number' ? summary.unresolvedCount : 0,
+    fieldCounts: summary.fieldCounts && typeof summary.fieldCounts === 'object' ? summary.fieldCounts : {},
+    mentionedCount: typeof summary.mentionedCount === 'number' ? summary.mentionedCount : 0,
+    mentionedFieldCounts: summary.mentionedFieldCounts && typeof summary.mentionedFieldCounts === 'object' ? summary.mentionedFieldCounts : {},
+  }
 }
 
 function normalizeCommentInbox(payload: { items?: RawInboxItem[]; total?: number; limit?: number; offset?: number } | null | undefined): MultitableCommentInboxPage {
@@ -157,7 +195,7 @@ function normalizeCommentInbox(payload: { items?: RawInboxItem[]; total?: number
   return {
     items: Array.isArray(payload.items)
       ? payload.items.map((item) => ({
-          ...normalizeComment(item),
+          ...normalizeMultitableComment(item),
           unread: item.unread !== false,
           baseId: typeof item.baseId === 'string' || item.baseId === null ? item.baseId : null,
           sheetId: typeof item.sheetId === 'string'
@@ -438,12 +476,36 @@ export class MultitableApiClient {
     })
     const data = await parseJson<{ comment?: RawComment }>(res)
     return {
-      comment: normalizeComment(data.comment),
+      comment: normalizeMultitableComment(data.comment),
     }
   }
 
   async resolveComment(commentId: string): Promise<void> {
     const res = await this.fetch(`/api/comments/${commentId}/resolve`, { method: 'POST' })
+    return parseJson(res)
+  }
+
+  async listCommentPresence(params: { containerId: string; targetIds?: string[] }): Promise<{ items: MultitableCommentPresenceSummary[] }> {
+    const targetIds = (params.targetIds ?? []).filter((targetId) => typeof targetId === 'string' && targetId.trim().length > 0)
+    const res = await this.fetch(`/api/comments/summary${qs({
+      spreadsheetId: params.containerId,
+      rowIds: targetIds.length ? targetIds.join(',') : undefined,
+    })}`)
+    const data = await parseJson<{ items?: MultitableCommentPresenceSummary[] }>(res)
+    return normalizeCommentPresenceList(data)
+  }
+
+  async loadMentionSummary(params: { spreadsheetId: string }): Promise<CommentMentionSummary> {
+    const res = await this.fetch(`/api/comments/mention-summary${qs(params)}`)
+    return parseJson(res)
+  }
+
+  async markMentionsRead(params: { spreadsheetId: string }): Promise<void> {
+    const res = await this.fetch('/api/comments/mention-summary/mark-read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    })
     return parseJson(res)
   }
 
