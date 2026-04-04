@@ -163,12 +163,44 @@ export interface CommentInboxItem extends CommentRecord {
     recordId?: string | null;
 }
 
+export interface CommentPresenceSummaryRecord {
+    spreadsheetId: string;
+    rowId: string;
+    unresolvedCount: number;
+    fieldCounts: Record<string, number>;
+    mentionedCount: number;
+    mentionedFieldCounts: Record<string, number>;
+}
+
+export interface CommentMentionSummaryItem {
+    rowId: string;
+    mentionedCount: number;
+    unreadCount: number;
+    mentionedFieldIds: string[];
+}
+
+export interface CommentMentionSummary {
+    spreadsheetId: string;
+    unresolvedMentionCount: number;
+    unreadMentionCount: number;
+    mentionedRecordCount: number;
+    unreadRecordCount: number;
+    items: CommentMentionSummaryItem[];
+}
+
 export interface ICommentService {
     createComment(data: CommentCreateInput): Promise<CommentRecord>;
     getComments(spreadsheetId: string, options?: CommentQueryOptions): Promise<{ items: CommentRecord[]; total: number }>;
     getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }>;
     getUnreadCount(userId: string): Promise<number>;
     markCommentRead(commentId: string, userId: string): Promise<void>;
+    getCommentPresenceSummary(
+      spreadsheetId: string,
+      rowIds?: string[],
+      mentionUserId?: string,
+    ): Promise<{ items: CommentPresenceSummaryRecord[]; total: number }>;
+    getMentionSummary(spreadsheetId: string, mentionUserId: string): Promise<CommentMentionSummary>;
+    markMentionsRead(spreadsheetId: string, userId: string): Promise<void>;
     resolveComment(commentId: string): Promise<void>;
 }
 

@@ -69,5 +69,62 @@ describe('WebSocket Rooms - basic flow', () => {
 
     a.close(); b.close()
   })
-})
 
+  it('join-comment-record scopes comment delivery to a single record room', async () => {
+    if (!baseUrl || !server) return
+
+    const a = ioClient(baseUrl, { transports: ['websocket'] })
+    const b = ioClient(baseUrl, { transports: ['websocket'] })
+
+    await Promise.all([
+      new Promise<void>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('A connect timeout')), 3000)
+        a.on('connect', () => { clearTimeout(t); resolve() })
+      }),
+      new Promise<void>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('B connect timeout')), 3000)
+        b.on('connect', () => { clearTimeout(t); resolve() })
+      }),
+    ])
+
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('A join timeout')), 3000)
+      a.on('joined-comment-record', (payload: any) => {
+        try {
+          expect(payload).toEqual({ spreadsheetId: 'sheet_orders', rowId: 'rec_1' })
+          clearTimeout(t)
+          resolve()
+        } catch (error) {
+          clearTimeout(t)
+          reject(error)
+        }
+      })
+      a.emit('join-comment-record', { spreadsheetId: 'sheet_orders', rowId: 'rec_1' })
+    })
+
+    const gotA = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('A did not receive comment event')), 3000)
+      a.on('comment:created', (payload: any) => { clearTimeout(t); resolve(payload) })
+    })
+
+    let gotB = false
+    b.on('comment:created', () => { gotB = true })
+
+    // @ts-ignore
+    server['createCoreAPI']().websocket.broadcastTo('comments:sheet_orders:rec_1', 'comment:created', {
+      spreadsheetId: 'sheet_orders',
+      comment: { id: 'c1', rowId: 'rec_1' },
+    })
+
+    const payload = await gotA
+    expect(payload).toEqual({
+      spreadsheetId: 'sheet_orders',
+      comment: { id: 'c1', rowId: 'rec_1' },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(gotB).toBe(false)
+
+    a.close()
+    b.close()
+  })
+})

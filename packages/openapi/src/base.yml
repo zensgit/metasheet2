@@ -31,23 +31,6 @@ components:
               type: string
             message:
               type: string
-            details:
-              type: array
-              items:
-                type: object
-                properties:
-                  field:
-                    type: string
-                  message:
-                    type: string
-    DirectErrorResponse:
-      type: object
-      properties:
-        success:
-          type: boolean
-          default: false
-        error:
-          type: string
     User:
       type: object
       properties:
@@ -109,12 +92,14 @@ components:
         targetFieldId:
           type: string
           nullable: true
+          description: Frontend alias for fieldId.
         containerType:
           type: string
           nullable: true
         containerId:
           type: string
           nullable: true
+          description: Frontend alias for spreadsheetId.
         spreadsheetId:
           type: string
           nullable: true
@@ -124,6 +109,7 @@ components:
         fieldId:
           type: string
           nullable: true
+          description: Backend field-thread identifier. Replies inherit the parent field scope.
         content:
           type: string
         authorId:
@@ -131,6 +117,7 @@ components:
         parentId:
           type: string
           nullable: true
+          description: Parent comment id for one-level threaded replies.
         resolved:
           type: boolean
         createdAt:
@@ -141,6 +128,7 @@ components:
           type: array
           items:
             type: string
+          description: Mentioned user identifiers parsed from comment content.
     CommentsListResponse:
       type: object
       properties:
@@ -163,6 +151,145 @@ components:
             offset:
               type: integer
               example: 0
+    CommentInboxItem:
+      allOf:
+        - $ref: '#/components/schemas/Comment'
+        - type: object
+          properties:
+            unread:
+              type: boolean
+            baseId:
+              type: string
+              nullable: true
+            sheetId:
+              type: string
+              nullable: true
+            viewId:
+              type: string
+              nullable: true
+            recordId:
+              type: string
+              nullable: true
+          required: [unread]
+    CommentInboxResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/CommentInboxItem'
+            total:
+              type: integer
+              example: 1
+            limit:
+              type: integer
+              example: 50
+            offset:
+              type: integer
+              example: 0
+    CommentUnreadCountResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            count:
+              type: integer
+              example: 0
+    CommentPresenceSummary:
+      type: object
+      properties:
+        spreadsheetId:
+          type: string
+        rowId:
+          type: string
+        unresolvedCount:
+          type: integer
+        fieldCounts:
+          type: object
+          additionalProperties:
+            type: integer
+        mentionedCount:
+          type: integer
+          description: Unresolved comments in this record that mention the current requester.
+        mentionedFieldCounts:
+          type: object
+          description: Per-field unresolved mention counts for the current requester.
+          additionalProperties:
+            type: integer
+    CommentMentionSummaryItem:
+      type: object
+      properties:
+        rowId:
+          type: string
+        mentionedCount:
+          type: integer
+          description: Number of unresolved comments in this record that mention the current user.
+        unreadCount:
+          type: integer
+          description: Number of unresolved mentioned comments in this record that have not been marked as read by the current user.
+        mentionedFieldIds:
+          type: array
+          items:
+            type: string
+          description: Deduplicated, sorted field ids where the user is mentioned.
+      required: [rowId, mentionedCount, unreadCount, mentionedFieldIds]
+    CommentMentionSummary:
+      type: object
+      properties:
+        spreadsheetId:
+          type: string
+        unresolvedMentionCount:
+          type: integer
+          description: Total number of unresolved comments mentioning the current user across all records.
+        unreadMentionCount:
+          type: integer
+          description: Total unresolved mentioned comments that have not been marked as read by the current user.
+        mentionedRecordCount:
+          type: integer
+          description: Number of distinct records with unresolved mentions.
+        unreadRecordCount:
+          type: integer
+          description: Number of distinct records with unread mentions.
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CommentMentionSummaryItem'
+          description: Per-record breakdown, sorted by mentionedCount desc, rowId asc.
+      required: [spreadsheetId, unresolvedMentionCount, unreadMentionCount, mentionedRecordCount, unreadRecordCount, items]
+    CommentMentionSummaryResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          $ref: '#/components/schemas/CommentMentionSummary'
+    CommentsSummaryResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/CommentPresenceSummary'
+            total:
+              type: integer
+              example: 1
     PluginAdminEntry:
       type: object
       properties:
@@ -241,55 +368,6 @@ components:
         created_at:
           type: string
           format: date-time
-    AttendancePunchEvent:
-      type: object
-      properties:
-        id:
-          type: string
-        userId:
-          type: string
-        user_id:
-          type: string
-        orgId:
-          type: string
-        org_id:
-          type: string
-        workDate:
-          type: string
-          format: date
-          nullable: true
-        work_date:
-          type: string
-          format: date
-          nullable: true
-        occurredAt:
-          type: string
-          format: date-time
-        occurred_at:
-          type: string
-          format: date-time
-        eventType:
-          type: string
-          enum: [check_in, check_out]
-        event_type:
-          type: string
-          enum: [check_in, check_out]
-        source:
-          type: string
-        timezone:
-          type: string
-        location:
-          type: object
-        meta:
-          type: object
-        createdAt:
-          type: string
-          format: date-time
-          nullable: true
-        created_at:
-          type: string
-          format: date-time
-          nullable: true
     AttendanceRecord:
       type: object
       properties:
@@ -751,13 +829,6 @@ components:
       type: object
       properties:
         source:
-          type: string
-        defaultProfileId:
-          type: string
-          nullable: true
-        csvTemplateUrl:
-          type: string
-        csvTemplateFilename:
           type: string
         mapping:
           type: object
@@ -1475,18 +1546,6 @@ components:
           type: string
         targetId:
           type: string
-        baseId:
-          type: string
-          nullable: true
-        sheetId:
-          type: string
-          nullable: true
-        viewId:
-          type: string
-          nullable: true
-        recordId:
-          type: string
-          nullable: true
         targetFieldId:
           type: string
           nullable: true
@@ -1499,59 +1558,6 @@ components:
         - targetId
         - containerType
         - containerId
-    MultitableFieldPermission:
-      type: object
-      properties:
-        visible:
-          type: boolean
-        readOnly:
-          type: boolean
-      required:
-        - visible
-        - readOnly
-    MultitableFieldPermissions:
-      type: object
-      additionalProperties:
-        $ref: '#/components/schemas/MultitableFieldPermission'
-    MultitableViewPermission:
-      type: object
-      properties:
-        canAccess:
-          type: boolean
-        canConfigure:
-          type: boolean
-        canDelete:
-          type: boolean
-      required:
-        - canAccess
-        - canConfigure
-        - canDelete
-    MultitableViewPermissions:
-      type: object
-      additionalProperties:
-        $ref: '#/components/schemas/MultitableViewPermission'
-    MultitableRowActions:
-      type: object
-      properties:
-        canEdit:
-          type: boolean
-        canDelete:
-          type: boolean
-        canComment:
-          type: boolean
-      required:
-        - canEdit
-        - canDelete
-        - canComment
-    MultitableScopedPermissions:
-      type: object
-      properties:
-        fieldPermissions:
-          $ref: '#/components/schemas/MultitableFieldPermissions'
-        viewPermissions:
-          $ref: '#/components/schemas/MultitableViewPermissions'
-        rowActions:
-          $ref: '#/components/schemas/MultitableRowActions'
     MultitableLinkedRecordSummary:
       type: object
       properties:
@@ -1689,8 +1695,6 @@ components:
           type: array
           items:
             type: string
-        permissions:
-          $ref: '#/components/schemas/MultitableScopedPermissions'
     MultitableCapabilities:
       type: object
       properties:
@@ -1719,6 +1723,123 @@ components:
         - canManageViews
         - canComment
         - canManageAutomation
+    MultitableFieldCapability:
+      type: object
+      properties:
+        visible:
+          type: boolean
+        editable:
+          type: boolean
+        commentable:
+          type: boolean
+        exportable:
+          type: boolean
+        formulaReadable:
+          type: boolean
+      required:
+        - visible
+        - editable
+        - commentable
+        - exportable
+        - formulaReadable
+    MultitableFieldCapabilities:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/MultitableFieldCapability'
+    MultitableDependencyNode:
+      type: object
+      properties:
+        fieldId:
+          type: string
+        fieldName:
+          type: string
+        fieldType:
+          type: string
+          enum: [formula, lookup, rollup]
+        dependsOnFieldIds:
+          type: array
+          items:
+            type: string
+        dependsOnFieldNames:
+          type: array
+          items:
+            type: string
+        cyclic:
+          type: boolean
+        expression:
+          type: string
+          nullable: true
+        linkFieldId:
+          type: string
+          nullable: true
+        targetFieldId:
+          type: string
+          nullable: true
+        foreignSheetId:
+          type: string
+          nullable: true
+        aggregation:
+          type: string
+          enum: [count, sum, avg, min, max]
+          nullable: true
+        unresolvedFieldNames:
+          type: array
+          items:
+            type: string
+      required:
+        - fieldId
+        - fieldName
+        - fieldType
+        - dependsOnFieldIds
+        - dependsOnFieldNames
+        - cyclic
+    MultitableDependencyEdge:
+      type: object
+      properties:
+        fromFieldId:
+          type: string
+        toFieldId:
+          type: string
+        kind:
+          type: string
+          enum: [formula-reference, lookup-link, lookup-target, rollup-link, rollup-target]
+      required:
+        - fromFieldId
+        - toFieldId
+        - kind
+    MultitableDependencyCycle:
+      type: object
+      properties:
+        fieldIds:
+          type: array
+          items:
+            type: string
+        fieldNames:
+          type: array
+          items:
+            type: string
+      required:
+        - fieldIds
+        - fieldNames
+    MultitableDependencyGraph:
+      type: object
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableDependencyNode'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableDependencyEdge'
+        cycles:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableDependencyCycle'
+      required:
+        - nodes
+        - edges
+        - cycles
     MultitableContext:
       type: object
       properties:
@@ -1740,10 +1861,10 @@ components:
             $ref: '#/components/schemas/MultitableView'
         capabilities:
           $ref: '#/components/schemas/MultitableCapabilities'
-        fieldPermissions:
-          $ref: '#/components/schemas/MultitableFieldPermissions'
-        viewPermissions:
-          $ref: '#/components/schemas/MultitableViewPermissions'
+        fieldCapabilities:
+          allOf:
+            - $ref: '#/components/schemas/MultitableFieldCapabilities'
+          nullable: true
     MultitableViewData:
       type: object
       properties:
@@ -1761,6 +1882,14 @@ components:
           $ref: '#/components/schemas/MultitableViewLinkSummaries'
         attachmentSummaries:
           $ref: '#/components/schemas/MultitableViewAttachmentSummaries'
+        fieldCapabilities:
+          allOf:
+            - $ref: '#/components/schemas/MultitableFieldCapabilities'
+          nullable: true
+        dependencyGraph:
+          allOf:
+            - $ref: '#/components/schemas/MultitableDependencyGraph'
+          nullable: true
         view:
           allOf:
             - $ref: '#/components/schemas/MultitableView'
@@ -1790,12 +1919,14 @@ components:
           $ref: '#/components/schemas/MultitableRecord'
         capabilities:
           $ref: '#/components/schemas/MultitableCapabilities'
-        fieldPermissions:
-          $ref: '#/components/schemas/MultitableFieldPermissions'
-        viewPermissions:
-          $ref: '#/components/schemas/MultitableViewPermissions'
-        rowActions:
-          $ref: '#/components/schemas/MultitableRowActions'
+        fieldCapabilities:
+          allOf:
+            - $ref: '#/components/schemas/MultitableFieldCapabilities'
+          nullable: true
+        dependencyGraph:
+          allOf:
+            - $ref: '#/components/schemas/MultitableDependencyGraph'
+          nullable: true
         commentsScope:
           $ref: '#/components/schemas/MultitableCommentsScope'
         linkSummaries:
@@ -1831,12 +1962,14 @@ components:
             $ref: '#/components/schemas/MultitableField'
         capabilities:
           $ref: '#/components/schemas/MultitableCapabilities'
-        fieldPermissions:
-          $ref: '#/components/schemas/MultitableFieldPermissions'
-        viewPermissions:
-          $ref: '#/components/schemas/MultitableViewPermissions'
-        rowActions:
-          $ref: '#/components/schemas/MultitableRowActions'
+        fieldCapabilities:
+          allOf:
+            - $ref: '#/components/schemas/MultitableFieldCapabilities'
+          nullable: true
+        dependencyGraph:
+          allOf:
+            - $ref: '#/components/schemas/MultitableDependencyGraph'
+          nullable: true
         record:
           allOf:
             - $ref: '#/components/schemas/MultitableRecord'
@@ -1872,8 +2005,18 @@ components:
           $ref: '#/components/schemas/MultitableRecord'
         commentsScope:
           $ref: '#/components/schemas/MultitableCommentsScope'
+        records:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableComputedRecord'
+        linkSummaries:
+          $ref: '#/components/schemas/MultitableLinkSummaryMap'
         attachmentSummaries:
           $ref: '#/components/schemas/MultitableAttachmentSummaryMap'
+        relatedRecords:
+          type: array
+          items:
+            $ref: '#/components/schemas/MultitableRelatedRecord'
       required:
         - record
         - commentsScope
@@ -1982,9 +2125,6 @@ components:
                 error:
                   code: "VALIDATION_ERROR"
                   message: "Required field 'name' is missing"
-                  details:
-                    - field: "name"
-                      message: "Required"
             invalid_field_type:
               summary: Invalid Field Type
               value:
@@ -2006,26 +2146,6 @@ components:
                 error:
                   code: "INVALID_FORMAT"
                   message: "Request body must be valid JSON"
-    Conflict:
-      description: Conflict - Request conflicts with current resource state
-      content:
-        application/json:
-          schema: { $ref: '#/components/schemas/ErrorResponse' }
-          examples:
-            optimistic_lock_conflict:
-              summary: Version Conflict
-              value:
-                ok: false
-                error:
-                  code: "CONFLICT"
-                  message: "Resource state changed. Refresh and try again."
-            duplicate_code_conflict:
-              summary: Duplicate Code
-              value:
-                ok: false
-                error:
-                  code: "DUPLICATE_CODE"
-                  message: "Code already exists."
     NotFound:
       description: Not found - Resource does not exist
       content:

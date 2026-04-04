@@ -1,7 +1,9 @@
-import { Server as SocketServer, type Socket } from 'socket.io'
+import type { Socket } from 'socket.io';
+import { Server as SocketServer } from 'socket.io'
 import type { Server as HttpServer } from 'http'
 import type { ILogger } from '../di/identifiers'
 import type { EventBus } from '../integration/events/event-bus'
+import { buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
 
 export class CollabService {
   private io: SocketServer | null = null
@@ -39,6 +41,22 @@ export class CollabService {
     return null
   }
 
+  private parseCommentRecordScope(payload: unknown): { spreadsheetId: string; rowId: string } | null {
+    if (!payload || typeof payload !== 'object') return null
+    const next = payload as { spreadsheetId?: unknown; rowId?: unknown }
+    const spreadsheetId = typeof next.spreadsheetId === 'string' ? next.spreadsheetId.trim() : ''
+    const rowId = typeof next.rowId === 'string' ? next.rowId.trim() : ''
+    if (!spreadsheetId || !rowId) return null
+    return { spreadsheetId, rowId }
+  }
+
+  private parseSheetScope(payload: unknown): string | null {
+    if (!payload || typeof payload !== 'object') return null
+    const next = payload as { spreadsheetId?: unknown }
+    const spreadsheetId = typeof next.spreadsheetId === 'string' ? next.spreadsheetId.trim() : ''
+    return spreadsheetId || null
+  }
+
   initialize(httpServer: HttpServer): void {
     this.io = new SocketServer(httpServer, {
       cors: {
@@ -72,6 +90,39 @@ export class CollabService {
       socket.on('leave-sheet', (sheetId: string) => {
         socket.leave(`sheet:${sheetId}`)
         this.logger.info(`Client ${socket.id} left sheet:${sheetId}`)
+      })
+
+      socket.on('join-comment-record', (payload: unknown) => {
+        const scope = this.parseCommentRecordScope(payload)
+        if (!scope) return
+        const room = buildCommentRecordRoom(scope)
+        socket.join(room)
+        this.logger.info(`Client ${socket.id} joined ${room}`)
+        socket.emit('joined-comment-record', scope)
+      })
+
+      socket.on('leave-comment-record', (payload: unknown) => {
+        const scope = this.parseCommentRecordScope(payload)
+        if (!scope) return
+        const room = buildCommentRecordRoom(scope)
+        socket.leave(room)
+        this.logger.info(`Client ${socket.id} left ${room}`)
+      })
+
+      socket.on('join-comment-sheet', (payload: unknown) => {
+        const spreadsheetId = this.parseSheetScope(payload)
+        if (!spreadsheetId) return
+        const room = buildCommentSheetRoom({ spreadsheetId })
+        socket.join(room)
+        this.logger.info(`Client ${socket.id} joined ${room}`)
+      })
+
+      socket.on('leave-comment-sheet', (payload: unknown) => {
+        const spreadsheetId = this.parseSheetScope(payload)
+        if (!spreadsheetId) return
+        const room = buildCommentSheetRoom({ spreadsheetId })
+        socket.leave(room)
+        this.logger.info(`Client ${socket.id} left ${room}`)
       })
 
       socket.on('ping', () => {
