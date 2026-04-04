@@ -6264,21 +6264,31 @@ const importGroupSyncSummary = computed(() => {
     ? segments.join(' · ')
     : tr('disabled', '未启用')
 })
-const importPlanVisible = computed(() =>
+const importHasCsvInput = computed(() => Boolean(importCsvFileName.value || importCsvFileId.value))
+const importHasUserMapConfig = computed(() =>
   Boolean(
-    importTemplateGuide.value
-    || importCsvFileName.value
-    || importCsvFileId.value
-    || importPayloadRowCountHint.value !== null
-    || selectedImportProfile.value
-    || importUserMapCount.value > 0
+    importUserMapCount.value > 0
     || importUserMapError.value
     || importUserMapKeyField.value.trim()
-    || importUserMapSourceFields.value.trim()
-    || importGroupAutoCreate.value
+    || importUserMapSourceFields.value.trim(),
+  )
+)
+const importHasGroupSyncConfig = computed(() =>
+  Boolean(
+    importGroupAutoCreate.value
     || importGroupAutoAssign.value
     || importGroupRuleSetId.value.trim()
     || importGroupTimezone.value.trim(),
+  )
+)
+const importPlanVisible = computed(() =>
+  Boolean(
+    importTemplateGuide.value
+    || importHasCsvInput.value
+    || importPayloadRowCountHint.value !== null
+    || selectedImportProfile.value
+    || importHasUserMapConfig.value
+    || importHasGroupSyncConfig.value,
   )
 )
 const importCommitTokenSummary = computed(() => {
@@ -6326,43 +6336,40 @@ const importPlanSummaryCards = computed(() => [
 ])
 const importPreviewShownRows = computed(() => importPreview.value.length)
 const importPreviewTotalRows = computed(() => {
-  const asyncPreviewRows = Number(importAsyncJob.value?.kind === 'preview' ? importAsyncJob.value.preview?.rowCount : 0)
-  if (Number.isFinite(asyncPreviewRows) && asyncPreviewRows > 0) return asyncPreviewRows
+  const asyncPreviewRows = Number(
+    importAsyncJob.value?.kind === 'preview'
+      ? (importAsyncJob.value.preview?.rowCount ?? 0)
+      : 0,
+  )
+  if (asyncPreviewRows > 0) return asyncPreviewRows
   const taskRows = Number(importPreviewTask.value?.totalRows ?? 0)
-  if (Number.isFinite(taskRows) && taskRows > 0) return taskRows
+  if (taskRows > 0) return taskRows
   return importPreviewShownRows.value
 })
 const importPreviewUserCount = computed(() =>
   new Set(importPreview.value.map(item => item.userId).filter(Boolean)).size
 )
-const importPreviewWarningCount = computed(() => {
-  const warnings = new Set<string>()
-  for (const warning of importCsvWarnings.value) {
-    const text = String(warning || '').trim()
-    if (text) warnings.add(text)
-  }
-  for (const item of importPreview.value) {
-    for (const warning of Array.isArray(item.warnings) ? item.warnings : []) {
-      const text = String(warning || '').trim()
-      if (text) warnings.add(text)
-    }
-  }
-  return warnings.size
-})
-const importPreviewPolicyCount = computed(() => {
-  const items = new Set<string>()
-  for (const row of importPreview.value) {
-    for (const policy of Array.isArray(row.appliedPolicies) ? row.appliedPolicies : []) {
-      const text = String(policy || '').trim()
-      if (text) items.add(text)
-    }
-    for (const group of Array.isArray(row.userGroups) ? row.userGroups : []) {
-      const text = String(group || '').trim()
-      if (text) items.add(text)
-    }
-  }
-  return items.size
-})
+const importPreviewWarningCount = computed(() =>
+  new Set(
+    [
+      ...importCsvWarnings.value,
+      ...importPreview.value.flatMap(item => Array.isArray(item.warnings) ? item.warnings : []),
+    ]
+      .map(warning => String(warning || '').trim())
+      .filter(Boolean),
+  ).size
+)
+const importPreviewPolicyCount = computed(() =>
+  new Set(
+    importPreview.value
+      .flatMap(row => [
+        ...(Array.isArray(row.appliedPolicies) ? row.appliedPolicies : []),
+        ...(Array.isArray(row.userGroups) ? row.userGroups : []),
+      ])
+      .map(item => String(item || '').trim())
+      .filter(Boolean),
+  ).size
+)
 const importPreviewExecutionSummary = computed(() => {
   if (importAsyncJob.value) {
     const progress = importAsyncJob.value.total
@@ -8592,8 +8599,10 @@ function estimateImportRowCount(payload: Record<string, any>): number | null {
     for (let i = 0; i < payload.csvText.length; i++) {
       if (payload.csvText[i] === '\n') lines += 1
     }
-    // header + last line (if no trailing newline)
-    return Math.max(0, lines)
+    const normalizedRows = payload.csvText.endsWith('\n')
+      ? lines - 1
+      : lines
+    return Math.max(0, normalizedRows)
   }
   return null
 }

@@ -67,6 +67,14 @@ function findPanel(container: HTMLElement, label: string): HTMLElement {
   return panel as HTMLElement
 }
 
+function findScorecard(panel: HTMLElement, label: string): HTMLElement {
+  const card = Array.from(panel.querySelectorAll('.attendance__preview-scorecard')).find(
+    candidate => candidate.textContent?.includes(label),
+  )
+  expect(card, `expected scorecard containing "${label}"`).toBeTruthy()
+  return card as HTMLElement
+}
+
 describe('Attendance import ops summary', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -133,6 +141,23 @@ describe('Attendance import ops summary', () => {
     expect(planPanel.textContent).toContain('auto-assign members')
     expect(planPanel.textContent).toContain('UTC+08:00 · Asia/Shanghai')
     expect(planPanel.textContent).toContain('Commit token: not prepared yet')
+  })
+
+  it('does not overcount inline csv rows when the payload ends with a trailing newline', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    const vm = app.mount(container!)
+    await flushUi()
+
+    const setupState = (vm as any).$?.setupState as Record<string, any>
+    setupState.importForm.payload = JSON.stringify({
+      csvText: 'userId,workDate\nuser-1,2026-04-04\nuser-2,2026-04-05\n',
+    }, null, 2)
+    await flushUi()
+
+    const importSection = findImportSection(container!)
+    const planPanel = findPanel(importSection, 'Current import plan')
+    const estimatedRowsCard = findScorecard(planPanel, 'Estimated rows')
+    expect(estimatedRowsCard.textContent).toContain('2')
   })
 
   it('summarizes preview rows, users, warnings, and policies before commit', async () => {

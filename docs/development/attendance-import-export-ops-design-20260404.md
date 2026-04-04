@@ -11,7 +11,7 @@ Start the attendance "import/export implementation capability" track with a pure
 
 ## Scope
 
-- Target file: [AttendanceView.vue](/Users/huazhou/Downloads/Github/metasheet2/.worktrees/attendance-import-export-ops-20260404/apps/web/src/views/AttendanceView.vue)
+- Target file: [AttendanceView.vue](../../apps/web/src/views/AttendanceView.vue)
 - No backend route changes
 - No approval-center file changes
 - Keep the existing import workflow intact
