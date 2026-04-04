@@ -29,7 +29,7 @@ function normalizeStringArray(value: unknown): string[] {
 function normalizeUuidString(value: string): string | null {
   const normalized = value.trim()
   if (!normalized) return null
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(normalized)
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(normalized)
     ? normalized
     : null
 }
@@ -66,10 +66,15 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     shiftsByOrg.get(orgId)!.push(row)
   }
 
+  const lookupsByOrg = new Map<string, ReturnType<typeof buildShiftLookup>>()
+  for (const [orgId, rows] of shiftsByOrg) {
+    lookupsByOrg.set(orgId, buildShiftLookup(rows))
+  }
+
   for (const rule of ruleResult.rows) {
     const current = normalizeStringArray(rule.shift_sequence)
     if (!current.length) continue
-    const lookup = buildShiftLookup(shiftsByOrg.get(rule.org_id || 'default') ?? [])
+    const lookup = lookupsByOrg.get(rule.org_id || 'default') ?? { byId: new Set<string>(), byName: new Map<string, string[]>() }
     let changed = false
     const next = current.map((shiftRef) => {
       const uuid = normalizeUuidString(shiftRef)
