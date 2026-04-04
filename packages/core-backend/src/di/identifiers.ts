@@ -157,6 +157,7 @@ export interface CommentRecord {
 
 export interface CommentInboxItem extends CommentRecord {
     unread: boolean;
+    mentioned: boolean;
     baseId?: string | null;
     sheetId?: string | null;
     viewId?: string | null;

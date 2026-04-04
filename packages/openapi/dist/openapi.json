@@ -232,6 +232,9 @@
               "unread": {
                 "type": "boolean"
               },
+              "mentioned": {
+                "type": "boolean"
+              },
               "baseId": {
                 "type": "string",
                 "nullable": true
@@ -250,7 +253,8 @@
               }
             },
             "required": [
-              "unread"
+              "unread",
+              "mentioned"
             ]
           }
         ]
@@ -13416,7 +13420,7 @@
     "/api/comments/inbox": {
       "get": {
         "summary": "List comment inbox items",
-        "description": "Returns comments that mention the current authenticated user, including unread state and navigation context.",
+        "description": "Returns comments from other collaborators that either mention the current authenticated user or remain unread, including unread state, mention state, and navigation context.",
         "security": [
           {
             "bearerAuth": []
@@ -13466,7 +13470,7 @@
     "/api/comments/unread-count": {
       "get": {
         "summary": "Get unread comment count",
-        "description": "Returns the count of unread comments mentioning the current authenticated user.",
+        "description": "Returns the count of unread comments from other collaborators that currently appear in the comment inbox.",
         "security": [
           {
             "bearerAuth": []

@@ -79,6 +79,7 @@ describe('MultitableCommentInboxView', () => {
             mentions: ['user_1'],
             createdAt: '2026-04-04T08:00:00.000Z',
             unread: true,
+            mentioned: true,
           }],
           total: 1,
           limit: 50,
@@ -109,6 +110,7 @@ describe('MultitableCommentInboxView', () => {
             mentions: ['user_1'],
             createdAt: '2026-04-04T08:00:00.000Z',
             unread: false,
+            mentioned: true,
           }],
           total: 1,
           limit: 50,
@@ -141,6 +143,7 @@ describe('MultitableCommentInboxView', () => {
     expect(container?.textContent).toContain('Need review')
     expect(container?.textContent).toContain('1')
     expect(container?.textContent).toContain('View view_grid')
+    expect(container?.textContent).toContain('Mention')
 
     const openButton = Array.from(container!.querySelectorAll('button')).find((element) => element.textContent?.includes('Open')) as HTMLButtonElement | undefined
     openButton?.click()

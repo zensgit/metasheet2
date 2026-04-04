@@ -158,6 +158,8 @@ components:
           properties:
             unread:
               type: boolean
+            mentioned:
+              type: boolean
             baseId:
               type: string
               nullable: true
@@ -170,7 +172,7 @@ components:
             recordId:
               type: string
               nullable: true
-          required: [unread]
+          required: [unread, mentioned]
     CommentInboxResponse:
       type: object
       properties:

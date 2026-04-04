@@ -133,7 +133,7 @@ describe('Comments API', () => {
     }
   })
 
-  it('creates, lists, resolves, and exposes inbox/unread state', async () => {
+  it('creates, lists, resolves, and exposes inbox activity state', async () => {
     if (!baseUrl) return
 
     const ts = Date.now()
@@ -198,6 +198,24 @@ describe('Comments API', () => {
     createdCommentIds.push(fallbackJson.data.comment.id)
     expect(fallbackJson.data.comment.mentions).toEqual(['user_2'])
 
+    const plainRes = await fetch(`${baseUrl}/api/comments`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authorToken}`,
+      },
+      body: JSON.stringify({
+        spreadsheetId,
+        rowId,
+        content: 'Unread activity without mention',
+      }),
+    })
+    expect(plainRes.status).toBe(201)
+    const plainJson = await plainRes.json()
+    const plainComment = plainJson.data?.comment
+    createdCommentIds.push(plainComment.id)
+    expect(plainComment?.mentions).toEqual([])
+
     const listRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}`, {
       headers: { Authorization: `Bearer ${authorToken}` },
     })
@@ -210,7 +228,7 @@ describe('Comments API', () => {
     })
     expect(unreadCountRes.status).toBe(200)
     const unreadCountJson = await unreadCountRes.json()
-    expect(unreadCountJson.data.count).toBeGreaterThanOrEqual(2)
+    expect(unreadCountJson.data.count).toBe(3)
 
     const inboxRes = await fetch(`${baseUrl}/api/comments/inbox`, {
       headers: { Authorization: `Bearer ${mentionedToken}` },
@@ -218,12 +236,18 @@ describe('Comments API', () => {
     expect(inboxRes.status).toBe(200)
     const inboxJson = await inboxRes.json()
     const inboxItem = inboxJson.data.items.find((item: any) => item.id === comment.id)
+    const plainInboxItem = inboxJson.data.items.find((item: any) => item.id === plainComment.id)
     expect(inboxItem).toBeTruthy()
     expect(inboxItem.unread).toBe(true)
+    expect(inboxItem.mentioned).toBe(true)
     expect(inboxItem.baseId).toBe(baseId)
     expect(inboxItem.sheetId).toBe(spreadsheetId)
     expect(inboxItem.viewId).toBe(viewId)
     expect(inboxItem.recordId).toBe(rowId)
+    expect(plainInboxItem).toBeTruthy()
+    expect(plainInboxItem.unread).toBe(true)
+    expect(plainInboxItem.mentioned).toBe(false)
+    expect(inboxJson.data.total).toBe(3)
 
     const markReadRes = await fetch(`${baseUrl}/api/comments/${comment.id}/read`, {
       method: 'POST',
@@ -236,7 +260,7 @@ describe('Comments API', () => {
     })
     expect(unreadAfterRes.status).toBe(200)
     const unreadAfterJson = await unreadAfterRes.json()
-    expect(unreadAfterJson.data.count).toBe(1)
+    expect(unreadAfterJson.data.count).toBe(2)
 
     const resolveRes = await fetch(`${baseUrl}/api/comments/${comment.id}/resolve`, {
       method: 'POST',

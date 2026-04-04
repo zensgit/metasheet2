@@ -160,6 +160,8 @@ components:
           properties:
             unread:
               type: boolean
+            mentioned:
+              type: boolean
             baseId:
               type: string
               nullable: true
@@ -174,6 +176,7 @@ components:
               nullable: true
           required:
             - unread
+            - mentioned
     CommentInboxResponse:
       type: object
       properties:
@@ -8600,8 +8603,9 @@ paths:
     get:
       summary: List comment inbox items
       description: >-
-        Returns comments that mention the current authenticated user, including
-        unread state and navigation context.
+        Returns comments from other collaborators that either mention the
+        current authenticated user or remain unread, including unread state,
+        mention state, and navigation context.
       security:
         - bearerAuth: []
       parameters:
@@ -8632,8 +8636,8 @@ paths:
     get:
       summary: Get unread comment count
       description: >-
-        Returns the count of unread comments mentioning the current
-        authenticated user.
+        Returns the count of unread comments from other collaborators that
+        currently appear in the comment inbox.
       security:
         - bearerAuth: []
       responses:

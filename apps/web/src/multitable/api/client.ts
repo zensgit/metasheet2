@@ -113,6 +113,7 @@ type RawComment = Partial<MultitableComment> & {
 
 type RawInboxItem = RawComment & {
   unread?: boolean
+  mentioned?: boolean
   baseId?: string | null
   sheetId?: string | null
   viewId?: string | null
@@ -198,6 +199,7 @@ function normalizeCommentInbox(payload: { items?: RawInboxItem[]; total?: number
       ? payload.items.map((item) => ({
           ...normalizeMultitableComment(item),
           unread: item.unread !== false,
+          mentioned: item.mentioned === true,
           baseId: typeof item.baseId === 'string' || item.baseId === null ? item.baseId : null,
           sheetId: typeof item.sheetId === 'string'
             ? item.sheetId

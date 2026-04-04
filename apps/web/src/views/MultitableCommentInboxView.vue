@@ -3,7 +3,7 @@
     <header class="mt-comment-inbox__header">
       <div>
         <h1>Multitable Comment Inbox</h1>
-        <p>Mentions and unread comments pulled from <code>/api/comments/inbox</code>.</p>
+        <p>Mentions and unread comments from other collaborators, pulled from <code>/api/comments/inbox</code>.</p>
       </div>
       <button class="mt-comment-inbox__refresh" type="button" :disabled="loading" @click="() => void refreshInbox()">
         {{ loading ? 'Refreshing...' : 'Refresh' }}
@@ -42,6 +42,7 @@
             </p>
           </div>
           <div class="mt-comment-inbox__flags">
+            <span v-if="item.mentioned" class="mt-comment-inbox__badge mt-comment-inbox__badge--mention">Mention</span>
             <span v-if="item.unread" class="mt-comment-inbox__badge mt-comment-inbox__badge--unread">Unread</span>
             <span v-if="item.resolved" class="mt-comment-inbox__badge">Resolved</span>
           </div>
@@ -290,6 +291,11 @@ onMounted(() => {
 
 .mt-comment-inbox__badge--unread {
   background: #e0ecff;
+}
+
+.mt-comment-inbox__badge--mention {
+  background: #dcfce7;
+  color: #166534;
 }
 
 .mt-comment-inbox__content {
