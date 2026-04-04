@@ -93,6 +93,36 @@
         </div>
       </section>
 
+      <section v-if="showReports" class="attendance__card attendance__card--report-toolbar">
+        <div class="attendance__requests-header">
+          <h3>{{ tr('Report Period', '报表区间') }}</h3>
+          <small class="attendance__field-hint" data-report-period-label>
+            {{ reportRangeLabel }}
+          </small>
+        </div>
+        <div class="attendance__filter-pills attendance__filter-pills--range" data-report-filter-group="range-preset">
+          <button
+            v-for="preset in reportRangePresetOptions"
+            :key="preset.id"
+            class="attendance__filter-pill"
+            :class="{ 'attendance__filter-pill--active': activeReportRangePreset === preset.id }"
+            type="button"
+            :data-report-filter-value="preset.id"
+            @click="applyReportRangePreset(preset.id)"
+          >
+            {{ preset.label }}
+          </button>
+        </div>
+        <p class="attendance__field-hint attendance__field-hint--strong">
+          {{
+            tr(
+              'Exports follow the active date range, org/user filters, and the server-side dataset. Local pills only refine what is visible on this page.',
+              '导出遵循当前日期区间、组织/用户筛选和服务端数据集；本地筛选只影响当前页面可见内容。',
+            )
+          }}
+        </p>
+      </section>
+
       <section v-if="showReports" class="attendance__grid attendance__grid--reports-insights">
         <div class="attendance__card" data-reports-insight="snapshot">
           <div class="attendance__requests-header">
@@ -109,6 +139,9 @@
           <small class="attendance__field-hint">
             {{ tr('Snapshot combines filtered request totals with the current records page.', '快照结合了筛选后的申请汇总与当前记录页。') }}
           </small>
+          <p class="attendance__field-hint attendance__field-hint--strong">
+            {{ reportRangeLabel }}
+          </p>
           <div class="attendance__summary attendance__summary--reports">
             <div class="attendance__summary-item">
               <span>{{ tr('Visible requests', '筛选后申请') }}</span>
@@ -133,6 +166,36 @@
             <div class="attendance__summary-item">
               <span>{{ tr('Work minutes', '工时分钟') }}</span>
               <strong>{{ filteredRecordsWorkMinutes }}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div class="attendance__card" data-reports-insight="trend">
+          <div class="attendance__requests-header">
+            <h3>{{ tr('Attendance Trend', '考勤趋势') }}</h3>
+            <small class="attendance__field-hint">
+              {{ tr('Range totals from the attendance summary API.', '来自汇总接口的区间总量。') }}
+            </small>
+          </div>
+          <div class="attendance__summary attendance__summary--reports">
+            <div v-for="item in reportTrendItems" :key="item.key" class="attendance__summary-item">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.count }}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div class="attendance__card" data-reports-insight="metrics">
+          <div class="attendance__requests-header">
+            <h3>{{ tr('Management Metrics', '管理统计') }}</h3>
+            <small class="attendance__field-hint">
+              {{ tr('Range-level attendance totals for quick manager review.', '用于经理快速查看的区间级考勤总量。') }}
+            </small>
+          </div>
+          <div class="attendance__summary attendance__summary--reports">
+            <div v-for="item in reportMetricItems" :key="item.key" class="attendance__summary-item">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
             </div>
           </div>
         </div>
@@ -4244,6 +4307,7 @@ import { buildTimezoneOptions, formatTimezoneLabel } from '../utils/timezones'
 
 type AttendancePageMode = 'overview' | 'reports' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
+type AttendanceReportRangePreset = 'this-week' | 'this-month' | 'last-month' | 'this-quarter'
 const ATTENDANCE_OVERVIEW_SECTION_IDS = {
   requests: 'attendance-overview-requests',
   anomalies: 'attendance-overview-anomalies',
@@ -5122,6 +5186,96 @@ const requestReportStatusFilter = ref('all')
 const requestReportTypeFilter = ref('all')
 const recordStatusFilter = ref('all')
 
+function startOfWeek(date: Date): Date {
+  const next = new Date(date)
+  const day = next.getDay()
+  const delta = day === 0 ? -6 : 1 - day
+  next.setDate(next.getDate() + delta)
+  next.setHours(0, 0, 0, 0)
+  return next
+}
+
+function endOfWeek(date: Date): Date {
+  const next = startOfWeek(date)
+  next.setDate(next.getDate() + 6)
+  next.setHours(23, 59, 59, 999)
+  return next
+}
+
+function firstDayOfQuarter(date: Date): Date {
+  const month = Math.floor(date.getMonth() / 3) * 3
+  return new Date(date.getFullYear(), month, 1)
+}
+
+function lastDayOfQuarter(date: Date): Date {
+  const start = firstDayOfQuarter(date)
+  return new Date(start.getFullYear(), start.getMonth() + 3, 0)
+}
+
+function buildReportRangePreset(preset: AttendanceReportRangePreset): { from: string; to: string } {
+  if (preset === 'this-week') {
+    const now = new Date()
+    return {
+      from: toDateInput(startOfWeek(now)),
+      to: toDateInput(endOfWeek(now)),
+    }
+  }
+  if (preset === 'this-month') {
+    const now = new Date()
+    return {
+      from: toDateInput(firstDayOfMonth(now)),
+      to: toDateInput(lastDayOfMonth(now)),
+    }
+  }
+  if (preset === 'last-month') {
+    const now = new Date()
+    const previousMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+    return {
+      from: toDateInput(firstDayOfMonth(previousMonth)),
+      to: toDateInput(lastDayOfMonth(previousMonth)),
+    }
+  }
+  const now = new Date()
+  return {
+    from: toDateInput(firstDayOfQuarter(now)),
+    to: toDateInput(lastDayOfQuarter(now)),
+  }
+}
+
+function formatShortDate(value: string): string {
+  const date = new Date(`${value}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat(locale.value, {
+    month: 'short',
+    day: 'numeric',
+  }).format(date)
+}
+
+const reportRangePresetOptions = computed<Array<{ id: AttendanceReportRangePreset; label: string }>>(() => [
+  { id: 'this-week', label: tr('This week', '本周') },
+  { id: 'this-month', label: tr('This month', '本月') },
+  { id: 'last-month', label: tr('Last month', '上月') },
+  { id: 'this-quarter', label: tr('This quarter', '本季度') },
+])
+
+const activeReportRangePreset = computed<AttendanceReportRangePreset | ''>(() => {
+  for (const preset of reportRangePresetOptions.value) {
+    const range = buildReportRangePreset(preset.id)
+    if (range.from === fromDate.value && range.to === toDate.value) {
+      return preset.id
+    }
+  }
+  return ''
+})
+
+const reportRangeLabel = computed(() => {
+  if (!fromDate.value || !toDate.value) return tr('Range not set', '区间未设置')
+  return tr(
+    `Range: ${formatShortDate(fromDate.value)} - ${formatShortDate(toDate.value)}`,
+    `区间：${formatShortDate(fromDate.value)} - ${formatShortDate(toDate.value)}`,
+  )
+})
+
 function summarizeReportBreakdown<T>(
   items: T[],
   keyOf: (item: T) => string,
@@ -5216,6 +5370,30 @@ const filteredRecordsWorkMinutes = computed(() =>
   filteredRecords.value.reduce((sum, record) => sum + (Number(record.work_minutes) || 0), 0)
 )
 
+const reportTrendItems = computed(() => {
+  const current = summary.value
+  return [
+    { key: 'normal', label: formatStatus('normal'), count: current?.normal_days ?? 0 },
+    { key: 'late', label: formatStatus('late'), count: current?.late_days ?? 0 },
+    { key: 'late_early', label: formatStatus('late_early'), count: current?.late_early_days ?? 0 },
+    { key: 'adjusted', label: formatStatus('adjusted'), count: current?.adjusted_days ?? 0 },
+    { key: 'partial', label: formatStatus('partial'), count: current?.partial_days ?? 0 },
+    { key: 'absent', label: formatStatus('absent'), count: current?.absent_days ?? 0 },
+  ]
+})
+
+const reportMetricItems = computed(() => {
+  const current = summary.value
+  return [
+    { key: 'total-minutes', label: tr('Total minutes', '总分钟数'), value: current?.total_minutes ?? 0 },
+    { key: 'late-minutes', label: tr('Late minutes', '迟到分钟'), value: current?.total_late_minutes ?? 0 },
+    { key: 'early-leave-minutes', label: tr('Early leave minutes', '早退分钟'), value: current?.total_early_leave_minutes ?? 0 },
+    { key: 'leave-minutes', label: tr('Leave minutes', '请假分钟'), value: current?.leave_minutes ?? 0 },
+    { key: 'overtime-minutes', label: tr('Overtime minutes', '加班分钟'), value: current?.overtime_minutes ?? 0 },
+    { key: 'off-days', label: tr('Off days', '休息日'), value: current?.off_days ?? 0 },
+  ]
+})
+
 const reportsFiltersActive = computed(() =>
   requestReportStatusFilter.value !== 'all'
   || requestReportTypeFilter.value !== 'all'
@@ -5226,6 +5404,14 @@ function clearReportsFilters(): void {
   requestReportStatusFilter.value = 'all'
   requestReportTypeFilter.value = 'all'
   recordStatusFilter.value = 'all'
+}
+
+async function applyReportRangePreset(preset: AttendanceReportRangePreset): Promise<void> {
+  const range = buildReportRangePreset(preset)
+  fromDate.value = range.from
+  toDate.value = range.to
+  recordsPage.value = 1
+  await reloadReportsWithStatus()
 }
 const leaveTypes = ref<AttendanceLeaveType[]>([])
 const overtimeRules = ref<AttendanceOvertimeRule[]>([])
@@ -5865,7 +6051,10 @@ const ruleBuilderEarlyGraceMinutes = ref(10)
 const ruleBuilderWorkingDaysText = ref('1, 2, 3, 4, 5')
 
 function toDateInput(date: Date): string {
-  return date.toISOString().slice(0, 10)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
 }
 
 function firstDayOfMonth(date: Date): Date {
@@ -9878,21 +10067,21 @@ async function reloadReportsWithStatus() {
   loading.value = true
   recordsPage.value = 1
   try {
-    await Promise.all([loadRequestReport(), loadRecords()])
+    await Promise.all([loadSummary(), loadRequestReport(), loadRecords()])
     setStatus(
       appendStatusContext(
         tr(
           `Reports refreshed (${requestReportTotal.value} requests / ${recordsTotal.value} records).`,
           `报表已刷新（${requestReportTotal.value} 条申请 / ${recordsTotal.value} 条记录）。`,
         ),
-        requestReportTimezoneContextHint.value,
+        `${requestReportTimezoneContextHint.value} · ${reportRangeLabel.value}`,
       ),
     )
   } catch (error: any) {
     setStatusFromErrorWithContext(
       error,
       tr('Failed to refresh reports', '刷新报表失败'),
-      requestReportTimezoneContextHint.value,
+      `${requestReportTimezoneContextHint.value} · ${reportRangeLabel.value}`,
       'refresh',
     )
   } finally {
@@ -12571,6 +12760,10 @@ const holidaySectionBindings = {
   gap: 8px;
 }
 
+.attendance__card--report-toolbar {
+  margin-bottom: 20px;
+}
+
 .attendance__summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
@@ -12605,6 +12798,10 @@ const holidaySectionBindings = {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
+}
+
+.attendance__filter-pills--range {
+  margin-bottom: 10px;
 }
 
 .attendance__filter-pill {
