@@ -22,11 +22,11 @@ function search_fixed_string() {
   shift
 
   if command -v rg >/dev/null 2>&1; then
-    rg -n --fixed-strings -- "$needle" "$@" >/dev/null 2>&1
+    rg --fixed-strings -- "$needle" "$@" >/dev/null 2>&1
     return
   fi
 
-  grep -nF -- "$needle" "$@" >/dev/null 2>&1
+  grep -rIF -- "$needle" "$@" >/dev/null 2>&1
 }
 
 function search_extended_regex() {
@@ -34,11 +34,11 @@ function search_extended_regex() {
   shift
 
   if command -v rg >/dev/null 2>&1; then
-    rg -n -- "$pattern" "$@" >/dev/null 2>&1
+    rg -- "$pattern" "$@" >/dev/null 2>&1
     return
   fi
 
-  grep -RInE -- "$pattern" "$@" >/dev/null 2>&1
+  grep -rIE -- "$pattern" "$@" >/dev/null 2>&1
 }
 
 function verify_windows_entrypoints() {
