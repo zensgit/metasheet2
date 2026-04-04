@@ -57,12 +57,38 @@
               @click="emit('select-record', row.id)"
               @keydown="onCardKeydown($event, row.id)"
             >
-              <div class="meta-kanban__card-title">{{ cardTitle(row) }}</div>
+              <div class="meta-kanban__card-header">
+                <div class="meta-kanban__card-title">{{ cardTitle(row) }}</div>
+                <button
+                  v-if="canComment"
+                  class="meta-kanban__comment-btn"
+                  :class="rowCommentButtonClass(row.id)"
+                  type="button"
+                  :aria-label="`Open comments for ${cardTitle(row)}`"
+                  @click.stop="emit('open-comments', row.id)"
+                  @keydown="onRowCommentKeydown($event, row.id)"
+                >
+                  <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(row.id)" />
+                </button>
+              </div>
               <div class="meta-kanban__card-fields">
-                <span v-for="f in previewFields" :key="f.id" class="meta-kanban__card-field">
-                  <span class="meta-kanban__card-field-label">{{ f.name }}:</span>
-                  {{ formatValue(row, f) }}
-                </span>
+                <div v-for="f in previewFields" :key="f.id" class="meta-kanban__card-field">
+                  <span class="meta-kanban__card-field-copy">
+                    <span class="meta-kanban__card-field-label">{{ f.name }}:</span>
+                    {{ formatValue(row, f) }}
+                  </span>
+                  <button
+                    v-if="canComment"
+                    type="button"
+                    class="meta-kanban__field-comment-btn"
+                    :class="fieldCommentButtonClass(row.id, f.id)"
+                    :aria-label="`Open comments for ${f.name} on ${cardTitle(row)}`"
+                    @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: f.id })"
+                    @keydown="onFieldCommentKeydown($event, row.id, f.id)"
+                  >
+                    <MetaCommentAffordance :state="fieldCommentAffordance(row.id, f.id)" />
+                  </button>
+                </div>
               </div>
             </div>
             <div v-if="!uncategorized.length" class="meta-kanban__drop-hint">
@@ -90,12 +116,38 @@
               @click="emit('select-record', row.id)"
               @keydown="onCardKeydown($event, row.id)"
             >
-              <div class="meta-kanban__card-title">{{ cardTitle(row) }}</div>
+              <div class="meta-kanban__card-header">
+                <div class="meta-kanban__card-title">{{ cardTitle(row) }}</div>
+                <button
+                  v-if="canComment"
+                  class="meta-kanban__comment-btn"
+                  :class="rowCommentButtonClass(row.id)"
+                  type="button"
+                  :aria-label="`Open comments for ${cardTitle(row)}`"
+                  @click.stop="emit('open-comments', row.id)"
+                  @keydown="onRowCommentKeydown($event, row.id)"
+                >
+                  <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(row.id)" />
+                </button>
+              </div>
               <div class="meta-kanban__card-fields">
-                <span v-for="f in previewFields" :key="f.id" class="meta-kanban__card-field">
-                  <span class="meta-kanban__card-field-label">{{ f.name }}:</span>
-                  {{ formatValue(row, f) }}
-                </span>
+                <div v-for="f in previewFields" :key="f.id" class="meta-kanban__card-field">
+                  <span class="meta-kanban__card-field-copy">
+                    <span class="meta-kanban__card-field-label">{{ f.name }}:</span>
+                    {{ formatValue(row, f) }}
+                  </span>
+                  <button
+                    v-if="canComment"
+                    type="button"
+                    class="meta-kanban__field-comment-btn"
+                    :class="fieldCommentButtonClass(row.id, f.id)"
+                    :aria-label="`Open comments for ${f.name} on ${cardTitle(row)}`"
+                    @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: f.id })"
+                    @keydown="onFieldCommentKeydown($event, row.id, f.id)"
+                  >
+                    <MetaCommentAffordance :state="fieldCommentAffordance(row.id, f.id)" />
+                  </button>
+                </div>
               </div>
             </div>
             <div v-if="!columnRows(opt.value).length" class="meta-kanban__drop-hint">
@@ -113,9 +165,17 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaKanbanViewConfig, MetaRecord } from '../types'
+import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaKanbanViewConfig, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { resolveKanbanViewConfig } from '../utils/view-config'
 import { formatFieldDisplay } from '../utils/field-display'
+import MetaCommentActionChip from './MetaCommentActionChip.vue'
+import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import {
+  handleCommentAffordanceKeydown,
+  resolveCommentAffordanceStateClass,
+  resolveFieldCommentAffordance,
+  resolveRecordCommentAffordance,
+} from '../utils/comment-affordance'
 
 const props = defineProps<{
   rows: MetaRecord[]
@@ -123,14 +183,18 @@ const props = defineProps<{
   loading: boolean
   canCreate?: boolean
   canEdit?: boolean
+  canComment?: boolean
   groupInfo?: Record<string, unknown> | null
   viewConfig?: Record<string, unknown> | null
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
   attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
+  commentPresence?: Record<string, MultitableCommentPresenceSummary | undefined>
 }>()
 
 const emit = defineEmits<{
   (e: 'select-record', recordId: string): void
+  (e: 'open-comments', recordId: string): void
+  (e: 'open-field-comments', payload: { recordId: string; fieldId: string }): void
   (e: 'patch-cell', recordId: string, fieldId: string, value: unknown, version: number): void
   (e: 'create-record', data: Record<string, unknown>): void
   (e: 'update-view-config', input: { config: Record<string, unknown>; groupInfo?: Record<string, unknown> }): void
@@ -223,6 +287,30 @@ function formatValue(row: MetaRecord, field: MetaField): string {
     linkSummaries: props.linkSummaries?.[row.id]?.[field.id],
     attachmentSummaries: props.attachmentSummaries?.[row.id]?.[field.id],
   })
+}
+
+function rowCommentAffordance(recordId: string) {
+  return resolveRecordCommentAffordance(props.commentPresence?.[recordId])
+}
+
+function fieldCommentAffordance(recordId: string, fieldId: string) {
+  return resolveFieldCommentAffordance(props.commentPresence?.[recordId], fieldId)
+}
+
+function rowCommentButtonClass(recordId: string): string {
+  return resolveCommentAffordanceStateClass('meta-kanban__comment-btn', rowCommentAffordance(recordId))
+}
+
+function fieldCommentButtonClass(recordId: string, fieldId: string): string {
+  return resolveCommentAffordanceStateClass('meta-kanban__field-comment-btn', fieldCommentAffordance(recordId, fieldId))
+}
+
+function onRowCommentKeydown(event: KeyboardEvent, recordId: string) {
+  handleCommentAffordanceKeydown(event, () => emit('open-comments', recordId))
+}
+
+function onFieldCommentKeydown(event: KeyboardEvent, recordId: string, fieldId: string) {
+  handleCommentAffordanceKeydown(event, () => emit('open-field-comments', { recordId, fieldId }))
 }
 
 function onPickGroupField(e: Event) {
@@ -333,10 +421,20 @@ function onCardKeydown(e: KeyboardEvent, cardId: string) {
 .meta-kanban__card:hover { box-shadow: 0 2px 8px rgba(0,0,0,.12); }
 .meta-kanban__card:focus-visible { outline: 2px solid #409eff; outline-offset: 1px; }
 .meta-kanban__card[draggable="true"] { cursor: grab; }
-.meta-kanban__card-title { font-size: 13px; font-weight: 500; color: #333; margin-bottom: 4px; }
+.meta-kanban__card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.meta-kanban__card-title { font-size: 13px; font-weight: 500; color: #333; min-width: 0; }
+.meta-kanban__comment-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 2px 8px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; flex-shrink: 0; }
+.meta-kanban__comment-btn:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
+.meta-kanban__comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-kanban__comment-btn--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-kanban__card-fields { display: flex; flex-direction: column; gap: 2px; }
-.meta-kanban__card-field { font-size: 11px; color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta-kanban__card-field { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; font-size: 11px; color: #888; }
+.meta-kanban__card-field-copy { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-kanban__card-field-label { color: #aaa; }
+.meta-kanban__field-comment-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 22px; padding: 0 5px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; flex-shrink: 0; }
+.meta-kanban__field-comment-btn:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
+.meta-kanban__field-comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-kanban__field-comment-btn--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-kanban__drop-hint { padding: 12px 10px; font-size: 11px; color: #94a3b8; text-align: center; border: 1px dashed #cbd5e1; border-radius: 6px; background: rgba(255,255,255,.7); }
 .meta-kanban__add-btn { margin: 4px 8px 8px; padding: 4px; border: 1px dashed #ccc; border-radius: 4px; background: transparent; cursor: pointer; font-size: 12px; color: #999; }
 .meta-kanban__add-btn:hover { border-color: #409eff; color: #409eff; }

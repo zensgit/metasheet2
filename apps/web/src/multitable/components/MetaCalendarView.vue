@@ -60,14 +60,39 @@
                 :class="{ 'meta-calendar__event--attachment': ev.isAttachmentTitle }"
                 @click.stop="emit('select-record', ev.id)"
               >
-                <MetaAttachmentList
-                  v-if="ev.isAttachmentTitle"
-                  class="meta-calendar__event-attachments"
-                  :attachments="ev.attachments"
-                  variant="compact"
-                  empty-label="No attachments"
-                />
-                <template v-else>{{ ev.title }}</template>
+                <div class="meta-calendar__event-copy">
+                  <MetaAttachmentList
+                    v-if="ev.isAttachmentTitle"
+                    class="meta-calendar__event-attachments"
+                    :attachments="ev.attachments"
+                    variant="compact"
+                    empty-label="No attachments"
+                  />
+                  <template v-else>{{ ev.title }}</template>
+                </div>
+                <div v-if="canComment" class="meta-calendar__event-actions">
+                  <button
+                    type="button"
+                    class="meta-calendar__comment-btn"
+                    :class="rowCommentButtonClass(ev.id)"
+                    :aria-label="`Open comments for ${ev.title}`"
+                    @click.stop="emit('open-comments', ev.id)"
+                    @keydown="onRowCommentKeydown($event, ev.id)"
+                  >
+                    <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(ev.id)" />
+                  </button>
+                  <button
+                    v-if="dateField"
+                    type="button"
+                    class="meta-calendar__field-comment-btn"
+                    :class="fieldCommentButtonClass(ev.id)"
+                    :aria-label="`Open comments for ${dateField.name}`"
+                    @click.stop="emit('open-field-comments', { recordId: ev.id, fieldId: dateField.id })"
+                    @keydown="onFieldCommentKeydown($event, ev.id, dateField.id)"
+                  >
+                    <MetaCommentAffordance :state="fieldCommentAffordance(ev.id)" />
+                  </button>
+                </div>
               </div>
               <div v-if="cell.overflow > 0" class="meta-calendar__overflow">+{{ cell.overflow }} more</div>
             </div>
@@ -103,14 +128,39 @@
                 :class="{ 'meta-calendar__event--attachment': ev.isAttachmentTitle }"
                 @click.stop="emit('select-record', ev.id)"
               >
-                <MetaAttachmentList
-                  v-if="ev.isAttachmentTitle"
-                  class="meta-calendar__event-attachments"
-                  :attachments="ev.attachments"
-                  variant="compact"
-                  empty-label="No attachments"
-                />
-                <template v-else>{{ ev.title }}</template>
+                <div class="meta-calendar__event-copy">
+                  <MetaAttachmentList
+                    v-if="ev.isAttachmentTitle"
+                    class="meta-calendar__event-attachments"
+                    :attachments="ev.attachments"
+                    variant="compact"
+                    empty-label="No attachments"
+                  />
+                  <template v-else>{{ ev.title }}</template>
+                </div>
+                <div v-if="canComment" class="meta-calendar__event-actions">
+                  <button
+                    type="button"
+                    class="meta-calendar__comment-btn"
+                    :class="rowCommentButtonClass(ev.id)"
+                    :aria-label="`Open comments for ${ev.title}`"
+                    @click.stop="emit('open-comments', ev.id)"
+                    @keydown="onRowCommentKeydown($event, ev.id)"
+                  >
+                    <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(ev.id)" />
+                  </button>
+                  <button
+                    v-if="dateField"
+                    type="button"
+                    class="meta-calendar__field-comment-btn"
+                    :class="fieldCommentButtonClass(ev.id)"
+                    :aria-label="`Open comments for ${dateField.name}`"
+                    @click.stop="emit('open-field-comments', { recordId: ev.id, fieldId: dateField.id })"
+                    @keydown="onFieldCommentKeydown($event, ev.id, dateField.id)"
+                  >
+                    <MetaCommentAffordance :state="fieldCommentAffordance(ev.id)" />
+                  </button>
+                </div>
               </div>
               <div v-if="cell.overflow > 0" class="meta-calendar__overflow">+{{ cell.overflow }} more</div>
             </div>
@@ -142,14 +192,39 @@
               @click="emit('select-record', ev.id)"
               @keydown.enter="emit('select-record', ev.id)"
             >
-              <MetaAttachmentList
-                v-if="ev.isAttachmentTitle"
-                class="meta-calendar__day-event-attachments"
-                :attachments="ev.attachments"
-                variant="compact"
-                empty-label="No attachments"
-              />
-              <template v-else>{{ ev.title }}</template>
+              <div class="meta-calendar__event-copy">
+                <MetaAttachmentList
+                  v-if="ev.isAttachmentTitle"
+                  class="meta-calendar__day-event-attachments"
+                  :attachments="ev.attachments"
+                  variant="compact"
+                  empty-label="No attachments"
+                />
+                <template v-else>{{ ev.title }}</template>
+              </div>
+              <div v-if="canComment" class="meta-calendar__event-actions">
+                <button
+                  type="button"
+                  class="meta-calendar__comment-btn"
+                  :class="rowCommentButtonClass(ev.id)"
+                  :aria-label="`Open comments for ${ev.title}`"
+                  @click.stop="emit('open-comments', ev.id)"
+                  @keydown="onRowCommentKeydown($event, ev.id)"
+                >
+                  <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(ev.id)" />
+                </button>
+                <button
+                  v-if="dateField"
+                  type="button"
+                  class="meta-calendar__field-comment-btn"
+                  :class="fieldCommentButtonClass(ev.id)"
+                  :aria-label="`Open comments for ${dateField.name}`"
+                  @click.stop="emit('open-field-comments', { recordId: ev.id, fieldId: dateField.id })"
+                  @keydown="onFieldCommentKeydown($event, ev.id, dateField.id)"
+                >
+                  <MetaCommentAffordance :state="fieldCommentAffordance(ev.id)" />
+                </button>
+              </div>
             </div>
             <div v-if="!currentDayEvents.length" class="meta-calendar__empty-hint">No records on this day</div>
           </div>
@@ -163,10 +238,18 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import type { LinkedRecordSummary, MetaAttachment, MetaCalendarViewConfig, MetaField, MetaRecord } from '../types'
+import type { LinkedRecordSummary, MetaAttachment, MetaCalendarViewConfig, MetaField, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { resolveCalendarViewConfig } from '../utils/view-config'
 import { formatFieldDisplay } from '../utils/field-display'
 import MetaAttachmentList from './MetaAttachmentList.vue'
+import MetaCommentActionChip from './MetaCommentActionChip.vue'
+import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import {
+  handleCommentAffordanceKeydown,
+  resolveCommentAffordanceStateClass,
+  resolveFieldCommentAffordance,
+  resolveRecordCommentAffordance,
+} from '../utils/comment-affordance'
 
 const MAX_EVENTS_PER_CELL = 3
 
@@ -175,13 +258,17 @@ const props = defineProps<{
   fields: MetaField[]
   loading: boolean
   canCreate?: boolean
+  canComment?: boolean
   viewConfig?: Record<string, unknown> | null
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
   attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
+  commentPresence?: Record<string, MultitableCommentPresenceSummary | undefined>
 }>()
 
 const emit = defineEmits<{
   (e: 'select-record', recordId: string): void
+  (e: 'open-comments', recordId: string): void
+  (e: 'open-field-comments', payload: { recordId: string; fieldId: string }): void
   (e: 'create-record', data: Record<string, unknown>): void
   (e: 'update-view-config', input: { config: Record<string, unknown> }): void
 }>()
@@ -374,6 +461,31 @@ const weekCells = computed<CalendarCell[]>(() => {
 
 const currentDayEvents = computed(() => eventsByDate.value[activeDayStr.value] ?? [])
 
+function rowCommentAffordance(recordId: string) {
+  return resolveRecordCommentAffordance(props.commentPresence?.[recordId])
+}
+
+function fieldCommentAffordance(recordId: string) {
+  if (!dateField.value) return resolveFieldCommentAffordance(null, '')
+  return resolveFieldCommentAffordance(props.commentPresence?.[recordId], dateField.value.id)
+}
+
+function rowCommentButtonClass(recordId: string): string {
+  return resolveCommentAffordanceStateClass('meta-calendar__comment-btn', rowCommentAffordance(recordId))
+}
+
+function fieldCommentButtonClass(recordId: string): string {
+  return resolveCommentAffordanceStateClass('meta-calendar__field-comment-btn', fieldCommentAffordance(recordId))
+}
+
+function onRowCommentKeydown(event: KeyboardEvent, recordId: string) {
+  handleCommentAffordanceKeydown(event, () => emit('open-comments', recordId))
+}
+
+function onFieldCommentKeydown(event: KeyboardEvent, recordId: string, fieldId: string) {
+  handleCommentAffordanceKeydown(event, () => emit('open-field-comments', { recordId, fieldId }))
+}
+
 const activeDayLabel = computed(() =>
   viewDate.value.toLocaleDateString('default', {
     weekday: 'long',
@@ -541,10 +653,20 @@ function onCellKeydown(e: KeyboardEvent, cellIdx: number, cells: CalendarCell[])
 .meta-calendar__cell--week { min-height: 120px; }
 .meta-calendar__day-num { font-size: 12px; color: #666; margin-bottom: 2px; }
 .meta-calendar__events { display: flex; flex-direction: column; gap: 2px; }
-.meta-calendar__event { padding: 2px 4px; background: #409eff; color: #fff; border-radius: 3px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.meta-calendar__event { padding: 2px 4px; background: #409eff; color: #fff; border-radius: 3px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; display: flex; align-items: center; gap: 6px; }
 .meta-calendar__event:hover { background: #337ecc; }
 .meta-calendar__event--attachment { background: #f8fafc; color: #334155; border: 1px solid #dbeafe; white-space: normal; }
 .meta-calendar__event--attachment:hover { background: #eff6ff; }
+.meta-calendar__event-copy { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; }
+.meta-calendar__event-actions { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.meta-calendar__comment-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 24px; padding: 2px 6px; border: 1px solid #bfdbfe; border-radius: 999px; background: #fff; cursor: pointer; color: #2563eb; }
+.meta-calendar__comment-btn:hover { border-color: #60a5fa; background: #dbeafe; }
+.meta-calendar__comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-calendar__comment-btn--idle { border-color: #bfdbfe; background: #fff; color: #2563eb; }
+.meta-calendar__field-comment-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 22px; padding: 0 5px; border: 1px solid #bfdbfe; border-radius: 999px; background: #fff; cursor: pointer; color: #2563eb; }
+.meta-calendar__field-comment-btn:hover { border-color: #60a5fa; background: #dbeafe; }
+.meta-calendar__field-comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-calendar__field-comment-btn--idle { border-color: #bfdbfe; background: #fff; color: #2563eb; }
 .meta-calendar__event-attachments { pointer-events: none; }
 .meta-calendar__event-attachments :deep(.meta-attachment-list__items) { gap: 4px; }
 .meta-calendar__event-attachments :deep(.meta-attachment-list__card) { border-color: #bfdbfe; background: #fff; }
@@ -554,7 +676,7 @@ function onCellKeydown(e: KeyboardEvent, cellIdx: number, cells: CalendarCell[])
 .meta-calendar__day-heading { font-size: 16px; font-weight: 600; color: #1f2937; }
 .meta-calendar__day-meta { font-size: 12px; color: #64748b; }
 .meta-calendar__day-list { flex: 1; display: flex; flex-direction: column; gap: 8px; min-height: 160px; }
-.meta-calendar__day-event { padding: 10px 12px; border: 1px solid #dbeafe; border-radius: 8px; background: #eff6ff; color: #1d4ed8; cursor: pointer; }
+.meta-calendar__day-event { padding: 10px 12px; border: 1px solid #dbeafe; border-radius: 8px; background: #eff6ff; color: #1d4ed8; cursor: pointer; display: flex; align-items: center; gap: 8px; }
 .meta-calendar__day-event--attachment { background: #f8fafc; color: #334155; }
 .meta-calendar__day-event-attachments :deep(.meta-attachment-list__card) { border-color: #bfdbfe; background: #fff; }
 .meta-calendar__empty-hint { color: #94a3b8; font-size: 13px; }

@@ -58,7 +58,7 @@
         :aria-label="cardTitle(row)"
         @click="emit('select-record', row.id)"
         @keydown="onCardKeydown($event, idx)"
-      >
+        >
         <div v-if="coverAttachment(row)" class="meta-gallery__cover">
           <img
             v-if="coverAttachment(row)?.thumbnailUrl || coverAttachment(row)?.url"
@@ -68,18 +68,44 @@
           />
           <div v-else class="meta-gallery__cover-fallback">{{ coverAttachment(row)?.filename }}</div>
         </div>
-        <div class="meta-gallery__card-title">{{ cardTitle(row) }}</div>
+        <div class="meta-gallery__card-header">
+          <div class="meta-gallery__card-title">{{ cardTitle(row) }}</div>
+          <button
+            v-if="canComment"
+            class="meta-gallery__comment-btn"
+            :class="rowCommentButtonClass(row.id)"
+            type="button"
+            :aria-label="`Open comments for ${cardTitle(row)}`"
+            @click.stop="emit('open-comments', row.id)"
+            @keydown="onRowCommentKeydown($event, row.id)"
+          >
+            <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(row.id)" />
+          </button>
+        </div>
         <div class="meta-gallery__card-body">
           <div v-for="field in displayFields" :key="field.id" class="meta-gallery__field">
-            <span class="meta-gallery__field-label">{{ field.name }}</span>
-            <div v-if="field.type === 'attachment'" class="meta-gallery__field-value meta-gallery__field-value--attachment">
-              <MetaAttachmentList
-                :attachments="attachmentItems(row, field)"
-                variant="compact"
-                empty-label="No attachments"
-              />
+            <div class="meta-gallery__field-copy">
+              <span class="meta-gallery__field-label">{{ field.name }}</span>
+              <div v-if="field.type === 'attachment'" class="meta-gallery__field-value meta-gallery__field-value--attachment">
+                <MetaAttachmentList
+                  :attachments="attachmentItems(row, field)"
+                  variant="compact"
+                  empty-label="No attachments"
+                />
+              </div>
+              <span v-else class="meta-gallery__field-value">{{ formatValue(row, field) }}</span>
             </div>
-            <span v-else class="meta-gallery__field-value">{{ formatValue(row, field) }}</span>
+            <button
+              v-if="canComment"
+              type="button"
+              class="meta-gallery__field-comment-btn"
+              :class="fieldCommentButtonClass(row.id, field.id)"
+              :aria-label="`Open comments for ${field.name} on ${cardTitle(row)}`"
+              @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: field.id })"
+              @keydown="onFieldCommentKeydown($event, row.id, field.id)"
+            >
+              <MetaCommentAffordance :state="fieldCommentAffordance(row.id, field.id)" />
+            </button>
           </div>
         </div>
       </div>
@@ -101,25 +127,37 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaGalleryViewConfig, MetaRecord } from '../types'
+import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaGalleryViewConfig, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { resolveGalleryViewConfig } from '../utils/view-config'
 import { formatFieldDisplay } from '../utils/field-display'
 import MetaAttachmentList from './MetaAttachmentList.vue'
+import MetaCommentActionChip from './MetaCommentActionChip.vue'
+import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import {
+  handleCommentAffordanceKeydown,
+  resolveCommentAffordanceStateClass,
+  resolveFieldCommentAffordance,
+  resolveRecordCommentAffordance,
+} from '../utils/comment-affordance'
 
 const props = defineProps<{
   rows: MetaRecord[]
   fields: MetaField[]
   loading: boolean
   canCreate?: boolean
+  canComment?: boolean
   currentPage: number
   totalPages: number
   viewConfig?: Record<string, unknown> | null
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
   attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
+  commentPresence?: Record<string, MultitableCommentPresenceSummary | undefined>
 }>()
 
 const emit = defineEmits<{
   (e: 'select-record', recordId: string): void
+  (e: 'open-comments', recordId: string): void
+  (e: 'open-field-comments', payload: { recordId: string; fieldId: string }): void
   (e: 'go-to-page', page: number): void
   (e: 'create-record', data: Record<string, unknown>): void
   (e: 'update-view-config', input: { config: Record<string, unknown> }): void
@@ -239,6 +277,30 @@ function attachmentItems(row: MetaRecord, field: MetaField): MetaAttachment[] {
   }))
 }
 
+function rowCommentAffordance(recordId: string) {
+  return resolveRecordCommentAffordance(props.commentPresence?.[recordId])
+}
+
+function fieldCommentAffordance(recordId: string, fieldId: string) {
+  return resolveFieldCommentAffordance(props.commentPresence?.[recordId], fieldId)
+}
+
+function rowCommentButtonClass(recordId: string): string {
+  return resolveCommentAffordanceStateClass('meta-gallery__comment-btn', rowCommentAffordance(recordId))
+}
+
+function fieldCommentButtonClass(recordId: string, fieldId: string): string {
+  return resolveCommentAffordanceStateClass('meta-gallery__field-comment-btn', fieldCommentAffordance(recordId, fieldId))
+}
+
+function onRowCommentKeydown(event: KeyboardEvent, recordId: string) {
+  handleCommentAffordanceKeydown(event, () => emit('open-comments', recordId))
+}
+
+function onFieldCommentKeydown(event: KeyboardEvent, recordId: string, fieldId: string) {
+  handleCommentAffordanceKeydown(event, () => emit('open-field-comments', { recordId, fieldId }))
+}
+
 function emitConfigUpdate(next: Partial<Required<MetaGalleryViewConfig>>) {
   const normalized = normalizeGalleryConfig({
     titleFieldId: galleryDraft.titleFieldId,
@@ -341,12 +403,22 @@ function getColumnsCount(): number {
 .meta-gallery__card--large .meta-gallery__cover { min-height: 176px; margin: -18px -20px 14px; }
 .meta-gallery__cover-image { width: 100%; height: 100%; object-fit: cover; display: block; }
 .meta-gallery__cover-fallback { padding: 24px; font-size: 12px; color: #64748b; text-align: center; }
-.meta-gallery__card-title { font-size: 14px; font-weight: 600; color: #333; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta-gallery__card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.meta-gallery__card-title { font-size: 14px; font-weight: 600; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta-gallery__comment-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 2px 8px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; flex-shrink: 0; }
+.meta-gallery__comment-btn:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
+.meta-gallery__comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-gallery__comment-btn--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-gallery__card-body { display: flex; flex-direction: column; gap: 4px; }
-.meta-gallery__field { display: flex; gap: 8px; font-size: 12px; }
+.meta-gallery__field { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; font-size: 12px; }
+.meta-gallery__field-copy { flex: 1; min-width: 0; display: flex; gap: 8px; }
 .meta-gallery__field-label { color: #999; min-width: 60px; flex-shrink: 0; }
 .meta-gallery__field-value { color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-gallery__field-value--attachment { flex: 1; min-width: 0; white-space: normal; }
+.meta-gallery__field-comment-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 24px; padding: 0 6px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; flex-shrink: 0; }
+.meta-gallery__field-comment-btn:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
+.meta-gallery__field-comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-gallery__field-comment-btn--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-gallery__empty { grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px; color: #999; }
 .meta-gallery__empty-icon { font-size: 36px; opacity: 0.5; margin-bottom: 8px; }
 .meta-gallery__empty-title { font-size: 15px; font-weight: 600; color: #666; margin-bottom: 4px; }

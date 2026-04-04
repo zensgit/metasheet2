@@ -8,7 +8,16 @@
         <button class="meta-record-drawer__nav-btn" :disabled="currentRecordIndex >= recordIds.length - 1" aria-label="Next record" @click="navigateNext">&rsaquo;</button>
       </div>
       <div class="meta-record-drawer__actions">
-        <button v-if="resolvedCanComment" class="meta-record-drawer__btn" title="Comments" @click="emit('toggle-comments')">&#x1F4AC;</button>
+        <button
+          v-if="resolvedCanComment"
+          class="meta-record-drawer__btn meta-record-drawer__btn--comment"
+          :class="drawerCommentButtonClass"
+          title="Comments"
+          type="button"
+          @click="emit('toggle-comments')"
+        >
+          <MetaCommentActionChip label="Comments" :state="drawerCommentAffordance" />
+        </button>
         <button v-if="canManageAutomation" class="meta-record-drawer__btn" title="Open workflow designer" @click="emit('open-automation')">&#x2699; Workflow</button>
         <button v-if="resolvedCanDelete" class="meta-record-drawer__btn meta-record-drawer__btn--danger" @click="emit('delete')">Delete</button>
         <button class="meta-record-drawer__close" aria-label="Close record drawer" @click="emit('close')">&times;</button>
@@ -16,7 +25,21 @@
     </div>
     <div v-if="record" class="meta-record-drawer__body">
       <div v-for="field in visibleFields" :key="field.id" class="meta-record-drawer__field">
-        <label class="meta-record-drawer__label" :for="`drawer_field_${field.id}`">{{ field.name }}</label>
+        <div class="meta-record-drawer__field-header">
+          <label class="meta-record-drawer__label" :for="`drawer_field_${field.id}`">{{ field.name }}</label>
+          <button
+            v-if="resolvedCanComment"
+            type="button"
+            class="meta-record-drawer__comment-anchor"
+            :class="recordFieldAnchorClass(field.id)"
+            :data-comment-field="field.id"
+            :aria-label="`Comment on ${field.name}`"
+            :title="`Comment on ${field.name}`"
+            @click="emit('comment-field', field)"
+          >
+            <MetaCommentAffordance :state="recordFieldAffordance(field.id)" />
+          </button>
+        </div>
         <div class="meta-record-drawer__value">
           <input
             v-if="canEditField(field.id) && field.type === 'string'"
@@ -106,12 +129,20 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MultitableCommentPresenceSummary,
   MetaFieldPermission,
   MetaField,
   MetaRecord,
   MetaRowActions,
 } from '../types'
 import MetaAttachmentList from './MetaAttachmentList.vue'
+import MetaCommentActionChip from './MetaCommentActionChip.vue'
+import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import {
+  resolveCommentAffordanceStateClass,
+  resolveFieldCommentAffordance,
+  resolveRecordCommentAffordance,
+} from '../utils/comment-affordance'
 import { attachmentAcceptAttr, resolveAttachmentFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../utils/field-config'
 import { linkActionLabel } from '../utils/link-fields'
 
@@ -125,6 +156,7 @@ const props = withDefaults(defineProps<{
   canManageAutomation?: boolean
   fieldPermissions?: Record<string, MetaFieldPermission> | null
   rowActions?: MetaRowActions | null
+  commentPresence?: MultitableCommentPresenceSummary | null
   linkSummariesByField?: Record<string, LinkedRecordSummary[]>
   attachmentSummariesByField?: Record<string, MetaAttachment[]>
   recordIds?: string[]
@@ -139,6 +171,7 @@ const emit = defineEmits<{
   (e: 'delete'): void
   (e: 'patch', fieldId: string, value: unknown): void
   (e: 'toggle-comments'): void
+  (e: 'comment-field', field: MetaField): void
   (e: 'open-automation'): void
   (e: 'open-link-picker', field: MetaField): void
   (e: 'navigate', recordId: string): void
@@ -162,9 +195,21 @@ const currentRecordIndex = computed(() => {
 const visibleFields = computed(() => props.fields.filter((field) => props.fieldPermissions?.[field.id]?.visible !== false))
 const resolvedCanComment = computed(() => props.rowActions?.canComment ?? props.canComment)
 const resolvedCanDelete = computed(() => props.rowActions?.canDelete ?? props.canDelete)
+const drawerCommentAffordance = computed(() => resolveRecordCommentAffordance(props.commentPresence))
+const drawerCommentButtonClass = computed(() =>
+  resolveCommentAffordanceStateClass('meta-record-drawer__btn--comment', drawerCommentAffordance.value),
+)
 
 function canEditField(fieldId: string): boolean {
   return props.canEdit && props.rowActions?.canEdit !== false && props.fieldPermissions?.[fieldId]?.readOnly !== true
+}
+
+function recordFieldAffordance(fieldId: string) {
+  return resolveFieldCommentAffordance(props.commentPresence, fieldId)
+}
+
+function recordFieldAnchorClass(fieldId: string): string {
+  return resolveCommentAffordanceStateClass('meta-record-drawer__comment-anchor', recordFieldAffordance(fieldId))
 }
 
 function navigatePrev() {
@@ -383,6 +428,9 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__title { font-size: 15px; font-weight: 600; margin: 0; }
 .meta-record-drawer__actions { display: flex; gap: 8px; align-items: center; }
 .meta-record-drawer__btn { padding: 4px 10px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; }
+.meta-record-drawer__btn--comment { border-radius: 999px; padding: 3px 8px; }
+.meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-record-drawer__btn--comment.meta-record-drawer__btn--comment--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-record-drawer__btn--danger { color: #f56c6c; border-color: #f56c6c; }
 .meta-record-drawer__close { border: none; background: none; font-size: 20px; cursor: pointer; color: #999; }
 .meta-record-drawer__nav { display: flex; align-items: center; gap: 4px; margin-right: auto; margin-left: 8px; }
@@ -392,7 +440,12 @@ function attachmentAllowsMultiple(field: MetaField): boolean {
 .meta-record-drawer__nav-pos { font-size: 11px; color: #999; min-width: 36px; text-align: center; }
 .meta-record-drawer__body { padding: 12px 16px; flex: 1; }
 .meta-record-drawer__field { margin-bottom: 14px; }
-.meta-record-drawer__label { display: block; font-size: 12px; color: #999; margin-bottom: 4px; }
+.meta-record-drawer__field-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.meta-record-drawer__label { display: block; font-size: 12px; color: #999; }
+.meta-record-drawer__comment-anchor { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 24px; padding: 0 6px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; }
+.meta-record-drawer__comment-anchor:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
+.meta-record-drawer__comment-anchor--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-record-drawer__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-record-drawer__input { width: 100%; padding: 4px 8px; border: 1px solid #ddd; border-radius: 3px; font-size: 13px; }
 .meta-record-drawer__check { cursor: pointer; }
 .meta-record-drawer__link-btn { padding: 4px 10px; border: 1px solid #409eff; border-radius: 3px; background: #ecf5ff; color: #409eff; cursor: pointer; font-size: 12px; }

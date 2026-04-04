@@ -71,7 +71,10 @@
           :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
           :upload-fn="uploadAttachmentFn"
           :delete-attachment-fn="deleteAttachmentFn"
+          :can-comment="effectiveRowActions.canComment"
+          :comment-presence="selectedRecordCommentPresence"
           @submit="onFormSubmit" @open-link-picker="openLinkPicker" @update:dirty="formDirty = $event"
+          @comment-field="onToggleFieldComments"
         />
         <MetaKanbanView
           v-else-if="activeViewType === 'kanban'"
@@ -80,7 +83,11 @@
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :can-create="caps.canCreateRecord.value" :can-edit="caps.canEditRecord.value"
+          :can-comment="effectiveRowActions.canComment"
+          :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @patch-cell="onPatchCell" @create-record="onKanbanCreateRecord"
+          @open-comments="onOpenRecordComments"
+          @open-field-comments="onOpenGridFieldComments"
           @update-view-config="onPersistActiveViewConfig"
         />
         <MetaGalleryView
@@ -90,7 +97,11 @@
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :can-create="caps.canCreateRecord.value"
           :current-page="grid.currentPage.value" :total-pages="grid.totalPages.value"
+          :can-comment="effectiveRowActions.canComment"
+          :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @go-to-page="grid.goToPage" @create-record="onKanbanCreateRecord"
+          @open-comments="onOpenRecordComments"
+          @open-field-comments="onOpenGridFieldComments"
           @update-view-config="onPersistActiveViewConfig"
         />
         <MetaCalendarView
@@ -99,7 +110,11 @@
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :can-create="caps.canCreateRecord.value"
+          :can-comment="effectiveRowActions.canComment"
+          :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
+          @open-comments="onOpenRecordComments"
+          @open-field-comments="onOpenGridFieldComments"
           @update-view-config="onPersistActiveViewConfig"
         />
         <MetaTimelineView
@@ -108,7 +123,11 @@
           :view-config="workbench.activeView.value?.config"
           :link-summaries="grid.linkSummaries.value" :attachment-summaries="grid.attachmentSummaries.value"
           :can-create="caps.canCreateRecord.value" :can-edit="caps.canEditRecord.value"
+          :can-comment="effectiveRowActions.canComment"
+          :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @create-record="onKanbanCreateRecord"
+          @open-comments="onOpenRecordComments"
+          @open-field-comments="onOpenGridFieldComments"
           @patch-dates="onTimelinePatchDates"
           @update-view-config="onPersistActiveViewConfig"
         />
@@ -124,9 +143,13 @@
           :search-text="searchText" :row-density="rowDensity"
           :upload-fn="uploadAttachmentFn"
           :delete-attachment-fn="deleteAttachmentFn"
+          :can-comment="effectiveRowActions.canComment"
+          :comment-presence="commentPresenceState.presenceByRecordId.value"
           @select-record="onSelectRecord" @toggle-sort="onToggleSort" @patch-cell="onPatchCell"
           @go-to-page="grid.goToPage" @open-link-picker="onGridLinkPicker" @resize-column="grid.setColumnWidth"
           @bulk-delete="onBulkDelete" @reorder-field="onReorderField"
+          @open-comments="onOpenRecordComments"
+          @open-field-comments="onOpenGridFieldComments"
         />
       </div>
       <MetaRecordDrawer
@@ -135,13 +158,14 @@
         :can-manage-automation="caps.canManageAutomation.value"
         :field-permissions="effectiveFieldPermissions"
         :row-actions="effectiveRowActions"
+        :comment-presence="selectedRecordCommentPresence"
         :link-summaries-by-field="selectedRecordLinkSummaries"
         :attachment-summaries-by-field="selectedRecordAttachmentSummaries"
         :record-ids="drawerRecordIds"
         :upload-fn="uploadAttachmentFn"
         :delete-attachment-fn="deleteAttachmentFn"
         @close="onCloseDrawer" @delete="onDeleteRecord" @patch="onDrawerPatch"
-        @toggle-comments="onToggleComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker"
+        @toggle-comments="onToggleComments" @comment-field="onToggleFieldComments" @open-automation="openWorkflowDesigner(selectedRecordId ?? undefined)" @open-link-picker="openLinkPicker"
         @navigate="onDrawerNavigate"
       />
       <MetaCommentsDrawer
@@ -149,9 +173,12 @@
         :loading="commentsState.loading.value" :can-comment="effectiveRowActions.canComment" :can-resolve="effectiveRowActions.canComment"
         :highlighted-comment-id="highlightedCommentId"
         :unread-count="commentInboxState.unreadCount.value"
+        :target-field-id="selectedCommentFieldId"
+        :scope-label="commentsScopeLabel"
+        :reply-to-comment-id="selectedReplyCommentId"
         :draft="commentDraft" :submitting="commentsState.submitting.value" :error="commentsState.error.value"
         :resolving-ids="commentsState.resolvingIds.value"
-        @close="onCloseComments" @submit="onSubmitComment" @resolve="onResolveComment" @update:draft="commentDraft = $event"
+        @close="onCloseComments" @submit="onSubmitComment" @resolve="onResolveComment" @reply="onReplyToComment" @cancel-reply="onCancelCommentReply" @update:draft="commentDraft = $event"
       />
     </div>
     <div v-if="showShortcuts" class="mt-workbench__shortcuts-overlay" @click.self="showShortcuts = false">
@@ -227,6 +254,7 @@ import { useMultitableWorkbench } from '../composables/useMultitableWorkbench'
 import { useMultitableGrid } from '../composables/useMultitableGrid'
 import { useMultitableCapabilities } from '../composables/useMultitableCapabilities'
 import { useMultitableComments } from '../composables/useMultitableComments'
+import { useMultitableCommentPresence } from '../composables/useMultitableCommentPresence'
 import { useMultitableCommentInbox } from '../composables/useMultitableCommentInbox'
 import { useMultitableCommentInboxSummary } from '../composables/useMultitableCommentInboxSummary'
 import { useMultitableCommentRealtime } from '../composables/useMultitableCommentRealtime'
@@ -272,11 +300,14 @@ const capabilitySource = computed(() => workbench.capabilities.value ?? role.val
 const caps = useMultitableCapabilities(capabilitySource)
 const grid = useMultitableGrid({ sheetId: workbench.activeSheetId, viewId: workbench.activeViewId })
 const commentsState = useMultitableComments()
+const commentPresenceState = useMultitableCommentPresence()
 const commentInboxState = useMultitableCommentInbox()
 const mentionInboxState = useMultitableCommentInboxSummary()
 
 const selectedRecordId = ref<string | null>(null)
 const showComments = ref(false)
+const selectedCommentFieldId = ref<string | null>(null)
+const selectedReplyCommentId = ref<string | null>(null)
 const showMentionPopover = ref(false)
 const linkPickerVisible = ref(false)
 const linkPickerField = ref<MetaField | null>(null)
@@ -435,6 +466,16 @@ const selectedRecordAttachmentSummaries = computed<Record<string, MetaAttachment
   if (deepLinkedRecord.value?.id === recordId) return deepLinkedRecordAttachmentSummaries.value
   return {}
 })
+const visibleCommentPresenceRecordIds = computed(() => {
+  const nextIds = grid.rows.value.map((row) => row.id)
+  if (selectedRecordId.value && !nextIds.includes(selectedRecordId.value)) {
+    nextIds.push(selectedRecordId.value)
+  }
+  return nextIds
+})
+const selectedRecordCommentPresence = computed(() => (
+  selectedRecordId.value ? commentPresenceState.presenceByRecordId.value[selectedRecordId.value] ?? null : null
+))
 const selectedRecordCommentsScope = computed<MetaCommentsScope | null>(() => {
   if (!selectedRecordId.value || !workbench.activeSheetId.value) return null
   if (deepLinkedRecord.value?.id === selectedRecordId.value && deepLinkedRecordCommentsScope.value) {
@@ -451,6 +492,12 @@ const selectedRecordCommentsScope = computed<MetaCommentsScope | null>(() => {
     containerId: workbench.activeSheetId.value,
   }
 })
+const selectedCommentField = computed<MetaField | null>(() => {
+  const fieldId = selectedCommentFieldId.value ?? selectedRecordCommentsScope.value?.targetFieldId ?? null
+  if (!fieldId) return null
+  return grid.fields.value.find((field) => field.id === fieldId) ?? null
+})
+const commentsScopeLabel = computed(() => selectedCommentField.value?.name ?? null)
 const conflictFieldName = computed(() => {
   const fieldId = grid.conflict.value?.fieldId
   if (!fieldId) return 'cell'
@@ -731,6 +778,10 @@ async function selectRecord(recordId: string, opts?: { openComments?: boolean; h
   if (recordId !== selectedRecordId.value && !confirmDiscardRecordChanges()) return
   selectedRecordId.value = recordId
   commentDraft.value = ''
+  if (!opts?.openComments) {
+    selectedCommentFieldId.value = null
+    selectedReplyCommentId.value = null
+  }
   showComments.value = opts?.openComments === true
   await loadCommentsForRecord(recordId, {
     highlightCommentId: opts?.openComments ? (opts.highlightCommentId ?? null) : null,
@@ -749,6 +800,10 @@ function onMentionChipClick() {
 async function onMentionPopoverSelect(payload: { rowId: string; fieldId: string | null; mentionedFieldIds: string[] }) {
   showMentionPopover.value = false
   await selectRecord(payload.rowId, { openComments: true })
+  if (payload.fieldId) {
+    selectedCommentFieldId.value = payload.fieldId
+    selectedReplyCommentId.value = null
+  }
   if (workbench.activeSheetId.value) {
     await mentionInboxState.markRead({ spreadsheetId: workbench.activeSheetId.value })
   }
@@ -899,8 +954,15 @@ async function onFormSubmit(data: Record<string, unknown>) {
 async function onSubmitComment(payload: { content: string; mentions: string[] }) {
   if (!selectedRecordCommentsScope.value) return
   try {
-    await commentsState.addComment({ ...selectedRecordCommentsScope.value, content: payload.content, mentions: payload.mentions })
+    await commentsState.addComment({
+      ...selectedRecordCommentsScope.value,
+      content: payload.content,
+      mentions: payload.mentions,
+      targetFieldId: selectedCommentFieldId.value ?? selectedRecordCommentsScope.value.targetFieldId ?? undefined,
+      parentId: selectedReplyCommentId.value ?? undefined,
+    })
     commentDraft.value = ''
+    selectedReplyCommentId.value = null
     showSuccess('Comment added')
   } catch (e: any) {
     showError(commentsState.error.value ?? e.message ?? 'Failed to add comment')
@@ -1103,6 +1165,8 @@ function onCloseDrawer() {
   if (!confirmDiscardRecordChanges()) return
   selectedRecordId.value = null
   showComments.value = false
+  selectedCommentFieldId.value = null
+  selectedReplyCommentId.value = null
   commentDraft.value = ''
   highlightedCommentId.value = null
 }
@@ -1111,17 +1175,57 @@ function onToggleComments() {
   if (showComments.value) {
     if (!confirmDiscardCommentDraft()) return
     showComments.value = false
+    selectedCommentFieldId.value = null
+    selectedReplyCommentId.value = null
     commentDraft.value = ''
     highlightedCommentId.value = null
     return
   }
   showComments.value = true
+  selectedCommentFieldId.value = null
+  selectedReplyCommentId.value = null
   void commentInboxState.refreshUnreadCount().catch(() => undefined)
+}
+
+function onToggleFieldComments(field: MetaField) {
+  if (!selectedRecordId.value) return
+  selectedCommentFieldId.value = field.id
+  selectedReplyCommentId.value = null
+  showComments.value = true
+  commentDraft.value = ''
+  void loadCommentsForRecord(selectedRecordId.value, {
+    highlightCommentId: highlightedCommentId.value,
+  })
+}
+
+function onOpenRecordComments(recordId: string) {
+  void selectRecord(recordId, { openComments: true }).then(() => {
+    selectedCommentFieldId.value = null
+    selectedReplyCommentId.value = null
+  })
+}
+
+function onOpenGridFieldComments(payload: { recordId: string; fieldId: string }) {
+  void selectRecord(payload.recordId, { openComments: true }).then(() => {
+    selectedCommentFieldId.value = payload.fieldId
+    selectedReplyCommentId.value = null
+  })
+}
+
+function onReplyToComment(commentId: string) {
+  selectedReplyCommentId.value = commentId
+  showComments.value = true
+}
+
+function onCancelCommentReply() {
+  selectedReplyCommentId.value = null
 }
 
 function onCloseComments() {
   if (!confirmDiscardCommentDraft()) return
   showComments.value = false
+  selectedCommentFieldId.value = null
+  selectedReplyCommentId.value = null
   commentDraft.value = ''
   highlightedCommentId.value = null
 }
@@ -1151,6 +1255,8 @@ function discardWorkbenchDraftsForExternalContextChange() {
   formErrorMessage.value = null
   formFieldErrors.value = {}
   showComments.value = false
+  selectedCommentFieldId.value = null
+  selectedReplyCommentId.value = null
   highlightedCommentId.value = null
   selectedRecordId.value = null
   deepLinkedRecord.value = null
@@ -1659,6 +1765,21 @@ const selectedRecordResolved = computed<MetaRecord | null>(() => {
   }
   return null
 })
+
+watch(
+  [() => workbench.activeSheetId.value, visibleCommentPresenceRecordIds, () => effectiveRowActions.value.canComment],
+  ([sheetId, recordIds, canComment]) => {
+    if (!sheetId || !canComment || !recordIds.length) {
+      commentPresenceState.clearPresence()
+      return
+    }
+    void commentPresenceState.loadPresence({
+      containerId: sheetId,
+      targetIds: recordIds,
+    })
+  },
+  { immediate: true },
+)
 
 // --- Standalone form bootstrap ---
 async function loadStandaloneForm() {

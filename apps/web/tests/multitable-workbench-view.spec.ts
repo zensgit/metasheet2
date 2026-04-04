@@ -109,8 +109,19 @@ vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({
   useMultitableCommentRealtime: vi.fn(),
 }))
 
+vi.mock('../src/multitable/composables/useMultitableCommentPresence', () => ({
+  useMultitableCommentPresence: () => ({
+    presenceByRecordId: ref({}),
+    loading: ref(false),
+    error: ref<string | null>(null),
+    loadPresence: vi.fn().mockResolvedValue(undefined),
+    clearPresence: vi.fn(),
+  }),
+}))
+
 vi.mock('../src/multitable/realtime/comments-realtime', () => ({
   subscribeToMultitableCommentSheetRealtime: (...args: unknown[]) => subscribeToMultitableCommentSheetRealtimeMock(...args),
+  subscribeToMultitableCommentsRealtime: vi.fn(() => vi.fn()),
 }))
 
 vi.mock('../src/multitable/import/bulk-import', () => ({
@@ -170,7 +181,7 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
 vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
   default: defineComponent({
     name: 'MetaGridTable',
-    emits: ['select-record'],
+    emits: ['select-record', 'open-comments', 'open-field-comments'],
     render() {
       return h('div', [
         h(
@@ -188,6 +199,22 @@ vi.mock('../src/multitable/components/MetaGridTable.vue', () => ({
             onClick: () => this.$emit('select-record', 'rec_2'),
           },
           'select-record-2',
+        ),
+        h(
+          'button',
+          {
+            'data-open-comments': 'rec_1',
+            onClick: () => this.$emit('open-comments', 'rec_1'),
+          },
+          'open-comments',
+        ),
+        h(
+          'button',
+          {
+            'data-open-field-comments': 'rec_1/fld_title',
+            onClick: () => this.$emit('open-field-comments', { recordId: 'rec_1', fieldId: 'fld_title' }),
+          },
+          'open-field-comments',
         ),
       ])
     },
@@ -226,7 +253,7 @@ vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
       visible: { type: Boolean, default: false },
       record: { type: Object, default: null },
     },
-    emits: ['close', 'toggle-comments', 'navigate'],
+    emits: ['close', 'toggle-comments', 'comment-field', 'navigate'],
     render() {
       if (!this.$props.visible) return null
       const recordId = (this.$props.record as { id?: string } | null)?.id ?? ''
@@ -250,6 +277,14 @@ vi.mock('../src/multitable/components/MetaRecordDrawer.vue', () => ({
         h(
           'button',
           {
+            'data-comment-field': 'fld_title',
+            onClick: () => this.$emit('comment-field', { id: 'fld_title', name: 'Title', type: 'string' }),
+          },
+          'comment-field',
+        ),
+        h(
+          'button',
+          {
             'data-navigate-record': 'rec_2',
             onClick: () => this.$emit('navigate', 'rec_2'),
           },
@@ -265,7 +300,7 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
     props: {
       visible: { type: Boolean, default: false },
     },
-    emits: ['close', 'submit', 'update:draft'],
+    emits: ['close', 'submit', 'reply', 'cancel-reply', 'update:draft'],
     render() {
       if (!this.$props.visible) return null
       return h('div', [
@@ -284,6 +319,22 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
             onClick: () => this.$emit('submit', { content: 'Need review', mentions: [] }),
           },
           'submit-comment',
+        ),
+        h(
+          'button',
+          {
+            'data-reply-comment': 'comment_parent_1',
+            onClick: () => this.$emit('reply', 'comment_parent_1'),
+          },
+          'reply-comment',
+        ),
+        h(
+          'button',
+          {
+            'data-cancel-reply': 'true',
+            onClick: () => this.$emit('cancel-reply'),
+          },
+          'cancel-reply',
         ),
         h(
           'button',
@@ -1115,6 +1166,34 @@ describe('MultitableWorkbench view wiring', () => {
       targetFieldId: 'fld_notes',
       content: 'Need review',
       mentions: [],
+    })
+  })
+
+  it('submits field-scoped replies with targetFieldId and parentId', async () => {
+    gridMock.fields.value = [{ id: 'fld_title', name: 'Title', type: 'string' }]
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-field-comments="rec_1/fld_title"]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-reply-comment="comment_parent_1"]')!.click()
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-submit-comment="true"]')!.click()
+    await flushUi()
+
+    expect(addCommentSpy).toHaveBeenCalledWith({
+      targetType: 'meta_record',
+      targetId: 'rec_1',
+      baseId: 'base_ops',
+      sheetId: 'sheet_orders',
+      viewId: 'view_grid',
+      recordId: 'rec_1',
+      containerType: 'meta_sheet',
+      containerId: 'sheet_orders',
+      targetFieldId: 'fld_title',
+      content: 'Need review',
+      mentions: [],
+      parentId: 'comment_parent_1',
     })
   })
 
