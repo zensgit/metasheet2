@@ -11,7 +11,19 @@
           :key="field.id"
           class="meta-form-view__field"
         >
-          <label class="meta-form-view__label" :for="`field_${field.id}`">{{ field.name }}</label>
+          <div class="meta-form-view__label-row">
+            <label class="meta-form-view__label" :for="`field_${field.id}`">{{ field.name }}</label>
+            <button
+              v-if="record?.id && canComment"
+              type="button"
+              class="meta-form-view__comment-anchor"
+              :class="formFieldAnchorClass(field.id)"
+              :aria-label="`Comments for ${field.name}`"
+              @click="emit('comment-field', field)"
+            >
+              <MetaCommentAffordance :state="formFieldAffordance(field.id)" />
+            </button>
+          </div>
           <input
             v-if="field.type === 'string'"
             :id="`field_${field.id}`"
@@ -129,12 +141,18 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MultitableCommentPresenceSummary,
   MetaFieldPermission,
   MetaField,
   MetaRecord,
   MetaRowActions,
 } from '../types'
 import MetaAttachmentList from './MetaAttachmentList.vue'
+import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import {
+  resolveCommentAffordanceStateClass,
+  resolveFieldCommentAffordance,
+} from '../utils/comment-affordance'
 import { attachmentAcceptAttr, resolveAttachmentFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../utils/field-config'
 import { linkActionLabel } from '../utils/link-fields'
 
@@ -154,12 +172,15 @@ const props = defineProps<{
   attachmentSummariesByField?: Record<string, MetaAttachment[]> | null
   uploadFn?: MetaAttachmentUploadFn
   deleteAttachmentFn?: MetaAttachmentDeleteFn
+  canComment?: boolean
+  commentPresence?: MultitableCommentPresenceSummary | null
 }>()
 
 const emit = defineEmits<{
   (e: 'submit', data: Record<string, unknown>): void
   (e: 'open-link-picker', field: MetaField): void
   (e: 'update:dirty', dirty: boolean): void
+  (e: 'comment-field', field: MetaField): void
 }>()
 
 const formData = reactive<Record<string, unknown>>({})
@@ -184,6 +205,14 @@ const hasUnsavedChanges = computed(() => {
 
 const hasPendingAttachmentActions = computed(() => Object.keys(attachmentActivity.value).length > 0)
 const formDirty = computed(() => hasUnsavedChanges.value || hasPendingAttachmentActions.value)
+
+function formFieldAffordance(fieldId: string) {
+  return resolveFieldCommentAffordance(props.commentPresence, fieldId)
+}
+
+function formFieldAnchorClass(fieldId: string): string {
+  return resolveCommentAffordanceStateClass('meta-form-view__comment-anchor', formFieldAffordance(fieldId))
+}
 
 function syncFromRecord(record: MetaRecord | null | undefined) {
   Object.keys(formData).forEach((k) => delete formData[k])
@@ -449,7 +478,12 @@ function isSameFormValue(left: unknown, right: unknown): boolean {
 .meta-form-view__error { padding: 8px 12px; background: #fef0f0; color: #f56c6c; border-radius: 4px; font-size: 12px; margin-bottom: 12px; }
 .meta-form-view__form { max-width: 560px; }
 .meta-form-view__field { margin-bottom: 16px; }
-.meta-form-view__label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 4px; color: #333; }
+.meta-form-view__label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.meta-form-view__label { display: block; font-size: 13px; font-weight: 500; color: #333; }
+.meta-form-view__comment-anchor { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 24px; padding: 0 6px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; }
+.meta-form-view__comment-anchor:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
+.meta-form-view__comment-anchor--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-form-view__comment-anchor--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-form-view__input { width: 100%; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
 .meta-form-view__input--error { border-color: #f56c6c; background: #fff7f7; }
 .meta-form-view__input:disabled { background: #f5f7fa; color: #999; cursor: not-allowed; }

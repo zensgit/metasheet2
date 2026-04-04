@@ -74,13 +74,38 @@
           @keydown.enter="onSelect(item.record.id)"
         >
           <div class="meta-timeline__label-col" :class="{ 'meta-timeline__label-col--attachment': isAttachmentLabel }">
-            <MetaAttachmentList
-              v-if="isAttachmentLabel && displayField"
-              :attachments="attachmentItems(item.record, displayField)"
-              variant="compact"
-              empty-label="No attachments"
-            />
-            <template v-else>{{ displayLabel(item.record) }}</template>
+            <div class="meta-timeline__label-copy">
+              <MetaAttachmentList
+                v-if="isAttachmentLabel && displayField"
+                :attachments="attachmentItems(item.record, displayField)"
+                variant="compact"
+                empty-label="No attachments"
+              />
+              <template v-else>{{ displayLabel(item.record) }}</template>
+            </div>
+            <div v-if="canComment" class="meta-timeline__label-actions">
+              <button
+                type="button"
+                class="meta-timeline__comment-btn"
+                :class="rowCommentButtonClass(item.record.id)"
+                :aria-label="`Open comments for ${displayLabel(item.record)}`"
+                @click.stop="emit('open-comments', item.record.id)"
+                @keydown="onRowCommentKeydown($event, item.record.id)"
+              >
+                <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(item.record.id)" />
+              </button>
+              <button
+                v-if="displayField"
+                type="button"
+                class="meta-timeline__field-comment-btn"
+                :class="fieldCommentButtonClass(item.record.id)"
+                :aria-label="`Open comments for ${displayField.name}`"
+                @click.stop="emit('open-field-comments', { recordId: item.record.id, fieldId: displayField.id })"
+                @keydown="onFieldCommentKeydown($event, item.record.id, displayField.id)"
+              >
+                <MetaCommentAffordance :state="fieldCommentAffordance(item.record.id)" />
+              </button>
+            </div>
           </div>
           <div class="meta-timeline__bar-area" @dragover.prevent="onDragOver(item.record.id)" @drop="onDrop(item, $event)">
             <div
@@ -108,13 +133,38 @@
             @click="onSelect(row.id)"
             @keydown.enter="onSelect(row.id)"
           >
-            <MetaAttachmentList
-              v-if="isAttachmentLabel && displayField"
-              :attachments="attachmentItems(row, displayField)"
-              variant="compact"
-              empty-label="No attachments"
-            />
-            <template v-else>{{ displayLabel(row) }}</template>
+            <div class="meta-timeline__label-copy">
+              <MetaAttachmentList
+                v-if="isAttachmentLabel && displayField"
+                :attachments="attachmentItems(row, displayField)"
+                variant="compact"
+                empty-label="No attachments"
+              />
+              <template v-else>{{ displayLabel(row) }}</template>
+            </div>
+            <div v-if="canComment" class="meta-timeline__label-actions">
+              <button
+                type="button"
+                class="meta-timeline__comment-btn"
+                :class="rowCommentButtonClass(row.id)"
+                :aria-label="`Open comments for ${displayLabel(row)}`"
+                @click.stop="emit('open-comments', row.id)"
+                @keydown="onRowCommentKeydown($event, row.id)"
+              >
+                <MetaCommentActionChip label="Comments" :state="rowCommentAffordance(row.id)" />
+              </button>
+              <button
+                v-if="displayField"
+                type="button"
+                class="meta-timeline__field-comment-btn"
+                :class="fieldCommentButtonClass(row.id)"
+                :aria-label="`Open comments for ${displayField.name}`"
+                @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: displayField.id })"
+                @keydown="onFieldCommentKeydown($event, row.id, displayField.id)"
+              >
+                <MetaCommentAffordance :state="fieldCommentAffordance(row.id)" />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -129,10 +179,18 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaRecord, MetaTimelineViewConfig } from '../types'
+import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaRecord, MetaTimelineViewConfig, MultitableCommentPresenceSummary } from '../types'
 import { resolveTimelineViewConfig } from '../utils/view-config'
 import { formatFieldDisplay } from '../utils/field-display'
 import MetaAttachmentList from './MetaAttachmentList.vue'
+import MetaCommentActionChip from './MetaCommentActionChip.vue'
+import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import {
+  handleCommentAffordanceKeydown,
+  resolveCommentAffordanceStateClass,
+  resolveFieldCommentAffordance,
+  resolveRecordCommentAffordance,
+} from '../utils/comment-affordance'
 
 const props = defineProps<{
   rows: MetaRecord[]
@@ -140,13 +198,17 @@ const props = defineProps<{
   loading: boolean
   canCreate?: boolean
   canEdit?: boolean
+  canComment?: boolean
   viewConfig?: Record<string, unknown> | null
   linkSummaries?: Record<string, Record<string, LinkedRecordSummary[]>>
   attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
+  commentPresence?: Record<string, MultitableCommentPresenceSummary | undefined>
 }>()
 
 const emit = defineEmits<{
   (e: 'select-record', recordId: string): void
+  (e: 'open-comments', recordId: string): void
+  (e: 'open-field-comments', payload: { recordId: string; fieldId: string }): void
   (e: 'create-record', data: Record<string, unknown>): void
   (e: 'update-view-config', input: { config: Record<string, unknown> }): void
   (e: 'patch-dates', payload: {
@@ -231,6 +293,31 @@ const labelFieldHint = computed(() => {
   }
   return 'Timeline labels use this field across rows and unscheduled items.'
 })
+
+function rowCommentAffordance(recordId: string) {
+  return resolveRecordCommentAffordance(props.commentPresence?.[recordId])
+}
+
+function fieldCommentAffordance(recordId: string) {
+  if (!displayField.value) return resolveFieldCommentAffordance(null, '')
+  return resolveFieldCommentAffordance(props.commentPresence?.[recordId], displayField.value.id)
+}
+
+function rowCommentButtonClass(recordId: string): string {
+  return resolveCommentAffordanceStateClass('meta-timeline__comment-btn', rowCommentAffordance(recordId))
+}
+
+function fieldCommentButtonClass(recordId: string): string {
+  return resolveCommentAffordanceStateClass('meta-timeline__field-comment-btn', fieldCommentAffordance(recordId))
+}
+
+function onRowCommentKeydown(event: KeyboardEvent, recordId: string) {
+  handleCommentAffordanceKeydown(event, () => emit('open-comments', recordId))
+}
+
+function onFieldCommentKeydown(event: KeyboardEvent, recordId: string, fieldId: string) {
+  handleCommentAffordanceKeydown(event, () => emit('open-field-comments', { recordId, fieldId }))
+}
 
 function displayLabel(record: MetaRecord): string {
   if (!displayField.value) return record.id
@@ -464,8 +551,18 @@ function onDragEnd() {
 .meta-timeline__placeholder { text-align: center; padding: 32px; color: #999; font-size: 13px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
 .meta-timeline__placeholder-action { padding: 6px 12px; border: 1px solid #c7ddff; border-radius: 6px; background: #ecf5ff; color: #2563eb; font-size: 12px; cursor: pointer; }
 .meta-timeline__header { display: flex; align-items: flex-end; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; height: 40px; }
-.meta-timeline__label-col { width: 180px; min-width: 180px; font-size: 12px; font-weight: 600; color: #666; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; flex-direction: column; }
+.meta-timeline__label-col { width: 180px; min-width: 180px; font-size: 12px; font-weight: 600; color: #666; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .meta-timeline__label-col--attachment { white-space: normal; overflow: visible; text-overflow: initial; }
+.meta-timeline__label-copy { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.meta-timeline__label-actions { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.meta-timeline__comment-btn { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 2px 8px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; }
+.meta-timeline__comment-btn:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
+.meta-timeline__comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-timeline__comment-btn--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
+.meta-timeline__field-comment-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 22px; padding: 0 5px; border: 1px solid #d8e1ee; border-radius: 999px; background: #fff; cursor: pointer; color: #64748b; }
+.meta-timeline__field-comment-btn:hover { border-color: #93c5fd; background: #eff6ff; color: #2563eb; }
+.meta-timeline__field-comment-btn--active { border-color: #f59e0b; background: #fff7ed; color: #b45309; }
+.meta-timeline__field-comment-btn--idle { border-color: #d8e1ee; background: #fff; color: #64748b; }
 .meta-timeline__label-col--attachment :deep(.meta-attachment-list__items) { gap: 4px; }
 .meta-timeline__label-col--attachment :deep(.meta-attachment-list__card) { border-color: #bfdbfe; background: #fff; }
 .meta-timeline__header-meta { font-size: 10px; font-weight: 400; color: #94a3b8; }

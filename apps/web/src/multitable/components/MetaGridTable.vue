@@ -48,7 +48,20 @@
                 <td v-if="enableMultiSelect" class="meta-grid__check-col" @click.stop>
                   <input type="checkbox" :checked="selectedIds.has(row.id)" @change="toggleSelectRow(row.id)" />
                 </td>
-                <td class="meta-grid__row-num">{{ startIndex + flatIndex(group, ri) + 1 }}</td>
+                <td class="meta-grid__row-num">
+                  <span>{{ startIndex + flatIndex(group, ri) + 1 }}</span>
+                  <button
+                    v-if="canComment"
+                    type="button"
+                    class="meta-grid__comment-action"
+                    :class="rowCommentActionClass(row.id)"
+                    :aria-label="`Comments for row ${startIndex + flatIndex(group, ri) + 1}`"
+                    @click.stop="emit('open-comments', row.id)"
+                    @keydown="onRowCommentKeydown($event, row.id)"
+                  >
+                    <MetaCommentAffordance :state="rowCommentAffordance(row.id)" />
+                  </button>
+                </td>
                 <td
                   v-for="(field, ci) in visibleFields"
                   :key="field.id"
@@ -78,6 +91,17 @@
                     :link-summaries="props.linkSummaries?.[row.id]?.[field.id]"
                     :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                   />
+                  <button
+                    v-if="canComment && focusRow === flatIndex(group, ri) && focusCol === ci"
+                    type="button"
+                    class="meta-grid__field-comment-action"
+                    :class="fieldCommentActionClass(row.id, field.id)"
+                    :aria-label="`Comments for ${field.name}`"
+                    @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: field.id })"
+                    @keydown="onFieldCommentKeydown($event, row.id, field.id)"
+                  >
+                    <MetaCommentAffordance :state="fieldCommentAffordance(row.id, field.id)" />
+                  </button>
                 </td>
               </tr>
             </template>
@@ -105,6 +129,17 @@
               <td class="meta-grid__row-num">
                 <button class="meta-grid__expand-btn" :class="{ 'meta-grid__expand-btn--open': expandedRowIds.has(row.id) }" :aria-label="expandedRowIds.has(row.id) ? 'Collapse row' : 'Expand row'" @click.stop="toggleRowExpand(row.id)">&#x25B6;</button>
                 <span>{{ startIndex + ri + 1 }}</span>
+                <button
+                  v-if="canComment"
+                  type="button"
+                  class="meta-grid__comment-action"
+                  :class="rowCommentActionClass(row.id)"
+                  :aria-label="`Comments for row ${startIndex + ri + 1}`"
+                  @click.stop="emit('open-comments', row.id)"
+                  @keydown="onRowCommentKeydown($event, row.id)"
+                >
+                  <MetaCommentAffordance :state="rowCommentAffordance(row.id)" />
+                </button>
               </td>
               <td
                 v-for="(field, ci) in visibleFields"
@@ -137,6 +172,17 @@
                   :link-summaries="props.linkSummaries?.[row.id]?.[field.id]"
                   :attachment-summaries="props.attachmentSummaries?.[row.id]?.[field.id]"
                 />
+                <button
+                  v-if="canComment && focusRow === ri && focusCol === ci"
+                  type="button"
+                  class="meta-grid__field-comment-action"
+                  :class="fieldCommentActionClass(row.id, field.id)"
+                  :aria-label="`Comments for ${field.name}`"
+                  @click.stop="emit('open-field-comments', { recordId: row.id, fieldId: field.id })"
+                  @keydown="onFieldCommentKeydown($event, row.id, field.id)"
+                >
+                  <MetaCommentAffordance :state="fieldCommentAffordance(row.id, field.id)" />
+                </button>
               </td>
             </tr>
             <tr v-if="expandedRowIds.has(row.id)" class="meta-grid__expand-row">
@@ -197,12 +243,20 @@ import type {
   MetaAttachmentUploadFn,
   MetaField,
   MetaRecord,
+  MultitableCommentPresenceSummary,
   RowDensity,
 } from '../types'
 import type { SortRule } from '../composables/useMultitableGrid'
 import MetaCellRenderer from './cells/MetaCellRenderer.vue'
 import MetaCellEditor from './cells/MetaCellEditor.vue'
 import MetaFieldHeader from './MetaFieldHeader.vue'
+import MetaCommentAffordance from './MetaCommentAffordance.vue'
+import {
+  handleCommentAffordanceKeydown,
+  resolveCommentAffordanceStateClass,
+  resolveFieldCommentAffordance,
+  resolveRecordCommentAffordance,
+} from '../utils/comment-affordance'
 
 const EDITABLE = new Set(['string', 'number', 'boolean', 'date', 'select', 'link', 'attachment'])
 
@@ -229,10 +283,14 @@ const props = defineProps<{
   rowDensity?: RowDensity
   uploadFn?: MetaAttachmentUploadFn
   deleteAttachmentFn?: MetaAttachmentDeleteFn
+  canComment?: boolean
+  commentPresence?: Record<string, MultitableCommentPresenceSummary | undefined>
 }>()
 
 const emit = defineEmits<{
   (e: 'select-record', recordId: string): void
+  (e: 'open-comments', recordId: string): void
+  (e: 'open-field-comments', payload: { recordId: string; fieldId: string }): void
   (e: 'toggle-sort', fieldId: string): void
   (e: 'patch-cell', recordId: string, fieldId: string, value: unknown, version: number): void
   (e: 'go-to-page', page: number): void
@@ -343,6 +401,30 @@ function cellStyle(fid: string) {
   return w ? { width: `${w}px`, minWidth: `${w}px`, maxWidth: `${w}px` } : undefined
 }
 
+function rowCommentAffordance(recordId: string) {
+  return resolveRecordCommentAffordance(props.commentPresence?.[recordId])
+}
+
+function fieldCommentAffordance(recordId: string, fieldId: string) {
+  return resolveFieldCommentAffordance(props.commentPresence?.[recordId], fieldId)
+}
+
+function rowCommentActionClass(recordId: string): string {
+  return resolveCommentAffordanceStateClass('meta-grid__comment-action', rowCommentAffordance(recordId))
+}
+
+function fieldCommentActionClass(recordId: string, fieldId: string): string {
+  return resolveCommentAffordanceStateClass('meta-grid__field-comment-action', fieldCommentAffordance(recordId, fieldId))
+}
+
+function onRowCommentKeydown(event: KeyboardEvent, recordId: string) {
+  handleCommentAffordanceKeydown(event, () => emit('open-comments', recordId))
+}
+
+function onFieldCommentKeydown(event: KeyboardEvent, recordId: string, fieldId: string) {
+  handleCommentAffordanceKeydown(event, () => emit('open-field-comments', { recordId, fieldId }))
+}
+
 function onCellClick(ri: number, ci: number, rid: string) {
   focusRow.value = ri; focusCol.value = ci; emit('select-record', rid)
 }
@@ -421,14 +503,42 @@ function onKeydown(e: KeyboardEvent) {
 .meta-grid__table-wrap { flex: 1; overflow: auto; }
 .meta-grid__table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .meta-grid__row-num { width: 56px; min-width: 56px; text-align: center; color: #999; font-size: 12px; background: #f9fafb; border-bottom: 1px solid #eee; border-right: 1px solid #eee; padding: 6px 4px; position: sticky; left: 0; z-index: 1; }
+.meta-grid__row-num > span { display: inline-flex; align-items: center; justify-content: center; }
 .meta-grid__check-col { position: sticky; z-index: 1; }
 .meta-grid__row { transition: background 0.1s; content-visibility: auto; contain-intrinsic-size: auto 36px; }
 .meta-grid__row:hover { background: #f5f7fa; }
 .meta-grid__row--selected, .meta-grid__row--focused { background: #ecf5ff; }
-.meta-grid__cell { padding: 6px 12px; border-bottom: 1px solid #eee; overflow: hidden; text-overflow: ellipsis; cursor: default; }
+.meta-grid__cell { position: relative; padding: 6px 12px; border-bottom: 1px solid #eee; overflow: hidden; text-overflow: ellipsis; cursor: default; }
 .meta-grid__cell--editing { padding: 2px 4px; background: #fff; }
 .meta-grid__cell--readonly { color: #666; }
 .meta-grid__cell--focused { outline: 2px solid #409eff; outline-offset: -2px; }
+.meta-grid__comment-action,
+.meta-grid__field-comment-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+.meta-grid__comment-action {
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.meta-grid__field-comment-action {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+}
+.meta-grid__comment-action--active,
+.meta-grid__field-comment-action--active {
+  color: #1d4ed8;
+}
+.meta-grid__comment-action--idle,
+.meta-grid__field-comment-action--idle {
+  color: #94a3b8;
+}
 .meta-grid__empty { text-align: center; padding: 48px 32px; color: #999; }
 .meta-grid__empty-icon { font-size: 36px; margin-bottom: 8px; opacity: 0.5; }
 .meta-grid__empty-title { font-size: 15px; font-weight: 600; color: #666; margin-bottom: 4px; }
