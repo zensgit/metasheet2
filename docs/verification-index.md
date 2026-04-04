@@ -963,3 +963,10 @@ Entry points:
   - Verification: `docs/development/onprem-alertmanager-webhook-persistence-verification-20260401.md`
   - Deployment: `docs/deployment/onprem-alertmanager-webhook-persistence-20260401.md`
   - Deployment verification: `docs/deployment/onprem-alertmanager-webhook-persistence-verification-20260401.md`
+
+## 2026-04-04 DingTalk Launchd Scheduler Hardening
+
+- Launchd scheduler hardening:
+  - Design: `docs/development/dingtalk-oauth-launchd-scheduler-hardening-design-20260404.md`
+  - Verification: `docs/development/dingtalk-oauth-launchd-scheduler-hardening-verification-20260404.md`
+  - Deployment base: `docs/deployment/dingtalk-oauth-launchd-schedule-20260403.md`

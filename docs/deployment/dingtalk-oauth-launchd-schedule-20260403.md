@@ -28,6 +28,17 @@ pnpm ops:install-dingtalk-oauth-schedule
 - `~/Library/LaunchAgents/com.zensgit.metasheet.dingtalk-oauth-drill.plist`
 - `~/Library/LaunchAgents/com.zensgit.metasheet.dingtalk-oauth-summary.plist`
 
+当前 `drill` / `summary` 采用：
+
+- `StartCalendarInterval` 精确时刻触发
+- `StartInterval=600` 作为错过窗口后的补跑兜底
+- `RunAtLoad=true` 作为重装/重启后的补跑兜底
+
+并通过 `scripts/ops/dingtalk-oauth-schedule-window.sh` 保证：
+
+- 每天同类任务只执行一次
+- `summary` 必须等待当天 `drill` 成功
+
 日志目录：
 
 - `~/Library/Logs/metasheet2/dingtalk-oauth/`
@@ -61,6 +72,7 @@ pnpm ops:print-dingtalk-oauth-schedule-status
 
 ```bash
 STABILITY_INTERVAL_SECONDS=3600 \
+WINDOW_INTERVAL_SECONDS=600 \
 DRILL_HOUR=22 \
 DRILL_MINUTE=30 \
 SUMMARY_HOUR=22 \
