@@ -3,7 +3,7 @@ import { Server as SocketServer } from 'socket.io'
 import type { Server as HttpServer } from 'http'
 import type { ILogger } from '../di/identifiers'
 import type { EventBus } from '../integration/events/event-bus'
-import { buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
+import { buildCommentInboxRoom, buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
 
 export class CollabService {
   private io: SocketServer | null = null
@@ -121,6 +121,19 @@ export class CollabService {
         const spreadsheetId = this.parseSheetScope(payload)
         if (!spreadsheetId) return
         const room = buildCommentSheetRoom({ spreadsheetId })
+        socket.leave(room)
+        this.logger.info(`Client ${socket.id} left ${room}`)
+      })
+
+      socket.on('join-comment-inbox', () => {
+        const room = buildCommentInboxRoom()
+        socket.join(room)
+        this.logger.info(`Client ${socket.id} joined ${room}`)
+        socket.emit('joined-comment-inbox')
+      })
+
+      socket.on('leave-comment-inbox', () => {
+        const room = buildCommentInboxRoom()
         socket.leave(room)
         this.logger.info(`Client ${socket.id} left ${room}`)
       })

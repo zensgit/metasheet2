@@ -127,4 +127,62 @@ describe('WebSocket Rooms - basic flow', () => {
     a.close()
     b.close()
   })
+
+  it('join-comment-inbox scopes activity delivery to inbox subscribers', async () => {
+    if (!baseUrl || !server) return
+
+    const a = ioClient(baseUrl, { transports: ['websocket'] })
+    const b = ioClient(baseUrl, { transports: ['websocket'] })
+
+    await Promise.all([
+      new Promise<void>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('A connect timeout')), 3000)
+        a.on('connect', () => { clearTimeout(t); resolve() })
+      }),
+      new Promise<void>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('B connect timeout')), 3000)
+        b.on('connect', () => { clearTimeout(t); resolve() })
+      }),
+    ])
+
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('A inbox join timeout')), 3000)
+      a.on('joined-comment-inbox', () => {
+        clearTimeout(t)
+        resolve()
+      })
+      a.emit('join-comment-inbox')
+    })
+
+    const gotA = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('A did not receive inbox activity')), 3000)
+      a.on('comment:activity', (payload: any) => { clearTimeout(t); resolve(payload) })
+    })
+
+    let gotB = false
+    b.on('comment:activity', () => { gotB = true })
+
+    // @ts-ignore
+    server['createCoreAPI']().websocket.broadcastTo('comments-inbox', 'comment:activity', {
+      kind: 'created',
+      spreadsheetId: 'sheet_orders',
+      rowId: 'rec_1',
+      commentId: 'c1',
+      authorId: 'user_other',
+    })
+
+    const payload = await gotA
+    expect(payload).toEqual({
+      kind: 'created',
+      spreadsheetId: 'sheet_orders',
+      rowId: 'rec_1',
+      commentId: 'c1',
+      authorId: 'user_other',
+    })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(gotB).toBe(false)
+
+    a.close()
+    b.close()
+  })
 })

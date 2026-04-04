@@ -4,7 +4,7 @@ import { ICollabService, ILogger, type CommentInboxItem, type CommentQueryOption
 import type { CollabService } from './CollabService'
 import { db } from '../db/db'
 import { nowTimestamp } from '../db/type-helpers'
-import { buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
+import { buildCommentInboxRoom, buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms'
 
 export class CommentValidationError extends Error {
   constructor(message: string) {
@@ -70,6 +70,15 @@ type MentionGroupedCountRow = {
   field_id: string | null
   mentioned_count: number
   unread_count: number
+}
+
+type CommentActivityPayload = {
+  kind: 'created' | 'resolved'
+  spreadsheetId: string
+  rowId: string
+  fieldId?: string
+  commentId: string
+  authorId?: string
 }
 
 export class CommentService {
@@ -156,6 +165,18 @@ export class CommentService {
       buildCommentSheetRoom({ spreadsheetId: data.spreadsheetId }),
       'comment:created',
       createdPayload,
+    )
+    this.collabService.broadcastTo(
+      buildCommentInboxRoom(),
+      'comment:activity',
+      {
+        kind: 'created',
+        spreadsheetId: data.spreadsheetId,
+        rowId: data.rowId,
+        fieldId: effectiveFieldId,
+        commentId: comment.id,
+        authorId: data.authorId,
+      } satisfies CommentActivityPayload,
     )
     for (const mentionUserId of mentions) {
       if (mentionUserId && mentionUserId !== data.authorId) {
@@ -481,6 +502,17 @@ export class CommentService {
         buildCommentSheetRoom({ spreadsheetId: result.spreadsheet_id }),
         'comment:resolved',
         resolvedPayload,
+      )
+      this.collabService.broadcastTo(
+        buildCommentInboxRoom(),
+        'comment:activity',
+        {
+          kind: 'resolved',
+          spreadsheetId: result.spreadsheet_id,
+          rowId: result.row_id,
+          fieldId: result.field_id ?? undefined,
+          commentId,
+        } satisfies CommentActivityPayload,
       )
     }
   }
