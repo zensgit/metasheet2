@@ -282,7 +282,7 @@ import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, t
 import { isLinkField, isPersonField } from '../utils/link-fields'
 import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue } from '../utils/people-import'
 
-const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; commentId?: string; openComments?: boolean; mode?: string; role?: MultitableRole }>()
+const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean; mode?: string; role?: MultitableRole }>()
 const emit = defineEmits<{
   (e: 'ready', payload: { baseId: string; sheetId: string; viewId: string }): void
   (e: 'external-context-result', payload: {
@@ -775,12 +775,15 @@ async function loadCommentsForRecord(recordId: string, options?: { highlightComm
   }
 }
 
-async function selectRecord(recordId: string, opts?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null }) {
+async function selectRecord(recordId: string, opts?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
   if (recordId !== selectedRecordId.value && !confirmDiscardRecordChanges()) return
   selectedRecordId.value = recordId
   commentDraft.value = ''
   if (!opts?.openComments) {
     selectedCommentFieldId.value = null
+    selectedReplyCommentId.value = null
+  } else {
+    selectedCommentFieldId.value = opts.targetFieldId ?? null
     selectedReplyCommentId.value = null
   }
   showComments.value = opts?.openComments === true
@@ -1731,7 +1734,7 @@ async function onBulkDelete(recordIds: string[]) {
 // --- Deep-link record fetch (when record not in current page) ---
 const deepLinkedRecord = ref<MetaRecord | null>(null)
 
-async function resolveDeepLink(recordId: string, options?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null }) {
+async function resolveDeepLink(recordId: string, options?: { openComments?: boolean; highlightCommentId?: string | null; markReadCommentId?: string | null; targetFieldId?: string | null }) {
   // First check if it's in the current rows
   const inPage = grid.rows.value.find((r) => r.id === recordId)
   if (inPage) {
@@ -1913,6 +1916,7 @@ onMounted(async () => {
         openComments: props.openComments === true || Boolean(props.commentId),
         highlightCommentId: props.commentId ?? null,
         markReadCommentId: props.commentId ?? null,
+        targetFieldId: props.fieldId ?? null,
       })
     }
     if (activeViewType.value === 'form') {

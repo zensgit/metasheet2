@@ -127,6 +127,7 @@ async function onOpen(commentId: string) {
         baseId: resolvedBaseId,
         recordId: resolvedRecordId,
         commentId: item.id,
+        fieldId: item.fieldId ?? item.targetFieldId ?? undefined,
         openComments: 'true',
       },
     })
