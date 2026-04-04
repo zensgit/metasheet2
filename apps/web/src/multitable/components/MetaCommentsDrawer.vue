@@ -124,7 +124,7 @@ function formatTime(iso: string): string {
 }
 
 function formatContent(content: string): string {
-  return content.replace(/@\[([^\]]+)\]\(([^)]+)\)/g, (_match, _id, label) => `@${label}`)
+  return content.replace(/@\[([^\]]+)\]\(([^)]+)\)/g, (_match, label) => `@${label}`)
 }
 </script>
 

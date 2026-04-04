@@ -109,4 +109,68 @@ describe('MetaCommentsDrawer', () => {
     app.unmount()
     container.remove()
   })
+
+  it('renders mention tokens with display names instead of raw ids', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        {
+          path: '/',
+          name: 'home',
+          component: defineComponent({ render: () => h('div') }),
+        },
+        {
+          path: '/multitable/comments/inbox',
+          name: 'multitable-comment-inbox',
+          component: defineComponent({ render: () => h('div') }),
+        },
+      ],
+    })
+
+    const app = createApp(defineComponent({
+      render() {
+        return h(MetaCommentsDrawer, {
+          visible: true,
+          comments: [
+            {
+              id: 'c1',
+              containerId: 'sheet_1',
+              targetId: 'row_1',
+              fieldId: null,
+              mentions: ['user_1'],
+              authorId: 'user_2',
+              authorName: 'Ben',
+              content: 'Ping @[Amy Wong](user_1) for review',
+              resolved: false,
+              createdAt: '2026-04-01T09:00:00.000Z',
+            },
+          ],
+          loading: false,
+          canComment: false,
+          canResolve: true,
+          draft: '',
+          onResolve: vi.fn(),
+          onClose: vi.fn(),
+          onRetry: vi.fn(),
+          'onUpdate:draft': vi.fn(),
+          onSubmit: vi.fn(),
+        })
+      },
+    }))
+
+    app.use(router)
+    await router.push('/')
+    await router.isReady()
+    app.mount(container)
+    await flushUi()
+
+    expect(container.textContent).toContain('Ping @Amy Wong for review')
+    expect(container.textContent).not.toContain('@user_1')
+
+    app.unmount()
+    container.remove()
+  })
 })

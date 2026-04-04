@@ -52,12 +52,13 @@ export function useMultitableCommentInbox(client?: MultitableApiClient) {
     busyIds.value = [...busyIds.value, commentId]
     error.value = null
     try {
+      const wasUnread = inbox.value.find((item) => item.id === commentId)?.unread === true
       await api.markCommentRead(commentId)
       const nextItems: MultitableCommentInboxItem[] = inbox.value.map((item) =>
         item.id === commentId ? { ...item, unread: false } : item,
       )
       inbox.value = nextItems
-      unreadCount.value = nextItems.filter((item) => item.unread).length
+      if (wasUnread) unreadCount.value = Math.max(0, unreadCount.value - 1)
     } catch (e: any) {
       error.value = e.message ?? 'Failed to mark comment as read'
       throw e

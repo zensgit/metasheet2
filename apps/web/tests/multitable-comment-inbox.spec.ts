@@ -79,4 +79,32 @@ describe('useMultitableCommentInbox', () => {
     expect(state.items.value[0].unread).toBe(false)
     expect(state.unreadCount.value).toBe(0)
   })
+
+  it('decrements the global unread count instead of recalculating from the current page', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    ;(client as any).fetch = fetch
+
+    const state = useMultitableCommentInbox(client)
+    state.items.value = [{
+      id: 'c1',
+      containerId: 'sheet_ops',
+      targetId: 'rec_1',
+      fieldId: null,
+      parentId: undefined,
+      mentions: ['user_1'],
+      authorId: 'user_2',
+      authorName: 'Jamie',
+      content: 'hello',
+      resolved: false,
+      createdAt: '2026-04-04T00:00:00.000Z',
+      updatedAt: undefined,
+      unread: true,
+    }]
+    state.unreadCount.value = 3
+
+    await state.markRead('c1')
+
+    expect(state.items.value[0].unread).toBe(false)
+    expect(state.unreadCount.value).toBe(2)
+  })
 })

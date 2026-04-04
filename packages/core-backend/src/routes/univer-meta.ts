@@ -1216,7 +1216,7 @@ function deriveViewPermissions(
     views.map((view) => [
       view.id,
       {
-        canAccess: true,
+        canAccess: capabilities.canRead,
         canConfigure: capabilities.canManageViews,
         canDelete: capabilities.canManageViews,
       },

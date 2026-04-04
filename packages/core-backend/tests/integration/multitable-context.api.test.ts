@@ -145,6 +145,18 @@ describe('Multitable context API', () => {
       canComment: true,
       canManageAutomation: true,
     })
+    expect(response.body.data.viewPermissions).toEqual({
+      view_grid: {
+        canAccess: true,
+        canConfigure: false,
+        canDelete: false,
+      },
+      view_form: {
+        canAccess: true,
+        canConfigure: false,
+        canDelete: false,
+      },
+    })
   })
 
   test('derives multitable capabilities from req.user role and permissions when token roles/perms are absent', async () => {
@@ -218,6 +230,13 @@ describe('Multitable context API', () => {
       canManageViews: true,
       canComment: true,
       canManageAutomation: true,
+    })
+    expect(response.body.data.viewPermissions).toEqual({
+      view_grid: {
+        canAccess: true,
+        canConfigure: true,
+        canDelete: true,
+      },
     })
   })
 
