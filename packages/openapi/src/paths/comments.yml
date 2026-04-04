@@ -53,6 +53,11 @@ paths:
                 parentId:
                   type: string
                   description: Optional parent comment id. Reply-to-reply is rejected.
+                mentions:
+                  type: array
+                  items:
+                    type: string
+                  description: Optional explicit mention user ids. When omitted, the backend falls back to parsing mention tokens from content.
               required: [spreadsheetId, rowId, content]
       responses:
         '201':
@@ -68,6 +73,40 @@ paths:
                     properties:
                       comment: { $ref: '#/components/schemas/Comment' }
         '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/comments/inbox:
+    get:
+      summary: List comment inbox items
+      description: Returns comments that mention the current authenticated user, including unread state and navigation context.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommentInboxResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/comments/unread-count:
+    get:
+      summary: Get unread comment count
+      description: Returns the count of unread comments mentioning the current authenticated user.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommentUnreadCountResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/comments/mention-summary:
@@ -92,7 +131,7 @@ paths:
   /api/comments/mention-summary/mark-read:
     post:
       summary: Mark mention inbox as read
-      description: Updates the current user's last-read timestamp for the given spreadsheet. All mention inbox items created before this timestamp will be considered read.
+      description: Marks all currently unresolved mention items for the current user in the given spreadsheet as read.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -129,6 +168,20 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/CommentsSummaryResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/comments/{commentId}/read:
+    post:
+      summary: Mark a comment as read
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: commentId
+          required: true
+          schema: { type: string }
+      responses:
+        '204': { description: No Content }
         '400': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }

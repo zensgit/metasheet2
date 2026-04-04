@@ -151,6 +151,60 @@ components:
             offset:
               type: integer
               example: 0
+    CommentInboxItem:
+      allOf:
+        - $ref: '#/components/schemas/Comment'
+        - type: object
+          properties:
+            unread:
+              type: boolean
+            baseId:
+              type: string
+              nullable: true
+            sheetId:
+              type: string
+              nullable: true
+            viewId:
+              type: string
+              nullable: true
+            recordId:
+              type: string
+              nullable: true
+          required: [unread]
+    CommentInboxResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/CommentInboxItem'
+            total:
+              type: integer
+              example: 1
+            limit:
+              type: integer
+              example: 50
+            offset:
+              type: integer
+              example: 0
+    CommentUnreadCountResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            count:
+              type: integer
+              example: 0
     CommentPresenceSummary:
       type: object
       properties:
@@ -182,7 +236,7 @@ components:
           description: Number of unresolved comments in this record that mention the current user.
         unreadCount:
           type: integer
-          description: Number of unread mentions in this record (created after last_read_at).
+          description: Number of unresolved mentioned comments in this record that have not been marked as read by the current user.
         mentionedFieldIds:
           type: array
           items:
@@ -199,7 +253,7 @@ components:
           description: Total number of unresolved comments mentioning the current user across all records.
         unreadMentionCount:
           type: integer
-          description: Total unread mentions (created after user's last_read_at for this spreadsheet).
+          description: Total unresolved mentioned comments that have not been marked as read by the current user.
         mentionedRecordCount:
           type: integer
           description: Number of distinct records with unresolved mentions.

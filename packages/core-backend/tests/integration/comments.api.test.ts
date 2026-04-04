@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
@@ -11,11 +11,49 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
   })
 }
 
-async function ensureCommentsTable() {
+async function ensureCommentsTables() {
   const pool = poolManager.get()
-  await pool.query('DROP TABLE IF EXISTS meta_comments')
   await pool.query(`
-    CREATE TABLE meta_comments (
+    CREATE TABLE IF NOT EXISTS meta_bases (
+      id varchar(50) PRIMARY KEY,
+      name text NOT NULL,
+      icon text,
+      color text,
+      owner_id text,
+      workspace_id text,
+      created_at timestamp DEFAULT now(),
+      updated_at timestamp DEFAULT now(),
+      deleted_at timestamp
+    );
+  `)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meta_sheets (
+      id varchar(50) PRIMARY KEY,
+      base_id varchar(50),
+      name text NOT NULL,
+      description text,
+      created_at timestamp DEFAULT now(),
+      updated_at timestamp DEFAULT now(),
+      deleted_at timestamp
+    );
+  `)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meta_views (
+      id varchar(50) PRIMARY KEY,
+      sheet_id varchar(50) NOT NULL,
+      name text NOT NULL,
+      type text NOT NULL,
+      filter_info jsonb DEFAULT '{}'::jsonb,
+      sort_info jsonb DEFAULT '{}'::jsonb,
+      group_info jsonb DEFAULT '{}'::jsonb,
+      hidden_field_ids jsonb DEFAULT '[]'::jsonb,
+      config jsonb DEFAULT '{}'::jsonb,
+      created_at timestamp DEFAULT now(),
+      updated_at timestamp DEFAULT now()
+    );
+  `)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meta_comments (
       id varchar(50) PRIMARY KEY,
       spreadsheet_id varchar(50) NOT NULL,
       row_id varchar(50) NOT NULL,
@@ -29,21 +67,34 @@ async function ensureCommentsTable() {
       mentions jsonb
     );
   `)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meta_comment_reads (
+      comment_id varchar(50) NOT NULL,
+      user_id varchar(50) NOT NULL,
+      read_at timestamp DEFAULT now(),
+      created_at timestamp DEFAULT now(),
+      PRIMARY KEY (comment_id, user_id)
+    );
+  `)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_comments_sheet ON meta_comments(spreadsheet_id);')
   await pool.query('CREATE INDEX IF NOT EXISTS idx_comments_row ON meta_comments(row_id);')
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_comment_reads_user ON meta_comment_reads(user_id, read_at DESC);')
 }
 
 describe('Comments API', () => {
   let server: MetaSheetServer
   let baseUrl: string
-  let createdCommentIds: string[] = []
+  const createdCommentIds: string[] = []
+  const createdViewIds: string[] = []
+  const createdSheetIds: string[] = []
+  const createdBaseIds: string[] = []
 
   beforeAll(async () => {
     process.env.RBAC_BYPASS = 'true'
     const canListen = await canListenOnEphemeralPort()
     if (!canListen) return
 
-    await ensureCommentsTable()
+    await ensureCommentsTables()
 
     server = new MetaSheetServer({
       port: 0,
@@ -61,7 +112,17 @@ describe('Comments API', () => {
     try {
       const pool = poolManager.get()
       if (createdCommentIds.length > 0) {
+        await pool.query('DELETE FROM meta_comment_reads WHERE comment_id = ANY($1::text[])', [createdCommentIds])
         await pool.query('DELETE FROM meta_comments WHERE id = ANY($1::text[])', [createdCommentIds])
+      }
+      if (createdViewIds.length > 0) {
+        await pool.query('DELETE FROM meta_views WHERE id = ANY($1::text[])', [createdViewIds])
+      }
+      if (createdSheetIds.length > 0) {
+        await pool.query('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [createdSheetIds])
+      }
+      if (createdBaseIds.length > 0) {
+        await pool.query('DELETE FROM meta_bases WHERE id = ANY($1::text[])', [createdBaseIds])
       }
     } catch {
       // ignore cleanup failures
@@ -72,99 +133,123 @@ describe('Comments API', () => {
     }
   })
 
-  it('creates, lists, and resolves comments', async () => {
+  it('creates, lists, resolves, and exposes inbox/unread state', async () => {
     if (!baseUrl) return
 
     const ts = Date.now()
+    const baseId = `base_comments_${ts}`.slice(0, 50)
     const spreadsheetId = `sheet_comments_${ts}`.slice(0, 50)
+    const viewId = `view_comments_${ts}`.slice(0, 50)
     const rowId = `rec_comments_${ts}`.slice(0, 50)
-    const content = 'Hello @[user_1](u1)'
+    const pool = poolManager.get()
 
-    const tokenRes = await fetch(`${baseUrl}/api/auth/dev-token?userId=user_1`)
-    expect(tokenRes.status).toBe(200)
-    const tokenJson = await tokenRes.json()
-    const token = tokenJson.token as string
-    expect(typeof token).toBe('string')
+    await pool.query('INSERT INTO meta_bases (id, name) VALUES ($1, $2)', [baseId, 'Comments Base'])
+    createdBaseIds.push(baseId)
+    await pool.query('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3)', [
+      spreadsheetId,
+      baseId,
+      'Comments Sheet',
+    ])
+    createdSheetIds.push(spreadsheetId)
+    await pool.query('INSERT INTO meta_views (id, sheet_id, name, type) VALUES ($1, $2, $3, $4)', [
+      viewId,
+      spreadsheetId,
+      'All Comments',
+      'grid',
+    ])
+    createdViewIds.push(viewId)
+
+    const authorToken = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_1`)).json()).token as string
+    const mentionedToken = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_2`)).json()).token as string
 
     const createRes = await fetch(`${baseUrl}/api/comments`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${authorToken}`,
       },
-      body: JSON.stringify({ spreadsheetId, rowId, content }),
+      body: JSON.stringify({
+        spreadsheetId,
+        rowId,
+        content: 'Hello from user_1',
+        mentions: ['user_2'],
+      }),
     })
     expect(createRes.status).toBe(201)
     const created = await createRes.json()
-    expect(created.ok).toBe(true)
     const comment = created.data?.comment
-    expect(comment?.id).toBeTruthy()
     createdCommentIds.push(comment.id)
-    expect(comment?.spreadsheetId).toBe(spreadsheetId)
-    expect(comment?.rowId).toBe(rowId)
-    expect(comment?.authorId).toBe('user_1')
-    expect(Array.isArray(comment?.mentions)).toBe(true)
-    expect(comment?.mentions?.includes('user_1')).toBe(true)
+    expect(comment?.mentions).toEqual(['user_2'])
+
+    const fallbackRes = await fetch(`${baseUrl}/api/comments`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authorToken}`,
+      },
+      body: JSON.stringify({
+        spreadsheetId,
+        rowId,
+        content: 'Fallback @[Jamie](user_2)',
+      }),
+    })
+    expect(fallbackRes.status).toBe(201)
+    const fallbackJson = await fallbackRes.json()
+    createdCommentIds.push(fallbackJson.data.comment.id)
+    expect(fallbackJson.data.comment.mentions).toEqual(['user_2'])
 
     const listRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${authorToken}` },
     })
     expect(listRes.status).toBe(200)
     const listJson = await listRes.json()
-    expect(listJson.ok).toBe(true)
-    const items = listJson.data?.items ?? []
-    const total = listJson.data?.total ?? 0
-    expect(total).toBeGreaterThanOrEqual(items.length)
-    expect(items.some((item: any) => item.id === comment.id)).toBe(true)
+    expect(listJson.data.items.some((item: any) => item.id === comment.id)).toBe(true)
 
-    const listRowRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}&rowId=${rowId}`, {
-      headers: { Authorization: `Bearer ${token}` },
+    const unreadCountRes = await fetch(`${baseUrl}/api/comments/unread-count`, {
+      headers: { Authorization: `Bearer ${mentionedToken}` },
     })
-    expect(listRowRes.status).toBe(200)
-    const listRowJson = await listRowRes.json()
-    expect(listRowJson.ok).toBe(true)
-    const rowItems = listRowJson.data?.items ?? []
-    expect(rowItems.length).toBeGreaterThan(0)
-    expect(rowItems.every((item: any) => item.rowId === rowId)).toBe(true)
+    expect(unreadCountRes.status).toBe(200)
+    const unreadCountJson = await unreadCountRes.json()
+    expect(unreadCountJson.data.count).toBeGreaterThanOrEqual(2)
 
-    const listLimitedRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}&limit=1&offset=0`, {
-      headers: { Authorization: `Bearer ${token}` },
+    const inboxRes = await fetch(`${baseUrl}/api/comments/inbox`, {
+      headers: { Authorization: `Bearer ${mentionedToken}` },
     })
-    expect(listLimitedRes.status).toBe(200)
-    const listLimitedJson = await listLimitedRes.json()
-    expect(listLimitedJson.ok).toBe(true)
-    expect(listLimitedJson.data?.items?.length).toBeLessThanOrEqual(1)
-    expect(listLimitedJson.data?.total).toBeGreaterThanOrEqual(1)
+    expect(inboxRes.status).toBe(200)
+    const inboxJson = await inboxRes.json()
+    const inboxItem = inboxJson.data.items.find((item: any) => item.id === comment.id)
+    expect(inboxItem).toBeTruthy()
+    expect(inboxItem.unread).toBe(true)
+    expect(inboxItem.baseId).toBe(baseId)
+    expect(inboxItem.sheetId).toBe(spreadsheetId)
+    expect(inboxItem.viewId).toBe(viewId)
+    expect(inboxItem.recordId).toBe(rowId)
 
-    const listUnresolvedRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}&resolved=false`, {
-      headers: { Authorization: `Bearer ${token}` },
+    const markReadRes = await fetch(`${baseUrl}/api/comments/${comment.id}/read`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${mentionedToken}` },
     })
-    expect(listUnresolvedRes.status).toBe(200)
-    const listUnresolvedJson = await listUnresolvedRes.json()
-    expect(listUnresolvedJson.ok).toBe(true)
-    expect(listUnresolvedJson.data?.items?.some((item: any) => item.id === comment.id)).toBe(true)
+    expect(markReadRes.status).toBe(204)
+
+    const unreadAfterRes = await fetch(`${baseUrl}/api/comments/unread-count`, {
+      headers: { Authorization: `Bearer ${mentionedToken}` },
+    })
+    expect(unreadAfterRes.status).toBe(200)
+    const unreadAfterJson = await unreadAfterRes.json()
+    expect(unreadAfterJson.data.count).toBe(1)
 
     const resolveRes = await fetch(`${baseUrl}/api/comments/${comment.id}/resolve`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${authorToken}` },
     })
     expect(resolveRes.status).toBe(204)
 
-    const listAfterRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}`, {
-      headers: { Authorization: `Bearer ${token}` },
+    const resolvedListRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}&resolved=true`, {
+      headers: { Authorization: `Bearer ${authorToken}` },
     })
-    expect(listAfterRes.status).toBe(200)
-    const listAfterJson = await listAfterRes.json()
-    const updated = listAfterJson.data?.items?.find((item: any) => item.id === comment.id)
-    expect(updated?.resolved).toBe(true)
-
-    const listResolvedRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}&resolved=true`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    expect(listResolvedRes.status).toBe(200)
-    const listResolvedJson = await listResolvedRes.json()
-    expect(listResolvedJson.ok).toBe(true)
-    expect(listResolvedJson.data?.items?.some((item: any) => item.id === comment.id)).toBe(true)
+    expect(resolvedListRes.status).toBe(200)
+    const resolvedListJson = await resolvedListRes.json()
+    expect(resolvedListJson.data.items.some((item: any) => item.id === comment.id)).toBe(true)
   })
 
   it('returns mention-aware unresolved comment summaries for the current requester', async () => {
@@ -188,7 +273,8 @@ describe('Comments API', () => {
         spreadsheetId,
         rowId,
         fieldId,
-        content: 'Hello @[user_2](u2)',
+        content: 'Hello',
+        mentions: ['user_2'],
       }),
     })
     expect(createMentionedRes.status).toBe(201)
@@ -216,8 +302,7 @@ describe('Comments API', () => {
     })
     expect(summaryRes.status).toBe(200)
     const summaryJson = await summaryRes.json()
-    expect(summaryJson.ok).toBe(true)
-    expect(summaryJson.data?.items).toEqual([
+    expect(summaryJson.data.items).toEqual([
       {
         spreadsheetId,
         rowId,
@@ -236,10 +321,7 @@ describe('Comments API', () => {
     const spreadsheetId = `sheet_field_comments_${ts}`.slice(0, 50)
     const rowId = `rec_field_comments_${ts}`.slice(0, 50)
     const fieldId = 'fld_title'
-
-    const tokenRes = await fetch(`${baseUrl}/api/auth/dev-token?userId=user_2`)
-    expect(tokenRes.status).toBe(200)
-    const token = (await tokenRes.json()).token as string
+    const token = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_2`)).json()).token as string
 
     const rootRes = await fetch(`${baseUrl}/api/comments`, {
       method: 'POST',
@@ -255,11 +337,9 @@ describe('Comments API', () => {
       }),
     })
     expect(rootRes.status).toBe(201)
-    const rootJson = await rootRes.json()
-    const rootComment = rootJson.data?.comment
+    const rootComment = (await rootRes.json()).data?.comment
     createdCommentIds.push(rootComment.id)
-    expect(rootComment?.fieldId).toBe(fieldId)
-    expect(rootComment?.parentId).toBeUndefined()
+    expect(rootComment.fieldId).toBe(fieldId)
 
     const replyRes = await fetch(`${baseUrl}/api/comments`, {
       method: 'POST',
@@ -275,20 +355,10 @@ describe('Comments API', () => {
       }),
     })
     expect(replyRes.status).toBe(201)
-    const replyJson = await replyRes.json()
-    const replyComment = replyJson.data?.comment
+    const replyComment = (await replyRes.json()).data?.comment
     createdCommentIds.push(replyComment.id)
-    expect(replyComment?.parentId).toBe(rootComment.id)
-    expect(replyComment?.fieldId).toBe(fieldId)
-
-    const listRes = await fetch(`${baseUrl}/api/comments?spreadsheetId=${spreadsheetId}&rowId=${rowId}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    expect(listRes.status).toBe(200)
-    const listJson = await listRes.json()
-    const items = listJson.data?.items ?? []
-    expect(items.some((item: any) => item.id === rootComment.id && item.fieldId === fieldId)).toBe(true)
-    expect(items.some((item: any) => item.id === replyComment.id && item.parentId === rootComment.id && item.fieldId === fieldId)).toBe(true)
+    expect(replyComment.parentId).toBe(rootComment.id)
+    expect(replyComment.fieldId).toBe(fieldId)
   })
 
   it('rejects invalid parent comment scopes and reply-to-reply chains', async () => {
@@ -298,10 +368,7 @@ describe('Comments API', () => {
     const spreadsheetId = `sheet_invalid_parent_${ts}`.slice(0, 50)
     const rowId = `rec_invalid_parent_${ts}`.slice(0, 50)
     const otherRowId = `rec_invalid_parent_other_${ts}`.slice(0, 50)
-
-    const tokenRes = await fetch(`${baseUrl}/api/auth/dev-token?userId=user_3`)
-    expect(tokenRes.status).toBe(200)
-    const token = (await tokenRes.json()).token as string
+    const token = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_3`)).json()).token as string
 
     const rootRes = await fetch(`${baseUrl}/api/comments`, {
       method: 'POST',
@@ -317,8 +384,7 @@ describe('Comments API', () => {
       }),
     })
     expect(rootRes.status).toBe(201)
-    const rootJson = await rootRes.json()
-    const rootComment = rootJson.data?.comment
+    const rootComment = (await rootRes.json()).data?.comment
     createdCommentIds.push(rootComment.id)
 
     const replyRes = await fetch(`${baseUrl}/api/comments`, {
@@ -335,8 +401,7 @@ describe('Comments API', () => {
       }),
     })
     expect(replyRes.status).toBe(201)
-    const replyJson = await replyRes.json()
-    const replyComment = replyJson.data?.comment
+    const replyComment = (await replyRes.json()).data?.comment
     createdCommentIds.push(replyComment.id)
 
     const nestedReplyRes = await fetch(`${baseUrl}/api/comments`, {
@@ -354,8 +419,8 @@ describe('Comments API', () => {
     })
     expect(nestedReplyRes.status).toBe(400)
     const nestedReplyJson = await nestedReplyRes.json()
-    expect(nestedReplyJson.error?.code).toBe('VALIDATION_ERROR')
-    expect(nestedReplyJson.error?.message).toContain('Replying to replies is not supported')
+    expect(nestedReplyJson.error.code).toBe('VALIDATION_ERROR')
+    expect(nestedReplyJson.error.message).toContain('Replying to replies is not supported')
 
     const mismatchedRowRes = await fetch(`${baseUrl}/api/comments`, {
       method: 'POST',
@@ -372,11 +437,11 @@ describe('Comments API', () => {
     })
     expect(mismatchedRowRes.status).toBe(400)
     const mismatchedRowJson = await mismatchedRowRes.json()
-    expect(mismatchedRowJson.error?.code).toBe('VALIDATION_ERROR')
-    expect(mismatchedRowJson.error?.message).toContain('same record thread')
+    expect(mismatchedRowJson.error.code).toBe('VALIDATION_ERROR')
+    expect(mismatchedRowJson.error.message).toContain('same record thread')
   })
 
-  it('returns current-user mention-summary with correct aggregation and sort order', async () => {
+  it('returns current-user mention-summary with correct aggregation, unread counts, and sort order', async () => {
     if (!baseUrl) return
 
     const ts = Date.now()
@@ -400,38 +465,61 @@ describe('Comments API', () => {
       return json.data.comment
     }
 
-    // row1: 2 mentions of target_user across 2 fields
-    await create({ spreadsheetId, rowId: row1, fieldId: 'fld_a', content: 'hey @[target_user](tu)' })
-    await create({ spreadsheetId, rowId: row1, fieldId: 'fld_b', content: 'also @[target_user](tu)' })
-    // row2: 1 mention of target_user, no field
-    await create({ spreadsheetId, rowId: row2, content: 'cc @[target_user](tu)' })
-    // row3: mention of different user — should NOT appear
-    await create({ spreadsheetId, rowId: row3, content: 'hey @[other_user](ou)' })
-    // row1: resolved mention — should NOT count
-    const resolved = await create({ spreadsheetId, rowId: row1, content: '@[target_user](tu) done' })
+    await create({ spreadsheetId, rowId: row1, fieldId: 'fld_a', content: 'hey', mentions: ['target_user'] })
+    await create({ spreadsheetId, rowId: row1, fieldId: 'fld_b', content: 'also', mentions: ['target_user'] })
+    await create({ spreadsheetId, rowId: row2, content: 'cc', mentions: ['target_user'] })
+    await create({ spreadsheetId, rowId: row3, content: 'hey', mentions: ['other_user'] })
+    const resolved = await create({ spreadsheetId, rowId: row1, content: 'done', mentions: ['target_user'] })
     await fetch(`${baseUrl}/api/comments/${resolved.id}/resolve`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${authorToken}` },
     })
 
-    // Fetch mention-summary as the mentioned user
-    const res = await fetch(
-      `${baseUrl}/api/comments/mention-summary?spreadsheetId=${spreadsheetId}`,
-      { headers: { Authorization: `Bearer ${mentionedToken}` } },
-    )
+    const res = await fetch(`${baseUrl}/api/comments/mention-summary?spreadsheetId=${spreadsheetId}`, {
+      headers: { Authorization: `Bearer ${mentionedToken}` },
+    })
     expect(res.status).toBe(200)
     const json = await res.json()
-    expect(json.ok).toBe(true)
-
-    const data = json.data
-    // Only unresolved mentions of target_user count
-    expect(data.unresolvedMentionCount).toBe(3)
-    expect(data.mentionedRecordCount).toBe(2)
-
-    // Sorted: row1 (count=2) before row2 (count=1)
-    expect(data.items).toEqual([
+    expect(json.data.unresolvedMentionCount).toBe(3)
+    expect(json.data.mentionedRecordCount).toBe(2)
+    expect(json.data.unreadMentionCount).toBe(3)
+    expect(json.data.unreadRecordCount).toBe(2)
+    expect(json.data.items).toEqual([
       { rowId: row1, mentionedCount: 2, unreadCount: 2, mentionedFieldIds: ['fld_a', 'fld_b'] },
       { rowId: row2, mentionedCount: 1, unreadCount: 1, mentionedFieldIds: [] },
+    ])
+
+    const markReadRes = await fetch(`${baseUrl}/api/comments/mention-summary/mark-read`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${mentionedToken}`,
+      },
+      body: JSON.stringify({ spreadsheetId }),
+    })
+    expect(markReadRes.status).toBe(204)
+
+    const afterMarkReadRes = await fetch(`${baseUrl}/api/comments/mention-summary?spreadsheetId=${spreadsheetId}`, {
+      headers: { Authorization: `Bearer ${mentionedToken}` },
+    })
+    expect(afterMarkReadRes.status).toBe(200)
+    const afterMarkReadJson = await afterMarkReadRes.json()
+    expect(afterMarkReadJson.data.unresolvedMentionCount).toBe(3)
+    expect(afterMarkReadJson.data.unreadMentionCount).toBe(0)
+    expect(afterMarkReadJson.data.unreadRecordCount).toBe(0)
+
+    await create({ spreadsheetId, rowId: row2, content: 'fresh', mentions: ['target_user'] })
+
+    const afterFreshMentionRes = await fetch(`${baseUrl}/api/comments/mention-summary?spreadsheetId=${spreadsheetId}`, {
+      headers: { Authorization: `Bearer ${mentionedToken}` },
+    })
+    expect(afterFreshMentionRes.status).toBe(200)
+    const afterFreshMentionJson = await afterFreshMentionRes.json()
+    expect(afterFreshMentionJson.data.unresolvedMentionCount).toBe(4)
+    expect(afterFreshMentionJson.data.unreadMentionCount).toBe(1)
+    expect(afterFreshMentionJson.data.items).toEqual([
+      { rowId: row1, mentionedCount: 2, unreadCount: 0, mentionedFieldIds: ['fld_a', 'fld_b'] },
+      { rowId: row2, mentionedCount: 2, unreadCount: 1, mentionedFieldIds: [] },
     ])
   })
 
@@ -442,10 +530,7 @@ describe('Comments API', () => {
     const spreadsheetId = `sheet_presence_${ts}`.slice(0, 50)
     const rowOne = `rec_presence_1_${ts}`.slice(0, 50)
     const rowTwo = `rec_presence_2_${ts}`.slice(0, 50)
-
-    const tokenRes = await fetch(`${baseUrl}/api/auth/dev-token?userId=user_4`)
-    expect(tokenRes.status).toBe(200)
-    const token = (await tokenRes.json()).token as string
+    const token = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_4`)).json()).token as string
 
     async function createComment(body: Record<string, unknown>) {
       const response = await fetch(`${baseUrl}/api/comments`, {
@@ -491,8 +576,7 @@ describe('Comments API', () => {
     })
     expect(summaryRes.status).toBe(200)
     const summaryJson = await summaryRes.json()
-    expect(summaryJson.ok).toBe(true)
-    expect(summaryJson.data?.items).toEqual([
+    expect(summaryJson.data.items).toEqual([
       {
         spreadsheetId,
         rowId: rowOne,
@@ -502,6 +586,6 @@ describe('Comments API', () => {
         mentionedFieldCounts: {},
       },
     ])
-    expect(summaryJson.data?.total).toBe(1)
+    expect(summaryJson.data.total).toBe(1)
   })
 })

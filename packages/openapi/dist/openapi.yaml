@@ -153,6 +153,61 @@ components:
             offset:
               type: integer
               example: 0
+    CommentInboxItem:
+      allOf:
+        - $ref: '#/components/schemas/Comment'
+        - type: object
+          properties:
+            unread:
+              type: boolean
+            baseId:
+              type: string
+              nullable: true
+            sheetId:
+              type: string
+              nullable: true
+            viewId:
+              type: string
+              nullable: true
+            recordId:
+              type: string
+              nullable: true
+          required:
+            - unread
+    CommentInboxResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/CommentInboxItem'
+            total:
+              type: integer
+              example: 1
+            limit:
+              type: integer
+              example: 50
+            offset:
+              type: integer
+              example: 0
+    CommentUnreadCountResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            count:
+              type: integer
+              example: 0
     CommentPresenceSummary:
       type: object
       properties:
@@ -189,8 +244,8 @@ components:
         unreadCount:
           type: integer
           description: >-
-            Number of unread mentions in this record (created after
-            last_read_at).
+            Number of unresolved mentioned comments in this record that have not
+            been marked as read by the current user.
         mentionedFieldIds:
           type: array
           items:
@@ -214,8 +269,8 @@ components:
         unreadMentionCount:
           type: integer
           description: >-
-            Total unread mentions (created after user's last_read_at for this
-            spreadsheet).
+            Total unresolved mentioned comments that have not been marked as
+            read by the current user.
         mentionedRecordCount:
           type: integer
           description: Number of distinct records with unresolved mentions.
@@ -8509,6 +8564,13 @@ paths:
                 parentId:
                   type: string
                   description: Optional parent comment id. Reply-to-reply is rejected.
+                mentions:
+                  type: array
+                  items:
+                    type: string
+                  description: >-
+                    Optional explicit mention user ids. When omitted, the
+                    backend falls back to parsing mention tokens from content.
               required:
                 - spreadsheetId
                 - rowId
@@ -8530,6 +8592,57 @@ paths:
                         $ref: '#/components/schemas/Comment'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/comments/inbox:
+    get:
+      summary: List comment inbox items
+      description: >-
+        Returns comments that mention the current authenticated user, including
+        unread state and navigation context.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 50
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommentInboxResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/comments/unread-count:
+    get:
+      summary: Get unread comment count
+      description: >-
+        Returns the count of unread comments mentioning the current
+        authenticated user.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommentUnreadCountResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -8566,9 +8679,8 @@ paths:
     post:
       summary: Mark mention inbox as read
       description: >-
-        Updates the current user's last-read timestamp for the given
-        spreadsheet. All mention inbox items created before this timestamp will
-        be considered read.
+        Marks all currently unresolved mention items for the current user in the
+        given spreadsheet as read.
       security:
         - bearerAuth: []
       requestBody:
@@ -8618,6 +8730,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CommentsSummaryResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/comments/{commentId}/read:
+    post:
+      summary: Mark a comment as read
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: commentId
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: No Content
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
