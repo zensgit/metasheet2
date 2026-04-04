@@ -72,7 +72,14 @@
         <div class="meta-gallery__card-body">
           <div v-for="field in displayFields" :key="field.id" class="meta-gallery__field">
             <span class="meta-gallery__field-label">{{ field.name }}</span>
-            <span class="meta-gallery__field-value">{{ formatValue(row, field) }}</span>
+            <div v-if="field.type === 'attachment'" class="meta-gallery__field-value meta-gallery__field-value--attachment">
+              <MetaAttachmentList
+                :attachments="attachmentItems(row, field)"
+                variant="compact"
+                empty-label="No attachments"
+              />
+            </div>
+            <span v-else class="meta-gallery__field-value">{{ formatValue(row, field) }}</span>
           </div>
         </div>
       </div>
@@ -97,6 +104,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaGalleryViewConfig, MetaRecord } from '../types'
 import { resolveGalleryViewConfig } from '../utils/view-config'
 import { formatFieldDisplay } from '../utils/field-display'
+import MetaAttachmentList from './MetaAttachmentList.vue'
 
 const props = defineProps<{
   rows: MetaRecord[]
@@ -211,6 +219,26 @@ function formatValue(row: MetaRecord, field: MetaField): string {
   })
 }
 
+function attachmentIds(row: MetaRecord, field: MetaField): string[] {
+  const rawValue = row.data[field.id]
+  if (Array.isArray(rawValue)) return rawValue.map(String)
+  if (rawValue) return [String(rawValue)]
+  return []
+}
+
+function attachmentItems(row: MetaRecord, field: MetaField): MetaAttachment[] {
+  const summaryById = new Map((props.attachmentSummaries?.[row.id]?.[field.id] ?? []).map((attachment) => [attachment.id, attachment]))
+  return attachmentIds(row, field).map((id) => summaryById.get(id) ?? ({
+    id,
+    filename: id,
+    mimeType: 'application/octet-stream',
+    size: 0,
+    url: '',
+    thumbnailUrl: null,
+    uploadedAt: '',
+  }))
+}
+
 function emitConfigUpdate(next: Partial<Required<MetaGalleryViewConfig>>) {
   const normalized = normalizeGalleryConfig({
     titleFieldId: galleryDraft.titleFieldId,
@@ -318,6 +346,7 @@ function getColumnsCount(): number {
 .meta-gallery__field { display: flex; gap: 8px; font-size: 12px; }
 .meta-gallery__field-label { color: #999; min-width: 60px; flex-shrink: 0; }
 .meta-gallery__field-value { color: #555; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta-gallery__field-value--attachment { flex: 1; min-width: 0; white-space: normal; }
 .meta-gallery__empty { grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px; color: #999; }
 .meta-gallery__empty-icon { font-size: 36px; opacity: 0.5; margin-bottom: 8px; }
 .meta-gallery__empty-title { font-size: 15px; font-weight: 600; color: #666; margin-bottom: 4px; }

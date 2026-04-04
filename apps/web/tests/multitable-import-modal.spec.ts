@@ -21,6 +21,7 @@ async function flushUi() {
 describe('MetaImportModal', () => {
   beforeEach(() => {
     mockListLinkOptions.mockReset()
+    window.localStorage.clear()
   })
 
   it('shows failed rows and retries only the failed subset', async () => {
@@ -509,6 +510,59 @@ describe('MetaImportModal', () => {
     expect(importCalls).toHaveLength(2)
     expect(importCalls[1]?.records).toEqual([{ fld_vendor: ['rec_vendor_1'] }])
     expect(importCalls[1]?.failures).toEqual([])
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('restores a persisted import draft when reopened for the same sheet', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const Harness = defineComponent({
+      setup() {
+        const visible = ref(true)
+        return {
+          visible,
+          onClose: vi.fn(),
+          onImport: vi.fn(),
+        }
+      },
+      render() {
+        return h(MetaImportModal, {
+          visible: this.visible,
+          sheetId: 'sheet_ops',
+          fields: [{ id: 'fld_name', name: 'Name', type: 'string' }],
+          importing: false,
+          result: null,
+          onClose: this.onClose,
+          onImport: this.onImport,
+        })
+      },
+    })
+
+    const app = createApp(Harness)
+    const vm = app.mount(container) as { visible: boolean }
+    await flushUi()
+
+    const textarea = document.body.querySelector('.meta-import__textarea') as HTMLTextAreaElement
+    textarea.value = 'Name\nAlice'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    ;(document.body.querySelector('.meta-import__btn--primary') as HTMLButtonElement)?.click()
+    await flushUi()
+
+    expect((document.body.querySelector('.meta-import__field-select') as HTMLSelectElement | null)?.value).toBe('fld_name')
+    expect(window.localStorage.getItem('metasheet:multitable:import-draft:sheet_ops')).toContain('Alice')
+
+    vm.visible = false
+    await flushUi()
+    vm.visible = true
+    await flushUi()
+
+    expect(document.body.textContent).toContain('Recovered your previous import draft for this sheet.')
+    expect((document.body.querySelector('.meta-import__field-select') as HTMLSelectElement | null)?.value).toBe('fld_name')
+    expect(document.body.textContent).toContain('1 record(s) detected')
 
     app.unmount()
     container.remove()

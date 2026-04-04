@@ -68,6 +68,7 @@ export const AppRouteNames = {
   // Attendance routes
   ATTENDANCE: 'attendance',
   MULTITABLE: 'multitable',
+  MULTITABLE_COMMENT_INBOX: 'multitable-comment-inbox',
 
   // User routes
   USER_PROFILE: 'user-profile',
@@ -134,6 +135,7 @@ export interface AppRouteParams {
   'approval-history': Record<string, never>
   'attendance': Record<string, never>
   'multitable': { sheetId: string; viewId: string }
+  'multitable-comment-inbox': Record<string, never>
   'user-settings': Record<string, never>
   'user-management': Record<string, never>
   'permission-management': Record<string, never>
@@ -169,6 +171,15 @@ export interface AppRouteQuery {
     sortOrder?: 'asc' | 'desc'
   }
 
+  // Workflow designer bootstrap context
+  'workflow-designer': {
+    templateId?: string
+    baseId?: string
+    sheetId?: string
+    viewId?: string
+    recordId?: string
+  }
+
   // Approval list filters
   'approval-list': {
     status?: 'pending' | 'approved' | 'rejected'
@@ -186,6 +197,8 @@ export interface AppRouteQuery {
   'multitable': {
     baseId?: string
     recordId?: string
+    commentId?: string
+    openComments?: string
     mode?: 'grid' | 'form' | 'kanban' | 'gallery' | 'calendar' | 'timeline'
     embedded?: string
     role?: 'owner' | 'editor' | 'commenter' | 'viewer'
@@ -375,6 +388,7 @@ export const ROUTE_PATHS = {
   // Attendance
   ATTENDANCE: '/attendance',
   MULTITABLE: '/multitable/:sheetId/:viewId',
+  MULTITABLE_COMMENT_INBOX: '/multitable/comments/inbox',
 
   // User
   USER_PROFILE: '/profile/:id?',

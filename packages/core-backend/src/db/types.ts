@@ -89,6 +89,7 @@ export interface Database {
   meta_records: MetaRecordsTable
   meta_links: MetaLinksTable
   meta_comments: MetaCommentsTable
+  meta_comment_reads: MetaCommentReadsTable
   meta_dashboards: MetaDashboardsTable
   meta_widgets: MetaWidgetsTable
 }
@@ -587,6 +588,7 @@ export interface WorkflowIncidentsTable {
 // Meta Tables
 export interface MetaSheetsTable {
   id: Generated<string>
+  base_id: string | null
   name: string
   description: string | null
   created_at: CreatedAt
@@ -647,6 +649,13 @@ export interface MetaCommentsTable {
   mentions: JSONColumnType<string[]>
   created_at: CreatedAt
   updated_at: UpdatedAt
+}
+
+export interface MetaCommentReadsTable {
+  comment_id: string
+  user_id: string
+  read_at: UpdatedAt
+  created_at: CreatedAt
 }
 
 export interface MetaDashboardsTable {

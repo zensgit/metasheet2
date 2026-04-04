@@ -1,5 +1,12 @@
 import { ref, computed, watch } from 'vue'
-import type { MetaSheet, MetaField, MetaView, MetaCapabilities } from '../types'
+import type {
+  MetaCapabilities,
+  MetaField,
+  MetaFieldPermission,
+  MetaSheet,
+  MetaView,
+  MetaViewPermission,
+} from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
 
 const SYSTEM_PEOPLE_SHEET_DESCRIPTION = '__metasheet_system:people__'
@@ -34,6 +41,8 @@ export function useMultitableWorkbench(opts?: {
   const activeSheetId = ref(opts?.initialSheetId ?? '')
   const activeViewId = ref(opts?.initialViewId ?? '')
   const capabilities = ref<MetaCapabilities>({ ...EMPTY_CAPABILITIES })
+  const fieldPermissions = ref<Record<string, MetaFieldPermission>>({})
+  const viewPermissions = ref<Record<string, MetaViewPermission>>({})
   const loading = ref(false)
   const error = ref<string | null>(null)
   const suppressedSheetMetaReloads = new Set<string>()
@@ -50,6 +59,8 @@ export function useMultitableWorkbench(opts?: {
     fields: MetaField[]
     views: MetaView[]
     capabilities: MetaCapabilities
+    fieldPermissions: Record<string, MetaFieldPermission>
+    viewPermissions: Record<string, MetaViewPermission>
   }
 
   function snapshotState(): WorkbenchSnapshot {
@@ -61,6 +72,8 @@ export function useMultitableWorkbench(opts?: {
       fields: [...fields.value],
       views: [...views.value],
       capabilities: { ...capabilities.value },
+      fieldPermissions: { ...fieldPermissions.value },
+      viewPermissions: { ...viewPermissions.value },
     }
   }
 
@@ -75,6 +88,8 @@ export function useMultitableWorkbench(opts?: {
     fields.value = [...snapshot.fields]
     views.value = [...snapshot.views]
     capabilities.value = { ...snapshot.capabilities }
+    fieldPermissions.value = { ...snapshot.fieldPermissions }
+    viewPermissions.value = { ...snapshot.viewPermissions }
   }
 
   function syncContextState(
@@ -84,12 +99,16 @@ export function useMultitableWorkbench(opts?: {
       sheets?: MetaSheet[]
       views?: MetaView[]
       capabilities?: MetaCapabilities
+      fieldPermissions?: Record<string, MetaFieldPermission>
+      viewPermissions?: Record<string, MetaViewPermission>
     },
     preferredViewId?: string | null,
   ) {
     sheets.value = filterVisibleSheets(ctx.sheets ?? sheets.value)
     views.value = ctx.views ?? []
     capabilities.value = ctx.capabilities ?? { ...EMPTY_CAPABILITIES }
+    fieldPermissions.value = ctx.fieldPermissions ?? {}
+    viewPermissions.value = ctx.viewPermissions ?? {}
     if (ctx.base?.id) activeBaseId.value = ctx.base.id
     if (ctx.sheet?.baseId) activeBaseId.value = ctx.sheet.baseId
     if (ctx.sheet?.id && ctx.sheet.description !== SYSTEM_PEOPLE_SHEET_DESCRIPTION) {
@@ -292,6 +311,8 @@ export function useMultitableWorkbench(opts?: {
     activeSheetId,
     activeViewId,
     capabilities,
+    fieldPermissions,
+    viewPermissions,
     activeView,
     loading,
     error,

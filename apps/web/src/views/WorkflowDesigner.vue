@@ -16,6 +16,10 @@
       @save-workflow="saveWorkflow"
       @deploy-workflow="deployWorkflow"
     />
+    <div v-if="multitableContextSummary" class="workflow-designer__context-banner">
+      <strong>Source Context</strong>
+      <span>{{ multitableContextSummary }}</span>
+    </div>
 
     <!-- Main Content -->
     <div class="designer-content">
@@ -254,6 +258,21 @@ const templatePagination = ref<WorkflowDesignerPagination>({
 const recentTemplateItems = ref<RecentWorkflowTemplateItem[]>([])
 const selectedTemplateId = ref<string | null>(null)
 const selectedTemplate = ref<WorkflowDesignerTemplateDetail | null>(null)
+const multitableContext = computed(() => ({
+  baseId: typeof route.query.baseId === 'string' ? route.query.baseId : '',
+  sheetId: typeof route.query.sheetId === 'string' ? route.query.sheetId : '',
+  viewId: typeof route.query.viewId === 'string' ? route.query.viewId : '',
+  recordId: typeof route.query.recordId === 'string' ? route.query.recordId : '',
+}))
+const multitableContextSummary = computed(() => {
+  const parts = [
+    multitableContext.value.baseId ? `Base ${multitableContext.value.baseId}` : '',
+    multitableContext.value.sheetId ? `Sheet ${multitableContext.value.sheetId}` : '',
+    multitableContext.value.viewId ? `View ${multitableContext.value.viewId}` : '',
+    multitableContext.value.recordId ? `Record ${multitableContext.value.recordId}` : '',
+  ].filter(Boolean)
+  return parts.length > 0 ? parts.join(' · ') : ''
+})
 
 const selectedElement = ref<BpmnElement | null>(null)
 const elementName = ref('')
@@ -805,6 +824,17 @@ watch(isDirty, (dirty) => {
   display: flex;
   flex-direction: column;
   background: var(--el-bg-color-page);
+}
+
+.workflow-designer__context-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: #f4f8ff;
+  border-bottom: 1px solid #d9e7ff;
+  color: #315ea8;
+  font-size: 13px;
 }
 
 /* Header */

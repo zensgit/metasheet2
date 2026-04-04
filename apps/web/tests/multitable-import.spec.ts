@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { MultitableApiClient } from '../src/multitable/api/client'
-import { bulkImportRecords } from '../src/multitable/import/bulk-import'
+import { bulkImportRecords, skipDuplicateImportRows } from '../src/multitable/import/bulk-import'
 import { buildImportedRecords, parseDelimitedText } from '../src/multitable/import/delimited'
 
 describe('multitable import parsing', () => {
@@ -181,6 +181,37 @@ describe('multitable import parsing', () => {
         fieldName: 'Vendor',
         retryable: false,
         message: 'No import resolver is configured for linked field Vendor',
+      }),
+    ])
+  })
+
+  it('skips duplicate rows using the primary import field against existing and in-batch values', () => {
+    const result = skipDuplicateImportRows({
+      records: [
+        { fld_name: 'Alpha', fld_status: 'Open' },
+        { fld_name: 'alpha', fld_status: 'Closed' },
+        { fld_name: 'Beta', fld_status: 'Open' },
+      ],
+      rowIndexes: [0, 1, 2],
+      primaryFieldId: 'fld_name',
+      primaryFieldName: 'Name',
+      existingKeys: ['beta'],
+    })
+
+    expect(result.records).toEqual([{ fld_name: 'Alpha', fld_status: 'Open' }])
+    expect(result.rowIndexes).toEqual([0])
+    expect(result.skippedRows).toEqual([
+      expect.objectContaining({
+        rowIndex: 1,
+        fieldId: 'fld_name',
+        skipped: true,
+        message: 'Skipped duplicate row because Name already exists: alpha',
+      }),
+      expect.objectContaining({
+        rowIndex: 2,
+        fieldId: 'fld_name',
+        skipped: true,
+        message: 'Skipped duplicate row because Name already exists: Beta',
       }),
     ])
   })

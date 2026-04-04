@@ -1,5 +1,15 @@
 import { ref, computed, watch, type Ref, type ComputedRef, type WatchStopHandle } from 'vue'
-import type { MetaAttachment, MetaField, MetaRecord, MetaPage, PatchResult, LinkedRecordSummary } from '../types'
+import type {
+  LinkedRecordSummary,
+  MetaAttachment,
+  MetaField,
+  MetaFieldPermission,
+  MetaPage,
+  MetaRecord,
+  MetaRowActions,
+  MetaViewPermission,
+  PatchResult,
+} from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
 
 // --- Sort / Filter types ---
@@ -142,6 +152,9 @@ export function useMultitableGrid(opts: {
   const rows = ref<MetaRecord[]>([])
   const linkSummaries = ref<Record<string, Record<string, LinkedRecordSummary[]>>>({})
   const attachmentSummaries = ref<Record<string, Record<string, MetaAttachment[]>>>({})
+  const fieldPermissions = ref<Record<string, MetaFieldPermission>>({})
+  const viewPermission = ref<MetaViewPermission | null>(null)
+  const rowActions = ref<MetaRowActions | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)
   const conflict = ref<GridConflictState | null>(null)
@@ -155,7 +168,12 @@ export function useMultitableGrid(opts: {
   // Field visibility
   const hiddenFieldIds = ref<string[]>([])
   const visibleFields = computed(() =>
-    fields.value.filter((f) => !hiddenFieldIds.value.includes(f.id)),
+    fields.value.filter((f) => !hiddenFieldIds.value.includes(f.id) && fieldPermissions.value[f.id]?.visible !== false),
+  )
+  const readOnlyFieldIds = computed(() =>
+    fields.value
+      .filter((field) => fieldPermissions.value[field.id]?.readOnly === true)
+      .map((field) => field.id),
   )
 
   // Sort
@@ -238,6 +256,12 @@ export function useMultitableGrid(opts: {
       rows.value = serverRows
       linkSummaries.value = data.linkSummaries ?? {}
       attachmentSummaries.value = data.attachmentSummaries ?? {}
+      fieldPermissions.value = data.meta?.permissions?.fieldPermissions ?? {}
+      const nextViewPermission = data.view?.id
+        ? (data.meta?.permissions?.viewPermissions?.[data.view.id] ?? null)
+        : null
+      viewPermission.value = nextViewPermission
+      rowActions.value = data.meta?.permissions?.rowActions ?? null
       if (serverPage) page.value = serverPage
       if (data.view) syncFromView(data.view)
     } catch (e: any) {
@@ -607,7 +631,7 @@ export function useMultitableGrid(opts: {
 
   return {
     // State
-    fields, rows, linkSummaries, attachmentSummaries, loading, error, conflict, page, hiddenFieldIds, visibleFields,
+    fields, rows, linkSummaries, attachmentSummaries, fieldPermissions, viewPermission, rowActions, loading, error, conflict, page, hiddenFieldIds, visibleFields, readOnlyFieldIds,
     sortRules, filterRules, filterConjunction, sortFilterDirty,
     columnWidths, groupFieldId, groupField,
     editHistory, historyIndex, canUndo, canRedo,

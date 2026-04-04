@@ -73,7 +73,15 @@
           @click="onSelect(item.record.id)"
           @keydown.enter="onSelect(item.record.id)"
         >
-          <div class="meta-timeline__label-col">{{ displayLabel(item.record) }}</div>
+          <div class="meta-timeline__label-col" :class="{ 'meta-timeline__label-col--attachment': isAttachmentLabel }">
+            <MetaAttachmentList
+              v-if="isAttachmentLabel && displayField"
+              :attachments="attachmentItems(item.record, displayField)"
+              variant="compact"
+              empty-label="No attachments"
+            />
+            <template v-else>{{ displayLabel(item.record) }}</template>
+          </div>
           <div class="meta-timeline__bar-area" @dragover.prevent="onDragOver(item.record.id)" @drop="onDrop(item, $event)">
             <div
               class="meta-timeline__bar"
@@ -93,13 +101,20 @@
             v-for="row in unscheduledRows"
             :key="row.id"
             class="meta-timeline__unscheduled-row"
+            :class="{ 'meta-timeline__unscheduled-row--attachment': isAttachmentLabel }"
             tabindex="0"
             role="button"
             :aria-label="displayLabel(row)"
             @click="onSelect(row.id)"
             @keydown.enter="onSelect(row.id)"
           >
-            {{ displayLabel(row) }}
+            <MetaAttachmentList
+              v-if="isAttachmentLabel && displayField"
+              :attachments="attachmentItems(row, displayField)"
+              variant="compact"
+              empty-label="No attachments"
+            />
+            <template v-else>{{ displayLabel(row) }}</template>
           </div>
         </div>
 
@@ -117,6 +132,7 @@ import { ref, computed, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaRecord, MetaTimelineViewConfig } from '../types'
 import { resolveTimelineViewConfig } from '../utils/view-config'
 import { formatFieldDisplay } from '../utils/field-display'
+import MetaAttachmentList from './MetaAttachmentList.vue'
 
 const props = defineProps<{
   rows: MetaRecord[]
@@ -194,6 +210,7 @@ const displayField = computed(() =>
     ?? props.fields[0]
     ?? null,
 )
+const isAttachmentLabel = computed(() => displayField.value?.type === 'attachment')
 
 const zoomLabel = computed(() => {
   if (zoom.value === 'day') return 'Day'
@@ -224,6 +241,26 @@ function displayLabel(record: MetaRecord): string {
     attachmentSummaries: props.attachmentSummaries?.[record.id]?.[displayField.value.id],
   })
   return label === '—' ? record.id : label
+}
+
+function attachmentIds(record: MetaRecord, field: MetaField): string[] {
+  const rawValue = record.data[field.id]
+  if (Array.isArray(rawValue)) return rawValue.map(String)
+  if (rawValue) return [String(rawValue)]
+  return []
+}
+
+function attachmentItems(record: MetaRecord, field: MetaField): MetaAttachment[] {
+  const summaryById = new Map((props.attachmentSummaries?.[record.id]?.[field.id] ?? []).map((attachment) => [attachment.id, attachment]))
+  return attachmentIds(record, field).map((id) => summaryById.get(id) ?? ({
+    id,
+    filename: id,
+    mimeType: 'application/octet-stream',
+    size: 0,
+    url: '',
+    thumbnailUrl: null,
+    uploadedAt: '',
+  }))
 }
 
 function parseDate(val: unknown): Date | null {
@@ -428,11 +465,14 @@ function onDragEnd() {
 .meta-timeline__placeholder-action { padding: 6px 12px; border: 1px solid #c7ddff; border-radius: 6px; background: #ecf5ff; color: #2563eb; font-size: 12px; cursor: pointer; }
 .meta-timeline__header { display: flex; align-items: flex-end; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; height: 40px; }
 .meta-timeline__label-col { width: 180px; min-width: 180px; font-size: 12px; font-weight: 600; color: #666; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; flex-direction: column; }
+.meta-timeline__label-col--attachment { white-space: normal; overflow: visible; text-overflow: initial; }
+.meta-timeline__label-col--attachment :deep(.meta-attachment-list__items) { gap: 4px; }
+.meta-timeline__label-col--attachment :deep(.meta-attachment-list__card) { border-color: #bfdbfe; background: #fff; }
 .meta-timeline__header-meta { font-size: 10px; font-weight: 400; color: #94a3b8; }
 .meta-timeline__axis { flex: 1; position: relative; height: 28px; }
 .meta-timeline__zoom-badge { position: absolute; right: 0; top: -2px; font-size: 10px; color: #64748b; }
 .meta-timeline__tick { position: absolute; font-size: 10px; color: #999; transform: translateX(-50%); white-space: nowrap; top: 12px; }
-.meta-timeline__row { display: flex; align-items: center; height: 36px; border-bottom: 1px solid #f0f0f0; cursor: pointer; outline: none; }
+.meta-timeline__row { display: flex; align-items: center; min-height: 36px; padding: 4px 0; border-bottom: 1px solid #f0f0f0; cursor: pointer; outline: none; }
 .meta-timeline__row:hover { background: #f5f7fa; }
 .meta-timeline__row--selected { background: #ecf5ff; }
 .meta-timeline__row--dragging { opacity: 0.72; }
@@ -444,6 +484,8 @@ function onDragEnd() {
 .meta-timeline__unscheduled { margin-top: 12px; border-top: 1px solid #e5e7eb; padding-top: 8px; }
 .meta-timeline__unscheduled-header { font-size: 12px; font-weight: 600; color: #999; margin-bottom: 4px; }
 .meta-timeline__unscheduled-row { padding: 4px 8px; font-size: 12px; color: #666; cursor: pointer; border-radius: 3px; outline: none; }
+.meta-timeline__unscheduled-row--attachment :deep(.meta-attachment-list__items) { gap: 4px; }
+.meta-timeline__unscheduled-row--attachment :deep(.meta-attachment-list__card) { border-color: #bfdbfe; background: #fff; }
 .meta-timeline__unscheduled-row:hover { background: #f5f7fa; }
 .meta-timeline__unscheduled-row:focus-visible { outline: 2px solid #409eff; outline-offset: -2px; }
 .meta-timeline__empty { text-align: center; padding: 32px; color: #999; font-size: 13px; display: flex; flex-direction: column; align-items: center; gap: 12px; }

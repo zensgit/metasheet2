@@ -112,6 +112,15 @@ describe('Multitable context API', () => {
             ],
           }
         }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              { id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 },
+              { id: 'fld_status', name: 'Status', type: 'select', property: { options: [{ value: 'open' }] }, order: 2 },
+            ],
+          }
+        }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -183,6 +192,14 @@ describe('Multitable context API', () => {
             ],
           }
         }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              { id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 },
+            ],
+          }
+        }
         throw new Error(`Unhandled SQL in test: ${sql}`)
       },
     })
@@ -234,6 +251,14 @@ describe('Multitable context API', () => {
           return {
             rows: [
               { id: 'view_alpha', sheet_id: 'sheet_a', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {} },
+            ],
+          }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          expect(params).toEqual(['sheet_a'])
+          return {
+            rows: [
+              { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 },
             ],
           }
         }
@@ -324,6 +349,14 @@ describe('Multitable context API', () => {
               hidden_field_ids: [],
               config: { defaultView: 'week', colorRules: [{ field: 'category', value: 'meeting', color: '#00f' }] },
             }],
+          }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              { id: 'fld_due_date', name: 'Due Date', type: 'date', property: {}, order: 1 },
+            ],
           }
         }
         throw new Error(`Unhandled SQL in test: ${sql}`)
@@ -467,6 +500,14 @@ describe('Multitable context API', () => {
           return {
             rows: [
               { id: 'view_orders', sheet_id: 'sheet_orders', name: 'Grid', type: 'grid', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {} },
+            ],
+          }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          expect(params).toEqual(['sheet_orders'])
+          return {
+            rows: [
+              { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 },
             ],
           }
         }

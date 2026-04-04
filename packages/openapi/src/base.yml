@@ -1475,6 +1475,18 @@ components:
           type: string
         targetId:
           type: string
+        baseId:
+          type: string
+          nullable: true
+        sheetId:
+          type: string
+          nullable: true
+        viewId:
+          type: string
+          nullable: true
+        recordId:
+          type: string
+          nullable: true
         targetFieldId:
           type: string
           nullable: true
@@ -1487,6 +1499,59 @@ components:
         - targetId
         - containerType
         - containerId
+    MultitableFieldPermission:
+      type: object
+      properties:
+        visible:
+          type: boolean
+        readOnly:
+          type: boolean
+      required:
+        - visible
+        - readOnly
+    MultitableFieldPermissions:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/MultitableFieldPermission'
+    MultitableViewPermission:
+      type: object
+      properties:
+        canAccess:
+          type: boolean
+        canConfigure:
+          type: boolean
+        canDelete:
+          type: boolean
+      required:
+        - canAccess
+        - canConfigure
+        - canDelete
+    MultitableViewPermissions:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/MultitableViewPermission'
+    MultitableRowActions:
+      type: object
+      properties:
+        canEdit:
+          type: boolean
+        canDelete:
+          type: boolean
+        canComment:
+          type: boolean
+      required:
+        - canEdit
+        - canDelete
+        - canComment
+    MultitableScopedPermissions:
+      type: object
+      properties:
+        fieldPermissions:
+          $ref: '#/components/schemas/MultitableFieldPermissions'
+        viewPermissions:
+          $ref: '#/components/schemas/MultitableViewPermissions'
+        rowActions:
+          $ref: '#/components/schemas/MultitableRowActions'
     MultitableLinkedRecordSummary:
       type: object
       properties:
@@ -1624,6 +1689,8 @@ components:
           type: array
           items:
             type: string
+        permissions:
+          $ref: '#/components/schemas/MultitableScopedPermissions'
     MultitableCapabilities:
       type: object
       properties:
@@ -1673,6 +1740,10 @@ components:
             $ref: '#/components/schemas/MultitableView'
         capabilities:
           $ref: '#/components/schemas/MultitableCapabilities'
+        fieldPermissions:
+          $ref: '#/components/schemas/MultitableFieldPermissions'
+        viewPermissions:
+          $ref: '#/components/schemas/MultitableViewPermissions'
     MultitableViewData:
       type: object
       properties:
@@ -1719,6 +1790,12 @@ components:
           $ref: '#/components/schemas/MultitableRecord'
         capabilities:
           $ref: '#/components/schemas/MultitableCapabilities'
+        fieldPermissions:
+          $ref: '#/components/schemas/MultitableFieldPermissions'
+        viewPermissions:
+          $ref: '#/components/schemas/MultitableViewPermissions'
+        rowActions:
+          $ref: '#/components/schemas/MultitableRowActions'
         commentsScope:
           $ref: '#/components/schemas/MultitableCommentsScope'
         linkSummaries:
@@ -1754,6 +1831,12 @@ components:
             $ref: '#/components/schemas/MultitableField'
         capabilities:
           $ref: '#/components/schemas/MultitableCapabilities'
+        fieldPermissions:
+          $ref: '#/components/schemas/MultitableFieldPermissions'
+        viewPermissions:
+          $ref: '#/components/schemas/MultitableViewPermissions'
+        rowActions:
+          $ref: '#/components/schemas/MultitableRowActions'
         record:
           allOf:
             - $ref: '#/components/schemas/MultitableRecord'
