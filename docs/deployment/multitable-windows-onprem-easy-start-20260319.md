@@ -163,11 +163,13 @@ BASE_URL="http://127.0.0.1" \
 scripts/ops/multitable-onprem-apply-package.sh /opt/releases/metasheet-multitable-onprem-<version>.zip
 ```
 
-The packaged root now also includes Windows-friendly wrappers:
+The packaged root now also includes Windows-native wrappers:
 
 - `deploy.bat <package.zip|package.tgz>`: synchronous apply + upgrade
 - `deploy-runXX.bat <package.zip|package.tgz>`: same helper with the packaged run label baked in
 - `deploy-remote.bat <package.zip|package.tgz>`: detached background run that writes `output/logs/deploy-remote.log`
+
+These wrappers now call `scripts/ops/multitable-onprem-apply-package.ps1`, so a plain Windows Server 2022 host does not need bash or WSL just to apply a corrective package reroll.
 
 ## 11) Delivery checklist
 

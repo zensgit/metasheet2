@@ -1311,6 +1311,121 @@ describe('Attendance Plugin Integration', () => {
     expect(String(commitError?.message || '')).toContain('Detected columns: 日期, 工号, 姓名')
   })
 
+  it('maps standard work_date/check_in/check_out CSV headers through preview and commit', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const requesterId = `attendance-csv-standard-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(requesterId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const workDate = new Date().toISOString().slice(0, 10)
+    const csvText = [
+      'user_id,work_date,check_in,check_out',
+      `${requesterId},${workDate},${workDate}T09:00:00Z,${workDate}T18:00:00Z`,
+    ].join('\n')
+
+    const preparePreviewRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(preparePreviewRes.status).toBe(200)
+    const previewCommitToken = (preparePreviewRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(previewCommitToken).toBeTruthy()
+    if (!previewCommitToken) return
+
+    const previewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        mappingProfileId: 'dingtalk_csv_daily_summary',
+        timezone: 'UTC',
+        csvText,
+        commitToken: previewCommitToken,
+      }),
+    })
+    expect(previewRes.status).toBe(200)
+    const previewItems = (previewRes.body as { data?: { items?: Array<{ userId?: string; workDate?: string; firstInAt?: string | null; lastOutAt?: string | null }> } } | undefined)?.data?.items ?? []
+    expect(previewItems).toHaveLength(1)
+    expect(previewItems[0]?.userId).toBe(requesterId)
+    expect(previewItems[0]?.workDate).toBe(workDate)
+    expect(String(previewItems[0]?.firstInAt ?? '')).toContain(`${workDate}T09:00:00`)
+    expect(String(previewItems[0]?.lastOutAt ?? '')).toContain(`${workDate}T18:00:00`)
+
+    const previewWarnings = (previewRes.body as { data?: { csvWarnings?: string[] } } | undefined)?.data?.csvWarnings ?? []
+    expect(previewWarnings.some((warning) => warning.includes('check_in→firstInAt'))).toBe(true)
+    expect(previewWarnings.some((warning) => warning.includes('check_out→lastOutAt'))).toBe(true)
+
+    const prepareCommitRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    })
+    expect(prepareCommitRes.status).toBe(200)
+    const commitToken = (prepareCommitRes.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+    if (!commitToken) return
+
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        mappingProfileId: 'dingtalk_csv_daily_summary',
+        timezone: 'UTC',
+        csvText,
+        mode: 'override',
+        commitToken,
+        returnItems: false,
+      }),
+    })
+    expect(commitRes.status).toBe(200)
+    const commitData = (commitRes.body as { data?: any } | undefined)?.data
+    expect(Number(commitData?.processedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(Number(commitData?.failedRows ?? 0)).toBe(0)
+
+    const recordsRes = await requestJson(`${baseUrl}/api/attendance/records?userId=${encodeURIComponent(requesterId)}&from=${encodeURIComponent(workDate)}&to=${encodeURIComponent(workDate)}&page=1&pageSize=20`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(recordsRes.status).toBe(200)
+    const recordItems = (recordsRes.body as { data?: { items?: Array<Record<string, unknown>> } } | undefined)?.data?.items ?? []
+    expect(recordItems.length).toBeGreaterThanOrEqual(1)
+    const record = recordItems.find((item) => String(item.userId ?? item.user_id ?? '') === requesterId) ?? recordItems[0]
+    expect(String(record?.firstInAt ?? record?.first_in_at ?? '')).toContain(`${workDate}T09:00:00`)
+    expect(String(record?.lastOutAt ?? record?.last_out_at ?? '')).toContain(`${workDate}T18:00:00`)
+
+    const batchId = commitData?.batchId
+    if (batchId) {
+      const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      })
+      expect(rollbackRes.status).toBe(200)
+    }
+  })
+
   it('supports shift and overtime rule lookup by id and rejects malformed ids with 400', async () => {
     if (!baseUrl) return
 
