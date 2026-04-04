@@ -38,6 +38,10 @@ export interface PlatformApprovalBridgeRecord {
 
 const DEFAULT_WORKFLOW_KEY = 'plm-eco-review'
 
+export function createPlmApprovalInstanceId(externalApprovalId: string): string {
+  return `plm:${externalApprovalId}`
+}
+
 function normalizeStatus(value: string | undefined): string {
   const normalized = String(value || '').trim().toLowerCase()
   if (!normalized) return 'pending'
@@ -91,7 +95,7 @@ export function toPlatformApprovalBridgeRecord(
 export function createPlmApprovalBridgePreview(source: PlmApprovalBridgeSource) {
   const record = toPlatformApprovalBridgeRecord(source)
   return {
-    key: `${record.externalSystem}:${record.externalApprovalId}`,
+    key: createPlmApprovalInstanceId(record.externalApprovalId),
     workflowKey: record.workflowKey,
     businessKey: record.businessKey,
     title: record.title,

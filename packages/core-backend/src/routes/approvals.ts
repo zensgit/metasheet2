@@ -1,18 +1,27 @@
 /**
  * Approvals Router
- * Handles approval workflow endpoints
+ *
+ * Keeps legacy platform approval endpoints stable while exposing the new
+ * phase 1 unified approval bridge for PLM-backed approvals.
  */
 
+import type { Injector } from '@wendellhu/redi'
 import { Router } from 'express'
 import type { Request, Response } from 'express'
-import { authenticate } from '../middleware/auth'
 import { Logger } from '../core/logger'
+import { IPLMAdapter } from '../di/identifiers'
 import { pool } from '../db/pg'
+import { authenticate } from '../middleware/auth'
+import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
+import {
+  APPROVAL_ERROR_CODES,
+  type ApprovalBridgePlmAdapter,
+} from '../services/approval-bridge-types'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 
 const logger = new Logger('ApprovalsRouter')
+const MAX_APPROVAL_PAGE_SIZE = 200
 
-// Graceful degradation for missing tables
 let approvalsDegraded = false
 const allowDegradation = process.env.APPROVALS_OPTIONAL === '1'
 
@@ -20,8 +29,26 @@ interface ApprovalInstance {
   id: string
   status: string
   version: number
+  source_system?: string | null
   created_at: Date
   updated_at: Date
+}
+
+interface ApprovalRouterOptions {
+  injector?: Injector
+  plmAdapter?: ApprovalBridgePlmAdapter | null
+}
+
+function isPlmApprovalId(id: string): boolean {
+  return id.startsWith('plm:')
+}
+
+function parsePaging(value: unknown, fallback: number, max: number = MAX_APPROVAL_PAGE_SIZE): number {
+  const parsed = Number.parseInt(String(value || ''), 10)
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback
+  }
+  return Math.min(parsed, max)
 }
 
 function normalizeApprovalVersion(value: unknown): number | null {
@@ -80,10 +107,157 @@ function approvalErrorResponse(code: string, message: string) {
   }
 }
 
-export function approvalsRouter(): Router {
+function sendServiceError(res: Response, error: ServiceError): void {
+  res.status(error.statusCode).json({
+    error: {
+      code: error.code,
+      message: error.message,
+      ...(error.details ? { details: error.details } : {}),
+    },
+  })
+}
+
+function resolvePlmAdapter(options?: ApprovalRouterOptions): ApprovalBridgePlmAdapter | null {
+  if (options?.plmAdapter) {
+    return options.plmAdapter
+  }
+  if (!options?.injector) {
+    return null
+  }
+  return options.injector.get(IPLMAdapter) as unknown as ApprovalBridgePlmAdapter
+}
+
+function getBridgeService(options?: ApprovalRouterOptions): ApprovalBridgeService {
+  return new ApprovalBridgeService(resolvePlmAdapter(options))
+}
+
+function handleApprovalsError(
+  res: Response,
+  error: unknown,
+  fallbackCode: string,
+  fallbackMessage: string,
+  degradedResponse?: () => void,
+): void {
+  if (error instanceof ServiceError) {
+    sendServiceError(res, error)
+    return
+  }
+  if (isDatabaseSchemaError(error) && allowDegradation && degradedResponse) {
+    if (!approvalsDegraded) {
+      logger.warn('Approvals service degraded - tables not found')
+      approvalsDegraded = true
+    }
+    degradedResponse()
+    return
+  }
+
+  logger.error(fallbackMessage, error instanceof Error ? error : undefined)
+  res.status(500).json(approvalErrorResponse(fallbackCode, fallbackMessage))
+}
+
+export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   const r = Router()
 
-  // Get pending approvals for current user
+  r.get('/api/approvals', authenticate, async (req: Request, res: Response) => {
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+
+      const sourceSystem = typeof req.query.sourceSystem === 'string' ? req.query.sourceSystem : undefined
+      const status = typeof req.query.status === 'string' ? req.query.status : undefined
+      const workflowKey = typeof req.query.workflowKey === 'string' ? req.query.workflowKey : undefined
+      const businessKey = typeof req.query.businessKey === 'string' ? req.query.businessKey : undefined
+      const assignee = typeof req.query.assignee === 'string' ? req.query.assignee : undefined
+      const limit = parsePaging(req.query.limit, 50)
+      const offset = parsePaging(req.query.offset, 0, Number.MAX_SAFE_INTEGER)
+
+      if (sourceSystem === 'plm' && assignee) {
+        return res.status(400).json({
+          error: {
+            code: APPROVAL_ERROR_CODES.ASSIGNEE_FILTER_UNSUPPORTED,
+            message: 'PLM assignee filtering is not supported in phase 1',
+          },
+        })
+      }
+
+      const bridgeService = getBridgeService(options)
+      if (sourceSystem === 'plm' && !bridgeService.hasPlmAdapter()) {
+        return res.status(503).json(
+          approvalErrorResponse('PLM_APPROVAL_BRIDGE_UNAVAILABLE', 'PLM approval bridge is not configured'),
+        )
+      }
+
+      if (sourceSystem === 'plm') {
+        await bridgeService.syncPlmApprovals({
+          status,
+          limit,
+          offset,
+        })
+      }
+
+      const result = await bridgeService.listApprovals({
+        sourceSystem,
+        status,
+        workflowKey,
+        businessKey,
+        assignee,
+        limit,
+        offset,
+      })
+
+      res.json({
+        data: result.data,
+        total: result.total,
+        limit,
+        offset,
+      })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_LIST_FAILED',
+        'Failed to list approvals',
+        () => res.json({ data: [], total: 0, degraded: true }),
+      )
+    }
+  })
+
+  r.post('/api/approvals/sync/plm', authenticate, async (req: Request, res: Response) => {
+    try {
+      const bridgeService = getBridgeService(options)
+      if (!bridgeService.hasPlmAdapter()) {
+        return res.status(503).json(
+          approvalErrorResponse('PLM_APPROVAL_BRIDGE_UNAVAILABLE', 'PLM approval bridge is not configured'),
+        )
+      }
+
+      const result = await bridgeService.syncPlmApprovals({
+        status: typeof req.body?.status === 'string' ? req.body.status : undefined,
+        productId: typeof req.body?.productId === 'string' ? req.body.productId : undefined,
+        requesterId: typeof req.body?.requesterId === 'string' ? req.body.requesterId : undefined,
+        limit: parsePaging(req.body?.limit, 50),
+        offset: parsePaging(req.body?.offset, 0, Number.MAX_SAFE_INTEGER),
+      })
+
+      res.json({
+        success: true,
+        synced: result.synced,
+        errors: result.errors,
+      })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'PLM_APPROVAL_SYNC_FAILED',
+        'Failed to sync PLM approvals',
+      )
+    }
+  })
+
+  // Legacy endpoint: keep scoped to platform-owned approvals only.
   r.get('/api/approvals/pending', authenticate, async (req: Request, res: Response) => {
     try {
       if (!pool) {
@@ -99,26 +273,30 @@ export function approvalsRouter(): Router {
         )
       }
 
-      const limit = parseInt(req.query.limit as string) || 50
-      const offset = parseInt(req.query.offset as string) || 0
+      const limit = parsePaging(req.query.limit, 50)
+      const offset = parsePaging(req.query.offset, 0, Number.MAX_SAFE_INTEGER)
 
       const result = await pool.query<ApprovalInstance>(
         `SELECT ai.* FROM approval_instances ai
          WHERE ai.status = 'pending'
+           AND COALESCE(ai.source_system, 'platform') = 'platform'
          ORDER BY ai.created_at DESC
          LIMIT $1 OFFSET $2`,
-        [limit, offset]
+        [limit, offset],
       )
 
       const countResult = await pool.query<{ count: string }>(
-        `SELECT COUNT(*) as count FROM approval_instances WHERE status = 'pending'`
+        `SELECT COUNT(*)::text AS count
+         FROM approval_instances
+         WHERE status = 'pending'
+           AND COALESCE(source_system, 'platform') = 'platform'`,
       )
 
       res.json({
         data: result.rows,
-        total: parseInt(countResult.rows[0]?.count || '0'),
+        total: parseInt(countResult.rows[0]?.count || '0', 10),
         limit,
-        offset
+        offset,
       })
     } catch (error) {
       if (isDatabaseSchemaError(error) && allowDegradation) {
@@ -138,7 +316,53 @@ export function approvalsRouter(): Router {
     }
   })
 
-  // Approve a request
+  r.post('/api/approvals/:id/actions', authenticate, async (req: Request, res: Response) => {
+    try {
+      const bridgeService = getBridgeService(options)
+
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const action = req.body?.action
+      if (action !== 'approve' && action !== 'reject') {
+        return res.status(400).json({
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'action must be approve or reject',
+          },
+        })
+      }
+
+      const approval = await bridgeService.dispatchAction(
+        req.params.id,
+        {
+          action,
+          comment: typeof req.body?.comment === 'string' ? req.body.comment : undefined,
+        },
+        {
+          userId,
+          userName: resolveApprovalActorName(req, userId),
+          ip: req.ip || null,
+          userAgent: req.get('user-agent') || null,
+        },
+      )
+
+      res.json(approval)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_ACTION_DISPATCH_FAILED',
+        'Failed to dispatch approval action',
+      )
+    }
+  })
+
+  // Legacy endpoint: local platform approvals only.
   r.post('/api/approvals/:id/approve', authenticate, async (req: Request, res: Response) => {
     try {
       if (!pool) {
@@ -171,15 +395,15 @@ export function approvalsRouter(): Router {
         })
       }
 
-      // Start transaction
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
 
-        // Get current instance
         const instanceResult = await client.query<ApprovalInstance>(
-          'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-          [id]
+          `SELECT * FROM approval_instances
+           WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform'
+           FOR UPDATE`,
+          [id],
         )
 
         if (instanceResult.rows.length === 0) {
@@ -207,15 +431,13 @@ export function approvalsRouter(): Router {
 
         const newVersion = instance.version + 1
 
-        // Update instance
         await client.query(
           `UPDATE approval_instances
            SET status = 'approved', version = $1, updated_at = now()
            WHERE id = $2`,
-          [newVersion, id]
+          [newVersion, id],
         )
 
-        // Create approval record
         await client.query(
           `INSERT INTO approval_records
            (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
@@ -230,8 +452,8 @@ export function approvalsRouter(): Router {
             newVersion,
             JSON.stringify(metadata),
             req.ip || null,
-            req.get('user-agent') || null
-          ]
+            req.get('user-agent') || null,
+          ],
         )
 
         await client.query('COMMIT')
@@ -267,7 +489,7 @@ export function approvalsRouter(): Router {
     }
   })
 
-  // Reject a request
+  // Legacy endpoint: local platform approvals only.
   r.post('/api/approvals/:id/reject', authenticate, async (req: Request, res: Response) => {
     try {
       if (!pool) {
@@ -307,15 +529,15 @@ export function approvalsRouter(): Router {
         )
       }
 
-      // Start transaction
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
 
-        // Get current instance
         const instanceResult = await client.query<ApprovalInstance>(
-          'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-          [id]
+          `SELECT * FROM approval_instances
+           WHERE id = $1 AND COALESCE(source_system, 'platform') = 'platform'
+           FOR UPDATE`,
+          [id],
         )
 
         if (instanceResult.rows.length === 0) {
@@ -343,15 +565,13 @@ export function approvalsRouter(): Router {
 
         const newVersion = instance.version + 1
 
-        // Update instance
         await client.query(
           `UPDATE approval_instances
            SET status = 'rejected', version = $1, updated_at = now()
            WHERE id = $2`,
-          [newVersion, id]
+          [newVersion, id],
         )
 
-        // Create rejection record
         await client.query(
           `INSERT INTO approval_records
            (instance_id, action, actor_id, actor_name, reason, comment, from_status, to_status, from_version, to_version, metadata, ip_address, user_agent)
@@ -367,8 +587,8 @@ export function approvalsRouter(): Router {
             newVersion,
             JSON.stringify(metadata),
             req.ip || null,
-            req.get('user-agent') || null
-          ]
+            req.get('user-agent') || null,
+          ],
         )
 
         await client.query('COMMIT')
@@ -404,43 +624,27 @@ export function approvalsRouter(): Router {
     }
   })
 
-  // Get single approval instance details
   r.get('/api/approvals/:id', authenticate, async (req: Request, res: Response) => {
     try {
-      if (!pool) {
-        return res.status(503).json(
-          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
-        )
-      }
-
-      const { id } = req.params
-
-      const result = await pool.query<ApprovalInstance>(
-        'SELECT * FROM approval_instances WHERE id = $1',
-        [id]
-      )
-
-      if (result.rows.length === 0) {
+      const bridgeService = getBridgeService(options)
+      const approval = await bridgeService.getApproval(req.params.id)
+      if (!approval) {
         return res.status(404).json(
           approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),
         )
       }
 
-      res.json(result.rows[0])
+      res.json(approval)
     } catch (error) {
-      if (isDatabaseSchemaError(error) && allowDegradation) {
-        if (!approvalsDegraded) {
-          logger.warn('Approvals service degraded - tables not found')
-          approvalsDegraded = true
-        }
-        return res.status(404).json({
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_FETCH_FAILED',
+        'Failed to get approval',
+        () => res.status(404).json({
           ...approvalErrorResponse('APPROVAL_NOT_FOUND', 'Not found'),
           degraded: true,
-        })
-      }
-      logger.error('Failed to get approval', error instanceof Error ? error : undefined)
-      res.status(500).json(
-        approvalErrorResponse('APPROVAL_FETCH_FAILED', 'Failed to get approval'),
+        }),
       )
     }
   })

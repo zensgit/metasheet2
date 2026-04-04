@@ -523,11 +523,11 @@ export class MetaSheetServer {
     this.app.use('/api/auth', authRouter)
 
     // 路由：审批（示例）
-    this.app.use(approvalsRouter())
+    this.app.use(approvalsRouter({ injector: this.injector }))
     // 路由：审计日志（管理员）
     this.app.use(auditLogsRouter())
     // 路由：审批历史（从审计表衍生）
-    this.app.use(approvalHistoryRouter())
+    this.app.use(approvalHistoryRouter({ injector: this.injector }))
     // 路由：角色/权限/表/文件/表权限（占位）
     this.app.use(rolesRouter())
     this.app.use(permissionsRouter())

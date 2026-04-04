@@ -81,8 +81,8 @@ export interface IPLMAdapterService extends IAdapterLifecycle {
   getApprovals(options?: Record<string, unknown>): Promise<QueryResult<ApprovalRequest>>;
   getApprovalById(approvalId: string): Promise<QueryResult<ApprovalRequest>>;
   getApprovalHistory(approvalId: string): Promise<QueryResult<ApprovalHistoryEntry>>;
-  approveApproval(approvalId: string, comment?: string): Promise<QueryResult<Record<string, unknown>>>;
-  rejectApproval(approvalId: string, comment: string): Promise<QueryResult<Record<string, unknown>>>;
+  approveApproval(approvalId: string, version: number, comment?: string): Promise<QueryResult<Record<string, unknown>>>;
+  rejectApproval(approvalId: string, version: number, comment: string): Promise<QueryResult<Record<string, unknown>>>;
 }
 
 export interface IAthenaAdapterService extends IAdapterLifecycle {

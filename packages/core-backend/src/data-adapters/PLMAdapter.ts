@@ -1384,6 +1384,44 @@ export class PLMAdapter extends HTTPAdapter {
     return this.select<ApprovalRequest>(this.approvalRequestsPath(), { params })
   }
 
+  async getApprovalById(approvalId: string): Promise<QueryResult<ApprovalRequest>> {
+    if (this.mockMode) {
+      return {
+        data: [],
+        metadata: { totalCount: 0 },
+      }
+    }
+
+    if (this.apiMode === 'yuantus') {
+      const result = await this.query<YuantusEco>(`/api/v1/eco/${approvalId}`)
+      if (result.error) {
+        return { data: [], error: result.error }
+      }
+
+      const eco = result.data[0]
+      if (!eco) {
+        return { data: [], metadata: { totalCount: 0 } }
+      }
+
+      let product: PLMProduct | null = null
+      if (eco.product_id) {
+        try {
+          product = await this.getProductById(String(eco.product_id))
+        } catch (_err) {
+          product = null
+        }
+      }
+
+      const mapped = this.mapYuantusEcoApproval(eco, product || undefined)
+      return {
+        data: [mapped],
+        metadata: { totalCount: 1 },
+      }
+    }
+
+    return this.select<ApprovalRequest>(`${this.approvalsBasePath()}${approvalId}`)
+  }
+
   async getApprovalHistory(approvalId: string): Promise<QueryResult<ApprovalHistoryEntry>> {
     if (this.mockMode) {
       return {
