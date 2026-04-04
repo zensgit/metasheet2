@@ -8,6 +8,9 @@
         </div>
 
         <div v-if="step === 'paste'" class="meta-import__body">
+          <div v-if="restoredDraft" class="meta-import__warning">
+            <span>Recovered your previous import draft for this sheet.</span>
+          </div>
           <p class="meta-import__hint">Paste tab-separated data from Excel or Google Sheets (first row = headers):</p>
           <label class="meta-import__file-drop" @dragover.prevent @drop.prevent="onFileDrop">
             <input class="meta-import__file-input" type="file" accept=".csv,text/csv,.tsv,text/tab-separated-values,.txt,text/plain" @change="onFileSelect" />
@@ -28,6 +31,9 @@
         </div>
 
         <div v-else-if="step === 'preview'" class="meta-import__body">
+          <div v-if="restoredDraft" class="meta-import__warning">
+            <span>Recovered your previous import draft for this sheet.</span>
+          </div>
           <p class="meta-import__hint">{{ parsedRows.length }} record(s) detected. Map columns to fields:</p>
           <div v-if="hasImportDraftIssues" class="meta-import__warning">
             <span>{{ importDraftIssueText }}</span>
@@ -71,7 +77,7 @@
         </div>
 
         <div v-else class="meta-import__body">
-          <div class="meta-import__result" :class="hasFailedImports ? 'meta-import__result--warning' : 'meta-import__result--success'">
+          <div class="meta-import__result" :class="hasImportWarnings ? 'meta-import__result--warning' : 'meta-import__result--success'">
             <strong>{{ resultSummaryText }}</strong>
             <p v-if="hasFailedImports">
               <template v-if="retryableFailureCount > 0">
@@ -80,6 +86,9 @@
               <template v-else>
                 Review the failed rows below and return to mapping to fix the source data.
               </template>
+            </p>
+            <p v-else-if="hasSkippedImports">
+              Rows with duplicate values in the current primary import field were skipped.
             </p>
             <p v-else>The selected records were imported successfully.</p>
           </div>
@@ -165,14 +174,27 @@ type ImportResultFailure = ImportBuildFailure & {
   index?: number
   rowIndex: number
   retryable?: boolean
+  skipped?: boolean
 }
 
 type ImportResult = {
   attempted: number
   succeeded: number
   failed: number
+  skipped?: number
   firstError: string | null
   failures: ImportResultFailure[]
+}
+
+type ImportDraftSnapshot = {
+  version: 1
+  rawText: string
+  parsedHeaders: string[]
+  parsedRows: string[][]
+  fieldMapping: Record<number, string>
+  manualFieldOverrides: ImportFieldOverrides
+  manualOverrideSummaries: Record<string, LinkedRecordSummary[]>
+  step: 'paste' | 'preview'
 }
 
 type ImportDraftIssue = {
@@ -183,6 +205,7 @@ type ImportDraftIssue = {
 
 const props = defineProps<{
   visible: boolean
+  sheetId?: string | null
   fields: MetaField[]
   importing?: boolean
   result?: ImportResult | null
@@ -210,16 +233,20 @@ const manualFieldOverrides = ref<ImportFieldOverrides>({})
 const manualOverrideSummaries = ref<Record<string, LinkedRecordSummary[]>>({})
 const pickerTarget = ref<{ rowIndex: number; fieldId: string } | null>(null)
 const pickerVisible = ref(false)
+const restoredDraft = ref(false)
 
 const hasMappedFields = computed(() => Object.values(fieldMapping.value).some((value) => value))
 const importableFields = computed(() => props.fields.filter((field) => !['formula', 'lookup', 'rollup'].includes(field.type)))
 const importableFieldIds = computed(() => new Set(importableFields.value.map((field) => field.id)))
 const fieldsById = computed(() => new Map(props.fields.map((field) => [field.id, field])))
 const hasFailedImports = computed(() => (props.result?.failed ?? 0) > 0)
+const hasSkippedImports = computed(() => (props.result?.skipped ?? 0) > 0)
+const hasImportWarnings = computed(() => hasFailedImports.value || hasSkippedImports.value)
 const isImporting = computed(() => props.importing === true || step.value === 'importing')
-const retryableFailureCount = computed(() => (props.result?.failures ?? []).filter((failure) => failure.retryable !== false).length)
+const importDraftStorageKey = computed(() => `metasheet:multitable:import-draft:${props.sheetId || 'default'}`)
+const retryableFailureCount = computed(() => (props.result?.failures ?? []).filter((failure) => !failure.skipped && failure.retryable !== false).length)
 const manualFixRows = computed(() => (props.result?.failures ?? [])
-  .filter((failure) => failure.retryable === false)
+  .filter((failure) => !failure.skipped && failure.retryable === false)
   .map((failure) => {
     const field = typeof failure.fieldId === 'string' ? props.fields.find((candidate) => candidate.id === failure.fieldId) ?? null : null
     const problemColumnIndexes = typeof failure.fieldId === 'string'
@@ -241,7 +268,10 @@ const manualFixRows = computed(() => (props.result?.failures ?? [])
   }))
 const resultSummaryText = computed(() => {
   if (!props.result) return 'Import complete'
+  const skipped = props.result.skipped ?? 0
+  if (props.result.failed > 0 && skipped > 0) return `${props.result.succeeded} imported, ${skipped} skipped, ${props.result.failed} failed`
   if (props.result.failed > 0) return `${props.result.succeeded} imported, ${props.result.failed} failed`
+  if (skipped > 0) return `${props.result.succeeded} imported, ${skipped} skipped`
   return `Imported ${props.result.succeeded} record(s)`
 })
 const failedPreviewRows = computed(() => (props.result?.failures ?? []).slice(0, 5).map((failure) => ({
@@ -345,6 +375,72 @@ function overrideKey(rowIndex: number, fieldId: string) {
   return `${rowIndex}:${fieldId}`
 }
 
+function readStorage(): Storage | null {
+  try {
+    return globalThis.localStorage ?? null
+  } catch {
+    return null
+  }
+}
+
+function buildImportDraftSnapshot(): ImportDraftSnapshot {
+  return {
+    version: 1,
+    rawText: rawText.value,
+    parsedHeaders: [...parsedHeaders.value],
+    parsedRows: parsedRows.value.map((row) => [...row]),
+    fieldMapping: { ...fieldMapping.value },
+    manualFieldOverrides: JSON.parse(JSON.stringify(manualFieldOverrides.value)) as ImportFieldOverrides,
+    manualOverrideSummaries: JSON.parse(JSON.stringify(manualOverrideSummaries.value)) as Record<string, LinkedRecordSummary[]>,
+    step: parsedRows.value.length > 0 ? 'preview' : 'paste',
+  }
+}
+
+function clearImportDraft() {
+  readStorage()?.removeItem(importDraftStorageKey.value)
+}
+
+function persistImportDraft() {
+  const storage = readStorage()
+  if (!storage || !props.visible) return
+  if (!importDraftDirty.value || step.value === 'importing') {
+    storage.removeItem(importDraftStorageKey.value)
+    return
+  }
+  storage.setItem(importDraftStorageKey.value, JSON.stringify(buildImportDraftSnapshot()))
+}
+
+function restoreImportDraft() {
+  const storage = readStorage()
+  if (!storage) return false
+  const raw = storage.getItem(importDraftStorageKey.value)
+  if (!raw) return false
+  try {
+    const snapshot = JSON.parse(raw) as Partial<ImportDraftSnapshot>
+    rawText.value = typeof snapshot.rawText === 'string' ? snapshot.rawText : ''
+    parsedHeaders.value = Array.isArray(snapshot.parsedHeaders) ? snapshot.parsedHeaders.filter((item): item is string => typeof item === 'string') : []
+    parsedRows.value = Array.isArray(snapshot.parsedRows)
+      ? snapshot.parsedRows.map((row) => Array.isArray(row) ? row.map((cell) => typeof cell === 'string' ? cell : '') : [])
+      : []
+    fieldMapping.value = Object.fromEntries(
+      Object.entries(snapshot.fieldMapping ?? {}).filter(([, fieldId]) => typeof fieldId === 'string'),
+    ) as Record<number, string>
+    manualFieldOverrides.value = (snapshot.manualFieldOverrides && typeof snapshot.manualFieldOverrides === 'object')
+      ? snapshot.manualFieldOverrides
+      : {}
+    manualOverrideSummaries.value = (snapshot.manualOverrideSummaries && typeof snapshot.manualOverrideSummaries === 'object')
+      ? snapshot.manualOverrideSummaries
+      : {}
+    step.value = snapshot.step === 'preview' && parsedRows.value.length > 0 ? 'preview' : 'paste'
+    parseError.value = ''
+    restoredDraft.value = true
+    return true
+  } catch {
+    storage.removeItem(importDraftStorageKey.value)
+    return false
+  }
+}
+
 watch(() => props.visible, (visible, previousVisible) => {
   if (!visible) {
     resetState()
@@ -352,7 +448,9 @@ watch(() => props.visible, (visible, previousVisible) => {
   }
   if (!previousVisible) {
     resetState()
-    nextTick(() => textareaRef.value?.focus())
+    if (!restoreImportDraft()) {
+      nextTick(() => textareaRef.value?.focus())
+    }
   }
 })
 
@@ -368,6 +466,30 @@ watch(pickerField, (field) => {
   if (!pickerVisible.value) return
   if (field && isLinkField(field)) return
   closePicker()
+})
+
+watch(
+  [
+    () => props.visible,
+    rawText,
+    parsedHeaders,
+    parsedRows,
+    fieldMapping,
+    manualFieldOverrides,
+    manualOverrideSummaries,
+    step,
+  ],
+  ([visible]) => {
+    if (!visible) return
+    persistImportDraft()
+  },
+  { deep: true },
+)
+
+watch(() => props.result, (result) => {
+  if (result && result.failed === 0 && (result.skipped ?? 0) === 0) {
+    clearImportDraft()
+  }
 })
 
 function parseAndPreview() {
@@ -445,6 +567,7 @@ function requestClose() {
     return
   }
   if (importDraftDirty.value && !window.confirm('Discard unsaved import changes?')) return
+  clearImportDraft()
   emit('close')
 }
 
@@ -461,8 +584,8 @@ function goBackToPreview() {
 function retryFailedRows() {
   const result = props.result
   if (!result?.failures.length) return
-  const retryableFailures = result.failures.filter((failure) => failure.retryable !== false)
-  const preservedFailures = result.failures.filter((failure) => failure.retryable === false).map((failure) => ({ ...failure }))
+  const retryableFailures = result.failures.filter((failure) => !failure.skipped && failure.retryable !== false)
+  const preservedFailures = result.failures.filter((failure) => failure.skipped || failure.retryable === false).map((failure) => ({ ...failure }))
   const nextRecords = retryableFailures
     .map((failure) => (typeof failure.index === 'number' ? lastAttemptRecords.value[failure.index] : null))
     .filter((record): record is Record<string, unknown> => !!record)
@@ -544,7 +667,7 @@ async function applyFixesAndRetry() {
   const result = props.result
   if (!result?.failures.length) return
 
-  const manualFailures = result.failures.filter((failure) => failure.retryable === false)
+  const manualFailures = result.failures.filter((failure) => !failure.skipped && failure.retryable === false)
   const manualRowIndexes = [...new Set(manualFailures.map((failure) => failure.rowIndex))].sort((a, b) => a - b)
   const subsetOverrides = manualRowIndexes.reduce<ImportFieldOverrides>((acc, originalRowIndex, subsetRowIndex) => {
     if (manualFieldOverrides.value[originalRowIndex]) acc[subsetRowIndex] = { ...manualFieldOverrides.value[originalRowIndex] }
@@ -558,7 +681,7 @@ async function applyFixesAndRetry() {
     fieldOverrides: subsetOverrides,
   })
 
-  const retryableFailures = result.failures.filter((failure) => failure.retryable !== false)
+  const retryableFailures = result.failures.filter((failure) => !failure.skipped && failure.retryable !== false)
   const nextRetryableRecords = retryableFailures
     .map((failure) => (typeof failure.index === 'number' ? lastAttemptRecords.value[failure.index] : null))
     .filter((record): record is Record<string, unknown> => !!record)
@@ -639,6 +762,7 @@ function resetState() {
   pickerTarget.value = null
   pickerVisible.value = false
   parseError.value = ''
+  restoredDraft.value = false
 }
 
 onBeforeUnmount(() => {

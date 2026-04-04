@@ -20,6 +20,7 @@ import {
 import { isDatabaseSchemaError } from '../utils/database-errors'
 
 const logger = new Logger('ApprovalsRouter')
+const MAX_APPROVAL_PAGE_SIZE = 200
 
 let approvalsDegraded = false
 const allowDegradation = process.env.APPROVALS_OPTIONAL === '1'
@@ -42,9 +43,12 @@ function isPlmApprovalId(id: string): boolean {
   return id.startsWith('plm:')
 }
 
-function parsePaging(value: unknown, fallback: number): number {
+function parsePaging(value: unknown, fallback: number, max: number = MAX_APPROVAL_PAGE_SIZE): number {
   const parsed = Number.parseInt(String(value || ''), 10)
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback
+  }
+  return Math.min(parsed, max)
 }
 
 function normalizeApprovalVersion(value: unknown): number | null {
@@ -123,12 +127,8 @@ function resolvePlmAdapter(options?: ApprovalRouterOptions): ApprovalBridgePlmAd
   return options.injector.get(IPLMAdapter) as unknown as ApprovalBridgePlmAdapter
 }
 
-function getBridgeService(options?: ApprovalRouterOptions): ApprovalBridgeService | null {
-  const plmAdapter = resolvePlmAdapter(options)
-  if (!plmAdapter) {
-    return null
-  }
-  return new ApprovalBridgeService(plmAdapter)
+function getBridgeService(options?: ApprovalRouterOptions): ApprovalBridgeService {
+  return new ApprovalBridgeService(resolvePlmAdapter(options))
 }
 
 function handleApprovalsError(
@@ -172,7 +172,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const businessKey = typeof req.query.businessKey === 'string' ? req.query.businessKey : undefined
       const assignee = typeof req.query.assignee === 'string' ? req.query.assignee : undefined
       const limit = parsePaging(req.query.limit, 50)
-      const offset = parsePaging(req.query.offset, 0)
+      const offset = parsePaging(req.query.offset, 0, Number.MAX_SAFE_INTEGER)
 
       if (sourceSystem === 'plm' && assignee) {
         return res.status(400).json({
@@ -184,7 +184,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
 
       const bridgeService = getBridgeService(options)
-      if (!bridgeService) {
+      if (sourceSystem === 'plm' && !bridgeService.hasPlmAdapter()) {
         return res.status(503).json(
           approvalErrorResponse('PLM_APPROVAL_BRIDGE_UNAVAILABLE', 'PLM approval bridge is not configured'),
         )
@@ -228,7 +228,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   r.post('/api/approvals/sync/plm', authenticate, async (req: Request, res: Response) => {
     try {
       const bridgeService = getBridgeService(options)
-      if (!bridgeService) {
+      if (!bridgeService.hasPlmAdapter()) {
         return res.status(503).json(
           approvalErrorResponse('PLM_APPROVAL_BRIDGE_UNAVAILABLE', 'PLM approval bridge is not configured'),
         )
@@ -239,7 +239,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         productId: typeof req.body?.productId === 'string' ? req.body.productId : undefined,
         requesterId: typeof req.body?.requesterId === 'string' ? req.body.requesterId : undefined,
         limit: parsePaging(req.body?.limit, 50),
-        offset: parsePaging(req.body?.offset, 0),
+        offset: parsePaging(req.body?.offset, 0, Number.MAX_SAFE_INTEGER),
       })
 
       res.json({
@@ -274,7 +274,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       }
 
       const limit = parsePaging(req.query.limit, 50)
-      const offset = parsePaging(req.query.offset, 0)
+      const offset = parsePaging(req.query.offset, 0, Number.MAX_SAFE_INTEGER)
 
       const result = await pool.query<ApprovalInstance>(
         `SELECT ai.* FROM approval_instances ai
@@ -319,11 +319,6 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   r.post('/api/approvals/:id/actions', authenticate, async (req: Request, res: Response) => {
     try {
       const bridgeService = getBridgeService(options)
-      if (!bridgeService) {
-        return res.status(503).json(
-          approvalErrorResponse('PLM_APPROVAL_BRIDGE_UNAVAILABLE', 'PLM approval bridge is not configured'),
-        )
-      }
 
       const userId = resolveApprovalActorId(req)
       if (!userId) {
@@ -632,33 +627,6 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
   r.get('/api/approvals/:id', authenticate, async (req: Request, res: Response) => {
     try {
       const bridgeService = getBridgeService(options)
-      if (!bridgeService) {
-        if (isPlmApprovalId(req.params.id)) {
-          return res.status(503).json(
-            approvalErrorResponse('PLM_APPROVAL_BRIDGE_UNAVAILABLE', 'PLM approval bridge is not configured'),
-          )
-        }
-
-        if (!pool) {
-          return res.status(503).json(
-            approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
-          )
-        }
-
-        const result = await pool.query<ApprovalInstance>(
-          'SELECT * FROM approval_instances WHERE id = $1',
-          [req.params.id],
-        )
-
-        if (result.rows.length === 0) {
-          return res.status(404).json(
-            approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),
-          )
-        }
-
-        return res.json(result.rows[0])
-      }
-
       const approval = await bridgeService.getApproval(req.params.id)
       if (!approval) {
         return res.status(404).json(

@@ -18,7 +18,7 @@
             class="meta-form-view__input"
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="text"
-            :disabled="readOnly"
+            :disabled="isFieldReadOnly(field.id)"
             :aria-required="field.required ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
@@ -31,7 +31,7 @@
             class="meta-form-view__input"
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="number"
-            :disabled="readOnly"
+            :disabled="isFieldReadOnly(field.id)"
             :aria-required="field.required ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
@@ -39,7 +39,7 @@
             @input="formData[field.id] = ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value)"
           />
           <label v-else-if="field.type === 'boolean'" class="meta-form-view__check">
-            <input type="checkbox" :disabled="readOnly" :checked="!!formData[field.id]" @change="formData[field.id] = ($event.target as HTMLInputElement).checked" />
+            <input type="checkbox" :disabled="isFieldReadOnly(field.id)" :checked="!!formData[field.id]" @change="formData[field.id] = ($event.target as HTMLInputElement).checked" />
             {{ formData[field.id] ? 'Yes' : 'No' }}
           </label>
           <input
@@ -48,7 +48,7 @@
             class="meta-form-view__input"
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
             type="date"
-            :disabled="readOnly"
+            :disabled="isFieldReadOnly(field.id)"
             :aria-required="field.required ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
@@ -60,7 +60,7 @@
             :id="`field_${field.id}`"
             class="meta-form-view__input"
             :class="{ 'meta-form-view__input--error': !!fieldErrors?.[field.id] || !!validationErrors[field.id] }"
-            :disabled="readOnly"
+            :disabled="isFieldReadOnly(field.id)"
             :aria-required="field.required ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
@@ -74,11 +74,11 @@
             v-else-if="field.type === 'link'"
             type="button"
             class="meta-form-view__link-btn"
-            :disabled="readOnly"
+            :disabled="isFieldReadOnly(field.id)"
             @click="emit('open-link-picker', field)"
           >{{ linkButtonLabel(field.id) }}</button>
           <div v-else-if="field.type === 'attachment'" class="meta-form-view__attachment-field">
-            <div v-if="!readOnly" class="meta-form-view__attachment-controls">
+            <div v-if="!isFieldReadOnly(field.id)" class="meta-form-view__attachment-controls">
               <input
                 type="file"
                 :multiple="attachmentAllowsMultiple(field)"
@@ -87,7 +87,7 @@
                 class="meta-form-view__file-input"
                 @change="onFormFileSelect(field.id, $event)"
               />
-              <span class="meta-form-view__attachment-hint">Add or replace files</span>
+              <span class="meta-form-view__attachment-hint">{{ attachmentActionHint(field.id) }}</span>
               <button
                 v-if="attachmentList(field.id).length"
                 type="button"
@@ -101,7 +101,7 @@
             </span>
             <MetaAttachmentList
               :attachments="attachmentItems(field.id)"
-              :removable="!readOnly"
+              :removable="!isFieldReadOnly(field.id)"
               empty-label=""
               @remove="onRemoveAttachment(field.id, $event)"
             />
@@ -129,11 +129,13 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaFieldPermission,
   MetaField,
   MetaRecord,
+  MetaRowActions,
 } from '../types'
 import MetaAttachmentList from './MetaAttachmentList.vue'
-import { attachmentAcceptAttr, resolveAttachmentFieldProperty, validateAttachmentSelection } from '../utils/field-config'
+import { attachmentAcceptAttr, resolveAttachmentFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../utils/field-config'
 import { linkActionLabel } from '../utils/link-fields'
 
 const props = defineProps<{
@@ -146,6 +148,8 @@ const props = defineProps<{
   successMessage?: string | null
   errorMessage?: string | null
   fieldErrors?: Record<string, string> | null
+  fieldPermissions?: Record<string, MetaFieldPermission> | null
+  rowActions?: MetaRowActions | null
   linkSummariesByField?: Record<string, LinkedRecordSummary[]> | null
   attachmentSummariesByField?: Record<string, MetaAttachment[]> | null
   uploadFn?: MetaAttachmentUploadFn
@@ -166,8 +170,12 @@ const localAttachmentSummaries = ref<Record<string, Record<string, MetaAttachmen
 
 const editableFields = computed(() => {
   const hidden = new Set(props.hiddenFieldIds ?? [])
-  return props.fields.filter((f) => !hidden.has(f.id))
+  return props.fields.filter((field) => !hidden.has(field.id) && props.fieldPermissions?.[field.id]?.visible !== false)
 })
+
+function isFieldReadOnly(fieldId: string): boolean {
+  return !!props.readOnly || props.fieldPermissions?.[fieldId]?.readOnly === true || props.rowActions?.canEdit === false
+}
 
 const hasUnsavedChanges = computed(() => {
   if (!props.record) return Object.keys(formData).some((k) => !isEmptyFormValue(formData[k]))
@@ -269,6 +277,14 @@ function attachmentItems(fieldId: string): MetaAttachment[] {
   }))
 }
 
+function attachmentActionHint(fieldId: string): string {
+  const field = props.fields.find((item) => item.id === fieldId)
+  if (!field || field.type !== 'attachment') return 'Add files'
+  const allowsMultiple = attachmentAllowsMultiple(field)
+  if (allowsMultiple) return 'Add files'
+  return attachmentList(fieldId).length ? 'Upload a new file to replace the current one' : 'Upload a file'
+}
+
 async function onFormFileSelect(fieldId: string, e: Event) {
   const input = e.target as HTMLInputElement
   const files = input.files
@@ -285,13 +301,16 @@ async function onFormFileSelect(fieldId: string, e: Event) {
   }
   if (!props.uploadFn) {
     const existing = attachmentList(fieldId)
-    formData[fieldId] = [...existing, ...Array.from(files).map((file) => file.name)]
+    const replaceExisting = field ? shouldReplaceAttachmentSelection(field, files, existing.length) : false
+    const uploadedNames = Array.from(files).map((file) => file.name)
+    formData[fieldId] = replaceExisting ? uploadedNames : [...existing, ...uploadedNames]
     input.value = ''
     return
   }
   setAttachmentActivity(fieldId, 'uploading')
   try {
     const existing = attachmentList(fieldId)
+    const replaceExisting = field ? shouldReplaceAttachmentSelection(field, files, existing.length) : false
     const newIds: string[] = []
     for (const file of Array.from(files)) {
       const attachment = await props.uploadFn(file, {
@@ -301,7 +320,7 @@ async function onFormFileSelect(fieldId: string, e: Event) {
       rememberLocalAttachment(fieldId, attachment)
       newIds.push(attachment.id)
     }
-    formData[fieldId] = [...existing, ...newIds]
+    formData[fieldId] = replaceExisting ? newIds : [...existing, ...newIds]
   } catch (error: any) {
     setAttachmentOperationError(fieldId, error?.message ?? 'Failed to upload attachment')
   } finally {

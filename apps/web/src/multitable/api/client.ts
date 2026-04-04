@@ -27,6 +27,9 @@ import type {
   PatchRecordsInput,
   FormSubmitInput,
   MultitableComment,
+  MultitableCommentInboxItem,
+  MultitableCommentInboxPage,
+  MetaCommentsScope,
   MetaAttachment,
 } from '../types'
 import { apiFetch } from '../../utils/api'
@@ -100,13 +103,95 @@ function firstFieldError(fieldErrors?: Record<string, string>): string | null {
   return first ?? null
 }
 
-function normalizeCommentsList(payload: { comments?: MultitableComment[]; items?: MultitableComment[] } | null | undefined): {
+type RawComment = Partial<MultitableComment> & {
+  spreadsheetId?: string
+  rowId?: string
+}
+
+type RawInboxItem = RawComment & {
+  unread?: boolean
+  baseId?: string | null
+  sheetId?: string | null
+  viewId?: string | null
+  recordId?: string | null
+}
+
+function normalizeComment(payload: RawComment | null | undefined): MultitableComment {
+  return {
+    id: typeof payload?.id === 'string' ? payload.id : '',
+    containerId: typeof payload?.containerId === 'string'
+      ? payload.containerId
+      : typeof payload?.spreadsheetId === 'string'
+        ? payload.spreadsheetId
+        : '',
+    targetId: typeof payload?.targetId === 'string'
+      ? payload.targetId
+      : typeof payload?.rowId === 'string'
+        ? payload.rowId
+        : '',
+    fieldId: typeof payload?.fieldId === 'string' ? payload.fieldId : null,
+    parentId: typeof payload?.parentId === 'string' ? payload.parentId : undefined,
+    mentions: Array.isArray(payload?.mentions) ? payload.mentions.filter((value): value is string => typeof value === 'string') : [],
+    authorId: typeof payload?.authorId === 'string' ? payload.authorId : '',
+    authorName: typeof payload?.authorName === 'string' ? payload.authorName : undefined,
+    content: typeof payload?.content === 'string' ? payload.content : '',
+    resolved: payload?.resolved === true,
+    createdAt: typeof payload?.createdAt === 'string' ? payload.createdAt : '',
+    updatedAt: typeof payload?.updatedAt === 'string' ? payload.updatedAt : undefined,
+  }
+}
+
+function normalizeCommentsList(payload: { comments?: RawComment[]; items?: RawComment[] } | null | undefined): {
   comments: MultitableComment[]
 } {
   if (!payload) return { comments: [] }
-  if (Array.isArray(payload.comments)) return { comments: payload.comments }
-  if (Array.isArray(payload.items)) return { comments: payload.items }
+  if (Array.isArray(payload.comments)) return { comments: payload.comments.map((item) => normalizeComment(item)) }
+  if (Array.isArray(payload.items)) return { comments: payload.items.map((item) => normalizeComment(item)) }
   return { comments: [] }
+}
+
+function normalizeCommentInbox(payload: { items?: RawInboxItem[]; total?: number; limit?: number; offset?: number } | null | undefined): MultitableCommentInboxPage {
+  if (!payload) {
+    return { items: [], total: 0, limit: 0, offset: 0 }
+  }
+  return {
+    items: Array.isArray(payload.items)
+      ? payload.items.map((item) => ({
+          ...normalizeComment(item),
+          unread: item.unread !== false,
+          baseId: typeof item.baseId === 'string' || item.baseId === null ? item.baseId : null,
+          sheetId: typeof item.sheetId === 'string'
+            ? item.sheetId
+            : typeof item.spreadsheetId === 'string'
+              ? item.spreadsheetId
+              : null,
+          viewId: typeof item.viewId === 'string' || item.viewId === null ? item.viewId : null,
+          recordId: typeof item.recordId === 'string'
+            ? item.recordId
+            : typeof item.rowId === 'string'
+              ? item.rowId
+              : null,
+        })) as MultitableCommentInboxItem[]
+      : [],
+    total: typeof payload.total === 'number' ? payload.total : 0,
+    limit: typeof payload.limit === 'number' ? payload.limit : 0,
+    offset: typeof payload.offset === 'number' ? payload.offset : 0,
+  }
+}
+
+function normalizeCommentsParams(params: { containerId: string; targetId: string; targetFieldId?: string | null } | MetaCommentsScope) {
+  if ('containerType' in params) {
+    return {
+      containerId: params.containerId,
+      targetId: params.targetId,
+      targetFieldId: params.targetFieldId ?? null,
+    }
+  }
+  return {
+    containerId: params.containerId,
+    targetId: params.targetId,
+    targetFieldId: params.targetFieldId ?? null,
+  }
 }
 
 export class MultitableApiClient {
@@ -316,30 +401,66 @@ export class MultitableApiClient {
   }
 
   // --- Comments (uses /api/comments) ---
-  async listComments(params: { containerId: string; targetId: string }): Promise<{ comments: MultitableComment[] }> {
+  async listComments(params: { containerId: string; targetId: string; targetFieldId?: string | null } | MetaCommentsScope): Promise<{ comments: MultitableComment[] }> {
+    const normalized = normalizeCommentsParams(params)
     const res = await this.fetch(`/api/comments${qs({
-      spreadsheetId: params.containerId,
-      rowId: params.targetId,
+      spreadsheetId: normalized.containerId,
+      rowId: normalized.targetId,
     })}`)
-    const data = await parseJson<{ comments?: MultitableComment[]; items?: MultitableComment[] }>(res)
+    const data = await parseJson<{ comments?: RawComment[]; items?: RawComment[] }>(res)
     return normalizeCommentsList(data)
   }
 
-  async createComment(input: { containerId: string; targetId: string; content: string }): Promise<{ comment: MultitableComment }> {
+  async createComment(input: {
+    containerId: string
+    targetId: string
+    targetFieldId?: string | null
+    content: string
+    parentId?: string
+    mentions?: string[]
+  } | (MetaCommentsScope & {
+    content: string
+    parentId?: string
+    mentions?: string[]
+  })): Promise<{ comment: MultitableComment }> {
+    const normalized = normalizeCommentsParams(input)
     const res = await this.fetch('/api/comments', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        spreadsheetId: input.containerId,
-        rowId: input.targetId,
+        spreadsheetId: normalized.containerId,
+        rowId: normalized.targetId,
+        fieldId: normalized.targetFieldId ?? undefined,
         content: input.content,
+        parentId: input.parentId,
+        mentions: input.mentions,
       }),
     })
-    return parseJson(res)
+    const data = await parseJson<{ comment?: RawComment }>(res)
+    return {
+      comment: normalizeComment(data.comment),
+    }
   }
 
   async resolveComment(commentId: string): Promise<void> {
     const res = await this.fetch(`/api/comments/${commentId}/resolve`, { method: 'POST' })
+    return parseJson(res)
+  }
+
+  async listCommentInbox(params?: { limit?: number; offset?: number }): Promise<MultitableCommentInboxPage> {
+    const res = await this.fetch(`/api/comments/inbox${qs(params ?? {})}`)
+    const data = await parseJson<{ items?: RawInboxItem[]; total?: number; limit?: number; offset?: number }>(res)
+    return normalizeCommentInbox(data)
+  }
+
+  async getCommentUnreadCount(): Promise<number> {
+    const res = await this.fetch('/api/comments/unread-count')
+    const data = await parseJson<{ count?: number }>(res)
+    return typeof data?.count === 'number' ? data.count : 0
+  }
+
+  async markCommentRead(commentId: string): Promise<void> {
+    const res = await this.fetch(`/api/comments/${commentId}/read`, { method: 'POST' })
     return parseJson(res)
   }
 }

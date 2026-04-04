@@ -1,5 +1,5 @@
 import type { RouteRecordRaw } from 'vue-router'
-import { ROUTE_PATHS } from './types'
+import { AppRouteNames, ROUTE_PATHS } from './types'
 import { buildMultitableRoute } from './multitableRoute'
 import GridView from '../views/GridView.vue'
 import KanbanView from '../views/KanbanView.vue'
@@ -9,6 +9,7 @@ import FormView from '../views/FormView.vue'
 import PlmProductView from '../views/PlmProductView.vue'
 import SpreadsheetsView from '../views/SpreadsheetsView.vue'
 import SpreadsheetDetailView from '../views/SpreadsheetDetailView.vue'
+import MultitableCommentInboxView from '../views/MultitableCommentInboxView.vue'
 import PluginManagerView from '../views/PluginManagerView.vue'
 import PluginViewHost from '../views/PluginViewHost.vue'
 import AttendanceExperienceView from '../views/attendance/AttendanceExperienceView.vue'
@@ -69,6 +70,12 @@ export const appRoutes: RouteRecordRaw[] = [
     name: 'attendance',
     component: AttendanceExperienceView,
     meta: { title: 'Attendance', titleZh: '考勤', requiresAuth: true, requiredFeature: 'attendance' }
+  },
+  {
+    path: ROUTE_PATHS.MULTITABLE_COMMENT_INBOX,
+    name: AppRouteNames.MULTITABLE_COMMENT_INBOX,
+    component: MultitableCommentInboxView,
+    meta: { title: 'Comment Inbox', titleZh: '评论收件箱', requiresAuth: true }
   },
   {
     path: '/p/plugin-attendance/attendance',

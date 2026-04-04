@@ -119,11 +119,18 @@ export function attachmentAcceptAttr(field?: MetaField | null): string | undefin
   return acceptedMimeTypes.length > 0 ? acceptedMimeTypes.join(',') : undefined
 }
 
+export function shouldReplaceAttachmentSelection(field: MetaField, files: FileList | File[], existingCount: number): boolean {
+  if (field.type !== 'attachment') return false
+  const { maxFiles } = resolveAttachmentFieldProperty(field.property)
+  const fileCount = Array.from(files).length
+  return maxFiles === 1 && existingCount >= 1 && fileCount === 1
+}
+
 export function validateAttachmentSelection(field: MetaField, files: FileList | File[], existingCount: number): string | null {
   if (field.type !== 'attachment') return null
   const { maxFiles, acceptedMimeTypes } = resolveAttachmentFieldProperty(field.property)
   const fileList = Array.from(files)
-  if (maxFiles && existingCount + fileList.length > maxFiles) {
+  if (maxFiles && existingCount + fileList.length > maxFiles && !shouldReplaceAttachmentSelection(field, fileList, existingCount)) {
     return maxFiles === 1
       ? 'This field only allows one attachment. Clear the current file before adding another.'
       : `This field allows up to ${maxFiles} attachments.`

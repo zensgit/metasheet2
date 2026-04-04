@@ -2187,6 +2187,22 @@
           "targetId": {
             "type": "string"
           },
+          "baseId": {
+            "type": "string",
+            "nullable": true
+          },
+          "sheetId": {
+            "type": "string",
+            "nullable": true
+          },
+          "viewId": {
+            "type": "string",
+            "nullable": true
+          },
+          "recordId": {
+            "type": "string",
+            "nullable": true
+          },
           "targetFieldId": {
             "type": "string",
             "nullable": true
@@ -2204,6 +2220,85 @@
           "containerType",
           "containerId"
         ]
+      },
+      "MultitableFieldPermission": {
+        "type": "object",
+        "properties": {
+          "visible": {
+            "type": "boolean"
+          },
+          "readOnly": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "visible",
+          "readOnly"
+        ]
+      },
+      "MultitableFieldPermissions": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/MultitableFieldPermission"
+        }
+      },
+      "MultitableViewPermission": {
+        "type": "object",
+        "properties": {
+          "canAccess": {
+            "type": "boolean"
+          },
+          "canConfigure": {
+            "type": "boolean"
+          },
+          "canDelete": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "canAccess",
+          "canConfigure",
+          "canDelete"
+        ]
+      },
+      "MultitableViewPermissions": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/MultitableViewPermission"
+        }
+      },
+      "MultitableRowActions": {
+        "type": "object",
+        "properties": {
+          "canEdit": {
+            "type": "boolean"
+          },
+          "canDelete": {
+            "type": "boolean"
+          },
+          "canComment": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "canEdit",
+          "canDelete",
+          "canComment"
+        ]
+      },
+      "MultitableScopedPermissions": {
+        "type": "object",
+        "properties": {
+          "fieldPermissions": {
+            "$ref": "#/components/schemas/MultitableFieldPermissions"
+          },
+          "viewPermissions": {
+            "$ref": "#/components/schemas/MultitableViewPermissions"
+          },
+          "rowActions": {
+            "$ref": "#/components/schemas/MultitableRowActions"
+          }
+        }
       },
       "MultitableLinkedRecordSummary": {
         "type": "object",
@@ -2402,6 +2497,9 @@
             "items": {
               "type": "string"
             }
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/MultitableScopedPermissions"
           }
         }
       },
@@ -2477,6 +2575,12 @@
           },
           "capabilities": {
             "$ref": "#/components/schemas/MultitableCapabilities"
+          },
+          "fieldPermissions": {
+            "$ref": "#/components/schemas/MultitableFieldPermissions"
+          },
+          "viewPermissions": {
+            "$ref": "#/components/schemas/MultitableViewPermissions"
           }
         }
       },
@@ -2551,6 +2655,15 @@
           "capabilities": {
             "$ref": "#/components/schemas/MultitableCapabilities"
           },
+          "fieldPermissions": {
+            "$ref": "#/components/schemas/MultitableFieldPermissions"
+          },
+          "viewPermissions": {
+            "$ref": "#/components/schemas/MultitableViewPermissions"
+          },
+          "rowActions": {
+            "$ref": "#/components/schemas/MultitableRowActions"
+          },
           "commentsScope": {
             "$ref": "#/components/schemas/MultitableCommentsScope"
           },
@@ -2604,6 +2717,15 @@
           },
           "capabilities": {
             "$ref": "#/components/schemas/MultitableCapabilities"
+          },
+          "fieldPermissions": {
+            "$ref": "#/components/schemas/MultitableFieldPermissions"
+          },
+          "viewPermissions": {
+            "$ref": "#/components/schemas/MultitableViewPermissions"
+          },
+          "rowActions": {
+            "$ref": "#/components/schemas/MultitableRowActions"
           },
           "record": {
             "allOf": [
@@ -21170,21 +21292,20 @@
                   "bpmnXml": {
                     "type": "string"
                   },
-                  "nodes": {
-                    "type": "array",
-                    "items": {
-                      "type": "object"
-                    }
-                  },
-                  "edges": {
-                    "type": "array",
-                    "items": {
-                      "type": "object"
-                    }
+                  "version": {
+                    "oneOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
                   }
                 },
                 "required": [
-                  "name"
+                  "name",
+                  "bpmnXml"
                 ]
               }
             }
@@ -21346,17 +21467,15 @@
                   "bpmnXml": {
                     "type": "string"
                   },
-                  "nodes": {
-                    "type": "array",
-                    "items": {
-                      "type": "object"
-                    }
-                  },
-                  "edges": {
-                    "type": "array",
-                    "items": {
-                      "type": "object"
-                    }
+                  "version": {
+                    "oneOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
                   }
                 }
               }

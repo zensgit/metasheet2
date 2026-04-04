@@ -1,6 +1,8 @@
 import { ref } from 'vue'
-import type { MultitableComment } from '../types'
+import type { MetaCommentsScope, MultitableComment } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
+
+type CommentsTarget = { containerId: string; targetId: string; targetFieldId?: string | null } | MetaCommentsScope
 
 export function useMultitableComments(client?: MultitableApiClient) {
   const api = client ?? multitableClient
@@ -10,7 +12,7 @@ export function useMultitableComments(client?: MultitableApiClient) {
   const submitting = ref(false)
   const resolvingIds = ref<string[]>([])
 
-  async function loadComments(params: { containerId: string; targetId: string }) {
+  async function loadComments(params: CommentsTarget) {
     loading.value = true
     error.value = null
     try {
@@ -23,7 +25,7 @@ export function useMultitableComments(client?: MultitableApiClient) {
     }
   }
 
-  async function addComment(input: { containerId: string; targetId: string; content: string }) {
+  async function addComment(input: CommentsTarget & { content: string; parentId?: string; mentions?: string[] }) {
     error.value = null
     submitting.value = true
     try {
@@ -60,5 +62,33 @@ export function useMultitableComments(client?: MultitableApiClient) {
     error.value = null
   }
 
-  return { comments, loading, error, submitting, resolvingIds, loadComments, addComment, resolveComment, clearComments }
+  function upsertComment(comment: MultitableComment) {
+    const index = comments.value.findIndex((item) => item.id === comment.id)
+    if (index >= 0) {
+      comments.value[index] = { ...comments.value[index], ...comment }
+      return
+    }
+    comments.value = [comment, ...comments.value]
+  }
+
+  function applyResolvedComment(commentId: string) {
+    const index = comments.value.findIndex((item) => item.id === commentId)
+    if (index >= 0) {
+      comments.value[index] = { ...comments.value[index], resolved: true }
+    }
+  }
+
+  return {
+    comments,
+    loading,
+    error,
+    submitting,
+    resolvingIds,
+    loadComments,
+    addComment,
+    resolveComment,
+    clearComments,
+    upsertComment,
+    applyResolvedComment,
+  }
 }

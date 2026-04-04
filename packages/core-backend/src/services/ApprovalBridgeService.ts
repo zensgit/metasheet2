@@ -25,6 +25,7 @@ import type {
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
 
 const logger = new Logger('ApprovalBridgeService')
+const PLM_SYNC_CONCURRENCY = 5
 
 type ApprovalRecordRow = {
   id: string | number
@@ -43,14 +44,12 @@ function toIsoString(value: Date | string | null | undefined): string | null {
   return value instanceof Date ? value.toISOString() : String(value)
 }
 
-const PLM_TIMESTAMP_UNKNOWN = '1970-01-01T00:00:00.000Z'
-
-function toOccurredAt(...values: Array<Date | string | null | undefined>): string {
+function toOccurredAt(...values: Array<Date | string | null | undefined>): string | null {
   for (const value of values) {
     const iso = toIsoString(value)
     if (iso) return iso
   }
-  return PLM_TIMESTAMP_UNKNOWN
+  return null
 }
 
 function isPlmId(id: string): boolean {
@@ -120,7 +119,11 @@ function toBridgeSource(raw: {
 }
 
 export class ApprovalBridgeService {
-  constructor(private readonly plmAdapter: ApprovalBridgePlmAdapter) {}
+  constructor(private readonly plmAdapter: ApprovalBridgePlmAdapter | null = null) {}
+
+  hasPlmAdapter(): boolean {
+    return this.plmAdapter !== null
+  }
 
   async syncPlmApprovals(options?: PlmSyncOptions): Promise<{
     synced: number
@@ -128,7 +131,8 @@ export class ApprovalBridgeService {
   }> {
     if (!pool) throw new Error('Database not available')
 
-    const result = await this.plmAdapter.getApprovals({
+    const plmAdapter = this.requirePlmAdapter()
+    const result = await plmAdapter.getApprovals({
       status: options?.status,
       productId: options?.productId,
       requesterId: options?.requesterId,
@@ -148,12 +152,10 @@ export class ApprovalBridgeService {
     let synced = 0
     const errors: Array<{ externalId: string; error: string }> = []
 
-    const syncResults = await Promise.allSettled(
-      result.data.map(async (approval) => {
-        await this.upsertPlmMirror(toBridgeSource(approval))
-        return approval.id
-      }),
-    )
+    const syncResults = await this.runInBatches(result.data, PLM_SYNC_CONCURRENCY, async (approval) => {
+      await this.upsertPlmMirror(toBridgeSource(approval))
+      return approval.id
+    })
 
     syncResults.forEach((settledResult, index) => {
       if (settledResult.status === 'fulfilled') {
@@ -220,7 +222,7 @@ export class ApprovalBridgeService {
 
     const instancesResult = await pool.query<ApprovalInstanceRow>(
       `SELECT * FROM approval_instances ${whereClause}
-       ORDER BY updated_at DESC
+       ORDER BY COALESCE(source_updated_at, updated_at) DESC, updated_at DESC, id DESC
        LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
       [...params, limit, offset],
     )
@@ -289,7 +291,6 @@ export class ApprovalBridgeService {
   ): Promise<UnifiedApprovalDTO> {
     if (!pool) throw new Error('Database not available')
 
-    let instance = await this.loadApprovalInstance(id)
     if (isPlmId(id)) {
       try {
         await this.refreshPlmInstance(id)
@@ -299,42 +300,48 @@ export class ApprovalBridgeService {
         )
         await this.markSyncError(id, error)
       }
-      instance = await this.loadApprovalInstance(id)
     }
-
-    if (!instance) {
-      throw new ServiceError('Approval not found', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
-    }
-
-    if (instance.status !== 'pending') {
-      throw new ServiceError(
-        `Cannot ${request.action}: current status is ${instance.status}`,
-        409,
-        APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION,
-      )
-    }
-
-    const rejectCommentRequired = instance.policy_snapshot?.rejectCommentRequired !== false
-    if (request.action === 'reject' && rejectCommentRequired && !request.comment?.trim()) {
-      throw new ServiceError(
-        'Rejection comment is required',
-        400,
-        APPROVAL_ERROR_CODES.REJECT_COMMENT_REQUIRED,
-      )
-    }
-
-    if (instance.source_system === 'plm') {
-      await this.dispatchPlmAction(id, instance.version, request)
-    }
-
-    const nextStatus = request.action === 'approve' ? 'approved' : 'rejected'
-    const nextVersion = instance.version + 1
     const client = await pool.connect()
 
     try {
       await client.query('BEGIN')
 
-      await client.query(
+      const lockedResult = await client.query<ApprovalInstanceRow>(
+        `SELECT * FROM approval_instances
+         WHERE id = $1
+         FOR UPDATE`,
+        [id],
+      )
+      const instance = lockedResult.rows[0]
+      if (!instance) {
+        throw new ServiceError('Approval not found', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
+      }
+
+      if (instance.status !== 'pending') {
+        throw new ServiceError(
+          `Cannot ${request.action}: current status is ${instance.status}`,
+          409,
+          APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION,
+        )
+      }
+
+      const rejectCommentRequired = instance.policy_snapshot?.rejectCommentRequired !== false
+      if (request.action === 'reject' && rejectCommentRequired && !request.comment?.trim()) {
+        throw new ServiceError(
+          'Rejection comment is required',
+          400,
+          APPROVAL_ERROR_CODES.REJECT_COMMENT_REQUIRED,
+        )
+      }
+
+      if (instance.source_system === 'plm') {
+        await this.dispatchPlmAction(id, instance.version, request)
+      }
+
+      const nextStatus = request.action === 'approve' ? 'approved' : 'rejected'
+      const nextVersion = instance.version + 1
+
+      const updateResult = await client.query(
         `UPDATE approval_instances
          SET status = $1,
              version = $2,
@@ -342,9 +349,28 @@ export class ApprovalBridgeService {
              sync_error = NULL,
              last_synced_at = now(),
              updated_at = now()
-         WHERE id = $3`,
-        [nextStatus, nextVersion, id],
+         WHERE id = $3
+           AND version = $4
+           AND status = $5`,
+        [nextStatus, nextVersion, id, instance.version, instance.status],
       )
+
+      if (updateResult.rowCount !== 1) {
+        const latest = await this.loadApprovalInstance(id)
+        throw new ServiceError(
+          latest
+            ? `Cannot ${request.action}: current status is ${latest.status}`
+            : 'Approval changed during processing',
+          409,
+          APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION,
+          latest
+            ? {
+                currentVersion: latest.version,
+                currentStatus: latest.status,
+              }
+            : undefined,
+        )
+      }
 
       await client.query(
         `UPDATE approval_assignments
@@ -387,6 +413,33 @@ export class ApprovalBridgeService {
       throw new ServiceError('Approval not found after action', 404, APPROVAL_ERROR_CODES.APPROVAL_NOT_FOUND)
     }
     return updated
+  }
+
+  private requirePlmAdapter(): ApprovalBridgePlmAdapter {
+    if (!this.plmAdapter) {
+      throw new ServiceError(
+        'PLM approval bridge is not configured',
+        503,
+        'PLM_APPROVAL_BRIDGE_UNAVAILABLE',
+      )
+    }
+
+    return this.plmAdapter
+  }
+
+  private async runInBatches<TItem, TResult>(
+    items: TItem[],
+    batchSize: number,
+    task: (item: TItem) => Promise<TResult>,
+  ): Promise<Array<PromiseSettledResult<TResult>>> {
+    const results: Array<PromiseSettledResult<TResult>> = []
+
+    for (let index = 0; index < items.length; index += batchSize) {
+      const batch = items.slice(index, index + batchSize)
+      results.push(...(await Promise.allSettled(batch.map(task))))
+    }
+
+    return results
   }
 
   private async loadApprovalInstance(id: string): Promise<ApprovalInstanceRow | null> {
@@ -496,7 +549,7 @@ export class ApprovalBridgeService {
 
   private async refreshPlmInstance(id: string): Promise<void> {
     const externalApprovalId = extractExternalId(id)
-    const result = await this.plmAdapter.getApprovalById(externalApprovalId)
+    const result = await this.requirePlmAdapter().getApprovalById(externalApprovalId)
 
     if (result.error) {
       throw new ServiceError(
@@ -516,7 +569,7 @@ export class ApprovalBridgeService {
   }
 
   private async getPlmHistory(id: string): Promise<UnifiedApprovalHistoryDTO[]> {
-    const result = await this.plmAdapter.getApprovalHistory(extractExternalId(id))
+    const result = await this.requirePlmAdapter().getApprovalHistory(extractExternalId(id))
 
     if (result.error) {
       throw new ServiceError(
@@ -552,8 +605,8 @@ export class ApprovalBridgeService {
   private async dispatchPlmAction(id: string, version: number, request: ApprovalActionRequest): Promise<void> {
     const externalApprovalId = extractExternalId(id)
     const result = request.action === 'approve'
-      ? await this.plmAdapter.approveApproval(externalApprovalId, version, request.comment)
-      : await this.plmAdapter.rejectApproval(externalApprovalId, version, request.comment || '')
+      ? await this.requirePlmAdapter().approveApproval(externalApprovalId, version, request.comment)
+      : await this.requirePlmAdapter().rejectApproval(externalApprovalId, version, request.comment || '')
 
     if (result.error) {
       throw new ServiceError(

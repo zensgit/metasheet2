@@ -57,9 +57,17 @@
                 v-for="ev in cell.events"
                 :key="ev.id"
                 class="meta-calendar__event"
+                :class="{ 'meta-calendar__event--attachment': ev.isAttachmentTitle }"
                 @click.stop="emit('select-record', ev.id)"
               >
-                {{ ev.title }}
+                <MetaAttachmentList
+                  v-if="ev.isAttachmentTitle"
+                  class="meta-calendar__event-attachments"
+                  :attachments="ev.attachments"
+                  variant="compact"
+                  empty-label="No attachments"
+                />
+                <template v-else>{{ ev.title }}</template>
               </div>
               <div v-if="cell.overflow > 0" class="meta-calendar__overflow">+{{ cell.overflow }} more</div>
             </div>
@@ -92,9 +100,17 @@
                 v-for="ev in cell.events"
                 :key="ev.id"
                 class="meta-calendar__event"
+                :class="{ 'meta-calendar__event--attachment': ev.isAttachmentTitle }"
                 @click.stop="emit('select-record', ev.id)"
               >
-                {{ ev.title }}
+                <MetaAttachmentList
+                  v-if="ev.isAttachmentTitle"
+                  class="meta-calendar__event-attachments"
+                  :attachments="ev.attachments"
+                  variant="compact"
+                  empty-label="No attachments"
+                />
+                <template v-else>{{ ev.title }}</template>
               </div>
               <div v-if="cell.overflow > 0" class="meta-calendar__overflow">+{{ cell.overflow }} more</div>
             </div>
@@ -120,12 +136,20 @@
               v-for="ev in currentDayEvents"
               :key="ev.id"
               class="meta-calendar__day-event"
+              :class="{ 'meta-calendar__day-event--attachment': ev.isAttachmentTitle }"
               role="button"
               tabindex="0"
               @click="emit('select-record', ev.id)"
               @keydown.enter="emit('select-record', ev.id)"
             >
-              {{ ev.title }}
+              <MetaAttachmentList
+                v-if="ev.isAttachmentTitle"
+                class="meta-calendar__day-event-attachments"
+                :attachments="ev.attachments"
+                variant="compact"
+                empty-label="No attachments"
+              />
+              <template v-else>{{ ev.title }}</template>
             </div>
             <div v-if="!currentDayEvents.length" class="meta-calendar__empty-hint">No records on this day</div>
           </div>
@@ -142,6 +166,7 @@ import { ref, computed, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaCalendarViewConfig, MetaField, MetaRecord } from '../types'
 import { resolveCalendarViewConfig } from '../utils/view-config'
 import { formatFieldDisplay } from '../utils/field-display'
+import MetaAttachmentList from './MetaAttachmentList.vue'
 
 const MAX_EVENTS_PER_CELL = 3
 
@@ -216,10 +241,39 @@ const titleField = computed(() =>
     ?? null,
 )
 
+type CalendarEvent = {
+  id: string
+  title: string
+  attachments: MetaAttachment[]
+  isAttachmentTitle: boolean
+}
+
+function attachmentIds(row: MetaRecord, field: MetaField): string[] {
+  const rawValue = row.data[field.id]
+  if (Array.isArray(rawValue)) return rawValue.map(String)
+  if (rawValue) return [String(rawValue)]
+  return []
+}
+
+function attachmentItems(row: MetaRecord, field: MetaField): MetaAttachment[] {
+  const summaryById = new Map((props.attachmentSummaries?.[row.id]?.[field.id] ?? []).map((attachment) => [attachment.id, attachment]))
+  return attachmentIds(row, field).map((id) => summaryById.get(id) ?? ({
+    id,
+    filename: id,
+    mimeType: 'application/octet-stream',
+    size: 0,
+    url: '',
+    thumbnailUrl: null,
+    uploadedAt: '',
+  }))
+}
+
 const eventsByDate = computed(() => {
-  const map: Record<string, Array<{ id: string; title: string }>> = {}
+  const map: Record<string, CalendarEvent[]> = {}
   if (!dateField.value) return map
   for (const row of props.rows) {
+    const isAttachmentTitle = titleField.value?.type === 'attachment'
+    const attachments = titleField.value && isAttachmentTitle ? attachmentItems(row, titleField.value) : []
     const titleDisplay = titleField.value
       ? formatFieldDisplay({
         field: titleField.value,
@@ -240,7 +294,7 @@ const eventsByDate = computed(() => {
     for (let cursor = new Date(start); cursor.getTime() <= safeEnd.getTime(); cursor.setDate(cursor.getDate() + 1)) {
       const dateStr = fmt(cursor.getFullYear(), cursor.getMonth() + 1, cursor.getDate())
       if (!map[dateStr]) map[dateStr] = []
-      map[dateStr].push({ id: row.id, title })
+      map[dateStr].push({ id: row.id, title, attachments, isAttachmentTitle })
     }
   }
   return map
@@ -252,7 +306,7 @@ interface CalendarCell {
   dateStr: string
   inMonth: boolean
   isToday: boolean
-  events: Array<{ id: string; title: string }>
+  events: CalendarEvent[]
   overflow: number
 }
 
@@ -489,6 +543,11 @@ function onCellKeydown(e: KeyboardEvent, cellIdx: number, cells: CalendarCell[])
 .meta-calendar__events { display: flex; flex-direction: column; gap: 2px; }
 .meta-calendar__event { padding: 2px 4px; background: #409eff; color: #fff; border-radius: 3px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .meta-calendar__event:hover { background: #337ecc; }
+.meta-calendar__event--attachment { background: #f8fafc; color: #334155; border: 1px solid #dbeafe; white-space: normal; }
+.meta-calendar__event--attachment:hover { background: #eff6ff; }
+.meta-calendar__event-attachments { pointer-events: none; }
+.meta-calendar__event-attachments :deep(.meta-attachment-list__items) { gap: 4px; }
+.meta-calendar__event-attachments :deep(.meta-attachment-list__card) { border-color: #bfdbfe; background: #fff; }
 .meta-calendar__overflow { font-size: 10px; color: #999; padding: 1px 4px; }
 .meta-calendar__day-view { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
 .meta-calendar__day-panel { min-width: 240px; display: flex; flex-direction: column; gap: 8px; padding: 16px; border: 1px solid #e5e7eb; border-radius: 10px; background: #fbfdff; }
@@ -496,6 +555,8 @@ function onCellKeydown(e: KeyboardEvent, cellIdx: number, cells: CalendarCell[])
 .meta-calendar__day-meta { font-size: 12px; color: #64748b; }
 .meta-calendar__day-list { flex: 1; display: flex; flex-direction: column; gap: 8px; min-height: 160px; }
 .meta-calendar__day-event { padding: 10px 12px; border: 1px solid #dbeafe; border-radius: 8px; background: #eff6ff; color: #1d4ed8; cursor: pointer; }
+.meta-calendar__day-event--attachment { background: #f8fafc; color: #334155; }
+.meta-calendar__day-event-attachments :deep(.meta-attachment-list__card) { border-color: #bfdbfe; background: #fff; }
 .meta-calendar__empty-hint { color: #94a3b8; font-size: 13px; }
 .meta-calendar__loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.7); font-size: 14px; color: #666; z-index: 10; }
 </style>

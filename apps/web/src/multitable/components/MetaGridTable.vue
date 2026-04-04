@@ -191,7 +191,14 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadFn, MetaField, MetaRecord, RowDensity } from '../types'
+import type {
+  MetaAttachment,
+  MetaAttachmentDeleteFn,
+  MetaAttachmentUploadFn,
+  MetaField,
+  MetaRecord,
+  RowDensity,
+} from '../types'
 import type { SortRule } from '../composables/useMultitableGrid'
 import MetaCellRenderer from './cells/MetaCellRenderer.vue'
 import MetaCellEditor from './cells/MetaCellEditor.vue'
@@ -212,6 +219,7 @@ const props = defineProps<{
   selectedRecordId?: string | null
   canEdit: boolean
   canDelete?: boolean
+  fieldReadOnlyIds?: string[]
   columnWidths?: Record<string, number>
   linkSummaries?: Record<string, Record<string, { id: string; display: string }[]>>
   attachmentSummaries?: Record<string, Record<string, MetaAttachment[]>>
@@ -327,7 +335,7 @@ function flatIndex(group: RowGroup, localIdx: number): number {
 
 const getSortDir = (fid: string) => props.sortRules.find((r) => r.fieldId === fid)?.direction ?? null
 const isSortable = (f: MetaField) => !['link', 'lookup', 'rollup'].includes(f.type)
-const isEditable = (f: MetaField) => props.canEdit && EDITABLE.has(f.type)
+const isEditable = (f: MetaField) => props.canEdit && EDITABLE.has(f.type) && !props.fieldReadOnlyIds?.includes(f.id)
 const isEditing = (rid: string, fid: string) => editCell.value?.recordId === rid && editCell.value?.fieldId === fid
 
 function cellStyle(fid: string) {

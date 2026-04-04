@@ -33,6 +33,7 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
   r.get('/api/approvals/:id/history', authenticate, async (req: Request, res: Response) => {
     const id = req.params.id
     if (isPlmApprovalId(id)) {
+      const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>)
       const plmAdapter = resolvePlmAdapter(options)
       if (!plmAdapter) {
         return res.status(503).json({
@@ -45,12 +46,13 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
       }
 
       const history = await new ApprovalBridgeService(plmAdapter).getApprovalHistory(id)
+      const items = history.slice(offset, offset + pageSize)
       return res.json({
         ok: true,
         data: {
-          items: history,
-          page: 1,
-          pageSize: history.length,
+          items,
+          page,
+          pageSize,
           total: history.length,
         },
       })

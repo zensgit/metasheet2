@@ -42,6 +42,7 @@ import { installMetrics, requestMetricsMiddleware } from './metrics/metrics'
 import { getPoolStats } from './db/pg'
 import { isDatabaseSchemaError } from './utils/database-errors'
 import { startOperationAuditRetention } from './audit/operation-audit-retention'
+import { startMultitableAttachmentCleanup } from './multitable/attachment-orphan-retention'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
 import { approvalsRouter } from './routes/approvals'
 import { authRouter } from './routes/auth'
@@ -109,6 +110,7 @@ export class MetaSheetServer {
   private observabilityShutdown?: () => Promise<void>
   private observabilityEnabled = false
   private stopOperationAuditRetention?: () => void
+  private stopMultitableAttachmentCleanup?: () => void
   // Optional bypass/degraded-mode flags for local debug
   private disableWorkflow = process.env.DISABLE_WORKFLOW === 'true'
   private disableEventBus = process.env.DISABLE_EVENT_BUS === 'true'
@@ -576,7 +578,12 @@ export class MetaSheetServer {
     // 路由：Univer Mock API（用于前端 POC，不依赖数据库；仅非生产环境启用）
     if (process.env.NODE_ENV !== 'production') {
       this.app.use('/api/univer-mock', univerMockRouter())
-      // DB-backed Meta API（用于把 POC 写回真实 meta schema；仅非生产环境启用）
+    }
+
+    // Canonical multitable API used by the frontend and OpenAPI contracts.
+    this.app.use('/api/multitable', univerMetaRouter())
+    // Keep the legacy dev alias while existing tools/worktrees still reference it.
+    if (process.env.NODE_ENV !== 'production') {
       this.app.use('/api/univer-meta', univerMetaRouter())
     }
 
@@ -895,6 +902,13 @@ export class MetaSheetServer {
         this.logger.warn(`Operation audit retention stop error: ${err instanceof Error ? err.message : String(err)}`)
       }
     }))
+    shutdownTasks.push(Promise.resolve().then(() => {
+      try {
+        this.stopMultitableAttachmentCleanup?.()
+      } catch (err) {
+        this.logger.warn(`Multitable attachment cleanup stop error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }))
 
     // 1. Close HTTP server
     shutdownTasks.push(new Promise<void>((resolve) => {
@@ -1085,6 +1099,7 @@ export class MetaSheetServer {
     // Background tasks (after server starts listening)
     if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       this.stopOperationAuditRetention = startOperationAuditRetention({ logger: this.logger })
+      this.stopMultitableAttachmentCleanup = startMultitableAttachmentCleanup({ logger: this.logger })
     }
 
     // Register signal handlers only for real runtime, not test runners.

@@ -65,7 +65,7 @@ export interface UnifiedApprovalHistoryDTO {
   comment: string | null
   fromStatus: string | null
   toStatus: string
-  occurredAt: string
+  occurredAt: string | null
   metadata: Record<string, unknown>
 }
 

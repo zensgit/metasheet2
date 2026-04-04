@@ -222,6 +222,11 @@ const routeState = vi.hoisted(() => {
       return { rows, rowCount: rows.length }
     }
 
+    if (normalized.startsWith('SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE')) {
+      const row = state.instances.get(String(params[0]))
+      return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }
+    }
+
     if (normalized.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
       const row = state.instances.get(String(params[0]))
       return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }
@@ -231,7 +236,36 @@ const routeState = vi.hoisted(() => {
       const { rows, index } = filterDynamicInstances(normalized, params)
       const limit = Number(params[index])
       const offset = Number(params[index + 1])
-      const sorted = rows.sort((left, right) => right.updated_at.getTime() - left.updated_at.getTime())
+      const sorted = rows.sort((left, right) => {
+        const leftPrimary = (left.source_updated_at ?? left.updated_at).getTime()
+        const rightPrimary = (right.source_updated_at ?? right.updated_at).getTime()
+        if (leftPrimary !== rightPrimary) {
+          return rightPrimary - leftPrimary
+        }
+        if (left.updated_at.getTime() !== right.updated_at.getTime()) {
+          return right.updated_at.getTime() - left.updated_at.getTime()
+        }
+        return right.id.localeCompare(left.id)
+      })
+      const sliced = sorted.slice(offset, offset + limit)
+      return { rows: sliced, rowCount: sliced.length }
+    }
+
+    if (normalized.startsWith('SELECT * FROM approval_instances ORDER BY COALESCE(source_updated_at, updated_at) DESC')) {
+      const limit = Number(params[0])
+      const offset = Number(params[1])
+      const rows = Array.from(state.instances.values())
+      const sorted = rows.sort((left, right) => {
+        const leftPrimary = (left.source_updated_at ?? left.updated_at).getTime()
+        const rightPrimary = (right.source_updated_at ?? right.updated_at).getTime()
+        if (leftPrimary !== rightPrimary) {
+          return rightPrimary - leftPrimary
+        }
+        if (left.updated_at.getTime() !== right.updated_at.getTime()) {
+          return right.updated_at.getTime() - left.updated_at.getTime()
+        }
+        return right.id.localeCompare(left.id)
+      })
       const sliced = sorted.slice(offset, offset + limit)
       return { rows: sliced, rowCount: sliced.length }
     }
@@ -327,7 +361,9 @@ const routeState = vi.hoisted(() => {
 
     if (normalized.startsWith('UPDATE approval_instances SET status = $1,')) {
       const row = state.instances.get(String(params[2]))
-      if (row) {
+      const expectedVersion = Number(params[3])
+      const expectedStatus = String(params[4])
+      if (row && row.version === expectedVersion && row.status === expectedStatus) {
         row.status = String(params[0])
         row.version = Number(params[1])
         row.sync_status = 'ok'
@@ -522,7 +558,7 @@ function createPlmAdapterMock(): ApprovalBridgePlmAdapter & {
   }
 }
 
-function createApp(plmAdapter: ApprovalBridgePlmAdapter) {
+function createApp(plmAdapter?: ApprovalBridgePlmAdapter) {
   const app = express()
   app.use(express.json())
   app.use(approvalsRouter({ plmAdapter }))
@@ -570,6 +606,44 @@ describe('approval bridge routes', () => {
     })
   })
 
+  it('lists platform approvals without requiring a configured PLM bridge', async () => {
+    routeState.state.assignments.set('local-1:user-1', {
+      id: 'assign-1',
+      instance_id: 'local-1',
+      assignment_type: 'user',
+      assignee_id: 'user-1',
+      source_step: 0,
+      is_active: true,
+      metadata: {},
+      created_at: new Date('2026-04-04T08:00:00.000Z'),
+      updated_at: new Date('2026-04-04T08:00:00.000Z'),
+    })
+
+    const response = await request(createApp())
+      .get('/api/approvals?assignee=user-1')
+      .expect(200)
+
+    expect(response.body.total).toBe(1)
+    expect(response.body.data[0].id).toBe('local-1')
+  })
+
+  it('clamps oversized unified list limits before syncing PLM approvals', async () => {
+    const plmAdapter = createPlmAdapterMock()
+    const app = createApp(plmAdapter)
+
+    await request(app)
+      .get('/api/approvals?sourceSystem=plm&limit=999')
+      .expect(200)
+
+    expect(plmAdapter.getApprovals).toHaveBeenCalledWith({
+      status: undefined,
+      productId: undefined,
+      requesterId: undefined,
+      limit: 200,
+      offset: 0,
+    })
+  })
+
   it('rejects PLM assignee filtering in phase 1', async () => {
     const app = createApp(createPlmAdapterMock())
 
@@ -578,6 +652,19 @@ describe('approval bridge routes', () => {
       .expect(400)
 
     expect(response.body.error.code).toBe('ASSIGNEE_FILTER_UNSUPPORTED')
+  })
+
+  it('lists platform approvals without requiring a PLM adapter', async () => {
+    const response = await request(createApp())
+      .get('/api/approvals')
+      .expect(200)
+
+    expect(response.body.total).toBe(1)
+    expect(response.body.data).toHaveLength(1)
+    expect(response.body.data[0]).toMatchObject({
+      id: 'local-1',
+      sourceSystem: 'platform',
+    })
   })
 
   it('filters non-PLM approvals by active assignee assignments', async () => {
@@ -653,7 +740,7 @@ describe('approval bridge routes', () => {
     const app = createApp(createPlmAdapterMock())
 
     const response = await request(app)
-      .get('/api/approvals/plm:eco-1/history')
+      .get('/api/approvals/plm:eco-1/history?page=1&pageSize=1')
       .expect(200)
 
     expect(response.body).toMatchObject({
@@ -673,7 +760,37 @@ describe('approval bridge routes', () => {
     })
   })
 
-  it('uses a deterministic fallback occurredAt when PLM history has no timestamps', async () => {
+  it('paginates PLM history through the canonical history route', async () => {
+    routeState.plmHistory.push({
+      id: 'hist-2',
+      eco_id: 'eco-1',
+      stage_id: 'approval',
+      approval_type: 'mandatory',
+      required_role: 'manager',
+      user_id: 'reviewer-2',
+      status: 'rejected',
+      comment: 'needs changes',
+      approved_at: '2026-04-04T00:11:00.000Z',
+      created_at: '2026-04-04T00:11:00.000Z',
+    })
+
+    const response = await request(createApp(createPlmAdapterMock()))
+      .get('/api/approvals/plm:eco-1/history?page=2&pageSize=1')
+      .expect(200)
+
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        page: 2,
+        pageSize: 1,
+        total: 2,
+      },
+    })
+    expect(response.body.data.items).toHaveLength(1)
+    expect(response.body.data.items[0].id).toBe('hist-2')
+  })
+
+  it('returns null occurredAt when PLM history has no timestamps', async () => {
     routeState.plmHistory[0].approved_at = null
     routeState.plmHistory[0].created_at = null
     const app = createApp(createPlmAdapterMock())
@@ -682,7 +799,7 @@ describe('approval bridge routes', () => {
       .get('/api/approvals/plm:eco-1/history')
       .expect(200)
 
-    expect(response.body.data.items[0].occurredAt).toBe('1970-01-01T00:00:00.000Z')
+    expect(response.body.data.items[0].occurredAt).toBeNull()
   })
 
   it('requires a reject comment on unified actions', async () => {

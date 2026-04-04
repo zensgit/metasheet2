@@ -63,7 +63,7 @@ Result:
 
 ### Script Issue
 
-The package script in [package.json](/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/package.json) is currently incorrect:
+The package script in [package.json](packages/core-backend/package.json) is currently incorrect:
 
 ```json
 "test:unit": "vitest run packages/core-backend/tests/unit --reporter=dot"

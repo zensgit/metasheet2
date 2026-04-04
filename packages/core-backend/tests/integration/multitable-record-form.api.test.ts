@@ -140,9 +140,13 @@ describe('Multitable record and form context API', () => {
         fld_files: ['att_1'],
       },
     })
-    expect(response.body.data.commentsScope).toEqual({
+    expect(response.body.data.commentsScope).toMatchObject({
       targetType: 'meta_record',
       targetId: 'rec_1',
+      baseId: 'base_ops',
+      sheetId: 'sheet_orders',
+      viewId: null,
+      recordId: 'rec_1',
       containerType: 'meta_sheet',
       containerId: 'sheet_orders',
     })
@@ -237,9 +241,13 @@ describe('Multitable record and form context API', () => {
       expect.objectContaining({ id: 'fld_files', name: 'Files' }),
     ])
     expect(response.body.data.record).toMatchObject({ id: 'rec_existing', version: 5 })
-    expect(response.body.data.commentsScope).toEqual({
+    expect(response.body.data.commentsScope).toMatchObject({
       targetType: 'meta_record',
       targetId: 'rec_existing',
+      baseId: 'base_ops',
+      sheetId: 'sheet_ops',
+      viewId: 'view_form_ops',
+      recordId: 'rec_existing',
       containerType: 'meta_sheet',
       containerId: 'sheet_ops',
     })
@@ -665,9 +673,13 @@ describe('Multitable record and form context API', () => {
         uploadedAt: '2026-03-19T12:30:00.000Z',
       })],
     })
-    expect(response.body.data.commentsScope).toEqual({
+    expect(response.body.data.commentsScope).toMatchObject({
       targetType: 'meta_record',
       targetId: 'rec_existing',
+      baseId: 'base_ops',
+      sheetId: 'sheet_ops',
+      viewId: 'view_form_ops',
+      recordId: 'rec_existing',
       containerType: 'meta_sheet',
       containerId: 'sheet_ops',
     })
@@ -789,9 +801,13 @@ describe('Multitable record and form context API', () => {
         uploadedAt: '2026-03-19T12:45:00.000Z',
       })],
     })
-    expect(response.body.data.commentsScope).toEqual({
+    expect(response.body.data.commentsScope).toMatchObject({
       targetType: 'meta_record',
       targetId: 'rec_existing',
+      baseId: 'base_ops',
+      sheetId: 'sheet_ops',
+      viewId: null,
+      recordId: 'rec_existing',
       containerType: 'meta_sheet',
       containerId: 'sheet_ops',
     })

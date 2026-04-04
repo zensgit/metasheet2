@@ -8,17 +8,18 @@
         <button class="meta-record-drawer__nav-btn" :disabled="currentRecordIndex >= recordIds.length - 1" aria-label="Next record" @click="navigateNext">&rsaquo;</button>
       </div>
       <div class="meta-record-drawer__actions">
-        <button v-if="canComment" class="meta-record-drawer__btn" title="Comments" @click="emit('toggle-comments')">&#x1F4AC;</button>
-        <button v-if="canDelete" class="meta-record-drawer__btn meta-record-drawer__btn--danger" @click="emit('delete')">Delete</button>
+        <button v-if="resolvedCanComment" class="meta-record-drawer__btn" title="Comments" @click="emit('toggle-comments')">&#x1F4AC;</button>
+        <button v-if="canManageAutomation" class="meta-record-drawer__btn" title="Open workflow designer" @click="emit('open-automation')">&#x2699; Workflow</button>
+        <button v-if="resolvedCanDelete" class="meta-record-drawer__btn meta-record-drawer__btn--danger" @click="emit('delete')">Delete</button>
         <button class="meta-record-drawer__close" aria-label="Close record drawer" @click="emit('close')">&times;</button>
       </div>
     </div>
     <div v-if="record" class="meta-record-drawer__body">
-      <div v-for="field in fields" :key="field.id" class="meta-record-drawer__field">
+      <div v-for="field in visibleFields" :key="field.id" class="meta-record-drawer__field">
         <label class="meta-record-drawer__label" :for="`drawer_field_${field.id}`">{{ field.name }}</label>
         <div class="meta-record-drawer__value">
           <input
-            v-if="canEdit && field.type === 'string'"
+            v-if="canEditField(field.id) && field.type === 'string'"
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
             type="text"
@@ -26,7 +27,7 @@
             @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
           />
           <input
-            v-else-if="canEdit && field.type === 'number'"
+            v-else-if="canEditField(field.id) && field.type === 'number'"
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
             type="number"
@@ -34,18 +35,18 @@
             @change="emit('patch', field.id, ($event.target as HTMLInputElement).value === '' ? null : Number(($event.target as HTMLInputElement).value))"
           />
           <input
-            v-else-if="canEdit && field.type === 'date'"
+            v-else-if="canEditField(field.id) && field.type === 'date'"
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
             type="date"
             :value="record.data[field.id] ?? ''"
             @change="emit('patch', field.id, ($event.target as HTMLInputElement).value)"
           />
-          <label v-else-if="canEdit && field.type === 'boolean'" class="meta-record-drawer__check">
+          <label v-else-if="canEditField(field.id) && field.type === 'boolean'" class="meta-record-drawer__check">
             <input type="checkbox" :checked="!!record.data[field.id]" @change="emit('patch', field.id, ($event.target as HTMLInputElement).checked)" />
           </label>
           <select
-            v-else-if="canEdit && field.type === 'select'"
+            v-else-if="canEditField(field.id) && field.type === 'select'"
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
             :value="record.data[field.id] ?? ''"
@@ -55,18 +56,18 @@
             <option v-for="opt in field.options ?? []" :key="opt.value" :value="opt.value">{{ opt.value }}</option>
           </select>
           <button
-            v-else-if="canEdit && field.type === 'link'"
+            v-else-if="canEditField(field.id) && field.type === 'link'"
             class="meta-record-drawer__link-btn"
             @click="emit('open-link-picker', field)"
           >{{ linkButtonLabel(field.id) }}</button>
           <div v-else-if="field.type === 'attachment'" class="meta-record-drawer__attachments">
             <MetaAttachmentList
               :attachments="attachmentItems(field.id)"
-              :removable="canEdit"
+              :removable="canEditField(field.id)"
               empty-label="—"
               @remove="onRemoveAttachment(field.id, $event)"
             />
-            <div v-if="canEdit" class="meta-record-drawer__attachment-add">
+            <div v-if="canEditField(field.id)" class="meta-record-drawer__attachment-add">
               <input
                 type="file"
                 :multiple="attachmentAllowsMultiple(field)"
@@ -75,7 +76,7 @@
                 :disabled="!!attachmentActivity[field.id]"
                 @change="onDrawerFileSelect(field.id, $event)"
               />
-              <span class="meta-record-drawer__attachment-hint">Add or replace files</span>
+              <span class="meta-record-drawer__attachment-hint">{{ attachmentActionHint(field.id) }}</span>
               <button
                 v-if="attachmentList(field.id).length"
                 type="button"
@@ -105,11 +106,13 @@ import type {
   MetaAttachment,
   MetaAttachmentDeleteFn,
   MetaAttachmentUploadFn,
+  MetaFieldPermission,
   MetaField,
   MetaRecord,
+  MetaRowActions,
 } from '../types'
 import MetaAttachmentList from './MetaAttachmentList.vue'
-import { attachmentAcceptAttr, resolveAttachmentFieldProperty, validateAttachmentSelection } from '../utils/field-config'
+import { attachmentAcceptAttr, resolveAttachmentFieldProperty, shouldReplaceAttachmentSelection, validateAttachmentSelection } from '../utils/field-config'
 import { linkActionLabel } from '../utils/link-fields'
 
 const props = withDefaults(defineProps<{
@@ -119,6 +122,9 @@ const props = withDefaults(defineProps<{
   canEdit: boolean
   canComment: boolean
   canDelete: boolean
+  canManageAutomation?: boolean
+  fieldPermissions?: Record<string, MetaFieldPermission> | null
+  rowActions?: MetaRowActions | null
   linkSummariesByField?: Record<string, LinkedRecordSummary[]>
   attachmentSummariesByField?: Record<string, MetaAttachment[]>
   recordIds?: string[]
@@ -133,6 +139,7 @@ const emit = defineEmits<{
   (e: 'delete'): void
   (e: 'patch', fieldId: string, value: unknown): void
   (e: 'toggle-comments'): void
+  (e: 'open-automation'): void
   (e: 'open-link-picker', field: MetaField): void
   (e: 'navigate', recordId: string): void
 }>()
@@ -151,6 +158,14 @@ const currentRecordIndex = computed(() => {
   if (!props.record || !props.recordIds.length) return -1
   return props.recordIds.indexOf(props.record.id)
 })
+
+const visibleFields = computed(() => props.fields.filter((field) => props.fieldPermissions?.[field.id]?.visible !== false))
+const resolvedCanComment = computed(() => props.rowActions?.canComment ?? props.canComment)
+const resolvedCanDelete = computed(() => props.rowActions?.canDelete ?? props.canDelete)
+
+function canEditField(fieldId: string): boolean {
+  return props.canEdit && props.rowActions?.canEdit !== false && props.fieldPermissions?.[fieldId]?.readOnly !== true
+}
 
 function navigatePrev() {
   const idx = currentRecordIndex.value
@@ -212,6 +227,16 @@ function linkSummaryCount(fieldId: string): number {
   return Array.isArray(raw) ? raw.length : raw ? 1 : 0
 }
 
+function attachmentActionHint(fieldId: string): string {
+  const field = props.fields.find((item) => item.id === fieldId)
+  if (!field || field.type !== 'attachment') return 'Add files'
+  return attachmentAllowsMultiple(field)
+    ? 'Add files'
+    : attachmentList(fieldId).length
+      ? 'Upload a new file to replace the current one'
+      : 'Upload a file'
+}
+
 async function onDrawerFileSelect(fieldId: string, e: Event) {
   const input = e.target as HTMLInputElement
   const files = input.files
@@ -228,13 +253,16 @@ async function onDrawerFileSelect(fieldId: string, e: Event) {
   }
   if (!props.uploadFn) {
     const existing = attachmentList(fieldId)
-    emit('patch', fieldId, [...existing, ...Array.from(files).map((file) => file.name)])
+    const replaceExisting = field ? shouldReplaceAttachmentSelection(field, files, existing.length) : false
+    const uploadedNames = Array.from(files).map((file) => file.name)
+    emit('patch', fieldId, replaceExisting ? uploadedNames : [...existing, ...uploadedNames])
     input.value = ''
     return
   }
   setAttachmentActivity(fieldId, 'uploading')
   try {
     const existing = attachmentList(fieldId)
+    const replaceExisting = field ? shouldReplaceAttachmentSelection(field, files, existing.length) : false
     const newIds: string[] = []
     for (const file of Array.from(files)) {
       const attachment = await props.uploadFn(file, {
@@ -244,7 +272,7 @@ async function onDrawerFileSelect(fieldId: string, e: Event) {
       rememberLocalAttachment(fieldId, attachment)
       newIds.push(attachment.id)
     }
-    emit('patch', fieldId, [...existing, ...newIds])
+    emit('patch', fieldId, replaceExisting ? newIds : [...existing, ...newIds])
   } catch (error: any) {
     setAttachmentError(fieldId, error?.message ?? 'Failed to upload attachment')
   } finally {

@@ -13,6 +13,7 @@ import {
   normalizeLoadedWorkflow,
   normalizeSavedWorkflow,
   restoreWorkflowDraft,
+  saveWorkflowDraft,
   saveWorkflowHubTeamView,
 } from '../src/views/workflowDesignerPersistence'
 import type { WorkflowHubRouteState } from '../src/views/workflowHubQueryState'
@@ -110,6 +111,42 @@ describe('workflowDesignerPersistence', () => {
       workflowId: 'wf-save-1',
       message: 'saved',
     })
+  })
+
+  it('saves workflow drafts with canonical BPMN payloads only', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        data: {
+          workflowId: 'wf-save-2',
+          message: 'saved',
+        },
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await saveWorkflowDraft({
+      workflowId: null,
+      name: '审批流',
+      description: ' 说明 ',
+      version: '2.0.0',
+      bpmnXml: '<bpmn />',
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/workflow-designer/workflows',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          name: '审批流',
+          description: ' 说明 ',
+          version: '2.0.0',
+          bpmnXml: '<bpmn />',
+        }),
+      }),
+    )
+    expect(result.workflowId).toBe('wf-save-2')
   })
 
   it('builds deployment payloads with fallback names', () => {

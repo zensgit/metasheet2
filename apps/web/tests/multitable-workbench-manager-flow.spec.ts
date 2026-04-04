@@ -4,6 +4,16 @@ import { computed, createApp, defineComponent, h, nextTick, ref, type App as Vue
 const showErrorSpy = vi.fn()
 const showSuccessSpy = vi.fn()
 
+vi.mock('vue-router', async () => {
+  const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
+  return {
+    ...actual,
+    useRouter: () => ({
+      push: vi.fn().mockResolvedValue(undefined),
+    }),
+  }
+})
+
 function stubComponent(name: string) {
   return defineComponent({
     name,
@@ -48,6 +58,17 @@ vi.mock('../src/multitable/composables/useMultitableComments', () => ({
     addComment: vi.fn(),
     resolveComment: vi.fn(),
   }),
+}))
+
+vi.mock('../src/multitable/composables/useMultitableCommentInbox', () => ({
+  useMultitableCommentInbox: () => ({
+    unreadCount: ref(0),
+    refreshUnreadCount: vi.fn().mockResolvedValue(0),
+  }),
+}))
+
+vi.mock('../src/multitable/composables/useMultitableCommentRealtime', () => ({
+  useMultitableCommentRealtime: vi.fn(),
 }))
 
 vi.mock('../src/multitable/import/bulk-import', () => ({
@@ -139,6 +160,8 @@ function createWorkbenchMock() {
       canComment: true,
       canManageAutomation: false,
     }),
+    fieldPermissions: ref({}),
+    viewPermissions: ref({}),
     activeView: computed(() => views.value.find((view) => view.id === activeViewId.value) ?? null),
     loading: ref(false),
     error: ref<string | null>(null),
@@ -173,6 +196,9 @@ function createGridMock() {
     columnWidths: ref<Record<string, number>>({}),
     linkSummaries: ref<Record<string, Record<string, unknown[]>>>({}),
     attachmentSummaries: ref<Record<string, Record<string, unknown[]>>>({}),
+    fieldPermissions: ref({}),
+    viewPermission: ref(null),
+    rowActions: ref(null),
     conflict: ref(null),
     error: ref<string | null>(null),
     sortFilterDirty: ref(false),

@@ -19,6 +19,76 @@ describe('MultitableApiClient', () => {
     await expect(client.resolveComment('c1')).resolves.toBeUndefined()
   })
 
+  it('loads inbox and unread counters from comment endpoints', async () => {
+    const fetchFn = vi.fn(async (input: string) => {
+      if (input.startsWith('/api/comments/inbox')) {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            items: [{
+              id: 'c1',
+              containerId: 'sheet_1',
+              targetId: 'row_1',
+              fieldId: 'field_1',
+              baseId: 'base_1',
+              sheetId: 'sheet_1',
+              viewId: 'view_1',
+              recordId: 'row_1',
+              mentions: ['user_2'],
+              authorId: 'user_1',
+              authorName: 'Amy',
+              content: 'Hello',
+              resolved: false,
+              createdAt: '2026-03-25T12:00:00.000Z',
+              unread: true,
+            }],
+            total: 1,
+            limit: 50,
+            offset: 0,
+          },
+        }), { status: 200 })
+      }
+      if (input === '/api/comments/unread-count') {
+        return new Response(JSON.stringify({ ok: true, data: { count: 7 } }), { status: 200 })
+      }
+      if (input === '/api/comments/c1/read') {
+        return new Response(null, { status: 204 })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.listCommentInbox()).resolves.toEqual({
+      items: [{
+        id: 'c1',
+        containerId: 'sheet_1',
+        targetId: 'row_1',
+        fieldId: 'field_1',
+        baseId: 'base_1',
+        sheetId: 'sheet_1',
+        viewId: 'view_1',
+        recordId: 'row_1',
+        mentions: ['user_2'],
+        authorId: 'user_1',
+        authorName: 'Amy',
+        content: 'Hello',
+        resolved: false,
+        createdAt: '2026-03-25T12:00:00.000Z',
+        unread: true,
+      }],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    })
+    await expect(client.getCommentUnreadCount()).resolves.toBe(7)
+    await expect(client.markCommentRead('c1')).resolves.toBeUndefined()
+
+    expect(fetchFn.mock.calls[0]?.[0]).toBe('/api/comments/inbox')
+    expect(fetchFn.mock.calls[1]?.[0]).toBe('/api/comments/unread-count')
+    expect(fetchFn).toHaveBeenCalledWith('/api/comments/c1/read', expect.objectContaining({ method: 'POST' }))
+  })
+
   it('surfaces first field error for submitForm failures', async () => {
     const client = new MultitableApiClient({
       fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({
@@ -131,6 +201,68 @@ describe('MultitableApiClient', () => {
   it('parses Retry-After seconds and http-date values', () => {
     expect(parseRetryAfterMs('2')).toBe(2000)
     expect(parseRetryAfterMs('Wed, 25 Mar 2026 12:00:05 GMT')).toBe(5000)
+  })
+
+  it('normalizes inbox comment payloads from backend naming', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: {
+        items: [{
+          id: 'cmt_1',
+          spreadsheetId: 'sheet_comments',
+          rowId: 'rec_1',
+          baseId: 'base_comments',
+          sheetId: 'sheet_comments',
+          viewId: 'view_comments',
+          recordId: 'rec_1',
+          authorId: 'user_2',
+          content: 'hello',
+          resolved: false,
+          mentions: ['user_1'],
+          createdAt: '2026-03-25T12:00:00.000Z',
+          unread: true,
+        }],
+        total: 1,
+        limit: 50,
+        offset: 0,
+      },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.listCommentInbox()).resolves.toEqual({
+      items: [{
+        id: 'cmt_1',
+        containerId: 'sheet_comments',
+        targetId: 'rec_1',
+        fieldId: null,
+        baseId: 'base_comments',
+        sheetId: 'sheet_comments',
+        viewId: 'view_comments',
+        recordId: 'rec_1',
+        parentId: undefined,
+        mentions: ['user_1'],
+        authorId: 'user_2',
+        authorName: undefined,
+        content: 'hello',
+        resolved: false,
+        createdAt: '2026-03-25T12:00:00.000Z',
+        updatedAt: undefined,
+        unread: true,
+      }],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    })
+  })
+
+  it('reads unread count from the comments inbox endpoint', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: true,
+      data: { count: 3 },
+    }), { status: 200 }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.getCommentUnreadCount()).resolves.toBe(3)
   })
 
   it('ignores invalid Retry-After values', () => {

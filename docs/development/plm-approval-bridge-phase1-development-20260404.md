@@ -26,7 +26,7 @@ Out of scope and intentionally not implemented:
 
 ## Schema Changes
 
-Migration added in [zzzz20260404100000_extend_approval_tables_for_bridge.ts](/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/src/db/migrations/zzzz20260404100000_extend_approval_tables_for_bridge.ts).
+Migration added in [zzzz20260404100000_extend_approval_tables_for_bridge.ts](packages/core-backend/src/db/migrations/zzzz20260404100000_extend_approval_tables_for_bridge.ts).
 
 `approval_instances` additions:
 
@@ -65,7 +65,7 @@ Design choices:
 
 ### PLM Adapter
 
-Updated [PLMAdapter.ts](/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/src/data-adapters/PLMAdapter.ts) with:
+Updated [PLMAdapter.ts](packages/core-backend/src/data-adapters/PLMAdapter.ts) with:
 
 - `getApprovalById(approvalId)`
 
@@ -73,7 +73,7 @@ This fixes detail read-through refresh. The earlier list-based fallback would no
 
 ### Bridge Mapper
 
-Updated [plm-approval-bridge.ts](/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/src/federation/plm-approval-bridge.ts) with:
+Updated [plm-approval-bridge.ts](packages/core-backend/src/federation/plm-approval-bridge.ts) with:
 
 - exported `createPlmApprovalInstanceId`
 
@@ -86,7 +86,7 @@ Mapping rules:
 
 ### Bridge Service
 
-Added [ApprovalBridgeService.ts](/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/src/services/ApprovalBridgeService.ts).
+Added [ApprovalBridgeService.ts](packages/core-backend/src/services/ApprovalBridgeService.ts).
 
 Main responsibilities:
 
@@ -106,7 +106,7 @@ Important runtime behavior:
 
 ### Unified API Routes
 
-Updated [approvals.ts](/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/src/routes/approvals.ts) and wired injector access in [index.ts](/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/src/index.ts).
+Updated [approvals.ts](packages/core-backend/src/routes/approvals.ts) and wired injector access in [index.ts](packages/core-backend/src/index.ts).
 
 New/expanded endpoints:
 
@@ -134,12 +134,12 @@ Phase 1 API constraints:
 
 Primary implementation files:
 
-- [zzzz20260404100000_extend_approval_tables_for_bridge.ts](/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/src/db/migrations/zzzz20260404100000_extend_approval_tables_for_bridge.ts)
-- [approval-bridge-types.ts](/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/src/services/approval-bridge-types.ts)
-- [ApprovalBridgeService.ts](/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/src/services/ApprovalBridgeService.ts)
-- [approvals.ts](/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/src/routes/approvals.ts)
-- [PLMAdapter.ts](/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/src/data-adapters/PLMAdapter.ts)
-- [plm-approval-bridge.ts](/Users/huazhou/Downloads/Github/metasheet2/packages/core-backend/src/federation/plm-approval-bridge.ts)
+- [zzzz20260404100000_extend_approval_tables_for_bridge.ts](packages/core-backend/src/db/migrations/zzzz20260404100000_extend_approval_tables_for_bridge.ts)
+- [approval-bridge-types.ts](packages/core-backend/src/services/approval-bridge-types.ts)
+- [ApprovalBridgeService.ts](packages/core-backend/src/services/ApprovalBridgeService.ts)
+- [approvals.ts](packages/core-backend/src/routes/approvals.ts)
+- [PLMAdapter.ts](packages/core-backend/src/data-adapters/PLMAdapter.ts)
+- [plm-approval-bridge.ts](packages/core-backend/src/federation/plm-approval-bridge.ts)
 
 ## Known Limits
 
