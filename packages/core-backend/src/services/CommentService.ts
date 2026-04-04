@@ -1,8 +1,15 @@
-import { sql } from 'kysely'
-import { ICollabService, ILogger, type CommentInboxItem, type CommentQueryOptions } from '../di/identifiers';
+
+import { ICollabService, ILogger, type CommentQueryOptions } from '../di/identifiers';
 import type { CollabService } from './CollabService';
 import { db } from '../db/db';
-import { nowTimestamp } from '../db/type-helpers';
+import { buildCommentRecordRoom, buildCommentSheetRoom } from './commentRooms';
+
+export class CommentValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CommentValidationError'
+  }
+}
 
 export interface Comment {
   id: string;
@@ -16,6 +23,15 @@ export interface Comment {
   createdAt: string;
   updatedAt: string;
   mentions: string[];
+}
+
+export interface CommentPresenceSummary {
+  spreadsheetId: string;
+  rowId: string;
+  unresolvedCount: number;
+  fieldCounts: Record<string, number>;
+  mentionedCount: number;
+  mentionedFieldCounts: Record<string, number>;
 }
 
 type CommentRow = {
@@ -32,12 +48,10 @@ type CommentRow = {
   mentions: string | string[] | null;
 }
 
-type CommentInboxRow = CommentRow & {
-  unread: boolean
-  base_id: string | null
-  sheet_id: string | null
-  view_id: string | null
-  record_id: string | null
+type CommentPresenceRow = {
+  row_id: string;
+  field_id: string | null;
+  mentions: string | string[] | null;
 }
 
 export class CommentService {
@@ -56,16 +70,43 @@ export class CommentService {
     content: string;
     authorId: string;
     parentId?: string;
-    mentions?: string[];
   }): Promise<Comment> {
     const id = `cmt_${Date.now()}`;
-    const mentions = data.mentions ?? this.parseMentions(data.content);
+    const mentions = this.parseMentions(data.content);
+    let effectiveFieldId = data.fieldId?.trim() || undefined
+
+    if (data.parentId) {
+      const parent = await db.selectFrom('meta_comments')
+        .selectAll()
+        .where('id', '=', data.parentId)
+        .executeTakeFirst()
+
+      if (!parent) {
+        throw new CommentValidationError('Parent comment not found')
+      }
+      if (parent.parent_id) {
+        throw new CommentValidationError('Replying to replies is not supported')
+      }
+      if (parent.spreadsheet_id !== data.spreadsheetId || parent.row_id !== data.rowId) {
+        throw new CommentValidationError('Reply must target the same record thread')
+      }
+
+      const parentFieldId = parent.field_id ?? undefined
+      if (parentFieldId) {
+        if (effectiveFieldId && effectiveFieldId !== parentFieldId) {
+          throw new CommentValidationError('Reply must target the same field thread')
+        }
+        effectiveFieldId = parentFieldId
+      } else if (effectiveFieldId) {
+        throw new CommentValidationError('Record-level threads cannot be narrowed to a field reply')
+      }
+    }
 
     await db.insertInto('meta_comments').values({
       id,
       spreadsheet_id: data.spreadsheetId,
       row_id: data.rowId,
-      field_id: data.fieldId ?? null,
+      field_id: effectiveFieldId ?? null,
       content: data.content,
       author_id: data.authorId,
       parent_id: data.parentId ?? null,
@@ -76,12 +117,17 @@ export class CommentService {
     const comment = await this.getComment(id);
     
     if (comment) {
-      this.collabService.broadcastTo(`sheet:${data.spreadsheetId}`, 'comment:created', { spreadsheetId: data.spreadsheetId, comment });
-      for (const mentionUserId of mentions) {
-        if (mentionUserId && mentionUserId !== data.authorId) {
-          this.collabService.sendTo(mentionUserId, 'comment:mention', { spreadsheetId: data.spreadsheetId, comment });
-        }
-      }
+      const createdPayload = { spreadsheetId: data.spreadsheetId, comment };
+      this.collabService.broadcastTo(
+        buildCommentRecordRoom({ spreadsheetId: data.spreadsheetId, rowId: data.rowId }),
+        'comment:created',
+        createdPayload,
+      );
+      this.collabService.broadcastTo(
+        buildCommentSheetRoom({ spreadsheetId: data.spreadsheetId }),
+        'comment:created',
+        createdPayload,
+      );
     }
 
     return comment!;
@@ -116,102 +162,194 @@ export class CommentService {
     return { items: rows.map((row) => this.mapRowToComment(row)), total };
   }
 
+  async getCommentPresenceSummary(
+    spreadsheetId: string,
+    rowIds?: string[],
+    mentionUserId?: string,
+  ): Promise<{ items: CommentPresenceSummary[]; total: number }> {
+    const normalizedRowIds = [...new Set((rowIds ?? [])
+      .map((rowId) => rowId.trim())
+      .filter((rowId) => rowId.length > 0))]
+    const normalizedMentionUserId = typeof mentionUserId === 'string' && mentionUserId.trim().length > 0
+      ? mentionUserId.trim()
+      : null
+
+    let query = db.selectFrom('meta_comments')
+      .select(['row_id', 'field_id', 'mentions'])
+      .where('spreadsheet_id', '=', spreadsheetId)
+      .where('resolved', '=', false)
+
+    if (normalizedRowIds.length > 0) {
+      query = query.where('row_id', 'in', normalizedRowIds)
+    }
+
+    const rows = await query.execute() as CommentPresenceRow[]
+    const summaryByRow = new Map<string, {
+      unresolvedCount: number
+      fieldCounts: Record<string, number>
+      mentionedCount: number
+      mentionedFieldCounts: Record<string, number>
+    }>()
+
+    for (const row of rows) {
+      const current = summaryByRow.get(row.row_id) ?? {
+        unresolvedCount: 0,
+        fieldCounts: {},
+        mentionedCount: 0,
+        mentionedFieldCounts: {},
+      }
+      current.unresolvedCount += 1
+      if (row.field_id) {
+        current.fieldCounts[row.field_id] = (current.fieldCounts[row.field_id] ?? 0) + 1
+      }
+      if (normalizedMentionUserId && this.parseMentionList(row.mentions).includes(normalizedMentionUserId)) {
+        current.mentionedCount += 1
+        if (row.field_id) {
+          current.mentionedFieldCounts[row.field_id] = (current.mentionedFieldCounts[row.field_id] ?? 0) + 1
+        }
+      }
+      summaryByRow.set(row.row_id, current)
+    }
+
+    const orderedRowIds = normalizedRowIds.length > 0
+      ? normalizedRowIds.filter((rowId) => summaryByRow.has(rowId))
+      : [...summaryByRow.keys()].sort()
+
+    const items = orderedRowIds.map((rowId) => {
+      const summary = summaryByRow.get(rowId)!
+      return {
+        spreadsheetId,
+        rowId,
+        unresolvedCount: summary.unresolvedCount,
+        fieldCounts: summary.fieldCounts,
+        mentionedCount: summary.mentionedCount,
+        mentionedFieldCounts: summary.mentionedFieldCounts,
+      }
+    })
+
+    return { items, total: items.length }
+  }
+
+  async getMentionSummary(
+    spreadsheetId: string,
+    mentionUserId: string,
+  ): Promise<{
+    spreadsheetId: string
+    unresolvedMentionCount: number
+    unreadMentionCount: number
+    mentionedRecordCount: number
+    unreadRecordCount: number
+    items: Array<{
+      rowId: string
+      mentionedCount: number
+      unreadCount: number
+      mentionedFieldIds: string[]
+    }>
+  }> {
+    const normalizedUserId = mentionUserId.trim()
+    if (!normalizedUserId) {
+      return { spreadsheetId, unresolvedMentionCount: 0, unreadMentionCount: 0, mentionedRecordCount: 0, unreadRecordCount: 0, items: [] }
+    }
+
+    const lastReadAt = await this.getLastReadAt(normalizedUserId, spreadsheetId)
+
+    const rows = await db.selectFrom('meta_comments')
+      .select(['row_id', 'field_id', 'mentions', 'created_at'])
+      .where('spreadsheet_id', '=', spreadsheetId)
+      .where('resolved', '=', false)
+      .execute() as Array<CommentPresenceRow & { created_at: string | Date }>
+
+    const byRow = new Map<string, { count: number; unread: number; fieldIds: Set<string> }>()
+
+    for (const row of rows) {
+      const mentionList = this.parseMentionList(row.mentions)
+      if (!mentionList.includes(normalizedUserId)) continue
+      const current = byRow.get(row.row_id) ?? { count: 0, unread: 0, fieldIds: new Set<string>() }
+      current.count += 1
+      const createdAt = row.created_at instanceof Date ? row.created_at : new Date(String(row.created_at))
+      if (!lastReadAt || createdAt.getTime() > lastReadAt.getTime()) {
+        current.unread += 1
+      }
+      if (row.field_id) current.fieldIds.add(row.field_id)
+      byRow.set(row.row_id, current)
+    }
+
+    const items = [...byRow.entries()]
+      .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]))
+      .map(([rowId, data]) => ({
+        rowId,
+        mentionedCount: data.count,
+        unreadCount: data.unread,
+        mentionedFieldIds: [...data.fieldIds].sort(),
+      }))
+
+    const unresolvedMentionCount = items.reduce((sum, item) => sum + item.mentionedCount, 0)
+    const unreadMentionCount = items.reduce((sum, item) => sum + item.unreadCount, 0)
+    const unreadRecordCount = items.filter((item) => item.unreadCount > 0).length
+
+    return {
+      spreadsheetId,
+      unresolvedMentionCount,
+      unreadMentionCount,
+      mentionedRecordCount: items.length,
+      unreadRecordCount,
+      items,
+    }
+  }
+
+  async markMentionsRead(spreadsheetId: string, userId: string): Promise<void> {
+    const normalizedUserId = userId.trim()
+    if (!normalizedUserId || !spreadsheetId) return
+
+    try {
+      await db.insertInto('meta_comment_reads' as any)
+        .values({ user_id: normalizedUserId, spreadsheet_id: spreadsheetId, last_read_at: new Date() } as any)
+        .onConflict((oc: any) => oc.columns(['user_id', 'spreadsheet_id']).doUpdateSet({ last_read_at: new Date() } as any))
+        .execute()
+    } catch {
+      // Table may not exist yet — silently ignore
+    }
+  }
+
+  private async getLastReadAt(userId: string, spreadsheetId: string): Promise<Date | null> {
+    try {
+      const result = await db.selectFrom('meta_comment_reads' as any)
+        .select('last_read_at')
+        .where('user_id', '=', userId)
+        .where('spreadsheet_id', '=', spreadsheetId)
+        .executeTakeFirst() as { last_read_at?: string | Date } | undefined
+      if (!result?.last_read_at) return null
+      return result.last_read_at instanceof Date ? result.last_read_at : new Date(String(result.last_read_at))
+    } catch {
+      return null // Table may not exist yet
+    }
+  }
+
   async resolveComment(commentId: string): Promise<void> {
     const result = await db.updateTable('meta_comments')
-      .set({ resolved: true, updated_at: nowTimestamp() })
+      .set({ resolved: true, updated_at: new Date() })
       .where('id', '=', commentId)
       .returningAll()
       .executeTakeFirst();
 
     if (result) {
-      this.collabService.broadcastTo(`sheet:${result.spreadsheet_id}`, 'comment:resolved', { spreadsheetId: result.spreadsheet_id, commentId });
+      const resolvedPayload = {
+        spreadsheetId: result.spreadsheet_id,
+        rowId: result.row_id,
+        fieldId: result.field_id ?? undefined,
+        commentId,
+      };
+      this.collabService.broadcastTo(
+        buildCommentRecordRoom({ spreadsheetId: result.spreadsheet_id, rowId: result.row_id }),
+        'comment:resolved',
+        resolvedPayload,
+      );
+      this.collabService.broadcastTo(
+        buildCommentSheetRoom({ spreadsheetId: result.spreadsheet_id }),
+        'comment:resolved',
+        resolvedPayload,
+      );
     }
-  }
-
-  async getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }> {
-    const limit = Math.min(200, Math.max(1, Number(options?.limit ?? 50)))
-    const offset = Math.max(0, Number(options?.offset ?? 0))
-    const mentionPredicate = sql<boolean>`c.mentions @> ${JSON.stringify([userId])}::jsonb`
-
-    const totalRow = await db
-      .selectFrom('meta_comments as c')
-      .select(({ fn }) => fn.countAll<number>().as('c'))
-      .where('c.author_id', '!=', userId)
-      .where(mentionPredicate)
-      .executeTakeFirst()
-    const total = totalRow ? Number((totalRow as { c: string | number }).c) : 0
-
-    const rows = await db
-      .selectFrom('meta_comments as c')
-      .leftJoin('meta_comment_reads as r', (join) => join
-        .onRef('r.comment_id', '=', 'c.id')
-        .on('r.user_id', '=', userId))
-      .leftJoin('meta_sheets as s', 's.id', 'c.spreadsheet_id')
-      .select((eb) => [
-        'c.id',
-        'c.spreadsheet_id',
-        'c.row_id',
-        'c.field_id',
-        'c.content',
-        'c.author_id',
-        'c.parent_id',
-        'c.resolved',
-        'c.created_at',
-        'c.updated_at',
-        'c.mentions',
-        eb.ref('s.base_id').as('base_id'),
-        eb.ref('s.id').as('sheet_id'),
-        eb.ref('c.row_id').as('record_id'),
-        sql<string | null>`(
-          select v.id
-          from meta_views as v
-          where v.sheet_id = c.spreadsheet_id
-          order by v.created_at asc, v.id asc
-          limit 1
-        )`.as('view_id'),
-        sql<boolean>`case when r.comment_id is null then true else false end`.as('unread'),
-      ])
-      .where('c.author_id', '!=', userId)
-      .where(mentionPredicate)
-      .orderBy('c.created_at', 'desc')
-      .limit(limit)
-      .offset(offset)
-      .execute()
-
-    return {
-      items: rows.map((row) => this.mapInboxRowToComment(row as unknown as CommentInboxRow)),
-      total,
-    }
-  }
-
-  async getUnreadCount(userId: string): Promise<number> {
-    const mentionPredicate = sql<boolean>`c.mentions @> ${JSON.stringify([userId])}::jsonb`
-    const row = await db
-      .selectFrom('meta_comments as c')
-      .leftJoin('meta_comment_reads as r', (join) => join
-        .onRef('r.comment_id', '=', 'c.id')
-        .on('r.user_id', '=', userId))
-      .select(({ fn }) => fn.countAll<number>().as('c'))
-      .where('c.author_id', '!=', userId)
-      .where(mentionPredicate)
-      .where(sql<boolean>`r.comment_id is null`)
-      .executeTakeFirst()
-    return row ? Number((row as { c: string | number }).c) : 0
-  }
-
-  async markCommentRead(commentId: string, userId: string): Promise<void> {
-    await db
-      .insertInto('meta_comment_reads')
-      .values({
-        comment_id: commentId,
-        user_id: userId,
-        read_at: new Date().toISOString(),
-        created_at: new Date().toISOString(),
-      })
-      .onConflict((oc) => oc.columns(['comment_id', 'user_id']).doUpdateSet({
-        read_at: new Date().toISOString(),
-      }))
-      .execute()
   }
 
   private async getComment(id: string): Promise<Comment | undefined> {
@@ -239,15 +377,17 @@ export class CommentService {
     };
   }
 
-  private mapInboxRowToComment(row: CommentInboxRow): CommentInboxItem {
-    return {
-      ...this.mapRowToComment(row),
-      unread: row.unread,
-      baseId: row.base_id,
-      sheetId: row.sheet_id ?? row.spreadsheet_id,
-      viewId: row.view_id,
-      recordId: row.record_id ?? row.row_id,
-    }
+  private parseMentionList(mentions: unknown): string[] {
+    const parsed = typeof mentions === 'string'
+      ? (() => {
+        try {
+          return JSON.parse(mentions) as unknown
+        } catch {
+          return []
+        }
+      })()
+      : mentions
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
   }
 
   private parseMentions(content: string): string[] {
@@ -255,7 +395,7 @@ export class CommentService {
     const mentions: string[] = [];
     let match;
     while ((match = regex.exec(content)) !== null) {
-      mentions.push(match[2]);
+      mentions.push(match[1]); // userId is in the first group [userId]
     }
     return mentions;
   }
