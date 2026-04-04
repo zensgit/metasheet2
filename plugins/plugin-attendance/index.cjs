@@ -4954,9 +4954,9 @@ function resolveShiftReference(shiftRef, lookup) {
   const uuid = normalizeUuidString(normalizedRef)
   if (uuid) {
     const shift = lookup.byId.get(uuid) ?? null
-    return shift
-      ? { status: 'resolved', shift, normalizedRef }
-      : { status: 'missing', shift: null, normalizedRef }
+    if (shift) {
+      return { status: 'resolved', shift, normalizedRef }
+    }
   }
   const matching = lookup.byName.get(normalizedRef) ?? []
   if (matching.length === 1) {
@@ -5045,7 +5045,6 @@ async function loadShiftByReference(db, orgId, shiftRef) {
   if (uuid) {
     const shift = await loadShiftById(db, targetOrg, uuid)
     if (shift) return shift
-    return null
   }
   const lookup = await loadShiftReferenceLookup(db, targetOrg, { names: [normalizedRef] })
   const resolution = resolveShiftReference(normalizedRef, lookup)

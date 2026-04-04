@@ -1789,6 +1789,95 @@ describe('Attendance Plugin Integration', () => {
     expect(lookupRes.status).toBe(200)
   })
 
+  it('accepts UUID-like shift names for rotation rules and runtime rotation resolution', async () => {
+    if (!baseUrl) return
+
+    const runSuffix = Date.now().toString(36)
+    const testUserId = `attendance-shift-uuid-like-name-${runSuffix}`
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const shiftUuidLikeName = randomUuidV4()
+    const workDate = '2026-03-30'
+    const shiftRes = await requestJson(`${baseUrl}/api/attendance/shifts`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: shiftUuidLikeName,
+        timezone: 'Asia/Tokyo',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        workingDays: [1, 2, 3, 4, 5],
+      }),
+    })
+    expect(shiftRes.status).toBe(201)
+    const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
+    expect(shiftId).toBeTruthy()
+    if (!shiftId) return
+
+    const rotationRuleRes = await requestJson(`${baseUrl}/api/attendance/rotation-rules`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: `UUID Like Rotation ${runSuffix}`,
+        timezone: 'Asia/Tokyo',
+        shiftSequence: [shiftUuidLikeName],
+        isActive: true,
+      }),
+    })
+    expect(rotationRuleRes.status).toBe(201)
+    const rotationRule = (rotationRuleRes.body as { data?: { id?: string; shiftSequence?: string[] } } | undefined)?.data
+    expect(rotationRule?.shiftSequence).toEqual([shiftId])
+    expect(rotationRule?.id).toBeTruthy()
+    if (!rotationRule?.id) return
+
+    const rotationAssignmentRes = await requestJson(`${baseUrl}/api/attendance/rotation-assignments`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userId: testUserId,
+        rotationRuleId: rotationRule.id,
+        startDate: workDate,
+        isActive: true,
+      }),
+    })
+    expect(rotationAssignmentRes.status).toBe(201)
+
+    const punchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        eventType: 'check_in',
+        occurredAt: `${workDate}T09:00:00+09:00`,
+      }),
+    })
+    expect(punchRes.status).toBe(200)
+    const punchBody = punchRes.body as {
+      data?: {
+        event?: { timezone?: string; workDate?: string; work_date?: string }
+        record?: { timezone?: string; workDate?: string; work_date?: string }
+      }
+    } | undefined
+    expect(punchBody?.data?.event?.timezone).toBe('Asia/Tokyo')
+    expect(punchBody?.data?.record?.timezone).toBe('Asia/Tokyo')
+  })
+
   it('returns 409 when deleting a shift that is still referenced by a rotation rule without assignments', async () => {
     if (!baseUrl) return
 
@@ -1844,7 +1933,7 @@ describe('Attendance Plugin Integration', () => {
     expect(deleteRes.status).toBe(409)
     const deleteBody = deleteRes.body as { error?: { code?: string; message?: string } } | undefined
     expect(deleteBody?.error?.code).toBe('CONFLICT')
-    expect(String(deleteBody?.error?.message || '')).toMatch(/active assignments|rotation schedules/i)
+    expect(String(deleteBody?.error?.message || '')).toMatch(/active assignments|rotation rules/i)
   })
 
   it('normalizes legacy name-based rotation rules when a referenced shift is renamed', async () => {
