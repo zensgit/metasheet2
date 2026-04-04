@@ -300,12 +300,14 @@ vi.mock('../src/multitable/components/MetaCommentsDrawer.vue', () => ({
     props: {
       visible: { type: Boolean, default: false },
       targetFieldId: { type: String, default: null },
+      mentionSuggestions: { type: Array, default: () => [] },
     },
     emits: ['close', 'submit', 'reply', 'cancel-reply', 'update:draft'],
     render() {
       if (!this.$props.visible) return null
       return h('div', {
         'data-current-comment-field': this.$props.targetFieldId ?? '',
+        'data-mention-suggestions-count': String((this.$props.mentionSuggestions as unknown[]).length),
       }, [
         h(
           'button',
@@ -625,6 +627,11 @@ function createWorkbenchMock() {
       }),
       loadFormContext: vi.fn(),
       getRecord: vi.fn(),
+      listCommentMentionSuggestions: vi.fn().mockResolvedValue({
+        items: [{ id: 'user_jamie', label: 'Jamie', subtitle: 'jamie@example.com' }],
+        total: 1,
+        limit: 100,
+      }),
       createSheet: vi.fn(),
       createBase: vi.fn(),
       createField: vi.fn(),
@@ -1174,6 +1181,20 @@ describe('MultitableWorkbench view wiring', () => {
       content: 'Need review',
       mentions: [],
     })
+  })
+
+  it('loads comment mention suggestions for the active sheet when opening comments', async () => {
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-comments="rec_1"]')!.click()
+    await flushUi()
+
+    expect(workbenchMock.client.listCommentMentionSuggestions).toHaveBeenCalledWith({
+      spreadsheetId: 'sheet_orders',
+      limit: 100,
+    })
+    expect(container!.querySelector('[data-mention-suggestions-count="1"]')).not.toBeNull()
   })
 
   it('applies route-provided fieldId when opening a deep-linked comment thread', async () => {

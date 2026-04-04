@@ -195,6 +195,35 @@ components:
             offset:
               type: integer
               example: 0
+    CommentMentionCandidate:
+      type: object
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        subtitle:
+          type: string
+      required: [id, label]
+    CommentMentionCandidatesResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/CommentMentionCandidate'
+            total:
+              type: integer
+              example: 1
+            limit:
+              type: integer
+              example: 50
     CommentUnreadCountResponse:
       type: object
       properties:

@@ -189,9 +189,19 @@ export interface CommentMentionSummary {
     items: CommentMentionSummaryItem[];
 }
 
+export interface CommentMentionCandidate {
+    id: string;
+    label: string;
+    subtitle?: string;
+}
+
 export interface ICommentService {
     createComment(data: CommentCreateInput): Promise<CommentRecord>;
     getComments(spreadsheetId: string, options?: CommentQueryOptions): Promise<{ items: CommentRecord[]; total: number }>;
+    listMentionCandidates(
+      spreadsheetId: string,
+      options?: { q?: string; limit?: number },
+    ): Promise<{ items: CommentMentionCandidate[]; total: number }>;
     getInbox(userId: string, options?: Pick<CommentQueryOptions, 'limit' | 'offset'>): Promise<{ items: CommentInboxItem[]; total: number }>;
     getUnreadCount(userId: string): Promise<number>;
     markCommentRead(commentId: string, userId: string): Promise<void>;

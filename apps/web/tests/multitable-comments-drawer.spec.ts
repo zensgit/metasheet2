@@ -69,6 +69,9 @@ describe('MetaCommentsDrawer', () => {
           loading: false,
           canComment: true,
           canResolve: true,
+          mentionSuggestions: [
+            { id: 'user_3', label: 'Alex Chen', subtitle: 'alex@example.com' },
+          ],
           draft: this.draft,
           onResolve: vi.fn(),
           onClose: vi.fn(),
@@ -101,6 +104,7 @@ describe('MetaCommentsDrawer', () => {
 
     const suggestion = Array.from(container.querySelectorAll('.meta-comment-composer__suggestion'))
       .find((button) => button.textContent?.includes('Amy Wong')) as HTMLButtonElement | undefined
+    expect(container.textContent).toContain('Alex Chen')
     suggestion?.click()
     await flushUi()
 
