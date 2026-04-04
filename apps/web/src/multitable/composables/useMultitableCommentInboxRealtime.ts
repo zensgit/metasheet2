@@ -1,11 +1,15 @@
-import { onBeforeUnmount, onMounted, watch } from 'vue'
+import { onBeforeUnmount, onMounted } from 'vue'
 import { io, type Socket } from 'socket.io-client'
 import { useAuth } from '../../composables/useAuth'
 import { resolveMultitableCommentsRealtimeBaseUrl } from '../realtime/comments-realtime'
 
 type UseMultitableCommentInboxRealtimeOptions = {
   refreshInbox: () => Promise<void>
-  sheetIds?: () => string[]
+}
+
+type CommentActivityPayload = {
+  kind?: 'created' | 'resolved'
+  authorId?: string | null
 }
 
 export function useMultitableCommentInboxRealtime(options: UseMultitableCommentInboxRealtimeOptions) {
@@ -16,15 +20,9 @@ export function useMultitableCommentInboxRealtime(options: UseMultitableCommentI
   let connectionPromise: Promise<Socket | null> | null = null
   let refreshInFlight = false
   let refreshQueued = false
-  let desiredSheetIds: string[] = []
-  const joinedSheetIds = new Set<string>()
 
-  function normalizeSheetIds(sheetIds: string[]): string[] {
-    return [...new Set(
-      sheetIds
-        .map((sheetId) => sheetId.trim())
-        .filter((sheetId) => sheetId.length > 0),
-    )].sort()
+  function emitInboxJoin(target: Pick<Socket, 'emit'> | null | undefined) {
+    if (typeof target?.emit === 'function') target.emit('join-comment-inbox')
   }
 
   async function flushRefreshQueue(): Promise<void> {
@@ -45,30 +43,8 @@ export function useMultitableCommentInboxRealtime(options: UseMultitableCommentI
     }
   }
 
-  function syncSheetSubscriptions(nextSheetIds = desiredSheetIds) {
-    if (!socket?.connected) return
-
-    const nextSet = new Set(nextSheetIds)
-    for (const sheetId of joinedSheetIds) {
-      if (nextSet.has(sheetId)) continue
-      socket.emit('leave-comment-sheet', { spreadsheetId: sheetId })
-      joinedSheetIds.delete(sheetId)
-    }
-
-    for (const sheetId of nextSet) {
-      if (joinedSheetIds.has(sheetId)) continue
-      socket.emit('join-comment-sheet', { spreadsheetId: sheetId })
-      joinedSheetIds.add(sheetId)
-    }
-  }
-
   function cleanupSocket() {
-    if (socket?.connected) {
-      for (const sheetId of joinedSheetIds) {
-        socket.emit('leave-comment-sheet', { spreadsheetId: sheetId })
-      }
-    }
-    joinedSheetIds.clear()
+    if (socket?.connected) socket.emit('leave-comment-inbox')
     socket?.disconnect()
     socket = null
     connectionPromise = null
@@ -91,21 +67,18 @@ export function useMultitableCommentInboxRealtime(options: UseMultitableCommentI
         })
 
         nextSocket.on('connect', () => {
-          syncSheetSubscriptions()
+          emitInboxJoin(nextSocket)
         })
         nextSocket.on('comment:mention', () => {
           void flushRefreshQueue()
         })
-        nextSocket.on('comment:created', (payload?: { comment?: { authorId?: string | null } | null }) => {
-          if (payload?.comment?.authorId && currentUserId && payload.comment.authorId === currentUserId) return
-          void flushRefreshQueue()
-        })
-        nextSocket.on('comment:resolved', () => {
+        nextSocket.on('comment:activity', (payload?: CommentActivityPayload) => {
+          if (payload?.kind === 'created' && payload.authorId && currentUserId && payload.authorId === currentUserId) return
           void flushRefreshQueue()
         })
 
         socket = nextSocket
-        syncSheetSubscriptions()
+        emitInboxJoin(nextSocket)
         return nextSocket
       } finally {
         connectionPromise = null
@@ -118,15 +91,6 @@ export function useMultitableCommentInboxRealtime(options: UseMultitableCommentI
   onMounted(() => {
     void ensureSocket()
   })
-
-  watch(
-    () => normalizeSheetIds(options.sheetIds?.() ?? []),
-    (sheetIds) => {
-      desiredSheetIds = sheetIds
-      syncSheetSubscriptions(sheetIds)
-    },
-    { immediate: true },
-  )
 
   onBeforeUnmount(() => {
     disconnected = true

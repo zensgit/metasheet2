@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
+import { io as ioClient } from 'socket.io-client'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 
@@ -611,5 +612,102 @@ describe('Comments API', () => {
       },
     ])
     expect(summaryJson.data.total).toBe(1)
+  })
+
+  it('broadcasts global inbox activity for comment create and resolve', async () => {
+    if (!baseUrl) return
+
+    const ts = Date.now()
+    const baseId = `base_comment_ws_${ts}`.slice(0, 50)
+    const spreadsheetId = `sheet_comment_ws_${ts}`.slice(0, 50)
+    const rowId = `rec_comment_ws_${ts}`.slice(0, 50)
+    const pool = poolManager.get()
+
+    await pool.query('INSERT INTO meta_bases (id, name) VALUES ($1, $2)', [baseId, 'Comment WS Base'])
+    createdBaseIds.push(baseId)
+    await pool.query('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1, $2, $3)', [
+      spreadsheetId,
+      baseId,
+      'Comment WS Sheet',
+    ])
+    createdSheetIds.push(spreadsheetId)
+
+    const authorToken = (await (await fetch(`${baseUrl}/api/auth/dev-token?userId=user_ws_author`)).json()).token as string
+    const socket = ioClient(`${baseUrl}?userId=user_ws_target`, { transports: ['websocket'] })
+
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('socket connect timeout')), 3000)
+      socket.on('connect', () => { clearTimeout(t); resolve() })
+    })
+
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('inbox join timeout')), 3000)
+      socket.on('joined-comment-inbox', () => {
+        clearTimeout(t)
+        resolve()
+      })
+      socket.emit('join-comment-inbox')
+    })
+
+    const createdActivity = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('create activity timeout')), 3000)
+      socket.on('comment:activity', (payload: any) => {
+        if (payload?.kind !== 'created') return
+        clearTimeout(t)
+        resolve(payload)
+      })
+    })
+
+    const createRes = await fetch(`${baseUrl}/api/comments`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authorToken}`,
+      },
+      body: JSON.stringify({
+        spreadsheetId,
+        rowId,
+        fieldId: 'fld_note',
+        content: 'Realtime inbox activity',
+      }),
+    })
+    expect(createRes.status).toBe(201)
+    const createJson = await createRes.json()
+    const createdComment = createJson.data.comment as { id: string }
+    createdCommentIds.push(createdComment.id)
+
+    await expect(createdActivity).resolves.toEqual({
+      kind: 'created',
+      spreadsheetId,
+      rowId,
+      fieldId: 'fld_note',
+      commentId: createdComment.id,
+      authorId: 'user_ws_author',
+    })
+
+    const resolvedActivity = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('resolve activity timeout')), 3000)
+      socket.on('comment:activity', (payload: any) => {
+        if (payload?.kind !== 'resolved' || payload?.commentId !== createdComment.id) return
+        clearTimeout(t)
+        resolve(payload)
+      })
+    })
+
+    const resolveRes = await fetch(`${baseUrl}/api/comments/${createdComment.id}/resolve`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${authorToken}` },
+    })
+    expect(resolveRes.status).toBe(204)
+
+    await expect(resolvedActivity).resolves.toEqual({
+      kind: 'resolved',
+      spreadsheetId,
+      rowId,
+      fieldId: 'fld_note',
+      commentId: createdComment.id,
+    })
+
+    socket.close()
   })
 })

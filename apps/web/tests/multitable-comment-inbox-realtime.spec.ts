@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, ref, type App } from 'vue'
+import { createApp, defineComponent, h, nextTick, type App } from 'vue'
 import { useMultitableCommentInboxRealtime } from '../src/multitable/composables/useMultitableCommentInboxRealtime'
 
 const handlers = new Map<string, (...args: any[]) => void>()
@@ -55,15 +55,13 @@ describe('useMultitableCommentInboxRealtime', () => {
     container = null
   })
 
-  it('refreshes inbox for mention and sheet activity events', async () => {
+  it('refreshes inbox for mention and global inbox activity events', async () => {
     const refreshInbox = vi.fn().mockResolvedValue(undefined)
-    const sheetIds = ref(['sheet_ops'])
 
     app = createApp(defineComponent({
       setup() {
         useMultitableCommentInboxRealtime({
           refreshInbox,
-          sheetIds: () => sheetIds.value,
         })
         return () => h('div')
       },
@@ -72,7 +70,7 @@ describe('useMultitableCommentInboxRealtime', () => {
     await flushUi(6)
 
     expect(ioMock).toHaveBeenCalledTimes(1)
-    expect(emitMock).toHaveBeenCalledWith('join-comment-sheet', { spreadsheetId: 'sheet_ops' })
+    expect(emitMock).toHaveBeenCalledWith('join-comment-inbox')
 
     handlers.get('comment:mention')?.({
       comment: {
@@ -83,17 +81,17 @@ describe('useMultitableCommentInboxRealtime', () => {
 
     expect(refreshInbox).toHaveBeenCalledTimes(1)
 
-    handlers.get('comment:created')?.({
-      comment: {
-        id: 'c2',
-        spreadsheetId: 'sheet_ops',
-        authorId: 'user_other',
-      },
+    handlers.get('comment:activity')?.({
+      kind: 'created',
+      commentId: 'c2',
+      spreadsheetId: 'sheet_ops',
+      authorId: 'user_other',
     })
     await flushUi(2)
     expect(refreshInbox).toHaveBeenCalledTimes(2)
 
-    handlers.get('comment:resolved')?.({
+    handlers.get('comment:activity')?.({
+      kind: 'resolved',
       spreadsheetId: 'sheet_ops',
       commentId: 'c2',
     })
@@ -108,7 +106,6 @@ describe('useMultitableCommentInboxRealtime', () => {
       setup() {
         useMultitableCommentInboxRealtime({
           refreshInbox,
-          sheetIds: () => ['sheet_ops'],
         })
         return () => h('div')
       },
@@ -116,12 +113,11 @@ describe('useMultitableCommentInboxRealtime', () => {
     app.mount(container!)
     await flushUi(6)
 
-    handlers.get('comment:created')?.({
-      comment: {
-        id: 'c_self',
-        spreadsheetId: 'sheet_ops',
-        authorId: 'user_inbox',
-      },
+    handlers.get('comment:activity')?.({
+      kind: 'created',
+      commentId: 'c_self',
+      spreadsheetId: 'sheet_ops',
+      authorId: 'user_inbox',
     })
     await flushUi(2)
 
@@ -138,7 +134,6 @@ describe('useMultitableCommentInboxRealtime', () => {
       setup() {
         useMultitableCommentInboxRealtime({
           refreshInbox,
-          sheetIds: () => ['sheet_ops'],
         })
         return () => h('div')
       },
@@ -146,10 +141,10 @@ describe('useMultitableCommentInboxRealtime', () => {
     app.mount(container!)
     await flushUi(6)
 
-    handlers.get('comment:created')?.({})
+    handlers.get('comment:activity')?.({ kind: 'created' })
     await flushUi(2)
-    handlers.get('comment:created')?.({})
-    handlers.get('comment:resolved')?.({})
+    handlers.get('comment:activity')?.({ kind: 'created' })
+    handlers.get('comment:activity')?.({ kind: 'resolved' })
     await flushUi(2)
 
     expect(refreshInbox).toHaveBeenCalledTimes(1)
@@ -160,15 +155,13 @@ describe('useMultitableCommentInboxRealtime', () => {
     expect(refreshInbox).toHaveBeenCalledTimes(2)
   })
 
-  it('joins and leaves sheet rooms when the loaded inbox sheets change', async () => {
+  it('joins and leaves the global inbox room with component lifecycle', async () => {
     const refreshInbox = vi.fn().mockResolvedValue(undefined)
-    const sheetIds = ref(['sheet_ops', 'sheet_finance', 'sheet_ops'])
 
     app = createApp(defineComponent({
       setup() {
         useMultitableCommentInboxRealtime({
           refreshInbox,
-          sheetIds: () => sheetIds.value,
         })
         return () => h('div')
       },
@@ -176,13 +169,11 @@ describe('useMultitableCommentInboxRealtime', () => {
     app.mount(container!)
     await flushUi(6)
 
-    expect(emitMock).toHaveBeenCalledWith('join-comment-sheet', { spreadsheetId: 'sheet_finance' })
-    expect(emitMock).toHaveBeenCalledWith('join-comment-sheet', { spreadsheetId: 'sheet_ops' })
+    expect(emitMock).toHaveBeenCalledWith('join-comment-inbox')
 
-    sheetIds.value = ['sheet_finance', 'sheet_support']
-    await flushUi(4)
+    app.unmount()
+    await flushUi(2)
 
-    expect(emitMock).toHaveBeenCalledWith('leave-comment-sheet', { spreadsheetId: 'sheet_ops' })
-    expect(emitMock).toHaveBeenCalledWith('join-comment-sheet', { spreadsheetId: 'sheet_support' })
+    expect(emitMock).toHaveBeenCalledWith('leave-comment-inbox')
   })
 })
