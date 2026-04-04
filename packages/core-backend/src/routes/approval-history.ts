@@ -4,7 +4,7 @@ import { Router } from 'express'
 import { IPLMAdapter } from '../di/identifiers'
 import { authenticate } from '../middleware/auth'
 import { pool } from '../db/pg'
-import { ApprovalBridgeService } from '../services/ApprovalBridgeService'
+import { ApprovalBridgeService, ServiceError } from '../services/ApprovalBridgeService'
 import type { ApprovalBridgePlmAdapter } from '../services/approval-bridge-types'
 import { parsePagination } from '../util/response'
 
@@ -27,79 +27,105 @@ function resolvePlmAdapter(options?: ApprovalHistoryRouterOptions): ApprovalBrid
   return options.injector.get(IPLMAdapter) as unknown as ApprovalBridgePlmAdapter
 }
 
+function sendHistoryServiceError(res: Response, error: ServiceError): void {
+  res.status(error.statusCode).json({
+    ok: false,
+    error: {
+      code: error.code,
+      message: error.message,
+      ...(error.details ? { details: error.details } : {}),
+    },
+  })
+}
+
 export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): Router {
   const r = Router()
 
   r.get('/api/approvals/:id/history', authenticate, async (req: Request, res: Response) => {
-    const id = req.params.id
-    if (isPlmApprovalId(id)) {
-      const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>)
-      const plmAdapter = resolvePlmAdapter(options)
-      if (!plmAdapter) {
-        return res.status(503).json({
-          ok: false,
-          error: {
-            code: 'PLM_APPROVAL_BRIDGE_UNAVAILABLE',
-            message: 'PLM approval bridge is not configured',
+    try {
+      const id = req.params.id
+      if (isPlmApprovalId(id)) {
+        const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>)
+        const plmAdapter = resolvePlmAdapter(options)
+        if (!plmAdapter) {
+          return res.status(503).json({
+            ok: false,
+            error: {
+              code: 'PLM_APPROVAL_BRIDGE_UNAVAILABLE',
+              message: 'PLM approval bridge is not configured',
+            },
+          })
+        }
+
+        const history = await new ApprovalBridgeService(plmAdapter).getApprovalHistory(id)
+        const items = history.slice(offset, offset + pageSize)
+        return res.json({
+          ok: true,
+          data: {
+            items,
+            page,
+            pageSize,
+            total: history.length,
           },
         })
       }
 
-      const history = await new ApprovalBridgeService(plmAdapter).getApprovalHistory(id)
-      const items = history.slice(offset, offset + pageSize)
+      if (!pool) {
+        return res.status(503).json({
+          ok: false,
+          error: {
+            code: 'SERVICE_UNAVAILABLE',
+            message: 'DB not configured',
+          },
+        })
+      }
+
+      const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>)
+      const countRes = await pool.query('SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1', [id])
+      const total = Number(countRes.rows[0]?.c || 0)
+      const { rows } = await pool.query(
+        `SELECT
+           id,
+           occurred_at,
+           actor_id,
+           actor_name,
+           action,
+           comment,
+           from_status,
+           to_status,
+           COALESCE(to_version, version) AS version,
+           from_version,
+           to_version
+         FROM approval_records
+         WHERE instance_id = $1
+         ORDER BY occurred_at DESC
+         LIMIT $2 OFFSET $3`,
+        [id, pageSize, offset],
+      )
+
       return res.json({
         ok: true,
         data: {
-          items,
+          items: rows,
           page,
           pageSize,
-          total: history.length,
+          total,
         },
       })
-    }
+    } catch (error) {
+      if (error instanceof ServiceError) {
+        sendHistoryServiceError(res, error)
+        return
+      }
 
-    if (!pool) {
-      return res.status(503).json({
+      return res.status(500).json({
         ok: false,
         error: {
-          code: 'SERVICE_UNAVAILABLE',
-          message: 'DB not configured',
+          code: 'APPROVAL_HISTORY_FETCH_FAILED',
+          message: 'Failed to load approval history',
         },
       })
     }
-
-    const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>)
-    const countRes = await pool.query('SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1', [id])
-    const total = Number(countRes.rows[0]?.c || 0)
-    const { rows } = await pool.query(
-      `SELECT
-         id,
-         occurred_at,
-         actor_id,
-         actor_name,
-         action,
-         comment,
-         from_status,
-         to_status,
-         COALESCE(to_version, version) AS version,
-         from_version,
-         to_version
-       FROM approval_records
-       WHERE instance_id = $1
-       ORDER BY occurred_at DESC
-       LIMIT $2 OFFSET $3`,
-      [id, pageSize, offset],
-    )
-
-    return res.json({
-      ok: true,
-      data: {
-        items: rows,
-        page,
-        pageSize,
-        total,
-      },
-    })
   })
 
   return r

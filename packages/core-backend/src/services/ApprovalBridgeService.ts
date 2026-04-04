@@ -39,6 +39,21 @@ type ApprovalRecordRow = {
   occurred_at: Date | string
 }
 
+type PlmApprovalFetch = {
+  id: string
+  title: string
+  status: string
+  request_type: string
+  version?: number
+  product_id?: string
+  product_number?: string
+  product_name?: string
+  requester_id: string
+  requester_name: string
+  created_at: string
+  updated_at?: string
+}
+
 function toIsoString(value: Date | string | null | undefined): string | null {
   if (!value) return null
   return value instanceof Date ? value.toISOString() : String(value)
@@ -58,6 +73,35 @@ function isPlmId(id: string): boolean {
 
 function extractExternalId(id: string): string {
   return id.replace(/^plm:/, '')
+}
+
+function normalizeSourceVersion(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) {
+    return value
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10)
+    if (Number.isInteger(parsed) && parsed >= 0) {
+      return parsed
+    }
+  }
+
+  return null
+}
+
+function compareHistoryDescending(
+  left: Pick<UnifiedApprovalHistoryDTO, 'occurredAt' | 'id'>,
+  right: Pick<UnifiedApprovalHistoryDTO, 'occurredAt' | 'id'>,
+): number {
+  const leftTime = left.occurredAt ? new Date(left.occurredAt).getTime() : Number.NEGATIVE_INFINITY
+  const rightTime = right.occurredAt ? new Date(right.occurredAt).getTime() : Number.NEGATIVE_INFINITY
+
+  if (leftTime !== rightTime) {
+    return rightTime - leftTime
+  }
+
+  return String(right.id).localeCompare(String(left.id))
 }
 
 function toUnifiedDTO(
@@ -95,6 +139,7 @@ function toBridgeSource(raw: {
   title: string
   status: string
   request_type: string
+  version?: number
   product_id?: string
   product_number?: string
   product_name?: string
@@ -115,6 +160,7 @@ function toBridgeSource(raw: {
     requester_name: raw.requester_name,
     created_at: raw.created_at,
     updated_at: raw.updated_at,
+    version: raw.version,
   }
 }
 
@@ -131,28 +177,12 @@ export class ApprovalBridgeService {
   }> {
     if (!pool) throw new Error('Database not available')
 
-    const plmAdapter = this.requirePlmAdapter()
-    const result = await plmAdapter.getApprovals({
-      status: options?.status,
-      productId: options?.productId,
-      requesterId: options?.requesterId,
-      limit: options?.limit ?? 50,
-      offset: options?.offset ?? 0,
-    })
-
-    if (result.error) {
-      throw new ServiceError(
-        'Failed to fetch PLM approvals',
-        502,
-        APPROVAL_ERROR_CODES.SOURCE_ACTION_FAILED,
-        { upstream: String(result.error) },
-      )
-    }
+    const approvals = await this.fetchPlmApprovalWindow(options)
 
     let synced = 0
     const errors: Array<{ externalId: string; error: string }> = []
 
-    const syncResults = await this.runInBatches(result.data, PLM_SYNC_CONCURRENCY, async (approval) => {
+    const syncResults = await this.runInBatches(approvals, PLM_SYNC_CONCURRENCY, async (approval) => {
       await this.upsertPlmMirror(toBridgeSource(approval))
       return approval.id
     })
@@ -161,7 +191,7 @@ export class ApprovalBridgeService {
       if (settledResult.status === 'fulfilled') {
         synced += 1
       } else {
-        const approval = result.data[index]
+        const approval = approvals[index]
         errors.push({
           externalId: String(approval.id),
           error: settledResult.reason instanceof Error ? settledResult.reason.message : String(settledResult.reason),
@@ -261,27 +291,7 @@ export class ApprovalBridgeService {
       return this.getPlmHistory(id)
     }
 
-    if (!pool) throw new Error('Database not available')
-
-    const result = await pool.query<ApprovalRecordRow>(
-      `SELECT id, action, actor_id, actor_name, comment, from_status, to_status, metadata, occurred_at
-       FROM approval_records
-       WHERE instance_id = $1
-       ORDER BY occurred_at DESC`,
-      [id],
-    )
-
-    return result.rows.map((row) => ({
-      id: String(row.id),
-      action: row.action,
-      actorId: row.actor_id,
-      actorName: row.actor_name,
-      comment: row.comment,
-      fromStatus: row.from_status,
-      toStatus: row.to_status,
-      occurredAt: toOccurredAt(row.occurred_at),
-      metadata: row.metadata || {},
-    }))
+    return this.loadLocalHistory(id)
   }
 
   async dispatchAction(
@@ -335,7 +345,7 @@ export class ApprovalBridgeService {
       }
 
       if (instance.source_system === 'plm') {
-        await this.dispatchPlmAction(id, instance.version, request)
+        await this.dispatchPlmAction(id, this.resolvePlmSourceVersion(instance), request)
       }
 
       const nextStatus = request.action === 'approve' ? 'approved' : 'rejected'
@@ -415,6 +425,40 @@ export class ApprovalBridgeService {
     return updated
   }
 
+  private async fetchPlmApprovalWindow(options?: PlmSyncOptions): Promise<PlmApprovalFetch[]> {
+    const plmAdapter = this.requirePlmAdapter()
+    const pageSize = Math.max(1, options?.limit ?? 50)
+    const requestedWindow = Math.max(0, options?.offset ?? 0) + pageSize
+    const approvals: PlmApprovalFetch[] = []
+
+    for (let pageOffset = 0; pageOffset < requestedWindow; pageOffset += pageSize) {
+      const result = await plmAdapter.getApprovals({
+        status: options?.status,
+        productId: options?.productId,
+        requesterId: options?.requesterId,
+        limit: pageSize,
+        offset: pageOffset,
+      })
+
+      if (result.error) {
+        throw new ServiceError(
+          'Failed to fetch PLM approvals',
+          502,
+          APPROVAL_ERROR_CODES.SOURCE_ACTION_FAILED,
+          { upstream: String(result.error) },
+        )
+      }
+
+      approvals.push(...result.data)
+
+      if (result.data.length < pageSize) {
+        break
+      }
+    }
+
+    return approvals
+  }
+
   private requirePlmAdapter(): ApprovalBridgePlmAdapter {
     if (!this.plmAdapter) {
       throw new ServiceError(
@@ -474,6 +518,40 @@ export class ApprovalBridgeService {
     }
 
     return assignmentsByInstance
+  }
+
+  private async loadLocalHistory(id: string): Promise<UnifiedApprovalHistoryDTO[]> {
+    if (!pool) {
+      return []
+    }
+
+    const result = await pool.query<ApprovalRecordRow>(
+      `SELECT id, action, actor_id, actor_name, comment, from_status, to_status, metadata, occurred_at
+       FROM approval_records
+       WHERE instance_id = $1
+       ORDER BY occurred_at DESC`,
+      [id],
+    )
+
+    return result.rows.map((row) => ({
+      id: String(row.id),
+      action: row.action,
+      actorId: row.actor_id,
+      actorName: row.actor_name,
+      comment: row.comment,
+      fromStatus: row.from_status,
+      toStatus: row.to_status,
+      occurredAt: toOccurredAt(row.occurred_at),
+      metadata: row.metadata || {},
+    }))
+  }
+
+  private resolvePlmSourceVersion(instance: ApprovalInstanceRow): number {
+    const sourceVersion =
+      normalizeSourceVersion(instance.metadata?.source_version) ??
+      normalizeSourceVersion(instance.metadata?.sourceVersion)
+
+    return sourceVersion ?? 0
   }
 
   private async upsertPlmMirror(source: PlmApprovalBridgeSource): Promise<void> {
@@ -580,7 +658,7 @@ export class ApprovalBridgeService {
       )
     }
 
-    return result.data.map((entry) => ({
+    const sourceHistory = result.data.map((entry) => ({
       id: String(entry.id),
       action: entry.status === 'approved'
         ? 'approve'
@@ -600,6 +678,10 @@ export class ApprovalBridgeService {
         requiredRole: entry.required_role,
       },
     }))
+
+    const localHistory = await this.loadLocalHistory(id)
+
+    return [...sourceHistory, ...localHistory].sort(compareHistoryDescending)
   }
 
   private async dispatchPlmAction(id: string, version: number, request: ApprovalActionRequest): Promise<void> {

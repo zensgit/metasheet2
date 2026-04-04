@@ -48,6 +48,7 @@ export interface ApprovalRequest {
   requester_id: string
   requester_name: string
   status: 'pending' | 'approved' | 'rejected'
+  version?: number
   created_at: string
   product_id?: string
   product_number?: string
@@ -444,6 +445,7 @@ interface YuantusEco {
   id: string
   name?: string
   eco_type?: string
+  version?: number | string
   product_id?: string
   product_number?: string
   product_name?: string
@@ -1137,6 +1139,7 @@ export class PLMAdapter extends HTTPAdapter {
     const productId = eco.product_id ? String(eco.product_id) : undefined
     const productNumber = eco.product_number || product?.partNumber || product?.code
     const productName = eco.product_name || product?.name
+    const parsedVersion = eco.version == null ? Number.NaN : Number(eco.version)
     return {
       id: eco.id,
       request_type: eco.eco_type || 'eco',
@@ -1144,6 +1147,7 @@ export class PLMAdapter extends HTTPAdapter {
       requester_id: requesterId,
       requester_name: requesterName,
       status: this.mapYuantusApprovalStatus(eco.state),
+      version: Number.isInteger(parsedVersion) && parsedVersion >= 0 ? parsedVersion : undefined,
       created_at: this.toIsoString(eco.created_at || eco.updated_at) || new Date().toISOString(),
       product_id: productId,
       product_number: productNumber,

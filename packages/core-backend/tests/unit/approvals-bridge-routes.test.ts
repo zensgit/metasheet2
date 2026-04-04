@@ -11,6 +11,7 @@ type ApprovalFixture = {
   requester_id: string
   requester_name: string
   status: 'pending' | 'approved' | 'rejected'
+  version?: number
   created_at: string
   updated_at?: string
   product_id?: string
@@ -92,6 +93,7 @@ const routeState = vi.hoisted(() => {
       requester_id: 'user-1',
       requester_name: 'Alice',
       status: 'pending',
+      version: 7,
       created_at: '2026-04-04T00:00:00.000Z',
       updated_at: '2026-04-04T00:05:00.000Z',
       product_id: 'prod-1',
@@ -480,7 +482,10 @@ const routeState = vi.hoisted(() => {
     state.assignments.clear()
     state.records = []
     state.recordId = 1
+    plmApprovals.splice(1)
+    plmHistory.splice(1)
     plmApprovals[0].status = 'pending'
+    plmApprovals[0].version = 7
     plmHistory[0].approved_at = '2026-04-04T00:10:00.000Z'
     plmHistory[0].created_at = '2026-04-04T00:09:00.000Z'
     state.instances.set('local-1', baseInstance())
@@ -522,14 +527,27 @@ function createPlmAdapterMock(): ApprovalBridgePlmAdapter & {
   approveApproval: ReturnType<typeof vi.fn>
   rejectApproval: ReturnType<typeof vi.fn>
 } {
+  const selectApprovals = (options?: { status?: string; limit?: number; offset?: number }) => {
+    const filtered = routeState.plmApprovals.filter((approval) => !options?.status || approval.status === options.status)
+    const offset = options?.offset ?? 0
+    const limit = options?.limit ?? filtered.length
+    return {
+      data: filtered.slice(offset, offset + limit),
+      totalCount: filtered.length,
+    }
+  }
+
   return {
-    getApprovals: vi.fn(async (options?: { status?: string }) => ({
-      data: routeState.plmApprovals.filter((approval) => !options?.status || approval.status === options.status),
-      metadata: { totalCount: routeState.plmApprovals.length },
-    })),
+    getApprovals: vi.fn(async (options?: { status?: string; limit?: number; offset?: number }) => {
+      const result = selectApprovals(options)
+      return {
+        data: result.data,
+        metadata: { totalCount: result.totalCount },
+      }
+    }),
     getApprovalById: vi.fn(async (approvalId: string) => ({
       data: routeState.plmApprovals.filter((approval) => approval.id === approvalId),
-      metadata: { totalCount: 1 },
+      metadata: { totalCount: routeState.plmApprovals.filter((approval) => approval.id === approvalId).length },
     })),
     getApprovalHistory: vi.fn(async () => ({
       data: routeState.plmHistory,
@@ -539,6 +557,9 @@ function createPlmAdapterMock(): ApprovalBridgePlmAdapter & {
       const approval = routeState.plmApprovals.find((item) => item.id === approvalId)
       if (approval) {
         approval.status = 'approved'
+        if (typeof approval.version === 'number') {
+          approval.version += 1
+        }
       }
       return {
         data: [{ id: approvalId, version, comment: comment || null }],
@@ -549,6 +570,9 @@ function createPlmAdapterMock(): ApprovalBridgePlmAdapter & {
       const approval = routeState.plmApprovals.find((item) => item.id === approvalId)
       if (approval) {
         approval.status = 'rejected'
+        if (typeof approval.version === 'number') {
+          approval.version += 1
+        }
       }
       return {
         data: [{ id: approvalId, version, comment }],
@@ -587,6 +611,7 @@ describe('approval bridge routes', () => {
       offset: 0,
     })
     expect(routeState.state.instances.has('plm:eco-1')).toBe(true)
+    expect(routeState.state.instances.get('plm:eco-1')?.metadata.source_version).toBe(7)
     expect(response.body.total).toBe(1)
     expect(response.body.data[0]).toMatchObject({
       id: 'plm:eco-1',
@@ -603,6 +628,49 @@ describe('approval bridge routes', () => {
           isActive: true,
         },
       ],
+    })
+  })
+
+  it('syncs enough PLM pages to satisfy later paginated unified list reads', async () => {
+    routeState.plmApprovals.push({
+      id: 'eco-2',
+      request_type: 'eco',
+      title: 'ECO-2',
+      requester_id: 'user-2',
+      requester_name: 'Bob',
+      status: 'pending',
+      version: 3,
+      created_at: '2026-04-04T00:01:00.000Z',
+      updated_at: '2026-04-04T00:06:00.000Z',
+      product_id: 'prod-2',
+      product_number: 'PN-2',
+      product_name: 'Drive Shaft',
+    })
+
+    const plmAdapter = createPlmAdapterMock()
+    const response = await request(createApp(plmAdapter))
+      .get('/api/approvals?sourceSystem=plm&limit=1&offset=1')
+      .expect(200)
+
+    expect(plmAdapter.getApprovals).toHaveBeenNthCalledWith(1, {
+      status: undefined,
+      productId: undefined,
+      requesterId: undefined,
+      limit: 1,
+      offset: 0,
+    })
+    expect(plmAdapter.getApprovals).toHaveBeenNthCalledWith(2, {
+      status: undefined,
+      productId: undefined,
+      requesterId: undefined,
+      limit: 1,
+      offset: 1,
+    })
+    expect(response.body.total).toBe(2)
+    expect(response.body.data).toHaveLength(1)
+    expect(response.body.data[0]).toMatchObject({
+      id: 'plm:eco-1',
+      externalApprovalId: 'eco-1',
     })
   })
 
@@ -787,7 +855,7 @@ describe('approval bridge routes', () => {
       },
     })
     expect(response.body.data.items).toHaveLength(1)
-    expect(response.body.data.items[0].id).toBe('hist-2')
+    expect(response.body.data.items[0].id).toBe('hist-1')
   })
 
   it('returns null occurredAt when PLM history has no timestamps', async () => {
@@ -822,7 +890,7 @@ describe('approval bridge routes', () => {
       .send({ action: 'approve', comment: 'Ship it' })
       .expect(200)
 
-    expect(plmAdapter.approveApproval).toHaveBeenCalledWith('eco-1', 0, 'Ship it')
+    expect(plmAdapter.approveApproval).toHaveBeenCalledWith('eco-1', 7, 'Ship it')
     expect(response.body).toMatchObject({
       id: 'plm:eco-1',
       status: 'approved',
@@ -836,7 +904,52 @@ describe('approval bridge routes', () => {
       action: 'approve',
       to_status: 'approved',
     })
+    expect(mirrored?.version).toBe(1)
     expect(Array.from(routeState.state.assignments.values())[0]?.is_active).toBe(false)
+  })
+
+  it('merges local audit records into PLM history responses', async () => {
+    const app = createApp(createPlmAdapterMock())
+
+    await request(app)
+      .post('/api/approvals/plm:eco-1/actions')
+      .send({ action: 'approve', comment: 'Ship it' })
+      .expect(200)
+
+    const history = await request(app)
+      .get('/api/approvals/plm:eco-1/history')
+      .expect(200)
+
+    expect(history.body.data.total).toBe(2)
+    expect(history.body.data.items[0]).toMatchObject({
+      action: 'approve',
+      actorId: 'test-user',
+      comment: 'Ship it',
+      metadata: {
+        sourceSystem: 'plm',
+      },
+    })
+  })
+
+  it('returns structured errors when PLM history fetch fails', async () => {
+    const plmAdapter = createPlmAdapterMock()
+    plmAdapter.getApprovalHistory.mockResolvedValueOnce({
+      data: [],
+      error: new Error('upstream boom'),
+    })
+
+    const response = await request(createApp(plmAdapter))
+      .get('/api/approvals/plm:eco-1/history')
+      .expect(502)
+
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'SOURCE_ACTION_FAILED',
+        message: 'Failed to fetch PLM approval history',
+      },
+    })
+    expect(String(response.body.error.details.upstream)).toContain('upstream boom')
   })
 
   it('filters non-PLM approvals by active assignee from approval_assignments', async () => {
