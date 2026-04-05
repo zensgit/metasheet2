@@ -43,13 +43,13 @@
       :visible="showMentionPopover"
       :items="mentionInboxState.summary.value?.items ?? []"
       :rows="grid.rows.value"
-      :fields="grid.fields.value"
+      :fields="propertyVisibleGridFields"
       :display-field-id="mentionDisplayFieldId"
       @close="showMentionPopover = false"
       @select-record="onMentionPopoverSelect"
     />
     <MetaToolbar
-      :fields="grid.fields.value" :hidden-field-ids="grid.hiddenFieldIds.value"
+      :fields="propertyVisibleGridFields" :hidden-field-ids="grid.hiddenFieldIds.value"
       :sort-rules="grid.sortRules.value" :filter-rules="grid.filterRules.value"
       :filter-conjunction="grid.filterConjunction.value"
       :can-create-record="caps.canCreateRecord.value" :can-undo="grid.canUndo.value" :can-redo="grid.canRedo.value"
@@ -212,7 +212,7 @@
     <MetaImportModal
       :visible="showImportModal"
       :sheet-id="workbench.activeSheetId.value"
-      :fields="grid.fields.value"
+      :fields="propertyVisibleGridFields"
       :field-resolvers="importFieldResolvers"
       :importing="importSubmitting"
       :result="importResult"
@@ -225,12 +225,12 @@
       @close="linkPickerVisible = false" @confirm="onLinkPickerConfirm"
     />
     <MetaFieldManager
-      :visible="showFieldManager" :fields="workbench.fields.value" :sheets="workbench.sheets.value" :sheet-id="workbench.activeSheetId.value"
+      :visible="showFieldManager" :fields="propertyVisibleWorkbenchFields" :sheets="workbench.sheets.value" :sheet-id="workbench.activeSheetId.value"
       @update:dirty="fieldManagerDirty = $event"
       @close="showFieldManager = false" @create-field="onCreateField" @update-field="onUpdateField" @delete-field="onDeleteField"
     />
     <MetaViewManager
-      :visible="showViewManager" :views="workbench.views.value" :fields="workbench.fields.value" :sheet-id="workbench.activeSheetId.value"
+      :visible="showViewManager" :views="workbench.views.value" :fields="propertyVisibleWorkbenchFields" :sheet-id="workbench.activeSheetId.value"
       :active-view-id="workbench.activeViewId.value"
       @update:dirty="viewManagerDirty = $event"
       @close="showViewManager = false" @create-view="onCreateView" @update-view="onUpdateView" @delete-view="onDeleteView"
@@ -291,6 +291,7 @@ import MetaMentionPopover from '../components/MetaMentionPopover.vue'
 import type { MetaBase } from '../types'
 import { bulkImportRecords, skipDuplicateImportRows } from '../import/bulk-import'
 import { extractImportTokens, type ImportBuildFailure, type ImportBuildResult, type ImportValueResolver } from '../import/delimited'
+import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { isLinkField, isPersonField } from '../utils/link-fields'
 import { addPeopleLookupToken, inferPeopleLookupKind, resolvePeopleImportValue } from '../utils/people-import'
 
@@ -762,9 +763,12 @@ async function resolveLinkedImportValue(rawValue: string, field: MetaField): Pro
   return resolvedIds
 }
 
+const propertyVisibleWorkbenchFields = computed(() => filterPropertyVisibleFields(workbench.fields.value))
+const propertyVisibleGridFields = computed(() => filterPropertyVisibleFields(grid.fields.value))
+
 const importFieldResolvers = computed<Record<string, ImportValueResolver>>(() => {
   const resolvers: Record<string, ImportValueResolver> = {}
-  for (const field of workbench.fields.value) {
+  for (const field of propertyVisibleWorkbenchFields.value) {
     if (!isLinkField(field)) continue
     resolvers[field.id] = async (rawValue, currentField) => {
       if (isPersonField(currentField)) {
@@ -1774,7 +1778,7 @@ async function refreshDialogMeta() {
     dialogMetaRefreshQueued = false
     const refreshed = await workbench.loadSheetMeta(activeSheetId)
     if (refreshed && workbench.activeSheetId.value === activeSheetId) {
-      grid.fields.value = [...workbench.fields.value]
+      grid.fields.value = [...propertyVisibleWorkbenchFields.value]
     }
   } catch {
     // Keep dialog refresh silent; explicit save paths still surface errors.
