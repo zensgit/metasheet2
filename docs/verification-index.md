@@ -536,7 +536,8 @@ Entry points:
   - Report: `docs/verification-plm-ui-substitutes-mutation-20260108_152816.md`
   - Artifact: `artifacts/plm-ui-substitutes-mutation-20260108_152816.png`
 - PLM regression:
-  - Script: `scripts/verify-plm-regression.sh`
+  - Run: `pnpm verify:plm-regression`
+  - Alias of: `pnpm verify:plm-ui-regression`
   - Report: `docs/verification-plm-regression-20260108_150410.md`
   - Report: `docs/verification-plm-regression-20260108_151809.md`
   - Report: `docs/verification-plm-regression-20260108_152816.md`

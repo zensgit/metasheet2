@@ -22,7 +22,7 @@
     "verify:smoke:all": "bash scripts/verify-smoke.sh",
     "verify:plm-ui-regression": "bash scripts/verify-plm-ui-regression.sh",
     "verify:plm-ui-full": "bash scripts/verify-plm-ui-full.sh",
-    "verify:plm-regression": "bash scripts/verify-plm-regression.sh",
+    "verify:plm-regression": "pnpm run verify:plm-ui-regression",
     "verify:attendance-ui": "node scripts/verify-attendance-ui.mjs",
     "verify:attendance-import-ui": "node scripts/verify-attendance-import-ui.mjs",
     "verify:attendance-ui-regression": "node scripts/verify-attendance-ui-regression.mjs",
