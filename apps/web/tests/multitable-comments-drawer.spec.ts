@@ -259,4 +259,170 @@ describe('MetaCommentsDrawer', () => {
     app.unmount()
     container.remove()
   })
+
+  it('shows edit/delete actions for the current user and seeds edit mode', async () => {
+    const draftSpy = vi.fn()
+    const editSpy = vi.fn()
+    const deleteSpy = vi.fn()
+    const cancelEditSpy = vi.fn()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', name: 'home', component: defineComponent({ render: () => h('div') }) },
+        { path: '/multitable/comments/inbox', name: 'multitable-comment-inbox', component: defineComponent({ render: () => h('div') }) },
+      ],
+    })
+
+    const app = createApp(defineComponent({
+      setup() {
+        const draft = ref('Edit @Amy Wong')
+        return { draft }
+      },
+      render() {
+        return h(MetaCommentsDrawer, {
+          visible: true,
+          comments: [
+            {
+              id: 'c1',
+              containerId: 'sheet_1',
+              targetId: 'row_1',
+              fieldId: null,
+              mentions: ['user_2'],
+              authorId: 'user_1',
+              authorName: 'Author',
+              content: 'Ping @[Amy Wong](user_2)',
+              resolved: false,
+              createdAt: '2026-04-01T09:00:00.000Z',
+            },
+          ],
+          loading: false,
+          canComment: true,
+          canResolve: true,
+          currentUserId: 'user_1',
+          editingCommentId: 'c1',
+          composerInitialMentions: [{ id: 'user_2', label: 'Amy Wong' }],
+          draft: this.draft,
+          onResolve: vi.fn(),
+          onClose: vi.fn(),
+          onRetry: vi.fn(),
+          onEdit: editSpy,
+          onDelete: deleteSpy,
+          'onUpdate:draft': (value: string) => {
+            this.draft = value
+            draftSpy(value)
+          },
+          onCancelEdit: cancelEditSpy,
+          onSubmit: vi.fn(),
+        })
+      },
+    }))
+
+    app.use(router)
+    await router.push('/')
+    await router.isReady()
+    app.mount(container)
+    await flushUi()
+
+    expect(container.textContent).toContain('Edit')
+    expect(container.textContent).toContain('Delete')
+    expect(container.textContent).toContain('Editing Author')
+    expect(container.textContent).toContain('Save')
+    expect(container.textContent).toContain('@Amy Wong')
+
+    const editButton = Array.from(container.querySelectorAll('.meta-comments-drawer__reply'))
+      .find((button) => button.textContent?.includes('Editing...')) as HTMLButtonElement | undefined
+    editButton?.click()
+    await flushUi()
+    expect(editSpy).toHaveBeenCalledWith('c1')
+
+    const deleteButton = Array.from(container.querySelectorAll('.meta-comments-drawer__reply'))
+      .find((button) => button.textContent?.includes('Delete')) as HTMLButtonElement | undefined
+    deleteButton?.click()
+    await flushUi()
+    expect(deleteSpy).toHaveBeenCalledWith('c1')
+
+    const cancelButton = container.querySelector('.meta-comments-drawer__reply-cancel') as HTMLButtonElement | null
+    cancelButton?.click()
+    await flushUi()
+    expect(cancelEditSpy).toHaveBeenCalledTimes(1)
+    expect(draftSpy).not.toHaveBeenCalled()
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('hides delete for root comments that still have replies', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', name: 'home', component: defineComponent({ render: () => h('div') }) },
+        { path: '/multitable/comments/inbox', name: 'multitable-comment-inbox', component: defineComponent({ render: () => h('div') }) },
+      ],
+    })
+
+    const app = createApp(defineComponent({
+      render() {
+        return h(MetaCommentsDrawer, {
+          visible: true,
+          comments: [
+            {
+              id: 'c1',
+              containerId: 'sheet_1',
+              targetId: 'row_1',
+              fieldId: null,
+              mentions: [],
+              authorId: 'user_1',
+              authorName: 'Author',
+              content: 'thread root',
+              resolved: false,
+              createdAt: '2026-04-01T09:00:00.000Z',
+            },
+            {
+              id: 'c2',
+              containerId: 'sheet_1',
+              targetId: 'row_1',
+              parentId: 'c1',
+              fieldId: null,
+              mentions: [],
+              authorId: 'user_2',
+              authorName: 'Other',
+              content: 'reply',
+              resolved: false,
+              createdAt: '2026-04-01T10:00:00.000Z',
+            },
+          ],
+          loading: false,
+          canComment: true,
+          canResolve: true,
+          currentUserId: 'user_1',
+          draft: '',
+          onResolve: vi.fn(),
+          onClose: vi.fn(),
+          onRetry: vi.fn(),
+          'onUpdate:draft': vi.fn(),
+          onSubmit: vi.fn(),
+        })
+      },
+    }))
+
+    app.use(router)
+    await router.push('/')
+    await router.isReady()
+    app.mount(container)
+    await flushUi()
+
+    const actionLabels = Array.from(container.querySelectorAll('.meta-comments-drawer__reply')).map((button) => button.textContent?.trim())
+    expect(actionLabels).toContain('Edit')
+    expect(actionLabels).toContain('Reply')
+    expect(actionLabels).not.toContain('Delete')
+
+    app.unmount()
+    container.remove()
+  })
 })

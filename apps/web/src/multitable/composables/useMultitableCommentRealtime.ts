@@ -11,6 +11,9 @@ type CommentEventPayload = {
     rowId?: string
   }
   commentId?: string
+  rowId?: string
+  fieldId?: string | null
+  authorId?: string
 }
 
 type MaybeReactive<T> = T | { value: T } | (() => T)
@@ -72,10 +75,23 @@ export function useMultitableCommentRealtime(options: UseMultitableCommentRealti
   let disconnected = false
   let connectionPromise: Promise<Socket | null> | null = null
 
-  function shouldReloadForComment(comment: MultitableComment): boolean {
+  function selectedRecordMatches(rowId: string | null | undefined): boolean {
     const selectedRecordId = readValue(options.selectedRecordId)?.trim()
     const commentsVisible = readValue(options.commentsVisible)
-    return Boolean(commentsVisible && selectedRecordId && selectedRecordId === comment.targetId)
+    return Boolean(commentsVisible && selectedRecordId && rowId && selectedRecordId === rowId)
+  }
+
+  function shouldReloadForComment(comment: MultitableComment): boolean {
+    return selectedRecordMatches(comment.targetId)
+  }
+
+  function shouldReloadForRowId(rowId: string | null | undefined): boolean {
+    return selectedRecordMatches(rowId)
+  }
+
+  async function refreshUnreadIfNeeded(actorId?: string | null) {
+    if (actorId && currentUserId && actorId === currentUserId) return
+    await options.refreshUnreadCount?.()
   }
 
   function cleanupSocket() {
@@ -112,26 +128,41 @@ export function useMultitableCommentRealtime(options: UseMultitableCommentRealti
           if (comment && shouldReloadForComment(comment)) {
             void options.reloadSelectedRecordComments()
           }
+          void refreshUnreadIfNeeded(comment?.authorId)
+        })
+        nextSocket.on('comment:updated', (payload: CommentEventPayload) => {
+          const comment = normalizeRealtimeComment(payload.comment)
+          if (comment && shouldReloadForComment(comment)) {
+            void options.reloadSelectedRecordComments()
+          }
+          void refreshUnreadIfNeeded(comment?.authorId ?? payload.authorId)
         })
         nextSocket.on('comment:resolved', (payload: CommentEventPayload) => {
-          const selectedRecordId = readValue(options.selectedRecordId)?.trim()
           if (
             typeof payload.commentId === 'string' &&
             payload.commentId.trim().length > 0 &&
-            selectedRecordId &&
-            readValue(options.commentsVisible)
+            shouldReloadForRowId(payload.rowId)
           ) {
             void options.reloadSelectedRecordComments()
           }
+          void refreshUnreadIfNeeded(payload.authorId)
+        })
+        nextSocket.on('comment:deleted', (payload: CommentEventPayload) => {
+          if (
+            typeof payload.commentId === 'string' &&
+            payload.commentId.trim().length > 0 &&
+            shouldReloadForRowId(payload.rowId)
+          ) {
+            void options.reloadSelectedRecordComments()
+          }
+          void refreshUnreadIfNeeded(payload.authorId)
         })
         nextSocket.on('comment:mention', (payload: CommentEventPayload) => {
           const comment = normalizeRealtimeComment(payload.comment)
           if (comment && shouldReloadForComment(comment)) {
             void options.reloadSelectedRecordComments()
           }
-          if (comment && comment.authorId !== currentUserId) {
-            void options.refreshUnreadCount?.()
-          }
+          void refreshUnreadIfNeeded(comment?.authorId)
         })
 
         socket = nextSocket

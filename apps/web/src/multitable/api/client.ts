@@ -549,6 +549,29 @@ export class MultitableApiClient {
     return parseJson(res)
   }
 
+  async updateComment(commentId: string, input: {
+    content: string
+    mentions?: string[]
+  }): Promise<{ comment: MultitableComment }> {
+    const res = await this.fetch(`/api/comments/${commentId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content: input.content,
+        mentions: input.mentions,
+      }),
+    })
+    const data = await parseJson<{ comment?: RawComment }>(res)
+    return {
+      comment: normalizeMultitableComment(data.comment),
+    }
+  }
+
+  async deleteComment(commentId: string): Promise<void> {
+    const res = await this.fetch(`/api/comments/${commentId}`, { method: 'DELETE' })
+    return parseJson(res)
+  }
+
   async listCommentPresence(params: { containerId: string; targetIds?: string[] }): Promise<{ items: MultitableCommentPresenceSummary[] }> {
     const targetIds = (params.targetIds ?? []).filter((targetId) => typeof targetId === 'string' && targetId.trim().length > 0)
     const res = await this.fetch(`/api/comments/summary${qs({

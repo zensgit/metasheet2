@@ -71,9 +71,13 @@ vi.mock('../src/multitable/composables/useMultitableComments', () => ({
     loading: ref(false),
     submitting: ref(false),
     resolvingIds: ref<string[]>([]),
+    updatingIds: ref<string[]>([]),
+    deletingIds: ref<string[]>([]),
     error: ref<string | null>(null),
     loadComments: loadCommentsSpy,
     addComment: addCommentSpy,
+    updateComment: vi.fn(),
+    deleteComment: vi.fn(),
     resolveComment: resolveCommentSpy,
   }),
 }))
@@ -103,7 +107,9 @@ vi.mock('../src/multitable/composables/useMultitableCommentInboxSummary', () => 
     markRead: vi.fn().mockResolvedValue(undefined),
     clearSummary: vi.fn(),
     onRealtimeCommentCreated: vi.fn(),
+    onRealtimeCommentUpdated: vi.fn(),
     onRealtimeCommentResolved: vi.fn(),
+    onRealtimeCommentDeleted: vi.fn(),
   }),
 }))
 

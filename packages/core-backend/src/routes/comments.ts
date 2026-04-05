@@ -5,7 +5,12 @@ import type { Injector } from '@wendellhu/redi'
 import { ICommentService, type CommentQueryOptions } from '../di/identifiers'
 import { Logger } from '../core/logger'
 import { rbacGuard } from '../rbac/rbac'
-import { CommentValidationError } from '../services/CommentService'
+import {
+  CommentAccessError,
+  CommentConflictError,
+  CommentNotFoundError,
+  CommentValidationError,
+} from '../services/CommentService'
 
 const logger = new Logger('CommentsRoutes')
 const DEFAULT_LIMIT = 50
@@ -63,6 +68,22 @@ function getUserId(req: Request): string {
   if (typeof raw === 'string' && raw.trim().length > 0) return raw
   if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw)
   return 'anonymous'
+}
+
+function respondCommentError(res: Response, error: unknown, fallbackMessage: string) {
+  if (error instanceof CommentValidationError) {
+    return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error.message } })
+  }
+  if (error instanceof CommentAccessError) {
+    return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: error.message } })
+  }
+  if (error instanceof CommentNotFoundError) {
+    return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: error.message } })
+  }
+  if (error instanceof CommentConflictError) {
+    return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: error.message } })
+  }
+  return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: fallbackMessage } })
 }
 
 export function commentsRouter(injector?: Injector): Router {
@@ -249,11 +270,47 @@ export function commentsRouter(injector?: Injector): Router {
       })
       return res.status(201).json({ ok: true, data: { comment } })
     } catch (error) {
-      if (error instanceof CommentValidationError) {
-        return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: error.message } })
-      }
       logger.error('Failed to create comment', error as Error)
-      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create comment' } })
+      return respondCommentError(res, error, 'Failed to create comment')
+    }
+  })
+
+  router.patch('/api/comments/:commentId', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
+    const commentId = req.params.commentId
+    if (!commentId || commentId.trim().length === 0) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'commentId required' } })
+    }
+
+    const schema = z.object({
+      content: z.string().min(1),
+      mentions: z.array(z.string().min(1)).optional(),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const comment = await commentService.updateComment(commentId, getUserId(req), parsed.data)
+      return res.json({ ok: true, data: { comment } })
+    } catch (error) {
+      logger.error('Failed to update comment', error as Error)
+      return respondCommentError(res, error, 'Failed to update comment')
+    }
+  })
+
+  router.delete('/api/comments/:commentId', rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
+    const commentId = req.params.commentId
+    if (!commentId || commentId.trim().length === 0) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'commentId required' } })
+    }
+
+    try {
+      await commentService.deleteComment(commentId, getUserId(req))
+      return res.status(204).end()
+    } catch (error) {
+      logger.error('Failed to delete comment', error as Error)
+      return respondCommentError(res, error, 'Failed to delete comment')
     }
   })
 
@@ -301,7 +358,7 @@ export function commentsRouter(injector?: Injector): Router {
       return res.status(204).end()
     } catch (error) {
       logger.error('Failed to resolve comment', error as Error)
-      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to resolve comment' } })
+      return respondCommentError(res, error, 'Failed to resolve comment')
     }
   })
 

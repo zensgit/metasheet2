@@ -19,6 +19,65 @@ describe('MultitableApiClient', () => {
     await expect(client.resolveComment('c1')).resolves.toBeUndefined()
   })
 
+  it('updates and deletes comments through dedicated endpoints', async () => {
+    const fetchFn = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input === '/api/comments/c1' && init?.method === 'PATCH') {
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            comment: {
+              id: 'c1',
+              spreadsheetId: 'sheet_1',
+              rowId: 'row_1',
+              authorId: 'user_1',
+              content: 'Edited @[Amy](user_2)',
+              mentions: ['user_2'],
+              resolved: false,
+              createdAt: '2026-04-05T08:00:00.000Z',
+              updatedAt: '2026-04-05T08:01:00.000Z',
+            },
+          },
+        }), { status: 200 })
+      }
+      if (input === '/api/comments/c1' && init?.method === 'DELETE') {
+        return new Response(null, { status: 204 })
+      }
+      throw new Error(`Unexpected request: ${input}`)
+    })
+
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.updateComment('c1', {
+      content: 'Edited @[Amy](user_2)',
+      mentions: ['user_2'],
+    })).resolves.toEqual({
+      comment: {
+        id: 'c1',
+        containerId: 'sheet_1',
+        targetId: 'row_1',
+        spreadsheetId: 'sheet_1',
+        rowId: 'row_1',
+        fieldId: null,
+        targetFieldId: null,
+        parentId: undefined,
+        mentions: ['user_2'],
+        authorId: 'user_1',
+        authorName: undefined,
+        content: 'Edited @[Amy](user_2)',
+        resolved: false,
+        createdAt: '2026-04-05T08:00:00.000Z',
+        updatedAt: '2026-04-05T08:01:00.000Z',
+      },
+    })
+    await expect(client.deleteComment('c1')).resolves.toBeUndefined()
+
+    expect(fetchFn).toHaveBeenCalledWith('/api/comments/c1', expect.objectContaining({
+      method: 'PATCH',
+      body: JSON.stringify({ content: 'Edited @[Amy](user_2)', mentions: ['user_2'] }),
+    }))
+    expect(fetchFn).toHaveBeenCalledWith('/api/comments/c1', expect.objectContaining({ method: 'DELETE' }))
+  })
+
   it('loads inbox and unread counters from comment endpoints', async () => {
     const fetchFn = vi.fn(async (input: string) => {
       if (input.startsWith('/api/comments/inbox')) {

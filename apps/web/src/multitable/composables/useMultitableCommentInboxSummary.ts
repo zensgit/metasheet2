@@ -4,6 +4,8 @@ import type { CommentMentionSummary } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
 import type {
   MultitableCommentCreatedEvent,
+  MultitableCommentDeletedEvent,
+  MultitableCommentUpdatedEvent,
   MultitableCommentResolvedEvent,
 } from '../realtime/comments-realtime'
 
@@ -226,6 +228,22 @@ export function useMultitableCommentInboxSummary(opts?: {
     void queueSummaryRefresh(currentSummary.spreadsheetId)
   }
 
+  function onRealtimeCommentUpdated(event: MultitableCommentUpdatedEvent) {
+    const currentSummary = summary.value
+    if (!currentSummary) return
+    const eventSpreadsheetId = resolveEventSpreadsheetId(event)
+    if (!eventSpreadsheetId || eventSpreadsheetId !== currentSummary.spreadsheetId) return
+    void queueSummaryRefresh(currentSummary.spreadsheetId)
+  }
+
+  function onRealtimeCommentDeleted(event: MultitableCommentDeletedEvent) {
+    const currentSummary = summary.value
+    if (!currentSummary) return
+    const eventSpreadsheetId = resolveEventSpreadsheetId(event)
+    if (!eventSpreadsheetId || eventSpreadsheetId !== currentSummary.spreadsheetId) return
+    void queueSummaryRefresh(currentSummary.spreadsheetId)
+  }
+
   return {
     summary,
     loading,
@@ -236,6 +254,8 @@ export function useMultitableCommentInboxSummary(opts?: {
     markRead,
     clearSummary,
     onRealtimeCommentCreated,
+    onRealtimeCommentUpdated,
     onRealtimeCommentResolved,
+    onRealtimeCommentDeleted,
   }
 }
