@@ -27,6 +27,7 @@ async function createApp(args: {
 }) {
   vi.resetModules()
   process.env.ATTACHMENT_PATH = args.attachmentPath
+  const publishSpy = vi.fn()
 
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
@@ -34,6 +35,9 @@ async function createApp(args: {
     listUserPermissions: vi.fn().mockResolvedValue(args.fallbackPermissions ?? []),
     invalidateUserPerms: vi.fn(),
     getPermCacheStatus: vi.fn(),
+  }))
+  vi.doMock('../../src/integration/events/event-bus', () => ({
+    eventBus: { publish: publishSpy },
   }))
 
   const { poolManager } = await import('../../src/integration/db/connection-pool')
@@ -53,7 +57,7 @@ async function createApp(args: {
   })
   app.use('/api/multitable', univerMetaRouter())
 
-  return { app, mockPool }
+  return { app, mockPool, publishSpy }
 }
 
 describe('Multitable attachment API', () => {
@@ -70,7 +74,7 @@ describe('Multitable attachment API', () => {
     let uploadedAttachmentId = ''
 
     try {
-      const { app } = await createApp({
+      const { app, publishSpy } = await createApp({
         attachmentPath,
         tokenPerms: ['multitable:write', 'multitable:read'],
         queryHandler: async (sql, params) => {
@@ -148,7 +152,7 @@ describe('Multitable attachment API', () => {
     let uploadedAttachmentId = ''
 
     try {
-      const { app } = await createApp({
+      const { app, publishSpy } = await createApp({
         attachmentPath,
         tokenPerms: ['multitable:write', 'multitable:read'],
         queryHandler: async (sql, params) => {
@@ -227,6 +231,14 @@ describe('Multitable attachment API', () => {
       expect(deleted.body).toEqual({
         ok: true,
         data: { deleted: uploadedAttachmentId },
+      })
+      expect(publishSpy).toHaveBeenCalledWith('spreadsheet.cell.updated', {
+        spreadsheetId: 'sheet_ops',
+        actorId: 'user_multitable_attachments',
+        source: 'multitable',
+        kind: 'attachment-updated',
+        recordId: 'rec_ops_1',
+        recordIds: ['rec_ops_1'],
       })
       await expect(fs.stat(path.join(attachmentPath, storedPath))).rejects.toThrow()
     } finally {
