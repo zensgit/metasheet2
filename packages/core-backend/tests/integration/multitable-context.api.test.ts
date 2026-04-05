@@ -227,6 +227,7 @@ describe('Multitable context API', () => {
               { id: 'fld_formula', name: 'Total', type: 'formula', property: { expression: '{fld_amount} * 2' }, order: 2 },
               { id: 'fld_lookup', name: 'Vendor Name', type: 'lookup', property: { linkFieldId: 'fld_vendor', targetFieldId: 'fld_name' }, order: 3 },
               { id: 'fld_locked', name: 'Locked', type: 'string', property: { readonly: true }, order: 4 },
+              { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true }, order: 5 },
             ],
           }
         }
@@ -244,6 +245,7 @@ describe('Multitable context API', () => {
       fld_formula: { visible: true, readOnly: true },
       fld_lookup: { visible: false, readOnly: true },
       fld_locked: { visible: true, readOnly: true },
+      fld_secret: { visible: false, readOnly: false },
     })
   })
 

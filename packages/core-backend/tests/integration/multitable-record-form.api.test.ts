@@ -296,6 +296,7 @@ describe('Multitable record and form context API', () => {
                 fld_formula_total: '42',
                 fld_hidden_lookup: 'Derived',
                 fld_locked: 'Locked value',
+                fld_secret: 'Restricted value',
               },
             }],
           }
@@ -311,6 +312,7 @@ describe('Multitable record and form context API', () => {
                 fld_formula_total: '42',
                 fld_hidden_lookup: 'Derived',
                 fld_locked: 'Locked value',
+                fld_secret: 'Restricted value',
               },
             }],
           }
@@ -327,6 +329,7 @@ describe('Multitable record and form context API', () => {
                 fld_formula_total: '42',
                 fld_hidden_lookup: 'Derived',
                 fld_locked: 'Locked value',
+                fld_secret: 'Restricted value',
               },
             }],
           }
@@ -343,6 +346,7 @@ describe('Multitable record and form context API', () => {
               { id: 'fld_formula_total', name: 'Total', type: 'formula', property: { expression: '{fld_amount} * 2' }, order: 2 },
               { id: 'fld_hidden_lookup', name: 'Lookup', type: 'lookup', property: { linkFieldId: 'fld_vendor', targetFieldId: 'fld_name' }, order: 3 },
               { id: 'fld_locked', name: 'Locked', type: 'string', property: { readOnly: true }, order: 4 },
+              { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true }, order: 5 },
             ],
           }
         }
@@ -356,11 +360,22 @@ describe('Multitable record and form context API', () => {
       .expect(200)
 
     expect(formResponse.body.data.readOnly).toBe(false)
+    expect(formResponse.body.data.fields.map((field: { id: string }) => field.id)).toEqual([
+      'fld_title',
+      'fld_formula_total',
+      'fld_locked',
+    ])
     expect(formResponse.body.data.fieldPermissions).toEqual({
       fld_title: { visible: true, readOnly: false },
       fld_formula_total: { visible: true, readOnly: true },
       fld_hidden_lookup: { visible: false, readOnly: true },
       fld_locked: { visible: true, readOnly: true },
+      fld_secret: { visible: false, readOnly: false },
+    })
+    expect(formResponse.body.data.record.data).toEqual({
+      fld_title: 'Editable title',
+      fld_formula_total: '42',
+      fld_locked: 'Locked value',
     })
 
     const recordResponse = await request(app)
@@ -368,12 +383,26 @@ describe('Multitable record and form context API', () => {
       .query({ viewId: 'view_ops_permissions' })
       .expect(200)
 
+    expect(recordResponse.body.data.fields.map((field: { id: string }) => field.id)).toEqual([
+      'fld_title',
+      'fld_formula_total',
+      'fld_hidden_lookup',
+      'fld_locked',
+    ])
     expect(recordResponse.body.data.fieldPermissions).toEqual({
       fld_title: { visible: true, readOnly: false },
       fld_formula_total: { visible: true, readOnly: true },
       fld_hidden_lookup: { visible: false, readOnly: true },
       fld_locked: { visible: true, readOnly: true },
+      fld_secret: { visible: false, readOnly: false },
     })
+    expect(recordResponse.body.data.record.data).toMatchObject({
+      fld_title: 'Editable title',
+      fld_formula_total: '42',
+      fld_locked: 'Locked value',
+    })
+    expect(recordResponse.body.data.record.data).toHaveProperty('fld_hidden_lookup')
+    expect(recordResponse.body.data.record.data).not.toHaveProperty('fld_secret')
     expect(recordResponse.body.data.rowActions).toEqual({
       canEdit: true,
       canDelete: true,
@@ -412,6 +441,7 @@ describe('Multitable record and form context API', () => {
                 { id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 },
                 { id: 'fld_vendor_link', name: 'Vendor', type: 'link', property: { foreignSheetId: 'sheet_vendors' }, order: 2 },
                 { id: 'fld_files', name: 'Files', type: 'attachment', property: {}, order: 3 },
+                { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true }, order: 4 },
               ],
             }
           }
@@ -428,7 +458,7 @@ describe('Multitable record and form context API', () => {
               {
                 id: 'rec_1',
                 version: 2,
-                data: { fld_name: 'Order A', fld_vendor_link: ['vendor_1'], fld_files: ['att_view_1'] },
+                data: { fld_name: 'Order A', fld_vendor_link: ['vendor_1'], fld_files: ['att_view_1'], fld_secret: 'Internal note' },
               },
             ],
           }
@@ -468,6 +498,11 @@ describe('Multitable record and form context API', () => {
 
     expect(response.body.ok).toBe(true)
     expect(response.body.data.id).toBe('sheet_orders')
+    expect(response.body.data.fields.map((field: { id: string }) => field.id)).toEqual([
+      'fld_name',
+      'fld_vendor_link',
+      'fld_files',
+    ])
     expect(response.body.data.rows).toEqual([
       {
         id: 'rec_1',
@@ -1209,6 +1244,95 @@ describe('Multitable record and form context API', () => {
     expect(response.body.error.code).toBe('VALIDATION_ERROR')
     expect(response.body.error.fieldErrors).toEqual({
       fld_internal: 'Field is not available in this form',
+    })
+  })
+
+  test('returns 403 when property-hidden fields are submitted through form views', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config FROM meta_views WHERE id = $1')) {
+          expect(params).toEqual(['view_form_ops'])
+          return {
+            rows: [{
+              id: 'view_form_ops',
+              sheet_id: 'sheet_ops',
+              name: 'Ops Form',
+              type: 'form',
+              filter_info: {},
+              sort_info: {},
+              group_info: {},
+              hidden_field_ids: [],
+              config: {},
+            }],
+          }
+        }
+        if (sql.includes('SELECT id, base_id, name, description FROM meta_sheets WHERE id = $1')) {
+          expect(params).toEqual(['sheet_ops'])
+          return { rows: [{ id: 'sheet_ops', base_id: 'base_ops', name: 'Ops', description: null }] }
+        }
+        if (sql.includes('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC')) {
+          expect(params).toEqual(['sheet_ops'])
+          return {
+            rows: [
+              { id: 'fld_title', name: 'Title', type: 'string', property: {}, order: 1 },
+              { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true }, order: 2 },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/views/view_form_ops/submit')
+      .send({
+        data: {
+          fld_secret: 'restricted',
+        },
+      })
+      .expect(403)
+
+    expect(response.body.ok).toBe(false)
+    expect(response.body.error.code).toBe('FIELD_HIDDEN')
+    expect(response.body.error.fieldErrors).toEqual({
+      fld_secret: 'Field is hidden',
+    })
+  })
+
+  test('returns 403 when property-hidden fields are patched through bulk multitable patch', async () => {
+    const { app } = await createApp({
+      tokenPerms: ['multitable:write'],
+      queryHandler: async (sql, params) => {
+        if (sql.includes('SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1')) {
+          expect(params).toEqual(['sheet_orders'])
+          return {
+            rows: [
+              { id: 'fld_secret', name: 'Secret', type: 'string', property: { hidden: true } },
+            ],
+          }
+        }
+        throw new Error(`Unhandled SQL in test: ${sql}`)
+      },
+    })
+
+    const response = await request(app)
+      .post('/api/multitable/patch')
+      .send({
+        sheetId: 'sheet_orders',
+        changes: [{
+          recordId: 'rec_1',
+          fieldId: 'fld_secret',
+          value: 'restricted',
+          expectedVersion: 1,
+        }],
+      })
+      .expect(403)
+
+    expect(response.body.ok).toBe(false)
+    expect(response.body.error).toEqual({
+      code: 'FIELD_HIDDEN',
+      message: 'Field is hidden: fld_secret',
     })
   })
 })
