@@ -495,7 +495,7 @@ export class MetaSheetServer {
     this.app.use(attendanceSecurityMiddleware())
 
     // 健康检查
-    this.app.get('/health', (req, res) => {
+    const healthHandler = (req: Request, res: Response) => {
       const endTimer = (res as unknown as Record<string, unknown>).__metricsTimer as ((opts: { route: string; method: string }) => (statusCode: number) => void) | undefined
       try {
         const stats = getPoolStats()
@@ -507,6 +507,8 @@ export class MetaSheetServer {
         } catch { /* ignore plugin summary errors */ }
         res.json({
           status: 'ok',
+          ok: true,
+          success: true,
           timestamp: new Date().toISOString(),
           plugins: this.pluginLoader.getPlugins().size,
           pluginsSummary: pluginsSummary || undefined,
@@ -517,7 +519,9 @@ export class MetaSheetServer {
         endTimer?.({ route: '/health', method: 'GET' })(500)
         throw err
       }
-    })
+    }
+    this.app.get('/health', healthHandler)
+    this.app.get('/api/health', healthHandler)
 
     // 路由：认证（登录/注册/token管理）
     this.app.use('/api/auth', authRouter)
