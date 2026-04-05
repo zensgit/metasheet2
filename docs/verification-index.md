@@ -67,8 +67,8 @@ Entry points:
   - Report: `docs/verification-plm-2025-12-28.md`
 
 - Yuantus PLM verification:
-  - Script: `scripts/verify-yuantus-plm.sh`
   - Run: `pnpm verify:yuantus`
+  - Alias of: `pnpm test:plm`
   - Report: `docs/verification-yuantus-plm-20251231_1507.md`
   - Connection notes: `docs/yuantus-plm-connection.md`
   - External env checklist: `docs/PLM_EXTERNAL_ENV_CHECKLIST.md`
