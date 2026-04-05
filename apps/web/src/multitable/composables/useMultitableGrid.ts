@@ -58,6 +58,11 @@ type RemoteRecordMergeOptions = {
   attachmentSummaries?: Record<string, MetaAttachment[]>
 }
 
+type RemoteRecordPatchOptions = {
+  version?: number
+  patch: Record<string, unknown>
+}
+
 // --- Serialisation helpers ---
 
 export function buildSortInfo(rules: SortRule[]): { rules: Array<{ fieldId: string; desc: boolean }> } | undefined {
@@ -657,6 +662,23 @@ export function useMultitableGrid(opts: {
     return true
   }
 
+  function applyRemoteRecordPatch(recordId: string, options: RemoteRecordPatchOptions): boolean {
+    const index = rows.value.findIndex((row) => row.id === recordId)
+    if (index < 0) return false
+    const nextRows = [...rows.value]
+    const current = nextRows[index]
+    nextRows[index] = {
+      ...current,
+      version: typeof options.version === 'number' ? options.version : current.version,
+      data: {
+        ...current.data,
+        ...options.patch,
+      },
+    }
+    rows.value = nextRows
+    return true
+  }
+
   function removeRemoteRecord(recordId: string): boolean {
     const nextRows = rows.value.filter((row) => row.id !== recordId)
     if (nextRows.length === rows.value.length) return false
@@ -715,7 +737,7 @@ export function useMultitableGrid(opts: {
     addFilterRule, updateFilterRule, removeFilterRule, clearFilters,
     applySortFilter,
     createRecord, deleteRecord, patchCell,
-    mergeRemoteRecord, removeRemoteRecord,
+    mergeRemoteRecord, applyRemoteRecordPatch, removeRemoteRecord,
     undo, redo, clearEditHistory, dismissConflict, retryConflict,
     setColumnWidth, setGroupField,
     setSearchQuery,

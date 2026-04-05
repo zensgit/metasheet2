@@ -100,6 +100,11 @@ describe('Multitable sheet realtime events', () => {
       recordId: response.body.data.record.id,
       recordIds: [response.body.data.record.id],
       fieldIds: ['fld_title'],
+      recordPatches: [{
+        recordId: response.body.data.record.id,
+        version: 1,
+        patch: { fld_title: 'Alpha' },
+      }],
     }))
   })
 
@@ -165,6 +170,11 @@ describe('Multitable sheet realtime events', () => {
       recordId: 'rec_1',
       recordIds: ['rec_1'],
       fieldIds: ['fld_title'],
+      recordPatches: [{
+        recordId: 'rec_1',
+        version: 5,
+        patch: { fld_title: 'Updated title' },
+      }],
     })
   })
 
@@ -212,6 +222,11 @@ describe('Multitable sheet realtime events', () => {
       kind: 'record-updated',
       recordIds: ['rec_1'],
       fieldIds: ['fld_title'],
+      recordPatches: [{
+        recordId: 'rec_1',
+        version: 3,
+        patch: { fld_title: 'Bulk patched' },
+      }],
     })
   })
 })

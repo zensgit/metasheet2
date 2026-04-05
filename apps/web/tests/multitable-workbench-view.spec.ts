@@ -682,8 +682,12 @@ function createWorkbenchMock() {
 }
 
 function createGridMock() {
+  const fields = ref([
+    { id: 'fld_title', name: 'Title', type: 'string', order: 1 },
+    { id: 'fld_status', name: 'Status', type: 'select', order: 2, options: [{ value: 'todo' }] },
+  ])
   return {
-    fields: ref([]),
+    fields,
     rows: ref([
       { id: 'rec_1', version: 1, data: { fld_title: 'Alpha' } },
       { id: 'rec_2', version: 1, data: { fld_title: 'Beta' } },
@@ -692,7 +696,7 @@ function createGridMock() {
     currentPage: ref(1),
     totalPages: ref(1),
     page: ref({ offset: 0, limit: 50, total: 0, hasMore: false }),
-    visibleFields: ref([]),
+    visibleFields: fields,
     sortRules: ref([]),
     filterRules: ref([]),
     filterConjunction: ref('and'),
@@ -726,6 +730,7 @@ function createGridMock() {
     createRecord: vi.fn(),
     deleteRecord: vi.fn(),
     mergeRemoteRecord: vi.fn().mockReturnValue(true),
+    applyRemoteRecordPatch: vi.fn().mockReturnValue(true),
     removeRemoteRecord: vi.fn().mockReturnValue(true),
     loadViewData: vi.fn(),
     reloadCurrentPage: vi.fn(),
@@ -812,6 +817,7 @@ describe('MultitableWorkbench view wiring', () => {
       structuralFieldIds: expect.any(Object),
       reloadCurrentSheetPage: expect.any(Function),
       reloadSelectedRecordContext: expect.any(Function),
+      applyRemoteRecordPatch: expect.any(Function),
       mergeRemoteRecord: expect.any(Function),
       removeLocalRecord: expect.any(Function),
     }))
@@ -845,9 +851,27 @@ describe('MultitableWorkbench view wiring', () => {
     })
 
     const realtimeOptions = useMultitableSheetRealtimeMock.mock.calls[0]?.[0] as {
+      applyRemoteRecordPatch: (payload: {
+        recordId: string
+        version?: number
+        fieldIds: string[]
+        patch: Record<string, unknown>
+      }) => Promise<boolean>
       mergeRemoteRecord: (recordId: string) => Promise<boolean>
       removeLocalRecord: (recordId: string) => boolean
     }
+
+    await expect(realtimeOptions.applyRemoteRecordPatch({
+      recordId: 'rec_1',
+      version: 8,
+      fieldIds: ['fld_title'],
+      patch: { fld_title: 'Remote cell' },
+    })).resolves.toBe(true)
+    expect(gridMock.applyRemoteRecordPatch).toHaveBeenCalledWith('rec_1', {
+      version: 8,
+      patch: { fld_title: 'Remote cell' },
+    })
+    expect(workbenchMock.client.getRecord).not.toHaveBeenCalled()
 
     await expect(realtimeOptions.mergeRemoteRecord('rec_1')).resolves.toBe(true)
     expect(workbenchMock.client.getRecord).toHaveBeenCalledWith('rec_1', {

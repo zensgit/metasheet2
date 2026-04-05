@@ -142,6 +142,11 @@ type MultitableSheetRealtimePayload = {
   recordId?: string
   recordIds?: string[]
   fieldIds?: string[]
+  recordPatches?: Array<{
+    recordId: string
+    version?: number
+    patch: Record<string, unknown>
+  }>
 }
 
 type RecordSummaryPage = {
@@ -3522,6 +3527,11 @@ export function univerMetaRouter(): Router {
         recordId: record.id,
         recordIds: [record.id],
         fieldIds: Object.keys(patch),
+        recordPatches: [{
+          recordId: record.id,
+          version: record.version,
+          patch,
+        }],
       })
 
       return res.json({
@@ -4311,7 +4321,13 @@ export function univerMetaRouter(): Router {
 
     try {
       const pool = poolManager.get()
-      let updatedRecordRealtimeScope: { sheetId: string; recordId: string } | null = null
+      let updatedRecordRealtimeScope: {
+        sheetId: string
+        recordId: string
+        fieldId: string
+        version: number
+        patch: Record<string, unknown>
+      } | null = null
       const attachmentRes = await pool.query(
         `SELECT id, sheet_id, record_id, field_id, storage_file_id
          FROM multitable_attachments
@@ -4339,13 +4355,20 @@ export function univerMetaRouter(): Router {
             const currentIds = normalizeAttachmentIds(data[fieldId])
             const nextIds = currentIds.filter((id) => id !== attachmentId)
             if (nextIds.length !== currentIds.length) {
-              await query(
+              const updateRes = await query(
                 `UPDATE meta_records
                  SET data = data || $1::jsonb, updated_at = now(), version = version + 1
-                 WHERE id = $2 AND sheet_id = $3`,
+                 WHERE id = $2 AND sheet_id = $3
+                 RETURNING version`,
                 [JSON.stringify({ [fieldId]: nextIds }), recordId, sheetId],
               )
-              updatedRecordRealtimeScope = { sheetId, recordId }
+              updatedRecordRealtimeScope = {
+                sheetId,
+                recordId,
+                fieldId,
+                version: Number((updateRes.rows[0] as any)?.version ?? Number(recordRow?.version ?? 0) + 1),
+                patch: { [fieldId]: nextIds },
+              }
             }
           }
         }
@@ -4371,7 +4394,12 @@ export function univerMetaRouter(): Router {
           kind: 'attachment-updated',
           recordId: updatedRecordRealtimeScope.recordId,
           recordIds: [updatedRecordRealtimeScope.recordId],
-          fieldIds: typeof attachmentRow.field_id === 'string' ? [attachmentRow.field_id] : undefined,
+          fieldIds: [updatedRecordRealtimeScope.fieldId],
+          recordPatches: [{
+            recordId: updatedRecordRealtimeScope.recordId,
+            version: updatedRecordRealtimeScope.version,
+            patch: updatedRecordRealtimeScope.patch,
+          }],
         })
       }
 
@@ -4581,6 +4609,11 @@ export function univerMetaRouter(): Router {
         recordId,
         recordIds: [recordId],
         fieldIds: Object.keys(patch),
+        recordPatches: [{
+          recordId,
+          version,
+          patch,
+        }],
       })
       return res.json({ ok: true, data: { record: { id: recordId, version, data: patch } } })
     } catch (err) {
@@ -5038,6 +5071,13 @@ export function univerMetaRouter(): Router {
           kind: 'record-updated',
           recordIds: updates.map((update) => update.recordId),
           fieldIds: [...new Set(Array.from(changesByRecord.values()).flatMap((changes) => changes.map((change) => change.fieldId)))],
+          recordPatches: updates.map((update) => ({
+            recordId: update.recordId,
+            version: update.version,
+            patch: Object.fromEntries(
+              (changesByRecord.get(update.recordId) ?? []).map((change) => [change.fieldId, change.value]),
+            ),
+          })),
         })
       }
 
