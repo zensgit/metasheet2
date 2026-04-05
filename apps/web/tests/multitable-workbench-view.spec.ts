@@ -191,7 +191,7 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
     props: {
       fields: { type: Array, default: () => [] },
     },
-    emits: ['import'],
+    emits: ['import', 'export-csv'],
     render() {
       const fieldIds = (this.$props.fields as Array<{ id?: string }>)
         .map((field) => field.id ?? '')
@@ -208,6 +208,14 @@ vi.mock('../src/multitable/components/MetaToolbar.vue', () => ({
               onClick: () => this.$emit('import'),
             },
             'open-import',
+          ),
+          h(
+            'button',
+            {
+              'data-export-csv': 'true',
+              onClick: () => this.$emit('export-csv'),
+            },
+            'export-csv',
           ),
         ],
       )
@@ -896,13 +904,86 @@ describe('MultitableWorkbench view wiring', () => {
     await flushUi()
 
     expect(container!.querySelector('[data-import-field-ids]')?.getAttribute('data-import-field-ids'))
-      .toBe('fld_title,fld_view_hidden')
+      .toBe('fld_title')
 
     managerButtons.find((button) => button.textContent?.includes('Views'))?.click()
     await flushUi()
 
     expect(container!.querySelector('[data-view-manager-field-ids]')?.getAttribute('data-view-manager-field-ids'))
       .toBe('fld_title,fld_view_hidden')
+  })
+
+  it('filters readonly fields from import surfaces', async () => {
+    workbenchMock.fields.value = [
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_locked', name: 'Locked', type: 'string', property: { readonly: true } },
+    ]
+    gridMock.fields.value = [...workbenchMock.fields.value]
+    workbenchMock.fieldPermissions.value = {
+      fld_title: { visible: true, readOnly: false },
+      fld_locked: { visible: true, readOnly: true },
+    }
+
+    mountWorkbench()
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-open-import="true"]')!.click()
+    await flushUi()
+
+    expect(container!.querySelector('[data-import-field-ids]')?.getAttribute('data-import-field-ids'))
+      .toBe('fld_title')
+  })
+
+  it('exports only scoped visible grid fields', async () => {
+    gridMock.fields.value = [
+      { id: 'fld_title', name: 'Title', type: 'string' },
+      { id: 'fld_view_hidden', name: 'View Hidden', type: 'string' },
+    ]
+    gridMock.visibleFields.value = [...gridMock.fields.value]
+    gridMock.rows.value = [
+      { id: 'rec_1', version: 1, data: { fld_title: 'Alpha', fld_view_hidden: 'Hidden value' } },
+    ]
+    gridMock.fieldPermissions.value = {
+      fld_title: { visible: true, readOnly: false },
+      fld_view_hidden: { visible: false, readOnly: false },
+    }
+
+    let exportedBlob: Blob | null = null
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const createObjectURLMock = vi.fn((blob: Blob | MediaSource) => {
+      exportedBlob = blob as Blob
+      return 'blob:multitable-export'
+    })
+    const revokeObjectURLMock = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURLMock })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURLMock })
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    try {
+      mountWorkbench()
+      await flushUi()
+
+      container!.querySelector<HTMLButtonElement>('[data-export-csv="true"]')!.click()
+      await flushUi()
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1)
+      const csv = exportedBlob
+        ? await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = () => resolve(String(reader.result ?? ''))
+          reader.onerror = () => reject(reader.error)
+          reader.readAsText(exportedBlob as Blob)
+        })
+        : ''
+      expect(csv).toContain('Title')
+      expect(csv).not.toContain('View Hidden')
+      expect(csv).not.toContain('Hidden value')
+      expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:multitable-export')
+    } finally {
+      clickSpy.mockRestore()
+      Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: originalCreateObjectURL })
+      Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: originalRevokeObjectURL })
+    }
   })
 
   it('syncs external base/sheet/view props after mount', async () => {
